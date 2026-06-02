@@ -17,6 +17,8 @@ use std::{
 
 use crate::error::SdkError;
 
+pub const REQUEST_TIMEOUT_HEADER: &str = "X-Tensorlake-Request-Timeout-Ms";
+
 /// Wraps any SDK operation result with the W3C `trace_id` so callers can
 /// correlate the request with its server-side spans in Datadog APM or any
 /// other OTEL-compatible backend.
@@ -80,6 +82,10 @@ pub struct Client {
     client: ClientWithMiddleware,
     /// Default headers configured on the underlying clients.
     default_headers: HeaderMap,
+    /// User-Agent configured on the underlying client.
+    user_agent: String,
+    /// Total request timeout configured for this client.
+    timeout: Option<Duration>,
 }
 
 /// Builder for creating a [`Client`] with a fluent API.
@@ -201,6 +207,8 @@ impl ClientBuilder {
             base_client,
             client,
             default_headers,
+            user_agent: ua.to_string(),
+            timeout: self.timeout,
         })
     }
 }
@@ -227,6 +235,64 @@ impl Client {
             base_client: self.base_client.clone(),
             client,
             default_headers: self.default_headers.clone(),
+            user_agent: self.user_agent.clone(),
+            timeout: self.timeout,
+        }
+    }
+
+    /// Create a new client for a different base URL without a total request timeout.
+    ///
+    /// Sandbox proxy clients use this for long-running process and follow streams,
+    /// where the server-side process timeout is independent from lifecycle HTTP deadlines.
+    pub fn with_base_url_without_timeout(&self, new_url: &str) -> Result<Self, SdkError> {
+        self.with_base_url_and_timeout(new_url, None)
+    }
+
+    /// Create a new client for a different base URL with an explicit total request timeout.
+    pub fn with_base_url_and_timeout(
+        &self,
+        new_url: &str,
+        timeout: Option<Duration>,
+    ) -> Result<Self, SdkError> {
+        let base_client = new_base_client(&self.default_headers, &self.user_agent, timeout)?;
+        let client = ReqwestClientBuilder::new(base_client.clone()).build();
+        Ok(Self {
+            base_url: new_url.to_string(),
+            base_client,
+            client,
+            default_headers: self.default_headers.clone(),
+            user_agent: self.user_agent.clone(),
+            timeout,
+        })
+    }
+
+    fn prepare_request(&self, request: &mut Request) {
+        let (traceparent, _) = generate_traceparent();
+        if let Ok(value) = traceparent.parse::<HeaderValue>() {
+            request.headers_mut().insert("traceparent", value);
+        }
+        self.insert_request_timeout_header(request);
+    }
+
+    fn prepare_traced_request(&self, request: &mut Request) -> String {
+        let (traceparent, trace_id) = generate_traceparent();
+        if let Ok(value) = traceparent.parse::<HeaderValue>() {
+            request.headers_mut().insert("traceparent", value);
+        }
+        self.insert_request_timeout_header(request);
+        trace_id
+    }
+
+    fn insert_request_timeout_header(&self, request: &mut Request) {
+        let Some(timeout) = self.timeout else {
+            return;
+        };
+        let millis = timeout.as_millis();
+        if millis == 0 {
+            return;
+        }
+        if let Ok(value) = HeaderValue::from_str(&millis.to_string()) {
+            request.headers_mut().insert(REQUEST_TIMEOUT_HEADER, value);
         }
     }
 
@@ -234,10 +300,7 @@ impl Client {
     /// correlation. Use [`execute_traced`] or [`execute_json`] when you need the
     /// `trace_id` returned to the caller.
     pub async fn execute(&self, mut request: Request) -> Result<Response, SdkError> {
-        let (traceparent, _) = generate_traceparent();
-        if let Ok(value) = traceparent.parse::<HeaderValue>() {
-            request.headers_mut().insert("traceparent", value);
-        }
+        self.prepare_request(&mut request);
         let response = self.client.execute(request).await?;
         self.handle_response(response).await
     }
@@ -245,10 +308,7 @@ impl Client {
     /// Execute an HTTP request without mapping non-success statuses to [`SdkError`].
     /// Injects a W3C `traceparent` header for server-side correlation.
     pub async fn execute_raw(&self, mut request: Request) -> Result<Response, SdkError> {
-        let (traceparent, _) = generate_traceparent();
-        if let Ok(value) = traceparent.parse::<HeaderValue>() {
-            request.headers_mut().insert("traceparent", value);
-        }
+        self.prepare_request(&mut request);
         let response = self.client.execute(request).await?;
         Ok(response)
     }
@@ -257,10 +317,7 @@ impl Client {
     /// the raw response alongside the `trace_id`. Use this when you need the
     /// `trace_id` but want to handle the response body yourself.
     pub async fn execute_traced(&self, mut request: Request) -> Result<Traced<Response>, SdkError> {
-        let (traceparent, trace_id) = generate_traceparent();
-        if let Ok(value) = traceparent.parse::<HeaderValue>() {
-            request.headers_mut().insert("traceparent", value);
-        }
+        let trace_id = self.prepare_traced_request(&mut request);
         let response = self.client.execute(request).await?;
         let response = self.handle_response(response).await?;
         Ok(Traced::new(trace_id, response))
@@ -277,6 +334,30 @@ impl Client {
         request: Request,
     ) -> Result<Traced<T>, SdkError> {
         let traced = self.execute_traced(request).await?;
+        Self::decode_traced_json(traced).await
+    }
+
+    /// Execute an HTTP request and deserialize JSON if the status is success or
+    /// explicitly listed in `allowed_statuses`.
+    pub async fn execute_json_allow_status<T: DeserializeOwned>(
+        &self,
+        mut request: Request,
+        allowed_statuses: &[StatusCode],
+    ) -> Result<Traced<T>, SdkError> {
+        let trace_id = self.prepare_traced_request(&mut request);
+        let response = self.client.execute(request).await?;
+        let response =
+            if response.status().is_success() || allowed_statuses.contains(&response.status()) {
+                response
+            } else {
+                self.handle_response(response).await?
+            };
+        Self::decode_traced_json(Traced::new(trace_id, response)).await
+    }
+
+    async fn decode_traced_json<T: DeserializeOwned>(
+        traced: Traced<Response>,
+    ) -> Result<Traced<T>, SdkError> {
         let trace_id = traced.trace_id.clone();
         let bytes = traced.into_inner().bytes().await?;
         let jd = &mut serde_json::Deserializer::from_slice(bytes.as_ref());
@@ -300,13 +381,19 @@ impl Client {
         T: DeserializeOwned,
     {
         let (traceparent, trace_id) = generate_traceparent();
-        let response = self
+        let mut request_builder = self
             .base_client
             .get(self.base_url.clone() + path)
             .header(ACCEPT, "text/event-stream")
-            .header("traceparent", traceparent)
-            .send()
-            .await?;
+            .header("traceparent", traceparent);
+        if let Some(timeout) = self.timeout {
+            let millis = timeout.as_millis();
+            if millis > 0 {
+                request_builder =
+                    request_builder.header(REQUEST_TIMEOUT_HEADER, millis.to_string());
+            }
+        }
+        let response = request_builder.send().await?;
 
         let stream = response
             .bytes_stream()

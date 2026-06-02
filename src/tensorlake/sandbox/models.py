@@ -72,6 +72,7 @@ class SandboxStatus(str, Enum):
     SUSPENDING = "suspending"
     SUSPENDED = "suspended"
     TERMINATED = "terminated"
+    TIMEOUT = "timeout"
 
 
 class SnapshotStatus(str, Enum):

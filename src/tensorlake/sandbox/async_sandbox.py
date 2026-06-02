@@ -67,6 +67,7 @@ class AsyncSandbox:
         *,
         sandbox_id: str | None = None,
         routing_hint: str | None = None,
+        request_timeout: float | None = None,
         _proxy_rust_client: object | None = None,
     ) -> None:
         if identifier and sandbox_id and identifier != sandbox_id:
@@ -89,6 +90,7 @@ class AsyncSandbox:
         self._api_key = api_key
         self._organization_id = organization_id
         self._project_id = project_id
+        self._request_timeout = request_timeout
         parsed_proxy = urlparse(proxy_url)
         self._host_header = None
         if parsed_proxy.hostname in ("localhost", "127.0.0.1"):
@@ -115,15 +117,18 @@ class AsyncSandbox:
             )
         else:
             try:
-                self._rust_client = RustCloudSandboxProxyClient(
-                    proxy_url=proxy_url,
-                    sandbox_id=sandbox_identifier,
-                    api_key=api_key,
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    routing_hint=routing_hint,
-                    user_agent=USER_AGENT,
-                )
+                kwargs = {
+                    "proxy_url": proxy_url,
+                    "sandbox_id": sandbox_identifier,
+                    "api_key": api_key,
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "routing_hint": routing_hint,
+                    "user_agent": USER_AGENT,
+                }
+                if request_timeout is not None:
+                    kwargs["request_timeout_sec"] = request_timeout
+                self._rust_client = RustCloudSandboxProxyClient(**kwargs)
                 self._base_url = self._rust_client.base_url()
             except Exception as e:
                 _raise_as_sandbox_error(e)
@@ -146,7 +151,8 @@ class AsyncSandbox:
         pool_id: str | None = None,
         snapshot_id: str | None = None,
         proxy_url: str | None = None,
-        startup_timeout: float = 60,
+        request_timeout: float | None = None,
+        startup_timeout: float | None = None,
         name: str | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
@@ -156,12 +162,22 @@ class AsyncSandbox:
     ) -> "AsyncSandbox":
         from .async_client import AsyncSandboxClient
 
+        effective_request_timeout = (
+            startup_timeout
+            if startup_timeout is not None
+            else (
+                request_timeout
+                if request_timeout is not None
+                else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+            )
+        )
         client = AsyncSandboxClient(
             api_url=api_url,
             api_key=api_key,
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=effective_request_timeout,
             _internal=True,
         )
         return await client.create_and_connect(
@@ -178,7 +194,7 @@ class AsyncSandbox:
             pool_id=pool_id,
             snapshot_id=snapshot_id,
             proxy_url=proxy_url,
-            startup_timeout=startup_timeout,
+            request_timeout=effective_request_timeout,
             name=name,
         )
 
@@ -194,6 +210,7 @@ class AsyncSandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        request_timeout: float | None = None,
     ) -> "AsyncSandbox":
         from .async_client import AsyncSandboxClient
 
@@ -203,10 +220,18 @@ class AsyncSandbox:
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=(
+                request_timeout
+                if request_timeout is not None
+                else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+            ),
             _internal=True,
         )
         return await client.connect(
-            sandbox_id, proxy_url=proxy_url, routing_hint=routing_hint
+            sandbox_id,
+            proxy_url=proxy_url,
+            routing_hint=routing_hint,
+            request_timeout=request_timeout,
         )
 
     # --- Lifecycle ---

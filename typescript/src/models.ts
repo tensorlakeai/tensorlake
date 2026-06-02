@@ -7,6 +7,7 @@ export enum SandboxStatus {
   SUSPENDING = "suspending",
   SUSPENDED = "suspended",
   TERMINATED = "terminated",
+  TIMEOUT = "timeout",
 }
 
 export enum SnapshotStatus {
@@ -377,6 +378,10 @@ export interface SandboxClientOptions {
   namespace?: string;
   maxRetries?: number;
   retryBackoffMs?: number;
+  /** Total HTTP request timeout in seconds. Default: 300. */
+  requestTimeout?: number;
+  /** @deprecated Use requestTimeout. Total HTTP request timeout in milliseconds. */
+  timeoutMs?: number;
 }
 
 export interface SandboxOptions {
@@ -389,11 +394,18 @@ export interface SandboxOptions {
   resolveProxyInfo?: (
     identifier: string,
   ) => Promise<SandboxInfo & { readonly traceId: string }>;
+  /** Optional total HTTP request timeout in seconds for sandbox proxy operations. Omit for no total proxy timeout. */
+  requestTimeout?: number;
+  /** @deprecated Use requestTimeout. Optional total HTTP request timeout in milliseconds for sandbox proxy operations. */
+  timeoutMs?: number;
 }
 
 export interface CreateAndConnectOptions extends CreateSandboxOptions {
   poolId?: string;
   proxyUrl?: string;
+  /** Total HTTP request timeout in seconds for sandbox startup. Default: client requestTimeout. */
+  requestTimeout?: number;
+  /** @deprecated Use requestTimeout. */
   startupTimeout?: number;
 }
 

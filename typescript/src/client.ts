@@ -32,6 +32,9 @@ import {
 import { Sandbox } from "./sandbox.js";
 import { isLocalhost, lifecyclePath, resolveProxyUrl, resolveSandboxLifecycleUrl } from "./url.js";
 
+const CREATE_SANDBOX_RETRYABLE_STATUS_CODES = new Set([429, 502, 503]);
+const CREATE_SANDBOX_ALLOWED_ERROR_STATUS_CODES = new Set([504]);
+
 /**
  * Client for managing TensorLake sandboxes, pools, and snapshots.
  *
@@ -46,6 +49,9 @@ export class SandboxClient {
   private readonly projectId: string | undefined;
   private readonly namespace: string;
   private readonly local: boolean;
+  private readonly maxRetries: number;
+  private readonly retryBackoffMs: number;
+  private readonly requestTimeoutMs: number;
 
   /** @internal Pass `true` to suppress the deprecation warning when used by `Sandbox.create()` / `Sandbox.connect()`. */
   constructor(options?: SandboxClientOptions, _internal = false) {
@@ -60,14 +66,18 @@ export class SandboxClient {
     this.projectId = options?.projectId;
     this.namespace = options?.namespace ?? defaults.NAMESPACE;
     this.local = isLocalhost(this.apiUrl);
+    this.maxRetries = options?.maxRetries ?? defaults.MAX_RETRIES;
+    this.retryBackoffMs = options?.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS;
+    this.requestTimeoutMs = resolveRequestTimeoutMs(options);
 
     this.http = new HttpClient({
       baseUrl: resolveSandboxLifecycleUrl(this.apiUrl),
       apiKey: this.apiKey,
       organizationId: this.organizationId,
       projectId: this.projectId,
-      maxRetries: options?.maxRetries ?? defaults.MAX_RETRIES,
-      retryBackoffMs: options?.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS,
+      maxRetries: this.maxRetries,
+      retryBackoffMs: this.retryBackoffMs,
+      timeoutMs: this.requestTimeoutMs,
     });
   }
 
@@ -77,12 +87,16 @@ export class SandboxClient {
     organizationId?: string;
     projectId?: string;
     apiUrl?: string;
+    requestTimeout?: number;
+    timeoutMs?: number;
   }): SandboxClient {
     return new SandboxClient({
       apiUrl: options?.apiUrl ?? "https://api.tensorlake.ai",
       apiKey: options?.apiKey,
       organizationId: options?.organizationId,
       projectId: options?.projectId,
+      requestTimeout: options?.requestTimeout,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
@@ -90,15 +104,39 @@ export class SandboxClient {
   static forLocalhost(options?: {
     apiUrl?: string;
     namespace?: string;
+    requestTimeout?: number;
+    timeoutMs?: number;
   }): SandboxClient {
     return new SandboxClient({
       apiUrl: options?.apiUrl ?? "http://localhost:8900",
       namespace: options?.namespace ?? "default",
+      requestTimeout: options?.requestTimeout,
+      timeoutMs: options?.timeoutMs,
     });
   }
 
   close(): void {
     this.http.close();
+  }
+
+  private withRequestTimeout(requestTimeout: number | undefined): SandboxClient {
+    if (requestTimeout == null) {
+      return this;
+    }
+    const timeoutMs = secondsToMillis(requestTimeout);
+    if (timeoutMs === this.requestTimeoutMs) {
+      return this;
+    }
+    return new SandboxClient({
+      apiUrl: this.apiUrl,
+      apiKey: this.apiKey,
+      organizationId: this.organizationId,
+      projectId: this.projectId,
+      namespace: this.namespace,
+      maxRetries: this.maxRetries,
+      retryBackoffMs: this.retryBackoffMs,
+      timeoutMs,
+    }, /* _internal */ true);
   }
 
   // --- Path helper ---
@@ -141,7 +179,11 @@ export class SandboxClient {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "POST",
       this.path("sandboxes"),
-      { body },
+      {
+        body,
+        retryableStatusCodes: CREATE_SANDBOX_RETRYABLE_STATUS_CODES,
+        allowedErrorStatusCodes: CREATE_SANDBOX_ALLOWED_ERROR_STATUS_CODES,
+      },
     );
     const result = fromSnakeKeys(raw, "sandboxId") as CreateSandboxResponse;
     return Object.assign(result, { traceId: raw.traceId }) as Traced<CreateSandboxResponse>;
@@ -365,6 +407,10 @@ export class SandboxClient {
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "POST",
       this.path(`sandbox-pools/${poolId}/sandboxes`),
+      {
+        retryableStatusCodes: CREATE_SANDBOX_RETRYABLE_STATUS_CODES,
+        allowedErrorStatusCodes: CREATE_SANDBOX_ALLOWED_ERROR_STATUS_CODES,
+      },
     );
     const result = fromSnakeKeys(raw, "sandboxId") as CreateSandboxResponse;
     return Object.assign(result, { traceId: raw.traceId }) as Traced<CreateSandboxResponse>;
@@ -560,7 +606,12 @@ export class SandboxClient {
   // --- Connect ---
 
   /** Return a `Sandbox` handle for an existing running sandbox without verifying it exists. */
-  connect(identifier: string, proxyUrl?: string, routingHint?: string): Sandbox {
+  connect(
+    identifier: string,
+    proxyUrl?: string,
+    routingHint?: string,
+    requestTimeout?: number,
+  ): Sandbox {
     const resolvedProxy = proxyUrl ?? resolveProxyUrl(this.apiUrl);
     return new Sandbox({
       sandboxId: identifier,
@@ -572,28 +623,34 @@ export class SandboxClient {
       resolveProxyInfo: proxyUrl == null
         ? async (currentIdentifier) => this.get(currentIdentifier)
         : undefined,
+      requestTimeout,
     });
   }
 
   /**
    * Create a sandbox, wait for it to reach `Running`, and return a connected handle.
    *
-   * Blocks until the sandbox is ready or `startupTimeout` elapses. The returned
+   * Blocks until the sandbox is ready or `requestTimeout` elapses. The returned
    * `Sandbox` auto-terminates when `terminate()` is called.
    *
-   * @param options.startupTimeout - Max seconds to wait for `Running` status (default 60).
+   * @param options.requestTimeout - Max seconds to wait for `Running` status (default: client requestTimeout).
+   * @param options.startupTimeout - Deprecated alias for `requestTimeout`.
    * @throws {SandboxError} If the sandbox terminates during startup or the timeout elapses.
    */
   async createAndConnect(
     options?: CreateAndConnectOptions,
   ): Promise<Sandbox> {
-    const startupTimeout = options?.startupTimeout ?? 60;
+    const requestTimeout =
+      options?.requestTimeout ??
+      options?.startupTimeout ??
+      this.requestTimeoutMs / 1000;
+    const requestClient = this.withRequestTimeout(requestTimeout);
 
     // claim() never sends options.name to the server, so only create() should fall
     // back to it locally when the server response omits a name.
     const result = options?.poolId != null
-      ? await this.claim(options.poolId)
-      : await this.create(options);
+      ? await requestClient.claim(options.poolId)
+      : await requestClient.create(options);
     const requestedName = options?.poolId != null ? null : options?.name ?? null;
 
     const finishConnect = (
@@ -601,12 +658,13 @@ export class SandboxClient {
       name: string | null | undefined,
       ingressEndpoint: string | undefined,
     ) => {
-      const sandbox = this.connect(
+      const sandbox = requestClient.connect(
         result.sandboxId,
         options?.proxyUrl ?? ingressEndpoint,
         routingHint,
+        requestTimeout,
       );
-      sandbox._setOwner(this);
+      sandbox._setOwner(requestClient);
       sandbox.traceId = result.traceId;
       sandbox._setLifecycleIdentifier(result.sandboxId);
       sandbox._setName(name ?? requestedName);
@@ -630,11 +688,21 @@ export class SandboxClient {
         }),
       );
     }
+    if (result.status === SandboxStatus.TIMEOUT) {
+      try {
+        await requestClient.delete(result.sandboxId);
+      } catch {
+        // ignore cleanup failures
+      }
+      throw new SandboxError(
+        `Sandbox ${result.sandboxId} did not start within ${requestTimeout}s`,
+      );
+    }
 
-    const deadline = Date.now() + startupTimeout * 1000;
+    const deadline = Date.now() + secondsToMillis(requestTimeout);
 
     while (Date.now() < deadline) {
-      const info = await this.get(result.sandboxId);
+      const info = await requestClient.get(result.sandboxId);
       if (info.status === SandboxStatus.RUNNING) {
         return finishConnect(info.routingHint, info.name, info.ingressEndpoint);
       }
@@ -654,13 +722,39 @@ export class SandboxClient {
 
     // Timed out — clean up
     try {
-      await this.delete(result.sandboxId);
+      await requestClient.delete(result.sandboxId);
     } catch {
       // ignore cleanup failures
     }
     throw new SandboxError(
-      `Sandbox ${result.sandboxId} did not start within ${startupTimeout}s`,
+      `Sandbox ${result.sandboxId} did not start within ${requestTimeout}s`,
     );
+  }
+}
+
+function resolveRequestTimeoutMs(
+  options?: { requestTimeout?: number; timeoutMs?: number },
+): number {
+  if (options?.requestTimeout != null) {
+    return secondsToMillis(options.requestTimeout);
+  }
+  if (options?.timeoutMs != null) {
+    validateTimeoutMs(options.timeoutMs);
+    return options.timeoutMs;
+  }
+  return defaults.DEFAULT_HTTP_TIMEOUT_MS;
+}
+
+function secondsToMillis(seconds: number): number {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new SandboxError("requestTimeout must be a positive number of seconds");
+  }
+  return Math.ceil(seconds * 1000);
+}
+
+function validateTimeoutMs(timeoutMs: number): void {
+  if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+    throw new SandboxError("timeoutMs must be a positive number of milliseconds");
   }
 }
 

@@ -4,6 +4,7 @@ pub mod models;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::Method;
+use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use serde_json::Value;
 use std::path::Path;
@@ -71,13 +72,17 @@ impl SandboxesClient {
         let req = self
             .client
             .build_post_json_request(Method::POST, &uri, request)?;
-        self.client.execute_json(req).await
+        self.client
+            .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
+            .await
     }
 
     pub async fn claim(&self, pool_id: &str) -> Result<Traced<CreateSandboxResponse>, SdkError> {
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}/sandboxes"));
         let req = self.client.request(Method::POST, &uri).build()?;
-        self.client.execute_json(req).await
+        self.client
+            .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
+            .await
     }
 
     pub async fn get(&self, sandbox_id: &str) -> Result<Traced<SandboxInfo>, SdkError> {

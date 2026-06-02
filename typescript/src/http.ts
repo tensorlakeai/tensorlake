@@ -13,6 +13,8 @@ import {
   SandboxNotFoundError,
 } from "./errors.js";
 
+const REQUEST_TIMEOUT_HEADER = "X-Tensorlake-Request-Timeout-Ms";
+
 export interface HttpClientOptions {
   baseUrl: string;
   apiKey?: string;
@@ -23,7 +25,7 @@ export interface HttpClientOptions {
   routingHint?: string;
   maxRetries?: number;
   retryBackoffMs?: number;
-  timeoutMs?: number;
+  timeoutMs?: number | null;
 }
 
 setGlobalDispatcher(
@@ -42,6 +44,8 @@ export interface HttpRequestOptions {
   json?: unknown;
   signal?: AbortSignal;
   allowHttpErrors?: boolean;
+  retryableStatusCodes?: Set<number>;
+  allowedErrorStatusCodes?: Set<number>;
 }
 
 /**
@@ -79,7 +83,7 @@ export class HttpClient {
   private readonly headers: Record<string, string>;
   private readonly maxRetries: number;
   private readonly retryBackoffMs: number;
-  private readonly timeoutMs: number;
+  private readonly timeoutMs: number | null;
   private abortController: AbortController | null = null;
 
   constructor(options: HttpClientOptions) {
@@ -87,11 +91,16 @@ export class HttpClient {
     this.baseUrl = url.endsWith("/") ? url.slice(0, -1) : url;
     this.maxRetries = options.maxRetries ?? defaults.MAX_RETRIES;
     this.retryBackoffMs = options.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS;
-    this.timeoutMs = options.timeoutMs ?? defaults.DEFAULT_HTTP_TIMEOUT_MS;
+    this.timeoutMs = options.timeoutMs === undefined
+      ? defaults.DEFAULT_HTTP_TIMEOUT_MS
+      : options.timeoutMs;
 
     this.headers = {
       "User-Agent": `tensorlake-typescript-sdk/${defaults.SDK_VERSION}`,
     };
+    if (this.timeoutMs != null) {
+      this.headers[REQUEST_TIMEOUT_HEADER] = String(this.timeoutMs);
+    }
     if (options.apiKey) {
       this.headers["Authorization"] = `Bearer ${options.apiKey}`;
     }
@@ -125,12 +134,18 @@ export class HttpClient {
       body?: unknown;
       headers?: Record<string, string>;
       signal?: AbortSignal;
+      retryableStatusCodes?: Set<number>;
+      allowedErrorStatusCodes?: Set<number>;
+      allowHttpErrors?: boolean;
     },
   ): Promise<Traced<T>> {
     const response = await this.requestResponse(method, path, {
       json: options?.body,
       headers: options?.headers,
       signal: options?.signal,
+      retryableStatusCodes: options?.retryableStatusCodes,
+      allowedErrorStatusCodes: options?.allowedErrorStatusCodes,
+      allowHttpErrors: options?.allowHttpErrors,
     });
     const text = await response.text();
     const data = (text ? JSON.parse(text) : undefined) as T;
@@ -208,6 +223,8 @@ export class HttpClient {
       headers,
       options?.signal,
       options?.allowHttpErrors ?? false,
+      options?.retryableStatusCodes ?? defaults.RETRYABLE_STATUS_CODES,
+      options?.allowedErrorStatusCodes ?? new Set(),
     );
     return withTraceId(response, traceId);
   }
@@ -229,6 +246,8 @@ export class HttpClient {
     headers: Record<string, string>,
     signal?: AbortSignal,
     allowHttpErrors = false,
+    retryableStatusCodes: Set<number> = defaults.RETRYABLE_STATUS_CODES,
+    allowedErrorStatusCodes: Set<number> = new Set(),
   ): Promise<{ response: Response; traceId: string }> {
     const url = `${this.baseUrl}${path}`;
     const { traceparent, traceId } = HttpClient.makeTraceparent();
@@ -242,10 +261,9 @@ export class HttpClient {
       }
 
       this.abortController = new AbortController();
-      const timeoutId = setTimeout(
-        () => this.abortController?.abort(),
-        this.timeoutMs,
-      );
+      const timeoutId = this.timeoutMs == null
+        ? null
+        : setTimeout(() => this.abortController?.abort(), this.timeoutMs);
 
       // Combine external signal with internal timeout
       const combinedSignal = signal
@@ -260,13 +278,13 @@ export class HttpClient {
           signal: combinedSignal,
         })) as Response;
 
-        clearTimeout(timeoutId);
+        if (timeoutId != null) clearTimeout(timeoutId);
 
         if (response.ok) return { response, traceId };
 
         // Check if retryable
         if (
-          defaults.RETRYABLE_STATUS_CODES.has(response.status) &&
+          retryableStatusCodes.has(response.status) &&
           attempt < this.maxRetries
         ) {
           lastError = new RemoteAPIError(
@@ -276,7 +294,7 @@ export class HttpClient {
           continue;
         }
 
-        if (allowHttpErrors) {
+        if (allowHttpErrors || allowedErrorStatusCodes.has(response.status)) {
           return { response, traceId };
         }
 
@@ -284,7 +302,7 @@ export class HttpClient {
         const errorBody = await response.text().catch(() => "");
         throwMappedError(response.status, errorBody, path);
       } catch (err) {
-        clearTimeout(timeoutId);
+        if (timeoutId != null) clearTimeout(timeoutId);
 
         if (
           err instanceof RemoteAPIError ||
