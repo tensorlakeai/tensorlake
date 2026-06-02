@@ -8,6 +8,7 @@ from tensorlake.sandbox import (
     SnapshotStatus,
     SnapshotType,
     SnapshotWaitCondition,
+    _defaults,
 )
 from tensorlake.sandbox.client import SandboxClient
 from tensorlake.sandbox.exceptions import SandboxError
@@ -120,6 +121,27 @@ class _FakeRustClient:
 
 
 class TestSandboxClientRustBackend(unittest.TestCase):
+    def test_constructor_passes_default_request_timeout_to_rust_backend(self):
+        class _RecordingRustClient:
+            kwargs = None
+
+            def __init__(self, **kwargs):
+                type(self).kwargs = kwargs
+
+            def close(self):
+                return None
+
+        with patch(
+            "tensorlake.sandbox.client.RustCloudSandboxClient",
+            _RecordingRustClient,
+        ):
+            SandboxClient(api_url="http://localhost:8900", api_key="k", _internal=True)
+
+        self.assertEqual(
+            _RecordingRustClient.kwargs["request_timeout_sec"],
+            _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
+        )
+
     def test_connect_accepts_sandbox_name(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
 

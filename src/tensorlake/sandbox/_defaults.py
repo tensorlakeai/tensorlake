@@ -14,7 +14,7 @@ SANDBOX_PROXY_URL: str = os.getenv(
 
 # Sandbox operations (create, get, list) may take several seconds when the
 # server is performing container scheduling or image pulls.
-DEFAULT_HTTP_TIMEOUT_SEC: float = 30.0
+DEFAULT_HTTP_TIMEOUT_SEC: float = 300.0
 
 # Retry configuration for transient errors (connection failures, 429/502/503/504).
 MAX_RETRIES: int = 3
