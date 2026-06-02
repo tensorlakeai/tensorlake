@@ -10,9 +10,21 @@ import { Image, dockerfileContent } from "./image.js";
  * Renders the source to a Dockerfile (for `Image` inputs) and hands the
  * Dockerfile path/text + context to the Rust core via `@tensorlake/native`,
  * which parses, validates, materializes, and registers the image. The Rust
- * core owns parsing, the Dockerfile-instruction allowlist
- * (`ARG`/`ONBUILD`/`SHELL`/`USER` are rejected) and ignored-set warnings
- * (`CMD`/`ENTRYPOINT`/`EXPOSE`/`HEALTHCHECK`/`LABEL`/`STOPSIGNAL`/`VOLUME`).
+ * core owns parsing and the Dockerfile-instruction allowlist:
+ *
+ * - Rejected (the build errors): `ONBUILD`, `SHELL`, `USER`.
+ * - Accepted but not materialized (warned; image-config metadata discarded by
+ *   `docker build --output type=tar`): `CMD`, `ENTRYPOINT`, `EXPOSE`,
+ *   `HEALTHCHECK`, `LABEL`, `STOPSIGNAL`, `VOLUME`.
+ * - Supported: `FROM`, `RUN`, `WORKDIR`, `ENV`, `COPY`, `ADD`, multi-stage
+ *   builds (`FROM ... AS`, `COPY --from=`), and top-level `ARG` (forwarded to
+ *   `docker build`; values are not substituted at parse time).
+ *
+ * Private registries: when a Dockerfile pulls `FROM` / `COPY --from=` an image
+ * in a private container registry, credentials are read from the standard
+ * Docker config file (`$DOCKER_CONFIG/config.json`, default
+ * `~/.docker/config.json`) and shipped to the builder. See
+ * {@link createSandboxImage}.
  */
 
 export interface CreateSandboxImageOptions {
@@ -195,6 +207,24 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
 
 // --- Public API ------------------------------------------------------------
 
+/**
+ * Build a sandbox image from a Dockerfile path or an {@link Image} and register
+ * it as a named sandbox template.
+ *
+ * Private container registries: to pull `FROM` / `COPY --from=` an image in a
+ * private registry, provide credentials in the standard Docker config file —
+ * `$DOCKER_CONFIG/config.json`, defaulting to `~/.docker/config.json`. Populate
+ * it with `docker login` (or a daemonless tool like `skopeo`/`crane`/`oras
+ * login`, or by writing the JSON directly). Set the `DOCKER_CONFIG` environment
+ * variable to scope credentials to a single build in CI without touching global
+ * docker state. Basic auth (including an API key/token used as the password)
+ * and identity tokens are supported; credential helpers
+ * (`credsStore`/`credHelpers`) are resolved on this machine and inlined before
+ * the build, and the target registry must appear under `auths`/`credHelpers`.
+ * Credentials are uploaded only into the ephemeral builder sandbox (not sent to
+ * the sandbox-template API, not persisted server-side) and are not baked into
+ * the resulting image.
+ */
 export async function createSandboxImage(
   source: SandboxImageSource,
   options: CreateSandboxImageOptions = {},

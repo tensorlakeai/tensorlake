@@ -139,6 +139,11 @@ export class Image {
    *
    * Materializes the image in a build sandbox, snapshots the filesystem,
    * and registers the snapshot as a named sandbox template.
+   *
+   * Private container registries: if `baseImage` (or a `COPY --from=`)
+   * references a private registry, provide credentials via the standard Docker
+   * config file (`$DOCKER_CONFIG/config.json`, default `~/.docker/config.json`)
+   * — e.g. `docker login`. See {@link createSandboxImage} for full details.
    */
   async build(
     options: CreateSandboxImageOptions = {},

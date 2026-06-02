@@ -125,6 +125,14 @@ class Image:
 
         Returns:
             The registered sandbox template response as a dict.
+
+        Private container registries:
+            If the image's ``base_image`` (or a ``COPY --from=``) references a
+            private registry, provide credentials via the standard Docker config
+            file (``$DOCKER_CONFIG/config.json``, default
+            ``~/.docker/config.json``) — e.g. ``docker login``. See
+            :func:`tensorlake.image.sandbox_builder.build_sandbox_image` for the
+            full details.
         """
         from .sandbox_builder import build_sandbox_image
 

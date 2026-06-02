@@ -7,10 +7,22 @@ the snapshot as a named sandbox template
 (``POST /platform/v1/.../sandbox-templates``).
 
 This is the programmatic backend for :meth:`Image.build` and the
-``tl sbx image create`` CLI command. The Rust core owns parsing, the
-Dockerfile-instruction allowlist (``ARG``/``ONBUILD``/``SHELL``/``USER`` are
-rejected) and ignored-set warnings (``CMD``/``ENTRYPOINT``/``EXPOSE``/
-``HEALTHCHECK``/``LABEL``/``STOPSIGNAL``/``VOLUME``).
+``tl sbx image create`` CLI command. The Rust core owns parsing and the
+Dockerfile-instruction allowlist:
+
+* **Rejected** (the build errors): ``ONBUILD``, ``SHELL``, ``USER``.
+* **Accepted but not materialized** (warned; image-config metadata discarded by
+  ``docker build --output type=tar``): ``CMD``, ``ENTRYPOINT``, ``EXPOSE``,
+  ``HEALTHCHECK``, ``LABEL``, ``STOPSIGNAL``, ``VOLUME``.
+* **Supported**: ``FROM``, ``RUN``, ``WORKDIR``, ``ENV``, ``COPY``, ``ADD``,
+  multi-stage builds (``FROM ... AS``, ``COPY --from=``), and top-level ``ARG``
+  (accepted and forwarded to ``docker build``, though the SDK does not
+  substitute ``ARG`` values at parse time).
+
+Private registries: when a Dockerfile pulls ``FROM`` / ``COPY --from=`` an image
+in a private container registry, credentials are read from the standard Docker
+config file (``$DOCKER_CONFIG/config.json``, default ``~/.docker/config.json``)
+and shipped to the builder. See :func:`build_sandbox_image` for details.
 """
 
 from __future__ import annotations
@@ -215,6 +227,23 @@ def build_sandbox_image(
         SandboxImageBuildError: The build failed during parsing, provisioning,
             materialization, or registration.
         TypeError: ``source`` is neither an ``Image`` nor a path.
+
+    Private container registries:
+        To pull ``FROM`` or ``COPY --from=`` an image in a private registry,
+        provide credentials in the standard Docker config file —
+        ``$DOCKER_CONFIG/config.json``, defaulting to ``~/.docker/config.json``.
+        Populate it with ``docker login`` (or a daemonless tool such as
+        ``skopeo``/``crane``/``oras login``, or by writing the JSON directly).
+        Set the ``DOCKER_CONFIG`` environment variable to point at a directory
+        to scope credentials to a single build in CI without touching global
+        docker state. Basic auth (including an API key/token used as the
+        password) and identity tokens are supported; credential helpers
+        (``credsStore``/``credHelpers``) are resolved on this machine and
+        inlined before the build. The target registry must appear under
+        ``auths`` or ``credHelpers`` in the config. Credentials are uploaded
+        only into the ephemeral builder sandbox (not sent to the
+        sandbox-template API, not persisted server-side) and are not baked into
+        the resulting image.
     """
     if emit is None:
         emit = _stderr_emit if verbose else _noop_emit
@@ -291,6 +320,10 @@ def build_sandbox_application_image(
     Unlike :func:`build_sandbox_image`, this uses the Applications Dockerfile
     wrapper so deployed functions get the SDK runtime, default workdir, and
     deploy-time build environment variables.
+
+    Private container registries are supported the same way as
+    :func:`build_sandbox_image` — provide credentials via
+    ``$DOCKER_CONFIG/config.json`` (default ``~/.docker/config.json``).
     """
     if emit is None:
         emit = _stderr_emit if verbose else _noop_emit

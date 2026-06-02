@@ -621,7 +621,18 @@ enum ImageCommands {
         public: bool,
     },
 
-    /// Register a sandbox image from a Dockerfile
+    /// Register a sandbox image from a Dockerfile.
+    ///
+    /// Private base images: to pull `FROM` or `COPY --from=` an image in a
+    /// private container registry, provide credentials in the standard Docker
+    /// config file — `$DOCKER_CONFIG/config.json`, defaulting to
+    /// `~/.docker/config.json`. Populate it with `docker login` (or a
+    /// daemonless tool like `skopeo`/`crane`/`oras login`, or by writing the
+    /// JSON directly). Set `DOCKER_CONFIG` to point at a directory to scope
+    /// credentials to a single build in CI without touching global docker
+    /// state. Credential helpers (`credsStore`/`credHelpers`) are resolved on
+    /// this machine and inlined before the build; the target registry must
+    /// appear under `auths` or `credHelpers`.
     Create {
         /// Path to the Dockerfile
         dockerfile_path: String,
