@@ -32,7 +32,7 @@ import {
 import { Sandbox } from "./sandbox.js";
 import { isLocalhost, lifecyclePath, resolveProxyUrl, resolveSandboxLifecycleUrl } from "./url.js";
 
-const CREATE_SANDBOX_RETRYABLE_STATUS_CODES = new Set([429, 502, 503]);
+const CREATE_SANDBOX_RETRYABLE_STATUS_CODES = new Set([502, 503]);
 const CREATE_SANDBOX_ALLOWED_ERROR_STATUS_CODES = new Set([504]);
 
 /**

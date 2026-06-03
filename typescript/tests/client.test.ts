@@ -139,6 +139,19 @@ describe("SandboxClient", () => {
       expect(attempts).toBe(1);
       client.close();
     });
+
+    it("does not retry rate-limited create responses", async () => {
+      let attempts = 0;
+      mockFetch(() => {
+        attempts++;
+        return new Response("rate limited", { status: 429 });
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.create()).rejects.toThrow("rate limited");
+      expect(attempts).toBe(1);
+      client.close();
+    });
   });
 
   describe("get", () => {
@@ -586,6 +599,19 @@ describe("SandboxClient", () => {
       const result = await client.claim("pool-1");
       expect(result.sandboxId).toBe("sbx-timeout");
       expect(result.status).toBe(SandboxStatus.TIMEOUT);
+      expect(attempts).toBe(1);
+      client.close();
+    });
+
+    it("does not retry rate-limited claim responses", async () => {
+      let attempts = 0;
+      mockFetch(() => {
+        attempts++;
+        return new Response("rate limited", { status: 429 });
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.claim("pool-1")).rejects.toThrow("rate limited");
       expect(attempts).toBe(1);
       client.close();
     });
