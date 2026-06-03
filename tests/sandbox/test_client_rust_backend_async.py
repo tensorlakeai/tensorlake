@@ -413,6 +413,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                 "sbx-1",
                 api_url="http://localhost:8900",
                 api_key="k",
+                proxy_url="https://sandbox.tensorlake.ai",
                 request_timeout=10.0,
             )
             sandbox.close()
@@ -446,6 +447,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                 "sbx-1",
                 api_url="http://localhost:8900",
                 api_key="k",
+                proxy_url="https://sandbox.tensorlake.ai",
             )
             sandbox.close()
 
