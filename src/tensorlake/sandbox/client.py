@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import os
 import time
 import warnings
 from typing import NoReturn
@@ -134,6 +136,53 @@ def _unsupported_request_timeout_kwarg(e: TypeError) -> bool:
 
 
 _RESERVED_SANDBOX_MANAGEMENT_PORT = 9501
+_MAX_CLOUD_INIT_USER_DATA_BYTES = 16 * 1024
+_MAX_CLOUD_INIT_BASE64_BYTES = 32 * 1024
+
+
+def _read_cloud_init_config(
+    cloud_init: str | os.PathLike[str] | None = None,
+    cloud_init_path: str | os.PathLike[str] | None = None,
+    *,
+    snapshot_id: str | None = None,
+) -> str | None:
+    if cloud_init is not None and cloud_init_path is not None:
+        raise SandboxError("`cloud_init` and `cloud_init_path` cannot both be set.")
+
+    source = cloud_init if cloud_init is not None else cloud_init_path
+    if source is None:
+        return None
+    if snapshot_id is not None:
+        raise SandboxError("cloud-init cannot be used with `snapshot_id`.")
+
+    source_str = os.fspath(source)
+    parsed = urlparse(source_str)
+    if parsed.scheme in {"http", "https"} and parsed.netloc:
+        data = f"#include\n{source_str}\n".encode("utf-8")
+    else:
+        try:
+            with open(source_str, "rb") as file:
+                data = file.read()
+        except OSError as e:
+            raise SandboxError(
+                f"failed to read cloud-init file {source_str!r}: {e}"
+            ) from None
+
+    if not data:
+        raise SandboxError("cloud-init user data must not be empty")
+    if len(data) > _MAX_CLOUD_INIT_USER_DATA_BYTES:
+        raise SandboxError(
+            "cloud-init user data exceeds "
+            f"{_MAX_CLOUD_INIT_USER_DATA_BYTES} byte limit"
+        )
+    encoded = base64.b64encode(data).decode("ascii")
+    if len(encoded) > _MAX_CLOUD_INIT_BASE64_BYTES:
+        raise SandboxError(
+            "cloud-init user data exceeds "
+            f"{_MAX_CLOUD_INIT_BASE64_BYTES} byte base64 limit"
+        )
+
+    return encoded
 
 
 def _normalize_user_ports(ports: list[int]) -> list[int]:
@@ -375,6 +424,8 @@ class SandboxClient:
         deny_out: list[str] | None = None,
         snapshot_id: str | None = None,
         name: str | None = None,
+        cloud_init: str | os.PathLike[str] | None = None,
+        cloud_init_path: str | os.PathLike[str] | None = None,
     ) -> Traced[CreateSandboxResponse]:
         """Create a new standalone sandbox.
 
@@ -402,6 +453,9 @@ class SandboxClient:
                 overridden.
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
+            cloud_init: Local cloud-init user-data file path or HTTP(S) URL.
+                Fresh boots only; snapshot restores are rejected.
+            cloud_init_path: Deprecated alias for *cloud_init*.
 
         Returns:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
@@ -417,6 +471,11 @@ class SandboxClient:
                 allow_out=allow_out or [],
                 deny_out=deny_out or [],
             )
+        cloud_init_base64 = _read_cloud_init_config(
+            cloud_init=cloud_init,
+            cloud_init_path=cloud_init_path,
+            snapshot_id=snapshot_id,
+        )
 
         request_model = CreateSandboxRequest(
             image=image,
@@ -430,6 +489,7 @@ class SandboxClient:
             network=network,
             snapshot_id=snapshot_id,
             name=name,
+            cloud_init_base64=cloud_init_base64,
         )
 
         try:
@@ -1231,6 +1291,8 @@ class SandboxClient:
         request_timeout: float | None = None,
         startup_timeout: float | None = None,
         name: str | None = None,
+        cloud_init: str | os.PathLike[str] | None = None,
+        cloud_init_path: str | os.PathLike[str] | None = None,
     ) -> "Sandbox":
         """Create a sandbox, wait for it to start, and return a connected Sandbox.
 
@@ -1264,6 +1326,9 @@ class SandboxClient:
             startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
+            cloud_init: Local cloud-init user-data file path or HTTP(S) URL.
+                Not supported with pools or snapshot restores.
+            cloud_init_path: Deprecated alias for *cloud_init*.
 
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)
@@ -1286,6 +1351,8 @@ class SandboxClient:
         # claim() never sends `name` to the server, so only the create() path
         # may fall back to the requested name when caching info locally.
         requested_name = None if pool_id is not None else name
+        if pool_id is not None and (cloud_init is not None or cloud_init_path is not None):
+            raise SandboxError("cloud-init cannot be used with `pool_id`.")
         if pool_id is not None:
             result = request_client.claim(pool_id)
         else:
@@ -1301,6 +1368,8 @@ class SandboxClient:
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
                 name=name,
+                cloud_init=cloud_init,
+                cloud_init_path=cloud_init_path,
             )
 
         # Fast path: the blocking create/claim response already carries Running status

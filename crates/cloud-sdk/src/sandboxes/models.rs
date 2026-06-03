@@ -47,6 +47,8 @@ pub struct CreateSandboxRequest {
     /// When absent the sandbox is ephemeral.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cloud_init_base64: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

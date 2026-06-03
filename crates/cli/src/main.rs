@@ -394,6 +394,14 @@ enum SbxCommands {
         #[arg(short, long, conflicts_with = "snapshot")]
         image: Option<String>,
 
+        /// Local cloud-init user-data file path or HTTP(S) URL for fresh Firecracker boots
+        #[arg(
+            long = "cloud-init",
+            value_name = "PATH_OR_URL",
+            conflicts_with = "snapshot"
+        )]
+        cloud_init: Option<String>,
+
         /// Return immediately after creation instead of waiting for the sandbox to be running
         #[arg(short, long)]
         no_wait: bool,
@@ -1076,6 +1084,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         entrypoint,
                         snapshot,
                         image,
+                        cloud_init,
                         no_wait,
                         ports,
                         allow_unauthenticated_access,
@@ -1105,6 +1114,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 entrypoint: &entrypoint,
                                 snapshot_id: snapshot.as_deref(),
                                 image_name: image.as_deref(),
+                                cloud_init: cloud_init.as_deref(),
                                 wait: !no_wait,
                                 ports: &ports,
                                 allow_unauthenticated_access,

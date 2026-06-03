@@ -1,8 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as undici from "undici";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import { SandboxClient } from "../src/client.js";
 import { SandboxStatus, SnapshotStatus } from "../src/models.js";
-import { SandboxError, SandboxNotFoundError } from "../src/errors.js";
+import { SandboxNotFoundError } from "../src/errors.js";
 
 vi.mock("undici", async (importOriginal) => {
   const actual = await importOriginal<typeof import("undici")>();
@@ -10,11 +13,23 @@ vi.mock("undici", async (importOriginal) => {
 });
 
 describe("SandboxClient", () => {
+  let tempDirs: string[] = [];
 
   afterEach(() => {
     vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
+    const dirs = tempDirs;
+    tempDirs = [];
+    return Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
   });
+
+  async function tempFile(contents: string | Uint8Array): Promise<string> {
+    const dir = await mkdtemp(join(tmpdir(), "tensorlake-sdk-test-"));
+    tempDirs.push(dir);
+    const path = join(dir, "cloud-init.yaml");
+    await writeFile(path, contents);
+    return path;
+  }
 
   function mockFetch(
     handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
@@ -148,6 +163,103 @@ describe("SandboxClient", () => {
       const client = SandboxClient.forLocalhost();
       await expect(client.create()).rejects.toThrow("rate limited");
       expect(attempts).toBe(1);
+      client.close();
+    });
+
+    it("reads cloudInit file path and sends cloud_init_base64", async () => {
+      const path = await tempFile("#cloud-config\n");
+      mockFetch((_url, init) => {
+        const body = JSON.parse(init?.body as string);
+        expect(body.cloud_init_base64).toBe(
+          Buffer.from("#cloud-config\n").toString("base64"),
+        );
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-cloud-init", status: "pending" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await client.create({ cloudInit: path });
+      client.close();
+    });
+
+    it("encodes cloudInit URL as include user-data", async () => {
+      mockFetch((_url, init) => {
+        const body = JSON.parse(init?.body as string);
+        expect(body.cloud_init_base64).toBe(
+          Buffer.from("#include\nhttps://example.com/cloud-init.yaml\n").toString(
+            "base64",
+          ),
+        );
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-cloud-init-url", status: "pending" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await client.create({ cloudInit: "https://example.com/cloud-init.yaml" });
+      client.close();
+    });
+
+    it("rejects invalid cloudInit URLs before sending a request", async () => {
+      mockFetch(() => {
+        throw new Error("request should not be sent");
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(
+        client.create({ cloudInit: "ftp://example.com/cloud-init.yaml" }),
+      ).rejects.toThrow("HTTP(S) URL");
+      client.close();
+    });
+
+    it("sends cloudInit file with snapshotId", async () => {
+      const path = await tempFile("#cloud-config\n");
+      mockFetch((_url, init) => {
+        const body = JSON.parse(init?.body as string);
+        expect(body.snapshot_id).toBe("snap-1");
+        expect(body.cloud_init_base64).toBe(
+          Buffer.from("#cloud-config\n").toString("base64"),
+        );
+        return new Response(
+          JSON.stringify({
+            sandbox_id: "sbx-cloud-init-snapshot",
+            status: "pending",
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await client.create({ snapshotId: "snap-1", cloudInit: path });
+      client.close();
+    });
+
+    it("sends cloudInit URL with snapshotId", async () => {
+      mockFetch((_url, init) => {
+        const body = JSON.parse(init?.body as string);
+        expect(body.snapshot_id).toBe("snap-1");
+        expect(body.cloud_init_base64).toBe(
+          Buffer.from("#include\nhttps://example.com/cloud-init.yaml\n").toString(
+            "base64",
+          ),
+        );
+        return new Response(
+          JSON.stringify({
+            sandbox_id: "sbx-cloud-init-url-snapshot",
+            status: "pending",
+          }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await client.create({
+        snapshotId: "snap-1",
+        cloudInit: "https://example.com/cloud-init.yaml",
+      });
       client.close();
     });
   });

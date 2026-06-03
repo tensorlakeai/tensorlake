@@ -193,6 +193,12 @@ class NetworkConfig(BaseModel):
     )
 
 
+class CloudInitConfig(BaseModel):
+    """Cloud-init configuration for fresh sandbox boots."""
+
+    user_data: str
+
+
 # --- Request models ---
 
 
@@ -206,6 +212,7 @@ class CreateSandboxRequest(BaseModel):
     network: NetworkConfig | None = None
     snapshot_id: str | None = None
     name: str | None = None
+    cloud_init_base64: str | None = None
 
 
 class UpdateSandboxRequest(BaseModel):
