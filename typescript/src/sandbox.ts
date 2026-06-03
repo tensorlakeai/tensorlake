@@ -4,7 +4,7 @@ import {
   Desktop,
 } from "./desktop.js";
 import * as defaults from "./defaults.js";
-import { SandboxError } from "./errors.js";
+import { SandboxError, SandboxConnectionError } from "./errors.js";
 import { type HttpRequestOptions, type Traced, HttpClient } from "./http.js";
 import {
   type CheckpointOptions,
@@ -719,6 +719,7 @@ export class Sandbox {
     const stdoutLines: string[] = [];
     const stderrLines: string[] = [];
     let exitCode = -1;
+    let sawExit = false;
 
     for await (const raw of parseSSEStream<Record<string, unknown>>(sseStream)) {
       if (typeof raw.line === "string") {
@@ -728,12 +729,23 @@ export class Sandbox {
           stdoutLines.push(raw.line);
         }
       } else if ("exit_code" in raw || "signal" in raw) {
+        sawExit = true;
         if (typeof raw.exit_code === "number") {
           exitCode = raw.exit_code;
         } else if (typeof raw.signal === "number") {
           exitCode = -raw.signal;
         }
       }
+    }
+
+    // A completed run always terminates with an exit_code/signal event. If the
+    // stream ends without one, the command never finished — e.g. the sandbox was
+    // unreachable and the proxy closed the stream after a timeout. Surface that
+    // as an error instead of returning a misleading success with empty output.
+    if (!sawExit) {
+      throw new SandboxConnectionError(
+        `Command "${command}" did not complete: the process stream ended without an exit status.`,
+      );
     }
 
     return Object.assign(
