@@ -55,6 +55,48 @@ describe("HttpClient", () => {
     client.close();
   });
 
+  it("sends the default request timeout header", async () => {
+    mockFetch((_url, init) => {
+      const headers = init?.headers as Record<string, string>;
+      expect(headers["X-Tensorlake-Request-Timeout-Ms"]).toBe("300000");
+      return new Response("{}", { status: 200 });
+    });
+
+    const client = new HttpClient({ baseUrl: "http://localhost:8900" });
+    await client.requestJson("GET", "/test");
+    client.close();
+  });
+
+  it("sends a custom request timeout header", async () => {
+    mockFetch((_url, init) => {
+      const headers = init?.headers as Record<string, string>;
+      expect(headers["X-Tensorlake-Request-Timeout-Ms"]).toBe("120000");
+      return new Response("{}", { status: 200 });
+    });
+
+    const client = new HttpClient({
+      baseUrl: "http://localhost:8900",
+      timeoutMs: 120_000,
+    });
+    await client.requestJson("GET", "/test");
+    client.close();
+  });
+
+  it("omits the request timeout header when the timeout is disabled", async () => {
+    mockFetch((_url, init) => {
+      const headers = init?.headers as Record<string, string>;
+      expect(headers["X-Tensorlake-Request-Timeout-Ms"]).toBeUndefined();
+      return new Response("{}", { status: 200 });
+    });
+
+    const client = new HttpClient({
+      baseUrl: "http://localhost:8900",
+      timeoutMs: null,
+    });
+    await client.requestJson("GET", "/test");
+    client.close();
+  });
+
   it("adds JSON content type only when sending JSON bodies", async () => {
     mockFetch((_url, init) => {
       const headers = init?.headers as Record<string, string>;

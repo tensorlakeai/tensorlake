@@ -36,6 +36,22 @@ describe("Sandbox", () => {
       expect(sbx.sandboxId).toBe("sbx-abc");
       sbx.close();
     });
+
+    it("uses explicit requestTimeout for proxy operations", async () => {
+      mockFetch((_url, init) => {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers["X-Tensorlake-Request-Timeout-Ms"]).toBe("10000");
+        return new Response(JSON.stringify({ healthy: true }), { status: 200 });
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-abc",
+        proxyUrl: "http://localhost:9443",
+        requestTimeout: 10,
+      });
+      await sbx.health();
+      sbx.close();
+    });
   });
 
   describe("run", () => {

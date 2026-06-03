@@ -181,6 +181,9 @@ class SandboxProxyConnection {
       hostHeader,
       sandboxIdHeader,
       routingHint,
+      timeoutMs: this.options.requestTimeout != null
+        ? secondsToMillis(this.options.requestTimeout)
+        : (this.options.timeoutMs ?? null),
     });
   }
 }
@@ -438,6 +441,13 @@ function sendPtyFrame(socket: WebSocket, frame: Buffer): Promise<void> {
   });
 }
 
+function secondsToMillis(seconds: number): number {
+  if (!Number.isFinite(seconds) || seconds <= 0) {
+    throw new SandboxError("requestTimeout must be a positive number of seconds");
+  }
+  return Math.ceil(seconds * 1000);
+}
+
 /**
  * Client for interacting with a running sandbox.
  *
@@ -508,9 +518,7 @@ export class Sandbox {
     // Dynamic import to break the circular dependency (client.ts imports Sandbox).
     const { SandboxClient } = await import("./client.js");
     const client = new SandboxClient(options, /* _internal */ true);
-    const sandbox = await client.createAndConnect(options);
-    sandbox.lifecycleClient = client;
-    return sandbox;
+    return client.createAndConnect(options);
   }
 
   /**
@@ -529,6 +537,7 @@ export class Sandbox {
       options.sandboxId,
       options.proxyUrl,
       options.routingHint,
+      options.requestTimeout,
     );
     sandbox.lifecycleClient = client;
     return sandbox;

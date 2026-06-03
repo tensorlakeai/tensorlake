@@ -121,6 +121,37 @@ describe("SandboxClient", () => {
       await client.create();
       client.close();
     });
+
+    it("returns readiness timeout responses without retrying", async () => {
+      let attempts = 0;
+      mockFetch(() => {
+        attempts++;
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-timeout", status: "timeout" }),
+          { status: 504 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const result = await client.create();
+      expect(result.sandboxId).toBe("sbx-timeout");
+      expect(result.status).toBe(SandboxStatus.TIMEOUT);
+      expect(attempts).toBe(1);
+      client.close();
+    });
+
+    it("does not retry rate-limited create responses", async () => {
+      let attempts = 0;
+      mockFetch(() => {
+        attempts++;
+        return new Response("rate limited", { status: 429 });
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.create()).rejects.toThrow("rate limited");
+      expect(attempts).toBe(1);
+      client.close();
+    });
   });
 
   describe("get", () => {
@@ -553,6 +584,37 @@ describe("SandboxClient", () => {
       expect(result.sandboxId).toBe("sbx-3");
       client.close();
     });
+
+    it("returns readiness timeout responses without retrying", async () => {
+      let attempts = 0;
+      mockFetch(() => {
+        attempts++;
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-timeout", status: "timeout" }),
+          { status: 504 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const result = await client.claim("pool-1");
+      expect(result.sandboxId).toBe("sbx-timeout");
+      expect(result.status).toBe(SandboxStatus.TIMEOUT);
+      expect(attempts).toBe(1);
+      client.close();
+    });
+
+    it("does not retry rate-limited claim responses", async () => {
+      let attempts = 0;
+      mockFetch(() => {
+        attempts++;
+        return new Response("rate limited", { status: 429 });
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.claim("pool-1")).rejects.toThrow("rate limited");
+      expect(attempts).toBe(1);
+      client.close();
+    });
   });
 
   describe("createAndConnect", () => {
@@ -576,6 +638,83 @@ describe("SandboxClient", () => {
         "https://sandbox.us-east-1.aws.tensorlake.ai",
       );
       sandbox.close();
+      client.close();
+    });
+
+    it("uses per-call requestTimeout for the initial create request", async () => {
+      mockFetch((_url, init) => {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers["X-Tensorlake-Request-Timeout-Ms"]).toBe("10000");
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-1", status: "running" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost({ requestTimeout: 300 });
+      const sandbox = await client.createAndConnect({ requestTimeout: 10 });
+      expect(sandbox.sandboxId).toBe("sbx-1");
+      client.close();
+      sandbox.close();
+    });
+
+    it("uses startupTimeout as a compatibility alias for requestTimeout", async () => {
+      mockFetch((_url, init) => {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers["X-Tensorlake-Request-Timeout-Ms"]).toBe("12000");
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-1", status: "running" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost({ requestTimeout: 300 });
+      const sandbox = await client.createAndConnect({ startupTimeout: 12 });
+      expect(sandbox.sandboxId).toBe("sbx-1");
+      client.close();
+      sandbox.close();
+    });
+
+    it("prefers requestTimeout over startupTimeout", async () => {
+      mockFetch((_url, init) => {
+        const headers = init?.headers as Record<string, string>;
+        expect(headers["X-Tensorlake-Request-Timeout-Ms"]).toBe("15000");
+        return new Response(
+          JSON.stringify({ sandbox_id: "sbx-1", status: "running" }),
+          { status: 200 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost({ requestTimeout: 300 });
+      const sandbox = await client.createAndConnect({
+        requestTimeout: 15,
+        startupTimeout: 12,
+      });
+      expect(sandbox.sandboxId).toBe("sbx-1");
+      client.close();
+      sandbox.close();
+    });
+
+    it("deletes the sandbox returned by a readiness timeout response", async () => {
+      const calls: string[] = [];
+      mockFetch((url, init) => {
+        calls.push(`${init?.method ?? "GET"} ${url}`);
+        if (init?.method === "POST") {
+          return new Response(
+            JSON.stringify({ sandbox_id: "sbx-timeout", status: "timeout" }),
+            { status: 504 },
+          );
+        }
+        expect(init?.method).toBe("DELETE");
+        expect(url).toContain("/sandboxes/sbx-timeout");
+        return new Response("{}", { status: 200 });
+      });
+
+      const client = SandboxClient.forLocalhost({ requestTimeout: 300 });
+      await expect(
+        client.createAndConnect({ requestTimeout: 10 }),
+      ).rejects.toThrow("Sandbox sbx-timeout did not start within 10s");
+      expect(calls).toHaveLength(2);
       client.close();
     });
 

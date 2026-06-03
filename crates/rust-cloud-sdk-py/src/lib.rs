@@ -586,27 +586,27 @@ impl CloudSandboxClient {
 
     fn create_sandbox(&self, request_json: String) -> PyResult<(String, String)> {
         let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
-        self.run_with_retry(5, move |client| {
-            let request = request.clone();
-            async move {
+        let client = self.client.clone();
+        shared_runtime()
+            .block_on(async move {
                 let traced = client.create(&request).await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
                 Ok((trace_id, json))
-            }
-        })
+            })
+            .map_err(into_sandbox_py_error)
     }
 
     fn claim_sandbox(&self, pool_id: String) -> PyResult<(String, String)> {
-        self.run_with_retry(5, move |client| {
-            let pool_id = pool_id.clone();
-            async move {
+        let client = self.client.clone();
+        shared_runtime()
+            .block_on(async move {
                 let traced = client.claim(&pool_id).await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
                 Ok((trace_id, json))
-            }
-        })
+            })
+            .map_err(into_sandbox_py_error)
     }
 
     fn get_sandbox_json(&self, sandbox_id: String) -> PyResult<(String, String)> {
@@ -828,12 +828,10 @@ impl CloudSandboxClient {
         let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| {
-                let request = request.clone();
-                async move { c.create(&request).await }
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced = client
+                .create(&request)
+                .await
+                .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
@@ -847,12 +845,10 @@ impl CloudSandboxClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| {
-                let pool_id = pool_id.clone();
-                async move { c.claim(&pool_id).await }
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced = client
+                .claim(&pool_id)
+                .await
+                .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
@@ -1182,16 +1178,30 @@ impl CloudSandboxClient {
     /// pool. All proxy clients created this way reuse the same underlying reqwest::Client,
     /// so HTTP/2 connections can be coalesced: only the first sandbox in a session pays the
     /// TCP+TLS handshake cost.
-    #[pyo3(signature = (proxy_url, sandbox_id, routing_hint=None))]
+    #[pyo3(signature = (proxy_url, sandbox_id, routing_hint=None, request_timeout_sec=None))]
     fn connect_proxy(
         &self,
         proxy_url: String,
         sandbox_id: String,
         routing_hint: Option<String>,
+        request_timeout_sec: Option<f64>,
     ) -> PyResult<CloudSandboxProxyClient> {
         let (base_url, host_override, sandbox_id_header) =
             resolve_proxy_target(&proxy_url, &sandbox_id)?;
-        let shared_client = self.client.http_client().with_base_url(&base_url);
+        let shared_client = if let Some(seconds) = request_timeout_sec {
+            self.client
+                .http_client()
+                .with_base_url_and_timeout(
+                    &base_url,
+                    Some(duration_from_seconds("request_timeout_sec", seconds)?),
+                )
+                .map_err(into_sandbox_py_error)?
+        } else {
+            self.client
+                .http_client()
+                .with_base_url_without_timeout(&base_url)
+                .map_err(into_sandbox_py_error)?
+        };
         let proxy = SandboxProxyClient::new(shared_client, host_override)
             .with_sandbox_id(sandbox_id_header)
             .with_routing_hint(routing_hint);
@@ -1227,7 +1237,7 @@ pub struct CloudSandboxProxyClient {
 #[pymethods]
 impl CloudSandboxProxyClient {
     #[new]
-    #[pyo3(signature = (proxy_url, sandbox_id, api_key=None, organization_id=None, project_id=None, routing_hint=None, user_agent=None))]
+    #[pyo3(signature = (proxy_url, sandbox_id, api_key=None, organization_id=None, project_id=None, routing_hint=None, user_agent=None, request_timeout_sec=None))]
     fn new(
         proxy_url: String,
         sandbox_id: String,
@@ -1236,6 +1246,7 @@ impl CloudSandboxProxyClient {
         project_id: Option<String>,
         routing_hint: Option<String>,
         user_agent: Option<String>,
+        request_timeout_sec: Option<f64>,
     ) -> PyResult<Self> {
         let (base_url, host_override, sandbox_id_header) =
             resolve_proxy_target(&proxy_url, &sandbox_id)?;
@@ -1253,6 +1264,9 @@ impl CloudSandboxProxyClient {
 
         if let Some(ua) = user_agent.as_deref() {
             builder = builder.user_agent(ua);
+        }
+        if let Some(seconds) = request_timeout_sec {
+            builder = builder.timeout(duration_from_seconds("request_timeout_sec", seconds)?);
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;

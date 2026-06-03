@@ -128,6 +128,10 @@ def _raise_as_sandbox_error(e: Exception) -> NoReturn:
     raise SandboxError(str(e)) from e
 
 
+def _unsupported_request_timeout_kwarg(e: TypeError) -> bool:
+    return "request_timeout_sec" in str(e)
+
+
 _RESERVED_SANDBOX_MANAGEMENT_PORT = 9501
 
 
@@ -207,6 +211,7 @@ class SandboxClient:
         namespace: str | None = _defaults.NAMESPACE,
         max_retries: int = _defaults.MAX_RETRIES,
         retry_backoff_sec: float = _defaults.RETRY_BACKOFF_SEC,
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
         _internal: bool = False,
     ):
         if not _internal:
@@ -222,22 +227,30 @@ class SandboxClient:
         self._namespace: str | None = namespace
         self._max_retries = max_retries
         self._retry_backoff_sec = retry_backoff_sec
+        self._request_timeout = request_timeout
         if not _RUST_SANDBOX_CLIENT_AVAILABLE:
             raise SandboxError(
                 "Rust Cloud SDK sandbox client is required but unavailable. "
                 "Build/install it with `make build_rust_py_client`."
             )
 
+        kwargs = {
+            "api_url": self._api_url,
+            "api_key": self._api_key,
+            "organization_id": self._organization_id,
+            "project_id": self._project_id,
+            "namespace": self._namespace,
+            "user_agent": USER_AGENT,
+            "request_timeout_sec": self._request_timeout,
+        }
         try:
-            self._rust_client = RustCloudSandboxClient(
-                api_url=self._api_url,
-                api_key=self._api_key,
-                organization_id=self._organization_id,
-                project_id=self._project_id,
-                namespace=self._namespace,
-                user_agent=USER_AGENT,
-                request_timeout_sec=_defaults.DEFAULT_HTTP_TIMEOUT_SEC,
-            )
+            try:
+                self._rust_client = RustCloudSandboxClient(**kwargs)
+            except TypeError as e:
+                if not _unsupported_request_timeout_kwarg(e):
+                    raise
+                kwargs.pop("request_timeout_sec")
+                self._rust_client = RustCloudSandboxClient(**kwargs)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -248,6 +261,7 @@ class SandboxClient:
         organization_id: str | None = None,
         project_id: str | None = None,
         api_url: str = "https://api.tensorlake.ai",
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> "SandboxClient":
         """Create a client for the Tensorlake cloud platform.
 
@@ -266,6 +280,7 @@ class SandboxClient:
             api_key=api_key,
             organization_id=organization_id,
             project_id=project_id,
+            request_timeout=request_timeout,
         )
 
     @classmethod
@@ -273,6 +288,7 @@ class SandboxClient:
         cls,
         api_url: str = "http://localhost:8900",
         namespace: str = "default",
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> "SandboxClient":
         """Create a client for a local Indexify server.
 
@@ -283,7 +299,9 @@ class SandboxClient:
             api_url: Local server URL
             namespace: Namespace for resource scoping
         """
-        return cls(api_url=api_url, namespace=namespace)
+        return cls(
+            api_url=api_url, namespace=namespace, request_timeout=request_timeout
+        )
 
     def __enter__(self) -> "SandboxClient":
         """Context manager entry."""
@@ -327,6 +345,21 @@ class SandboxClient:
             proxy_host = "sandbox." + host[4:]
             return f"{parsed.scheme}://{proxy_host}"
         return _defaults.SANDBOX_PROXY_URL
+
+    def _with_request_timeout(self, request_timeout: float) -> "SandboxClient":
+        if request_timeout == self._request_timeout:
+            return self
+        return SandboxClient(
+            api_url=self._api_url,
+            api_key=self._api_key,
+            organization_id=self._organization_id,
+            project_id=self._project_id,
+            namespace=self._namespace,
+            max_retries=self._max_retries,
+            retry_backoff_sec=self._retry_backoff_sec,
+            request_timeout=request_timeout,
+            _internal=True,
+        )
 
     def create(
         self,
@@ -1087,6 +1120,7 @@ class SandboxClient:
         proxy_url: str | None = None,
         sandbox_id: str | None = None,
         routing_hint: str | None = None,
+        request_timeout: float | None = None,
     ) -> "Sandbox":
         """Connect to a running sandbox for process and file operations.
 
@@ -1116,11 +1150,14 @@ class SandboxClient:
             proxy_sandbox_id = info.sandbox_id
             routing_hint = routing_hint or info.routing_hint
 
-        proxy_rust_client = self._rust_client.connect_proxy(
-            proxy_url=proxy_url,
-            sandbox_id=proxy_sandbox_id,
-            routing_hint=routing_hint,
-        )
+        connect_proxy_kwargs = {
+            "proxy_url": proxy_url,
+            "sandbox_id": proxy_sandbox_id,
+            "routing_hint": routing_hint,
+        }
+        if request_timeout is not None:
+            connect_proxy_kwargs["request_timeout_sec"] = request_timeout
+        proxy_rust_client = self._rust_client.connect_proxy(**connect_proxy_kwargs)
 
         sandbox = Sandbox(
             identifier=proxy_sandbox_id,
@@ -1153,7 +1190,8 @@ class SandboxClient:
         pool_id: str | None = None,
         snapshot_id: str | None = None,
         proxy_url: str | None = None,
-        startup_timeout: float = 60,
+        request_timeout: float | None = None,
+        startup_timeout: float | None = None,
         name: str | None = None,
     ) -> "Sandbox":
         """Create a sandbox, wait for it to start, and return a connected Sandbox.
@@ -1184,7 +1222,9 @@ class SandboxClient:
             pool_id: Pool ID to use for warm containers (optional)
             snapshot_id: ID of a completed snapshot to restore from
             proxy_url: Override the sandbox proxy URL
-            startup_timeout: Max seconds to wait for Running status (default 60)
+            request_timeout: Max seconds to wait for Running status.
+                Defaults to the client request timeout.
+            startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
 
@@ -1195,13 +1235,24 @@ class SandboxClient:
             SandboxError: If sandbox fails to start or times out
             SandboxConnectionError: If the server is unreachable
         """
+        wait_timeout = (
+            request_timeout
+            if request_timeout is not None
+            else (
+                startup_timeout
+                if startup_timeout is not None
+                else self._request_timeout
+            )
+        )
+        request_client = self._with_request_timeout(wait_timeout)
+
         # claim() never sends `name` to the server, so only the create() path
         # may fall back to the requested name when caching info locally.
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
-            result = self.claim(pool_id)
+            result = request_client.claim(pool_id)
         else:
-            result = self.create(
+            result = request_client.create(
                 image=image,
                 cpus=cpus,
                 memory_mb=memory_mb,
@@ -1220,7 +1271,7 @@ class SandboxClient:
         # and a short-lived routing hint. Use it immediately to skip an extra poll RTT
         # and let the proxy route the first request without a placement lookup.
         if result.status == SandboxStatus.RUNNING:
-            sandbox = self.connect(
+            sandbox = request_client.connect(
                 result.sandbox_id,
                 proxy_url=proxy_url
                 or result.ingress_endpoint
@@ -1229,7 +1280,7 @@ class SandboxClient:
             )
             sandbox._sandbox_id = result.sandbox_id
             sandbox._owns_sandbox = True
-            sandbox._lifecycle_client = self
+            sandbox._lifecycle_client = request_client
             sandbox._trace_id = result.trace_id
             sandbox._cached_info = SandboxInfo.model_construct(
                 sandbox_id=result.sandbox_id,
@@ -1247,12 +1298,20 @@ class SandboxClient:
                     termination_reason=result.termination_reason,
                 )
             )
+        if result.status == SandboxStatus.TIMEOUT:
+            try:
+                request_client.delete(result.sandbox_id)
+            except Exception:
+                pass
+            raise SandboxError(
+                f"Sandbox {result.sandbox_id} did not start within {wait_timeout}s"
+            )
 
-        deadline = time.time() + startup_timeout
+        deadline = time.time() + wait_timeout
         while time.time() < deadline:
-            info = self.get(result.sandbox_id)
+            info = request_client.get(result.sandbox_id)
             if info.status == SandboxStatus.RUNNING:
-                sandbox = self.connect(
+                sandbox = request_client.connect(
                     result.sandbox_id,
                     proxy_url=proxy_url
                     or info.ingress_endpoint
@@ -1262,7 +1321,7 @@ class SandboxClient:
                 sandbox._sandbox_id = info.sandbox_id
                 sandbox._cached_info = info.value
                 sandbox._owns_sandbox = True
-                sandbox._lifecycle_client = self
+                sandbox._lifecycle_client = request_client
                 sandbox._trace_id = result.trace_id
                 return sandbox
             if info.status in (SandboxStatus.SUSPENDED, SandboxStatus.TERMINATED):
@@ -1279,9 +1338,9 @@ class SandboxClient:
 
         # Timed out — clean up the pending sandbox
         try:
-            self.delete(result.sandbox_id)
+            request_client.delete(result.sandbox_id)
         except Exception:
             pass
         raise SandboxError(
-            f"Sandbox {result.sandbox_id} did not start within {startup_timeout}s"
+            f"Sandbox {result.sandbox_id} did not start within {wait_timeout}s"
         )

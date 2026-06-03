@@ -132,6 +132,7 @@ class Sandbox:
         *,
         sandbox_id: str | None = None,
         routing_hint: str | None = None,
+        request_timeout: float | None = None,
         _proxy_rust_client: object | None = None,
     ):
         if identifier and sandbox_id and identifier != sandbox_id:
@@ -154,6 +155,7 @@ class Sandbox:
         self._api_key = api_key
         self._organization_id = organization_id
         self._project_id = project_id
+        self._request_timeout = request_timeout
         parsed_proxy = urlparse(proxy_url)
         self._host_header = None
         if parsed_proxy.hostname in ("localhost", "127.0.0.1"):
@@ -180,15 +182,18 @@ class Sandbox:
             )
         else:
             try:
-                self._rust_client = RustCloudSandboxProxyClient(
-                    proxy_url=proxy_url,
-                    sandbox_id=sandbox_identifier,
-                    api_key=api_key,
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    routing_hint=routing_hint,
-                    user_agent=USER_AGENT,
-                )
+                kwargs = {
+                    "proxy_url": proxy_url,
+                    "sandbox_id": sandbox_identifier,
+                    "api_key": api_key,
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "routing_hint": routing_hint,
+                    "user_agent": USER_AGENT,
+                }
+                if request_timeout is not None:
+                    kwargs["request_timeout_sec"] = request_timeout
+                self._rust_client = RustCloudSandboxProxyClient(**kwargs)
                 self._base_url = self._rust_client.base_url()
             except Exception as e:
                 _raise_as_sandbox_error(e)
@@ -211,7 +216,8 @@ class Sandbox:
         pool_id: str | None = None,
         snapshot_id: str | None = None,
         proxy_url: str | None = None,
-        startup_timeout: float = 60,
+        request_timeout: float | None = None,
+        startup_timeout: float | None = None,
         name: str | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
@@ -240,7 +246,8 @@ class Sandbox:
             pool_id: Pool ID to claim a warm container from.
             snapshot_id: Restore from this snapshot ID.
             proxy_url: Override the sandbox proxy URL.
-            startup_timeout: Max seconds to wait for Running status (default 60).
+            request_timeout: Max seconds to wait for HTTP operations.
+            startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name; named sandboxes support suspend/resume.
             api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
             api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
@@ -256,12 +263,22 @@ class Sandbox:
         """
         from .client import SandboxClient
 
+        effective_request_timeout = (
+            startup_timeout
+            if startup_timeout is not None
+            else (
+                request_timeout
+                if request_timeout is not None
+                else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+            )
+        )
         client = SandboxClient(
             api_url=api_url,
             api_key=api_key,
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=effective_request_timeout,
             _internal=True,
         )
         return client.create_and_connect(
@@ -278,7 +295,7 @@ class Sandbox:
             pool_id=pool_id,
             snapshot_id=snapshot_id,
             proxy_url=proxy_url,
-            startup_timeout=startup_timeout,
+            request_timeout=effective_request_timeout,
             name=name,
         )
 
@@ -294,6 +311,7 @@ class Sandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        request_timeout: float | None = None,
     ) -> "Sandbox":
         """Attach to an existing sandbox and return a connected handle.
 
@@ -322,12 +340,18 @@ class Sandbox:
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=(
+                request_timeout
+                if request_timeout is not None
+                else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+            ),
             _internal=True,
         )
         return client.connect(
             sandbox_id,
             proxy_url=proxy_url,
             routing_hint=routing_hint,
+            request_timeout=request_timeout,
         )
 
     # --- Class-level snapshot management ---
@@ -341,6 +365,7 @@ class Sandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> SnapshotInfo:
         """Get information about a snapshot by ID.
 
@@ -365,6 +390,7 @@ class Sandbox:
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=request_timeout,
             _internal=True,
         )
         return client.get_snapshot(snapshot_id).value
@@ -378,6 +404,7 @@ class Sandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> None:
         """Delete a snapshot by ID.
 
@@ -399,6 +426,7 @@ class Sandbox:
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=request_timeout,
             _internal=True,
         )
         client.delete_snapshot(snapshot_id)
@@ -411,6 +439,7 @@ class Sandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> TracedIterator[SandboxInfo]:
         """List all sandboxes in the namespace.
 
@@ -434,6 +463,7 @@ class Sandbox:
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=request_timeout,
             _internal=True,
         )
         return client.list()
