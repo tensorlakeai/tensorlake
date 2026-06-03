@@ -1,0 +1,4 @@
+FROM tensorlake/ubuntu-minimal
+
+RUN mkdir -p /opt/tensorlake-smoke \
+ && printf 'sandbox image smoke ok\n' > /opt/tensorlake-smoke/ready.txt
