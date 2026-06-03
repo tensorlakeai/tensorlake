@@ -16,7 +16,6 @@ from .exceptions import (
 from .models import (
     ArchivedSandboxInfo,
     CheckpointType,
-    CloudInitConfig,
     CommandResult,
     ContainerResourcesInfo,
     CopiedSandboxResponse,
@@ -83,7 +82,6 @@ __all__ = [
     "CreateSandboxPoolResponse",
     "ContainerResourcesInfo",
     "NetworkConfig",
-    "CloudInitConfig",
     "ArchivedSandboxInfo",
     "ListArchivedSandboxesResponse",
     "sandbox_url_from_ingress_endpoint",

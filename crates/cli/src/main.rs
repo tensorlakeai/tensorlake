@@ -394,7 +394,7 @@ enum SbxCommands {
         #[arg(short, long, conflicts_with = "snapshot")]
         image: Option<String>,
 
-        /// Local cloud-init user-data file path or HTTP(S) URL for fresh Firecracker boots
+        /// Local cloud-init file path or HTTP(S) URL for the sandbox
         #[arg(
             long = "cloud-init",
             value_name = "PATH_OR_URL",

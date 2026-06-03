@@ -9,7 +9,6 @@ use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 const DEFAULT_SANDBOX_CPUS: f64 = 1.0;
 const DEFAULT_SANDBOX_MEMORY_MB: i64 = 1024;
 const MAX_CLOUD_INIT_USER_DATA_BYTES: usize = 16 * 1024;
-const MAX_CLOUD_INIT_BASE64_BYTES: usize = 32 * 1024;
 
 pub async fn create_with_request(
     ctx: &CliContext,
@@ -274,13 +273,24 @@ fn build_create_request_body(
     body
 }
 
-fn is_http_url(source: &str) -> bool {
-    source.starts_with("http://") || source.starts_with("https://")
+fn cloud_init_include_data(source: &str) -> Result<Option<Vec<u8>>> {
+    match url::Url::parse(source) {
+        Ok(url) if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() => {
+            Ok(Some(format!("#include\n{source}\n").into_bytes()))
+        }
+        Ok(_) => Err(CliError::usage(
+            "cloud-init URL must be an absolute HTTP(S) URL with a host",
+        )),
+        Err(_) if source.contains("://") => Err(CliError::usage(
+            "cloud-init URL must be an absolute HTTP(S) URL with a host",
+        )),
+        Err(_) => Ok(None),
+    }
 }
 
 fn encode_cloud_init_source(source: &str) -> Result<String> {
-    let data = if is_http_url(source) {
-        format!("#include\n{source}\n").into_bytes()
+    let data = if let Some(data) = cloud_init_include_data(source)? {
+        data
     } else {
         std::fs::read(source).map_err(|error| {
             CliError::Other(anyhow::anyhow!(
@@ -300,19 +310,12 @@ fn encode_cloud_init_source(source: &str) -> Result<String> {
             MAX_CLOUD_INIT_USER_DATA_BYTES
         )));
     }
-    let encoded = BASE64_STANDARD.encode(data);
-    if encoded.len() > MAX_CLOUD_INIT_BASE64_BYTES {
-        return Err(CliError::usage(format!(
-            "cloud-init user data exceeds {} byte base64 limit",
-            MAX_CLOUD_INIT_BASE64_BYTES
-        )));
-    }
-    Ok(encoded)
+    Ok(BASE64_STANDARD.encode(data))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{build_create_request_body, format_ready_message};
+    use super::{build_create_request_body, encode_cloud_init_source, format_ready_message};
 
     #[test]
     fn create_body_uses_defaults_without_snapshot() {
@@ -404,6 +407,14 @@ mod tests {
         );
 
         assert_eq!(body["cloud_init_base64"], "I2Nsb3VkLWNvbmZpZwo=");
+    }
+
+    #[test]
+    fn cloud_init_rejects_invalid_url() {
+        let err = encode_cloud_init_source("ftp://example.com/cloud-init.yaml")
+            .expect_err("unsupported URL scheme should fail");
+
+        assert!(err.to_string().contains("HTTP(S) URL"));
     }
 
     #[test]

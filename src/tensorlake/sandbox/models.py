@@ -193,12 +193,6 @@ class NetworkConfig(BaseModel):
     )
 
 
-class CloudInitConfig(BaseModel):
-    """Cloud-init configuration for fresh sandbox boots."""
-
-    user_data: str
-
-
 # --- Request models ---
 
 

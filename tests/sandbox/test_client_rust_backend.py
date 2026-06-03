@@ -525,7 +525,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             file.write("#cloud-config\n")
             file.flush()
 
-            client.create(cloud_init_path=file.name)
+            client.create(cloud_init=file.name)
 
         request_json = json.loads(fake.create_request_json)
         self.assertEqual(
@@ -548,6 +548,16 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             ).decode("ascii"),
         )
 
+    def test_create_rejects_invalid_cloud_init_url(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        with self.assertRaisesRegex(SandboxError, "HTTP\\(S\\) URL"):
+            client.create(cloud_init="ftp://example.com/cloud-init.yaml")
+
+        self.assertIsNone(fake.create_request_json)
+
     def test_create_rejects_cloud_init_with_snapshot(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         with tempfile.NamedTemporaryFile("w", encoding="utf-8") as file:
@@ -555,7 +565,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             file.flush()
 
             with self.assertRaisesRegex(SandboxError, "snapshot_id"):
-                client.create(snapshot_id="snap-1", cloud_init_path=file.name)
+                client.create(snapshot_id="snap-1", cloud_init=file.name)
 
     def test_create_and_connect_raises_error_details_from_startup_failure(self):
         class _StartupFailureRustClient(_FakeRustClient):

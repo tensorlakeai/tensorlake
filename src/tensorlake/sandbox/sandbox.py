@@ -222,7 +222,6 @@ class Sandbox:
         startup_timeout: float | None = None,
         name: str | None = None,
         cloud_init: str | os.PathLike[str] | None = None,
-        cloud_init_path: str | os.PathLike[str] | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
         organization_id: str | None = None,
@@ -252,9 +251,8 @@ class Sandbox:
             request_timeout: Max seconds to wait for HTTP operations.
             startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name; named sandboxes support suspend/resume.
-            cloud_init: Local cloud-init user-data file path or HTTP(S) URL.
+            cloud_init: Local cloud-init file path or HTTP(S) URL for the sandbox.
                 Fresh boots only; not supported with pools or snapshot restores.
-            cloud_init_path: Deprecated alias for *cloud_init*.
             api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
             api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
             organization_id: Organization ID for multi-tenant access.
@@ -303,7 +301,6 @@ class Sandbox:
             request_timeout=effective_request_timeout,
             name=name,
             cloud_init=cloud_init,
-            cloud_init_path=cloud_init_path,
         )
 
     @classmethod
