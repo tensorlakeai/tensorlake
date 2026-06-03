@@ -543,9 +543,9 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         request_json = json.loads(fake.create_request_json)
         self.assertEqual(
             request_json["cloud_init_base64"],
-            base64.b64encode(
-                b"#include\nhttps://example.com/cloud-init.yaml\n"
-            ).decode("ascii"),
+            base64.b64encode(b"#include\nhttps://example.com/cloud-init.yaml\n").decode(
+                "ascii"
+            ),
         )
 
     def test_create_rejects_invalid_cloud_init_url(self):

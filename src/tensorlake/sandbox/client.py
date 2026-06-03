@@ -148,13 +148,9 @@ def _cloud_init_include_data(source_str: str) -> bytes | None:
     if len(parsed.scheme) == 1 and source_str[1:3] in {":\\", ":/"}:
         return None
     if parsed.scheme:
-        raise SandboxError(
-            "cloud-init URL must be an absolute HTTP(S) URL with a host"
-        )
+        raise SandboxError("cloud-init URL must be an absolute HTTP(S) URL with a host")
     if _URL_SCHEME_RE.match(source_str):
-        raise SandboxError(
-            "cloud-init URL must be an absolute HTTP(S) URL with a host"
-        )
+        raise SandboxError("cloud-init URL must be an absolute HTTP(S) URL with a host")
     return None
 
 
