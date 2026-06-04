@@ -85,7 +85,6 @@ export interface CreateSandboxOptions {
   memoryMb?: number;
   /** Root disk size in megabytes. When omitted, the server uses its default disk size. */
   diskMb?: number;
-  secretNames?: string[];
   timeoutSecs?: number;
   entrypoint?: string[];
   allowInternetAccess?: boolean;
@@ -122,7 +121,6 @@ export interface SandboxInfo {
   /** Resolved sandbox image name. */
   image?: string;
   resources: ContainerResourcesInfo;
-  secretNames: string[];
   timeoutSecs?: number;
   entrypoint?: string[];
   network?: NetworkConfig;
@@ -213,7 +211,6 @@ export interface CreatePoolOptions {
   cpus?: number;
   memoryMb?: number;
   ephemeralDiskMb?: number;
-  secretNames?: string[];
   timeoutSecs?: number;
   entrypoint?: string[];
   maxContainers?: number;
@@ -226,7 +223,6 @@ export interface UpdatePoolOptions {
   cpus?: number;
   memoryMb?: number;
   ephemeralDiskMb?: number;
-  secretNames?: string[];
   timeoutSecs?: number;
   entrypoint?: string[];
   maxContainers?: number;
@@ -251,7 +247,6 @@ export interface SandboxPoolInfo {
   /** Sandbox image name backing the pool. */
   image: string;
   resources: ContainerResourcesInfo;
-  secretNames: string[];
   timeoutSecs: number;
   entrypoint?: string[];
   maxContainers?: number;

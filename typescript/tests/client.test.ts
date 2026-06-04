@@ -65,7 +65,6 @@ describe("SandboxClient", () => {
         expect(body.resources.memory_mb).toBe(1024);
         expect(body.resources.ephemeral_disk_mb).toBeUndefined();
         expect(body.resources.disk_mb).toBe(25 * 1024);
-        expect(body.secret_names).toEqual(["my-secret"]);
         expect(body.network).toEqual({
           allow_internet_access: false,
           allow_out: ["8.8.8.8"],
@@ -83,7 +82,6 @@ describe("SandboxClient", () => {
         cpus: 2,
         memoryMb: 1024,
         diskMb: 25 * 1024,
-        secretNames: ["my-secret"],
         allowInternetAccess: false,
         allowOut: ["8.8.8.8"],
       });
@@ -163,7 +161,6 @@ describe("SandboxClient", () => {
             namespace: "default",
             status: "running",
             resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-            secret_names: [],
             created_at: 1700000000,
           }),
           { status: 200 },
@@ -186,7 +183,6 @@ describe("SandboxClient", () => {
             namespace: "default",
             status: "running",
             resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-            secret_names: [],
             name: "my-sandbox",
           }),
           { status: 200 },
@@ -207,7 +203,6 @@ describe("SandboxClient", () => {
             namespace: "default",
             status: "running",
             resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-            secret_names: [],
             allow_unauthenticated_access: true,
             exposed_ports: [8080, 3000],
             ingress_endpoint: "https://sandbox.us-east-1.aws.tensorlake.ai",
@@ -234,7 +229,6 @@ describe("SandboxClient", () => {
             namespace: "default",
             status: "running",
             resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-            secret_names: [],
           }),
           { status: 200 },
         ),
@@ -258,7 +252,6 @@ describe("SandboxClient", () => {
                 namespace: "default",
                 status: "running",
                 resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-                secret_names: [],
               },
             ],
           }),
@@ -305,7 +298,6 @@ describe("SandboxClient", () => {
             namespace: "default",
             status: "running",
             resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-            secret_names: [],
             name: "my-new-name",
           }),
           { status: 200 },
@@ -332,7 +324,6 @@ describe("SandboxClient", () => {
             namespace: "default",
             status: "running",
             resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-            secret_names: [],
             allow_unauthenticated_access: true,
             exposed_ports: [8080, 8081],
           }),
@@ -368,7 +359,6 @@ describe("SandboxClient", () => {
             namespace: "default",
             status: "running",
             resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-            secret_names: [],
             allow_unauthenticated_access: false,
             exposed_ports: [8080],
             ingress_endpoint: "https://sandbox.us-east-1.aws.tensorlake.ai",
@@ -396,7 +386,6 @@ describe("SandboxClient", () => {
               namespace: "default",
               status: "running",
               resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-              secret_names: [],
               allow_unauthenticated_access: false,
               exposed_ports: [8080],
             }),
@@ -414,7 +403,6 @@ describe("SandboxClient", () => {
                 namespace: "default",
                 status: "running",
                 resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-                secret_names: [],
                 allow_unauthenticated_access: true,
                 exposed_ports: [8080, 8081],
               }),
@@ -440,7 +428,6 @@ describe("SandboxClient", () => {
               namespace: "default",
               status: "running",
               resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-              secret_names: [],
               allow_unauthenticated_access: true,
               exposed_ports: [8080],
             }),
@@ -458,7 +445,6 @@ describe("SandboxClient", () => {
                 namespace: "default",
                 status: "running",
                 resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-                secret_names: [],
                 allow_unauthenticated_access: false,
                 exposed_ports: [],
               }),
@@ -518,7 +504,7 @@ describe("SandboxClient", () => {
         expect(url).toContain("/sandboxes/sbx-1");
         return Promise.resolve(
           new Response(
-            JSON.stringify({ sandbox_id: "sbx-1", status: "suspended", namespace: "default", resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 }, secret_names: [] }),
+            JSON.stringify({ sandbox_id: "sbx-1", status: "suspended", namespace: "default", resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 } }),
             { status: 200 },
           ),
         );
@@ -557,7 +543,7 @@ describe("SandboxClient", () => {
         expect(url).toContain("/sandboxes/sbx-1");
         return Promise.resolve(
           new Response(
-            JSON.stringify({ sandbox_id: "sbx-1", status: "running", namespace: "default", resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 }, secret_names: [] }),
+            JSON.stringify({ sandbox_id: "sbx-1", status: "running", namespace: "default", resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 } }),
             { status: 200 },
           ),
         );
@@ -733,7 +719,6 @@ describe("SandboxClient", () => {
               namespace: "default",
               status: "terminated",
               resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-              secret_names: [],
               error_details: { message: "failed to pull image tensorlake/missing-image" },
             }),
             { status: 200 },
@@ -939,7 +924,6 @@ describe("SandboxClient", () => {
             namespace: "default",
             image: "node:20",
             resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-            secret_names: [],
             timeout_secs: 0,
           }),
           { status: 200 },
