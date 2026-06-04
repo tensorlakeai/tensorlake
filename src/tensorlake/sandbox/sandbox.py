@@ -207,7 +207,6 @@ class Sandbox:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -237,7 +236,6 @@ class Sandbox:
             memory_mb: Memory in megabytes.
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
-            secret_names: List of secret names to inject.
             timeout_secs: Sandbox timeout in seconds.
             entrypoint: Custom entrypoint command.
             allow_internet_access: If True (default), outbound traffic is allowed.
@@ -286,7 +284,6 @@ class Sandbox:
             cpus=cpus,
             memory_mb=memory_mb,
             disk_mb=disk_mb,
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             allow_internet_access=allow_internet_access,

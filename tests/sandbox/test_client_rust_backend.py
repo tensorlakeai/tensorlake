@@ -85,8 +85,7 @@ class _FakeRustClient:
         "cpus": 1.0,
         "memory_mb": 512,
         "ephemeral_disk_mb": 1024
-      },
-      "secret_names": []
+      }
     }
   ]
 }
@@ -107,7 +106,6 @@ class _FakeRustClient:
     "memory_mb": 512,
     "ephemeral_disk_mb": 1024
   },
-  "secret_names": [],
   "allow_unauthenticated_access": false,
   "exposed_ports": [8080],
   "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
@@ -129,7 +127,6 @@ class _FakeRustClient:
                 "memory_mb": 512,
                 "ephemeral_disk_mb": 1024,
             },
-            "secret_names": [],
             "name": payload.get("name"),
             "allow_unauthenticated_access": payload.get(
                 "allow_unauthenticated_access", False
@@ -514,7 +511,6 @@ class TestSandboxClientRustBackend(unittest.TestCase):
     "memory_mb": 512,
     "ephemeral_disk_mb": 1024
   },
-  "secret_names": [],
   "error_details": {
     "message": "failed to pull image tensorlake/missing-image"
   }

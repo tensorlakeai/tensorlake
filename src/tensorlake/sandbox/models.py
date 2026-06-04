@@ -201,7 +201,6 @@ class CreateSandboxRequest(BaseModel):
 
     image: str | None = None
     resources: CreateSandboxResources
-    secret_names: list[str] | None = None
     timeout_secs: int | None = None
     entrypoint: list[str] | None = None
     network: NetworkConfig | None = None
@@ -222,7 +221,6 @@ class SandboxPoolRequest(BaseModel):
 
     image: str
     resources: ContainerResourcesInfo
-    secret_names: list[str] | None = None
     timeout_secs: int = 0
     entrypoint: list[str] | None = None
     max_containers: int | None = None
@@ -252,7 +250,6 @@ class SandboxInfo(BaseModel):
     status: SandboxStatus
     image: str | None = None
     resources: ContainerResourcesInfo
-    secret_names: list[str] = Field(default_factory=list)
     timeout_secs: int | None = None
     entrypoint: list[str] | None = None
     network: NetworkConfig | None = None
@@ -353,7 +350,6 @@ class SandboxPoolInfo(BaseModel):
     namespace: str
     image: str
     resources: ContainerResourcesInfo
-    secret_names: list[str] = Field(default_factory=list)
     timeout_secs: int = 0
     entrypoint: list[str] | None = None
     max_containers: int | None = None

@@ -158,7 +158,6 @@ export class SandboxClient {
     };
 
     if (options?.image != null) body.image = options.image;
-    if (options?.secretNames != null) body.secret_names = options.secretNames;
     if (options?.timeoutSecs != null) body.timeout_secs = options.timeoutSecs;
     if (options?.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options?.snapshotId != null) body.snapshot_id = options.snapshotId;
@@ -533,7 +532,6 @@ export class SandboxClient {
       timeout_secs: options.timeoutSecs ?? 0,
     };
 
-    if (options.secretNames != null) body.secret_names = options.secretNames;
     if (options.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options.maxContainers != null) body.max_containers = options.maxContainers;
     if (options.warmContainers != null) body.warm_containers = options.warmContainers;
@@ -582,7 +580,6 @@ export class SandboxClient {
       timeout_secs: options.timeoutSecs ?? 0,
     };
 
-    if (options.secretNames != null) body.secret_names = options.secretNames;
     if (options.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options.maxContainers != null) body.max_containers = options.maxContainers;
     if (options.warmContainers != null) body.warm_containers = options.warmContainers;

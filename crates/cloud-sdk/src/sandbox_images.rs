@@ -328,7 +328,6 @@ where
         .create(&CreateSandboxRequest {
             image: Some(prepared.builder.image.clone()),
             resources,
-            secret_names: None,
             timeout_secs: Some(BUILDER_SANDBOX_TIMEOUT_SECS),
             entrypoint: None,
             network: None,

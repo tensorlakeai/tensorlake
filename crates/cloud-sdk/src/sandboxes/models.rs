@@ -36,8 +36,6 @@ pub struct CreateSandboxRequest {
     pub image: Option<String>,
     pub resources: CreateSandboxResources,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub secret_names: Option<Vec<String>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub entrypoint: Option<Vec<String>>,
@@ -66,8 +64,6 @@ pub struct SandboxPoolRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     pub resources: ContainerResourcesInfo,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub secret_names: Option<Vec<String>>,
     #[serde(default)]
     pub timeout_secs: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -103,8 +99,6 @@ pub struct SandboxInfo {
     #[serde(default)]
     pub image: Option<String>,
     pub resources: ContainerResourcesInfo,
-    #[serde(default)]
-    pub secret_names: Vec<String>,
     #[serde(default)]
     pub timeout_secs: Option<i64>,
     #[serde(default)]
@@ -199,8 +193,6 @@ pub struct SandboxPoolInfo {
     pub namespace: String,
     pub image: String,
     pub resources: ContainerResourcesInfo,
-    #[serde(default)]
-    pub secret_names: Vec<String>,
     #[serde(default)]
     pub timeout_secs: i64,
     #[serde(default)]

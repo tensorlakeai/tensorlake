@@ -367,7 +367,6 @@ class SandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -386,7 +385,6 @@ class SandboxClient:
             memory_mb: Memory in megabytes
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
-            secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
             allow_internet_access: If True (default), outbound traffic is
@@ -398,8 +396,8 @@ class SandboxClient:
             deny_out: Destination IPs/CIDRs to deny
                 (e.g. ``["192.168.1.0/24"]``).
             snapshot_id: ID of a completed snapshot to restore from.
-                When set, image, resources, entrypoint, and secrets
-                are inherited from the snapshot unless explicitly
+                When set, image, resources, and entrypoint are
+                inherited from the snapshot unless explicitly
                 overridden.
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
@@ -426,7 +424,6 @@ class SandboxClient:
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             network=network,
@@ -941,7 +938,6 @@ class SandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         ephemeral_disk_mb: int = 1024,
-        secret_names: list[str] | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -955,7 +951,6 @@ class SandboxClient:
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
             ephemeral_disk_mb: Ephemeral disk space in megabytes
-            secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (default: 0 = no timeout)
             entrypoint: Custom entrypoint command (optional)
             max_containers: Maximum number of containers in pool
@@ -973,7 +968,6 @@ class SandboxClient:
             resources=ContainerResourcesInfo(
                 cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             max_containers=max_containers,
@@ -1036,7 +1030,6 @@ class SandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         ephemeral_disk_mb: int = 1024,
-        secret_names: list[str] | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -1051,7 +1044,6 @@ class SandboxClient:
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
             ephemeral_disk_mb: Ephemeral disk space in megabytes
-            secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (default: 0 = no timeout)
             entrypoint: Custom entrypoint command (optional)
             max_containers: Maximum number of containers in pool
@@ -1070,7 +1062,6 @@ class SandboxClient:
             resources=ContainerResourcesInfo(
                 cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             max_containers=max_containers,
@@ -1181,7 +1172,6 @@ class SandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -1208,7 +1198,6 @@ class SandboxClient:
             memory_mb: Memory in megabytes
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
-            secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
             allow_internet_access: If True (default), outbound traffic is
@@ -1257,7 +1246,6 @@ class SandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                secret_names=secret_names,
                 timeout_secs=timeout_secs,
                 entrypoint=entrypoint,
                 allow_internet_access=allow_internet_access,

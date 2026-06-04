@@ -204,7 +204,6 @@ class AsyncSandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -225,7 +224,6 @@ class AsyncSandboxClient:
             resources=CreateSandboxResources(
                 cpus=cpus, memory_mb=memory_mb, disk_mb=disk_mb
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             network=network,
@@ -546,7 +544,6 @@ class AsyncSandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         ephemeral_disk_mb: int = 1024,
-        secret_names: list[str] | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -557,7 +554,6 @@ class AsyncSandboxClient:
             resources=ContainerResourcesInfo(
                 cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             max_containers=max_containers,
@@ -599,7 +595,6 @@ class AsyncSandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         ephemeral_disk_mb: int = 1024,
-        secret_names: list[str] | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -610,7 +605,6 @@ class AsyncSandboxClient:
             resources=ContainerResourcesInfo(
                 cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             max_containers=max_containers,
@@ -694,7 +688,6 @@ class AsyncSandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -727,7 +720,6 @@ class AsyncSandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                secret_names=secret_names,
                 timeout_secs=timeout_secs,
                 entrypoint=entrypoint,
                 allow_internet_access=allow_internet_access,

@@ -315,7 +315,6 @@ describe("Sandbox", () => {
         namespace: "default",
         status: "running",
         resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-        secret_names: [],
         ...overrides,
       });
     }
