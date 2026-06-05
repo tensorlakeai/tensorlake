@@ -1162,22 +1162,25 @@ async fn run_streaming_process(
         info = proxy.get_process(pid).await?.into_inner();
     }
 
-    let exit_code = if let Some(code) = info.exit_code {
-        code
-    } else if let Some(signal) = info.signal {
-        -signal
-    } else {
-        0
-    };
+    classify_process_exit(command, info.exit_code, info.signal)
+}
 
-    if exit_code != 0 {
-        return Err(SandboxImageBuildError::other(format!(
+fn classify_process_exit(command: &str, exit_code: Option<i64>, signal: Option<i64>) -> Result<()> {
+    match (exit_code, signal) {
+        (Some(0), _) => Ok(()),
+        (Some(code), _) => Err(SandboxImageBuildError::other(format!(
             "Command '{}' failed with exit code {}",
-            command, exit_code
-        )));
+            command, code
+        ))),
+        (None, Some(signal)) => Err(SandboxImageBuildError::other(format!(
+            "Command '{}' was terminated by signal {}",
+            command, signal
+        ))),
+        (None, None) => Err(SandboxImageBuildError::other(format!(
+            "Command '{}' did not report an exit status after {} polls; treating the build step as failed",
+            command, PROCESS_EXIT_POLL_ATTEMPTS
+        ))),
     }
-
-    Ok(())
 }
 
 fn streaming_process_payload(
@@ -1844,6 +1847,34 @@ mod tests {
     fn default_registered_name_uses_parent_for_dockerfile() {
         let path = std::path::Path::new("/tmp/example/Dockerfile");
         assert_eq!(default_registered_name(path), "example");
+    }
+
+    #[test]
+    fn process_exit_classification_accepts_zero_exit_code() {
+        let result = super::classify_process_exit("build-step", Some(0), None);
+
+        assert!(result.is_ok());
+    }
+
+    #[test]
+    fn process_exit_classification_rejects_nonzero_exit_code() {
+        let error = super::classify_process_exit("build-step", Some(1), None).unwrap_err();
+
+        assert!(error.to_string().contains("exit code 1"));
+    }
+
+    #[test]
+    fn process_exit_classification_rejects_signal() {
+        let error = super::classify_process_exit("build-step", None, Some(9)).unwrap_err();
+
+        assert!(error.to_string().contains("signal 9"));
+    }
+
+    #[test]
+    fn process_exit_classification_rejects_missing_exit_status() {
+        let error = super::classify_process_exit("build-step", None, None).unwrap_err();
+
+        assert!(error.to_string().contains("did not report an exit status"));
     }
 
     #[test]
