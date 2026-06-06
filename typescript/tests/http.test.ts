@@ -215,6 +215,89 @@ describe("HttpClient", () => {
     client.close();
   });
 
+  it("bubbles the inner cause into the connection error", async () => {
+    mockFetch(() => {
+      const cause = Object.assign(
+        new Error("connect ECONNREFUSED 127.0.0.1:8900"),
+        { code: "ECONNREFUSED" },
+      );
+      throw Object.assign(new TypeError("fetch failed"), { cause });
+    });
+
+    const client = new HttpClient({
+      baseUrl: "http://localhost:8900",
+      maxRetries: 0,
+    });
+    try {
+      await client.requestJson("GET", "/test");
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      expect(err).toBeInstanceOf(SandboxConnectionError);
+      const ce = err as SandboxConnectionError;
+      // The inner reason is surfaced in the message, not just "fetch failed".
+      expect(ce.message).toContain("fetch failed");
+      expect(ce.message).toContain("connect ECONNREFUSED 127.0.0.1:8900");
+      // The full raw cause chain is preserved for programmatic inspection.
+      expect((ce.cause as { cause?: { code?: string } })?.cause?.code).toBe(
+        "ECONNREFUSED",
+      );
+    }
+    client.close();
+  });
+
+  it("appends the inner code when absent from the message", async () => {
+    mockFetch(() => {
+      const cause = Object.assign(new Error("Connect Timeout Error"), {
+        code: "UND_ERR_CONNECT_TIMEOUT",
+      });
+      throw Object.assign(new TypeError("fetch failed"), { cause });
+    });
+
+    const client = new HttpClient({
+      baseUrl: "http://localhost:8900",
+      maxRetries: 0,
+    });
+    try {
+      await client.requestJson("GET", "/test");
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      const ce = err as SandboxConnectionError;
+      expect(ce.message).toContain(
+        "Connect Timeout Error (UND_ERR_CONNECT_TIMEOUT)",
+      );
+    }
+    client.close();
+  });
+
+  it("reports the request deadline when the client timeout fires", async () => {
+    mockFetch((_url, init) => {
+      // Hang until our internal timeout aborts the request.
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () => {
+          reject(
+            Object.assign(new Error("This operation was aborted"), {
+              name: "AbortError",
+            }),
+          );
+        });
+      }) as Promise<Response>;
+    });
+
+    const client = new HttpClient({
+      baseUrl: "http://localhost:8900",
+      maxRetries: 0,
+      timeoutMs: 20,
+    });
+    try {
+      await client.requestJson("GET", "/test");
+      expect.unreachable("should have thrown");
+    } catch (err) {
+      const ce = err as SandboxConnectionError;
+      expect(ce.message).toContain("request timed out after 20ms");
+    }
+    client.close();
+  });
+
   it("retries on network failure then succeeds", async () => {
     let attempts = 0;
     mockFetch(() => {
