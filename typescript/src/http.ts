@@ -6,6 +6,7 @@ import {
 } from "undici";
 import * as defaults from "./defaults.js";
 import {
+  describeError,
   PoolInUseError,
   PoolNotFoundError,
   RemoteAPIError,
@@ -261,9 +262,15 @@ export class HttpClient {
       }
 
       this.abortController = new AbortController();
+      // Track whether *our* deadline fired, so we can tell a client-imposed
+      // timeout apart from a network rejection or a caller-initiated abort.
+      let timedOut = false;
       const timeoutId = this.timeoutMs == null
         ? null
-        : setTimeout(() => this.abortController?.abort(), this.timeoutMs);
+        : setTimeout(() => {
+            timedOut = true;
+            this.abortController?.abort();
+          }, this.timeoutMs);
 
       // Combine external signal with internal timeout
       const combinedSignal = signal
@@ -313,20 +320,30 @@ export class HttpClient {
           throw err;
         }
 
-        if (signal?.aborted) {
-          throw new SandboxConnectionError("Request aborted");
+        // A caller-supplied signal fired (and it wasn't our own deadline).
+        if (signal?.aborted && !timedOut) {
+          throw new SandboxConnectionError("request aborted by caller", {
+            cause: err,
+          });
         }
 
         // Network / timeout error
         lastError = err instanceof Error ? err : new Error(String(err));
 
         if (attempt >= this.maxRetries) {
-          throw new SandboxConnectionError(lastError.message);
+          // Surface the real inner cause; for our own deadline, say so plainly.
+          const detail = timedOut
+            ? `request timed out after ${this.timeoutMs}ms`
+            : describeError(err);
+          throw new SandboxConnectionError(detail, { cause: err });
         }
       }
     }
 
-    throw new SandboxConnectionError(lastError?.message ?? "Request failed");
+    throw new SandboxConnectionError(
+      lastError ? describeError(lastError) : "request failed",
+      { cause: lastError },
+    );
   }
 }
 
