@@ -235,11 +235,36 @@ class CreateSandboxResponse(BaseModel):
 
     sandbox_id: str
     status: SandboxStatus
+    reason: str | None = None
     routing_hint: str | None = None
     ingress_endpoint: str | None = None
     name: str | None = None
     termination_reason: str | None = None
     error_details: Any | None = None
+
+
+class CopiedSandboxResponse(BaseModel):
+    """One sandbox returned by a live sandbox copy request.
+
+    Partial copy responses can include failed sandboxes, so ``status`` is kept
+    as a raw server string instead of the normal ``SandboxStatus`` enum.
+    """
+
+    sandbox_id: str
+    status: str
+    reason: str | None = None
+    routing_hint: str | None = None
+    ingress_endpoint: str | None = None
+    name: str | None = None
+    termination_reason: str | None = None
+    error_details: Any | None = None
+
+
+class CopySandboxResponse(BaseModel):
+    """Response from live-copying a running sandbox."""
+
+    source_sandbox_id: str
+    sandboxes: list[CopiedSandboxResponse]
 
 
 class SandboxInfo(BaseModel):

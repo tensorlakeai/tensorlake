@@ -28,6 +28,7 @@ class _FakeRustClient:
         self.update_request_json = None
         self.last_get_sandbox_id = None
         self.create_snapshot_calls: list[tuple[str, str | None]] = []
+        self.copy_calls: list[tuple[str, int]] = []
         self.suspend_calls: list[str] = []
         self.resume_calls: list[str] = []
         self.connect_proxy_calls: list[dict] = []
@@ -70,6 +71,25 @@ class _FakeRustClient:
     def create_sandbox(self, request_json):
         self.create_request_json = request_json
         return ("trace-create-sandbox", '{"sandbox_id":"sbx-1","status":"pending"}')
+
+    def copy_sandbox(self, *, sandbox_id, times):
+        self.copy_calls.append((sandbox_id, times))
+        return (
+            "trace-copy-sandbox",
+            json.dumps(
+                {
+                    "source_sandbox_id": sandbox_id,
+                    "sandboxes": [
+                        {"sandbox_id": "copy-1", "status": "running"},
+                        {
+                            "sandbox_id": "copy-2",
+                            "status": "failed",
+                            "reason": "no capacity",
+                        },
+                    ],
+                }
+            ),
+        )
 
     def list_sandboxes_json(self):
         return (
@@ -571,6 +591,28 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(len(sandboxes_list), 1)
         self.assertEqual(sandboxes_list[0].sandbox_id, "sbx-1")
         self.assertEqual(sandboxes_list[0].status, "running")
+
+    def test_copy_uses_rust_backend_and_allows_partial_failures(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        response = client.copy("sbx-1", times=2)
+
+        self.assertEqual(response.trace_id, "trace-copy-sandbox")
+        self.assertEqual(fake.copy_calls, [("sbx-1", 2)])
+        self.assertEqual(response.source_sandbox_id, "sbx-1")
+        self.assertEqual(response.sandboxes[0].sandbox_id, "copy-1")
+        self.assertEqual(response.sandboxes[0].status, "running")
+        self.assertEqual(response.sandboxes[1].status, "failed")
+        self.assertEqual(response.sandboxes[1].reason, "no capacity")
+
+    def test_copy_rejects_invalid_times(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _FakeRustClient()
+
+        with self.assertRaisesRegex(SandboxError, "times must be a positive integer"):
+            client.copy("sbx-1", times=0)
 
     def test_update_sandbox_sends_port_access_fields(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")

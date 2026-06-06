@@ -18,13 +18,13 @@ use crate::{
 pub use desktop::SandboxDesktopClient;
 
 use models::{
-    ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CreateSandboxPoolResponse,
-    CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest, CreateSnapshotResponse,
-    DaemonInfo, HealthResponse, ListArchivedSandboxesParams, ListArchivedSandboxesResponse,
-    ListDirectoryResponse, ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse,
-    ListSnapshotsResponse, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo,
-    SandboxPoolInfo, SandboxPoolRequest, SendSignalResponse, SnapshotInfo, SnapshotType,
-    UpdateSandboxRequest,
+    ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CopySandboxResponse,
+    CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
+    CreateSnapshotResponse, DaemonInfo, HealthResponse, ListArchivedSandboxesParams,
+    ListArchivedSandboxesResponse, ListDirectoryResponse, ListProcessesResponse,
+    ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse, OutputEvent,
+    OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxPoolInfo, SandboxPoolRequest,
+    SendSignalResponse, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
 };
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
@@ -82,6 +82,28 @@ impl SandboxesClient {
         let req = self.client.request(Method::POST, &uri).build()?;
         self.client
             .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
+            .await
+    }
+
+    pub async fn copy(
+        &self,
+        sandbox_id: &str,
+        times: usize,
+    ) -> Result<Traced<CopySandboxResponse>, SdkError> {
+        let uri = self.endpoint(&format!("sandbox/{sandbox_id}/copy"));
+        let req = self
+            .client
+            .request(Method::POST, &uri)
+            .query(&[("times", times)])
+            .build()?;
+        self.client
+            .execute_json_allow_status(
+                req,
+                &[
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    StatusCode::GATEWAY_TIMEOUT,
+                ],
+            )
             .await
     }
 

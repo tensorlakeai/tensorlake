@@ -107,11 +107,36 @@ export interface UpdateSandboxOptions {
 export interface CreateSandboxResponse {
   sandboxId: string;
   status: SandboxStatus;
+  reason?: string;
   routingHint?: string;
   ingressEndpoint?: string;
   name?: string | null;
   terminationReason?: string;
   errorDetails?: unknown;
+}
+
+export interface CopySandboxOptions {
+  /** Number of running copies to create. Defaults to 1. */
+  times?: number;
+  /** Per-request timeout in seconds for the blocking live-copy request. */
+  requestTimeout?: number;
+}
+
+export interface CopiedSandboxResponse {
+  sandboxId: string;
+  /** Raw server status. Partial copy responses can include statuses such as `"failed"`. */
+  status: string;
+  reason?: string;
+  routingHint?: string;
+  ingressEndpoint?: string;
+  name?: string | null;
+  terminationReason?: string;
+  errorDetails?: unknown;
+}
+
+export interface CopySandboxResponse {
+  sourceSandboxId: string;
+  sandboxes: CopiedSandboxResponse[];
 }
 
 export interface SandboxInfo {

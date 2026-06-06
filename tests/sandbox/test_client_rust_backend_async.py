@@ -28,6 +28,7 @@ class _FakeAsyncRustClient:
         self.update_request_json: str = ""
         self.last_get_sandbox_id: str = ""
         self.create_snapshot_calls: list[tuple[str, str | None]] = []
+        self.copy_calls: list[tuple[str, int]] = []
         self.suspend_calls: list[str] = []
         self.resume_calls: list[str] = []
         self.connect_proxy_calls: list[dict] = []
@@ -74,6 +75,25 @@ class _FakeAsyncRustClient:
         return (
             "trace-create-sandbox",
             '{"sandbox_id":"sbx-1","status":"pending"}',
+        )
+
+    async def copy_sandbox_async(self, *, sandbox_id, times):
+        self.copy_calls.append((sandbox_id, times))
+        return (
+            "trace-copy-sandbox",
+            json.dumps(
+                {
+                    "source_sandbox_id": sandbox_id,
+                    "sandboxes": [
+                        {"sandbox_id": "copy-1", "status": "running"},
+                        {
+                            "sandbox_id": "copy-2",
+                            "status": "failed",
+                            "reason": "no capacity",
+                        },
+                    ],
+                }
+            ),
         )
 
     async def list_sandboxes_json_async(self):
@@ -635,6 +655,26 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(sandboxes_list), 1)
         self.assertEqual(sandboxes_list[0].sandbox_id, "sbx-1")
         self.assertEqual(sandboxes_list[0].status, "running")
+
+    async def test_copy_uses_rust_backend_and_allows_partial_failures(self):
+        fake = _FakeAsyncRustClient()
+        client = _make_client(fake)
+
+        response = await client.copy("sbx-1", times=2)
+
+        self.assertEqual(response.trace_id, "trace-copy-sandbox")
+        self.assertEqual(fake.copy_calls, [("sbx-1", 2)])
+        self.assertEqual(response.source_sandbox_id, "sbx-1")
+        self.assertEqual(response.sandboxes[0].sandbox_id, "copy-1")
+        self.assertEqual(response.sandboxes[0].status, "running")
+        self.assertEqual(response.sandboxes[1].status, "failed")
+        self.assertEqual(response.sandboxes[1].reason, "no capacity")
+
+    async def test_copy_rejects_invalid_times(self):
+        client = _make_client()
+
+        with self.assertRaisesRegex(SandboxError, "times must be a positive integer"):
+            await client.copy("sbx-1", times=0)
 
     async def test_update_sandbox_sends_port_access_fields(self):
         fake = _FakeAsyncRustClient()

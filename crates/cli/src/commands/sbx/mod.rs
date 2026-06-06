@@ -1,4 +1,5 @@
 pub mod clone;
+pub mod copy;
 pub mod cp;
 pub mod create;
 pub mod describe;
@@ -162,7 +163,7 @@ pub fn sandbox_proxy_base(ctx: &CliContext, sandbox_id: &str) -> (String, Option
 }
 
 fn proxy_base_from_url(proxy_url: &str, sandbox_id: &str) -> (String, Option<String>) {
-    if let Ok(parsed) = url::Url::parse(&proxy_url) {
+    if let Ok(parsed) = url::Url::parse(proxy_url) {
         let host = parsed.host_str().unwrap_or("");
         if host == "localhost" || host == "127.0.0.1" {
             // Localhost: keep URL as-is, set Host header to {sandbox_id}.local

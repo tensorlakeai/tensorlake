@@ -4,8 +4,7 @@ use std::time::Duration;
 use crate::auth::context::CliContext;
 use crate::commands::sbx::pty::cache_pty_token;
 use crate::commands::sbx::{
-    ResolvedSandboxProxyTarget, parse_env_vars, resolve_sandbox_proxy_target,
-    with_sandbox_headers,
+    ResolvedSandboxProxyTarget, parse_env_vars, resolve_sandbox_proxy_target, with_sandbox_headers,
 };
 use crate::error::{CliError, Result};
 use reqwest::header::{AUTHORIZATION, HOST, HeaderMap, HeaderName, HeaderValue};
@@ -140,10 +139,7 @@ fn ensure_interactive_terminal(command_name: &str) -> Result<()> {
     Ok(())
 }
 
-fn build_ws_headers(
-    ctx: &CliContext,
-    target: &ResolvedSandboxProxyTarget,
-) -> Result<HeaderMap> {
+fn build_ws_headers(ctx: &CliContext, target: &ResolvedSandboxProxyTarget) -> Result<HeaderMap> {
     let mut ws_headers = HeaderMap::new();
 
     if let Ok(token) = ctx.bearer_token() {

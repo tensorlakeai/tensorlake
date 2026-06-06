@@ -22,6 +22,7 @@ from .exceptions import (
 from .models import (
     ArchivedSandboxInfo,
     ContainerResourcesInfo,
+    CopySandboxResponse,
     CreateSandboxPoolResponse,
     CreateSandboxRequest,
     CreateSandboxResources,
@@ -463,6 +464,53 @@ class SandboxClient:
                 trace_id, CreateSandboxResponse.model_validate_json(response_json)
             )
         except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def copy(
+        self,
+        sandbox_id: str,
+        *,
+        times: int = 1,
+        request_timeout: float | None = None,
+    ) -> Traced[CopySandboxResponse]:
+        """Live-copy a running sandbox.
+
+        The server creates ``times`` running copies from the source sandbox. A
+        partial response can include failed copies; inspect each returned
+        sandbox's ``status`` and ``reason``.
+
+        Args:
+            sandbox_id: Source sandbox ID or name.
+            times: Number of copies to create. Must be at least 1.
+            request_timeout: Optional HTTP request timeout in seconds for this
+                blocking copy request.
+
+        Returns:
+            Traced[CopySandboxResponse] with the source sandbox ID and copy
+            results.
+
+        Raises:
+            SandboxNotFoundError: If the source sandbox doesn't exist.
+            SandboxError: If ``times`` is invalid or the API request fails.
+        """
+        if isinstance(times, bool) or not isinstance(times, int) or times < 1:
+            raise SandboxError("times must be a positive integer")
+        client = (
+            self._with_request_timeout(request_timeout)
+            if request_timeout is not None
+            else self
+        )
+        try:
+            trace_id, response_json = client._rust_client.copy_sandbox(
+                sandbox_id=sandbox_id,
+                times=times,
+            )
+            return Traced(
+                trace_id, CopySandboxResponse.model_validate_json(response_json)
+            )
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
     def get(self, sandbox_id: str) -> Traced[SandboxInfo]:

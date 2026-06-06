@@ -361,6 +361,7 @@ fn is_suspended_sandbox(sandbox: &serde_json::Value) -> bool {
         .is_some_and(|status| status.eq_ignore_ascii_case("suspended"))
 }
 
+#[cfg(test)]
 fn is_non_terminated_sandbox(sandbox: &serde_json::Value) -> bool {
     !is_terminated_sandbox(sandbox)
 }

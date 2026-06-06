@@ -6,7 +6,9 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_sandbox_path, resolve_sandbox_proxy_target, with_sandbox_headers};
+use crate::commands::sbx::{
+    parse_sandbox_path, resolve_sandbox_proxy_target, with_sandbox_headers,
+};
 use crate::error::{CliError, Result};
 
 pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {

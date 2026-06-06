@@ -86,6 +86,9 @@ export type {
 export type {
   ContainerResourcesInfo,
   NetworkConfig,
+  CopySandboxOptions,
+  CopiedSandboxResponse,
+  CopySandboxResponse,
   CreateSandboxOptions,
   CreateSandboxResponse,
   SandboxInfo,

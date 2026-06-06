@@ -388,7 +388,7 @@ impl CloudApiClient {
                 let response = images_client
                     .create_application_build(&build_service_path, &request, &image_contexts)
                     .await?;
-                Ok(serde_json::to_string(&*response).map_err(SdkError::from)?)
+                serde_json::to_string(&*response).map_err(SdkError::from)
             }
         })
     }
@@ -406,7 +406,7 @@ impl CloudApiClient {
                 let response = images_client
                     .application_build_info(&build_service_path, &application_build_id)
                     .await?;
-                Ok(serde_json::to_string(&*response).map_err(SdkError::from)?)
+                serde_json::to_string(&*response).map_err(SdkError::from)
             }
         })
     }
@@ -424,7 +424,7 @@ impl CloudApiClient {
                 let response = images_client
                     .cancel_application_build(&build_service_path, &application_build_id)
                     .await?;
-                Ok(serde_json::to_string(&*response).map_err(SdkError::from)?)
+                serde_json::to_string(&*response).map_err(SdkError::from)
             }
         })
     }
@@ -602,6 +602,18 @@ impl CloudSandboxClient {
         shared_runtime()
             .block_on(async move {
                 let traced = client.claim(&pool_id).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            })
+            .map_err(into_sandbox_py_error)
+    }
+
+    fn copy_sandbox(&self, sandbox_id: String, times: usize) -> PyResult<(String, String)> {
+        let client = self.client.clone();
+        shared_runtime()
+            .block_on(async move {
+                let traced = client.copy(&sandbox_id, times).await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
                 Ok((trace_id, json))
@@ -847,6 +859,24 @@ impl CloudSandboxClient {
         future_into_py(py, async move {
             let traced = client
                 .claim(&pool_id)
+                .await
+                .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn copy_sandbox_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+        times: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = client
+                .copy(&sandbox_id, times)
                 .await
                 .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
@@ -2130,7 +2160,7 @@ impl CloudDocumentAIClient {
             let body_json = body_json.clone();
             async move {
                 let response = client.request(method, &path, body_json.as_ref()).await?;
-                Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
+                serde_json::to_string(&response).map_err(SdkError::from)
             }
         })
     }
@@ -2141,7 +2171,7 @@ impl CloudDocumentAIClient {
             let content = content.clone();
             async move {
                 let response = client.upload_file(&file_name, content).await?;
-                Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
+                serde_json::to_string(&response).map_err(SdkError::from)
             }
         })
     }
@@ -2663,18 +2693,17 @@ fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
     if is_localhost_api_url(api_url) {
         return api_url.to_string();
     }
-    if let Ok(mut parsed) = reqwest::Url::parse(api_url) {
-        if let Some(host) = parsed.host_str() {
-            if let Some(rest) = host.strip_prefix("api.") {
-                let new_host = format!("sandbox.{rest}");
-                if parsed.set_host(Some(&new_host)).is_ok() {
-                    let mut result = parsed.to_string();
-                    if result.ends_with('/') {
-                        result.pop();
-                    }
-                    return result;
-                }
+    if let Ok(mut parsed) = reqwest::Url::parse(api_url)
+        && let Some(host) = parsed.host_str()
+        && let Some(rest) = host.strip_prefix("api.")
+    {
+        let new_host = format!("sandbox.{rest}");
+        if parsed.set_host(Some(&new_host)).is_ok() {
+            let mut result = parsed.to_string();
+            if result.ends_with('/') {
+                result.pop();
             }
+            return result;
         }
     }
     "https://sandbox.tensorlake.ai".to_string()
