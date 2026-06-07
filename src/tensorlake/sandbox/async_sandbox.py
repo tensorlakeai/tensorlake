@@ -21,6 +21,7 @@ from .exceptions import RemoteAPIError, SandboxConnectionError, SandboxError
 from .models import (
     CheckpointType,
     CommandResult,
+    CopySandboxResponse,
     DaemonInfo,
     HealthResponse,
     ListDirectoryResponse,
@@ -268,6 +269,19 @@ class AsyncSandbox:
             wait=wait,
             timeout=timeout,
             poll_interval=poll_interval,
+        )
+
+    async def copy(
+        self,
+        *,
+        times: int = 1,
+        request_timeout: float | None = None,
+    ) -> Traced[CopySandboxResponse]:
+        self._require_lifecycle_client("copy")
+        return await self._lifecycle_client.copy(
+            self._lifecycle_identifier(),
+            times=times,
+            request_timeout=request_timeout,
         )
 
     async def checkpoint(

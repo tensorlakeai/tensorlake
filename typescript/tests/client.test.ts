@@ -603,6 +603,50 @@ describe("SandboxClient", () => {
     });
   });
 
+  describe("copy", () => {
+    it("live-copies a sandbox and maps partial failures", async () => {
+      mockFetch((url, init) => {
+        expect(url).toContain("/v1/namespaces/default/sandbox/sbx-1/copy?times=2");
+        expect(init?.method).toBe("POST");
+        const headers = init?.headers as Record<string, string>;
+        expect(headers["X-Tensorlake-Request-Timeout-Ms"]).toBe("12000");
+        return new Response(
+          JSON.stringify({
+            source_sandbox_id: "sbx-1",
+            sandboxes: [
+              { sandbox_id: "copy-1", status: "running" },
+              { sandbox_id: "copy-2", status: "failed", reason: "no capacity" },
+            ],
+          }),
+          { status: 422 },
+        );
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const response = await client.copy("sbx-1", {
+        times: 2,
+        requestTimeout: 12,
+      });
+
+      expect(response.sourceSandboxId).toBe("sbx-1");
+      expect(response.sandboxes[0].sandboxId).toBe("copy-1");
+      expect(response.sandboxes[0].status).toBe("running");
+      expect(response.sandboxes[1].sandboxId).toBe("copy-2");
+      expect(response.sandboxes[1].status).toBe("failed");
+      expect(response.sandboxes[1].reason).toBe("no capacity");
+      expect(response.traceId).toBeDefined();
+      client.close();
+    });
+
+    it("rejects invalid times", async () => {
+      const client = SandboxClient.forLocalhost();
+      await expect(client.copy("sbx-1", { times: 0 })).rejects.toThrow(
+        "times must be a positive integer",
+      );
+      client.close();
+    });
+  });
+
   describe("createAndConnect", () => {
     it("uses ingress endpoint from running create response", async () => {
       mockFetch(() =>

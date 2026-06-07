@@ -596,23 +596,23 @@ async fn resolve_template_payload(
         ))
     })?;
     let is_public = template.public.unwrap_or(false);
-    if let Some(kind) = template.rootfs_node_kind.as_deref() {
-        if kind != "base" {
-            return Err(SandboxImageBuildError::other(format!(
-                "template '{}' cannot be used as a build image (only base templates are supported, got rootfsNodeKind='{}'). \
-                 Build a base image from this template first.",
-                reference, kind
-            )));
-        }
+    if let Some(kind) = template.rootfs_node_kind.as_deref()
+        && kind != "base"
+    {
+        return Err(SandboxImageBuildError::other(format!(
+            "template '{}' cannot be used as a build image (only base templates are supported, got rootfsNodeKind='{}'). \
+             Build a base image from this template first.",
+            reference, kind
+        )));
     }
-    if let Some(fmt) = template.snapshot_format_version.as_deref() {
-        if fmt != "durable_archive_v1" {
-            return Err(SandboxImageBuildError::other(format!(
-                "template '{}' uses snapshot format '{}', which the rootfs builder cannot materialize. \
-                 Re-register the template with durable_archive_v1.",
-                reference, fmt
-            )));
-        }
+    if let Some(fmt) = template.snapshot_format_version.as_deref()
+        && fmt != "durable_archive_v1"
+    {
+        return Err(SandboxImageBuildError::other(format!(
+            "template '{}' uses snapshot format '{}', which the rootfs builder cannot materialize. \
+             Re-register the template with durable_archive_v1.",
+            reference, fmt
+        )));
     }
     Ok(Some(json!({
         "templateId": template_id,
@@ -1372,16 +1372,15 @@ fn load_dockerfile_text_plan(
             // locally (e.g., for COPY --from referring to it by image name).
             // Skip the demotion when the prior image equals the new final
             // FROM (would duplicate the entry) or is itself unresolvable.
-            if let Some(prior) = final_from_image.take() {
-                if prior != image
-                    && !prior.eq_ignore_ascii_case("scratch")
-                    && !prior.contains('$')
-                    && !prior.contains('@')
-                    && !stage_aliases.iter().any(|alias| alias == prior.as_str())
-                    && additional_refs_seen.insert(prior.clone())
-                {
-                    additional_refs.push(prior);
-                }
+            if let Some(prior) = final_from_image.take()
+                && prior != image
+                && !prior.eq_ignore_ascii_case("scratch")
+                && !prior.contains('$')
+                && !prior.contains('@')
+                && !stage_aliases.iter().any(|alias| alias == prior.as_str())
+                && additional_refs_seen.insert(prior.clone())
+            {
+                additional_refs.push(prior);
             }
             if image.contains('$') {
                 unresolvable_image_references.push(UnresolvableImageReference {
@@ -1650,10 +1649,10 @@ fn copy_from_values(value: &str) -> Vec<String> {
             if !v.is_empty() {
                 out.push(v.to_string());
             }
-        } else if token == "--from" {
-            if let Some(next) = tokens.next() {
-                out.push(next.to_string());
-            }
+        } else if token == "--from"
+            && let Some(next) = tokens.next()
+        {
+            out.push(next.to_string());
         }
     }
     out
@@ -1674,10 +1673,10 @@ fn run_mount_from_values(value: &str) -> Vec<String> {
             None => continue,
         };
         for entry in body.split(',') {
-            if let Some(v) = entry.strip_prefix("from=") {
-                if !v.is_empty() {
-                    out.push(v.to_string());
-                }
+            if let Some(v) = entry.strip_prefix("from=")
+                && !v.is_empty()
+            {
+                out.push(v.to_string());
             }
         }
     }

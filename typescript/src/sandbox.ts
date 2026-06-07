@@ -10,6 +10,8 @@ import {
   type CheckpointOptions,
   type CommandResult,
   type ConnectOptions,
+  type CopySandboxOptions,
+  type CopySandboxResponse,
   type CreateAndConnectOptions,
   type CreatePtySessionOptions,
   type DaemonInfo,
@@ -652,6 +654,12 @@ export class Sandbox {
   async resume(options?: SuspendResumeOptions): Promise<void> {
     const client = this.requireLifecycleClient("resume");
     await client.resume(this.lifecycleIdentifier, options);
+  }
+
+  /** Live-copy this running sandbox. */
+  async copy(options?: CopySandboxOptions): Promise<Traced<CopySandboxResponse>> {
+    const client = this.requireLifecycleClient("copy");
+    return client.copy(this.lifecycleIdentifier, options);
   }
 
   /**

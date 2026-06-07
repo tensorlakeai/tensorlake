@@ -670,7 +670,12 @@ class TestMaxContainers(BaseSandboxTest):
         if self.__class__.pool_id:
             # Wait for sandbox containers to terminate.
             time.sleep(3)
-            self.client.delete_pool(self.__class__.pool_id)
+            try:
+                self.client.delete_pool(self.__class__.pool_id)
+            except PoolNotFoundError:
+                # This is a cleanup step, and the server can already have
+                # removed the pool after the claimed containers terminate.
+                pass
             self.__class__.pool_id = None
 
 

@@ -54,6 +54,33 @@ describe("Sandbox", () => {
     });
   });
 
+  describe("copy", () => {
+    it("uses the lifecycle client", async () => {
+      mockFetch((url, init) => {
+        expect(url).toContain("/v1/namespaces/default/sandbox/sbx-abc/copy?times=3");
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({
+            source_sandbox_id: "sbx-abc",
+            sandboxes: [{ sandbox_id: "copy-1", status: "running" }],
+          }),
+          { status: 200 },
+        );
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-abc",
+        proxyUrl: "http://localhost:9443",
+        apiUrl: "http://localhost:8900",
+      });
+      const response = await sbx.copy({ times: 3 });
+
+      expect(response.sourceSandboxId).toBe("sbx-abc");
+      expect(response.sandboxes[0].sandboxId).toBe("copy-1");
+      sbx.close();
+    });
+  });
+
   describe("run", () => {
     /** Build an SSE-formatted response body from an array of JSON events. */
     function sseResponse(events: unknown[]): Response {

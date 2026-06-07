@@ -84,10 +84,7 @@ fn build_tunnel_url(proxy_base: &str, remote_port: u16) -> Result<String> {
     Ok(url.to_string())
 }
 
-fn build_proxy_headers(
-    ctx: &CliContext,
-    target: &ResolvedSandboxProxyTarget,
-) -> Result<HeaderMap> {
+fn build_proxy_headers(ctx: &CliContext, target: &ResolvedSandboxProxyTarget) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,

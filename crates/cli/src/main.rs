@@ -477,16 +477,30 @@ enum SbxCommands {
         dest: String,
     },
 
+    /// Copy a running sandbox using the server live-copy API
+    Copy {
+        /// Source sandbox ID or name
+        sandbox_id: String,
+
+        /// Number of running sandbox copies to create
+        #[arg(short = 'n', long, default_value = "1")]
+        times: NonZeroUsize,
+
+        /// Max seconds to wait for copied sandboxes to become ready
+        #[arg(long)]
+        timeout: Option<f64>,
+    },
+
     /// Create a checkpoint (snapshot) or list checkpoints
     #[command(alias = "snapshot")]
     Checkpoint(SnapshotArgs),
 
-    /// Clone a running sandbox via snapshot
+    /// Clone a running sandbox using the server live-copy API
     Clone {
         /// Source sandbox ID or name
         sandbox_id: String,
 
-        /// Max seconds to wait for the snapshot to become locally ready
+        /// Max seconds to wait for cloned sandboxes to become ready
         #[arg(short, long, default_value = "300")]
         timeout: f64,
 
@@ -1053,6 +1067,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         .await
                     }
                     SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
+                    SbxCommands::Copy {
+                        sandbox_id,
+                        times,
+                        timeout,
+                    } => commands::sbx::copy::run(ctx, &sandbox_id, times.get(), timeout).await,
                     SbxCommands::Checkpoint(snapshot_args) => match snapshot_args.command {
                         Some(SnapshotCommands::Ls) => commands::sbx::snapshot_ls::run(ctx).await,
                         Some(SnapshotCommands::Rm { snapshot_ids }) => {
@@ -1273,6 +1292,59 @@ mod tests {
     #[test]
     fn clone_times_rejects_zero() {
         let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "0"]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cp_file_copy_requires_destination() {
+        let result = Cli::try_parse_from(["tl", "sbx", "cp", "sbx-123"]);
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn cp_file_copy_parses_destination() {
+        let cli =
+            Cli::try_parse_from(["tl", "sbx", "cp", "local.txt", "sbx-123:/tmp/file"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Cp { src, dest }) => {
+                assert_eq!(src, "local.txt");
+                assert_eq!(dest, "sbx-123:/tmp/file");
+            }
+            _ => panic!("expected sbx cp command"),
+        }
+    }
+
+    #[test]
+    fn copy_times_defaults_to_one() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "copy", "sbx-123"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Copy { times, .. }) => assert_eq!(times.get(), 1),
+            _ => panic!("expected sbx copy command"),
+        }
+    }
+
+    #[test]
+    fn copy_times_parses_explicit_value() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "copy", "sbx-123", "--times", "3"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Copy {
+                sandbox_id, times, ..
+            }) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(times.get(), 3);
+            }
+            _ => panic!("expected sbx copy command"),
+        }
+    }
+
+    #[test]
+    fn copy_times_rejects_zero() {
+        let result = Cli::try_parse_from(["tl", "sbx", "copy", "sbx-123", "--times", "0"]);
 
         assert!(result.is_err());
     }

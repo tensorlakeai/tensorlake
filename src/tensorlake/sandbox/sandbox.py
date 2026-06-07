@@ -23,6 +23,7 @@ from .exceptions import (
 from .models import (
     CheckpointType,
     CommandResult,
+    CopySandboxResponse,
     DaemonInfo,
     HealthResponse,
     ListDirectoryResponse,
@@ -524,6 +525,29 @@ class Sandbox:
         self._require_lifecycle_client("resume")
         self._lifecycle_client.resume(
             self.sandbox_id, wait=wait, timeout=timeout, poll_interval=poll_interval
+        )
+
+    def copy(
+        self,
+        *,
+        times: int = 1,
+        request_timeout: float | None = None,
+    ) -> Traced[CopySandboxResponse]:
+        """Live-copy this running sandbox.
+
+        Args:
+            times: Number of running copies to create. Must be at least 1.
+            request_timeout: Optional HTTP request timeout in seconds for this
+                blocking copy request.
+
+        Returns:
+            Traced[CopySandboxResponse] with copy results.
+        """
+        self._require_lifecycle_client("copy")
+        return self._lifecycle_client.copy(
+            self._lifecycle_identifier(),
+            times=times,
+            request_timeout=request_timeout,
         )
 
     def checkpoint(

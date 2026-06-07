@@ -5,6 +5,8 @@ import {
   type ArchivedSandboxInfo,
   type CheckpointOptions,
   type ConnectOptions,
+  type CopySandboxOptions,
+  type CopySandboxResponse,
   type CreateAndConnectOptions,
   type CreatePoolOptions,
   type CreateSandboxOptions,
@@ -34,6 +36,7 @@ import { isLocalhost, lifecyclePath, resolveProxyUrl, resolveSandboxLifecycleUrl
 
 const CREATE_SANDBOX_RETRYABLE_STATUS_CODES = new Set([502, 503]);
 const CREATE_SANDBOX_ALLOWED_ERROR_STATUS_CODES = new Set([504]);
+const COPY_SANDBOX_ALLOWED_ERROR_STATUS_CODES = new Set([422, 504]);
 
 /**
  * Client for managing TensorLake sandboxes, pools, and snapshots.
@@ -413,6 +416,31 @@ export class SandboxClient {
     );
     const result = fromSnakeKeys(raw, "sandboxId") as CreateSandboxResponse;
     return Object.assign(result, { traceId: raw.traceId }) as Traced<CreateSandboxResponse>;
+  }
+
+  /**
+   * Live-copy a running sandbox.
+   *
+   * The server creates `times` running copies from the source sandbox. Partial
+   * responses can include failed copies; inspect each returned sandbox's
+   * `status` and `reason`.
+   */
+  async copy(
+    sandboxId: string,
+    options?: CopySandboxOptions,
+  ): Promise<Traced<CopySandboxResponse>> {
+    const times = options?.times ?? 1;
+    if (!Number.isInteger(times) || times < 1) {
+      throw new SandboxError("times must be a positive integer");
+    }
+    const client = this.withRequestTimeout(options?.requestTimeout);
+    const raw = await client.http.requestJson<Record<string, unknown>>(
+      "POST",
+      client.path(`sandbox/${sandboxId}/copy?times=${encodeURIComponent(String(times))}`),
+      { allowedErrorStatusCodes: COPY_SANDBOX_ALLOWED_ERROR_STATUS_CODES },
+    );
+    const result = fromSnakeKeys(raw, "sandboxId") as CopySandboxResponse;
+    return Object.assign(result, { traceId: raw.traceId }) as Traced<CopySandboxResponse>;
   }
 
   // --- Snapshots ---

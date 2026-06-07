@@ -79,6 +79,8 @@ pub struct CreateSandboxResponse {
     pub sandbox_id: String,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_hint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress_endpoint: Option<String>,
@@ -88,6 +90,12 @@ pub struct CreateSandboxResponse {
     pub termination_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_details: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CopySandboxResponse {
+    pub source_sandbox_id: String,
+    pub sandboxes: Vec<CreateSandboxResponse>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -434,6 +442,18 @@ mod tests {
             serde_json::to_string(&body).unwrap(),
             r#"{"snapshot_type":"filesystem"}"#
         );
+    }
+
+    #[test]
+    fn copy_sandbox_response_deserializes() {
+        let json = r#"{
+            "source_sandbox_id":"source-1",
+            "sandboxes":[{"sandbox_id":"copy-1","status":"running"}]
+        }"#;
+        let response: CopySandboxResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.source_sandbox_id, "source-1");
+        assert_eq!(response.sandboxes[0].sandbox_id, "copy-1");
+        assert_eq!(response.sandboxes[0].status, "running");
     }
 
     #[test]
