@@ -13,6 +13,7 @@ import {
   SandboxConnectionError,
   SandboxNotFoundError,
 } from "./errors.js";
+import { nowMs, traceEvent, traceTiming } from "./trace.js";
 
 const REQUEST_TIMEOUT_HEADER = "X-Tensorlake-Request-Timeout-Ms";
 
@@ -254,10 +255,18 @@ export class HttpClient {
     const { traceparent, traceId } = HttpClient.makeTraceparent();
     headers["traceparent"] = traceparent;
     let lastError: Error | undefined;
+    const operationStart = nowMs();
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       if (attempt > 0) {
         const delay = this.retryBackoffMs * Math.pow(2, attempt - 1);
+        traceEvent("http.request", "retry_sleep_start", {
+          method,
+          path,
+          attempt,
+          delay_ms: delay,
+          trace_id: traceId,
+        });
         await sleep(delay);
       }
 
@@ -277,6 +286,7 @@ export class HttpClient {
         ? anySignal([signal, this.abortController.signal])
         : this.abortController.signal;
 
+      const attemptStart = nowMs();
       try {
         const response = (await undiciFetch(url, {
           method,
@@ -286,8 +296,24 @@ export class HttpClient {
         })) as Response;
 
         if (timeoutId != null) clearTimeout(timeoutId);
+        traceTiming("http.request", "headers", attemptStart, {
+          method,
+          path,
+          status: response.status,
+          attempt,
+          trace_id: traceId,
+        });
 
-        if (response.ok) return { response, traceId };
+        if (response.ok) {
+          traceTiming("http.request", "complete", operationStart, {
+            method,
+            path,
+            status: response.status,
+            attempts: attempt + 1,
+            trace_id: traceId,
+          });
+          return { response, traceId };
+        }
 
         // Check if retryable
         if (
@@ -298,10 +324,24 @@ export class HttpClient {
             response.status,
             await response.text().catch(() => ""),
           );
+          traceEvent("http.request", "retryable_status", {
+            method,
+            path,
+            status: response.status,
+            attempt,
+            trace_id: traceId,
+          });
           continue;
         }
 
         if (allowHttpErrors || allowedErrorStatusCodes.has(response.status)) {
+          traceTiming("http.request", "complete", operationStart, {
+            method,
+            path,
+            status: response.status,
+            attempts: attempt + 1,
+            trace_id: traceId,
+          });
           return { response, traceId };
         }
 
@@ -329,6 +369,13 @@ export class HttpClient {
 
         // Network / timeout error
         lastError = err instanceof Error ? err : new Error(String(err));
+        traceTiming("http.request", "error", attemptStart, {
+          method,
+          path,
+          attempt,
+          trace_id: traceId,
+          error: timedOut ? `request timed out after ${this.timeoutMs}ms` : describeError(err),
+        });
 
         if (attempt >= this.maxRetries) {
           // Surface the real inner cause; for our own deadline, say so plainly.

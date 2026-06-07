@@ -43,6 +43,7 @@ import {
   TcpTunnel,
 } from "./tunnel.js";
 import { parseSSEStream } from "./sse.js";
+import { nowMs, traceEvent, tracePayloadsEnabled, traceTiming } from "./trace.js";
 import { resolveProxyTarget } from "./url.js";
 import WebSocket, { type RawData } from "ws";
 
@@ -80,7 +81,13 @@ class SandboxProxyConnection {
       return this.resolvePromise;
     }
 
-    this.resolvePromise = this.resolveProxyInfo(this.sandbox._getLifecycleIdentifier())
+    const identifier = this.sandbox._getLifecycleIdentifier();
+    const resolveStart = nowMs();
+    traceEvent("sandbox.proxy", "resolve_start", {
+      sandbox_id: identifier,
+    });
+
+    this.resolvePromise = this.resolveProxyInfo(identifier)
       .then((info) => {
         this.resolveProxyInfo = undefined;
         this.sandbox.traceId = info.traceId;
@@ -92,6 +99,12 @@ class SandboxProxyConnection {
         const nextHttp = this.configureProxy(proxyUrl, info.sandboxId, this.routingHint);
         this.http.close();
         this.http = nextHttp;
+        traceTiming("sandbox.proxy", "resolve_complete", resolveStart, {
+          sandbox_id: info.sandboxId,
+          trace_id: info.traceId,
+          routing_hint: this.routingHint,
+          ingress_endpoint: info.ingressEndpoint,
+        });
       })
       .finally(() => {
         this.resolvePromise = null;
@@ -719,6 +732,7 @@ export class Sandbox {
    * the process, streams output, and delivers the exit code over one connection.
    */
   async run(command: string, options?: RunOptions): Promise<Traced<CommandResult>> {
+    const opStart = nowMs();
     const body: Record<string, unknown> = { command };
     if (options?.args) body.args = options.args;
     if (options?.env) body.env = options.env;
@@ -727,17 +741,31 @@ export class Sandbox {
     const user = processUserPayload(options?.user);
     body.user = user;
 
+    traceEvent("sandbox.run", "start", {
+      sandbox_id: this.sandboxId,
+      command: tracePayloadsEnabled() ? command : undefined,
+      command_length: command.length,
+    });
+
+    const requestStart = nowMs();
     const sseStream = await this.http.requestStream(
       "POST",
       "/api/v1/processes/run",
       { json: body },
     );
     const traceId = sseStream.traceId;
+    traceTiming("sandbox.run", "stream_headers", requestStart, {
+      sandbox_id: this.sandboxId,
+      trace_id: traceId,
+      command: tracePayloadsEnabled() ? command : undefined,
+      command_length: command.length,
+    });
 
     const stdoutLines: string[] = [];
     const stderrLines: string[] = [];
     let exitCode = -1;
 
+    const streamStart = nowMs();
     for await (const raw of parseSSEStream<Record<string, unknown>>(sseStream)) {
       if (typeof raw.line === "string") {
         if (raw.stream === "stderr") {
@@ -753,6 +781,20 @@ export class Sandbox {
         }
       }
     }
+    traceTiming("sandbox.run", "stream_complete", streamStart, {
+      sandbox_id: this.sandboxId,
+      trace_id: traceId,
+      command: tracePayloadsEnabled() ? command : undefined,
+      command_length: command.length,
+      exit_code: exitCode,
+    });
+    traceTiming("sandbox.run", "complete", opStart, {
+      sandbox_id: this.sandboxId,
+      trace_id: traceId,
+      command: tracePayloadsEnabled() ? command : undefined,
+      command_length: command.length,
+      exit_code: exitCode,
+    });
 
     return Object.assign(
       { exitCode, stdout: stdoutLines.join("\n"), stderr: stderrLines.join("\n") },

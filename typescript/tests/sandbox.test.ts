@@ -15,6 +15,8 @@ describe("Sandbox", () => {
   afterEach(() => {
     vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
+    delete process.env.TENSORLAKE_TRACE;
+    delete process.env.TENSORLAKE_TRACE_PAYLOADS;
   });
 
   function mockFetch(
@@ -110,6 +112,60 @@ describe("Sandbox", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("hello");
       expect(result.stderr).toBe("");
+      sbx.close();
+    });
+
+    it("emits run stream timing traces when enabled", async () => {
+      process.env.TENSORLAKE_TRACE = "1";
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockFetch((url, init) => {
+        if (url.includes("/api/v1/processes/run") && init?.method === "POST") {
+          return sseResponse([
+            { pid: 42, started_at: 1700000000 },
+            { exit_code: 0 },
+          ]);
+        }
+        return new Response("", { status: 404 });
+      });
+
+      const sbx = makeSandbox();
+      await sbx.run("echo");
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[tensorlake:trace] op=sandbox.run phase=stream_headers"),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("command_length=4"),
+      );
+      expect(errorSpy.mock.calls.some(([line]) => String(line).includes("command=echo"))).toBe(
+        false,
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("phase=stream_complete"),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("phase=complete"),
+      );
+      sbx.close();
+    });
+
+    it("can include run command payloads when explicitly enabled", async () => {
+      process.env.TENSORLAKE_TRACE = "1";
+      process.env.TENSORLAKE_TRACE_PAYLOADS = "1";
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockFetch((url, init) => {
+        if (url.includes("/api/v1/processes/run") && init?.method === "POST") {
+          return sseResponse([{ exit_code: 0 }]);
+        }
+        return new Response("", { status: 404 });
+      });
+
+      const sbx = makeSandbox();
+      await sbx.run("echo");
+
+      expect(errorSpy.mock.calls.some(([line]) => String(line).includes("command=echo"))).toBe(
+        true,
+      );
       sbx.close();
     });
 

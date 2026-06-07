@@ -18,6 +18,8 @@ describe("SandboxClient", () => {
   afterEach(() => {
     vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
+    delete process.env.TENSORLAKE_TRACE;
+    delete process.env.TENSORLAKE_TRACE_PAYLOADS;
     const dirs = tempDirs;
     tempDirs = [];
     return Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
@@ -778,6 +780,36 @@ describe("SandboxClient", () => {
       expect(sandbox.sandboxId).toBe("sbx-1");
       expect((sandbox as unknown as { baseUrl: string }).baseUrl).toBe(
         "https://sandbox.us-east-1.aws.tensorlake.ai",
+      );
+      sandbox.close();
+      client.close();
+    });
+
+    it("emits create lifecycle timing traces when enabled", async () => {
+      process.env.TENSORLAKE_TRACE = "1";
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockFetch(() =>
+        new Response(
+          JSON.stringify({
+            sandbox_id: "sbx-1",
+            status: "running",
+            routing_hint: "hint-1",
+          }),
+          { status: 200 },
+        ),
+      );
+
+      const client = SandboxClient.forCloud({ apiKey: "key" });
+      const sandbox = await client.createAndConnect();
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[tensorlake:trace] op=sandbox.create phase=start"),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("phase=create_response"),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("phase=complete"),
       );
       sandbox.close();
       client.close();
