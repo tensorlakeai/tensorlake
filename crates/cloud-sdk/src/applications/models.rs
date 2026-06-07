@@ -1232,6 +1232,11 @@ impl InvokeApplicationRequest {
     }
 }
 
+#[derive(Debug, Deserialize)]
+pub(super) struct InvokeApplicationResponse {
+    pub(super) request_id: String,
+}
+
 /// Response from invoking an application
 pub enum InvokeResponse {
     /// The request ID of the invocation
@@ -1451,6 +1456,29 @@ mod tests {
         assert!(result.is_ok());
         let event = result.unwrap();
         assert!(event.created_at.is_some());
+    }
+
+    #[test]
+    fn invoke_application_response_deserializes_request_id() {
+        let json = json!({"request_id": "req-123"});
+        let response: InvokeApplicationResponse = serde_json::from_value(json).unwrap();
+
+        assert_eq!(response.request_id, "req-123");
+    }
+
+    #[test]
+    fn invoke_application_response_rejects_missing_request_id() {
+        let result: Result<InvokeApplicationResponse, _> = serde_json::from_value(json!({}));
+
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn invoke_application_response_rejects_non_string_request_id() {
+        let result: Result<InvokeApplicationResponse, _> =
+            serde_json::from_value(json!({"request_id": 123}));
+
+        assert!(result.is_err());
     }
 
     #[test]
