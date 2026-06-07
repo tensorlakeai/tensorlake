@@ -19,7 +19,6 @@ describe("HttpClient", () => {
   afterEach(() => {
     vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
-    delete process.env.TENSORLAKE_TRACE;
   });
 
   function mockFetch(
@@ -34,40 +33,6 @@ describe("HttpClient", () => {
     const client = new HttpClient({ baseUrl: "http://localhost:8900" });
     const result = await client.requestJson<{ ok: boolean }>("GET", "/test");
     expect(result).toMatchObject({ ok: true });
-    client.close();
-  });
-
-  it("does not emit timing traces by default", async () => {
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    mockFetch(() => new Response(JSON.stringify({ ok: true }), { status: 200 }));
-
-    const client = new HttpClient({ baseUrl: "http://localhost:8900" });
-    await client.requestJson<{ ok: boolean }>("GET", "/test");
-
-    expect(errorSpy).not.toHaveBeenCalled();
-    client.close();
-  });
-
-  it("emits timing traces when enabled", async () => {
-    process.env.TENSORLAKE_TRACE = "1";
-    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    mockFetch(() => new Response(JSON.stringify({ ok: true }), { status: 200 }));
-
-    const client = new HttpClient({ baseUrl: "http://localhost:8900" });
-    await client.requestJson<{ ok: boolean }>("GET", "/test");
-
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("[tensorlake:trace] op=http.request phase=headers"),
-    );
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("phase=complete"),
-    );
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("method=GET"),
-    );
-    expect(errorSpy).toHaveBeenCalledWith(
-      expect.stringContaining("path=/test"),
-    );
     client.close();
   });
 

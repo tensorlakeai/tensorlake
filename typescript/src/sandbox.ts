@@ -43,7 +43,7 @@ import {
   TcpTunnel,
 } from "./tunnel.js";
 import { parseSSEStream } from "./sse.js";
-import { nowMs, traceEvent, tracePayloadsEnabled, traceTiming } from "./trace.js";
+import { nowMs, logSdkTimingEvent, sdkTimingPayloadsEnabled, logSdkTiming } from "./sdk-timings.js";
 import { resolveProxyTarget } from "./url.js";
 import WebSocket, { type RawData } from "ws";
 
@@ -83,7 +83,7 @@ class SandboxProxyConnection {
 
     const identifier = this.sandbox._getLifecycleIdentifier();
     const resolveStart = nowMs();
-    traceEvent("sandbox.proxy", "resolve_start", {
+    logSdkTimingEvent("sandbox.proxy", "resolve_start", {
       sandbox_id: identifier,
     });
 
@@ -99,9 +99,9 @@ class SandboxProxyConnection {
         const nextHttp = this.configureProxy(proxyUrl, info.sandboxId, this.routingHint);
         this.http.close();
         this.http = nextHttp;
-        traceTiming("sandbox.proxy", "resolve_complete", resolveStart, {
+        logSdkTiming("sandbox.proxy", "resolve_complete", resolveStart, {
           sandbox_id: info.sandboxId,
-          trace_id: info.traceId,
+          server_trace_id: info.traceId,
           routing_hint: this.routingHint,
           ingress_endpoint: info.ingressEndpoint,
         });
@@ -741,9 +741,9 @@ export class Sandbox {
     const user = processUserPayload(options?.user);
     body.user = user;
 
-    traceEvent("sandbox.run", "start", {
+    logSdkTimingEvent("sandbox.run", "start", {
       sandbox_id: this.sandboxId,
-      command: tracePayloadsEnabled() ? command : undefined,
+      command: sdkTimingPayloadsEnabled() ? command : undefined,
       command_length: command.length,
     });
 
@@ -754,10 +754,10 @@ export class Sandbox {
       { json: body },
     );
     const traceId = sseStream.traceId;
-    traceTiming("sandbox.run", "stream_headers", requestStart, {
+    logSdkTiming("sandbox.run", "stream_headers", requestStart, {
       sandbox_id: this.sandboxId,
-      trace_id: traceId,
-      command: tracePayloadsEnabled() ? command : undefined,
+      server_trace_id: traceId,
+      command: sdkTimingPayloadsEnabled() ? command : undefined,
       command_length: command.length,
     });
 
@@ -781,17 +781,17 @@ export class Sandbox {
         }
       }
     }
-    traceTiming("sandbox.run", "stream_complete", streamStart, {
+    logSdkTiming("sandbox.run", "stream_complete", streamStart, {
       sandbox_id: this.sandboxId,
-      trace_id: traceId,
-      command: tracePayloadsEnabled() ? command : undefined,
+      server_trace_id: traceId,
+      command: sdkTimingPayloadsEnabled() ? command : undefined,
       command_length: command.length,
       exit_code: exitCode,
     });
-    traceTiming("sandbox.run", "complete", opStart, {
+    logSdkTiming("sandbox.run", "complete", opStart, {
       sandbox_id: this.sandboxId,
-      trace_id: traceId,
-      command: tracePayloadsEnabled() ? command : undefined,
+      server_trace_id: traceId,
+      command: sdkTimingPayloadsEnabled() ? command : undefined,
       command_length: command.length,
       exit_code: exitCode,
     });
