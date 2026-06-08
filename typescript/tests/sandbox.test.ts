@@ -57,7 +57,7 @@ describe("Sandbox", () => {
   describe("copy", () => {
     it("uses the lifecycle client", async () => {
       mockFetch((url, init) => {
-        expect(url).toContain("/v1/namespaces/default/sandbox/sbx-abc/copy?times=3");
+        expect(url).toContain("/v1/namespaces/default/sandboxes/sbx-abc/copy?times=3");
         expect(init?.method).toBe("POST");
         return new Response(
           JSON.stringify({

@@ -436,7 +436,7 @@ export class SandboxClient {
     const client = this.withRequestTimeout(options?.requestTimeout);
     const raw = await client.http.requestJson<Record<string, unknown>>(
       "POST",
-      client.path(`sandbox/${sandboxId}/copy?times=${encodeURIComponent(String(times))}`),
+      client.path(`sandboxes/${sandboxId}/copy?times=${encodeURIComponent(String(times))}`),
       { allowedErrorStatusCodes: COPY_SANDBOX_ALLOWED_ERROR_STATUS_CODES },
     );
     const result = fromSnakeKeys(raw, "sandboxId") as CopySandboxResponse;

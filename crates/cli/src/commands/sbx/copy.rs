@@ -96,7 +96,7 @@ async fn request_sandbox_copy(
     timeout: Option<f64>,
 ) -> Result<CopySandboxResponse> {
     let client = ctx.client()?;
-    let url = sandbox_endpoint(ctx, &format!("sandbox/{sandbox_id}/copy"));
+    let url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}/copy"));
     let mut request = client.post(&url).query(&[("times", times)]);
     if let Some(timeout) = timeout {
         let timeout_ms = timeout_to_millis(timeout)?;

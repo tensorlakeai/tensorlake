@@ -90,7 +90,7 @@ impl SandboxesClient {
         sandbox_id: &str,
         times: usize,
     ) -> Result<Traced<CopySandboxResponse>, SdkError> {
-        let uri = self.endpoint(&format!("sandbox/{sandbox_id}/copy"));
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/copy"));
         let req = self
             .client
             .request(Method::POST, &uri)
