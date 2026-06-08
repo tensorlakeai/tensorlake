@@ -156,13 +156,9 @@ def _cloud_init_include_data(source_str: str) -> bytes | None:
 
 def _read_cloud_init_config(
     cloud_init: str | os.PathLike[str] | None = None,
-    *,
-    snapshot_id: str | None = None,
 ) -> str | None:
     if cloud_init is None:
         return None
-    if snapshot_id is not None:
-        raise SandboxError("cloud-init cannot be used with `snapshot_id`.")
 
     source_str = os.fspath(cloud_init)
     data = _cloud_init_include_data(source_str)
@@ -453,7 +449,7 @@ class SandboxClient:
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
             cloud_init: Local cloud-init file path or HTTP(S) URL for the sandbox.
-                Fresh boots only; snapshot restores are rejected.
+                Supported for fresh sandboxes and filesystem-only snapshot restores.
 
         Returns:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
@@ -469,10 +465,7 @@ class SandboxClient:
                 allow_out=allow_out or [],
                 deny_out=deny_out or [],
             )
-        cloud_init_base64 = _read_cloud_init_config(
-            cloud_init=cloud_init,
-            snapshot_id=snapshot_id,
-        )
+        cloud_init_base64 = _read_cloud_init_config(cloud_init=cloud_init)
 
         request_model = CreateSandboxRequest(
             image=image,
@@ -1323,7 +1316,7 @@ class SandboxClient:
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
             cloud_init: Local cloud-init file path or HTTP(S) URL for the sandbox.
-                Not supported with pools or snapshot restores.
+                Not supported with pools.
 
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)

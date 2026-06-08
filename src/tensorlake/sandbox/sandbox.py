@@ -252,7 +252,7 @@ class Sandbox:
             startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name; named sandboxes support suspend/resume.
             cloud_init: Local cloud-init file path or HTTP(S) URL for the sandbox.
-                Fresh boots only; not supported with pools or snapshot restores.
+                Not supported with pools.
             api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
             api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
             organization_id: Organization ID for multi-tenant access.

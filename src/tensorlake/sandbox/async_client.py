@@ -223,10 +223,7 @@ class AsyncSandboxClient:
                 allow_out=allow_out or [],
                 deny_out=deny_out or [],
             )
-        cloud_init_base64 = _read_cloud_init_config(
-            cloud_init=cloud_init,
-            snapshot_id=snapshot_id,
-        )
+        cloud_init_base64 = _read_cloud_init_config(cloud_init=cloud_init)
         request_model = CreateSandboxRequest(
             image=image,
             resources=CreateSandboxResources(
