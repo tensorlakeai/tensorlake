@@ -274,6 +274,10 @@ fn build_create_request_body(
 }
 
 fn cloud_init_include_data(source: &str) -> Result<Option<Vec<u8>>> {
+    if is_windows_absolute_path(source) {
+        return Ok(None);
+    }
+
     match url::Url::parse(source) {
         Ok(url) if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() => {
             Ok(Some(format!("#include\n{source}\n").into_bytes()))
@@ -286,6 +290,14 @@ fn cloud_init_include_data(source: &str) -> Result<Option<Vec<u8>>> {
         )),
         Err(_) => Ok(None),
     }
+}
+
+fn is_windows_absolute_path(source: &str) -> bool {
+    let bytes = source.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
 }
 
 fn encode_cloud_init_source(source: &str) -> Result<String> {
@@ -410,11 +422,36 @@ mod tests {
     }
 
     #[test]
+    fn create_body_allows_snapshot_with_cloud_init_user_data_base64() {
+        let body = build_create_request_body(
+            None,
+            None,
+            None,
+            None,
+            &[],
+            Some("snap-fs"),
+            None,
+            Some("I2Nsb3VkLWNvbmZpZwo="),
+        );
+
+        assert_eq!(body["snapshot_id"], "snap-fs");
+        assert_eq!(body["cloud_init_base64"], "I2Nsb3VkLWNvbmZpZwo=");
+    }
+
+    #[test]
     fn cloud_init_rejects_invalid_url() {
         let err = encode_cloud_init_source("ftp://example.com/cloud-init.yaml")
             .expect_err("unsupported URL scheme should fail");
 
         assert!(err.to_string().contains("HTTP(S) URL"));
+    }
+
+    #[test]
+    fn cloud_init_treats_windows_absolute_paths_as_files() {
+        let err = encode_cloud_init_source(r"C:\cloud-init.yaml")
+            .expect_err("missing Windows path should be treated as a file path");
+
+        assert!(err.to_string().contains("failed to read cloud-init file"));
     }
 
     #[test]

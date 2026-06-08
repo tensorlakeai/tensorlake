@@ -395,11 +395,7 @@ enum SbxCommands {
         image: Option<String>,
 
         /// Local cloud-init file path or HTTP(S) URL for the sandbox
-        #[arg(
-            long = "cloud-init",
-            value_name = "PATH_OR_URL",
-            conflicts_with = "snapshot"
-        )]
+        #[arg(long = "cloud-init", value_name = "PATH_OR_URL")]
         cloud_init: Option<String>,
 
         /// Return immediately after creation instead of waiting for the sandbox to be running
