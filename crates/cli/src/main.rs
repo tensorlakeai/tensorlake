@@ -574,20 +574,6 @@ enum SbxCommands {
     #[command(alias = "snapshot")]
     Checkpoint(SnapshotArgs),
 
-    /// Clone a running sandbox using the server live-copy API
-    Clone {
-        /// Source sandbox ID or name
-        sandbox_id: String,
-
-        /// Max seconds to wait for cloned sandboxes to become ready
-        #[arg(short, long, default_value = "300")]
-        timeout: f64,
-
-        /// Number of copies to create from the same snapshot
-        #[arg(short = 'n', long, default_value = "1")]
-        times: NonZeroUsize,
-    },
-
     /// Manage user-exposed sandbox ports
     #[command(subcommand)]
     Port(PortCommands),
@@ -1227,11 +1213,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             .await
                         }
                     },
-                    SbxCommands::Clone {
-                        sandbox_id,
-                        timeout,
-                        times,
-                    } => commands::sbx::clone::run(ctx, &sandbox_id, timeout, times.get()).await,
                     SbxCommands::Port(port_cmd) => match port_cmd {
                         PortCommands::Ls { sandbox_id } => {
                             commands::sbx::port::list(ctx, &sandbox_id).await
@@ -1403,28 +1384,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn clone_times_defaults_to_one() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123"]).unwrap();
-
-        match cli.command {
-            Commands::Sbx(SbxCommands::Clone { times, .. }) => assert_eq!(times.get(), 1),
-            _ => panic!("expected sbx clone command"),
-        }
-    }
-
-    #[test]
-    fn clone_times_parses_explicit_value() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "3"]).unwrap();
-
-        match cli.command {
-            Commands::Sbx(SbxCommands::Clone { times, .. }) => assert_eq!(times.get(), 3),
-            _ => panic!("expected sbx clone command"),
-        }
-    }
-
-    #[test]
-    fn clone_times_rejects_zero() {
-        let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "0"]);
+    fn clone_command_is_not_supported() {
+        let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123"]);
 
         assert!(result.is_err());
     }

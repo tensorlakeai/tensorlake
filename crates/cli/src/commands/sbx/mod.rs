@@ -1,4 +1,3 @@
-pub mod clone;
 pub mod copy;
 pub mod cp;
 pub mod create;

@@ -18,8 +18,6 @@ struct CopiedSandbox {
     sandbox_id: String,
     status: String,
     #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
     reason: Option<String>,
     #[serde(default)]
     termination_reason: Option<String>,
@@ -31,16 +29,6 @@ pub async fn run(
     times: usize,
     timeout: Option<f64>,
 ) -> Result<()> {
-    run_sandbox_copy(ctx, sandbox_id, times, timeout, "Copying").await
-}
-
-pub async fn run_sandbox_copy(
-    ctx: &CliContext,
-    sandbox_id: &str,
-    times: usize,
-    timeout: Option<f64>,
-    action: &str,
-) -> Result<()> {
     if parse_sandbox_path(sandbox_id).0.is_some() {
         return Err(CliError::usage(
             "Copying a running sandbox expects a sandbox ID or name, not a sandbox file path.",
@@ -48,9 +36,9 @@ pub async fn run_sandbox_copy(
     }
 
     if times == 1 {
-        eprintln!("{action} sandbox {sandbox_id}...");
+        eprintln!("Copying sandbox {sandbox_id}...");
     } else {
-        eprintln!("{action} sandbox {sandbox_id} into {times} copies...");
+        eprintln!("Copying sandbox {sandbox_id} into {times} copies...");
     }
 
     let response = request_sandbox_copy(ctx, sandbox_id, times, timeout).await?;
@@ -74,17 +62,7 @@ pub async fn run_sandbox_copy(
         )));
     }
 
-    for sandbox in &response.sandboxes {
-        println!("{}", sandbox.sandbox_id);
-    }
-
-    if response.sandboxes.len() > 1 {
-        eprintln!();
-        for (index, sandbox) in response.sandboxes.iter().enumerate() {
-            let display = sandbox.name.as_deref().unwrap_or(&sandbox.sandbox_id);
-            eprintln!("  Sandbox {}: {}", index + 1, display);
-        }
-    }
+    println!("{}", created_sandboxes_message(&response.sandboxes));
 
     Ok(())
 }
@@ -167,4 +145,41 @@ fn summarize_sandboxes(sandboxes: &[&CopiedSandbox]) -> String {
         })
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+fn created_sandboxes_message(sandboxes: &[CopiedSandbox]) -> String {
+    let ids = sandboxes
+        .iter()
+        .map(|sandbox| sandbox.sandbox_id.as_str())
+        .collect::<Vec<_>>()
+        .join(", ");
+    format!("Created sandboxes: {ids}")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn created_sandboxes_message_lists_ids() {
+        let sandboxes = vec![
+            CopiedSandbox {
+                sandbox_id: "sbx-1".to_string(),
+                status: "running".to_string(),
+                reason: None,
+                termination_reason: None,
+            },
+            CopiedSandbox {
+                sandbox_id: "sbx-2".to_string(),
+                status: "running".to_string(),
+                reason: None,
+                termination_reason: None,
+            },
+        ];
+
+        assert_eq!(
+            created_sandboxes_message(&sandboxes),
+            "Created sandboxes: sbx-1, sbx-2"
+        );
+    }
 }
