@@ -1360,6 +1360,15 @@ impl CloudSandboxProxyClient {
         })
     }
 
+    fn restart_process_json(&self, pid: i64) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| async move {
+            let traced = client.restart_process(pid).await?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+            Ok((trace_id, json))
+        })
+    }
+
     fn send_signal_json(&self, pid: i64, signal: i64) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| async move {
             let traced = client.send_signal(pid, signal).await?;
@@ -1622,6 +1631,26 @@ impl CloudSandboxProxyClient {
             .await
             .map_err(into_sandbox_py_error)?;
             Ok(trace_id)
+        })
+    }
+
+    fn restart_process_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(
+                client,
+                5,
+                move |c| async move { c.restart_process(pid).await },
+            )
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
         })
     }
 

@@ -606,7 +606,7 @@ describe("SandboxClient", () => {
   describe("copy", () => {
     it("live-copies a sandbox and maps partial failures", async () => {
       mockFetch((url, init) => {
-        expect(url).toContain("/v1/namespaces/default/sandbox/sbx-1/copy?times=2");
+        expect(url).toContain("/v1/namespaces/default/sandboxes/sbx-1/copy?times=2");
         expect(init?.method).toBe("POST");
         const headers = init?.headers as Record<string, string>;
         expect(headers["X-Tensorlake-Request-Timeout-Ms"]).toBe("12000");

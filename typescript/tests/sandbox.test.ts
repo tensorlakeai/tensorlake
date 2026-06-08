@@ -57,7 +57,7 @@ describe("Sandbox", () => {
   describe("copy", () => {
     it("uses the lifecycle client", async () => {
       mockFetch((url, init) => {
-        expect(url).toContain("/v1/namespaces/default/sandbox/sbx-abc/copy?times=3");
+        expect(url).toContain("/v1/namespaces/default/sandboxes/sbx-abc/copy?times=3");
         expect(init?.method).toBe("POST");
         return new Response(
           JSON.stringify({
@@ -239,6 +239,118 @@ describe("Sandbox", () => {
 
       const sbx = makeSandbox();
       await sbx.startProcess("bash");
+      sbx.close();
+    });
+
+    it("sends managed process options and parses managed metadata", async () => {
+      mockFetch((_url, init) => {
+        const body = JSON.parse(init?.body as string);
+        expect(body.name).toBe("web");
+        expect(body.restart).toEqual({
+          policy: "always",
+          max_restarts: 10,
+          initial_backoff_ms: 250,
+        });
+        expect(body.health_check).toEqual({
+          type: "http",
+          port: 8000,
+          path: "/health",
+          interval_ms: 5000,
+        });
+        return new Response(
+          JSON.stringify({
+            handle: 7,
+            pid: 1,
+            status: "running",
+            command: "bash",
+            args: [],
+            stdin_writable: false,
+            started_at: 1700000000,
+            managed: {
+              id: "managed-1",
+              name: "web",
+              status: "running",
+              restart_count: 0,
+              restart: {
+                policy: "always",
+                max_restarts: 10,
+                initial_backoff_ms: 250,
+                max_backoff_ms: 30000,
+              },
+              health_check: {
+                type: "http",
+                port: 8000,
+                path: "/health",
+                interval_ms: 5000,
+              },
+              health_status: "healthy",
+              consecutive_health_failures: 0,
+            },
+          }),
+          { status: 200 },
+        );
+      });
+
+      const sbx = makeSandbox();
+      const proc = await sbx.startProcess("bash", {
+        name: "web",
+        restart: {
+          policy: "always",
+          maxRestarts: 10,
+          initialBackoffMs: 250,
+        },
+        healthCheck: {
+          type: "http",
+          port: 8000,
+          path: "/health",
+          intervalMs: 5000,
+        },
+      });
+      expect(proc.handle).toBe(7);
+      expect(proc.managed?.name).toBe("web");
+      expect(proc.managed?.restartCount).toBe(0);
+      expect(proc.managed?.restart.initialBackoffMs).toBe(250);
+      expect(proc.managed?.healthCheck?.intervalMs).toBe(5000);
+      sbx.close();
+    });
+  });
+
+  describe("restartProcess", () => {
+    it("posts to restart endpoint", async () => {
+      mockFetch((url, init) => {
+        expect(url).toContain("/api/v1/processes/42/restart");
+        expect(init?.method).toBe("POST");
+        return new Response(
+          JSON.stringify({
+            handle: 8,
+            pid: 43,
+            status: "running",
+            command: "bash",
+            args: [],
+            stdin_writable: false,
+            started_at: 1700000001,
+            managed: {
+              id: "managed-1",
+              name: "web",
+              status: "running",
+              restart_count: 1,
+              restart: {
+                policy: "always",
+                initial_backoff_ms: 500,
+                max_backoff_ms: 30000,
+              },
+              health_status: "healthy",
+              consecutive_health_failures: 0,
+            },
+          }),
+          { status: 200 },
+        );
+      });
+
+      const sbx = makeSandbox();
+      const proc = await sbx.restartProcess(42);
+      expect(proc.pid).toBe(43);
+      expect(proc.managed?.restartCount).toBe(1);
       sbx.close();
     });
   });

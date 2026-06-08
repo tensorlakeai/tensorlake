@@ -436,6 +436,7 @@ class ProcessStatus(str, Enum):
     RUNNING = "running"
     EXITED = "exited"
     SIGNALED = "signaled"
+    OOM_KILLED = "oom_killed"
 
 
 class StdinMode(str, Enum):
@@ -465,9 +466,89 @@ class ProcessUserSpec(BaseModel):
 ProcessUser = str | ProcessUserSpec | dict[str, str | int | None]
 
 
+class RestartPolicy(str, Enum):
+    """Restart behavior for a managed sandbox process."""
+
+    NEVER = "never"
+    ON_FAILURE = "on_failure"
+    ALWAYS = "always"
+
+
+class RestartPolicyConfig(BaseModel):
+    """Restart policy and backoff settings for a managed process."""
+
+    policy: RestartPolicy = RestartPolicy.ON_FAILURE
+    max_restarts: int | None = None
+    initial_backoff_ms: int = 500
+    max_backoff_ms: int = 30_000
+
+
+class ProcessHealthCheckType(str, Enum):
+    """Managed-process health check type."""
+
+    HTTP = "http"
+    TCP = "tcp"
+
+
+class ProcessHealthCheck(BaseModel):
+    """Local health check for a managed process."""
+
+    type: ProcessHealthCheckType
+    port: int
+    path: str | None = None
+    initial_delay_ms: int = 5_000
+    interval_ms: int = 1_000
+    timeout_ms: int = 500
+    failure_threshold: int = 3
+
+
+class ManagedProcessStatus(str, Enum):
+    """Supervisor lifecycle status for a managed process."""
+
+    STARTING = "starting"
+    RUNNING = "running"
+    BACKING_OFF = "backing_off"
+    STOPPED = "stopped"
+
+
+class ManagedProcessHealthStatus(str, Enum):
+    """Latest managed-process health status."""
+
+    DISABLED = "disabled"
+    STARTING = "starting"
+    HEALTHY = "healthy"
+    UNHEALTHY = "unhealthy"
+
+
+class ManagedProcessExit(BaseModel):
+    """Terminal status of a previous managed process run."""
+
+    exit_code: int | None = None
+    signal: int | None = None
+    oom_killed: bool = False
+    ended_at: Timestamp
+
+
+class ManagedProcessInfo(BaseModel):
+    """Managed-process metadata embedded into ProcessInfo."""
+
+    id: str
+    name: str | None = None
+    status: ManagedProcessStatus
+    restart_count: int
+    restart: RestartPolicyConfig
+    health_check: ProcessHealthCheck | None = None
+    health_status: ManagedProcessHealthStatus
+    consecutive_health_failures: int
+    last_exit: ManagedProcessExit | None = None
+    last_error: str | None = None
+    next_restart_at: OptionalTimestamp = None
+
+
 class ProcessInfo(BaseModel):
     """Information about a process running in a sandbox."""
 
+    handle: int | None = None
     pid: int
     status: ProcessStatus
     exit_code: int | None = None
@@ -477,6 +558,7 @@ class ProcessInfo(BaseModel):
     args: list[str] = Field(default_factory=list)
     started_at: Timestamp
     ended_at: OptionalTimestamp = None
+    managed: ManagedProcessInfo | None = None
 
 
 class ListProcessesResponse(BaseModel):

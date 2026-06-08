@@ -90,7 +90,7 @@ impl SandboxesClient {
         sandbox_id: &str,
         times: usize,
     ) -> Result<Traced<CopySandboxResponse>, SdkError> {
-        let uri = self.endpoint(&format!("sandbox/{sandbox_id}/copy"));
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/copy"));
         let req = self
             .client
             .request(Method::POST, &uri)
@@ -360,6 +360,13 @@ impl SandboxProxyClient {
             .request(Method::DELETE, &format!("/api/v1/processes/{pid}"))
             .build()?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
+    }
+
+    pub async fn restart_process(&self, pid: i64) -> Result<Traced<ProcessInfo>, SdkError> {
+        let req = self
+            .request(Method::POST, &format!("/api/v1/processes/{pid}/restart"))
+            .build()?;
+        self.client.execute_json(req).await
     }
 
     pub async fn send_signal(

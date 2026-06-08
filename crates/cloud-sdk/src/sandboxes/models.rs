@@ -273,6 +273,8 @@ pub struct ListSnapshotsResponse {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessInfo {
+    #[serde(default)]
+    pub handle: Option<i64>,
     pub pid: i64,
     pub status: String,
     #[serde(default)]
@@ -287,11 +289,134 @@ pub struct ProcessInfo {
     pub started_at: serde_json::Value,
     #[serde(default)]
     pub ended_at: Option<serde_json::Value>,
+    #[serde(default)]
+    pub managed: Option<ProcessManagedInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ListProcessesResponse {
     pub processes: Vec<ProcessInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestartPolicy {
+    Never,
+    OnFailure,
+    Always,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartPolicyConfig {
+    #[serde(default = "default_restart_policy")]
+    pub policy: RestartPolicy,
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    #[serde(default = "default_restart_initial_backoff_ms")]
+    pub initial_backoff_ms: u64,
+    #[serde(default = "default_restart_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+}
+
+fn default_restart_policy() -> RestartPolicy {
+    RestartPolicy::OnFailure
+}
+
+fn default_restart_initial_backoff_ms() -> u64 {
+    500
+}
+
+fn default_restart_max_backoff_ms() -> u64 {
+    30_000
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessHealthCheckKind {
+    Http,
+    Tcp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessHealthCheck {
+    #[serde(rename = "type")]
+    pub kind: ProcessHealthCheckKind,
+    pub port: u16,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "default_health_initial_delay_ms")]
+    pub initial_delay_ms: u64,
+    #[serde(default = "default_health_interval_ms")]
+    pub interval_ms: u64,
+    #[serde(default = "default_health_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_health_failure_threshold")]
+    pub failure_threshold: u32,
+}
+
+fn default_health_initial_delay_ms() -> u64 {
+    5_000
+}
+
+fn default_health_interval_ms() -> u64 {
+    1_000
+}
+
+fn default_health_timeout_ms() -> u64 {
+    500
+}
+
+fn default_health_failure_threshold() -> u32 {
+    3
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisedProcessStatus {
+    Starting,
+    Running,
+    BackingOff,
+    Stopped,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisedProcessHealthStatus {
+    Disabled,
+    Starting,
+    Healthy,
+    Unhealthy,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SupervisedProcessExit {
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    #[serde(default)]
+    pub signal: Option<i64>,
+    #[serde(default)]
+    pub oom_killed: bool,
+    pub ended_at: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessManagedInfo {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub status: SupervisedProcessStatus,
+    pub restart_count: u32,
+    pub restart: RestartPolicyConfig,
+    #[serde(default)]
+    pub health_check: Option<ProcessHealthCheck>,
+    pub health_status: SupervisedProcessHealthStatus,
+    pub consecutive_health_failures: u32,
+    #[serde(default)]
+    pub last_exit: Option<SupervisedProcessExit>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub next_restart_at: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
