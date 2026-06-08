@@ -362,6 +362,13 @@ impl SandboxProxyClient {
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
+    pub async fn restart_process(&self, pid: i64) -> Result<Traced<ProcessInfo>, SdkError> {
+        let req = self
+            .request(Method::POST, &format!("/api/v1/processes/{pid}/restart"))
+            .build()?;
+        self.client.execute_json(req).await
+    }
+
     pub async fn send_signal(
         &self,
         pid: i64,

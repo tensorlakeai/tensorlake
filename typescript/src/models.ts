@@ -45,6 +45,7 @@ export enum ProcessStatus {
   RUNNING = "running",
   EXITED = "exited",
   SIGNALED = "signaled",
+  OOM_KILLED = "oom_killed",
 }
 
 export enum StdinMode {
@@ -291,6 +292,60 @@ export interface ProcessUserSpec {
 
 export type ProcessUser = string | ProcessUserSpec;
 
+export type RestartPolicy = "never" | "on_failure" | "always";
+
+export interface RestartPolicyConfig {
+  policy?: RestartPolicy;
+  maxRestarts?: number;
+  initialBackoffMs?: number;
+  maxBackoffMs?: number;
+}
+
+export type ProcessHealthCheckType = "http" | "tcp";
+
+export interface ProcessHealthCheck {
+  type: ProcessHealthCheckType;
+  port: number;
+  path?: string;
+  initialDelayMs?: number;
+  intervalMs?: number;
+  timeoutMs?: number;
+  failureThreshold?: number;
+}
+
+export type ManagedProcessStatus =
+  | "starting"
+  | "running"
+  | "backing_off"
+  | "stopped";
+
+export type ManagedProcessHealthStatus =
+  | "disabled"
+  | "starting"
+  | "healthy"
+  | "unhealthy";
+
+export interface ManagedProcessExit {
+  exitCode?: number;
+  signal?: number;
+  oomKilled: boolean;
+  endedAt: Date;
+}
+
+export interface ManagedProcessInfo {
+  id: string;
+  name?: string;
+  status: ManagedProcessStatus;
+  restartCount: number;
+  restart: RestartPolicyConfig;
+  healthCheck?: ProcessHealthCheck;
+  healthStatus: ManagedProcessHealthStatus;
+  consecutiveHealthFailures: number;
+  lastExit?: ManagedProcessExit;
+  lastError?: string;
+  nextRestartAt?: Date;
+}
+
 export interface StartProcessOptions {
   args?: string[];
   env?: Record<string, string>;
@@ -299,9 +354,16 @@ export interface StartProcessOptions {
   stdoutMode?: OutputMode;
   stderrMode?: OutputMode;
   user?: ProcessUser;
+  /** Optional managed-process name. Supplying this opts into managed process behavior. */
+  name?: string;
+  /** Optional restart behavior. Supplying this opts into managed process behavior. */
+  restart?: RestartPolicyConfig;
+  /** Optional HTTP/TCP health check. Supplying this opts into managed process behavior. */
+  healthCheck?: ProcessHealthCheck;
 }
 
 export interface ProcessInfo {
+  handle?: number;
   pid: number;
   status: ProcessStatus;
   exitCode?: number;
@@ -311,6 +373,7 @@ export interface ProcessInfo {
   args: string[];
   startedAt: Date;
   endedAt?: Date;
+  managed?: ManagedProcessInfo;
 }
 
 export interface SendSignalResponse {

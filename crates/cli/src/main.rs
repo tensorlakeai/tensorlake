@@ -8,7 +8,7 @@ mod output;
 mod project;
 mod python_ast;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::num::NonZeroUsize;
 
 use auth::context::CliContext;
@@ -466,6 +466,85 @@ enum SbxCommands {
         /// Process user to run as: username, uid, or uid:gid
         #[arg(long, default_value = "tl-user")]
         user: String,
+
+        /// Start the process and return immediately instead of streaming output
+        #[arg(long)]
+        detach: bool,
+
+        /// Managed-process name. Requires --detach.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Managed-process restart policy. Requires --detach.
+        #[arg(long, value_enum)]
+        restart: Option<RestartPolicyArg>,
+
+        /// Maximum number of restarts for a managed process. Requires --detach.
+        #[arg(long)]
+        max_restarts: Option<u32>,
+
+        /// Initial restart backoff in milliseconds. Requires --detach.
+        #[arg(long)]
+        initial_backoff_ms: Option<u64>,
+
+        /// Maximum restart backoff in milliseconds. Requires --detach.
+        #[arg(long)]
+        max_backoff_ms: Option<u64>,
+
+        /// HTTP health check as PORT or PORT:/path. Requires --detach.
+        #[arg(long)]
+        health_http: Option<String>,
+
+        /// TCP health check port. Requires --detach.
+        #[arg(long, value_parser = parse_tcp_port)]
+        health_tcp: Option<u16>,
+
+        /// Delay before the first health check in milliseconds. Requires --detach.
+        #[arg(long)]
+        health_initial_delay_ms: Option<u64>,
+
+        /// Health check interval in milliseconds. Requires --detach.
+        #[arg(long)]
+        health_interval_ms: Option<u64>,
+
+        /// Per-check health timeout in milliseconds. Requires --detach.
+        #[arg(long)]
+        health_timeout_ms: Option<u64>,
+
+        /// Consecutive health failures before restart. Requires --detach.
+        #[arg(long)]
+        health_failure_threshold: Option<u32>,
+    },
+
+    /// List or inspect sandbox processes
+    Ps {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Optional process PID to inspect
+        pid: Option<i64>,
+
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Restart a managed sandbox process by PID
+    Restart {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Process PID
+        pid: i64,
+    },
+
+    /// Kill a sandbox process by PID
+    Kill {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Process PID
+        pid: i64,
     },
 
     /// Copy files between local and sandbox
@@ -705,6 +784,23 @@ struct SnapshotArgs {
 enum SnapshotTypeArg {
     Memory,
     Filesystem,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartPolicyArg {
+    Never,
+    OnFailure,
+    Always,
+}
+
+impl RestartPolicyArg {
+    fn as_wire_value(self) -> &'static str {
+        match self {
+            RestartPolicyArg::Never => "never",
+            RestartPolicyArg::OnFailure => "on_failure",
+            RestartPolicyArg::Always => "always",
+        }
+    }
 }
 
 impl SnapshotTypeArg {
@@ -1053,18 +1149,55 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         workdir,
                         env,
                         user,
+                        detach,
+                        name,
+                        restart,
+                        max_restarts,
+                        initial_backoff_ms,
+                        max_backoff_ms,
+                        health_http,
+                        health_tcp,
+                        health_initial_delay_ms,
+                        health_interval_ms,
+                        health_timeout_ms,
+                        health_failure_threshold,
                     } => {
                         commands::sbx::exec::run(
                             ctx,
                             &sandbox_id,
                             &command,
                             &args,
-                            timeout,
-                            workdir.as_deref(),
-                            &env,
-                            Some(user.as_str()),
+                            commands::sbx::exec::ExecOptions {
+                                timeout,
+                                workdir: workdir.as_deref(),
+                                env: &env,
+                                user: Some(user.as_str()),
+                                detach,
+                                name: name.as_deref(),
+                                restart_policy: restart.map(RestartPolicyArg::as_wire_value),
+                                max_restarts,
+                                initial_backoff_ms,
+                                max_backoff_ms,
+                                health_http: health_http.as_deref(),
+                                health_tcp,
+                                health_initial_delay_ms,
+                                health_interval_ms,
+                                health_timeout_ms,
+                                health_failure_threshold,
+                            },
                         )
                         .await
+                    }
+                    SbxCommands::Ps {
+                        sandbox_id,
+                        pid,
+                        json,
+                    } => commands::sbx::process::ps(ctx, &sandbox_id, pid, json).await,
+                    SbxCommands::Restart { sandbox_id, pid } => {
+                        commands::sbx::process::restart(ctx, &sandbox_id, pid).await
+                    }
+                    SbxCommands::Kill { sandbox_id, pid } => {
+                        commands::sbx::process::kill(ctx, &sandbox_id, pid).await
                     }
                     SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
                     SbxCommands::Copy {
@@ -1376,6 +1509,13 @@ mod tests {
     }
 
     #[test]
+    fn restart_policy_maps_to_wire_values() {
+        assert_eq!(RestartPolicyArg::Never.as_wire_value(), "never");
+        assert_eq!(RestartPolicyArg::OnFailure.as_wire_value(), "on_failure");
+        assert_eq!(RestartPolicyArg::Always.as_wire_value(), "always");
+    }
+
+    #[test]
     fn sbx_checkpoint_parses_memory_checkpoint_type() {
         let cli = Cli::try_parse_from([
             "tl",
@@ -1449,6 +1589,85 @@ mod tests {
                 assert_eq!(user, "1000:1000");
             }
             _ => panic!("expected sbx exec command"),
+        }
+    }
+
+    #[test]
+    fn sbx_exec_parses_managed_detach_flags() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "exec",
+            "sbx-123",
+            "--detach",
+            "--name",
+            "web",
+            "--restart",
+            "on-failure",
+            "--max-restarts",
+            "3",
+            "--health-http",
+            "8000:/health",
+            "python",
+            "app.py",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Exec {
+                detach,
+                name,
+                restart,
+                max_restarts,
+                health_http,
+                command,
+                args,
+                ..
+            }) => {
+                assert!(detach);
+                assert_eq!(name.as_deref(), Some("web"));
+                assert_eq!(restart, Some(RestartPolicyArg::OnFailure));
+                assert_eq!(max_restarts, Some(3));
+                assert_eq!(health_http.as_deref(), Some("8000:/health"));
+                assert_eq!(command, "python");
+                assert_eq!(args, vec!["app.py"]);
+            }
+            _ => panic!("expected sbx exec command"),
+        }
+    }
+
+    #[test]
+    fn sbx_process_lifecycle_commands_parse() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "ps", "sbx-123", "42", "--json"]).unwrap();
+        match cli.command {
+            Commands::Sbx(SbxCommands::Ps {
+                sandbox_id,
+                pid,
+                json,
+            }) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(pid, Some(42));
+                assert!(json);
+            }
+            _ => panic!("expected sbx ps command"),
+        }
+
+        let cli = Cli::try_parse_from(["tl", "sbx", "restart", "sbx-123", "42"]).unwrap();
+        match cli.command {
+            Commands::Sbx(SbxCommands::Restart { sandbox_id, pid }) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(pid, 42);
+            }
+            _ => panic!("expected sbx restart command"),
+        }
+
+        let cli = Cli::try_parse_from(["tl", "sbx", "kill", "sbx-123", "42"]).unwrap();
+        match cli.command {
+            Commands::Sbx(SbxCommands::Kill { sandbox_id, pid }) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(pid, 42);
+            }
+            _ => panic!("expected sbx kill command"),
         }
     }
 

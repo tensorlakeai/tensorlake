@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -29,8 +30,10 @@ from .models import (
     OutputEvent,
     OutputMode,
     OutputResponse,
+    ProcessHealthCheck,
     ProcessInfo,
     ProcessUser,
+    RestartPolicyConfig,
     SandboxInfo,
     SandboxStatus,
     SendSignalResponse,
@@ -466,8 +469,13 @@ class AsyncSandbox:
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
         user: ProcessUser = "tl-user",
+        name: str | None = None,
+        restart: RestartPolicyConfig | Mapping[str, object] | None = None,
+        health_check: ProcessHealthCheck | Mapping[str, object] | None = None,
     ) -> Traced[ProcessInfo]:
         process_user = Sandbox._normalize_process_user(user)
+        restart_payload = Sandbox._normalize_restart_config(restart)
+        health_check_payload = Sandbox._normalize_health_check(health_check)
         payload = Sandbox._build_command_payload(
             command,
             args,
@@ -477,6 +485,9 @@ class AsyncSandbox:
             stdout_mode=stdout_mode if stdout_mode != OutputMode.CAPTURE else None,
             stderr_mode=stderr_mode if stderr_mode != OutputMode.CAPTURE else None,
             user=process_user,
+            name=name,
+            restart=restart_payload,
+            health_check=health_check_payload,
         )
         try:
             trace_id, response_json = await self._rust_client.start_process_json_async(
@@ -509,6 +520,15 @@ class AsyncSandbox:
         try:
             trace_id = await self._rust_client.kill_process_async(pid=pid)
             return Traced(trace_id, None)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    async def restart_process(self, pid: int) -> Traced[ProcessInfo]:
+        try:
+            trace_id, response_json = (
+                await self._rust_client.restart_process_json_async(pid=pid)
+            )
+            return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 

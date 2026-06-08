@@ -36,6 +36,7 @@ import {
   type SuspendResumeOptions,
   type UpdateSandboxOptions,
   fromSnakeKeys,
+  toSnakeKeys,
 } from "./models.js";
 import {
   type CreateTunnelOptions,
@@ -788,6 +789,11 @@ export class Sandbox {
     if (options?.stderrMode != null && options.stderrMode !== OutputMode.CAPTURE) {
       payload.stderr_mode = options.stderrMode;
     }
+    if (options?.name != null) payload.name = options.name;
+    if (options?.restart != null) payload.restart = toSnakeKeys(options.restart);
+    if (options?.healthCheck != null) {
+      payload.health_check = toSnakeKeys(options.healthCheck);
+    }
 
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "POST",
@@ -819,6 +825,15 @@ export class Sandbox {
   /** Send SIGKILL to a process. */
   async killProcess(pid: number): Promise<void> {
     await this.http.requestJson("DELETE", `/api/v1/processes/${pid}`);
+  }
+
+  /** Restart a managed process by PID. */
+  async restartProcess(pid: number): Promise<Traced<ProcessInfo>> {
+    const raw = await this.http.requestJson<Record<string, unknown>>(
+      "POST",
+      `/api/v1/processes/${pid}/restart`,
+    );
+    return Object.assign(fromSnakeKeys(raw) as ProcessInfo, { traceId: raw.traceId });
   }
 
   /** Send an arbitrary signal to a process (e.g. `15` for SIGTERM, `9` for SIGKILL). */
