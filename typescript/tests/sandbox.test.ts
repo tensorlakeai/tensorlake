@@ -15,6 +15,8 @@ describe("Sandbox", () => {
   afterEach(() => {
     vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
+    delete process.env.TENSORLAKE_SDK_TIMINGS;
+    delete process.env.TENSORLAKE_SDK_TIMING_PAYLOADS;
   });
 
   function mockFetch(
@@ -110,6 +112,50 @@ describe("Sandbox", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("hello");
       expect(result.stderr).toBe("");
+      sbx.close();
+    });
+
+    it("emits SDK timings without payloads by default", async () => {
+      process.env.TENSORLAKE_SDK_TIMINGS = "1";
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockFetch((url, init) => {
+        if (url.includes("/api/v1/processes/run") && init?.method === "POST") {
+          return sseResponse([
+            { pid: 42, started_at: 1700000000 },
+            { exit_code: 0 },
+          ]);
+        }
+        if (url.includes("/api/v1/files") && init?.method === "GET") {
+          return new Response("secret", { status: 200 });
+        }
+        return new Response("", { status: 404 });
+      });
+
+      const sbx = makeSandbox();
+      await sbx.run("echo");
+      await sbx.readFile("/home/tl-user/secret.txt");
+
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("[tensorlake:sdk-timing] op=sandbox.run phase=stream_headers"),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("command_length=4"),
+      );
+      expect(errorSpy.mock.calls.some(([line]) => String(line).includes("command=echo"))).toBe(
+        false,
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("phase=stream_complete"),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("phase=complete"),
+      );
+      expect(errorSpy).toHaveBeenCalledWith(
+        expect.stringContaining("path=/api/v1/files"),
+      );
+      expect(errorSpy.mock.calls.some(([line]) => String(line).includes("secret.txt"))).toBe(
+        false,
+      );
       sbx.close();
     });
 

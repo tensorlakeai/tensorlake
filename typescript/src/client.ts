@@ -33,6 +33,7 @@ import {
   toSnakeKeys,
 } from "./models.js";
 import { Sandbox } from "./sandbox.js";
+import { nowMs, logSdkTimingEvent, logSdkTiming } from "./sdk-timings.js";
 import { isLocalhost, lifecyclePath, resolveProxyUrl, resolveSandboxLifecycleUrl } from "./url.js";
 
 const CREATE_SANDBOX_RETRYABLE_STATUS_CODES = new Set([502, 503]);
@@ -726,17 +727,29 @@ export class SandboxClient {
     if (options?.poolId != null && options?.cloudInit != null) {
       throw new SandboxError("cloud-init cannot be used with poolId");
     }
+    const opStart = nowMs();
     const requestTimeout =
       options?.requestTimeout ??
       options?.startupTimeout ??
       this.requestTimeoutMs / 1000;
     const requestClient = this.withRequestTimeout(requestTimeout);
+    logSdkTimingEvent("sandbox.create", "start", {
+      request_timeout_s: requestTimeout,
+      image: options?.image,
+      pool_id: options?.poolId,
+    });
 
     // claim() never sends options.name to the server, so only create() should fall
     // back to it locally when the server response omits a name.
+    const createStart = nowMs();
     const result = options?.poolId != null
       ? await requestClient.claim(options.poolId)
       : await requestClient.create(options);
+    logSdkTiming("sandbox.create", options?.poolId != null ? "claim_response" : "create_response", createStart, {
+      sandbox_id: result.sandboxId,
+      status: result.status,
+      server_trace_id: result.traceId,
+    });
     const requestedName = options?.poolId != null ? null : options?.name ?? null;
 
     const finishConnect = (
@@ -754,6 +767,13 @@ export class SandboxClient {
       sandbox.traceId = result.traceId;
       sandbox._setLifecycleIdentifier(result.sandboxId);
       sandbox._setName(name ?? requestedName);
+      logSdkTiming("sandbox.create", "complete", opStart, {
+        sandbox_id: result.sandboxId,
+        status: SandboxStatus.RUNNING,
+        server_trace_id: result.traceId,
+        routing_hint: routingHint,
+        ingress_endpoint: ingressEndpoint,
+      });
       return sandbox;
     };
 
@@ -788,7 +808,13 @@ export class SandboxClient {
     const deadline = Date.now() + secondsToMillis(requestTimeout);
 
     while (Date.now() < deadline) {
+      const pollStart = nowMs();
       const info = await requestClient.get(result.sandboxId);
+      logSdkTiming("sandbox.create", "poll_response", pollStart, {
+        sandbox_id: result.sandboxId,
+        status: info.status,
+        server_trace_id: info.traceId,
+      });
       if (info.status === SandboxStatus.RUNNING) {
         return finishConnect(info.routingHint, info.name, info.ingressEndpoint);
       }
