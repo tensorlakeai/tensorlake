@@ -32,10 +32,13 @@ def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) ->
     for op in img._build_operations:
         dockerfile_lines.append(render_op_line(op))
 
-    # Run tensorlake install after all user commands. There's implicit dependency
-    # of tensorlake install success on user commands right now.
+    # Run Tensorlake install after all user commands so user layers cannot
+    # remove or downgrade the runtime. Force reinstall makes pip replay package
+    # console scripts even when Tensorlake was already present in the base.
     dockerfile_lines.append(
-        f"RUN python3 -m pip install --break-system-packages tensorlake=={_SDK_VERSION}"
+        "RUN python3 -m pip install --break-system-packages "
+        f"--force-reinstall --no-cache-dir tensorlake=={_SDK_VERSION} "
+        "&& command -v function-executor"
     )
 
     return "\n".join(dockerfile_lines)

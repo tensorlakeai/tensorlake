@@ -405,9 +405,13 @@ impl Image {
             || sdk_version.starts_with("!=")
             || sdk_version.starts_with("==")
         {
-            format!("RUN python3 -m pip install --break-system-packages tensorlake{sdk_version}")
+            format!(
+                "RUN python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir tensorlake{sdk_version} && command -v function-executor"
+            )
         } else {
-            format!("RUN python3 -m pip install --break-system-packages tensorlake=={sdk_version}")
+            format!(
+                "RUN python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir tensorlake=={sdk_version} && command -v function-executor"
+            )
         };
         lines.push(install_command);
 
@@ -677,12 +681,12 @@ mod tests {
         assert!(
             image
                 .dockerfile_content("1.2.3", None)
-                .contains("RUN python3 -m pip install --break-system-packages tensorlake==1.2.3")
+                .contains("RUN python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir tensorlake==1.2.3 && command -v function-executor")
         );
         assert!(
             image
                 .dockerfile_content(">=1.2.3", None)
-                .contains("RUN python3 -m pip install --break-system-packages tensorlake>=1.2.3")
+                .contains("RUN python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir tensorlake>=1.2.3 && command -v function-executor")
         );
     }
 
