@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
 import { type Traced, HttpClient } from "./http.js";
@@ -37,6 +38,61 @@ import { isLocalhost, lifecyclePath, resolveProxyUrl, resolveSandboxLifecycleUrl
 const CREATE_SANDBOX_RETRYABLE_STATUS_CODES = new Set([502, 503]);
 const CREATE_SANDBOX_ALLOWED_ERROR_STATUS_CODES = new Set([504]);
 const COPY_SANDBOX_ALLOWED_ERROR_STATUS_CODES = new Set([422, 504]);
+
+const MAX_CLOUD_INIT_USER_DATA_BYTES = 16 * 1024;
+
+function cloudInitIncludeData(source: string): Buffer | undefined {
+  const isWindowsPath = /^[A-Za-z]:[\\/]/.test(source);
+  try {
+    const url = new URL(source);
+    if (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.hostname.length > 0
+    ) {
+      return Buffer.from(`#include\n${url.toString()}\n`, "utf8");
+    }
+    if (!isWindowsPath) {
+      throw new SandboxError(
+        "cloud-init URL must be an absolute HTTP(S) URL with a host",
+      );
+    }
+  } catch (error) {
+    if (error instanceof SandboxError) throw error;
+    if (!isWindowsPath && /^[A-Za-z][A-Za-z0-9+.-]*:/.test(source)) {
+      throw new SandboxError(
+        "cloud-init URL must be an absolute HTTP(S) URL with a host",
+      );
+    }
+  }
+  return undefined;
+}
+
+async function readCloudInitBase64(
+  cloudInit: string | URL | undefined,
+): Promise<string | undefined> {
+  if (cloudInit == null) return undefined;
+
+  const sourceText = cloudInit instanceof URL ? cloudInit.toString() : cloudInit;
+  const includeData = cloudInitIncludeData(sourceText);
+  const data =
+    includeData ??
+    (await readFile(sourceText).catch((error) => {
+      throw new SandboxError(
+        `failed to read cloud-init file ${JSON.stringify(sourceText)}: ${error}`,
+      );
+    }));
+
+  if (data.length === 0) {
+    throw new SandboxError("cloud-init user data must not be empty");
+  }
+  if (data.length > MAX_CLOUD_INIT_USER_DATA_BYTES) {
+    throw new SandboxError(
+      `cloud-init user data exceeds ${MAX_CLOUD_INIT_USER_DATA_BYTES} byte limit`,
+    );
+  }
+
+  return data.toString("base64");
+}
 
 /**
  * Client for managing TensorLake sandboxes, pools, and snapshots.
@@ -152,6 +208,7 @@ export class SandboxClient {
 
   /** Create a new sandbox. Returns immediately; the sandbox may still be starting. Use `createAndConnect()` for a blocking, ready-to-use handle. */
   async create(options?: CreateSandboxOptions): Promise<Traced<CreateSandboxResponse>> {
+    const cloudInitBase64 = await readCloudInitBase64(options?.cloudInit);
     const body: Record<string, unknown> = {
       resources: {
         cpus: options?.cpus ?? 1.0,
@@ -165,6 +222,7 @@ export class SandboxClient {
     if (options?.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options?.snapshotId != null) body.snapshot_id = options.snapshotId;
     if (options?.name != null) body.name = options.name;
+    if (cloudInitBase64 != null) body.cloud_init_base64 = cloudInitBase64;
 
     if (
       options?.allowInternetAccess === false ||
@@ -665,6 +723,9 @@ export class SandboxClient {
   async createAndConnect(
     options?: CreateAndConnectOptions,
   ): Promise<Sandbox> {
+    if (options?.poolId != null && options?.cloudInit != null) {
+      throw new SandboxError("cloud-init cannot be used with poolId");
+    }
     const requestTimeout =
       options?.requestTimeout ??
       options?.startupTimeout ??
