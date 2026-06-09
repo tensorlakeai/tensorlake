@@ -130,6 +130,25 @@ describe("Sandbox", () => {
       await sbx.run("echo");
       sbx.close();
     });
+
+    it("throws when the stream ends without an exit event", async () => {
+      // Reproduces the unreachable-sandbox case: the proxy closes the run
+      // stream after a timeout without ever delivering an exit_code, so the
+      // command never actually executed. This must surface as an error rather
+      // than a silent success with empty output.
+      mockFetch((url) => {
+        if (url.includes("/api/v1/processes/run")) {
+          return sseResponse([{ pid: 42, started_at: 1700000000 }]);
+        }
+        return new Response("", { status: 404 });
+      });
+
+      const sbx = makeSandbox();
+      await expect(sbx.run("node", { args: ["-v"] })).rejects.toThrow(
+        /did not complete/,
+      );
+      sbx.close();
+    });
   });
 
   describe("listProcesses", () => {
