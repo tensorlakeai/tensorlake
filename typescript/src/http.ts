@@ -46,10 +46,11 @@ const warmH2Sessions = positiveIntegerEnv(
   "TENSORLAKE_UNDICI_WARM_H2_SESSIONS",
 ) ?? (envFlag("TENSORLAKE_UNDICI_WARM_H2") ? configuredConnections ?? 4 : 0);
 const warmH2Path = process.env.TENSORLAKE_UNDICI_WARM_H2_PATH ?? "/";
+const allowH2 = process.env.TENSORLAKE_UNDICI_ALLOW_H2 !== "0";
 
 const globalDispatcher = new Agent({
   keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS,
-  allowH2: true,
+  allowH2,
   ...(configuredConnections == null ? {} : { connections: configuredConnections }),
 });
 
