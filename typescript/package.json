@@ -68,7 +68,7 @@
     "vitest": "^2.0.0"
   },
   "dependencies": {
-    "undici": "8.3.0",
+    "undici": "https://github.com/thedebugger/undici/archive/bf6e185918b7ff33ee0cc2695b0636eaf32f5e4b.tar.gz",
     "ws": "^8.20.0"
   }
 }

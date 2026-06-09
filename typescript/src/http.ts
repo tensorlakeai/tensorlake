@@ -1,5 +1,7 @@
 import {
   Agent,
+  Client,
+  Dispatcher,
   fetch as undiciFetch,
   setGlobalDispatcher,
   type BodyInit as UndiciBodyInit,
@@ -21,6 +23,8 @@ import {
 } from "./sdk-timings.js";
 
 const REQUEST_TIMEOUT_HEADER = "X-Tensorlake-Request-Timeout-Ms";
+const KEEP_ALIVE_TIMEOUT_MS = 60_000;
+const DEFAULT_MAX_CONCURRENT_STREAMS = 100;
 
 export interface HttpClientOptions {
   baseUrl: string;
@@ -35,12 +39,24 @@ export interface HttpClientOptions {
   timeoutMs?: number | null;
 }
 
-setGlobalDispatcher(
-  new Agent({
-    keepAliveTimeout: 60_000,
-    allowH2: true,
-  }),
+const configuredConnections = positiveIntegerEnv(
+  "TENSORLAKE_UNDICI_CONNECTIONS",
 );
+const warmH2Sessions = positiveIntegerEnv(
+  "TENSORLAKE_UNDICI_WARM_H2_SESSIONS",
+) ?? (envFlag("TENSORLAKE_UNDICI_WARM_H2") ? configuredConnections ?? 4 : 0);
+const warmH2Path = process.env.TENSORLAKE_UNDICI_WARM_H2_PATH ?? "/";
+
+const globalDispatcher = new Agent({
+  keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS,
+  allowH2: true,
+  ...(configuredConnections == null ? {} : { connections: configuredConnections }),
+});
+
+setGlobalDispatcher(globalDispatcher);
+
+const shardedDispatchers = new Map<string, ShardedH2Dispatcher>();
+const warmupPromises = new Map<string, Promise<void>>();
 
 
 type RequestBody = BodyInit | Uint8Array | ArrayBuffer;
@@ -262,6 +278,8 @@ export class HttpClient {
     let lastError: Error | undefined;
     const operationStart = nowMs();
     const timingPath = sdkTimingPayloadsEnabled() ? path : stripPathPayload(path);
+    const dispatcher = getDispatcherForUrl(url);
+    await warmDispatcherForUrl(url, dispatcher, headers);
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       if (attempt > 0) {
@@ -299,6 +317,7 @@ export class HttpClient {
           headers,
           body,
           signal: combinedSignal,
+          dispatcher,
         })) as Response;
 
         if (timeoutId != null) clearTimeout(timeoutId);
@@ -398,6 +417,168 @@ export class HttpClient {
       { cause: lastError },
     );
   }
+}
+
+class ShardedH2Dispatcher extends Dispatcher {
+  private readonly clients: Client[];
+  private nextClient = 0;
+
+  constructor(private readonly origin: string, connections: number) {
+    super();
+    this.clients = Array.from(
+      { length: connections },
+      () =>
+        new Client(origin, {
+          allowH2: true,
+          keepAliveTimeout: KEEP_ALIVE_TIMEOUT_MS,
+          maxConcurrentStreams: DEFAULT_MAX_CONCURRENT_STREAMS,
+        }),
+    );
+  }
+
+  dispatch(
+    options: Dispatcher.DispatchOptions,
+    handler: Dispatcher.DispatchHandler,
+  ): boolean {
+    const client = this.clients[this.nextClient % this.clients.length];
+    this.nextClient += 1;
+    return client.dispatch(options, handler);
+  }
+
+  close(callback: () => void): void;
+  close(): Promise<void>;
+  close(callback?: () => void): Promise<void> | void {
+    const promise = Promise.all(this.clients.map((client) => client.close()))
+      .then(() => undefined);
+    if (callback) {
+      promise.then(callback, callback);
+      return;
+    }
+    return promise;
+  }
+
+  destroy(err: Error | null, callback: () => void): void;
+  destroy(callback: () => void): void;
+  destroy(err: Error | null): Promise<void>;
+  destroy(): Promise<void>;
+  destroy(
+    err?: Error | null | (() => void),
+    callback?: () => void,
+  ): Promise<void> | void {
+    const destroyError = typeof err === "function" ? null : err ?? null;
+    const destroyCallback = typeof err === "function" ? err : callback;
+    const promise = Promise.all(
+      this.clients.map((client) => client.destroy(destroyError)),
+    ).then(() => undefined);
+    if (destroyCallback) {
+      promise.then(destroyCallback, destroyCallback);
+      return;
+    }
+    return promise;
+  }
+
+  async warm(headers: Record<string, string>): Promise<void> {
+    const warmHeaders = warmupHeaders(headers);
+    await Promise.all(
+      this.clients.map(async (client) => {
+        const response = await undiciFetch(`${this.origin}${warmH2Path}`, {
+          method: "GET",
+          headers: warmHeaders,
+          dispatcher: client,
+        });
+        await response.arrayBuffer().catch(() => undefined);
+      }),
+    );
+  }
+}
+
+function getDispatcherForUrl(url: string): Dispatcher {
+  if (warmH2Sessions <= 0) {
+    return globalDispatcher;
+  }
+
+  const origin = new URL(url).origin;
+  let dispatcher = shardedDispatchers.get(origin);
+  if (!dispatcher) {
+    dispatcher = new ShardedH2Dispatcher(origin, warmH2Sessions);
+    shardedDispatchers.set(origin, dispatcher);
+  }
+  return dispatcher;
+}
+
+async function warmDispatcherForUrl(
+  url: string,
+  dispatcher: Dispatcher,
+  headers: Record<string, string>,
+): Promise<void> {
+  if (!(dispatcher instanceof ShardedH2Dispatcher)) {
+    return;
+  }
+
+  const origin = new URL(url).origin;
+  let warmupPromise = warmupPromises.get(origin);
+  if (!warmupPromise) {
+    const start = nowMs();
+    logSdkTimingEvent("http.transport", "warmup_start", {
+      origin,
+      sessions: warmH2Sessions,
+      path: warmH2Path,
+    });
+    warmupPromise = dispatcher
+      .warm(headers)
+      .then(() => {
+        logSdkTiming("http.transport", "warmup_complete", start, {
+          origin,
+          sessions: warmH2Sessions,
+          path: warmH2Path,
+        });
+      })
+      .catch((err) => {
+        logSdkTiming("http.transport", "warmup_error", start, {
+          origin,
+          sessions: warmH2Sessions,
+          path: warmH2Path,
+          error: describeError(err),
+        });
+      });
+    warmupPromises.set(origin, warmupPromise);
+  }
+
+  await warmupPromise;
+}
+
+function warmupHeaders(headers: Record<string, string>): Record<string, string> {
+  const warmHeaders = { ...headers };
+  deleteHeader(warmHeaders, "Content-Type");
+  deleteHeader(warmHeaders, "Accept");
+  deleteHeader(warmHeaders, "traceparent");
+  return warmHeaders;
+}
+
+function deleteHeader(headers: Record<string, string>, name: string): void {
+  const lowered = name.toLowerCase();
+  for (const key of Object.keys(headers)) {
+    if (key.toLowerCase() === lowered) {
+      delete headers[key];
+    }
+  }
+}
+
+function positiveIntegerEnv(name: string): number | undefined {
+  const value = process.env[name];
+  if (value == null || value === "") {
+    return undefined;
+  }
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed) || parsed <= 0) {
+    return undefined;
+  }
+  return parsed;
+}
+
+function envFlag(name: string): boolean {
+  const value = process.env[name]?.toLowerCase();
+  return value === "1" || value === "true" || value === "yes";
 }
 
 function hasHeader(headers: Record<string, string>, name: string): boolean {
