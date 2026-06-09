@@ -363,24 +363,36 @@ pub struct ListDirectoryResponse {
     pub entries: Vec<DirectoryEntry>,
 }
 
-/// Request body for `POST /api/v1/blob/sign`. The proxy converts either the
-/// `rel_path` returned by platform-api or a full parent snapshot URI into a
-/// concrete upload/download spec.
+/// Request body for `POST /api/v1/blob/sign`. The proxy converts either an
+/// artifact path returned by platform-api or a full parent snapshot blob URI
+/// into a concrete builder upload/download spec.
 #[derive(Clone, Debug, PartialEq, Serialize)]
 pub struct SignBlobRequest {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub rel_path: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub uri: Option<String>,
-    pub op: BlobOp,
+    pub target: SignBlobTarget,
+    pub op: SignBlobOp,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub enum BlobOp {
-    SingleGet,
-    SinglePut,
-    MultipartPut { parts: u32, part_size_bytes: u64 },
+pub enum SignBlobTarget {
+    Artifact { rel_path: String },
+    Blob { uri: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SignBlobOp {
+    PutArtifact {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        multipart_hint: Option<MultipartHint>,
+    },
+    GetBlob,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MultipartHint {
+    pub max_parts: u32,
+    pub part_size_bytes: u64,
 }
 
 #[cfg(test)]
@@ -405,6 +417,59 @@ mod tests {
             snapshot_type: None,
         };
         assert_eq!(serde_json::to_string(&body).unwrap(), "{}");
+    }
+
+    #[test]
+    fn sign_blob_put_artifact_serializes_as_adt() {
+        let body = SignBlobRequest {
+            target: SignBlobTarget::Artifact {
+                rel_path: "projects/p/sandbox-template-builds/b/s.tlsnap".to_string(),
+            },
+            op: SignBlobOp::PutArtifact {
+                multipart_hint: Some(MultipartHint {
+                    max_parts: 160,
+                    part_size_bytes: 67_108_864,
+                }),
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "target": {
+                    "kind": "artifact",
+                    "rel_path": "projects/p/sandbox-template-builds/b/s.tlsnap"
+                },
+                "op": {
+                    "kind": "put_artifact",
+                    "multipart_hint": {
+                        "max_parts": 160,
+                        "part_size_bytes": 67_108_864
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn sign_blob_get_blob_serializes_as_adt() {
+        let body = SignBlobRequest {
+            target: SignBlobTarget::Blob {
+                uri: "gs://bucket/path/parent-manifest.json".to_string(),
+            },
+            op: SignBlobOp::GetBlob,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "target": {
+                    "kind": "blob",
+                    "uri": "gs://bucket/path/parent-manifest.json"
+                },
+                "op": { "kind": "get_blob" }
+            })
+        );
     }
 
     #[test]

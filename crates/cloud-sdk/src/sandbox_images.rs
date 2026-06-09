@@ -20,8 +20,8 @@ use crate::{
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
         models::{
-            BlobOp, CreateSandboxRequest, CreateSandboxResources, ProcessInfo, SandboxInfo,
-            SignBlobRequest,
+            CreateSandboxRequest, CreateSandboxResources, MultipartHint, ProcessInfo, SandboxInfo,
+            SignBlobOp, SignBlobRequest, SignBlobTarget,
         },
     },
 };
@@ -389,13 +389,12 @@ where
         // produced it — preserving the platform-api ↔ in-sandbox-builder
         // passthrough property.
         //
-        // The op is always multipart per the rollout design decision. We
-        // don't know the final snapshot file size until the in-sandbox
-        // builder finishes and writes metadata.json, so the part count uses
-        // the rootfs disk budget (`rootfsDiskBytes`) as a pre-build upper
-        // bound. Clamp to [1, MULTIPART_MAX_PARTS] so a 0 MB hint still
-        // produces a valid op and absurd inputs don't blow past S3's
-        // 10,000-part ceiling.
+        // The CLI doesn't know the final snapshot file size until the
+        // in-sandbox builder finishes and writes metadata.json, so the
+        // provider-neutral upload request includes a capacity hint derived
+        // from the rootfs disk budget (`rootfsDiskBytes`). Clamp to
+        // [1, MULTIPART_MAX_PARTS] so a 0 MB hint still produces a valid
+        // request and absurd inputs don't blow past S3's 10,000-part ceiling.
         //
         // Legacy path: `snapshot_rel_path` is absent, the upload block is
         // already in `prepared_spec`, and we do nothing here.
@@ -406,11 +405,12 @@ where
                 .clamp(1, MULTIPART_MAX_PARTS as u64) as u32;
             let signed = proxy
                 .sign_blob(&SignBlobRequest {
-                    rel_path: Some(rel_path),
-                    uri: None,
-                    op: BlobOp::MultipartPut {
-                        parts,
-                        part_size_bytes: MULTIPART_PART_SIZE_BYTES,
+                    target: SignBlobTarget::Artifact { rel_path },
+                    op: SignBlobOp::PutArtifact {
+                        multipart_hint: Some(MultipartHint {
+                            max_parts: parts,
+                            part_size_bytes: MULTIPART_PART_SIZE_BYTES,
+                        }),
                     },
                 })
                 .await
@@ -421,9 +421,10 @@ where
             if let Some(parent) = prepared.parent.as_ref() {
                 let signed = proxy
                     .sign_blob(&SignBlobRequest {
-                        rel_path: None,
-                        uri: Some(parent.parent_manifest_uri.clone()),
-                        op: BlobOp::SingleGet,
+                        target: SignBlobTarget::Blob {
+                            uri: parent.parent_manifest_uri.clone(),
+                        },
+                        op: SignBlobOp::GetBlob,
                     })
                     .await
                     .map_err(SandboxImageBuildError::Sdk)?
@@ -1034,8 +1035,8 @@ fn rootfs_disk_bytes_to_mb(rootfs_disk_bytes: u64) -> Result<u64> {
         .map(|bytes| bytes / (1024 * 1024))
 }
 
-/// Part size used when the new-path `sign_blob` flow asks the proxy for a
-/// multipart upload. Used directly by the splice in `build_sandbox_image`.
+/// Part size used when the new-path `sign_blob` flow sends an upload capacity
+/// hint to the proxy. Used directly by the splice in `build_sandbox_image`.
 const MULTIPART_PART_SIZE_MB: u64 = 64;
 const MULTIPART_PART_SIZE_BYTES: u64 = MULTIPART_PART_SIZE_MB * 1024 * 1024;
 
