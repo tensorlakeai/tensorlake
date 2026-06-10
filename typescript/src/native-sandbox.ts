@@ -213,6 +213,13 @@ interface NativeErrorPayload {
 export interface NativeErrorContext {
   sandboxId?: string;
   poolId?: string;
+  /**
+   * When set, a 404 maps to the typed not-found error for that entity
+   * (`SandboxNotFoundError` / `PoolNotFoundError`). Lifecycle ops set it;
+   * proxy/data-plane ops omit it so a 404 (e.g. missing file or process)
+   * stays a generic `RemoteAPIError`, matching the pre-shim behavior.
+   */
+  notFoundKind?: "sandbox" | "pool";
 }
 
 function parseNativeError(error: unknown): NativeErrorPayload | null {
@@ -260,8 +267,12 @@ export function translateNativeError(
   }
 
   if (status === 404) {
-    if (context?.poolId) return new PoolNotFoundError(context.poolId);
-    if (context?.sandboxId) return new SandboxNotFoundError(context.sandboxId);
+    if (context?.notFoundKind === "pool" && context.poolId) {
+      return new PoolNotFoundError(context.poolId);
+    }
+    if (context?.notFoundKind === "sandbox" && context.sandboxId) {
+      return new SandboxNotFoundError(context.sandboxId);
+    }
     return new RemoteAPIError(404, message);
   }
 

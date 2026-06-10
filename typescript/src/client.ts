@@ -260,7 +260,7 @@ export class SandboxClient {
     return this.tracedJson<SandboxInfo>(
       () => this.native.getSandbox(sandboxId),
       "sandboxId",
-      { sandboxId },
+      { sandboxId, notFoundKind: "sandbox" },
     );
   }
 
@@ -311,7 +311,7 @@ export class SandboxClient {
     return this.tracedJson<ArchivedSandboxInfo>(
       () => this.native.getArchivedSandbox(sandboxId),
       "sandboxId",
-      { sandboxId },
+      { sandboxId, notFoundKind: "sandbox" },
     );
   }
 
@@ -331,7 +331,7 @@ export class SandboxClient {
     return this.tracedJson<SandboxInfo>(
       () => this.native.updateSandbox(sandboxId, JSON.stringify(body)),
       "sandboxId",
-      { sandboxId },
+      { sandboxId, notFoundKind: "sandbox" },
     );
   }
 
@@ -385,7 +385,7 @@ export class SandboxClient {
 
   /** Terminate and delete a sandbox. */
   async delete(sandboxId: string): Promise<void> {
-    await callNative(() => this.native.deleteSandbox(sandboxId), { sandboxId });
+    await callNative(() => this.native.deleteSandbox(sandboxId), { sandboxId, notFoundKind: "sandbox" });
   }
 
   /**
@@ -397,7 +397,7 @@ export class SandboxClient {
    * (fire-and-return); the server processes the suspend asynchronously.
    */
   async suspend(sandboxId: string, options?: SuspendResumeOptions): Promise<void> {
-    await callNative(() => this.native.suspendSandbox(sandboxId), { sandboxId });
+    await callNative(() => this.native.suspendSandbox(sandboxId), { sandboxId, notFoundKind: "sandbox" });
     if (options?.wait === false) return;
     const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
@@ -421,7 +421,7 @@ export class SandboxClient {
    * (fire-and-return); the server processes the resume asynchronously.
    */
   async resume(sandboxId: string, options?: SuspendResumeOptions): Promise<void> {
-    await callNative(() => this.native.resumeSandbox(sandboxId), { sandboxId });
+    await callNative(() => this.native.resumeSandbox(sandboxId), { sandboxId, notFoundKind: "sandbox" });
     if (options?.wait === false) return;
     const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
@@ -442,7 +442,7 @@ export class SandboxClient {
     return this.tracedJson<CreateSandboxResponse>(
       () => this.native.claimSandbox(poolId),
       "sandboxId",
-      { poolId },
+      { poolId, notFoundKind: "pool" },
     );
   }
 
@@ -465,7 +465,7 @@ export class SandboxClient {
     return client.tracedJson<CopySandboxResponse>(
       () => client.native.copySandbox(sandboxId, times),
       "sandboxId",
-      { sandboxId },
+      { sandboxId, notFoundKind: "sandbox" },
     );
   }
 
@@ -486,7 +486,7 @@ export class SandboxClient {
     return this.plainJson<CreateSnapshotResponse>(
       () => this.native.createSnapshot(sandboxId, options?.snapshotType ?? null),
       "snapshotId",
-      { sandboxId },
+      { sandboxId, notFoundKind: "sandbox" },
     );
   }
 
@@ -578,7 +578,7 @@ export class SandboxClient {
     return this.plainJson<SandboxPoolInfo>(
       () => this.native.getPool(poolId),
       "poolId",
-      { poolId },
+      { poolId, notFoundKind: "pool" },
     );
   }
 
@@ -614,13 +614,13 @@ export class SandboxClient {
     return this.plainJson<SandboxPoolInfo>(
       () => this.native.updatePool(poolId, JSON.stringify(body)),
       "poolId",
-      { poolId },
+      { poolId, notFoundKind: "pool" },
     );
   }
 
   /** Delete a sandbox pool. Fails if the pool has active containers. */
   async deletePool(poolId: string): Promise<void> {
-    await callNative(() => this.native.deletePool(poolId), { poolId });
+    await callNative(() => this.native.deletePool(poolId), { poolId, notFoundKind: "pool" });
   }
 
   // --- Connect ---

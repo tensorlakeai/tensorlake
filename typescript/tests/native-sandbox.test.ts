@@ -163,7 +163,11 @@ describe("Sandbox native proxy path", () => {
     sbx.close();
   });
 
-  it("translates a 404 native error into SandboxNotFoundError", async () => {
+  it("translates a proxy 404 into RemoteAPIError (not SandboxNotFoundError)", async () => {
+    // A 404 from a data-plane op means the file/process is missing, not the
+    // sandbox — proxy ops omit the not-found context so they stay RemoteAPIError,
+    // matching the pre-shim behavior. SandboxNotFoundError is reserved for the
+    // lifecycle client's sandbox lookups.
     installFakeBinding({
       getProcess: vi.fn(async () => {
         throw new Error(
@@ -172,7 +176,8 @@ describe("Sandbox native proxy path", () => {
       }),
     });
     const sbx = makeSandbox();
-    await expect(sbx.getProcess(1)).rejects.toBeInstanceOf(SandboxNotFoundError);
+    await expect(sbx.getProcess(1)).rejects.toBeInstanceOf(RemoteAPIError);
+    await expect(sbx.getProcess(1)).rejects.not.toBeInstanceOf(SandboxNotFoundError);
     sbx.close();
   });
 
