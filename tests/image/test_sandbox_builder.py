@@ -245,6 +245,42 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             sbm.build_sandbox_image(12345)  # type: ignore[arg-type]
 
 
+class TestBuildSandboxApplicationImage(unittest.TestCase):
+    def test_function_image_build_checks_function_executor_on_path(self):
+        ctx = _make_ctx()
+        image = Image(name="function-image", base_image="python:3.12-slim").run(
+            "python3 -m pip uninstall -y tensorlake || true"
+        )
+        build_ctx, rust_builder = _make_build_patches(ctx)
+        captured: dict[str, object] = {}
+
+        with build_ctx, rust_builder as rust_builder_mock:
+
+            def fake_rust_builder(*args, **_kwargs):
+                captured["dockerfile_text"] = args[14]
+                return '{"id":"tpl-1","snapshot_id":"snap-1"}'
+
+            rust_builder_mock.side_effect = fake_rust_builder
+            sbm.build_sandbox_application_image(
+                image,
+                cpus=BUILD_CPUS,
+                memory_mb=BUILD_MEMORY_MB,
+            )
+
+        dockerfile_text = captured["dockerfile_text"]
+        self.assertIsInstance(dockerfile_text, str)
+        install_line = dockerfile_text.rstrip().splitlines()[-1]
+        self.assertIn(
+            "--force-reinstall --no-cache-dir --prefix=/usr/local tensorlake==",
+            install_line,
+        )
+        self.assertIn("sudo -E env PIP_USER=false", install_line)
+        self.assertTrue(
+            install_line.endswith("&& test -x /usr/local/bin/function-executor"),
+            install_line,
+        )
+
+
 class TestApplicationDockerfileContent(unittest.TestCase):
     def test_default_image_uses_ubuntu_minimal_base(self):
         dockerfile = dockerfile_content(Image(name="default-base"))
@@ -253,9 +289,12 @@ class TestApplicationDockerfileContent(unittest.TestCase):
     def test_sdk_install_uses_python3_module_pip(self):
         dockerfile = dockerfile_content(Image(name="install-command"))
         self.assertIn(
-            "RUN python3 -m pip install --break-system-packages tensorlake==",
+            "python3 -m pip install --break-system-packages "
+            "--force-reinstall --no-cache-dir --prefix=/usr/local tensorlake==",
             dockerfile,
         )
+        self.assertIn("sudo -E env PIP_USER=false", dockerfile)
+        self.assertIn("&& test -x /usr/local/bin/function-executor", dockerfile)
 
 
 if __name__ == "__main__":

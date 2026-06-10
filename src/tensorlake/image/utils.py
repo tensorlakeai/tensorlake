@@ -32,10 +32,21 @@ def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) ->
     for op in img._build_operations:
         dockerfile_lines.append(render_op_line(op))
 
-    # Run tensorlake install after all user commands. There's implicit dependency
-    # of tensorlake install success on user commands right now.
+    # Run Tensorlake install after all user commands so user layers cannot
+    # remove or downgrade the runtime. Force reinstall makes pip replay package
+    # console scripts even when Tensorlake was already present in the base.
+    # Install into /usr/local so function-executor is visible to the root
+    # process launched by the Firecracker dataplane.
+    install_cmd = (
+        "python3 -m pip install --break-system-packages --force-reinstall "
+        f"--no-cache-dir --prefix=/usr/local tensorlake=={_SDK_VERSION}"
+    )
     dockerfile_lines.append(
-        f"RUN python3 -m pip install --break-system-packages tensorlake=={_SDK_VERSION}"
+        'RUN if [ "$(id -u)" = "0" ]; then '
+        f"PIP_USER=false {install_cmd}; "
+        "else "
+        f"sudo -E env PIP_USER=false {install_cmd}; "
+        "fi && test -x /usr/local/bin/function-executor"
     )
 
     return "\n".join(dockerfile_lines)
