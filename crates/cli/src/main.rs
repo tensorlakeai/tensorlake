@@ -1388,12 +1388,28 @@ async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> erro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
     #[test]
     fn clone_command_is_not_supported() {
         let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123"]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_images_command_is_hidden_from_help() {
+        let mut help = Vec::new();
+        Cli::command().write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(!help.contains("build-images"));
+        let missing_subcommand_error = match Cli::try_parse_from(["tl"]) {
+            Ok(_) => String::new(),
+            Err(error) => error.to_string(),
+        };
+        assert!(!missing_subcommand_error.contains("build-images"));
+        assert!(Cli::try_parse_from(["tl", "build-images", "app.py"]).is_ok());
     }
 
     #[test]
