@@ -409,8 +409,9 @@ impl Image {
         } else {
             format!("tensorlake=={sdk_version}")
         };
+        lines.push("USER root".to_string());
         let install_command = format!(
-            "RUN if [ \"$(id -u)\" = \"0\" ]; then PIP_USER=false python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir --prefix=/usr/local {tensorlake_spec}; else sudo -E env PIP_USER=false python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir --prefix=/usr/local {tensorlake_spec}; fi && test -x /usr/local/bin/function-executor"
+            "RUN PIP_USER=false python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir {tensorlake_spec} && test -x /usr/local/bin/function-executor"
         );
         lines.push(install_command);
 
@@ -677,20 +678,17 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(
-            image
-                .dockerfile_content("1.2.3", None)
-                .contains("python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir --prefix=/usr/local tensorlake==1.2.3")
-        );
-        assert!(
-            image
-                .dockerfile_content("1.2.3", None)
-                .contains("&& test -x /usr/local/bin/function-executor")
-        );
+        let dockerfile = image.dockerfile_content("1.2.3", None);
+        assert!(dockerfile.contains("python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir tensorlake==1.2.3"));
+        assert!(!dockerfile.contains("--prefix=/usr/local"));
+        assert!(!dockerfile.contains("sudo"));
+        assert!(!dockerfile.contains("id -u"));
+        assert!(dockerfile.contains("\nUSER root\nRUN PIP_USER=false python3 -m pip install"));
+        assert!(dockerfile.contains("&& test -x /usr/local/bin/function-executor"));
         assert!(
             image
                 .dockerfile_content(">=1.2.3", None)
-                .contains("python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir --prefix=/usr/local tensorlake>=1.2.3")
+                .contains("python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir tensorlake>=1.2.3")
         );
     }
 

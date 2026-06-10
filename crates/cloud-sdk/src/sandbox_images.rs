@@ -70,13 +70,8 @@ const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS: &[&str] = &["ONBUILD", "SHELL"];
 /// etc.) rather than the filesystem. `docker build --output type=tar` discards
 /// the image config, so these are effectively no-ops on the rootfs path — we
 /// warn to surface that to the user and pass them through to the builder.
-const IGNORED_DOCKERFILE_INSTRUCTIONS: &[&str] = &[
-    "EXPOSE",
-    "HEALTHCHECK",
-    "LABEL",
-    "STOPSIGNAL",
-    "VOLUME",
-];
+const IGNORED_DOCKERFILE_INSTRUCTIONS: &[&str] =
+    &["EXPOSE", "HEALTHCHECK", "LABEL", "STOPSIGNAL", "VOLUME"];
 
 #[derive(Debug, Error)]
 pub enum SandboxImageBuildError {
@@ -1980,13 +1975,7 @@ mod tests {
             .collect();
         assert_eq!(
             keywords,
-            vec![
-                "LABEL",
-                "EXPOSE",
-                "HEALTHCHECK",
-                "STOPSIGNAL",
-                "VOLUME",
-            ]
+            vec!["LABEL", "EXPOSE", "HEALTHCHECK", "STOPSIGNAL", "VOLUME",]
         );
         // Dockerfile text is preserved verbatim so the rootfs builder still
         // sees the same instructions.

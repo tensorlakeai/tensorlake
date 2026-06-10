@@ -269,12 +269,17 @@ class TestBuildSandboxApplicationImage(unittest.TestCase):
 
         dockerfile_text = captured["dockerfile_text"]
         self.assertIsInstance(dockerfile_text, str)
-        install_line = dockerfile_text.rstrip().splitlines()[-1]
+        dockerfile_lines = dockerfile_text.rstrip().splitlines()
+        self.assertEqual(dockerfile_lines[-2], "USER root")
+        install_line = dockerfile_lines[-1]
         self.assertIn(
-            "--force-reinstall --no-cache-dir --prefix=/usr/local tensorlake==",
+            "--force-reinstall --no-cache-dir tensorlake==",
             install_line,
         )
-        self.assertIn("sudo -E env PIP_USER=false", install_line)
+        self.assertNotIn("--prefix=/usr/local", install_line)
+        self.assertNotIn("sudo", install_line)
+        self.assertNotIn("id -u", install_line)
+        self.assertIn("RUN PIP_USER=false python3 -m pip install", install_line)
         self.assertTrue(
             install_line.endswith("&& test -x /usr/local/bin/function-executor"),
             install_line,
@@ -290,10 +295,15 @@ class TestApplicationDockerfileContent(unittest.TestCase):
         dockerfile = dockerfile_content(Image(name="install-command"))
         self.assertIn(
             "python3 -m pip install --break-system-packages "
-            "--force-reinstall --no-cache-dir --prefix=/usr/local tensorlake==",
+            "--force-reinstall --no-cache-dir tensorlake==",
             dockerfile,
         )
-        self.assertIn("sudo -E env PIP_USER=false", dockerfile)
+        self.assertNotIn("--prefix=/usr/local", dockerfile)
+        self.assertIn(
+            "\nUSER root\nRUN PIP_USER=false python3 -m pip install", dockerfile
+        )
+        self.assertNotIn("sudo", dockerfile)
+        self.assertNotIn("id -u", dockerfile)
         self.assertIn("&& test -x /usr/local/bin/function-executor", dockerfile)
 
 
