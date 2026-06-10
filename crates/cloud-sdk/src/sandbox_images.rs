@@ -55,23 +55,22 @@ const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
 const ROOTFS_BUILDER_PROCESS_USER: &str = "root";
 
-/// Dockerfile instructions rejected during sandbox-image build. The rootfs
-/// builder hands the Dockerfile to `docker build` verbatim, so without this
-/// allowlist these instructions would silently take effect inside the
-/// resulting rootfs. Mirrors the historical Python/TS SDK behavior.
-// Instructions the SDK refuses to forward to the rootfs builder. ARG used to
-// be in this list; it is accepted at top-level scope so a Dockerfile can
-// declare global defaults that Docker resolves at build time, but the SDK
-// does not substitute ARG values at parse time.
-const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS: &[&str] = &["ONBUILD", "SHELL", "USER"];
+/// Dockerfile instructions rejected during sandbox-image build. `ONBUILD`
+/// registers deferred triggers that only fire when the image is used as a base
+/// in a downstream build, and `SHELL` changes the shell used for shell-form
+/// `RUN`/`CMD`/`ENTRYPOINT`; neither has a meaningful effect on the rootfs path
+/// (`docker build --output type=tar` discards image config and there is no
+/// child build), so we reject them rather than accept a silent no-op.
+// ARG used to be in this list; it is accepted at top-level scope so a
+// Dockerfile can declare global defaults that Docker resolves at build time,
+// but the SDK does not substitute ARG values at parse time.
+const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS: &[&str] = &["ONBUILD", "SHELL"];
 
-/// Dockerfile instructions that affect image config (CMD, ENTRYPOINT, etc.)
-/// rather than the filesystem. `docker build --output type=tar` discards the
-/// image config, so these are effectively no-ops on the rootfs path — we warn
-/// to surface that to the user and pass them through to the builder.
+/// Dockerfile instructions that affect image config (exposed ports, labels,
+/// etc.) rather than the filesystem. `docker build --output type=tar` discards
+/// the image config, so these are effectively no-ops on the rootfs path — we
+/// warn to surface that to the user and pass them through to the builder.
 const IGNORED_DOCKERFILE_INSTRUCTIONS: &[&str] = &[
-    "CMD",
-    "ENTRYPOINT",
     "EXPOSE",
     "HEALTHCHECK",
     "LABEL",
@@ -1877,7 +1876,7 @@ mod tests {
 
     #[test]
     fn load_dockerfile_plan_rejects_unsupported_instructions() {
-        for instruction in ["ONBUILD RUN echo", "SHELL [\"/bin/bash\"]", "USER app"] {
+        for instruction in ["ONBUILD RUN echo", "SHELL [\"/bin/bash\"]"] {
             let temp_dir = tempfile::tempdir().unwrap();
             let dockerfile_path = temp_dir.path().join("Dockerfile");
             std::fs::write(
@@ -1966,8 +1965,6 @@ mod tests {
             "FROM python:3.12-slim\n\
              LABEL maintainer=alice\n\
              EXPOSE 8080\n\
-             CMD [\"python\", \"-m\", \"http.server\"]\n\
-             ENTRYPOINT [\"/usr/bin/env\"]\n\
              HEALTHCHECK CMD echo ok\n\
              STOPSIGNAL SIGTERM\n\
              VOLUME /data\n\
@@ -1986,8 +1983,6 @@ mod tests {
             vec![
                 "LABEL",
                 "EXPOSE",
-                "CMD",
-                "ENTRYPOINT",
                 "HEALTHCHECK",
                 "STOPSIGNAL",
                 "VOLUME",
@@ -1996,6 +1991,34 @@ mod tests {
         // Dockerfile text is preserved verbatim so the rootfs builder still
         // sees the same instructions.
         assert!(plan.dockerfile_text.contains("EXPOSE 8080"));
+    }
+
+    #[test]
+    fn load_dockerfile_plan_accepts_user_cmd_entrypoint() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile_path,
+            "FROM python:3.12-slim\n\
+             USER app\n\
+             CMD [\"python\", \"-m\", \"http.server\"]\n\
+             ENTRYPOINT [\"/usr/bin/env\"]\n\
+             RUN echo hi\n",
+        )
+        .unwrap();
+
+        // USER, CMD, and ENTRYPOINT are now supported: the plan loads without
+        // error and none of them land in the ignored set.
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+        let keywords: Vec<&str> = plan
+            .ignored_instructions
+            .iter()
+            .map(|(_, kw)| kw.as_str())
+            .collect();
+        assert!(
+            keywords.is_empty(),
+            "expected no ignored instructions, got {keywords:?}",
+        );
     }
 
     #[test]

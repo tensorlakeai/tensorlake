@@ -11,8 +11,8 @@ import { Image, dockerfileContent } from "./image.js";
  * Dockerfile path/text + context to the Rust core via `@tensorlake/native`,
  * which parses, validates, materializes, and registers the image. The Rust
  * core owns parsing, the Dockerfile-instruction allowlist
- * (`ARG`/`ONBUILD`/`SHELL`/`USER` are rejected) and ignored-set warnings
- * (`CMD`/`ENTRYPOINT`/`EXPOSE`/`HEALTHCHECK`/`LABEL`/`STOPSIGNAL`/`VOLUME`).
+ * (`ONBUILD`/`SHELL` are rejected) and ignored-set warnings
+ * (`EXPOSE`/`HEALTHCHECK`/`LABEL`/`STOPSIGNAL`/`VOLUME`).
  */
 
 export interface CreateSandboxImageOptions {
