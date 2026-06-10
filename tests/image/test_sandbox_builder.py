@@ -271,11 +271,12 @@ class TestBuildSandboxApplicationImage(unittest.TestCase):
         self.assertIsInstance(dockerfile_text, str)
         install_line = dockerfile_text.rstrip().splitlines()[-1]
         self.assertIn(
-            "--force-reinstall --no-cache-dir tensorlake==",
+            "--force-reinstall --no-cache-dir --prefix=/usr/local tensorlake==",
             install_line,
         )
+        self.assertIn("sudo -E env PIP_USER=false", install_line)
         self.assertTrue(
-            install_line.endswith("&& command -v function-executor"),
+            install_line.endswith("&& test -x /usr/local/bin/function-executor"),
             install_line,
         )
 
@@ -288,11 +289,12 @@ class TestApplicationDockerfileContent(unittest.TestCase):
     def test_sdk_install_uses_python3_module_pip(self):
         dockerfile = dockerfile_content(Image(name="install-command"))
         self.assertIn(
-            "RUN python3 -m pip install --break-system-packages "
-            "--force-reinstall --no-cache-dir tensorlake==",
+            "python3 -m pip install --break-system-packages "
+            "--force-reinstall --no-cache-dir --prefix=/usr/local tensorlake==",
             dockerfile,
         )
-        self.assertIn("&& command -v function-executor", dockerfile)
+        self.assertIn("sudo -E env PIP_USER=false", dockerfile)
+        self.assertIn("&& test -x /usr/local/bin/function-executor", dockerfile)
 
 
 if __name__ == "__main__":
