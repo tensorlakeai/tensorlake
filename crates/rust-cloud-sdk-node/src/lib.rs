@@ -8,6 +8,8 @@
 
 #![deny(clippy::all)]
 
+mod sandbox;
+
 use std::path::PathBuf;
 
 use napi::{

@@ -421,17 +421,57 @@ impl SandboxProxyClient {
     }
 
     pub async fn follow_stdout(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
-        self.follow_stream(&format!("/api/v1/processes/{pid}/stdout/follow"))
-            .await
+        let mut events = Vec::new();
+        let trace_id = self
+            .follow_stdout_streaming(pid, |event| events.push(event))
+            .await?;
+        Ok(Traced::new(trace_id, events))
     }
 
     pub async fn follow_stderr(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
-        self.follow_stream(&format!("/api/v1/processes/{pid}/stderr/follow"))
-            .await
+        let mut events = Vec::new();
+        let trace_id = self
+            .follow_stderr_streaming(pid, |event| events.push(event))
+            .await?;
+        Ok(Traced::new(trace_id, events))
     }
 
     pub async fn follow_output(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
-        self.follow_stream(&format!("/api/v1/processes/{pid}/output/follow"))
+        let mut events = Vec::new();
+        let trace_id = self
+            .follow_output_streaming(pid, |event| events.push(event))
+            .await?;
+        Ok(Traced::new(trace_id, events))
+    }
+
+    /// Stream stdout output events to `on_event` as they arrive, without
+    /// buffering. Returns the request `trace_id` once the upstream stream
+    /// closes. This is the streaming counterpart to [`follow_stdout`] used by
+    /// language bindings that surface a live event stream to the caller.
+    pub async fn follow_stdout_streaming(
+        &self,
+        pid: i64,
+        on_event: impl FnMut(OutputEvent),
+    ) -> Result<String, SdkError> {
+        self.follow_stream_cb(&format!("/api/v1/processes/{pid}/stdout/follow"), on_event)
+            .await
+    }
+
+    pub async fn follow_stderr_streaming(
+        &self,
+        pid: i64,
+        on_event: impl FnMut(OutputEvent),
+    ) -> Result<String, SdkError> {
+        self.follow_stream_cb(&format!("/api/v1/processes/{pid}/stderr/follow"), on_event)
+            .await
+    }
+
+    pub async fn follow_output_streaming(
+        &self,
+        pid: i64,
+        on_event: impl FnMut(OutputEvent),
+    ) -> Result<String, SdkError> {
+        self.follow_stream_cb(&format!("/api/v1/processes/{pid}/output/follow"), on_event)
             .await
     }
 
@@ -439,6 +479,21 @@ impl SandboxProxyClient {
         &self,
         payload: &Value,
     ) -> Result<Traced<Vec<RunProcessEvent>>, SdkError> {
+        let mut events = Vec::new();
+        let trace_id = self
+            .run_process_streaming(payload, |event| events.push(event))
+            .await?;
+        Ok(Traced::new(trace_id, events))
+    }
+
+    /// Start a process and stream its lifecycle events to `on_event` as they
+    /// arrive. Returns the request `trace_id` once the process exits and the
+    /// stream closes. This is the streaming counterpart to [`run_process`].
+    pub async fn run_process_streaming(
+        &self,
+        payload: &Value,
+        mut on_event: impl FnMut(RunProcessEvent),
+    ) -> Result<String, SdkError> {
         let path = "/api/v1/processes/run";
         let req = self
             .request(Method::POST, path)
@@ -481,14 +536,17 @@ impl SandboxProxyClient {
                 }
             });
         futures::pin_mut!(stream);
-        let mut events = Vec::new();
         while let Some(event) = stream.next().await {
-            events.push(event?);
+            on_event(event?);
         }
-        Ok(Traced::new(trace_id, events))
+        Ok(trace_id)
     }
 
-    async fn follow_stream(&self, path: &str) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
+    async fn follow_stream_cb(
+        &self,
+        path: &str,
+        mut on_event: impl FnMut(OutputEvent),
+    ) -> Result<String, SdkError> {
         let req = self
             .request(Method::GET, path)
             .header(ACCEPT, "text/event-stream")
@@ -520,11 +578,10 @@ impl SandboxProxyClient {
                 }
             });
         futures::pin_mut!(stream);
-        let mut events = Vec::new();
         while let Some(event) = stream.next().await {
-            events.push(event?);
+            on_event(event?);
         }
-        Ok(Traced::new(trace_id, events))
+        Ok(trace_id)
     }
 
     pub async fn read_file(&self, path: &str) -> Result<Traced<Vec<u8>>, SdkError> {
@@ -589,6 +646,13 @@ impl SandboxProxyClient {
             .json(payload)
             .build()?;
         self.client.execute_json(req).await
+    }
+
+    pub async fn delete_pty_session(&self, session_id: &str) -> Result<Traced<()>, SdkError> {
+        let req = self
+            .request(Method::DELETE, &format!("/api/v1/pty/{session_id}"))
+            .build()?;
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
     pub async fn health(&self) -> Result<Traced<HealthResponse>, SdkError> {
