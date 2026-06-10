@@ -8,9 +8,9 @@ the snapshot as a named sandbox template
 
 This is the programmatic backend for :meth:`Image.build` and the
 ``tl sbx image create`` CLI command. The Rust core owns parsing, the
-Dockerfile-instruction allowlist (``ARG``/``ONBUILD``/``SHELL``/``USER`` are
-rejected) and ignored-set warnings (``CMD``/``ENTRYPOINT``/``EXPOSE``/
-``HEALTHCHECK``/``LABEL``/``STOPSIGNAL``/``VOLUME``).
+Dockerfile-instruction allowlist (``ONBUILD``/``SHELL`` are rejected) and
+ignored-set warnings (``EXPOSE``/``HEALTHCHECK``/``LABEL``/``STOPSIGNAL``/
+``VOLUME``).
 """
 
 from __future__ import annotations
