@@ -486,6 +486,12 @@ export interface SandboxOptions {
   requestTimeout?: number;
   /** @deprecated Use requestTimeout. Optional total HTTP request timeout in milliseconds for sandbox proxy operations. */
   timeoutMs?: number;
+  /**
+   * @internal Shared Rust-backed lifecycle client. When provided, the proxy
+   * client is minted via `connectProxy` so it reuses this client's connection
+   * pool (HTTP/2 coalescing across sandboxes).
+   */
+  nativeClient?: import("./native-sandbox.js").NativeSandboxClient;
 }
 
 export interface CreateAndConnectOptions extends CreateSandboxOptions {

@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import * as undici from "undici";
+import type { NativeStub } from "./native-stub.js";
 
 class MockWebSocket {
   static readonly CONNECTING = 0;
@@ -66,30 +66,38 @@ vi.mock("ws", () => ({
   default: MockWebSocket,
 }));
 
-vi.mock("undici", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("undici")>();
-  return { ...actual, fetch: vi.fn() };
-});
-
 describe("Sandbox PTY", () => {
   let Sandbox: typeof import("../src/sandbox.js").Sandbox;
+  let installNativeStub: typeof import("./native-stub.js").installNativeStub;
+  let clearNativeStub: typeof import("./native-stub.js").clearNativeStub;
 
   beforeEach(async () => {
     MockWebSocket.instances = [];
     MockWebSocket.failOnOpen = false;
+    // Reset modules so `sandbox.js` (which imports `ws` at module load) is
+    // re-evaluated against the hoisted `ws` mock. The native-stub helpers must
+    // be re-imported from the same fresh module graph so they target the same
+    // `native-sandbox.js` binding cache that `sandbox.js` reads.
     vi.resetModules();
     ({ Sandbox } = await import("../src/sandbox.js"));
+    ({ installNativeStub, clearNativeStub } = await import("./native-stub.js"));
   });
 
   afterEach(() => {
-    vi.mocked(undici.fetch).mockReset();
+    clearNativeStub();
     vi.restoreAllMocks();
   });
 
-  function mockFetch(
-    handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
-  ) {
-    vi.mocked(undici.fetch).mockImplementation(handler as typeof undici.fetch);
+  /** Install a native stub whose createPtySession returns the given session. */
+  function installPtyStub(sessionId: string, token: string): NativeStub {
+    return installNativeStub({
+      proxy: {
+        createPtySession: vi.fn(async () => ({
+          traceId: "t",
+          json: JSON.stringify({ session_id: sessionId, token }),
+        })),
+      },
+    });
   }
 
   function makeSandbox() {
@@ -101,18 +109,7 @@ describe("Sandbox PTY", () => {
   }
 
   it("creates a PTY handle, sends READY, streams data, and waits for exit", async () => {
-    mockFetch((url, init) => {
-      if (url.endsWith("/api/v1/pty") && init?.method === "POST") {
-        return new Response(
-          JSON.stringify({
-            session_id: "sess-1",
-            token: "tok-1",
-          }),
-          { status: 201 },
-        );
-      }
-      return new Response("", { status: 404 });
-    });
+    installPtyStub("sess-1", "tok-1");
 
     const onData = vi.fn();
     const onExit = vi.fn();
@@ -141,18 +138,7 @@ describe("Sandbox PTY", () => {
   });
 
   it("sends input and resize frames", async () => {
-    mockFetch((url, init) => {
-      if (url.endsWith("/api/v1/pty") && init?.method === "POST") {
-        return new Response(
-          JSON.stringify({
-            session_id: "sess-2",
-            token: "tok-2",
-          }),
-          { status: 201 },
-        );
-      }
-      return new Response("", { status: 404 });
-    });
+    installPtyStub("sess-2", "tok-2");
 
     const sandbox = makeSandbox();
     const pty = await sandbox.createPty({ command: "/bin/bash" });
@@ -166,18 +152,7 @@ describe("Sandbox PTY", () => {
   });
 
   it("disconnects and reconnects the same PTY handle", async () => {
-    mockFetch((url, init) => {
-      if (url.endsWith("/api/v1/pty") && init?.method === "POST") {
-        return new Response(
-          JSON.stringify({
-            session_id: "sess-3",
-            token: "tok-3",
-          }),
-          { status: 201 },
-        );
-      }
-      return new Response("", { status: 404 });
-    });
+    installPtyStub("sess-3", "tok-3");
 
     const sandbox = makeSandbox();
     const pty = await sandbox.createPty({ command: "/bin/bash" });
@@ -195,64 +170,25 @@ describe("Sandbox PTY", () => {
     await expect(pty.wait()).resolves.toBe(0);
   });
 
-  it("kills a PTY session through the HTTP API", async () => {
-    mockFetch((url, init) => {
-      if (url.endsWith("/api/v1/pty") && init?.method === "POST") {
-        return new Response(
-          JSON.stringify({
-            session_id: "sess-4",
-            token: "tok-4",
-          }),
-          { status: 201 },
-        );
-      }
-      if (url.endsWith("/api/v1/pty/sess-4") && init?.method === "DELETE") {
-        return new Response("", { status: 200 });
-      }
-      return new Response("", { status: 404 });
-    });
+  it("kills a PTY session through the native client", async () => {
+    const handle = installPtyStub("sess-4", "tok-4");
 
     const sandbox = makeSandbox();
     const pty = await sandbox.createPty({ command: "/bin/bash" });
 
     await expect(pty.kill()).resolves.toBeUndefined();
-    expect(vi.mocked(undici.fetch)).toHaveBeenCalledWith(
-      "https://sandbox.tensorlake.ai/api/v1/pty/sess-4",
-      expect.objectContaining({
-        method: "DELETE",
-      }),
-    );
+    expect(handle.proxy.deletePtySession).toHaveBeenCalledWith("sess-4");
   });
 
   it("cleans up the created PTY session when the initial websocket attach fails", async () => {
     MockWebSocket.failOnOpen = true;
-
-    mockFetch((url, init) => {
-      if (url.endsWith("/api/v1/pty") && init?.method === "POST") {
-        return new Response(
-          JSON.stringify({
-            session_id: "sess-fail",
-            token: "tok-fail",
-          }),
-          { status: 201 },
-        );
-      }
-      if (url.endsWith("/api/v1/pty/sess-fail") && init?.method === "DELETE") {
-        return new Response("", { status: 200 });
-      }
-      return new Response("", { status: 404 });
-    });
+    const handle = installPtyStub("sess-fail", "tok-fail");
 
     const sandbox = makeSandbox();
     await expect(
       sandbox.createPty({ command: "/bin/bash" }),
     ).rejects.toThrow(/mock websocket connect failure|READY completed/);
 
-    expect(vi.mocked(undici.fetch)).toHaveBeenCalledWith(
-      "https://sandbox.tensorlake.ai/api/v1/pty/sess-fail",
-      expect.objectContaining({
-        method: "DELETE",
-      }),
-    );
+    expect(handle.proxy.deletePtySession).toHaveBeenCalledWith("sess-fail");
   });
 });
