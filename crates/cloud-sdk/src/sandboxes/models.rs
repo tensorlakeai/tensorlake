@@ -284,6 +284,8 @@ pub struct ProcessInfo {
     #[serde(default)]
     pub signal: Option<i64>,
     #[serde(default)]
+    pub oom_killed: bool,
+    #[serde(default)]
     pub stdin_writable: bool,
     pub command: String,
     #[serde(default)]
@@ -458,6 +460,8 @@ pub enum RunProcessEvent {
         exit_code: Option<i64>,
         #[serde(default)]
         signal: Option<i64>,
+        #[serde(default)]
+        oom_killed: bool,
     },
 }
 
@@ -543,6 +547,7 @@ mod tests {
             RunProcessEvent::Exited {
                 exit_code: Some(0),
                 signal: None,
+                oom_killed: false,
             }
         ));
     }
@@ -556,8 +561,41 @@ mod tests {
             RunProcessEvent::Exited {
                 exit_code: None,
                 signal: Some(9),
+                oom_killed: false,
             }
         ));
+    }
+
+    #[test]
+    fn run_process_event_deserializes_oom_killed() {
+        let json = r#"{"signal": 9, "oom_killed": true}"#;
+        let event: RunProcessEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            event,
+            RunProcessEvent::Exited {
+                exit_code: None,
+                signal: Some(9),
+                oom_killed: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn process_info_deserializes_oom_killed() {
+        let json = r#"{
+            "pid": 42,
+            "status": "oom_killed",
+            "signal": 9,
+            "oom_killed": true,
+            "command": "/usr/local/bin/tl-rootfs-build",
+            "args": [],
+            "started_at": 123,
+            "ended_at": 456
+        }"#;
+        let info: ProcessInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.status, "oom_killed");
+        assert_eq!(info.signal, Some(9));
+        assert!(info.oom_killed);
     }
 
     #[test]

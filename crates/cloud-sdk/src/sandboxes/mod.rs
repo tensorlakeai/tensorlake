@@ -527,6 +527,7 @@ impl SandboxProxyClient {
                             Ok(RunProcessEvent::Exited {
                                 exit_code: None,
                                 signal: None,
+                                ..
                             }) => None,
                             Ok(evt) => Some(Ok(evt)),
                             Err(_) => None,
