@@ -41,9 +41,9 @@ const BUILDER_SANDBOX_TIMEOUT_SECS: i64 = 300;
 /// inactivity / lifetime expiry mid-build. Must be shorter than
 /// `BUILDER_SANDBOX_TIMEOUT_SECS`.
 const BUILDER_SANDBOX_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
-const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(300);
-const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const PROCESS_EXIT_POLL_ATTEMPTS: usize = 10;
+const PROCESS_START_ATTEMPTS: usize = 3;
+const PROCESS_REATTACH_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const PROCESS_REATTACH_ATTEMPTS: usize = 10;
 const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const PROXY_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const REMOTE_BUILD_DIR: &str = "/var/lib/tensorlake/rootfs-builder/build";
@@ -54,6 +54,12 @@ const ROOTFS_BUILDER_BIN_DIR: &str = "/usr/local/bin";
 const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
 const ROOTFS_BUILDER_PROCESS_USER: &str = "root";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessTerminalStatus {
+    code: i64,
+    oom_killed: bool,
+}
 
 /// Dockerfile instructions rejected during sandbox-image build. `ONBUILD`
 /// registers deferred triggers that only fire when the image is used as a base
@@ -1115,64 +1121,225 @@ async fn run_streaming_process(
     run_as_root: bool,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
+    let expected_args = args.clone();
     let payload = streaming_process_payload(command, args, env, working_dir, run_as_root);
-    let started = proxy.start_process(&payload).await?;
-    let pid = started.pid;
-    let mut stdout_seen = 0usize;
-    let mut stderr_seen = 0usize;
-    let mut info: ProcessInfo;
 
-    loop {
-        let stdout = proxy.get_stdout(pid).await?;
-        for line in stdout.lines.iter().skip(stdout_seen) {
-            emit(SandboxImageBuildEvent::BuildLog {
-                stream: "stdout".to_string(),
-                message: line.clone(),
-            });
-        }
-        stdout_seen = stdout.lines.len();
+    let started = start_or_recover_process(proxy, &payload, command, &expected_args, emit).await?;
 
-        let stderr = proxy.get_stderr(pid).await?;
-        for line in stderr.lines.iter().skip(stderr_seen) {
-            emit(SandboxImageBuildEvent::BuildLog {
-                stream: "stderr".to_string(),
-                message: line.clone(),
-            });
-        }
-        stderr_seen = stderr.lines.len();
+    let terminal_status = stream_started_process(proxy, started.pid, emit).await?;
 
-        info = proxy.get_process(pid).await?.into_inner();
-        if info.status != "running" {
-            break;
-        }
-
-        tokio::time::sleep(PROCESS_POLL_INTERVAL).await;
-    }
-
-    for _ in 0..PROCESS_EXIT_POLL_ATTEMPTS {
-        if info.exit_code.is_some() || info.signal.is_some() {
-            break;
-        }
-        tokio::time::sleep(PROCESS_EXIT_POLL_INTERVAL).await;
-        info = proxy.get_process(pid).await?.into_inner();
-    }
-
-    let exit_code = if let Some(code) = info.exit_code {
-        code
-    } else if let Some(signal) = info.signal {
-        -signal
-    } else {
-        0
-    };
-
-    if exit_code != 0 {
+    if terminal_status.code != 0 {
+        let reason = if terminal_status.oom_killed {
+            " (process was killed by the kernel OOM killer)"
+        } else {
+            ""
+        };
         return Err(SandboxImageBuildError::other(format!(
-            "Command '{}' failed with exit code {}",
-            command, exit_code
+            "Command '{}' failed with exit code {}{}",
+            command, terminal_status.code, reason
         )));
     }
 
     Ok(())
+}
+
+async fn start_or_recover_process(
+    proxy: &SandboxProxyClient,
+    payload: &Value,
+    command: &str,
+    expected_args: &[String],
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<ProcessInfo> {
+    let mut last_error = None;
+
+    for attempt in 1..=PROCESS_START_ATTEMPTS {
+        match proxy.start_process(payload).await {
+            Ok(started) => return Ok(started.into_inner()),
+            Err(start_error) => {
+                emit(SandboxImageBuildEvent::Status(format!(
+                    "Process start attempt {} failed; looking for an already-started process...",
+                    attempt
+                )));
+                match recover_started_process(proxy, command, expected_args).await {
+                    Ok(process) => return Ok(process),
+                    Err(recover_error) => {
+                        last_error = Some(format!(
+                            "start failed: {}; recovery failed: {}",
+                            start_error, recover_error
+                        ));
+                    }
+                }
+            }
+        }
+
+        if attempt < PROCESS_START_ATTEMPTS {
+            tokio::time::sleep(PROCESS_REATTACH_RETRY_INTERVAL).await;
+        }
+    }
+
+    Err(SandboxImageBuildError::other(last_error.unwrap_or_else(
+        || format!("Failed to start process '{}'", command),
+    )))
+}
+
+async fn recover_started_process(
+    proxy: &SandboxProxyClient,
+    command: &str,
+    expected_args: &[String],
+) -> Result<ProcessInfo> {
+    let mut last_error = None;
+
+    for _ in 0..PROCESS_REATTACH_ATTEMPTS {
+        match proxy.list_processes().await {
+            Ok(processes) => {
+                if let Some(process) = processes
+                    .into_inner()
+                    .into_iter()
+                    .filter(|process| process.command == command && process.args == expected_args)
+                    .max_by_key(|process| process.pid)
+                {
+                    return Ok(process);
+                }
+            }
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+        tokio::time::sleep(PROCESS_REATTACH_RETRY_INTERVAL).await;
+    }
+
+    let message = if let Some(error) = last_error {
+        format!(
+            "No process found for command '{}' after process-list errors: {}",
+            command, error
+        )
+    } else {
+        format!("No process found for command '{}'", command)
+    };
+    Err(SandboxImageBuildError::other(message))
+}
+
+async fn stream_started_process(
+    proxy: &SandboxProxyClient,
+    pid: i64,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<ProcessTerminalStatus> {
+    let mut output_events_seen = 0usize;
+    let mut attempts = 0usize;
+
+    loop {
+        let follow_result = follow_process_output(proxy, pid, &mut output_events_seen, emit).await;
+
+        if let Err(error) = follow_result {
+            attempts += 1;
+            if let Some(status) =
+                get_process_terminal_status_with_retries(proxy, pid, &mut attempts).await?
+            {
+                return Ok(status);
+            }
+            if attempts >= PROCESS_REATTACH_ATTEMPTS {
+                return Err(error);
+            }
+            emit(SandboxImageBuildEvent::Status(format!(
+                "Process stream interrupted; reattaching to process {}...",
+                pid
+            )));
+            tokio::time::sleep(PROCESS_REATTACH_RETRY_INTERVAL).await;
+            continue;
+        }
+
+        attempts = 0;
+        if let Some(status) =
+            get_process_terminal_status_with_retries(proxy, pid, &mut attempts).await?
+        {
+            return Ok(status);
+        }
+
+        emit(SandboxImageBuildEvent::Status(format!(
+            "Process output stream ended before process {} exited; reattaching...",
+            pid
+        )));
+        tokio::time::sleep(PROCESS_REATTACH_RETRY_INTERVAL).await;
+    }
+}
+
+async fn follow_process_output(
+    proxy: &SandboxProxyClient,
+    pid: i64,
+    output_events_seen: &mut usize,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<()> {
+    let mut replayed_events_seen = 0usize;
+    proxy
+        .follow_output_streaming(pid, |output| {
+            if replayed_events_seen < *output_events_seen {
+                replayed_events_seen += 1;
+                return;
+            }
+            replayed_events_seen += 1;
+            *output_events_seen += 1;
+            emit(SandboxImageBuildEvent::BuildLog {
+                stream: output.stream.unwrap_or_else(|| "stdout".to_string()),
+                message: output.line,
+            });
+        })
+        .await?;
+
+    Ok(())
+}
+
+async fn get_process_terminal_status_with_retries(
+    proxy: &SandboxProxyClient,
+    pid: i64,
+    attempts: &mut usize,
+) -> Result<Option<ProcessTerminalStatus>> {
+    loop {
+        match proxy.get_process(pid).await {
+            Ok(info) => return Ok(process_terminal_status(&info.into_inner())),
+            Err(error) => {
+                *attempts += 1;
+                if *attempts >= PROCESS_REATTACH_ATTEMPTS {
+                    return Err(error.into());
+                }
+                tokio::time::sleep(PROCESS_REATTACH_RETRY_INTERVAL).await;
+            }
+        }
+    }
+}
+
+fn process_terminal_status(info: &ProcessInfo) -> Option<ProcessTerminalStatus> {
+    let oom_killed = info.oom_killed
+        || info.status == "oom_killed"
+        || info
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.last_exit.as_ref())
+            .is_some_and(|last_exit| last_exit.oom_killed);
+
+    if oom_killed {
+        Some(ProcessTerminalStatus {
+            code: info
+                .signal
+                .map(|signal| -signal)
+                .or(info.exit_code)
+                .unwrap_or(-9),
+            oom_killed,
+        })
+    } else if let Some(code) = info.exit_code {
+        Some(ProcessTerminalStatus { code, oom_killed })
+    } else if let Some(signal) = info.signal {
+        Some(ProcessTerminalStatus {
+            code: -signal,
+            oom_killed,
+        })
+    } else if info.status != "running" {
+        Some(ProcessTerminalStatus {
+            code: 0,
+            oom_killed,
+        })
+    } else {
+        None
+    }
 }
 
 fn streaming_process_payload(
@@ -1828,10 +1995,11 @@ mod tests {
         CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
         PreparedSandboxTemplateBuild, build_rootfs_spec, collect_dir_files,
         complete_request_from_metadata, default_registered_name, load_dockerfile_plan,
-        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix, rootfs_builder_env,
-        rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
-        streaming_process_payload,
+        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
+        process_terminal_status, rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes,
+        rootfs_disk_bytes_to_mb, streaming_process_payload,
     };
+    use crate::sandboxes::models::ProcessInfo;
     use serde_json::{Value, json};
     use std::io::Write;
 
@@ -2353,6 +2521,28 @@ mod tests {
             files,
             vec![".dockerignore", "cache/keep.txt", "included.txt"]
         );
+    }
+
+    #[test]
+    fn process_terminal_status_detects_oom_killed_process() {
+        let info = ProcessInfo {
+            handle: Some(1),
+            pid: 42,
+            status: "oom_killed".to_string(),
+            exit_code: None,
+            signal: Some(9),
+            oom_killed: true,
+            stdin_writable: false,
+            command: "/usr/local/bin/tl-rootfs-build".to_string(),
+            args: Vec::new(),
+            started_at: json!(123),
+            ended_at: Some(json!(456)),
+            managed: None,
+        };
+
+        let status = process_terminal_status(&info).unwrap();
+        assert_eq!(status.code, -9);
+        assert!(status.oom_killed);
     }
 
     fn prepared_build(rootfs_node_kind: &str) -> PreparedSandboxTemplateBuild {
