@@ -81,6 +81,13 @@ export class CloudClient {
     );
   }
 
+  async deleteSandboxImage(imageName: string): Promise<void> {
+    await this.http.requestResponse(
+      "DELETE",
+      this.namespacePath(`sandbox-images/${encodeURIComponent(imageName)}`),
+    );
+  }
+
   async applications(): Promise<ApplicationSummary[]> {
     const raw = await this.http.requestJson<{ applications: Record<string, unknown>[] }>(
       "GET",
