@@ -1460,6 +1460,10 @@ mod tests {
     use super::*;
     use clap::CommandFactory;
 
+    fn parse_command<const N: usize>(args: [&str; N]) -> Commands {
+        Cli::try_parse_from(args).unwrap().command.unwrap()
+    }
+
     #[test]
     fn clone_command_is_not_supported() {
         let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123"]);
@@ -1495,33 +1499,26 @@ mod tests {
 
     #[test]
     fn orchestrate_commands_are_grouped_under_app() {
-        let cli = Cli::try_parse_from(["tl", "app", "new", "hello_world"]).unwrap();
-        match cli.command.unwrap() {
+        match parse_command(["tl", "app", "new", "hello_world"]) {
             Commands::App(AppCommands::New { name, force }) => {
                 assert_eq!(name, "hello_world");
                 assert!(!force);
             }
             _ => panic!("expected app new command"),
         }
-
-        let cli = Cli::try_parse_from(["tl", "app", "deploy", "hello_world.py"]).unwrap();
-        match cli.command.unwrap() {
+        match parse_command(["tl", "app", "deploy", "hello_world.py"]) {
             Commands::App(AppCommands::Deploy { args }) => {
                 assert_eq!(args, vec!["hello_world.py"]);
             }
             _ => panic!("expected app deploy command"),
         }
-
-        let cli = Cli::try_parse_from(["tl", "app", "cron", "ls", "hello_world"]).unwrap();
-        match cli.command.unwrap() {
+        match parse_command(["tl", "app", "cron", "ls", "hello_world"]) {
             Commands::App(AppCommands::Cron(CronCommands::List { application })) => {
                 assert_eq!(application, "hello_world");
             }
             _ => panic!("expected app cron ls command"),
         }
-
-        let cli = Cli::try_parse_from(["tl", "app", "ls"]).unwrap();
-        match cli.command.unwrap() {
+        match parse_command(["tl", "app", "ls"]) {
             Commands::App(AppCommands::Applications(ApplicationsArgs { command: None })) => {}
             _ => panic!("expected app ls command"),
         }
@@ -1561,10 +1558,7 @@ mod tests {
 
     #[test]
     fn cp_file_copy_parses_destination() {
-        let cli =
-            Cli::try_parse_from(["tl", "sbx", "cp", "local.txt", "sbx-123:/tmp/file"]).unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "cp", "local.txt", "sbx-123:/tmp/file"]) {
             Commands::Sbx(SbxCommands::Cp { src, dest }) => {
                 assert_eq!(src, "local.txt");
                 assert_eq!(dest, "sbx-123:/tmp/file");
@@ -1575,9 +1569,7 @@ mod tests {
 
     #[test]
     fn copy_times_defaults_to_one() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "copy", "sbx-123"]).unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "copy", "sbx-123"]) {
             Commands::Sbx(SbxCommands::Copy { times, .. }) => assert_eq!(times.get(), 1),
             _ => panic!("expected sbx copy command"),
         }
@@ -1585,9 +1577,7 @@ mod tests {
 
     #[test]
     fn copy_times_parses_explicit_value() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "copy", "sbx-123", "--times", "3"]).unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "copy", "sbx-123", "--times", "3"]) {
             Commands::Sbx(SbxCommands::Copy {
                 sandbox_id, times, ..
             }) => {
@@ -1640,17 +1630,14 @@ mod tests {
 
     #[test]
     fn sbx_checkpoint_parses_memory_checkpoint_type() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "checkpoint",
             "sbx-123",
             "--checkpoint-type",
             "memory",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
                 sandbox_id,
                 checkpoint_type,
@@ -1665,17 +1652,14 @@ mod tests {
 
     #[test]
     fn sbx_checkpoint_parses_filesystem_checkpoint_type() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "checkpoint",
             "sbx-123",
             "--checkpoint-type",
             "filesystem",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
                 sandbox_id,
                 checkpoint_type,
@@ -1690,10 +1674,7 @@ mod tests {
 
     #[test]
     fn sbx_run_parses_disk_mb_override() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "run", "--disk_mb", "30720", "echo", "hello"])
-            .unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "run", "--disk_mb", "30720", "echo", "hello"]) {
             Commands::Sbx(SbxCommands::Run { disk_mb, .. }) => {
                 assert_eq!(disk_mb, Some(30720));
             }
@@ -1703,11 +1684,7 @@ mod tests {
 
     #[test]
     fn sbx_exec_parses_process_user() {
-        let cli =
-            Cli::try_parse_from(["tl", "sbx", "exec", "--user", "1000:1000", "sbx-123", "id"])
-                .unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "exec", "--user", "1000:1000", "sbx-123", "id"]) {
             Commands::Sbx(SbxCommands::Exec { user, .. }) => {
                 assert_eq!(user.as_deref(), Some("1000:1000"));
             }
@@ -1717,9 +1694,7 @@ mod tests {
 
     #[test]
     fn sbx_exec_omits_process_user_by_default() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "exec", "sbx-123", "id"]).unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "exec", "sbx-123", "id"]) {
             Commands::Sbx(SbxCommands::Exec { user, .. }) => {
                 assert_eq!(user, None);
             }
@@ -1729,7 +1704,7 @@ mod tests {
 
     #[test]
     fn sbx_exec_parses_managed_detach_flags() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "exec",
@@ -1745,10 +1720,7 @@ mod tests {
             "8000:/health",
             "python",
             "app.py",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Exec {
                 detach,
                 name,
@@ -1773,8 +1745,7 @@ mod tests {
 
     #[test]
     fn sbx_process_lifecycle_commands_parse() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "ps", "sbx-123", "42", "--json"]).unwrap();
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "ps", "sbx-123", "42", "--json"]) {
             Commands::Sbx(SbxCommands::Ps {
                 sandbox_id,
                 pid,
@@ -1786,18 +1757,14 @@ mod tests {
             }
             _ => panic!("expected sbx ps command"),
         }
-
-        let cli = Cli::try_parse_from(["tl", "sbx", "restart", "sbx-123", "42"]).unwrap();
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "restart", "sbx-123", "42"]) {
             Commands::Sbx(SbxCommands::Restart { sandbox_id, pid }) => {
                 assert_eq!(sandbox_id, "sbx-123");
                 assert_eq!(pid, 42);
             }
             _ => panic!("expected sbx restart command"),
         }
-
-        let cli = Cli::try_parse_from(["tl", "sbx", "kill", "sbx-123", "42"]).unwrap();
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "kill", "sbx-123", "42"]) {
             Commands::Sbx(SbxCommands::Kill { sandbox_id, pid }) => {
                 assert_eq!(sandbox_id, "sbx-123");
                 assert_eq!(pid, 42);
@@ -1808,9 +1775,7 @@ mod tests {
 
     #[test]
     fn sbx_run_parses_process_user() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "run", "--user", "ubuntu", "id"]).unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "run", "--user", "ubuntu", "id"]) {
             Commands::Sbx(SbxCommands::Run { user, .. }) => {
                 assert_eq!(user.as_deref(), Some("ubuntu"));
             }
@@ -1820,9 +1785,7 @@ mod tests {
 
     #[test]
     fn sbx_run_omits_process_user_by_default() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "run", "id"]).unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "run", "id"]) {
             Commands::Sbx(SbxCommands::Run { user, .. }) => {
                 assert_eq!(user, None);
             }
@@ -1832,7 +1795,7 @@ mod tests {
 
     #[test]
     fn sbx_create_parses_disk_mb_override() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "create",
@@ -1840,10 +1803,7 @@ mod tests {
             "30720",
             "--image",
             "tensorlake/ubuntu-minimal",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Create { disk_mb, .. }) => {
                 assert_eq!(disk_mb, Some(30720));
             }
@@ -1853,7 +1813,7 @@ mod tests {
 
     #[test]
     fn sbx_create_parses_hidden_disk_gb_override() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "create",
@@ -1861,10 +1821,7 @@ mod tests {
             "25",
             "--image",
             "tensorlake/ubuntu-minimal",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Create {
                 disk_mb, disk_gb, ..
             }) => {
@@ -1877,7 +1834,7 @@ mod tests {
 
     #[test]
     fn image_create_parses_cpu_memory_and_disk_overrides() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "image",
@@ -1891,10 +1848,7 @@ mod tests {
             "30720",
             "--builder_disk_mb",
             "65536",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
                 cpus,
                 memory,
@@ -1913,7 +1867,7 @@ mod tests {
 
     #[test]
     fn image_create_parses_hidden_disk_gb_override() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "image",
@@ -1921,10 +1875,7 @@ mod tests {
             "./Dockerfile",
             "--disk",
             "25",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
                 disk_mb, disk_gb, ..
             })) => {
@@ -1937,7 +1888,7 @@ mod tests {
 
     #[test]
     fn image_register_parses_name_and_snapshot_id() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "image",
@@ -1947,10 +1898,7 @@ mod tests {
             "--dockerfile",
             "./Dockerfile",
             "--public",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Register {
                 image_name,
                 snapshot_id,
@@ -1968,10 +1916,7 @@ mod tests {
 
     #[test]
     fn sbx_port_expose_parses_ports() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "port", "expose", "sbx-123", "8080", "3000"])
-            .unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "port", "expose", "sbx-123", "8080", "3000"]) {
             Commands::Sbx(SbxCommands::Port(PortCommands::Expose { ports, .. })) => {
                 assert_eq!(ports, vec![8080, 3000]);
             }
@@ -2002,7 +1947,7 @@ mod tests {
 
     #[test]
     fn sbx_tunnel_parses_remote_and_listen_ports() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "tunnel",
@@ -2010,10 +1955,7 @@ mod tests {
             "5900",
             "--listen-port",
             "15900",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Tunnel {
                 sandbox_id,
                 remote_port,
@@ -2029,7 +1971,7 @@ mod tests {
 
     #[test]
     fn sbx_ssh_parses_shell_args_workdir_and_env() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "ssh",
@@ -2046,10 +1988,7 @@ mod tests {
             "FOO=bar",
             "--env",
             "TERM=screen-256color",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Ssh(SshArgs {
                 command,
                 sandbox_id,
@@ -2071,9 +2010,7 @@ mod tests {
 
     #[test]
     fn sbx_ssh_keys_ls_parses() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "ssh", "keys", "ls"]).unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "ssh", "keys", "ls"]) {
             Commands::Sbx(SbxCommands::Ssh(SshArgs {
                 command: Some(SshCommands::Keys(SshKeysCommands::Ls)),
                 sandbox_id: None,
@@ -2085,9 +2022,7 @@ mod tests {
 
     #[test]
     fn sbx_pty_ls_parses() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "pty", "ls", "sbx-123"]).unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "pty", "ls", "sbx-123"]) {
             Commands::Sbx(SbxCommands::Pty(PtyCommands::Ls {
                 sandbox_id,
                 show_token,
@@ -2103,7 +2038,7 @@ mod tests {
 
     #[test]
     fn sbx_pty_ls_with_token_flags_parses() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "pty",
@@ -2111,10 +2046,7 @@ mod tests {
             "sbx-123",
             "--show-token",
             "--json",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Pty(PtyCommands::Ls {
                 sandbox_id,
                 show_token,
@@ -2130,12 +2062,9 @@ mod tests {
 
     #[test]
     fn sbx_pty_attach_parses() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl", "sbx", "pty", "attach", "sbx-123", "sess-1", "--token", "tok-1",
-        ])
-        .unwrap();
-
-        match cli.command.unwrap() {
+        ]) {
             Commands::Sbx(SbxCommands::Pty(PtyCommands::Attach {
                 sandbox_id,
                 session_id,
@@ -2151,10 +2080,7 @@ mod tests {
 
     #[test]
     fn sbx_pty_rm_parses_multiple_session_ids() {
-        let cli =
-            Cli::try_parse_from(["tl", "sbx", "pty", "rm", "sbx-123", "sess-1", "sess-2"]).unwrap();
-
-        match cli.command.unwrap() {
+        match parse_command(["tl", "sbx", "pty", "rm", "sbx-123", "sess-1", "sess-2"]) {
             Commands::Sbx(SbxCommands::Pty(PtyCommands::Rm {
                 sandbox_id,
                 session_ids,
