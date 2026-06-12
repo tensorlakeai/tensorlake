@@ -53,8 +53,6 @@ import { nowMs, logSdkTimingEvent, sdkTimingPayloadsEnabled, logSdkTiming } from
 import { resolveProxyTarget } from "./url.js";
 import WebSocket, { type RawData } from "ws";
 
-const DEFAULT_PROCESS_USER = "tl-user";
-
 class SandboxProxyConnection {
   baseUrl = "";
   wsHeaders: Record<string, string> = {};
@@ -197,9 +195,11 @@ class SandboxProxyConnection {
 
 function processUserPayload(
   user: ProcessUser | undefined,
-): ProcessUser {
+): ProcessUser | undefined {
+  // No user requested: omit the field so the sandbox resolves the image's
+  // configured user (the image USER directive, falling back to root).
   if (user == null) {
-    return DEFAULT_PROCESS_USER;
+    return undefined;
   }
   if (typeof user === "string" && user.trim() === "") {
     throw new SandboxError("process user must not be empty");
@@ -721,7 +721,7 @@ export class Sandbox {
     if (options?.workingDir) body.working_dir = options.workingDir;
     if (options?.timeout != null) body.timeout = options.timeout;
     const user = processUserPayload(options?.user);
-    body.user = user;
+    if (user !== undefined) body.user = user;
 
     logSdkTimingEvent("sandbox.run", "start", {
       sandbox_id: this.sandboxId,
@@ -765,7 +765,7 @@ export class Sandbox {
     if (options?.env != null) payload.env = options.env;
     if (options?.workingDir != null) payload.working_dir = options.workingDir;
     const user = processUserPayload(options?.user);
-    payload.user = user;
+    if (user !== undefined) payload.user = user;
     if (options?.stdinMode != null && options.stdinMode !== StdinMode.CLOSED) {
       payload.stdin_mode = options.stdinMode;
     }

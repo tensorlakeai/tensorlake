@@ -126,6 +126,9 @@ fn build_process_payload(
         body["timeout"] = serde_json::json!(t);
     }
     if let Some(user) = options.user {
+        if user.trim().is_empty() {
+            return Err(CliError::usage("--user must not be empty"));
+        }
         body["user"] = Value::String(user.to_string());
     }
     if let Some(name) = options.name {

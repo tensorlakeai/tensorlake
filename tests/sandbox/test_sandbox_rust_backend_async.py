@@ -249,7 +249,7 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(fake.start_payload_json)
         self.assertEqual(payload["user"], {"uid": 1000, "gid": 1000})
 
-    async def test_start_process_omits_default_modes_and_serializes_default_user(self):
+    async def test_start_process_omits_default_modes_and_user(self):
         sandbox, fake = _make_async_sandbox()
 
         await sandbox.start_process(command="echo")
@@ -258,7 +258,9 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("stdin_mode", payload)
         self.assertNotIn("stdout_mode", payload)
         self.assertNotIn("stderr_mode", payload)
-        self.assertEqual(payload["user"], "tl-user")
+        # No user requested -> field omitted so the sandbox resolves the
+        # image's configured user (image USER, falling back to root).
+        self.assertNotIn("user", payload)
 
     async def test_start_process_rejects_invalid_user_spec_mapping(self):
         sandbox, _ = _make_async_sandbox()
