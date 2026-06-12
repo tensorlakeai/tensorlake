@@ -130,7 +130,7 @@ pub fn run(name: &str, force: bool) -> Result<()> {
     eprintln!("==================================================");
     eprintln!("\nNext steps:");
     eprintln!("  Deploy: tl app deploy {}", filename);
-    eprintln!("\nLearn more: https://docs.tensorlake.ai/quickstart");
+    eprintln!("\nLearn more: https://docs.tensorlake.ai/applications/introduction");
 
     Ok(())
 }
