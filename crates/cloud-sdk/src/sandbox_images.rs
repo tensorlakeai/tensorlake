@@ -414,8 +414,8 @@ where
 
         if complete_request.rootfs_format.as_deref() == Some("cas-streaming") {
             emit(SandboxImageBuildEvent::Status(
-                "Verifying and admitting the image into the streaming CAS (this can take a \
-                 few minutes for large images)..."
+                "Submitting the image for verification and admission into the streaming \
+                 CAS..."
                     .to_string(),
             ));
         } else {
@@ -423,13 +423,28 @@ where
                 "Completing image registration...".to_string(),
             ));
         }
-        let registered = complete_rootfs_build(
+        let (complete_status, completed) = complete_rootfs_build(
             &ctx,
             &platform_client,
             &prepared.build_id,
             &complete_request,
         )
         .await?;
+        // cas-streaming completions are asynchronous: the platform answers
+        // 202 immediately while the trusted service verifies the staged
+        // chunks; poll the build until it settles.
+        let registered = if complete_status == reqwest::StatusCode::ACCEPTED
+            || completed.get("status").and_then(Value::as_str) == Some("ingesting")
+        {
+            emit(SandboxImageBuildEvent::Status(
+                "Verifying and admitting the image into the streaming CAS (this can take \
+                 a few minutes for large images)..."
+                    .to_string(),
+            ));
+            wait_for_build_completed(&ctx, &platform_client, &prepared.build_id).await?
+        } else {
+            completed
+        };
         let template_id = registered.get("id").and_then(Value::as_str).unwrap_or("-");
         emit(SandboxImageBuildEvent::Status(format!(
             "Image '{}' registered ({})",
@@ -744,7 +759,7 @@ async fn complete_rootfs_build(
     client: &Client,
     build_id: &str,
     request: &CompleteSandboxTemplateBuildRequest,
-) -> Result<Value> {
+) -> Result<(reqwest::StatusCode, Value)> {
     let path = format!(
         "{}/{}/complete",
         sandbox_template_builds_path(ctx),
@@ -753,8 +768,8 @@ async fn complete_rootfs_build(
     let request = client.request(Method::POST, &path).json(request).build()?;
     let response = client.execute_raw(request).await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(SandboxImageBuildError::other(format!(
             "failed to complete sandbox image build (HTTP {}): {}",
@@ -762,7 +777,67 @@ async fn complete_rootfs_build(
         )));
     }
 
-    response.json().await.map_err(Into::into)
+    Ok((status, response.json().await?))
+}
+
+/// Interval between build-status polls while a cas-streaming admission runs.
+const BUILD_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// Upper bound on the admission wait: large images verify at IO speed, so
+/// half an hour is far beyond any healthy run.
+const BUILD_STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Poll the build endpoint until the asynchronous (cas-streaming) completion
+/// settles. Returns the registered template from the completed status.
+async fn wait_for_build_completed(
+    ctx: &ResolvedBuildContext,
+    client: &Client,
+    build_id: &str,
+) -> Result<Value> {
+    let path = format!("{}/{}", sandbox_template_builds_path(ctx), build_id);
+    let deadline = std::time::Instant::now() + BUILD_STATUS_POLL_TIMEOUT;
+    loop {
+        let request = client.request(Method::GET, &path).build()?;
+        let response = client.execute_raw(request).await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(SandboxImageBuildError::other(format!(
+                "failed to poll sandbox image build (HTTP {}): {}",
+                status, body
+            )));
+        }
+        let status: Value = response.json().await?;
+        match status.get("status").and_then(Value::as_str) {
+            Some("completed") => {
+                return status.get("template").cloned().ok_or_else(|| {
+                    SandboxImageBuildError::other(
+                        "build completed but the status payload has no template",
+                    )
+                });
+            }
+            Some("failed") => {
+                let error = status
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("admission failed");
+                return Err(SandboxImageBuildError::other(format!(
+                    "streaming image admission failed: {error}"
+                )));
+            }
+            Some("ingesting") | Some("prepared") => {}
+            other => {
+                return Err(SandboxImageBuildError::other(format!(
+                    "unexpected build status {other:?}"
+                )));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(SandboxImageBuildError::other(
+                "timed out waiting for the streaming image admission",
+            ));
+        }
+        tokio::time::sleep(BUILD_STATUS_POLL_INTERVAL).await;
+    }
 }
 
 fn sandbox_template_builds_path(ctx: &ResolvedBuildContext) -> String {
