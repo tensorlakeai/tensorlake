@@ -167,12 +167,14 @@ describe("Sandbox", () => {
       sbx.close();
     });
 
-    it("sends the default process user", async () => {
+    it("omits the process user by default", async () => {
       installNativeStub({
         proxy: {
           runProcess: vi.fn(async (json: string) => {
             const body = JSON.parse(json);
-            expect(body.user).toBe("tl-user");
+            // No user requested -> field omitted so the sandbox resolves the
+            // image's configured user (image USER, falling back to root).
+            expect(body.user).toBeUndefined();
             return runEvents([
               { pid: 42, started_at: 1700000000 },
               { exit_code: 0 },
@@ -280,12 +282,14 @@ describe("Sandbox", () => {
       sbx.close();
     });
 
-    it("sends the default process user", async () => {
+    it("omits the process user by default", async () => {
       installNativeStub({
         proxy: {
           startProcess: vi.fn(async (json: string) => {
             const body = JSON.parse(json);
-            expect(body.user).toBe("tl-user");
+            // No user requested -> field omitted so the sandbox resolves the
+            // image's configured user (image USER, falling back to root).
+            expect(body.user).toBeUndefined();
             return {
               traceId: "t",
               json: JSON.stringify({

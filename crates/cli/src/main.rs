@@ -467,9 +467,10 @@ enum SbxCommands {
         #[arg(short, long)]
         env: Vec<String>,
 
-        /// Process user to run as: username, uid, or uid:gid
-        #[arg(long, default_value = "tl-user")]
-        user: String,
+        /// Process user to run as: username, uid, or uid:gid (default: the
+        /// image's configured user)
+        #[arg(long)]
+        user: Option<String>,
 
         /// Start the process and return immediately instead of streaming output
         #[arg(long)]
@@ -619,9 +620,10 @@ enum SbxCommands {
         #[arg(short, long)]
         env: Vec<String>,
 
-        /// Process user to run as: username, uid, or uid:gid
-        #[arg(long, default_value = "tl-user")]
-        user: String,
+        /// Process user to run as: username, uid, or uid:gid (default: the
+        /// image's configured user)
+        #[arg(long)]
+        user: Option<String>,
 
         /// Keep sandbox after command exits
         #[arg(short, long)]
@@ -1163,7 +1165,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 timeout,
                                 workdir: workdir.as_deref(),
                                 env: &env,
-                                user: Some(user.as_str()),
+                                user: user.as_deref(),
                                 detach,
                                 name: name.as_deref(),
                                 restart_policy: restart.map(RestartPolicyArg::as_wire_value),
@@ -1259,7 +1261,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             timeout,
                             workdir.as_deref(),
                             &env,
-                            Some(user.as_str()),
+                            user.as_deref(),
                             keep,
                             &ports,
                             allow_unauthenticated_access,
@@ -1569,7 +1571,19 @@ mod tests {
 
         match cli.command {
             Commands::Sbx(SbxCommands::Exec { user, .. }) => {
-                assert_eq!(user, "1000:1000");
+                assert_eq!(user.as_deref(), Some("1000:1000"));
+            }
+            _ => panic!("expected sbx exec command"),
+        }
+    }
+
+    #[test]
+    fn sbx_exec_omits_process_user_by_default() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "exec", "sbx-123", "id"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Exec { user, .. }) => {
+                assert_eq!(user, None);
             }
             _ => panic!("expected sbx exec command"),
         }
@@ -1660,7 +1674,19 @@ mod tests {
 
         match cli.command {
             Commands::Sbx(SbxCommands::Run { user, .. }) => {
-                assert_eq!(user, "ubuntu");
+                assert_eq!(user.as_deref(), Some("ubuntu"));
+            }
+            _ => panic!("expected sbx run command"),
+        }
+    }
+
+    #[test]
+    fn sbx_run_omits_process_user_by_default() {
+        let cli = Cli::try_parse_from(["tl", "sbx", "run", "id"]).unwrap();
+
+        match cli.command {
+            Commands::Sbx(SbxCommands::Run { user, .. }) => {
+                assert_eq!(user, None);
             }
             _ => panic!("expected sbx run command"),
         }

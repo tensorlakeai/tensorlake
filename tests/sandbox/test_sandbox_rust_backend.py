@@ -198,13 +198,15 @@ class TestSandboxRustBackend(unittest.TestCase):
         payload = json.loads(fake.start_payload_json)
         self.assertEqual(payload["user"], {"uid": 1000, "gid": 1000})
 
-    def test_start_process_serializes_default_user(self):
+    def test_start_process_omits_user_by_default(self):
         sandbox, fake = _make_sandbox()
 
         sandbox.start_process(command="echo")
 
         payload = json.loads(fake.start_payload_json)
-        self.assertEqual(payload["user"], "tl-user")
+        # No user requested -> field omitted so the sandbox resolves the
+        # image's configured user (image USER, falling back to root).
+        self.assertNotIn("user", payload)
 
     def test_start_process_serializes_managed_options(self):
         sandbox, fake = _make_sandbox()
