@@ -18,6 +18,7 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 pyo3 = { workspace = true }
 pyo3-async-runtimes = { workspace = true }
+urlencoding = { workspace = true }
 
 [build-dependencies]
 pyo3-build-config = "0.28.3"

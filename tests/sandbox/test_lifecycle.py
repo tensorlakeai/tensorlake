@@ -9,10 +9,14 @@ Usage:
 """
 
 import os
+import tempfile
 import time
 import unittest
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from uuid import uuid4
 
+from tensorlake.image.sandbox_builder import build_sandbox_image, delete_sandbox_image
 from tensorlake.sandbox import (
     PoolContainerInfo,
     PoolInUseError,
@@ -202,6 +206,42 @@ class BaseSandboxTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.client.close()
+
+
+# ---------------------------------------------------------------------------
+# TestSandboxImages
+# ---------------------------------------------------------------------------
+
+
+class TestSandboxImages(BaseSandboxTest):
+    def test_create_then_delete_sandbox_image(self):
+        registered_name = f"sdk-python-delete-test-{uuid4().hex[:8]}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dockerfile_path = Path(tmpdir) / "Dockerfile"
+            dockerfile_path.write_text(
+                "FROM tensorlake/ubuntu-minimal\n"
+                "RUN printf 'python delete acceptance\\n' > /tmp/python-delete-acceptance\n",
+                encoding="utf-8",
+            )
+
+            created = False
+            try:
+                build_sandbox_image(
+                    str(dockerfile_path),
+                    registered_name=registered_name,
+                    cpus=1.0,
+                    memory_mb=1024,
+                )
+                created = True
+
+                delete_sandbox_image(registered_name)
+            finally:
+                if created:
+                    try:
+                        delete_sandbox_image(registered_name)
+                    except Exception:
+                        pass
 
 
 # ---------------------------------------------------------------------------

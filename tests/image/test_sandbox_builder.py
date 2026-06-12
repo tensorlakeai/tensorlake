@@ -82,6 +82,8 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             ANY,
         )
 
+
+class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
     def test_public_flag_and_registered_name(self):
         ctx = _make_ctx()
 
@@ -160,6 +162,33 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             emitted,
         )
         self.assertIn({"type": "status", "message": "builder running"}, emitted)
+
+
+class TestDeleteSandboxImage(unittest.TestCase):
+    def test_deletes_sandbox_image_with_env_context(self):
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(sbm, "_rust_delete_sandbox_image") as rust_delete,
+        ):
+            sbm.delete_sandbox_image("tensorlake/test:1")
+
+        rust_delete.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_apiKey_abc",
+            "tensorlake/test:1",
+            "org_1",
+            "proj_1",
+            "default",
+        )
+
+    def test_delete_requires_credentials(self):
+        ctx = _make_ctx(api_key=None, personal_access_token=None)
+
+        with patch.object(sbm, "_build_context_from_env", return_value=ctx):
+            with self.assertRaises(sbm.SandboxImageDeleteError):
+                sbm.delete_sandbox_image("image")
 
 
 class TestBuildSandboxImageFromImage(unittest.TestCase):

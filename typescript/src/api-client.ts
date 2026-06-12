@@ -39,6 +39,10 @@ export class APIClient {
     await this.cloudClient.deleteApplication(applicationName);
   }
 
+  async deleteSandboxImage(imageName: string): Promise<void> {
+    await this.cloudClient.deleteSandboxImage(imageName);
+  }
+
   async applications(): Promise<ApplicationSummary[]> {
     return this.cloudClient.applications();
   }

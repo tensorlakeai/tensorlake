@@ -67,4 +67,19 @@ impl SandboxTemplatesClient {
             Err(err) => Err(err),
         }
     }
+
+    /// Delete a sandbox template by registered name.
+    ///
+    /// The `name` argument is percent-encoded into the URL path so image-style
+    /// references containing `/` and `:` (e.g. `tensorlake/python:3.12-slim`)
+    /// round-trip correctly.
+    pub async fn delete(&self, name: &str) -> Result<Traced<()>, SdkError> {
+        let encoded = urlencoding::encode(name);
+        let path = format!("{}/{}", self.endpoint(), encoded);
+        let req = self.client.request(Method::DELETE, &path).build()?;
+        self.client
+            .execute_traced(req)
+            .await
+            .map(|traced| traced.map(|_| ()))
+    }
 }

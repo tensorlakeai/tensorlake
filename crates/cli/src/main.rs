@@ -790,6 +790,13 @@ enum ImageCommands {
         /// Image name or ID
         name_or_id: String,
     },
+
+    /// Delete a sandbox image
+    #[command(alias = "delete")]
+    Rm {
+        /// Image name or ID
+        name_or_id: String,
+    },
 }
 
 #[derive(Parser)]
@@ -1375,6 +1382,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         ImageCommands::Ls => commands::sbx::image::ls::run(ctx).await,
                         ImageCommands::Describe { name_or_id } => {
                             commands::sbx::image::describe::run(ctx, &name_or_id).await
+                        }
+                        ImageCommands::Rm { name_or_id } => {
+                            commands::sbx::image::rm::run(ctx, &name_or_id).await
                         }
                     },
                     SbxCommands::Tunnel {

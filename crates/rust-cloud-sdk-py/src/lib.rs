@@ -140,6 +140,19 @@ impl CloudApiClient {
         })
     }
 
+    fn delete_sandbox_image(&self, image_name: String) -> PyResult<()> {
+        let namespace = self.namespace.clone();
+        self.run_with_retry(5, move |client| {
+            let encoded_image = urlencoding::encode(&image_name).into_owned();
+            let path = format!("/v1/namespaces/{namespace}/sandbox-images/{encoded_image}");
+            async move {
+                let request = client.request(Method::DELETE, &path).build()?;
+                let _response = client.execute(request).await?;
+                Ok(())
+            }
+        })
+    }
+
     fn applications_json(&self) -> PyResult<String> {
         let namespace = self.namespace.clone();
         self.run_with_retry(5, move |client| {
