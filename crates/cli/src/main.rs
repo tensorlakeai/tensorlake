@@ -100,6 +100,7 @@ enum Commands {
     },
 
     /// Create a new Tensorlake application
+    #[command(hide = true)]
     New {
         /// Application name
         name: String,
@@ -110,6 +111,7 @@ enum Commands {
     },
 
     /// Deploy applications to Tensorlake Cloud
+    #[command(hide = true)]
     Deploy {
         /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -152,6 +154,7 @@ enum Commands {
     },
 
     /// Parse a document and print markdown
+    #[command(hide = true)]
     Parse {
         /// Local file path or HTTP/HTTPS URL
         path_or_url: String,
@@ -165,7 +168,12 @@ enum Commands {
         ignore_cache: bool,
     },
 
+    /// Manage Orchestrate applications
+    #[command(subcommand, name = "app", alias = "apps", alias = "orchestrate")]
+    App(AppCommands),
+
     /// Manage cron schedules for applications
+    #[command(hide = true)]
     #[command(subcommand)]
     Cron(CronCommands),
 
@@ -178,6 +186,7 @@ enum Commands {
     SshKeys(SshKeysCommands),
 
     /// List applications
+    #[command(hide = true)]
     #[command(name = "ls")]
     Applications(ApplicationsArgs),
 
@@ -297,6 +306,34 @@ enum CronCommands {
         /// Schedule ID to delete
         schedule_id: String,
     },
+}
+
+#[derive(Subcommand)]
+enum AppCommands {
+    /// Create a new Tensorlake application
+    New {
+        /// Application name
+        name: String,
+
+        /// Overwrite existing files
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Deploy applications to Tensorlake Cloud
+    Deploy {
+        /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Manage cron schedules for applications
+    #[command(subcommand)]
+    Cron(CronCommands),
+
+    /// List applications
+    #[command(name = "ls")]
+    Applications(ApplicationsArgs),
 }
 
 #[derive(Parser)]
@@ -961,15 +998,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             no_confirm,
         } => commands::init::run(ctx, directory.as_deref(), no_confirm).await,
         Commands::New { name, force } => commands::new::run(&name, force),
-        Commands::Deploy { args } => {
-            let onprem = std::env::var("TENSORLAKE_ONPREM")
-                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-                .unwrap_or(false);
-            if !onprem {
-                ensure_auth_and_project(ctx).await?;
-            }
-            commands::deploy::run(ctx, &args).await
-        }
+        Commands::Deploy { args } => run_deploy_command(ctx, &args).await,
         Commands::BuildImages {
             application_file_path,
             repository,
@@ -997,31 +1026,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             pages,
             ignore_cache,
         } => commands::parse::run(ctx, &path_or_url, pages.as_deref(), ignore_cache).await,
-        Commands::Cron(subcmd) => {
-            ensure_auth_and_project(ctx).await?;
-            match subcmd {
-                CronCommands::Create {
-                    application,
-                    schedule,
-                    input_json,
-                    input_file,
-                } => {
-                    commands::cron::create(
-                        ctx,
-                        &application,
-                        &schedule,
-                        input_json.as_deref(),
-                        input_file.as_deref(),
-                    )
-                    .await
-                }
-                CronCommands::List { application } => commands::cron::list(ctx, &application).await,
-                CronCommands::Delete {
-                    application,
-                    schedule_id,
-                } => commands::cron::delete(ctx, &application, &schedule_id).await,
-            }
-        }
+        Commands::App(subcmd) => run_app_command(ctx, subcmd).await,
+        Commands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
         Commands::Secrets(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
@@ -1038,12 +1044,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             ensure_auth(ctx).await?;
             run_ssh_keys_command(ctx, subcmd).await
         }
-        Commands::Applications(app_args) => {
-            ensure_auth_and_project(ctx).await?;
-            match app_args.command {
-                Some(ApplicationsCommands::Ls) | None => commands::applications::ls(ctx).await,
-            }
-        }
+        Commands::Applications(app_args) => run_applications_command(ctx, app_args).await,
         Commands::Sbx(subcmd) => match subcmd {
             SbxCommands::Ssh(ssh_args)
                 if matches!(ssh_args.command, Some(SshCommands::Keys(_))) =>
@@ -1377,6 +1378,61 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
     }
 }
 
+async fn run_app_command(ctx: &mut CliContext, subcmd: AppCommands) -> error::Result<()> {
+    match subcmd {
+        AppCommands::New { name, force } => commands::new::run(&name, force),
+        AppCommands::Deploy { args } => run_deploy_command(ctx, &args).await,
+        AppCommands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
+        AppCommands::Applications(app_args) => run_applications_command(ctx, app_args).await,
+    }
+}
+
+async fn run_deploy_command(ctx: &mut CliContext, args: &[String]) -> error::Result<()> {
+    let onprem = std::env::var("TENSORLAKE_ONPREM")
+        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if !onprem {
+        ensure_auth_and_project(ctx).await?;
+    }
+    commands::deploy::run(ctx, args).await
+}
+
+async fn run_cron_command(ctx: &mut CliContext, subcmd: CronCommands) -> error::Result<()> {
+    ensure_auth_and_project(ctx).await?;
+    match subcmd {
+        CronCommands::Create {
+            application,
+            schedule,
+            input_json,
+            input_file,
+        } => {
+            commands::cron::create(
+                ctx,
+                &application,
+                &schedule,
+                input_json.as_deref(),
+                input_file.as_deref(),
+            )
+            .await
+        }
+        CronCommands::List { application } => commands::cron::list(ctx, &application).await,
+        CronCommands::Delete {
+            application,
+            schedule_id,
+        } => commands::cron::delete(ctx, &application, &schedule_id).await,
+    }
+}
+
+async fn run_applications_command(
+    ctx: &mut CliContext,
+    app_args: ApplicationsArgs,
+) -> error::Result<()> {
+    ensure_auth_and_project(ctx).await?;
+    match app_args.command {
+        Some(ApplicationsCommands::Ls) | None => commands::applications::ls(ctx).await,
+    }
+}
+
 async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> error::Result<()> {
     match subcmd {
         SshKeysCommands::Ls => commands::ssh_keys::list(ctx).await,
@@ -1412,6 +1468,65 @@ mod tests {
         };
         assert!(!missing_subcommand_error.contains("build-images"));
         assert!(Cli::try_parse_from(["tl", "build-images", "app.py"]).is_ok());
+    }
+
+    #[test]
+    fn orchestrate_commands_are_grouped_under_app() {
+        let cli = Cli::try_parse_from(["tl", "app", "new", "hello_world"]).unwrap();
+        match cli.command {
+            Commands::App(AppCommands::New { name, force }) => {
+                assert_eq!(name, "hello_world");
+                assert!(!force);
+            }
+            _ => panic!("expected app new command"),
+        }
+
+        let cli = Cli::try_parse_from(["tl", "app", "deploy", "hello_world.py"]).unwrap();
+        match cli.command {
+            Commands::App(AppCommands::Deploy { args }) => {
+                assert_eq!(args, vec!["hello_world.py"]);
+            }
+            _ => panic!("expected app deploy command"),
+        }
+
+        let cli = Cli::try_parse_from(["tl", "app", "cron", "ls", "hello_world"]).unwrap();
+        match cli.command {
+            Commands::App(AppCommands::Cron(CronCommands::List { application })) => {
+                assert_eq!(application, "hello_world");
+            }
+            _ => panic!("expected app cron ls command"),
+        }
+
+        let cli = Cli::try_parse_from(["tl", "app", "ls"]).unwrap();
+        match cli.command {
+            Commands::App(AppCommands::Applications(ApplicationsArgs { command: None })) => {}
+            _ => panic!("expected app ls command"),
+        }
+    }
+
+    #[test]
+    fn app_aliases_parse() {
+        assert!(Cli::try_parse_from(["tl", "apps", "ls"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "orchestrate", "ls"]).is_ok());
+    }
+
+    #[test]
+    fn legacy_orchestrate_commands_are_hidden_but_still_parse() {
+        let mut help = Vec::new();
+        Cli::command().write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(!help.contains(" new "));
+        assert!(!help.contains(" deploy "));
+        assert!(!help.contains(" cron "));
+        assert!(!help.contains(" parse "));
+        assert!(!help.contains(" ls "));
+
+        assert!(Cli::try_parse_from(["tl", "new", "hello_world"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "deploy", "hello_world.py"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "cron", "ls", "hello_world"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "parse", "document.pdf"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "ls"]).is_ok());
     }
 
     #[test]
