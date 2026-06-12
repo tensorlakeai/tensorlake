@@ -2813,6 +2813,7 @@ fn create_image_context_file(
     user_agent=None,
     dockerfile_text=None,
     context_dir=None,
+    streaming=false,
     emit=None,
 ))]
 fn build_sandbox_image(
@@ -2833,6 +2834,7 @@ fn build_sandbox_image(
     user_agent: Option<String>,
     dockerfile_text: Option<String>,
     context_dir: Option<String>,
+    streaming: bool,
     emit: Option<Py<PyAny>>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageBuildOptions {
@@ -2851,6 +2853,7 @@ fn build_sandbox_image(
         cpus,
         memory_mb,
         is_public,
+        streaming,
         user_agent,
     };
 

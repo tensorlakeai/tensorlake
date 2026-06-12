@@ -128,6 +128,12 @@ pub struct SandboxImageBuildOptions {
     pub cpus: Option<f64>,
     pub memory_mb: Option<i64>,
     pub is_public: bool,
+    /// Non-default opt-in: build a content-addressed streaming (cas-streaming)
+    /// image. Streaming builds are base-only — the Dockerfile FROM must be an
+    /// unregistered OCI image — and complete through the platform's trusted
+    /// CAS ingest, so registration takes longer while the image is verified
+    /// and admitted.
+    pub streaming: bool,
     pub user_agent: Option<String>,
 }
 
@@ -207,6 +213,8 @@ struct PreparedSandboxTemplateBuild {
     snapshot_id: String,
     snapshot_uri: String,
     rootfs_node_kind: String,
+    #[serde(default)]
+    rootfs_format: Option<String>,
     builder: PreparedRootfsBuilder,
     parent: Option<PreparedRootfsParent>,
 }
@@ -240,6 +248,8 @@ struct CompleteSandboxTemplateBuildRequest {
     rootfs_node_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_manifest_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rootfs_format: Option<String>,
 }
 
 pub async fn build_sandbox_image<F>(options: SandboxImageBuildOptions, mut emit: F) -> Result<Value>
@@ -295,13 +305,24 @@ where
         "Preparing rootfs build...".to_string(),
     ));
     let platform_client = platform_client(&ctx)?;
-    let (prepared, prepared_spec) =
-        prepare_rootfs_build(&ctx, &platform_client, &plan, options.is_public).await?;
+    let (prepared, prepared_spec) = prepare_rootfs_build(
+        &ctx,
+        &platform_client,
+        &plan,
+        options.is_public,
+        options.streaming,
+    )
+    .await?;
     emit(SandboxImageBuildEvent::Status(format!(
-        "Build mode: Rootfs{}",
+        "Build mode: Rootfs{}{}",
         match prepared.rootfs_node_kind.as_str() {
             "diff" => "Diff",
             _ => "Base",
+        },
+        if prepared.rootfs_format.as_deref() == Some("cas-streaming") {
+            " (content-addressed streaming)"
+        } else {
+            ""
         }
     )));
 
@@ -388,11 +409,20 @@ where
         builder_result?;
 
         let metadata = read_build_metadata(&proxy).await?;
-        let complete_request = complete_request_from_metadata(&prepared, &metadata)?;
+        let complete_request =
+            complete_request_from_metadata(&prepared, &metadata, rootfs_disk_bytes)?;
 
-        emit(SandboxImageBuildEvent::Status(
-            "Completing image registration...".to_string(),
-        ));
+        if complete_request.rootfs_format.as_deref() == Some("cas-streaming") {
+            emit(SandboxImageBuildEvent::Status(
+                "Verifying and admitting the image into the streaming CAS (this can take a \
+                 few minutes for large images)..."
+                    .to_string(),
+            ));
+        } else {
+            emit(SandboxImageBuildEvent::Status(
+                "Completing image registration...".to_string(),
+            ));
+        }
         let registered = complete_rootfs_build(
             &ctx,
             &platform_client,
@@ -629,6 +659,7 @@ async fn prepare_rootfs_build(
     client: &Client,
     plan: &DockerfileBuildPlan,
     is_public: bool,
+    streaming: bool,
 ) -> Result<(PreparedSandboxTemplateBuild, Value)> {
     // Resolve every external image reference against the platform's template
     // registry. The final-stage FROM is treated separately so its resolution
@@ -665,19 +696,32 @@ async fn prepare_rootfs_build(
     } else {
         "base"
     };
+    // Streaming images are content-addressed and self-contained: fail before
+    // any sandbox spins up if the FROM resolved to a registered template.
+    if streaming && (parent_template_payload.is_some() || !additional_payload.is_empty()) {
+        return Err(SandboxImageBuildError::usage(
+            "--streaming builds support only base images: the Dockerfile FROM (and any \
+             COPY --from references) must be unregistered OCI images, not registered \
+             Tensorlake templates",
+        ));
+    }
     let parent_template_json = parent_template_payload.unwrap_or(Value::Null);
 
+    let mut prepare_body = json!({
+        "name": plan.registered_name,
+        "dockerfile": plan.dockerfile_text,
+        "baseImage": plan.base_image,
+        "public": is_public,
+        "rootfsNodeKind": rootfs_node_kind,
+        "parentTemplate": parent_template_json,
+        "additionalLocalImages": additional_payload,
+    });
+    if streaming {
+        prepare_body["rootfsFormat"] = Value::String("cas-streaming".to_string());
+    }
     let request = client
         .request(Method::POST, &sandbox_template_builds_path(ctx))
-        .json(&json!({
-            "name": plan.registered_name,
-            "dockerfile": plan.dockerfile_text,
-            "baseImage": plan.base_image,
-            "public": is_public,
-            "rootfsNodeKind": rootfs_node_kind,
-            "parentTemplate": parent_template_json,
-            "additionalLocalImages": additional_payload,
-        }))
+        .json(&prepare_body)
         .build()?;
     let response = client.execute_raw(request).await?;
 
@@ -1039,7 +1083,31 @@ async fn read_build_metadata(proxy: &SandboxProxyClient) -> Result<Value> {
 fn complete_request_from_metadata(
     prepared: &PreparedSandboxTemplateBuild,
     metadata: &Value,
+    rootfs_disk_bytes: u64,
 ) -> Result<CompleteSandboxTemplateBuildRequest> {
+    // cas-streaming builds: the builder staged a pre-chunked image; the
+    // registered identity comes from the platform's trusted verify-and-admit,
+    // so the completion only reports the staged artifacts and declared sizes.
+    if metadata_string(metadata, "rootfs_format", "rootfsFormat").as_deref()
+        == Some("cas-streaming")
+    {
+        return Ok(CompleteSandboxTemplateBuildRequest {
+            snapshot_id: metadata_string(metadata, "snapshot_id", "snapshotId")
+                .unwrap_or_else(|| prepared.snapshot_id.clone()),
+            snapshot_uri: prepared.snapshot_uri.clone(),
+            snapshot_format_version: "content_addressed_streaming_v1".to_string(),
+            snapshot_size_bytes: required_metadata_u64(
+                metadata,
+                "image_size_bytes",
+                "imageSizeBytes",
+            )?,
+            rootfs_disk_bytes,
+            rootfs_node_kind: "base".to_string(),
+            parent_manifest_uri: None,
+            rootfs_format: Some("cas-streaming".to_string()),
+        });
+    }
+
     let rootfs_node_kind = metadata_string(metadata, "rootfs_node_kind", "rootfsNodeKind")
         .unwrap_or_else(|| prepared.rootfs_node_kind.clone());
     let parent_manifest_uri = metadata_string(metadata, "parent_manifest_uri", "parentManifestUri")
@@ -1078,6 +1146,7 @@ fn complete_request_from_metadata(
         rootfs_disk_bytes: required_metadata_u64(metadata, "rootfs_disk_bytes", "rootfsDiskBytes")?,
         rootfs_node_kind,
         parent_manifest_uri,
+        rootfs_format: None,
     })
 }
 
@@ -2319,6 +2388,47 @@ mod tests {
     }
 
     #[test]
+    fn complete_request_for_cas_streaming_uses_staged_identity_and_format() {
+        let prepared = PreparedSandboxTemplateBuild {
+            build_id: "build-1".to_string(),
+            snapshot_id: "snapshot-1".to_string(),
+            snapshot_uri: "s3://bucket/projects/p/sandbox-template-builds/b/snapshot-1.erofs"
+                .to_string(),
+            rootfs_node_kind: "base".to_string(),
+            rootfs_format: Some("cas-streaming".to_string()),
+            builder: PreparedRootfsBuilder {
+                image: "tensorlake/rootfs-builder".to_string(),
+                command: "tl-rootfs-build".to_string(),
+                cpus: 2.0,
+                memory_mb: 4096,
+                disk_mb: 30720,
+            },
+            parent: None,
+        };
+        let metadata = json!({
+            "rootfsFormat": "cas-streaming",
+            "stagedArtifact": "chunked-erofs",
+            "snapshotId": "snapshot-1",
+            "imageSha256": "ab".repeat(32),
+            "imageSizeBytes": 600_000_000u64,
+            "chunkCount": 512,
+        });
+        let request =
+            complete_request_from_metadata(&prepared, &metadata, 10 * 1024 * 1024 * 1024).unwrap();
+        assert_eq!(request.snapshot_id, "snapshot-1");
+        assert_eq!(request.snapshot_uri, prepared.snapshot_uri);
+        assert_eq!(
+            request.snapshot_format_version,
+            "content_addressed_streaming_v1"
+        );
+        assert_eq!(request.snapshot_size_bytes, 600_000_000);
+        assert_eq!(request.rootfs_disk_bytes, 10 * 1024 * 1024 * 1024);
+        assert_eq!(request.rootfs_node_kind, "base");
+        assert_eq!(request.rootfs_format.as_deref(), Some("cas-streaming"));
+        assert!(request.parent_manifest_uri.is_none());
+    }
+
+    #[test]
     fn build_rootfs_spec_adds_builder_inputs() {
         let prepared_spec = json!({
             "buildId": "build-1",
@@ -2466,7 +2576,8 @@ mod tests {
             "parent_manifest_uri": "s3://bucket/parent.tlsnap"
         });
 
-        let request = complete_request_from_metadata(&prepared, &metadata).unwrap();
+        let request =
+            complete_request_from_metadata(&prepared, &metadata, 10 * 1024 * 1024 * 1024).unwrap();
         let body = serde_json::to_value(&request).unwrap();
         assert_eq!(body["snapshotId"], "snapshot-1");
         assert_eq!(body["snapshotUri"], "s3://bucket/child.tlsnap");
@@ -2485,7 +2596,8 @@ mod tests {
             "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
         });
 
-        let request = complete_request_from_metadata(&prepared, &metadata).unwrap();
+        let request =
+            complete_request_from_metadata(&prepared, &metadata, 10 * 1024 * 1024 * 1024).unwrap();
         assert_eq!(request.snapshot_id, "snapshot-prepared");
         assert_eq!(request.snapshot_uri, "s3://bucket/prepared.tlsnap");
         assert_eq!(
@@ -2551,6 +2663,7 @@ mod tests {
             snapshot_id: "snapshot-prepared".to_string(),
             snapshot_uri: "s3://bucket/prepared.tlsnap".to_string(),
             rootfs_node_kind: rootfs_node_kind.to_string(),
+            rootfs_format: None,
             builder: PreparedRootfsBuilder {
                 image: "tensorlake/rootfs-builder".to_string(),
                 command: "tl-rootfs-build".to_string(),
