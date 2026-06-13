@@ -95,6 +95,7 @@ async fn test_create_then_delete_sandbox_image() {
                 dockerfile_path,
                 dockerfile_text: None,
                 context_dir: None,
+                import_image_reference: None,
                 registered_name: Some(image_name.clone()),
                 disk_mb: None,
                 builder_disk_mb: None,

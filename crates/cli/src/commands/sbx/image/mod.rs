@@ -1,5 +1,6 @@
 pub mod create;
 pub mod describe;
+pub mod import;
 pub mod ls;
 pub mod register;
 pub mod rm;

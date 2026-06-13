@@ -781,6 +781,43 @@ enum ImageCommands {
         json: bool,
     },
 
+    /// Import a registry image directly into a sandbox image (no Dockerfile,
+    /// no Docker daemon — the image's layers are written straight into the
+    /// rootfs)
+    Import {
+        /// Registry image reference to import (e.g. ubuntu:24.04,
+        /// pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime, ghcr.io/org/app:v1)
+        image_reference: String,
+
+        /// Registered image name (defaults to the image's last path segment)
+        #[arg(short = 'n', long)]
+        registered_name: Option<String>,
+
+        /// Root disk size in MB for the generated sandbox image (default: 10240)
+        #[arg(long = "disk_mb")]
+        disk_mb: Option<u64>,
+
+        /// Root disk size in MB for the temporary builder sandbox
+        #[arg(long = "builder_disk_mb")]
+        builder_disk_mb: Option<u64>,
+
+        /// CPUs for the temporary build sandbox
+        #[arg(long)]
+        cpus: Option<f64>,
+
+        /// Memory in MB for the temporary build sandbox
+        #[arg(long)]
+        memory: Option<i64>,
+
+        /// Make this sandbox image publicly accessible
+        #[arg(short, long)]
+        public: bool,
+
+        /// Print the registered sandbox image JSON response to stdout
+        #[arg(long = "json", hide = true)]
+        json: bool,
+    },
+
     /// List all sandbox images
     Ls,
 
@@ -1367,6 +1404,29 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             commands::sbx::image::create::run(
                                 ctx,
                                 &dockerfile_path,
+                                registered_name.as_deref(),
+                                disk_mb,
+                                builder_disk_mb,
+                                cpus,
+                                memory,
+                                public,
+                                json,
+                            )
+                            .await
+                        }
+                        ImageCommands::Import {
+                            image_reference,
+                            registered_name,
+                            disk_mb,
+                            builder_disk_mb,
+                            cpus,
+                            memory,
+                            public,
+                            json,
+                        } => {
+                            commands::sbx::image::import::run(
+                                ctx,
+                                &image_reference,
                                 registered_name.as_deref(),
                                 disk_mb,
                                 builder_disk_mb,

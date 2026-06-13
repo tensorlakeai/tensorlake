@@ -1,5 +1,3 @@
-use std::path::PathBuf;
-
 use tensorlake::sandbox_images::{
     SandboxImageBuildEvent, SandboxImageBuildOptions, build_sandbox_image,
 };
@@ -9,10 +7,13 @@ use crate::{
     error::{CliError, Result},
 };
 
+/// Import a registry image directly into a Tensorlake sandbox image, with no
+/// Dockerfile and no Docker daemon: the builder pulls the image's layers and
+/// writes them straight into the rootfs.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     ctx: &CliContext,
-    dockerfile_path: &str,
+    image_reference: &str,
     registered_name: Option<&str>,
     disk_mb: Option<u64>,
     builder_disk_mb: Option<u64>,
@@ -28,10 +29,12 @@ pub async fn run(
         organization_id: ctx.effective_organization_id(),
         project_id: ctx.effective_project_id(),
         namespace: ctx.namespace.clone(),
-        dockerfile_path: PathBuf::from(dockerfile_path),
+        // Unused on the import path, but the option struct is shared with the
+        // Dockerfile build flow.
+        dockerfile_path: std::path::PathBuf::new(),
         dockerfile_text: None,
         context_dir: None,
-        import_image_reference: None,
+        import_image_reference: Some(image_reference.to_string()),
         registered_name: registered_name.map(str::to_string),
         disk_mb,
         builder_disk_mb,

@@ -96,6 +96,7 @@ pub async fn build_sandbox_image(
         dockerfile_path: PathBuf::from(options.dockerfile_path),
         dockerfile_text: options.dockerfile_text,
         context_dir: options.context_dir.map(PathBuf::from),
+        import_image_reference: None,
         registered_name: options.registered_name,
         disk_mb: options.disk_mb.map(u64::from),
         builder_disk_mb: options.builder_disk_mb.map(u64::from),
