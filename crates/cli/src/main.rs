@@ -19,7 +19,7 @@ use error::CliError;
 #[derive(Parser)]
 #[command(
     name = "tl",
-    about = "Tensorlake CLI",
+    about = concat!("Tensorlake CLI v", env!("CARGO_PKG_VERSION")),
     version,
     infer_subcommands = true,
     after_help = "\
@@ -73,6 +73,9 @@ enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Print the CLI version
+    Version,
+
     /// Login to TensorLake
     Login,
 
@@ -999,6 +1002,10 @@ fn missing_subcommand_error() -> &'static str {
 
 async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<()> {
     match command {
+        Commands::Version => {
+            println!("tl {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Commands::Login => commands::login::run(ctx).await,
         Commands::Whoami { output } => {
             commands::whoami::run(ctx, matches!(output, OutputFormat::Json)).await
