@@ -15,10 +15,9 @@ pub struct CliContext {
     pub organization_id: Option<String>,
     pub project_id: Option<String>,
     pub debug: bool,
-    /// W3C trace ID for this CLI invocation (32 lowercase hex chars).
+    /// W3C trace ID for this CLI invocation (32 lowercase hex chars),
+    /// injected as the `traceparent` header on every request.
     pub trace_id: String,
-    /// When true, print the trace ID to stderr after each command.
-    pub show_trace_id: bool,
     introspect_cache: Option<IntrospectResult>,
 }
 
@@ -41,7 +40,6 @@ impl CliContext {
             project_id: config.project_id,
             debug: config.debug,
             trace_id: hex::encode(rand::random::<[u8; 16]>()),
-            show_trace_id: config.show_trace_id,
             introspect_cache: None,
         }
     }
