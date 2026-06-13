@@ -81,6 +81,16 @@ const IGNORED_DOCKERFILE_INSTRUCTIONS: &[&str] =
 
 #[derive(Debug, Error)]
 pub enum SandboxImageBuildError {
+    /// A failure after the builder sandbox was created. Carries the IDs
+    /// support needs to find the build: the builder sandbox ID correlates
+    /// with dataplane and platform logs, the build ID with platform-api.
+    #[error("{source} (builder sandbox: {builder_sandbox_id}, build: {build_id})")]
+    BuildFailed {
+        builder_sandbox_id: String,
+        build_id: String,
+        #[source]
+        source: Box<SandboxImageBuildError>,
+    },
     #[error("{0}")]
     Usage(String),
     #[error("{0}")]
@@ -416,7 +426,11 @@ where
         )));
     }
 
-    result
+    result.map_err(|source| SandboxImageBuildError::BuildFailed {
+        builder_sandbox_id: sandbox_id,
+        build_id: prepared.build_id.clone(),
+        source: Box::new(source),
+    })
 }
 
 async fn resolve_build_context(options: SandboxImageBuildOptions) -> Result<ResolvedBuildContext> {
@@ -1991,6 +2005,21 @@ fn is_dockerignored(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn build_failed_error_names_the_builder_sandbox_and_build() {
+        let error = super::SandboxImageBuildError::BuildFailed {
+            builder_sandbox_id: "rtmmkcw33uvsbep6hn03u".to_string(),
+            build_id: "sandbox_template_build_123".to_string(),
+            source: Box::new(super::SandboxImageBuildError::Other(
+                "rootfs builder exited with status 1".to_string(),
+            )),
+        };
+        let message = error.to_string();
+        assert!(message.contains("builder sandbox: rtmmkcw33uvsbep6hn03u"));
+        assert!(message.contains("build: sandbox_template_build_123"));
+        assert!(message.contains("rootfs builder exited with status 1"));
+    }
     use super::{
         CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
         PreparedSandboxTemplateBuild, build_rootfs_spec, collect_dir_files,
