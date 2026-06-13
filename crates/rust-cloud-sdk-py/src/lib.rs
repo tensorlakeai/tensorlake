@@ -2845,6 +2845,7 @@ fn build_sandbox_image(
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text,
         context_dir: context_dir.map(PathBuf::from),
+        import_image_reference: None,
         registered_name,
         disk_mb,
         builder_disk_mb,

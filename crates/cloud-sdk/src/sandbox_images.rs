@@ -132,6 +132,11 @@ pub struct SandboxImageBuildOptions {
     pub dockerfile_path: PathBuf,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<PathBuf>,
+    /// When set, import this registry image reference directly into a rootfs
+    /// (no Dockerfile, no Docker daemon — the builder runs
+    /// `indexify-rootfs-materialize oci-image-to-ext4`). Mutually exclusive
+    /// with the Dockerfile build path.
+    pub import_image_reference: Option<String>,
     pub registered_name: Option<String>,
     pub disk_mb: Option<u64>,
     pub builder_disk_mb: Option<u64>,
@@ -189,6 +194,12 @@ struct DockerfileBuildPlan {
     /// Surfaced as warnings by the caller; preserved in `dockerfile_text` and
     /// forwarded to `docker build`.
     ignored_instructions: Vec<(usize, String)>,
+    /// When set, this is an image-import build rather than a Dockerfile build:
+    /// the builder pulls this registry reference directly into the rootfs with
+    /// no Docker daemon. There is no build context to upload and the base is
+    /// never resolved against the template registry (import always pulls from
+    /// the registry, producing a fresh base rootfs).
+    import_image_reference: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -256,18 +267,25 @@ pub async fn build_sandbox_image<F>(options: SandboxImageBuildOptions, mut emit:
 where
     F: FnMut(SandboxImageBuildEvent),
 {
-    emit(SandboxImageBuildEvent::Status(
-        "Loading Dockerfile...".to_string(),
-    ));
-    let plan = if let Some(dockerfile_text) = &options.dockerfile_text {
-        load_dockerfile_text_plan(
-            &options.dockerfile_path,
-            options.context_dir.as_deref(),
-            dockerfile_text.clone(),
-            options.registered_name.as_deref(),
-        )?
+    let plan = if let Some(image_ref) = &options.import_image_reference {
+        emit(SandboxImageBuildEvent::Status(format!(
+            "Importing registry image {image_ref}..."
+        )));
+        plan_image_import(image_ref, options.registered_name.as_deref())?
     } else {
-        load_dockerfile_plan(&options.dockerfile_path, options.registered_name.as_deref())?
+        emit(SandboxImageBuildEvent::Status(
+            "Loading Dockerfile...".to_string(),
+        ));
+        if let Some(dockerfile_text) = &options.dockerfile_text {
+            load_dockerfile_text_plan(
+                &options.dockerfile_path,
+                options.context_dir.as_deref(),
+                dockerfile_text.clone(),
+                options.registered_name.as_deref(),
+            )?
+        } else {
+            load_dockerfile_plan(&options.dockerfile_path, options.registered_name.as_deref())?
+        }
     };
     emit(SandboxImageBuildEvent::Status(format!(
         "Selected image name: {}",
@@ -658,8 +676,11 @@ async fn prepare_rootfs_build(
     // the value is an internal reference to an earlier-defined stage, not
     // an external image we should resolve as a template. Also skip when
     // the base image contains `$` (build-arg) or `@` (digest pin); those
-    // were already recorded as unresolvable and warned about.
-    let parent_template_payload = if plan.base_image_is_internal_stage
+    // were already recorded as unresolvable and warned about. Import builds
+    // never resolve a parent — they always pull a fresh base from the
+    // registry, even if the reference happens to match a template name.
+    let parent_template_payload = if plan.import_image_reference.is_some()
+        || plan.base_image_is_internal_stage
         || plan.base_image.contains('$')
         || plan.base_image.contains('@')
     {
@@ -841,9 +862,6 @@ async fn upload_build_inputs(
     disk_mb: Option<u64>,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
-    emit(SandboxImageBuildEvent::Status(
-        "Uploading build context...".to_string(),
-    ));
     // Pre-create REMOTE_BUILD_DIR with permissive mode as root so the
     // sandbox-user file API can write into it. The path lives under
     // /var/lib/tensorlake/ which is root-owned in the rootfs-builder image,
@@ -853,7 +871,14 @@ async fn upload_build_inputs(
     // `PUT /api/v1/files` calls (both running as the sandbox user) succeed
     // without further root involvement.
     ensure_remote_build_root(proxy).await?;
-    copy_local_path(proxy, &plan.context_dir, REMOTE_CONTEXT_DIR).await?;
+    // Import builds have no local build context — the rootfs comes straight
+    // from the registry image — so there is nothing to upload.
+    if plan.import_image_reference.is_none() {
+        emit(SandboxImageBuildEvent::Status(
+            "Uploading build context...".to_string(),
+        ));
+        copy_local_path(proxy, &plan.context_dir, REMOTE_CONTEXT_DIR).await?;
+    }
 
     let docker_config_json = resolved_docker_config_json().await?;
     let spec = build_rootfs_spec(prepared_spec, prepared, plan, disk_mb, docker_config_json)?;
@@ -888,6 +913,14 @@ fn build_rootfs_spec(
         "baseImage".to_string(),
         Value::String(plan.base_image.clone()),
     );
+    // Routes the builder to `oci-image-to-ext4` instead of docker build; the
+    // builder pulls this reference straight into the rootfs.
+    if let Some(import_image_reference) = &plan.import_image_reference {
+        object.insert(
+            "importImageReference".to_string(),
+            Value::String(import_image_reference.clone()),
+        );
+    }
     object.insert(
         "rootfsDiskBytes".to_string(),
         Value::Number(rootfs_disk_bytes(disk_mb, prepared)?.into()),
@@ -1478,6 +1511,55 @@ fn is_localhost(url: &str) -> bool {
     false
 }
 
+/// Build a plan for importing a registry image directly (no Dockerfile).
+/// The stored "dockerfile" is a synthetic `FROM <ref>` so the template
+/// registry records a faithful provenance, but the build never runs Docker:
+/// the spec's `importImageReference` routes the builder to
+/// `oci-image-to-ext4`. Import is always a fresh base from the registry, so
+/// the base is not resolved against the template registry.
+fn plan_image_import(
+    image_ref: &str,
+    registered_name: Option<&str>,
+) -> Result<DockerfileBuildPlan> {
+    let image_ref = image_ref.trim();
+    if image_ref.is_empty() {
+        return Err(SandboxImageBuildError::usage(
+            "image reference to import must not be empty",
+        ));
+    }
+    let registered_name = registered_name
+        .map(str::to_string)
+        .unwrap_or_else(|| default_registered_name_from_image(image_ref));
+    Ok(DockerfileBuildPlan {
+        context_dir: PathBuf::new(),
+        registered_name,
+        dockerfile_text: format!("FROM {image_ref}\n"),
+        base_image: image_ref.to_string(),
+        base_image_is_internal_stage: false,
+        additional_image_references: Vec::new(),
+        unresolvable_image_references: Vec::new(),
+        ignored_instructions: Vec::new(),
+        import_image_reference: Some(image_ref.to_string()),
+    })
+}
+
+/// Derive a registered name from an image reference: the last path segment
+/// with any tag/digest stripped (e.g. `pytorch/pytorch:2.4.1` -> `pytorch`,
+/// `ghcr.io/org/app@sha256:...` -> `app`).
+fn default_registered_name_from_image(image_ref: &str) -> String {
+    let without_digest = image_ref.split('@').next().unwrap_or(image_ref);
+    let last_segment = without_digest.rsplit('/').next().unwrap_or(without_digest);
+    let name = match last_segment.rsplit_once(':') {
+        Some((repo, tag)) if !tag.is_empty() => repo,
+        _ => last_segment,
+    };
+    if name.is_empty() {
+        "imported-image".to_string()
+    } else {
+        name.to_string()
+    }
+}
+
 fn load_dockerfile_plan(
     dockerfile_path: &Path,
     registered_name: Option<&str>,
@@ -1646,6 +1728,7 @@ fn load_dockerfile_text_plan(
         additional_image_references: additional_refs,
         unresolvable_image_references,
         ignored_instructions,
+        import_image_reference: None,
     })
 }
 
@@ -2051,6 +2134,70 @@ mod tests {
     }
 
     #[test]
+    fn plan_image_import_synthesizes_from_and_marks_import() {
+        let plan = super::plan_image_import("ubuntu:24.04", None).unwrap();
+        assert_eq!(plan.dockerfile_text, "FROM ubuntu:24.04\n");
+        assert_eq!(plan.base_image, "ubuntu:24.04");
+        assert_eq!(plan.import_image_reference.as_deref(), Some("ubuntu:24.04"));
+        assert!(plan.additional_image_references.is_empty());
+        // Last path segment with the tag stripped.
+        assert_eq!(plan.registered_name, "ubuntu");
+    }
+
+    #[test]
+    fn plan_image_import_honors_explicit_name_and_rejects_empty() {
+        let plan = super::plan_image_import("ghcr.io/org/app:v1", Some("my-image")).unwrap();
+        assert_eq!(plan.registered_name, "my-image");
+        assert!(super::plan_image_import("   ", None).is_err());
+    }
+
+    #[test]
+    fn default_registered_name_from_image_strips_path_tag_and_digest() {
+        assert_eq!(
+            super::default_registered_name_from_image("pytorch/pytorch:2.4.1-runtime"),
+            "pytorch"
+        );
+        assert_eq!(
+            super::default_registered_name_from_image(&format!(
+                "ghcr.io/org/app@sha256:{}",
+                "a".repeat(64)
+            )),
+            "app"
+        );
+        assert_eq!(
+            super::default_registered_name_from_image("ubuntu"),
+            "ubuntu"
+        );
+    }
+
+    #[test]
+    fn build_rootfs_spec_sets_import_reference_for_import_plans() {
+        let prepared_spec = json!({});
+        let prepared: super::PreparedSandboxTemplateBuild = serde_json::from_value(json!({
+            "buildId": "build-1",
+            "snapshotId": "snap-1",
+            "snapshotUri": "s3://bucket/snap-1",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "cpus": 2.0,
+                "memoryMb": 2048,
+                "diskMb": 20480
+            },
+            "parent": null
+        }))
+        .unwrap();
+        let plan = super::plan_image_import("ubuntu:24.04", None).unwrap();
+
+        let spec =
+            super::build_rootfs_spec(&prepared_spec, &prepared, &plan, Some(10240), None).unwrap();
+        assert_eq!(spec["importImageReference"], "ubuntu:24.04");
+        assert_eq!(spec["baseImage"], "ubuntu:24.04");
+        assert_eq!(spec["dockerfile"], "FROM ubuntu:24.04\n");
+    }
+
+    #[test]
     fn load_dockerfile_plan_reads_base_image_and_name() {
         let temp_dir = tempfile::tempdir().unwrap();
         let dockerfile_path = temp_dir.path().join("Dockerfile");
@@ -2385,6 +2532,7 @@ mod tests {
             base_image_is_internal_stage: false,
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
+            import_image_reference: None,
         };
 
         let spec = build_rootfs_spec(
@@ -2417,6 +2565,7 @@ mod tests {
             base_image_is_internal_stage: false,
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
+            import_image_reference: None,
         };
 
         let spec = build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None).unwrap();
