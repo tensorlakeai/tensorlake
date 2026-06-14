@@ -32,10 +32,22 @@ def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) ->
     for op in img._build_operations:
         dockerfile_lines.append(render_op_line(op))
 
-    # Run tensorlake install after all user commands. There's implicit dependency
-    # of tensorlake install success on user commands right now.
+    # Run Tensorlake install after all user commands so user layers cannot
+    # remove or downgrade the runtime. Force reinstall makes pip replay package
+    # console scripts even when Tensorlake was already present in the base.
+    # Run the SDK install as root so the generated Dockerfile does not depend
+    # on base images providing passwordless sudo. Let pip use the interpreter's
+    # default global install scheme. On Debian and Ubuntu Python, explicitly
+    # passing --prefix=/usr/local nests scripts under /usr/local/local/bin
+    # instead of the dataplane contract path.
+    install_cmd = (
+        "python3 -m pip install --break-system-packages --force-reinstall "
+        f"--no-cache-dir tensorlake=={_SDK_VERSION}"
+    )
+    dockerfile_lines.append("USER root")
     dockerfile_lines.append(
-        f"RUN python3 -m pip install --break-system-packages tensorlake=={_SDK_VERSION}"
+        f"RUN PIP_USER=false {install_cmd} "
+        "&& test -x /usr/local/bin/function-executor"
     )
 
     return "\n".join(dockerfile_lines)

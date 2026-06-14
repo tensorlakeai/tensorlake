@@ -8,7 +8,7 @@ mod output;
 mod project;
 mod python_ast;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::num::NonZeroUsize;
 
 use auth::context::CliContext;
@@ -19,7 +19,7 @@ use error::CliError;
 #[derive(Parser)]
 #[command(
     name = "tl",
-    about = "Tensorlake CLI",
+    about = concat!("Tensorlake CLI v", env!("CARGO_PKG_VERSION")),
     version,
     infer_subcommands = true,
     after_help = "\
@@ -61,12 +61,8 @@ struct Cli {
     #[arg(long, env = "TENSORLAKE_PROJECT_ID")]
     project: Option<String>,
 
-    /// Print the trace ID for this command to stderr (for APM correlation)
-    #[arg(long, env = "TENSORLAKE_SHOW_TRACE_ID", global = true)]
-    show_trace_id: bool,
-
     #[command(subcommand)]
-    command: Commands,
+    command: Option<Commands>,
 }
 
 #[derive(clap::ValueEnum, Clone)]
@@ -77,6 +73,9 @@ enum OutputFormat {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Print the CLI version
+    Version,
+
     /// Login to TensorLake
     Login,
 
@@ -100,6 +99,7 @@ enum Commands {
     },
 
     /// Create a new Tensorlake application
+    #[command(hide = true)]
     New {
         /// Application name
         name: String,
@@ -110,6 +110,7 @@ enum Commands {
     },
 
     /// Deploy applications to Tensorlake Cloud
+    #[command(hide = true)]
     Deploy {
         /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -152,6 +153,7 @@ enum Commands {
     },
 
     /// Parse a document and print markdown
+    #[command(hide = true)]
     Parse {
         /// Local file path or HTTP/HTTPS URL
         path_or_url: String,
@@ -165,7 +167,12 @@ enum Commands {
         ignore_cache: bool,
     },
 
+    /// Manage Orchestrate applications
+    #[command(subcommand, name = "app", alias = "apps", alias = "orchestrate")]
+    App(AppCommands),
+
     /// Manage cron schedules for applications
+    #[command(hide = true)]
     #[command(subcommand)]
     Cron(CronCommands),
 
@@ -178,6 +185,7 @@ enum Commands {
     SshKeys(SshKeysCommands),
 
     /// List applications
+    #[command(hide = true)]
     #[command(name = "ls")]
     Applications(ApplicationsArgs),
 
@@ -299,6 +307,34 @@ enum CronCommands {
     },
 }
 
+#[derive(Subcommand)]
+enum AppCommands {
+    /// Create a new Tensorlake application
+    New {
+        /// Application name
+        name: String,
+
+        /// Overwrite existing files
+        #[arg(short, long)]
+        force: bool,
+    },
+
+    /// Deploy applications to Tensorlake Cloud
+    Deploy {
+        /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+
+    /// Manage cron schedules for applications
+    #[command(subcommand)]
+    Cron(CronCommands),
+
+    /// List applications
+    #[command(name = "ls")]
+    Applications(ApplicationsArgs),
+}
+
 #[derive(Parser)]
 struct ApplicationsArgs {
     #[command(subcommand)]
@@ -394,6 +430,10 @@ enum SbxCommands {
         #[arg(short, long, conflicts_with = "snapshot")]
         image: Option<String>,
 
+        /// Local cloud-init file path or HTTP(S) URL for the sandbox
+        #[arg(long = "cloud-init", value_name = "PATH_OR_URL")]
+        cloud_init: Option<String>,
+
         /// Return immediately after creation instead of waiting for the sandbox to be running
         #[arg(short, long)]
         no_wait: bool,
@@ -463,9 +503,89 @@ enum SbxCommands {
         #[arg(short, long)]
         env: Vec<String>,
 
-        /// Process user to run as: username, uid, or uid:gid
-        #[arg(long, default_value = "tl-user")]
-        user: String,
+        /// Process user to run as: username, uid, or uid:gid (default: the
+        /// image's configured user)
+        #[arg(long)]
+        user: Option<String>,
+
+        /// Start the process and return immediately instead of streaming output
+        #[arg(long)]
+        detach: bool,
+
+        /// Managed-process name. Requires --detach.
+        #[arg(long)]
+        name: Option<String>,
+
+        /// Managed-process restart policy. Requires --detach.
+        #[arg(long, value_enum)]
+        restart: Option<RestartPolicyArg>,
+
+        /// Maximum number of restarts for a managed process. Requires --detach.
+        #[arg(long)]
+        max_restarts: Option<u32>,
+
+        /// Initial restart backoff in milliseconds. Requires --detach.
+        #[arg(long)]
+        initial_backoff_ms: Option<u64>,
+
+        /// Maximum restart backoff in milliseconds. Requires --detach.
+        #[arg(long)]
+        max_backoff_ms: Option<u64>,
+
+        /// HTTP health check as PORT or PORT:/path. Requires --detach.
+        #[arg(long)]
+        health_http: Option<String>,
+
+        /// TCP health check port. Requires --detach.
+        #[arg(long, value_parser = parse_tcp_port)]
+        health_tcp: Option<u16>,
+
+        /// Delay before the first health check in milliseconds. Requires --detach.
+        #[arg(long)]
+        health_initial_delay_ms: Option<u64>,
+
+        /// Health check interval in milliseconds. Requires --detach.
+        #[arg(long)]
+        health_interval_ms: Option<u64>,
+
+        /// Per-check health timeout in milliseconds. Requires --detach.
+        #[arg(long)]
+        health_timeout_ms: Option<u64>,
+
+        /// Consecutive health failures before restart. Requires --detach.
+        #[arg(long)]
+        health_failure_threshold: Option<u32>,
+    },
+
+    /// List or inspect sandbox processes
+    Ps {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Optional process PID to inspect
+        pid: Option<i64>,
+
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Restart a managed sandbox process by PID
+    Restart {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Process PID
+        pid: i64,
+    },
+
+    /// Kill a sandbox process by PID
+    Kill {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Process PID
+        pid: i64,
     },
 
     /// Copy files between local and sandbox
@@ -494,20 +614,6 @@ enum SbxCommands {
     /// Create a checkpoint (snapshot) or list checkpoints
     #[command(alias = "snapshot")]
     Checkpoint(SnapshotArgs),
-
-    /// Clone a running sandbox using the server live-copy API
-    Clone {
-        /// Source sandbox ID or name
-        sandbox_id: String,
-
-        /// Max seconds to wait for cloned sandboxes to become ready
-        #[arg(short, long, default_value = "300")]
-        timeout: f64,
-
-        /// Number of copies to create from the same snapshot
-        #[arg(short = 'n', long, default_value = "1")]
-        times: NonZeroUsize,
-    },
 
     /// Manage user-exposed sandbox ports
     #[command(subcommand)]
@@ -550,9 +656,10 @@ enum SbxCommands {
         #[arg(short, long)]
         env: Vec<String>,
 
-        /// Process user to run as: username, uid, or uid:gid
-        #[arg(long, default_value = "tl-user")]
-        user: String,
+        /// Process user to run as: username, uid, or uid:gid (default: the
+        /// image's configured user)
+        #[arg(long)]
+        user: Option<String>,
 
         /// Keep sandbox after command exits
         #[arg(short, long)]
@@ -674,11 +781,55 @@ enum ImageCommands {
         json: bool,
     },
 
+    /// Import a registry image directly into a sandbox image (no Dockerfile,
+    /// no Docker daemon — the image's layers are written straight into the
+    /// rootfs)
+    Import {
+        /// Registry image reference to import (e.g. ubuntu:24.04,
+        /// pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime, ghcr.io/org/app:v1)
+        image_reference: String,
+
+        /// Registered image name (defaults to the image's last path segment)
+        #[arg(short = 'n', long)]
+        registered_name: Option<String>,
+
+        /// Root disk size in MB for the generated sandbox image (default: 10240)
+        #[arg(long = "disk_mb")]
+        disk_mb: Option<u64>,
+
+        /// Root disk size in MB for the temporary builder sandbox
+        #[arg(long = "builder_disk_mb")]
+        builder_disk_mb: Option<u64>,
+
+        /// CPUs for the temporary build sandbox
+        #[arg(long)]
+        cpus: Option<f64>,
+
+        /// Memory in MB for the temporary build sandbox
+        #[arg(long)]
+        memory: Option<i64>,
+
+        /// Make this sandbox image publicly accessible
+        #[arg(short, long)]
+        public: bool,
+
+        /// Print the registered sandbox image JSON response to stdout
+        #[arg(long = "json", hide = true)]
+        json: bool,
+    },
+
     /// List all sandbox images
     Ls,
 
     /// Show details for a sandbox image
     Describe {
+        /// Image name or ID
+        name_or_id: String,
+    },
+
+    /// Delete a sandbox image
+    #[command(alias = "delete")]
+    Rm {
         /// Image name or ID
         name_or_id: String,
     },
@@ -705,6 +856,23 @@ struct SnapshotArgs {
 enum SnapshotTypeArg {
     Memory,
     Filesystem,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum RestartPolicyArg {
+    Never,
+    OnFailure,
+    Always,
+}
+
+impl RestartPolicyArg {
+    fn as_wire_value(self) -> &'static str {
+        match self {
+            RestartPolicyArg::Never => "never",
+            RestartPolicyArg::OnFailure => "on_failure",
+            RestartPolicyArg::Always => "always",
+        }
+    }
 }
 
 impl SnapshotTypeArg {
@@ -835,16 +1003,19 @@ async fn main() {
         cli.organization.as_deref(),
         cli.project.as_deref(),
         cli.debug,
-        cli.show_trace_id,
     );
 
     let mut ctx = CliContext::from_resolved(resolved);
 
-    let result = run_command(&mut ctx, cli.command).await;
+    let command = match cli.command {
+        Some(command) => command,
+        None => {
+            eprintln!("{}", missing_subcommand_error());
+            std::process::exit(2);
+        }
+    };
 
-    if ctx.show_trace_id {
-        eprintln!("Trace-ID: {}", ctx.trace_id);
-    }
+    let result = run_command(&mut ctx, command).await;
 
     if let Err(e) = result {
         match &e {
@@ -862,8 +1033,16 @@ async fn main() {
     }
 }
 
+fn missing_subcommand_error() -> &'static str {
+    "error: 'tl' requires a subcommand but one was not provided\n\nUsage: tl [OPTIONS] <COMMAND>\n\nFor more information, try '--help'."
+}
+
 async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<()> {
     match command {
+        Commands::Version => {
+            println!("tl {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
         Commands::Login => commands::login::run(ctx).await,
         Commands::Whoami { output } => {
             commands::whoami::run(ctx, matches!(output, OutputFormat::Json)).await
@@ -873,15 +1052,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             no_confirm,
         } => commands::init::run(ctx, directory.as_deref(), no_confirm).await,
         Commands::New { name, force } => commands::new::run(&name, force),
-        Commands::Deploy { args } => {
-            let onprem = std::env::var("TENSORLAKE_ONPREM")
-                .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
-                .unwrap_or(false);
-            if !onprem {
-                ensure_auth_and_project(ctx).await?;
-            }
-            commands::deploy::run(ctx, &args).await
-        }
+        Commands::Deploy { args } => run_deploy_command(ctx, &args).await,
         Commands::BuildImages {
             application_file_path,
             repository,
@@ -909,31 +1080,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             pages,
             ignore_cache,
         } => commands::parse::run(ctx, &path_or_url, pages.as_deref(), ignore_cache).await,
-        Commands::Cron(subcmd) => {
-            ensure_auth_and_project(ctx).await?;
-            match subcmd {
-                CronCommands::Create {
-                    application,
-                    schedule,
-                    input_json,
-                    input_file,
-                } => {
-                    commands::cron::create(
-                        ctx,
-                        &application,
-                        &schedule,
-                        input_json.as_deref(),
-                        input_file.as_deref(),
-                    )
-                    .await
-                }
-                CronCommands::List { application } => commands::cron::list(ctx, &application).await,
-                CronCommands::Delete {
-                    application,
-                    schedule_id,
-                } => commands::cron::delete(ctx, &application, &schedule_id).await,
-            }
-        }
+        Commands::App(subcmd) => run_app_command(ctx, subcmd).await,
+        Commands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
         Commands::Secrets(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
@@ -950,12 +1098,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             ensure_auth(ctx).await?;
             run_ssh_keys_command(ctx, subcmd).await
         }
-        Commands::Applications(app_args) => {
-            ensure_auth_and_project(ctx).await?;
-            match app_args.command {
-                Some(ApplicationsCommands::Ls) | None => commands::applications::ls(ctx).await,
-            }
-        }
+        Commands::Applications(app_args) => run_applications_command(ctx, app_args).await,
         Commands::Sbx(subcmd) => match subcmd {
             SbxCommands::Ssh(ssh_args)
                 if matches!(ssh_args.command, Some(SshCommands::Keys(_))) =>
@@ -994,6 +1137,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         entrypoint,
                         snapshot,
                         image,
+                        cloud_init,
                         no_wait,
                         ports,
                         allow_unauthenticated_access,
@@ -1023,6 +1167,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 entrypoint: &entrypoint,
                                 snapshot_id: snapshot.as_deref(),
                                 image_name: image.as_deref(),
+                                cloud_init: cloud_init.as_deref(),
                                 wait: !no_wait,
                                 ports: &ports,
                                 allow_unauthenticated_access,
@@ -1053,18 +1198,55 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         workdir,
                         env,
                         user,
+                        detach,
+                        name,
+                        restart,
+                        max_restarts,
+                        initial_backoff_ms,
+                        max_backoff_ms,
+                        health_http,
+                        health_tcp,
+                        health_initial_delay_ms,
+                        health_interval_ms,
+                        health_timeout_ms,
+                        health_failure_threshold,
                     } => {
                         commands::sbx::exec::run(
                             ctx,
                             &sandbox_id,
                             &command,
                             &args,
-                            timeout,
-                            workdir.as_deref(),
-                            &env,
-                            Some(user.as_str()),
+                            commands::sbx::exec::ExecOptions {
+                                timeout,
+                                workdir: workdir.as_deref(),
+                                env: &env,
+                                user: user.as_deref(),
+                                detach,
+                                name: name.as_deref(),
+                                restart_policy: restart.map(RestartPolicyArg::as_wire_value),
+                                max_restarts,
+                                initial_backoff_ms,
+                                max_backoff_ms,
+                                health_http: health_http.as_deref(),
+                                health_tcp,
+                                health_initial_delay_ms,
+                                health_interval_ms,
+                                health_timeout_ms,
+                                health_failure_threshold,
+                            },
                         )
                         .await
+                    }
+                    SbxCommands::Ps {
+                        sandbox_id,
+                        pid,
+                        json,
+                    } => commands::sbx::process::ps(ctx, &sandbox_id, pid, json).await,
+                    SbxCommands::Restart { sandbox_id, pid } => {
+                        commands::sbx::process::restart(ctx, &sandbox_id, pid).await
+                    }
+                    SbxCommands::Kill { sandbox_id, pid } => {
+                        commands::sbx::process::kill(ctx, &sandbox_id, pid).await
                     }
                     SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
                     SbxCommands::Copy {
@@ -1094,11 +1276,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             .await
                         }
                     },
-                    SbxCommands::Clone {
-                        sandbox_id,
-                        timeout,
-                        times,
-                    } => commands::sbx::clone::run(ctx, &sandbox_id, timeout, times.get()).await,
                     SbxCommands::Port(port_cmd) => match port_cmd {
                         PortCommands::Ls { sandbox_id } => {
                             commands::sbx::port::list(ctx, &sandbox_id).await
@@ -1139,7 +1316,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             timeout,
                             workdir.as_deref(),
                             &env,
-                            Some(user.as_str()),
+                            user.as_deref(),
                             keep,
                             &ports,
                             allow_unauthenticated_access,
@@ -1237,9 +1414,35 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             )
                             .await
                         }
+                        ImageCommands::Import {
+                            image_reference,
+                            registered_name,
+                            disk_mb,
+                            builder_disk_mb,
+                            cpus,
+                            memory,
+                            public,
+                            json,
+                        } => {
+                            commands::sbx::image::import::run(
+                                ctx,
+                                &image_reference,
+                                registered_name.as_deref(),
+                                disk_mb,
+                                builder_disk_mb,
+                                cpus,
+                                memory,
+                                public,
+                                json,
+                            )
+                            .await
+                        }
                         ImageCommands::Ls => commands::sbx::image::ls::run(ctx).await,
                         ImageCommands::Describe { name_or_id } => {
                             commands::sbx::image::describe::run(ctx, &name_or_id).await
+                        }
+                        ImageCommands::Rm { name_or_id } => {
+                            commands::sbx::image::rm::run(ctx, &name_or_id).await
                         }
                     },
                     SbxCommands::Tunnel {
@@ -1252,6 +1455,61 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 }
             }
         },
+    }
+}
+
+async fn run_app_command(ctx: &mut CliContext, subcmd: AppCommands) -> error::Result<()> {
+    match subcmd {
+        AppCommands::New { name, force } => commands::new::run(&name, force),
+        AppCommands::Deploy { args } => run_deploy_command(ctx, &args).await,
+        AppCommands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
+        AppCommands::Applications(app_args) => run_applications_command(ctx, app_args).await,
+    }
+}
+
+async fn run_deploy_command(ctx: &mut CliContext, args: &[String]) -> error::Result<()> {
+    let onprem = std::env::var("TENSORLAKE_ONPREM")
+        .map(|v| matches!(v.to_lowercase().as_str(), "1" | "true" | "yes" | "on"))
+        .unwrap_or(false);
+    if !onprem {
+        ensure_auth_and_project(ctx).await?;
+    }
+    commands::deploy::run(ctx, args).await
+}
+
+async fn run_cron_command(ctx: &mut CliContext, subcmd: CronCommands) -> error::Result<()> {
+    ensure_auth_and_project(ctx).await?;
+    match subcmd {
+        CronCommands::Create {
+            application,
+            schedule,
+            input_json,
+            input_file,
+        } => {
+            commands::cron::create(
+                ctx,
+                &application,
+                &schedule,
+                input_json.as_deref(),
+                input_file.as_deref(),
+            )
+            .await
+        }
+        CronCommands::List { application } => commands::cron::list(ctx, &application).await,
+        CronCommands::Delete {
+            application,
+            schedule_id,
+        } => commands::cron::delete(ctx, &application, &schedule_id).await,
+    }
+}
+
+async fn run_applications_command(
+    ctx: &mut CliContext,
+    app_args: ApplicationsArgs,
+) -> error::Result<()> {
+    ensure_auth_and_project(ctx).await?;
+    match app_args.command {
+        Some(ApplicationsCommands::Ls) | None => commands::applications::ls(ctx).await,
     }
 }
 
@@ -1268,32 +1526,95 @@ async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> erro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use clap::CommandFactory;
 
-    #[test]
-    fn clone_times_defaults_to_one() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123"]).unwrap();
-
-        match cli.command {
-            Commands::Sbx(SbxCommands::Clone { times, .. }) => assert_eq!(times.get(), 1),
-            _ => panic!("expected sbx clone command"),
-        }
+    fn parse_command<const N: usize>(args: [&str; N]) -> Commands {
+        Cli::try_parse_from(args).unwrap().command.unwrap()
     }
 
     #[test]
-    fn clone_times_parses_explicit_value() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "3"]).unwrap();
-
-        match cli.command {
-            Commands::Sbx(SbxCommands::Clone { times, .. }) => assert_eq!(times.get(), 3),
-            _ => panic!("expected sbx clone command"),
-        }
-    }
-
-    #[test]
-    fn clone_times_rejects_zero() {
-        let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123", "--times", "0"]);
+    fn clone_command_is_not_supported() {
+        let result = Cli::try_parse_from(["tl", "sbx", "clone", "sbx-123"]);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn build_images_command_is_hidden_from_help() {
+        let mut help = Vec::new();
+        Cli::command().write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(!help.contains("build-images"));
+        assert!(Cli::try_parse_from(["tl", "build-images", "app.py"]).is_ok());
+    }
+
+    #[test]
+    fn missing_subcommand_error_omits_hidden_commands_and_aliases() {
+        assert!(Cli::try_parse_from(["tl"]).is_ok());
+
+        let error = missing_subcommand_error();
+        assert!(error.contains("Usage: tl [OPTIONS] <COMMAND>"));
+        assert!(!error.contains("subcommands:"));
+        assert!(!error.contains("new"));
+        assert!(!error.contains("deploy"));
+        assert!(!error.contains("build-images"));
+        assert!(!error.contains("parse"));
+        assert!(!error.contains("cron"));
+        assert!(!error.contains("ssh-key"));
+        assert!(!error.contains("orchestrate"));
+    }
+
+    #[test]
+    fn orchestrate_commands_are_grouped_under_app() {
+        match parse_command(["tl", "app", "new", "hello_world"]) {
+            Commands::App(AppCommands::New { name, force }) => {
+                assert_eq!(name, "hello_world");
+                assert!(!force);
+            }
+            _ => panic!("expected app new command"),
+        }
+        match parse_command(["tl", "app", "deploy", "hello_world.py"]) {
+            Commands::App(AppCommands::Deploy { args }) => {
+                assert_eq!(args, vec!["hello_world.py"]);
+            }
+            _ => panic!("expected app deploy command"),
+        }
+        match parse_command(["tl", "app", "cron", "ls", "hello_world"]) {
+            Commands::App(AppCommands::Cron(CronCommands::List { application })) => {
+                assert_eq!(application, "hello_world");
+            }
+            _ => panic!("expected app cron ls command"),
+        }
+        match parse_command(["tl", "app", "ls"]) {
+            Commands::App(AppCommands::Applications(ApplicationsArgs { command: None })) => {}
+            _ => panic!("expected app ls command"),
+        }
+    }
+
+    #[test]
+    fn app_aliases_parse() {
+        assert!(Cli::try_parse_from(["tl", "apps", "ls"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "orchestrate", "ls"]).is_ok());
+    }
+
+    #[test]
+    fn legacy_orchestrate_commands_are_hidden_but_still_parse() {
+        let mut help = Vec::new();
+        Cli::command().write_long_help(&mut help).unwrap();
+        let help = String::from_utf8(help).unwrap();
+
+        assert!(!help.contains(" new "));
+        assert!(!help.contains(" deploy "));
+        assert!(!help.contains(" cron "));
+        assert!(!help.contains(" parse "));
+        assert!(!help.contains(" ls "));
+
+        assert!(Cli::try_parse_from(["tl", "new", "hello_world"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "deploy", "hello_world.py"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "cron", "ls", "hello_world"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "parse", "document.pdf"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "ls"]).is_ok());
     }
 
     #[test]
@@ -1305,10 +1626,7 @@ mod tests {
 
     #[test]
     fn cp_file_copy_parses_destination() {
-        let cli =
-            Cli::try_parse_from(["tl", "sbx", "cp", "local.txt", "sbx-123:/tmp/file"]).unwrap();
-
-        match cli.command {
+        match parse_command(["tl", "sbx", "cp", "local.txt", "sbx-123:/tmp/file"]) {
             Commands::Sbx(SbxCommands::Cp { src, dest }) => {
                 assert_eq!(src, "local.txt");
                 assert_eq!(dest, "sbx-123:/tmp/file");
@@ -1319,9 +1637,7 @@ mod tests {
 
     #[test]
     fn copy_times_defaults_to_one() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "copy", "sbx-123"]).unwrap();
-
-        match cli.command {
+        match parse_command(["tl", "sbx", "copy", "sbx-123"]) {
             Commands::Sbx(SbxCommands::Copy { times, .. }) => assert_eq!(times.get(), 1),
             _ => panic!("expected sbx copy command"),
         }
@@ -1329,9 +1645,7 @@ mod tests {
 
     #[test]
     fn copy_times_parses_explicit_value() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "copy", "sbx-123", "--times", "3"]).unwrap();
-
-        match cli.command {
+        match parse_command(["tl", "sbx", "copy", "sbx-123", "--times", "3"]) {
             Commands::Sbx(SbxCommands::Copy {
                 sandbox_id, times, ..
             }) => {
@@ -1376,18 +1690,22 @@ mod tests {
     }
 
     #[test]
+    fn restart_policy_maps_to_wire_values() {
+        assert_eq!(RestartPolicyArg::Never.as_wire_value(), "never");
+        assert_eq!(RestartPolicyArg::OnFailure.as_wire_value(), "on_failure");
+        assert_eq!(RestartPolicyArg::Always.as_wire_value(), "always");
+    }
+
+    #[test]
     fn sbx_checkpoint_parses_memory_checkpoint_type() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "checkpoint",
             "sbx-123",
             "--checkpoint-type",
             "memory",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
                 sandbox_id,
                 checkpoint_type,
@@ -1402,17 +1720,14 @@ mod tests {
 
     #[test]
     fn sbx_checkpoint_parses_filesystem_checkpoint_type() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "checkpoint",
             "sbx-123",
             "--checkpoint-type",
             "filesystem",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Checkpoint(SnapshotArgs {
                 sandbox_id,
                 checkpoint_type,
@@ -1427,10 +1742,7 @@ mod tests {
 
     #[test]
     fn sbx_run_parses_disk_mb_override() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "run", "--disk_mb", "30720", "echo", "hello"])
-            .unwrap();
-
-        match cli.command {
+        match parse_command(["tl", "sbx", "run", "--disk_mb", "30720", "echo", "hello"]) {
             Commands::Sbx(SbxCommands::Run { disk_mb, .. }) => {
                 assert_eq!(disk_mb, Some(30720));
             }
@@ -1440,25 +1752,110 @@ mod tests {
 
     #[test]
     fn sbx_exec_parses_process_user() {
-        let cli =
-            Cli::try_parse_from(["tl", "sbx", "exec", "--user", "1000:1000", "sbx-123", "id"])
-                .unwrap();
-
-        match cli.command {
+        match parse_command(["tl", "sbx", "exec", "--user", "1000:1000", "sbx-123", "id"]) {
             Commands::Sbx(SbxCommands::Exec { user, .. }) => {
-                assert_eq!(user, "1000:1000");
+                assert_eq!(user.as_deref(), Some("1000:1000"));
             }
             _ => panic!("expected sbx exec command"),
         }
     }
 
     #[test]
-    fn sbx_run_parses_process_user() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "run", "--user", "ubuntu", "id"]).unwrap();
+    fn sbx_exec_omits_process_user_by_default() {
+        match parse_command(["tl", "sbx", "exec", "sbx-123", "id"]) {
+            Commands::Sbx(SbxCommands::Exec { user, .. }) => {
+                assert_eq!(user, None);
+            }
+            _ => panic!("expected sbx exec command"),
+        }
+    }
 
-        match cli.command {
+    #[test]
+    fn sbx_exec_parses_managed_detach_flags() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "exec",
+            "sbx-123",
+            "--detach",
+            "--name",
+            "web",
+            "--restart",
+            "on-failure",
+            "--max-restarts",
+            "3",
+            "--health-http",
+            "8000:/health",
+            "python",
+            "app.py",
+        ]) {
+            Commands::Sbx(SbxCommands::Exec {
+                detach,
+                name,
+                restart,
+                max_restarts,
+                health_http,
+                command,
+                args,
+                ..
+            }) => {
+                assert!(detach);
+                assert_eq!(name.as_deref(), Some("web"));
+                assert_eq!(restart, Some(RestartPolicyArg::OnFailure));
+                assert_eq!(max_restarts, Some(3));
+                assert_eq!(health_http.as_deref(), Some("8000:/health"));
+                assert_eq!(command, "python");
+                assert_eq!(args, vec!["app.py"]);
+            }
+            _ => panic!("expected sbx exec command"),
+        }
+    }
+
+    #[test]
+    fn sbx_process_lifecycle_commands_parse() {
+        match parse_command(["tl", "sbx", "ps", "sbx-123", "42", "--json"]) {
+            Commands::Sbx(SbxCommands::Ps {
+                sandbox_id,
+                pid,
+                json,
+            }) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(pid, Some(42));
+                assert!(json);
+            }
+            _ => panic!("expected sbx ps command"),
+        }
+        match parse_command(["tl", "sbx", "restart", "sbx-123", "42"]) {
+            Commands::Sbx(SbxCommands::Restart { sandbox_id, pid }) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(pid, 42);
+            }
+            _ => panic!("expected sbx restart command"),
+        }
+        match parse_command(["tl", "sbx", "kill", "sbx-123", "42"]) {
+            Commands::Sbx(SbxCommands::Kill { sandbox_id, pid }) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert_eq!(pid, 42);
+            }
+            _ => panic!("expected sbx kill command"),
+        }
+    }
+
+    #[test]
+    fn sbx_run_parses_process_user() {
+        match parse_command(["tl", "sbx", "run", "--user", "ubuntu", "id"]) {
             Commands::Sbx(SbxCommands::Run { user, .. }) => {
-                assert_eq!(user, "ubuntu");
+                assert_eq!(user.as_deref(), Some("ubuntu"));
+            }
+            _ => panic!("expected sbx run command"),
+        }
+    }
+
+    #[test]
+    fn sbx_run_omits_process_user_by_default() {
+        match parse_command(["tl", "sbx", "run", "id"]) {
+            Commands::Sbx(SbxCommands::Run { user, .. }) => {
+                assert_eq!(user, None);
             }
             _ => panic!("expected sbx run command"),
         }
@@ -1466,7 +1863,7 @@ mod tests {
 
     #[test]
     fn sbx_create_parses_disk_mb_override() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "create",
@@ -1474,10 +1871,7 @@ mod tests {
             "30720",
             "--image",
             "tensorlake/ubuntu-minimal",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Create { disk_mb, .. }) => {
                 assert_eq!(disk_mb, Some(30720));
             }
@@ -1487,7 +1881,7 @@ mod tests {
 
     #[test]
     fn sbx_create_parses_hidden_disk_gb_override() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "create",
@@ -1495,10 +1889,7 @@ mod tests {
             "25",
             "--image",
             "tensorlake/ubuntu-minimal",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Create {
                 disk_mb, disk_gb, ..
             }) => {
@@ -1511,7 +1902,7 @@ mod tests {
 
     #[test]
     fn image_create_parses_cpu_memory_and_disk_overrides() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "image",
@@ -1525,10 +1916,7 @@ mod tests {
             "30720",
             "--builder_disk_mb",
             "65536",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
                 cpus,
                 memory,
@@ -1547,7 +1935,7 @@ mod tests {
 
     #[test]
     fn image_create_parses_hidden_disk_gb_override() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "image",
@@ -1555,10 +1943,7 @@ mod tests {
             "./Dockerfile",
             "--disk",
             "25",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Create {
                 disk_mb, disk_gb, ..
             })) => {
@@ -1571,7 +1956,7 @@ mod tests {
 
     #[test]
     fn image_register_parses_name_and_snapshot_id() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "image",
@@ -1581,10 +1966,7 @@ mod tests {
             "--dockerfile",
             "./Dockerfile",
             "--public",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Register {
                 image_name,
                 snapshot_id,
@@ -1602,10 +1984,7 @@ mod tests {
 
     #[test]
     fn sbx_port_expose_parses_ports() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "port", "expose", "sbx-123", "8080", "3000"])
-            .unwrap();
-
-        match cli.command {
+        match parse_command(["tl", "sbx", "port", "expose", "sbx-123", "8080", "3000"]) {
             Commands::Sbx(SbxCommands::Port(PortCommands::Expose { ports, .. })) => {
                 assert_eq!(ports, vec![8080, 3000]);
             }
@@ -1636,7 +2015,7 @@ mod tests {
 
     #[test]
     fn sbx_tunnel_parses_remote_and_listen_ports() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "tunnel",
@@ -1644,10 +2023,7 @@ mod tests {
             "5900",
             "--listen-port",
             "15900",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Tunnel {
                 sandbox_id,
                 remote_port,
@@ -1663,7 +2039,7 @@ mod tests {
 
     #[test]
     fn sbx_ssh_parses_shell_args_workdir_and_env() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "ssh",
@@ -1680,10 +2056,7 @@ mod tests {
             "FOO=bar",
             "--env",
             "TERM=screen-256color",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Ssh(SshArgs {
                 command,
                 sandbox_id,
@@ -1705,9 +2078,7 @@ mod tests {
 
     #[test]
     fn sbx_ssh_keys_ls_parses() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "ssh", "keys", "ls"]).unwrap();
-
-        match cli.command {
+        match parse_command(["tl", "sbx", "ssh", "keys", "ls"]) {
             Commands::Sbx(SbxCommands::Ssh(SshArgs {
                 command: Some(SshCommands::Keys(SshKeysCommands::Ls)),
                 sandbox_id: None,
@@ -1719,9 +2090,7 @@ mod tests {
 
     #[test]
     fn sbx_pty_ls_parses() {
-        let cli = Cli::try_parse_from(["tl", "sbx", "pty", "ls", "sbx-123"]).unwrap();
-
-        match cli.command {
+        match parse_command(["tl", "sbx", "pty", "ls", "sbx-123"]) {
             Commands::Sbx(SbxCommands::Pty(PtyCommands::Ls {
                 sandbox_id,
                 show_token,
@@ -1737,7 +2106,7 @@ mod tests {
 
     #[test]
     fn sbx_pty_ls_with_token_flags_parses() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl",
             "sbx",
             "pty",
@@ -1745,10 +2114,7 @@ mod tests {
             "sbx-123",
             "--show-token",
             "--json",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Pty(PtyCommands::Ls {
                 sandbox_id,
                 show_token,
@@ -1764,12 +2130,9 @@ mod tests {
 
     #[test]
     fn sbx_pty_attach_parses() {
-        let cli = Cli::try_parse_from([
+        match parse_command([
             "tl", "sbx", "pty", "attach", "sbx-123", "sess-1", "--token", "tok-1",
-        ])
-        .unwrap();
-
-        match cli.command {
+        ]) {
             Commands::Sbx(SbxCommands::Pty(PtyCommands::Attach {
                 sandbox_id,
                 session_id,
@@ -1785,10 +2148,7 @@ mod tests {
 
     #[test]
     fn sbx_pty_rm_parses_multiple_session_ids() {
-        let cli =
-            Cli::try_parse_from(["tl", "sbx", "pty", "rm", "sbx-123", "sess-1", "sess-2"]).unwrap();
-
-        match cli.command {
+        match parse_command(["tl", "sbx", "pty", "rm", "sbx-123", "sess-1", "sess-2"]) {
             Commands::Sbx(SbxCommands::Pty(PtyCommands::Rm {
                 sandbox_id,
                 session_ids,

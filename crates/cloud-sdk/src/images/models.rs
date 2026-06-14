@@ -399,16 +399,20 @@ impl Image {
             lines.push(render_build_operation(op));
         }
 
-        let install_command = if sdk_version.starts_with("~=")
+        let tensorlake_spec = if sdk_version.starts_with("~=")
             || sdk_version.starts_with(">=")
             || sdk_version.starts_with("<=")
             || sdk_version.starts_with("!=")
             || sdk_version.starts_with("==")
         {
-            format!("RUN python3 -m pip install --break-system-packages tensorlake{sdk_version}")
+            format!("tensorlake{sdk_version}")
         } else {
-            format!("RUN python3 -m pip install --break-system-packages tensorlake=={sdk_version}")
+            format!("tensorlake=={sdk_version}")
         };
+        lines.push("USER root".to_string());
+        let install_command = format!(
+            "RUN PIP_USER=false python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir {tensorlake_spec} && test -x /usr/local/bin/function-executor"
+        );
         lines.push(install_command);
 
         lines.join("\n")
@@ -674,15 +678,17 @@ mod tests {
             .build()
             .unwrap();
 
-        assert!(
-            image
-                .dockerfile_content("1.2.3", None)
-                .contains("RUN python3 -m pip install --break-system-packages tensorlake==1.2.3")
-        );
+        let dockerfile = image.dockerfile_content("1.2.3", None);
+        assert!(dockerfile.contains("python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir tensorlake==1.2.3"));
+        assert!(!dockerfile.contains("--prefix=/usr/local"));
+        assert!(!dockerfile.contains("sudo"));
+        assert!(!dockerfile.contains("id -u"));
+        assert!(dockerfile.contains("\nUSER root\nRUN PIP_USER=false python3 -m pip install"));
+        assert!(dockerfile.contains("&& test -x /usr/local/bin/function-executor"));
         assert!(
             image
                 .dockerfile_content(">=1.2.3", None)
-                .contains("RUN python3 -m pip install --break-system-packages tensorlake>=1.2.3")
+                .contains("python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir tensorlake>=1.2.3")
         );
     }
 

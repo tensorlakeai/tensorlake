@@ -31,9 +31,11 @@ from .models import (
     OutputEvent,
     OutputMode,
     OutputResponse,
+    ProcessHealthCheck,
     ProcessInfo,
     ProcessUser,
     ProcessUserSpec,
+    RestartPolicyConfig,
     SandboxInfo,
     SandboxStatus,
     SendSignalResponse,
@@ -219,6 +221,7 @@ class Sandbox:
         request_timeout: float | None = None,
         startup_timeout: float | None = None,
         name: str | None = None,
+        cloud_init: str | os.PathLike[str] | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
         organization_id: str | None = None,
@@ -248,6 +251,8 @@ class Sandbox:
             request_timeout: Max seconds to wait for HTTP operations.
             startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name; named sandboxes support suspend/resume.
+            cloud_init: Local cloud-init file path or HTTP(S) URL for the sandbox.
+                Not supported with pools.
             api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
             api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
             organization_id: Organization ID for multi-tenant access.
@@ -295,6 +300,7 @@ class Sandbox:
             proxy_url=proxy_url,
             request_timeout=effective_request_timeout,
             name=name,
+            cloud_init=cloud_init,
         )
 
     @classmethod
@@ -762,8 +768,13 @@ class Sandbox:
 
     @staticmethod
     def _normalize_process_user(
-        user: ProcessUser,
+        user: ProcessUser | None,
     ) -> str | dict[str, Any] | None:
+        if user is None:
+            # Caller did not request a specific user: omit the field so the
+            # sandbox resolves the image's configured user (e.g. the image
+            # ``USER`` directive, falling back to root).
+            return None
         if isinstance(user, str):
             value = user
         elif isinstance(user, ProcessUserSpec):
@@ -792,6 +803,44 @@ class Sandbox:
             raise SandboxError("process user name must not be empty")
         return payload
 
+    @staticmethod
+    def _normalize_restart_config(
+        restart: RestartPolicyConfig | Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if restart is None:
+            return None
+        try:
+            if isinstance(restart, RestartPolicyConfig):
+                config = restart
+            elif isinstance(restart, Mapping):
+                config = RestartPolicyConfig.model_validate(dict(restart))
+            else:
+                raise SandboxError(
+                    "process restart must be a RestartPolicyConfig or dict"
+                )
+        except ValidationError as exc:
+            raise SandboxError(f"invalid process restart config: {exc}") from exc
+        return config.model_dump(mode="json", exclude_none=True)
+
+    @staticmethod
+    def _normalize_health_check(
+        health_check: ProcessHealthCheck | Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if health_check is None:
+            return None
+        try:
+            if isinstance(health_check, ProcessHealthCheck):
+                config = health_check
+            elif isinstance(health_check, Mapping):
+                config = ProcessHealthCheck.model_validate(dict(health_check))
+            else:
+                raise SandboxError(
+                    "process health_check must be a ProcessHealthCheck or dict"
+                )
+        except ValidationError as exc:
+            raise SandboxError(f"invalid process health_check config: {exc}") from exc
+        return config.model_dump(mode="json", exclude_none=True)
+
     # --- High-level convenience ---
 
     def run(
@@ -801,7 +850,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         working_dir: str | None = None,
         timeout: float | None = None,
-        user: ProcessUser = "tl-user",
+        user: ProcessUser | None = None,
     ) -> Traced[CommandResult]:
         """Run a command to completion and return its output.
 
@@ -815,9 +864,10 @@ class Sandbox:
             env: Environment variables
             working_dir: Working directory
             timeout: Maximum seconds to wait (enforced server-side; None = no limit)
-            user: Process user. Defaults to ``"tl-user"``. Pass a username
-                such as ``"root"``, a Docker-style id string like ``"1000:1000"``,
-                or ``ProcessUserSpec(uid=1000, gid=1000)``.
+            user: Process user. Defaults to ``None``, which runs as the image's
+                configured user (the image ``USER`` directive, falling back to
+                root). Pass a username such as ``"root"``, a Docker-style id
+                string like ``"1000:1000"``, or ``ProcessUserSpec(uid=1000, gid=1000)``.
 
         Returns:
             Traced[CommandResult] — access ``.trace_id`` for the W3C trace ID
@@ -883,7 +933,10 @@ class Sandbox:
         stdin_mode: StdinMode = StdinMode.CLOSED,
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
-        user: ProcessUser = "tl-user",
+        user: ProcessUser | None = None,
+        name: str | None = None,
+        restart: RestartPolicyConfig | Mapping[str, Any] | None = None,
+        health_check: ProcessHealthCheck | Mapping[str, Any] | None = None,
     ) -> Traced[ProcessInfo]:
         """Start a new process in the sandbox.
 
@@ -895,15 +948,24 @@ class Sandbox:
             stdin_mode: StdinMode.CLOSED or StdinMode.PIPE
             stdout_mode: OutputMode.CAPTURE or OutputMode.DISCARD
             stderr_mode: OutputMode.CAPTURE or OutputMode.DISCARD
-            user: Process user. Defaults to ``"tl-user"``. Pass a username
-                such as ``"root"``, a Docker-style id string like ``"1000:1000"``,
-                or ``ProcessUserSpec(uid=1000, gid=1000)``.
+            user: Process user. Defaults to ``None``, which runs as the image's
+                configured user (the image ``USER`` directive, falling back to
+                root). Pass a username such as ``"root"``, a Docker-style id
+                string like ``"1000:1000"``, or ``ProcessUserSpec(uid=1000, gid=1000)``.
+            name: Optional managed-process name. Supplying this opts the process
+                into daemon management.
+            restart: Optional restart policy. Supplying this opts the process
+                into daemon management.
+            health_check: Optional HTTP or TCP health check. Supplying this opts
+                the process into daemon management.
 
         Returns:
             Traced[ProcessInfo] — access ``.trace_id`` for the W3C trace ID
             and ``.pid`` / ``.status`` directly (or via ``.value``).
         """
         process_user = self._normalize_process_user(user)
+        restart_payload = self._normalize_restart_config(restart)
+        health_check_payload = self._normalize_health_check(health_check)
         payload = self._build_command_payload(
             command,
             args,
@@ -913,6 +975,9 @@ class Sandbox:
             stdout_mode=stdout_mode if stdout_mode != OutputMode.CAPTURE else None,
             stderr_mode=stderr_mode if stderr_mode != OutputMode.CAPTURE else None,
             user=process_user,
+            name=name,
+            restart=restart_payload,
+            health_check=health_check_payload,
         )
 
         try:
@@ -945,6 +1010,14 @@ class Sandbox:
         try:
             trace_id = self._rust_client.kill_process(pid=pid)
             return Traced(trace_id, None)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def restart_process(self, pid: int) -> Traced[ProcessInfo]:
+        """Restart a managed process by PID."""
+        try:
+            trace_id, response_json = self._rust_client.restart_process_json(pid=pid)
+            return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 

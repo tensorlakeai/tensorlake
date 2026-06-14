@@ -72,14 +72,22 @@ vi.mock("ws", () => ({
 
 describe("TcpTunnel", () => {
   let Sandbox: typeof import("../src/sandbox.js").Sandbox;
+  let clearStub: (() => void) | undefined;
 
   beforeEach(async () => {
     MockWebSocket.instances = [];
     vi.resetModules();
+    // Constructing a Sandbox mints a native proxy client; install a fake
+    // binding (in the freshly-reset module graph, before importing sandbox.js)
+    // so the tunnel tests don't require a built native binary.
+    const stub = await import("./native-stub.js");
+    stub.installNativeStub();
+    clearStub = stub.clearNativeStub;
     ({ Sandbox } = await import("../src/sandbox.js"));
   });
 
   afterEach(() => {
+    clearStub?.();
     vi.restoreAllMocks();
   });
 

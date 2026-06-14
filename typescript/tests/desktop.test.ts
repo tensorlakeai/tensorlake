@@ -235,6 +235,8 @@ function countFrame(buffer: Buffer, frame: Uint8Array): number {
 describe("DesktopSession", () => {
   let DesktopSession: typeof import("../src/desktop.js").DesktopSession;
   let Sandbox: typeof import("../src/sandbox.js").Sandbox;
+  let installNativeStub: typeof import("./native-stub.js").installNativeStub;
+  let clearNativeStub: typeof import("./native-stub.js").clearNativeStub;
 
   beforeEach(async () => {
     MockWebSocket.instances = [];
@@ -243,18 +245,23 @@ describe("DesktopSession", () => {
     vi.resetModules();
     ({ DesktopSession } = await import("../src/desktop.js"));
     ({ Sandbox } = await import("../src/sandbox.js"));
-    // `connectDesktop` probes the in-sandbox VNC port via `Sandbox.run`
-    // before opening the WebSocket tunnel. Tests don't have a real daemon
-    // behind `sandbox.tensorlake.ai` (only the `ws` module is mocked), so
-    // short-circuit the probe to return "port is ready" immediately.
-    vi.spyOn(Sandbox.prototype, "run").mockResolvedValue({
-      exitCode: 0,
-      stdout: "",
-      stderr: "",
+    ({ installNativeStub, clearNativeStub } = await import("./native-stub.js"));
+    // The Sandbox constructor synchronously mints a native proxy client, so a
+    // fake binding must be installed before any Sandbox is built. The VNC port
+    // probe runs `/bin/bash` via `Sandbox.run` (-> native runProcess); have it
+    // resolve with exit_code 0 so the probe reports "port is ready".
+    installNativeStub({
+      proxy: {
+        runProcess: vi.fn(async () => ({
+          traceId: "t",
+          events: [JSON.stringify({ exit_code: 0 })],
+        })),
+      },
     });
   });
 
   afterEach(() => {
+    clearNativeStub();
     vi.restoreAllMocks();
   });
 

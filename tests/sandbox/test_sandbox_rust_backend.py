@@ -29,14 +29,58 @@ class _FakeRustProxyClient:
 
     def start_process_json(self, payload_json):
         self.start_payload_json = payload_json
+        payload = json.loads(payload_json)
+        response = {
+            "handle": 7,
+            "pid": 101,
+            "status": "running",
+            "stdin_writable": True,
+            "command": "echo",
+            "args": ["hello"],
+            "started_at": 1_700_000_000,
+        }
+        if payload.get("name"):
+            response["managed"] = {
+                "id": "managed-1",
+                "name": payload["name"],
+                "status": "running",
+                "restart_count": 0,
+                "restart": payload.get("restart")
+                or {
+                    "policy": "on_failure",
+                    "initial_backoff_ms": 500,
+                    "max_backoff_ms": 30000,
+                },
+                "health_check": payload.get("health_check"),
+                "health_status": "starting",
+                "consecutive_health_failures": 0,
+            }
+        return _TRACE_ID, json.dumps(response)
+
+    def restart_process_json(self, pid):
+        assert pid == 101
         return _TRACE_ID, json.dumps(
             {
+                "handle": 8,
                 "pid": 101,
                 "status": "running",
                 "stdin_writable": True,
                 "command": "echo",
                 "args": ["hello"],
                 "started_at": 1_700_000_000,
+                "managed": {
+                    "id": "managed-1",
+                    "name": "web",
+                    "status": "running",
+                    "restart_count": 1,
+                    "restart": {
+                        "policy": "always",
+                        "initial_backoff_ms": 500,
+                        "max_backoff_ms": 30000,
+                    },
+                    "health_status": "healthy",
+                    "consecutive_health_failures": 0,
+                },
             }
         )
 
@@ -154,13 +198,58 @@ class TestSandboxRustBackend(unittest.TestCase):
         payload = json.loads(fake.start_payload_json)
         self.assertEqual(payload["user"], {"uid": 1000, "gid": 1000})
 
-    def test_start_process_serializes_default_user(self):
+    def test_start_process_omits_user_by_default(self):
         sandbox, fake = _make_sandbox()
 
         sandbox.start_process(command="echo")
 
         payload = json.loads(fake.start_payload_json)
-        self.assertEqual(payload["user"], "tl-user")
+        # No user requested -> field omitted so the sandbox resolves the
+        # image's configured user (image USER, falling back to root).
+        self.assertNotIn("user", payload)
+
+    def test_start_process_serializes_managed_options(self):
+        sandbox, fake = _make_sandbox()
+
+        process = sandbox.start_process(
+            command="python",
+            args=["app.py"],
+            name="web",
+            restart={
+                "policy": "always",
+                "max_restarts": 10,
+                "initial_backoff_ms": 250,
+            },
+            health_check={
+                "type": "http",
+                "port": 8000,
+                "path": "/health",
+                "interval_ms": 5000,
+            },
+        )
+
+        payload = json.loads(fake.start_payload_json)
+        self.assertEqual(payload["name"], "web")
+        self.assertEqual(payload["restart"]["policy"], "always")
+        self.assertEqual(payload["restart"]["max_restarts"], 10)
+        self.assertEqual(payload["restart"]["initial_backoff_ms"], 250)
+        self.assertEqual(payload["health_check"]["type"], "http")
+        self.assertEqual(payload["health_check"]["port"], 8000)
+        self.assertEqual(payload["health_check"]["path"], "/health")
+        self.assertEqual(payload["health_check"]["interval_ms"], 5000)
+        self.assertEqual(process.handle, 7)
+        self.assertIsNotNone(process.managed)
+        self.assertEqual(process.managed.name, "web")
+
+    def test_restart_process_uses_rust_backend(self):
+        sandbox, _ = _make_sandbox()
+
+        process = sandbox.restart_process(101)
+
+        self.assertEqual(process.pid, 101)
+        self.assertEqual(process.handle, 8)
+        self.assertIsNotNone(process.managed)
+        self.assertEqual(process.managed.restart_count, 1)
 
     def test_start_process_rejects_invalid_user_spec_mapping(self):
         sandbox, _ = _make_sandbox()

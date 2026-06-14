@@ -2981,7 +2981,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.33"
+version = "0.5.43"
 dependencies = [
  "base64",
  "bollard",
@@ -3024,7 +3024,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.33"
+version = "0.5.43"
 dependencies = [
  "anyhow",
  "base64",
@@ -3067,11 +3067,13 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.33"
+version = "0.5.43"
 dependencies = [
  "napi",
  "napi-build",
  "napi-derive",
+ "reqwest",
+ "serde",
  "serde_json",
  "tensorlake",
  "tokio",
@@ -3079,7 +3081,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.33"
+version = "0.5.43"
 dependencies = [
  "futures",
  "pyo3",
@@ -3090,6 +3092,7 @@ dependencies = [
  "serde_json",
  "tensorlake",
  "tokio",
+ "urlencoding",
 ]
 
 [[package]]

@@ -82,6 +82,8 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             ANY,
         )
 
+
+class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
     def test_public_flag_and_registered_name(self):
         ctx = _make_ctx()
 
@@ -160,6 +162,33 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             emitted,
         )
         self.assertIn({"type": "status", "message": "builder running"}, emitted)
+
+
+class TestDeleteSandboxImage(unittest.TestCase):
+    def test_deletes_sandbox_image_with_env_context(self):
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(sbm, "_rust_delete_sandbox_image") as rust_delete,
+        ):
+            sbm.delete_sandbox_image("tensorlake/test:1")
+
+        rust_delete.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_apiKey_abc",
+            "tensorlake/test:1",
+            "org_1",
+            "proj_1",
+            "default",
+        )
+
+    def test_delete_requires_credentials(self):
+        ctx = _make_ctx(api_key=None, personal_access_token=None)
+
+        with patch.object(sbm, "_build_context_from_env", return_value=ctx):
+            with self.assertRaises(sbm.SandboxImageDeleteError):
+                sbm.delete_sandbox_image("image")
 
 
 class TestBuildSandboxImageFromImage(unittest.TestCase):
@@ -245,6 +274,47 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             sbm.build_sandbox_image(12345)  # type: ignore[arg-type]
 
 
+class TestBuildSandboxApplicationImage(unittest.TestCase):
+    def test_function_image_build_checks_function_executor_on_path(self):
+        ctx = _make_ctx()
+        image = Image(name="function-image", base_image="python:3.12-slim").run(
+            "python3 -m pip uninstall -y tensorlake || true"
+        )
+        build_ctx, rust_builder = _make_build_patches(ctx)
+        captured: dict[str, object] = {}
+
+        with build_ctx, rust_builder as rust_builder_mock:
+
+            def fake_rust_builder(*args, **_kwargs):
+                captured["dockerfile_text"] = args[14]
+                return '{"id":"tpl-1","snapshot_id":"snap-1"}'
+
+            rust_builder_mock.side_effect = fake_rust_builder
+            sbm.build_sandbox_application_image(
+                image,
+                cpus=BUILD_CPUS,
+                memory_mb=BUILD_MEMORY_MB,
+            )
+
+        dockerfile_text = captured["dockerfile_text"]
+        self.assertIsInstance(dockerfile_text, str)
+        dockerfile_lines = dockerfile_text.rstrip().splitlines()
+        self.assertEqual(dockerfile_lines[-2], "USER root")
+        install_line = dockerfile_lines[-1]
+        self.assertIn(
+            "--force-reinstall --no-cache-dir tensorlake==",
+            install_line,
+        )
+        self.assertNotIn("--prefix=/usr/local", install_line)
+        self.assertNotIn("sudo", install_line)
+        self.assertNotIn("id -u", install_line)
+        self.assertIn("RUN PIP_USER=false python3 -m pip install", install_line)
+        self.assertTrue(
+            install_line.endswith("&& test -x /usr/local/bin/function-executor"),
+            install_line,
+        )
+
+
 class TestApplicationDockerfileContent(unittest.TestCase):
     def test_default_image_uses_ubuntu_minimal_base(self):
         dockerfile = dockerfile_content(Image(name="default-base"))
@@ -253,9 +323,17 @@ class TestApplicationDockerfileContent(unittest.TestCase):
     def test_sdk_install_uses_python3_module_pip(self):
         dockerfile = dockerfile_content(Image(name="install-command"))
         self.assertIn(
-            "RUN python3 -m pip install --break-system-packages tensorlake==",
+            "python3 -m pip install --break-system-packages "
+            "--force-reinstall --no-cache-dir tensorlake==",
             dockerfile,
         )
+        self.assertNotIn("--prefix=/usr/local", dockerfile)
+        self.assertIn(
+            "\nUSER root\nRUN PIP_USER=false python3 -m pip install", dockerfile
+        )
+        self.assertNotIn("sudo", dockerfile)
+        self.assertNotIn("id -u", dockerfile)
+        self.assertIn("&& test -x /usr/local/bin/function-executor", dockerfile)
 
 
 if __name__ == "__main__":

@@ -8,9 +8,9 @@ the snapshot as a named sandbox template
 
 This is the programmatic backend for :meth:`Image.build` and the
 ``tl sbx image create`` CLI command. The Rust core owns parsing, the
-Dockerfile-instruction allowlist (``ARG``/``ONBUILD``/``SHELL``/``USER`` are
-rejected) and ignored-set warnings (``CMD``/``ENTRYPOINT``/``EXPOSE``/
-``HEALTHCHECK``/``LABEL``/``STOPSIGNAL``/``VOLUME``).
+Dockerfile-instruction allowlist (``ONBUILD``/``SHELL`` are rejected) and
+ignored-set warnings (``EXPOSE``/``HEALTHCHECK``/``LABEL``/``STOPSIGNAL``/
+``VOLUME``).
 """
 
 from __future__ import annotations
@@ -46,6 +46,10 @@ class SandboxImageLoadError(SandboxImageError):
 
 class SandboxImageBuildError(SandboxImageError):
     """The build failed while provisioning, materializing, or registering."""
+
+
+class SandboxImageDeleteError(SandboxImageError):
+    """Deleting a registered sandbox image failed."""
 
 
 # --- Emit helpers -----------------------------------------------------------
@@ -104,6 +108,33 @@ def _rust_build_sandbox_image(*args, **kwargs) -> str:
         from _cloud_sdk import build_sandbox_image as rust_build_sandbox_image
 
     return rust_build_sandbox_image(*args, **kwargs)
+
+
+def _rust_delete_sandbox_image(
+    api_url: str,
+    token: str,
+    image_name: str,
+    organization_id: str | None,
+    project_id: str | None,
+    namespace: str | None,
+) -> None:
+    try:
+        from tensorlake._cloud_sdk import CloudApiClient
+    except ImportError:
+        from _cloud_sdk import CloudApiClient
+
+    client = CloudApiClient(
+        api_url=api_url,
+        api_key=token,
+        organization_id=organization_id,
+        project_id=project_id,
+        namespace=namespace,
+        user_agent=USER_AGENT,
+    )
+    try:
+        client.delete_sandbox_image(image_name)
+    finally:
+        client.close()
 
 
 def _run_rust_image_create(
@@ -168,6 +199,37 @@ def _run_rust_image_create(
 
 
 # --- Public API -----------------------------------------------------------
+
+
+def delete_sandbox_image(image_name: str) -> None:
+    """Delete a registered sandbox image by name.
+
+    Uses the same environment-based Tensorlake auth and namespace context as
+    :func:`build_sandbox_image`.
+    """
+    if not isinstance(image_name, str) or not image_name:
+        raise TypeError("image_name must be a non-empty string")
+
+    ctx = _build_context_from_env()
+    token = ctx.api_key or ctx.personal_access_token
+    if not token:
+        raise SandboxImageDeleteError(
+            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
+        )
+
+    try:
+        _rust_delete_sandbox_image(
+            ctx.api_url,
+            token,
+            image_name,
+            ctx.organization_id,
+            ctx.project_id,
+            ctx.namespace,
+        )
+    except SandboxImageError:
+        raise
+    except Exception as e:
+        raise SandboxImageDeleteError(f"{type(e).__name__}: {e}") from e
 
 
 def build_sandbox_image(

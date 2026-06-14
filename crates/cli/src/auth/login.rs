@@ -205,7 +205,6 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
             ctx.organization_id.as_deref(),
             ctx.project_id.as_deref(),
             ctx.debug,
-            ctx.show_trace_id,
         );
         let updated_ctx = CliContext::from_resolved(resolved);
 

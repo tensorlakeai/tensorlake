@@ -2,6 +2,7 @@ import { createRequire } from "node:module";
 import path from "node:path";
 import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
+import { CloudClient } from "./cloud-client.js";
 import { Image, dockerfileContent } from "./image.js";
 
 /**
@@ -11,8 +12,8 @@ import { Image, dockerfileContent } from "./image.js";
  * Dockerfile path/text + context to the Rust core via `@tensorlake/native`,
  * which parses, validates, materializes, and registers the image. The Rust
  * core owns parsing, the Dockerfile-instruction allowlist
- * (`ARG`/`ONBUILD`/`SHELL`/`USER` are rejected) and ignored-set warnings
- * (`CMD`/`ENTRYPOINT`/`EXPOSE`/`HEALTHCHECK`/`LABEL`/`STOPSIGNAL`/`VOLUME`).
+ * (`ONBUILD`/`SHELL` are rejected) and ignored-set warnings
+ * (`EXPOSE`/`HEALTHCHECK`/`LABEL`/`STOPSIGNAL`/`VOLUME`).
  */
 
 export interface CreateSandboxImageOptions {
@@ -300,6 +301,31 @@ export async function createSandboxImage(
   });
   emit({ type: "done" });
   return result;
+}
+
+export async function deleteSandboxImage(imageName: string): Promise<void> {
+  if (typeof imageName !== "string" || imageName.length === 0) {
+    throw new TypeError("imageName must be a non-empty string");
+  }
+
+  const context = buildContextFromEnv();
+  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  if (!bearerToken) {
+    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
+  }
+
+  const client = new CloudClient({
+    apiUrl: context.apiUrl,
+    apiKey: bearerToken,
+    organizationId: context.organizationId,
+    projectId: context.projectId,
+    namespace: context.namespace,
+  });
+  try {
+    await client.deleteSandboxImage(imageName);
+  } finally {
+    client.close();
+  }
 }
 
 export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {

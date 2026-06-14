@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -29,8 +30,10 @@ from .models import (
     OutputEvent,
     OutputMode,
     OutputResponse,
+    ProcessHealthCheck,
     ProcessInfo,
     ProcessUser,
+    RestartPolicyConfig,
     SandboxInfo,
     SandboxStatus,
     SendSignalResponse,
@@ -154,6 +157,7 @@ class AsyncSandbox:
         request_timeout: float | None = None,
         startup_timeout: float | None = None,
         name: str | None = None,
+        cloud_init: str | os.PathLike[str] | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
         organization_id: str | None = None,
@@ -195,6 +199,7 @@ class AsyncSandbox:
             proxy_url=proxy_url,
             request_timeout=effective_request_timeout,
             name=name,
+            cloud_init=cloud_init,
         )
 
     @classmethod
@@ -408,7 +413,7 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         working_dir: str | None = None,
         timeout: float | None = None,
-        user: ProcessUser = "tl-user",
+        user: ProcessUser | None = None,
     ) -> Traced[CommandResult]:
         process_user = Sandbox._normalize_process_user(user)
         payload = Sandbox._build_command_payload(
@@ -465,9 +470,14 @@ class AsyncSandbox:
         stdin_mode: StdinMode = StdinMode.CLOSED,
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
-        user: ProcessUser = "tl-user",
+        user: ProcessUser | None = None,
+        name: str | None = None,
+        restart: RestartPolicyConfig | Mapping[str, object] | None = None,
+        health_check: ProcessHealthCheck | Mapping[str, object] | None = None,
     ) -> Traced[ProcessInfo]:
         process_user = Sandbox._normalize_process_user(user)
+        restart_payload = Sandbox._normalize_restart_config(restart)
+        health_check_payload = Sandbox._normalize_health_check(health_check)
         payload = Sandbox._build_command_payload(
             command,
             args,
@@ -477,6 +487,9 @@ class AsyncSandbox:
             stdout_mode=stdout_mode if stdout_mode != OutputMode.CAPTURE else None,
             stderr_mode=stderr_mode if stderr_mode != OutputMode.CAPTURE else None,
             user=process_user,
+            name=name,
+            restart=restart_payload,
+            health_check=health_check_payload,
         )
         try:
             trace_id, response_json = await self._rust_client.start_process_json_async(
@@ -509,6 +522,15 @@ class AsyncSandbox:
         try:
             trace_id = await self._rust_client.kill_process_async(pid=pid)
             return Traced(trace_id, None)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    async def restart_process(self, pid: int) -> Traced[ProcessInfo]:
+        try:
+            trace_id, response_json = (
+                await self._rust_client.restart_process_json_async(pid=pid)
+            )
+            return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 

@@ -57,6 +57,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target_id: linux-x64
+          - os: ubuntu-24.04-arm
+            target_id: linux-arm64
           - os: macos-14
             target_id: darwin-arm64
           - os: windows-latest
@@ -104,6 +106,8 @@ jobs:
         include:
           - os: ubuntu-latest
             target_id: linux-x64
+          - os: ubuntu-24.04-arm
+            target_id: linux-arm64
           - os: macos-14
             target_id: darwin-arm64
           - os: windows-latest
@@ -177,6 +181,12 @@ jobs:
           name: cli-linux-x64
           path: typescript/dist/bin/linux-x64
 
+      - name: Download Linux arm64 CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-linux-arm64
+          path: typescript/dist/bin/linux-arm64
+
       - name: Download macOS arm64 CLI artifact
         uses: actions/download-artifact@v4
         with:
@@ -194,6 +204,12 @@ jobs:
         with:
           name: native-linux-x64
           path: typescript/dist/native/linux-x64
+
+      - name: Download Linux arm64 native artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-arm64
+          path: typescript/dist/native/linux-arm64
 
       - name: Download macOS arm64 native artifact
         uses: actions/download-artifact@v4

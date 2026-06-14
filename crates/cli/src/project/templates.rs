@@ -21,7 +21,7 @@ def {function_name}(name: str) -> str:
 
 pub const README_TEMPLATE: &str = r#"# {app_name}
 
-A Tensorlake application created with `tensorlake new`.
+A Tensorlake application created with `tl app new`.
 
 ## Quick Start
 
@@ -30,7 +30,7 @@ A Tensorlake application created with `tensorlake new`.
 Deploy your application to make it available via HTTP:
 
 ```bash
-tensorlake deploy {filename}
+tl app deploy {filename}
 ```
 
 ### 2. Call Your Application

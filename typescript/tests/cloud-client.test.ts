@@ -99,6 +99,20 @@ describe("CloudClient", () => {
     client.close();
   });
 
+  it("deletes sandbox images through the namespaced image route", async () => {
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8900/v1/namespaces/default/sandbox-images/tensorlake%2Ftest%3A1",
+      );
+      expect(init?.method).toBe("DELETE");
+      return new Response(null, { status: 204 });
+    });
+
+    const client = new CloudClient({ apiUrl: "http://localhost:8900" });
+    await client.deleteSandboxImage("tensorlake/test:1");
+    client.close();
+  });
+
   it("streams build logs as camel-cased events", async () => {
     mockFetch(() =>
       new Response(

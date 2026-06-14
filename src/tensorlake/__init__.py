@@ -1,1 +1,1 @@
-from tensorlake.image import Image
+from tensorlake.image import Image, delete_sandbox_image

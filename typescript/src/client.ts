@@ -1,10 +1,15 @@
+import { readFile } from "node:fs/promises";
 import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
-import { type Traced, HttpClient } from "./http.js";
+import type { Traced } from "./http.js";
+import {
+  callNative,
+  loadNativeSandboxBinding,
+  type NativeErrorContext,
+  type NativeSandboxClient,
+} from "./native-sandbox.js";
 import {
   type ArchivedSandboxInfo,
-  type CheckpointOptions,
-  type ConnectOptions,
   type CopySandboxOptions,
   type CopySandboxResponse,
   type CreateAndConnectOptions,
@@ -29,31 +34,81 @@ import {
   type UpdatePoolOptions,
   type UpdateSandboxOptions,
   fromSnakeKeys,
-  toSnakeKeys,
 } from "./models.js";
 import { Sandbox } from "./sandbox.js";
-import { isLocalhost, lifecyclePath, resolveProxyUrl, resolveSandboxLifecycleUrl } from "./url.js";
+import { nowMs, logSdkTimingEvent, logSdkTiming } from "./sdk-timings.js";
+import { resolveProxyUrl } from "./url.js";
 
-const CREATE_SANDBOX_RETRYABLE_STATUS_CODES = new Set([502, 503]);
-const CREATE_SANDBOX_ALLOWED_ERROR_STATUS_CODES = new Set([504]);
-const COPY_SANDBOX_ALLOWED_ERROR_STATUS_CODES = new Set([422, 504]);
+const MAX_CLOUD_INIT_USER_DATA_BYTES = 16 * 1024;
+
+function cloudInitIncludeData(source: string): Buffer | undefined {
+  const isWindowsPath = /^[A-Za-z]:[\\/]/.test(source);
+  try {
+    const url = new URL(source);
+    if (
+      (url.protocol === "http:" || url.protocol === "https:") &&
+      url.hostname.length > 0
+    ) {
+      return Buffer.from(`#include\n${url.toString()}\n`, "utf8");
+    }
+    if (!isWindowsPath) {
+      throw new SandboxError(
+        "cloud-init URL must be an absolute HTTP(S) URL with a host",
+      );
+    }
+  } catch (error) {
+    if (error instanceof SandboxError) throw error;
+    if (!isWindowsPath && /^[A-Za-z][A-Za-z0-9+.-]*:/.test(source)) {
+      throw new SandboxError(
+        "cloud-init URL must be an absolute HTTP(S) URL with a host",
+      );
+    }
+  }
+  return undefined;
+}
+
+async function readCloudInitBase64(
+  cloudInit: string | URL | undefined,
+): Promise<string | undefined> {
+  if (cloudInit == null) return undefined;
+
+  const sourceText = cloudInit instanceof URL ? cloudInit.toString() : cloudInit;
+  const includeData = cloudInitIncludeData(sourceText);
+  const data =
+    includeData ??
+    (await readFile(sourceText).catch((error) => {
+      throw new SandboxError(
+        `failed to read cloud-init file ${JSON.stringify(sourceText)}: ${error}`,
+      );
+    }));
+
+  if (data.length === 0) {
+    throw new SandboxError("cloud-init user data must not be empty");
+  }
+  if (data.length > MAX_CLOUD_INIT_USER_DATA_BYTES) {
+    throw new SandboxError(
+      `cloud-init user data exceeds ${MAX_CLOUD_INIT_USER_DATA_BYTES} byte limit`,
+    );
+  }
+
+  return data.toString("base64");
+}
 
 /**
  * Client for managing TensorLake sandboxes, pools, and snapshots.
  *
- * Use `SandboxClient.forCloud()` or `SandboxClient.forLocalhost()` for
- * clearer construction depending on your deployment target.
+ * This is a thin shim over the Rust core ({@link NativeSandboxClient}): every
+ * call marshals a request to JSON, delegates the RPC (URL resolution,
+ * namespacing, retries, connection pooling) to Rust, and reshapes the JSON
+ * response. There is no TypeScript-side HTTP transport.
  */
 export class SandboxClient {
-  private readonly http: HttpClient;
+  private readonly native: NativeSandboxClient;
   private readonly apiUrl: string;
   private readonly apiKey: string | undefined;
   private readonly organizationId: string | undefined;
   private readonly projectId: string | undefined;
   private readonly namespace: string;
-  private readonly local: boolean;
-  private readonly maxRetries: number;
-  private readonly retryBackoffMs: number;
   private readonly requestTimeoutMs: number;
 
   /** @internal Pass `true` to suppress the deprecation warning when used by `Sandbox.create()` / `Sandbox.connect()`. */
@@ -68,20 +123,18 @@ export class SandboxClient {
     this.organizationId = options?.organizationId;
     this.projectId = options?.projectId;
     this.namespace = options?.namespace ?? defaults.NAMESPACE;
-    this.local = isLocalhost(this.apiUrl);
-    this.maxRetries = options?.maxRetries ?? defaults.MAX_RETRIES;
-    this.retryBackoffMs = options?.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS;
     this.requestTimeoutMs = resolveRequestTimeoutMs(options);
 
-    this.http = new HttpClient({
-      baseUrl: resolveSandboxLifecycleUrl(this.apiUrl),
-      apiKey: this.apiKey,
-      organizationId: this.organizationId,
-      projectId: this.projectId,
-      maxRetries: this.maxRetries,
-      retryBackoffMs: this.retryBackoffMs,
-      timeoutMs: this.requestTimeoutMs,
-    });
+    const binding = loadNativeSandboxBinding();
+    this.native = new binding.NativeSandboxClient(
+      this.apiUrl,
+      this.apiKey ?? null,
+      this.organizationId ?? null,
+      this.projectId ?? null,
+      this.namespace,
+      null,
+      this.requestTimeoutMs / 1000,
+    );
   }
 
   /** Create a client for the TensorLake cloud platform. */
@@ -119,7 +172,7 @@ export class SandboxClient {
   }
 
   close(): void {
-    this.http.close();
+    // The native client releases its connection pool on GC; nothing to do.
   }
 
   private withRequestTimeout(requestTimeout: number | undefined): SandboxClient {
@@ -136,22 +189,39 @@ export class SandboxClient {
       organizationId: this.organizationId,
       projectId: this.projectId,
       namespace: this.namespace,
-      maxRetries: this.maxRetries,
-      retryBackoffMs: this.retryBackoffMs,
       timeoutMs,
     }, /* _internal */ true);
   }
 
-  // --- Path helper ---
+  // --- Native marshalling helpers ---
 
-  private path(subpath: string): string {
-    return lifecyclePath(subpath, this.local, this.namespace);
+  /** Run a native JSON call and reshape it into a `Traced<T>`. */
+  private async tracedJson<T extends object>(
+    fn: () => Promise<{ traceId: string; json: string }>,
+    idField?: string,
+    context?: NativeErrorContext,
+  ): Promise<Traced<T>> {
+    const { traceId, json } = await callNative(fn, context);
+    return Object.assign(fromSnakeKeys(JSON.parse(json), idField) as T, {
+      traceId,
+    }) as Traced<T>;
+  }
+
+  /** Run a native JSON call and reshape it into a plain `T` (no trace id). */
+  private async plainJson<T>(
+    fn: () => Promise<{ traceId: string; json: string }>,
+    idField?: string,
+    context?: NativeErrorContext,
+  ): Promise<T> {
+    const { json } = await callNative(fn, context);
+    return fromSnakeKeys(JSON.parse(json), idField) as T;
   }
 
   // --- Sandbox CRUD ---
 
   /** Create a new sandbox. Returns immediately; the sandbox may still be starting. Use `createAndConnect()` for a blocking, ready-to-use handle. */
   async create(options?: CreateSandboxOptions): Promise<Traced<CreateSandboxResponse>> {
+    const cloudInitBase64 = await readCloudInitBase64(options?.cloudInit);
     const body: Record<string, unknown> = {
       resources: {
         cpus: options?.cpus ?? 1.0,
@@ -165,6 +235,7 @@ export class SandboxClient {
     if (options?.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options?.snapshotId != null) body.snapshot_id = options.snapshotId;
     if (options?.name != null) body.name = options.name;
+    if (cloudInitBase64 != null) body.cloud_init_base64 = cloudInitBase64;
 
     if (
       options?.allowInternetAccess === false ||
@@ -178,38 +249,29 @@ export class SandboxClient {
       };
     }
 
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "POST",
-      this.path("sandboxes"),
-      {
-        body,
-        retryableStatusCodes: CREATE_SANDBOX_RETRYABLE_STATUS_CODES,
-        allowedErrorStatusCodes: CREATE_SANDBOX_ALLOWED_ERROR_STATUS_CODES,
-      },
+    return this.tracedJson<CreateSandboxResponse>(
+      () => this.native.createSandbox(JSON.stringify(body)),
+      "sandboxId",
     );
-    const result = fromSnakeKeys(raw, "sandboxId") as CreateSandboxResponse;
-    return Object.assign(result, { traceId: raw.traceId }) as Traced<CreateSandboxResponse>;
   }
 
   /** Get current state and metadata for a sandbox by ID. */
   async get(sandboxId: string): Promise<Traced<SandboxInfo>> {
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "GET",
-      this.path(`sandboxes/${sandboxId}`),
+    return this.tracedJson<SandboxInfo>(
+      () => this.native.getSandbox(sandboxId),
+      "sandboxId",
+      { sandboxId, notFoundKind: "sandbox" },
     );
-    return Object.assign(fromSnakeKeys(raw, "sandboxId") as SandboxInfo, { traceId: raw.traceId });
   }
 
   /** List all sandboxes in the namespace. */
   async list(): Promise<Traced<SandboxInfo[]>> {
-    const raw = await this.http.requestJson<{ sandboxes: Record<string, unknown>[] }>(
-      "GET",
-      this.path("sandboxes"),
-    );
-    const sandboxes = (raw.sandboxes ?? []).map(
+    const { traceId, json } = await callNative(() => this.native.listSandboxes());
+    const parsed = JSON.parse(json) as { sandboxes?: Record<string, unknown>[] };
+    const sandboxes = (parsed.sandboxes ?? []).map(
       (s) => fromSnakeKeys(s, "sandboxId") as SandboxInfo,
     );
-    return Object.assign(sandboxes, { traceId: raw.traceId });
+    return Object.assign(sandboxes, { traceId });
   }
 
   /**
@@ -221,42 +283,35 @@ export class SandboxClient {
   async listArchived(
     options?: ListArchivedSandboxesOptions,
   ): Promise<Traced<ListArchivedSandboxesResponse>> {
-    const query: string[] = [];
-    if (options?.limit != null) {
-      query.push(`limit=${encodeURIComponent(String(options.limit))}`);
-    }
-    if (options?.cursor != null) {
-      query.push(`cursor=${encodeURIComponent(options.cursor)}`);
-    }
-    if (options?.direction != null) {
-      query.push(`direction=${encodeURIComponent(options.direction)}`);
-    }
-    const suffix = query.length ? `?${query.join("&")}` : "";
-    const raw = await this.http.requestJson<{
+    const { traceId, json } = await callNative(() =>
+      this.native.listArchivedSandboxes(
+        options?.limit ?? null,
+        options?.cursor ?? null,
+        options?.direction ?? null,
+      ),
+    );
+    const parsed = JSON.parse(json) as {
       sandboxes?: Record<string, unknown>[];
       prev_cursor?: string;
       next_cursor?: string;
-    }>("GET", this.path(`archived-sandboxes${suffix}`));
-    const sandboxes = (raw.sandboxes ?? []).map(
+    };
+    const sandboxes = (parsed.sandboxes ?? []).map(
       (s) => fromSnakeKeys(s, "sandboxId") as ArchivedSandboxInfo,
     );
     const response: ListArchivedSandboxesResponse = {
       sandboxes,
-      prevCursor: raw.prev_cursor,
-      nextCursor: raw.next_cursor,
+      prevCursor: parsed.prev_cursor,
+      nextCursor: parsed.next_cursor,
     };
-    return Object.assign(response, { traceId: raw.traceId });
+    return Object.assign(response, { traceId });
   }
 
   /** Get a single archived sandbox by id. */
   async getArchived(sandboxId: string): Promise<Traced<ArchivedSandboxInfo>> {
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "GET",
-      this.path(`archived-sandboxes/${encodeURIComponent(sandboxId)}`),
-    );
-    return Object.assign(
-      fromSnakeKeys(raw, "sandboxId") as ArchivedSandboxInfo,
-      { traceId: raw.traceId },
+    return this.tracedJson<ArchivedSandboxInfo>(
+      () => this.native.getArchivedSandbox(sandboxId),
+      "sandboxId",
+      { sandboxId, notFoundKind: "sandbox" },
     );
   }
 
@@ -273,12 +328,11 @@ export class SandboxClient {
     if (Object.keys(body).length === 0) {
       throw new SandboxError("At least one sandbox update field must be provided.");
     }
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "PATCH",
-      this.path(`sandboxes/${sandboxId}`),
-      { body },
+    return this.tracedJson<SandboxInfo>(
+      () => this.native.updateSandbox(sandboxId, JSON.stringify(body)),
+      "sandboxId",
+      { sandboxId, notFoundKind: "sandbox" },
     );
-    return Object.assign(fromSnakeKeys(raw, "sandboxId") as SandboxInfo, { traceId: raw.traceId });
   }
 
   /** Get the current proxy port settings for a sandbox. */
@@ -331,10 +385,7 @@ export class SandboxClient {
 
   /** Terminate and delete a sandbox. */
   async delete(sandboxId: string): Promise<void> {
-    await this.http.requestJson(
-      "DELETE",
-      this.path(`sandboxes/${sandboxId}`),
-    );
+    await callNative(() => this.native.deleteSandbox(sandboxId), { sandboxId, notFoundKind: "sandbox" });
   }
 
   /**
@@ -344,18 +395,9 @@ export class SandboxClient {
    * cannot. By default blocks until the sandbox is fully `Suspended`. Pass
    * `{ wait: false }` to return immediately after the request is sent
    * (fire-and-return); the server processes the suspend asynchronously.
-   *
-   * @param sandboxId - ID or name of the sandbox.
-   * @param options.wait - If `true` (default), poll until `Suspended`. Pass `false` to fire-and-return.
-   * @param options.timeout - Max seconds to wait when `wait=true` (default 300).
-   * @param options.pollInterval - Seconds between status polls when `wait=true` (default 1).
-   * @throws {SandboxError} If `wait=true` and the sandbox does not reach `Suspended` within `timeout`.
    */
   async suspend(sandboxId: string, options?: SuspendResumeOptions): Promise<void> {
-    await this.http.requestResponse(
-      "POST",
-      this.path(`sandboxes/${sandboxId}/suspend`),
-    );
+    await callNative(() => this.native.suspendSandbox(sandboxId), { sandboxId, notFoundKind: "sandbox" });
     if (options?.wait === false) return;
     const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
@@ -377,18 +419,9 @@ export class SandboxClient {
    * By default blocks until the sandbox is `Running` and routable. Pass
    * `{ wait: false }` to return immediately after the request is sent
    * (fire-and-return); the server processes the resume asynchronously.
-   *
-   * @param sandboxId - ID or name of the sandbox.
-   * @param options.wait - If `true` (default), poll until `Running`. Pass `false` to fire-and-return.
-   * @param options.timeout - Max seconds to wait when `wait=true` (default 300).
-   * @param options.pollInterval - Seconds between status polls when `wait=true` (default 1).
-   * @throws {SandboxError} If `wait=true` and the sandbox does not reach `Running` within `timeout`.
    */
   async resume(sandboxId: string, options?: SuspendResumeOptions): Promise<void> {
-    await this.http.requestResponse(
-      "POST",
-      this.path(`sandboxes/${sandboxId}/resume`),
-    );
+    await callNative(() => this.native.resumeSandbox(sandboxId), { sandboxId, notFoundKind: "sandbox" });
     if (options?.wait === false) return;
     const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
@@ -406,16 +439,11 @@ export class SandboxClient {
 
   /** Claim a warm sandbox from a pool, creating one if no warm containers are available. */
   async claim(poolId: string): Promise<Traced<CreateSandboxResponse>> {
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "POST",
-      this.path(`sandbox-pools/${poolId}/sandboxes`),
-      {
-        retryableStatusCodes: CREATE_SANDBOX_RETRYABLE_STATUS_CODES,
-        allowedErrorStatusCodes: CREATE_SANDBOX_ALLOWED_ERROR_STATUS_CODES,
-      },
+    return this.tracedJson<CreateSandboxResponse>(
+      () => this.native.claimSandbox(poolId),
+      "sandboxId",
+      { poolId, notFoundKind: "pool" },
     );
-    const result = fromSnakeKeys(raw, "sandboxId") as CreateSandboxResponse;
-    return Object.assign(result, { traceId: raw.traceId }) as Traced<CreateSandboxResponse>;
   }
 
   /**
@@ -434,13 +462,11 @@ export class SandboxClient {
       throw new SandboxError("times must be a positive integer");
     }
     const client = this.withRequestTimeout(options?.requestTimeout);
-    const raw = await client.http.requestJson<Record<string, unknown>>(
-      "POST",
-      client.path(`sandbox/${sandboxId}/copy?times=${encodeURIComponent(String(times))}`),
-      { allowedErrorStatusCodes: COPY_SANDBOX_ALLOWED_ERROR_STATUS_CODES },
+    return client.tracedJson<CopySandboxResponse>(
+      () => client.native.copySandbox(sandboxId, times),
+      "sandboxId",
+      { sandboxId, notFoundKind: "sandbox" },
     );
-    const result = fromSnakeKeys(raw, "sandboxId") as CopySandboxResponse;
-    return Object.assign(result, { traceId: raw.traceId }) as Traced<CopySandboxResponse>;
   }
 
   // --- Snapshots ---
@@ -452,54 +478,39 @@ export class SandboxClient {
    * status — the snapshot is created asynchronously. Poll `getSnapshot()` until
    * `local_ready`, `completed`, or `failed`, or use `snapshotAndWait()` to
    * block automatically.
-   *
-   * @param options.snapshotType - `"filesystem"` for cold-boot snapshots (e.g. image builds).
-   *   Omit to use the server default (`filesystem`).
    */
   async snapshot(
     sandboxId: string,
     options?: SnapshotOptions,
   ): Promise<CreateSnapshotResponse> {
-    // Preserve today's wire shape (no body) when snapshotType is not set.
-    const requestOptions =
-      options?.snapshotType != null
-        ? { body: { snapshot_type: options.snapshotType } }
-        : undefined;
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "POST",
-      this.path(`sandboxes/${sandboxId}/snapshot`),
-      requestOptions,
+    return this.plainJson<CreateSnapshotResponse>(
+      () => this.native.createSnapshot(sandboxId, options?.snapshotType ?? null),
+      "snapshotId",
+      { sandboxId, notFoundKind: "sandbox" },
     );
-    return fromSnakeKeys(raw, "snapshotId") as CreateSnapshotResponse;
   }
 
   /** Get current status and metadata for a snapshot by ID. */
   async getSnapshot(snapshotId: string): Promise<Traced<SnapshotInfo>> {
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "GET",
-      this.path(`snapshots/${snapshotId}`),
+    return this.tracedJson<SnapshotInfo>(
+      () => this.native.getSnapshot(snapshotId),
+      "snapshotId",
     );
-    return Object.assign(fromSnakeKeys(raw, "snapshotId") as SnapshotInfo, { traceId: raw.traceId });
   }
 
   /** List all snapshots in the namespace. */
   async listSnapshots(): Promise<Traced<SnapshotInfo[]>> {
-    const raw = await this.http.requestJson<{ snapshots: Record<string, unknown>[] }>(
-      "GET",
-      this.path("snapshots"),
-    );
-    const snapshots = (raw.snapshots ?? []).map(
+    const { traceId, json } = await callNative(() => this.native.listSnapshots());
+    const parsed = JSON.parse(json) as { snapshots?: Record<string, unknown>[] };
+    const snapshots = (parsed.snapshots ?? []).map(
       (s) => fromSnakeKeys(s, "snapshotId") as SnapshotInfo,
     );
-    return Object.assign(snapshots, { traceId: raw.traceId });
+    return Object.assign(snapshots, { traceId });
   }
 
   /** Delete a snapshot by ID. */
   async deleteSnapshot(snapshotId: string): Promise<void> {
-    await this.http.requestJson(
-      "DELETE",
-      this.path(`snapshots/${snapshotId}`),
-    );
+    await callNative(() => this.native.deleteSnapshot(snapshotId));
   }
 
   /**
@@ -508,14 +519,6 @@ export class SandboxClient {
    * Combines `snapshot()` with polling `getSnapshot()` until `local_ready`
    * or `completed`. Pass `{ waitUntil: "completed" }` when durable
    * `snapshotUri` metadata is required.
-   * Prefer `sandbox.checkpoint()` on a `Sandbox` handle for the same behavior
-   * without managing the client separately.
-   *
-   * @param sandboxId - ID of the running sandbox to snapshot.
-   * @param options.timeout - Max seconds to wait (default 300).
-   * @param options.pollInterval - Seconds between status polls (default 1).
-   * @param options.snapshotType - Snapshot type passed through to `snapshot()`.
-   * @throws {SandboxError} If the snapshot fails or `timeout` elapses.
    */
   async snapshotAndWait(
     sandboxId: string,
@@ -564,33 +567,29 @@ export class SandboxClient {
     if (options.maxContainers != null) body.max_containers = options.maxContainers;
     if (options.warmContainers != null) body.warm_containers = options.warmContainers;
 
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "POST",
-      this.path("sandbox-pools"),
-      { body },
+    return this.plainJson<CreateSandboxPoolResponse>(
+      () => this.native.createPool(JSON.stringify(body)),
+      "poolId",
     );
-    return fromSnakeKeys(raw, "poolId") as CreateSandboxPoolResponse;
   }
 
   /** Get current state and metadata for a sandbox pool by ID. */
   async getPool(poolId: string): Promise<SandboxPoolInfo> {
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "GET",
-      this.path(`sandbox-pools/${poolId}`),
+    return this.plainJson<SandboxPoolInfo>(
+      () => this.native.getPool(poolId),
+      "poolId",
+      { poolId, notFoundKind: "pool" },
     );
-    return fromSnakeKeys(raw, "poolId") as SandboxPoolInfo;
   }
 
   /** List all sandbox pools in the namespace. */
   async listPools(): Promise<Traced<SandboxPoolInfo[]>> {
-    const raw = await this.http.requestJson<{ pools: Record<string, unknown>[] }>(
-      "GET",
-      this.path("sandbox-pools"),
-    );
-    const pools = (raw.pools ?? []).map(
+    const { traceId, json } = await callNative(() => this.native.listPools());
+    const parsed = JSON.parse(json) as { pools?: Record<string, unknown>[] };
+    const pools = (parsed.pools ?? []).map(
       (p) => fromSnakeKeys(p, "poolId") as SandboxPoolInfo,
     );
-    return Object.assign(pools, { traceId: raw.traceId });
+    return Object.assign(pools, { traceId });
   }
 
   /** Replace the configuration of an existing sandbox pool. */
@@ -612,20 +611,16 @@ export class SandboxClient {
     if (options.maxContainers != null) body.max_containers = options.maxContainers;
     if (options.warmContainers != null) body.warm_containers = options.warmContainers;
 
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "PUT",
-      this.path(`sandbox-pools/${poolId}`),
-      { body },
+    return this.plainJson<SandboxPoolInfo>(
+      () => this.native.updatePool(poolId, JSON.stringify(body)),
+      "poolId",
+      { poolId, notFoundKind: "pool" },
     );
-    return fromSnakeKeys(raw, "poolId") as SandboxPoolInfo;
   }
 
   /** Delete a sandbox pool. Fails if the pool has active containers. */
   async deletePool(poolId: string): Promise<void> {
-    await this.http.requestJson(
-      "DELETE",
-      this.path(`sandbox-pools/${poolId}`),
-    );
+    await callNative(() => this.native.deletePool(poolId), { poolId, notFoundKind: "pool" });
   }
 
   // --- Connect ---
@@ -649,6 +644,7 @@ export class SandboxClient {
         ? async (currentIdentifier) => this.get(currentIdentifier)
         : undefined,
       requestTimeout,
+      nativeClient: this.native,
     });
   }
 
@@ -657,25 +653,36 @@ export class SandboxClient {
    *
    * Blocks until the sandbox is ready or `requestTimeout` elapses. The returned
    * `Sandbox` auto-terminates when `terminate()` is called.
-   *
-   * @param options.requestTimeout - Max seconds to wait for `Running` status (default: client requestTimeout).
-   * @param options.startupTimeout - Deprecated alias for `requestTimeout`.
-   * @throws {SandboxError} If the sandbox terminates during startup or the timeout elapses.
    */
   async createAndConnect(
     options?: CreateAndConnectOptions,
   ): Promise<Sandbox> {
+    if (options?.poolId != null && options?.cloudInit != null) {
+      throw new SandboxError("cloud-init cannot be used with poolId");
+    }
+    const opStart = nowMs();
     const requestTimeout =
       options?.requestTimeout ??
       options?.startupTimeout ??
       this.requestTimeoutMs / 1000;
     const requestClient = this.withRequestTimeout(requestTimeout);
+    logSdkTimingEvent("sandbox.create", "start", {
+      request_timeout_s: requestTimeout,
+      image: options?.image,
+      pool_id: options?.poolId,
+    });
 
     // claim() never sends options.name to the server, so only create() should fall
     // back to it locally when the server response omits a name.
+    const createStart = nowMs();
     const result = options?.poolId != null
       ? await requestClient.claim(options.poolId)
       : await requestClient.create(options);
+    logSdkTiming("sandbox.create", options?.poolId != null ? "claim_response" : "create_response", createStart, {
+      sandbox_id: result.sandboxId,
+      status: result.status,
+      server_trace_id: result.traceId,
+    });
     const requestedName = options?.poolId != null ? null : options?.name ?? null;
 
     const finishConnect = (
@@ -693,6 +700,13 @@ export class SandboxClient {
       sandbox.traceId = result.traceId;
       sandbox._setLifecycleIdentifier(result.sandboxId);
       sandbox._setName(name ?? requestedName);
+      logSdkTiming("sandbox.create", "complete", opStart, {
+        sandbox_id: result.sandboxId,
+        status: SandboxStatus.RUNNING,
+        server_trace_id: result.traceId,
+        routing_hint: routingHint,
+        ingress_endpoint: ingressEndpoint,
+      });
       return sandbox;
     };
 
@@ -727,7 +741,13 @@ export class SandboxClient {
     const deadline = Date.now() + secondsToMillis(requestTimeout);
 
     while (Date.now() < deadline) {
+      const pollStart = nowMs();
       const info = await requestClient.get(result.sandboxId);
+      logSdkTiming("sandbox.create", "poll_response", pollStart, {
+        sandbox_id: result.sandboxId,
+        status: info.status,
+        server_trace_id: info.traceId,
+      });
       if (info.status === SandboxStatus.RUNNING) {
         return finishConnect(info.routingHint, info.name, info.ingressEndpoint);
       }

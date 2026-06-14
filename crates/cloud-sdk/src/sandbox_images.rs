@@ -44,9 +44,9 @@ const BUILDER_SANDBOX_TIMEOUT_SECS: i64 = 300;
 /// inactivity / lifetime expiry mid-build. Must be shorter than
 /// `BUILDER_SANDBOX_TIMEOUT_SECS`.
 const BUILDER_SANDBOX_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(120);
-const PROCESS_POLL_INTERVAL: Duration = Duration::from_millis(300);
-const PROCESS_EXIT_POLL_INTERVAL: Duration = Duration::from_millis(200);
-const PROCESS_EXIT_POLL_ATTEMPTS: usize = 10;
+const PROCESS_START_ATTEMPTS: usize = 3;
+const PROCESS_REATTACH_RETRY_INTERVAL: Duration = Duration::from_secs(1);
+const PROCESS_REATTACH_ATTEMPTS: usize = 10;
 const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const PROXY_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const REMOTE_BUILD_DIR: &str = "/var/lib/tensorlake/rootfs-builder/build";
@@ -58,32 +58,42 @@ const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
 const ROOTFS_BUILDER_PROCESS_USER: &str = "root";
 
-/// Dockerfile instructions rejected during sandbox-image build. The rootfs
-/// builder hands the Dockerfile to `docker build` verbatim, so without this
-/// allowlist these instructions would silently take effect inside the
-/// resulting rootfs. Mirrors the historical Python/TS SDK behavior.
-// Instructions the SDK refuses to forward to the rootfs builder. ARG used to
-// be in this list; it is accepted at top-level scope so a Dockerfile can
-// declare global defaults that Docker resolves at build time, but the SDK
-// does not substitute ARG values at parse time.
-const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS: &[&str] = &["ONBUILD", "SHELL", "USER"];
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct ProcessTerminalStatus {
+    code: i64,
+    oom_killed: bool,
+}
 
-/// Dockerfile instructions that affect image config (CMD, ENTRYPOINT, etc.)
-/// rather than the filesystem. `docker build --output type=tar` discards the
-/// image config, so these are effectively no-ops on the rootfs path — we warn
-/// to surface that to the user and pass them through to the builder.
-const IGNORED_DOCKERFILE_INSTRUCTIONS: &[&str] = &[
-    "CMD",
-    "ENTRYPOINT",
-    "EXPOSE",
-    "HEALTHCHECK",
-    "LABEL",
-    "STOPSIGNAL",
-    "VOLUME",
-];
+/// Dockerfile instructions rejected during sandbox-image build. `ONBUILD`
+/// registers deferred triggers that only fire when the image is used as a base
+/// in a downstream build, and `SHELL` changes the shell used for shell-form
+/// `RUN`/`CMD`/`ENTRYPOINT`; neither has a meaningful effect on the rootfs path
+/// (`docker build --output type=tar` discards image config and there is no
+/// child build), so we reject them rather than accept a silent no-op.
+// ARG used to be in this list; it is accepted at top-level scope so a
+// Dockerfile can declare global defaults that Docker resolves at build time,
+// but the SDK does not substitute ARG values at parse time.
+const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS: &[&str] = &["ONBUILD", "SHELL"];
+
+/// Dockerfile instructions that affect image config (exposed ports, labels,
+/// etc.) rather than the filesystem. `docker build --output type=tar` discards
+/// the image config, so these are effectively no-ops on the rootfs path — we
+/// warn to surface that to the user and pass them through to the builder.
+const IGNORED_DOCKERFILE_INSTRUCTIONS: &[&str] =
+    &["EXPOSE", "HEALTHCHECK", "LABEL", "STOPSIGNAL", "VOLUME"];
 
 #[derive(Debug, Error)]
 pub enum SandboxImageBuildError {
+    /// A failure after the builder sandbox was created. Carries the IDs
+    /// support needs to find the build: the builder sandbox ID correlates
+    /// with dataplane and platform logs, the build ID with platform-api.
+    #[error("{source} (builder sandbox: {builder_sandbox_id}, build: {build_id})")]
+    BuildFailed {
+        builder_sandbox_id: String,
+        build_id: String,
+        #[source]
+        source: Box<SandboxImageBuildError>,
+    },
     #[error("{0}")]
     Usage(String),
     #[error("{0}")]
@@ -125,6 +135,11 @@ pub struct SandboxImageBuildOptions {
     pub dockerfile_path: PathBuf,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<PathBuf>,
+    /// When set, import this registry image reference directly into a rootfs
+    /// (no Dockerfile, no Docker daemon — the builder runs
+    /// `indexify-rootfs-materialize oci-image-to-ext4`). Mutually exclusive
+    /// with the Dockerfile build path.
+    pub import_image_reference: Option<String>,
     pub registered_name: Option<String>,
     pub disk_mb: Option<u64>,
     pub builder_disk_mb: Option<u64>,
@@ -182,6 +197,12 @@ struct DockerfileBuildPlan {
     /// Surfaced as warnings by the caller; preserved in `dockerfile_text` and
     /// forwarded to `docker build`.
     ignored_instructions: Vec<(usize, String)>,
+    /// When set, this is an image-import build rather than a Dockerfile build:
+    /// the builder pulls this registry reference directly into the rootfs with
+    /// no Docker daemon. There is no build context to upload and the base is
+    /// never resolved against the template registry (import always pulls from
+    /// the registry, producing a fresh base rootfs).
+    import_image_reference: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -264,18 +285,25 @@ pub async fn build_sandbox_image<F>(options: SandboxImageBuildOptions, mut emit:
 where
     F: FnMut(SandboxImageBuildEvent),
 {
-    emit(SandboxImageBuildEvent::Status(
-        "Loading Dockerfile...".to_string(),
-    ));
-    let plan = if let Some(dockerfile_text) = &options.dockerfile_text {
-        load_dockerfile_text_plan(
-            &options.dockerfile_path,
-            options.context_dir.as_deref(),
-            dockerfile_text.clone(),
-            options.registered_name.as_deref(),
-        )?
+    let plan = if let Some(image_ref) = &options.import_image_reference {
+        emit(SandboxImageBuildEvent::Status(format!(
+            "Importing registry image {image_ref}..."
+        )));
+        plan_image_import(image_ref, options.registered_name.as_deref())?
     } else {
-        load_dockerfile_plan(&options.dockerfile_path, options.registered_name.as_deref())?
+        emit(SandboxImageBuildEvent::Status(
+            "Loading Dockerfile...".to_string(),
+        ));
+        if let Some(dockerfile_text) = &options.dockerfile_text {
+            load_dockerfile_text_plan(
+                &options.dockerfile_path,
+                options.context_dir.as_deref(),
+                dockerfile_text.clone(),
+                options.registered_name.as_deref(),
+            )?
+        } else {
+            load_dockerfile_plan(&options.dockerfile_path, options.registered_name.as_deref())?
+        }
     };
     emit(SandboxImageBuildEvent::Status(format!(
         "Selected image name: {}",
@@ -351,6 +379,7 @@ where
             network: None,
             snapshot_id: None,
             name: None,
+            cloud_init_base64: None,
         })
         .await?;
     let sandbox_id = created.sandbox_id.clone();
@@ -501,7 +530,11 @@ where
         )));
     }
 
-    result
+    result.map_err(|source| SandboxImageBuildError::BuildFailed {
+        builder_sandbox_id: sandbox_id,
+        build_id: prepared.build_id.clone(),
+        source: Box::new(source),
+    })
 }
 
 async fn resolve_build_context(options: SandboxImageBuildOptions) -> Result<ResolvedBuildContext> {
@@ -745,8 +778,11 @@ async fn prepare_rootfs_build(
     // the value is an internal reference to an earlier-defined stage, not
     // an external image we should resolve as a template. Also skip when
     // the base image contains `$` (build-arg) or `@` (digest pin); those
-    // were already recorded as unresolvable and warned about.
-    let parent_template_payload = if plan.base_image_is_internal_stage
+    // were already recorded as unresolvable and warned about. Import builds
+    // never resolve a parent — they always pull a fresh base from the
+    // registry, even if the reference happens to match a template name.
+    let parent_template_payload = if plan.import_image_reference.is_some()
+        || plan.base_image_is_internal_stage
         || plan.base_image.contains('$')
         || plan.base_image.contains('@')
     {
@@ -927,9 +963,6 @@ async fn upload_build_inputs(
     disk_mb: Option<u64>,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
-    emit(SandboxImageBuildEvent::Status(
-        "Uploading build context...".to_string(),
-    ));
     // Pre-create REMOTE_BUILD_DIR with permissive mode as root so the
     // sandbox-user file API can write into it. The path lives under
     // /var/lib/tensorlake/ which is root-owned in the rootfs-builder image,
@@ -939,7 +972,14 @@ async fn upload_build_inputs(
     // `PUT /api/v1/files` calls (both running as the sandbox user) succeed
     // without further root involvement.
     ensure_remote_build_root(proxy).await?;
-    copy_local_path(proxy, &plan.context_dir, REMOTE_CONTEXT_DIR).await?;
+    // Import builds have no local build context — the rootfs comes straight
+    // from the registry image — so there is nothing to upload.
+    if plan.import_image_reference.is_none() {
+        emit(SandboxImageBuildEvent::Status(
+            "Uploading build context...".to_string(),
+        ));
+        copy_local_path(proxy, &plan.context_dir, REMOTE_CONTEXT_DIR).await?;
+    }
 
     let docker_config_json = resolved_docker_config_json().await?;
     let spec = build_rootfs_spec(prepared_spec, prepared, plan, disk_mb, docker_config_json)?;
@@ -974,6 +1014,14 @@ fn build_rootfs_spec(
         "baseImage".to_string(),
         Value::String(plan.base_image.clone()),
     );
+    // Routes the builder to `oci-image-to-ext4` instead of docker build; the
+    // builder pulls this reference straight into the rootfs.
+    if let Some(import_image_reference) = &plan.import_image_reference {
+        object.insert(
+            "importImageReference".to_string(),
+            Value::String(import_image_reference.clone()),
+        );
+    }
     object.insert(
         "rootfsDiskBytes".to_string(),
         Value::Number(rootfs_disk_bytes(disk_mb, prepared)?.into()),
@@ -1283,64 +1331,225 @@ async fn run_streaming_process(
     run_as_root: bool,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
+    let expected_args = args.clone();
     let payload = streaming_process_payload(command, args, env, working_dir, run_as_root);
-    let started = proxy.start_process(&payload).await?;
-    let pid = started.pid;
-    let mut stdout_seen = 0usize;
-    let mut stderr_seen = 0usize;
-    let mut info: ProcessInfo;
 
-    loop {
-        let stdout = proxy.get_stdout(pid).await?;
-        for line in stdout.lines.iter().skip(stdout_seen) {
-            emit(SandboxImageBuildEvent::BuildLog {
-                stream: "stdout".to_string(),
-                message: line.clone(),
-            });
-        }
-        stdout_seen = stdout.lines.len();
+    let started = start_or_recover_process(proxy, &payload, command, &expected_args, emit).await?;
 
-        let stderr = proxy.get_stderr(pid).await?;
-        for line in stderr.lines.iter().skip(stderr_seen) {
-            emit(SandboxImageBuildEvent::BuildLog {
-                stream: "stderr".to_string(),
-                message: line.clone(),
-            });
-        }
-        stderr_seen = stderr.lines.len();
+    let terminal_status = stream_started_process(proxy, started.pid, emit).await?;
 
-        info = proxy.get_process(pid).await?.into_inner();
-        if info.status != "running" {
-            break;
-        }
-
-        tokio::time::sleep(PROCESS_POLL_INTERVAL).await;
-    }
-
-    for _ in 0..PROCESS_EXIT_POLL_ATTEMPTS {
-        if info.exit_code.is_some() || info.signal.is_some() {
-            break;
-        }
-        tokio::time::sleep(PROCESS_EXIT_POLL_INTERVAL).await;
-        info = proxy.get_process(pid).await?.into_inner();
-    }
-
-    let exit_code = if let Some(code) = info.exit_code {
-        code
-    } else if let Some(signal) = info.signal {
-        -signal
-    } else {
-        0
-    };
-
-    if exit_code != 0 {
+    if terminal_status.code != 0 {
+        let reason = if terminal_status.oom_killed {
+            " (process was killed by the kernel OOM killer)"
+        } else {
+            ""
+        };
         return Err(SandboxImageBuildError::other(format!(
-            "Command '{}' failed with exit code {}",
-            command, exit_code
+            "Command '{}' failed with exit code {}{}",
+            command, terminal_status.code, reason
         )));
     }
 
     Ok(())
+}
+
+async fn start_or_recover_process(
+    proxy: &SandboxProxyClient,
+    payload: &Value,
+    command: &str,
+    expected_args: &[String],
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<ProcessInfo> {
+    let mut last_error = None;
+
+    for attempt in 1..=PROCESS_START_ATTEMPTS {
+        match proxy.start_process(payload).await {
+            Ok(started) => return Ok(started.into_inner()),
+            Err(start_error) => {
+                emit(SandboxImageBuildEvent::Status(format!(
+                    "Process start attempt {} failed; looking for an already-started process...",
+                    attempt
+                )));
+                match recover_started_process(proxy, command, expected_args).await {
+                    Ok(process) => return Ok(process),
+                    Err(recover_error) => {
+                        last_error = Some(format!(
+                            "start failed: {}; recovery failed: {}",
+                            start_error, recover_error
+                        ));
+                    }
+                }
+            }
+        }
+
+        if attempt < PROCESS_START_ATTEMPTS {
+            tokio::time::sleep(PROCESS_REATTACH_RETRY_INTERVAL).await;
+        }
+    }
+
+    Err(SandboxImageBuildError::other(last_error.unwrap_or_else(
+        || format!("Failed to start process '{}'", command),
+    )))
+}
+
+async fn recover_started_process(
+    proxy: &SandboxProxyClient,
+    command: &str,
+    expected_args: &[String],
+) -> Result<ProcessInfo> {
+    let mut last_error = None;
+
+    for _ in 0..PROCESS_REATTACH_ATTEMPTS {
+        match proxy.list_processes().await {
+            Ok(processes) => {
+                if let Some(process) = processes
+                    .into_inner()
+                    .into_iter()
+                    .filter(|process| process.command == command && process.args == expected_args)
+                    .max_by_key(|process| process.pid)
+                {
+                    return Ok(process);
+                }
+            }
+            Err(error) => {
+                last_error = Some(error);
+            }
+        }
+        tokio::time::sleep(PROCESS_REATTACH_RETRY_INTERVAL).await;
+    }
+
+    let message = if let Some(error) = last_error {
+        format!(
+            "No process found for command '{}' after process-list errors: {}",
+            command, error
+        )
+    } else {
+        format!("No process found for command '{}'", command)
+    };
+    Err(SandboxImageBuildError::other(message))
+}
+
+async fn stream_started_process(
+    proxy: &SandboxProxyClient,
+    pid: i64,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<ProcessTerminalStatus> {
+    let mut output_events_seen = 0usize;
+    let mut attempts = 0usize;
+
+    loop {
+        let follow_result = follow_process_output(proxy, pid, &mut output_events_seen, emit).await;
+
+        if let Err(error) = follow_result {
+            attempts += 1;
+            if let Some(status) =
+                get_process_terminal_status_with_retries(proxy, pid, &mut attempts).await?
+            {
+                return Ok(status);
+            }
+            if attempts >= PROCESS_REATTACH_ATTEMPTS {
+                return Err(error);
+            }
+            emit(SandboxImageBuildEvent::Status(format!(
+                "Process stream interrupted; reattaching to process {}...",
+                pid
+            )));
+            tokio::time::sleep(PROCESS_REATTACH_RETRY_INTERVAL).await;
+            continue;
+        }
+
+        attempts = 0;
+        if let Some(status) =
+            get_process_terminal_status_with_retries(proxy, pid, &mut attempts).await?
+        {
+            return Ok(status);
+        }
+
+        emit(SandboxImageBuildEvent::Status(format!(
+            "Process output stream ended before process {} exited; reattaching...",
+            pid
+        )));
+        tokio::time::sleep(PROCESS_REATTACH_RETRY_INTERVAL).await;
+    }
+}
+
+async fn follow_process_output(
+    proxy: &SandboxProxyClient,
+    pid: i64,
+    output_events_seen: &mut usize,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<()> {
+    let mut replayed_events_seen = 0usize;
+    proxy
+        .follow_output_streaming(pid, |output| {
+            if replayed_events_seen < *output_events_seen {
+                replayed_events_seen += 1;
+                return;
+            }
+            replayed_events_seen += 1;
+            *output_events_seen += 1;
+            emit(SandboxImageBuildEvent::BuildLog {
+                stream: output.stream.unwrap_or_else(|| "stdout".to_string()),
+                message: output.line,
+            });
+        })
+        .await?;
+
+    Ok(())
+}
+
+async fn get_process_terminal_status_with_retries(
+    proxy: &SandboxProxyClient,
+    pid: i64,
+    attempts: &mut usize,
+) -> Result<Option<ProcessTerminalStatus>> {
+    loop {
+        match proxy.get_process(pid).await {
+            Ok(info) => return Ok(process_terminal_status(&info.into_inner())),
+            Err(error) => {
+                *attempts += 1;
+                if *attempts >= PROCESS_REATTACH_ATTEMPTS {
+                    return Err(error.into());
+                }
+                tokio::time::sleep(PROCESS_REATTACH_RETRY_INTERVAL).await;
+            }
+        }
+    }
+}
+
+fn process_terminal_status(info: &ProcessInfo) -> Option<ProcessTerminalStatus> {
+    let oom_killed = info.oom_killed
+        || info.status == "oom_killed"
+        || info
+            .managed
+            .as_ref()
+            .and_then(|managed| managed.last_exit.as_ref())
+            .is_some_and(|last_exit| last_exit.oom_killed);
+
+    if oom_killed {
+        Some(ProcessTerminalStatus {
+            code: info
+                .signal
+                .map(|signal| -signal)
+                .or(info.exit_code)
+                .unwrap_or(-9),
+            oom_killed,
+        })
+    } else if let Some(code) = info.exit_code {
+        Some(ProcessTerminalStatus { code, oom_killed })
+    } else if let Some(signal) = info.signal {
+        Some(ProcessTerminalStatus {
+            code: -signal,
+            oom_killed,
+        })
+    } else if info.status != "running" {
+        Some(ProcessTerminalStatus {
+            code: 0,
+            oom_killed,
+        })
+    } else {
+        None
+    }
 }
 
 fn streaming_process_payload(
@@ -1463,6 +1672,55 @@ fn is_localhost(url: &str) -> bool {
         return matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
     }
     false
+}
+
+/// Build a plan for importing a registry image directly (no Dockerfile).
+/// The stored "dockerfile" is a synthetic `FROM <ref>` so the template
+/// registry records a faithful provenance, but the build never runs Docker:
+/// the spec's `importImageReference` routes the builder to
+/// `oci-image-to-ext4`. Import is always a fresh base from the registry, so
+/// the base is not resolved against the template registry.
+fn plan_image_import(
+    image_ref: &str,
+    registered_name: Option<&str>,
+) -> Result<DockerfileBuildPlan> {
+    let image_ref = image_ref.trim();
+    if image_ref.is_empty() {
+        return Err(SandboxImageBuildError::usage(
+            "image reference to import must not be empty",
+        ));
+    }
+    let registered_name = registered_name
+        .map(str::to_string)
+        .unwrap_or_else(|| default_registered_name_from_image(image_ref));
+    Ok(DockerfileBuildPlan {
+        context_dir: PathBuf::new(),
+        registered_name,
+        dockerfile_text: format!("FROM {image_ref}\n"),
+        base_image: image_ref.to_string(),
+        base_image_is_internal_stage: false,
+        additional_image_references: Vec::new(),
+        unresolvable_image_references: Vec::new(),
+        ignored_instructions: Vec::new(),
+        import_image_reference: Some(image_ref.to_string()),
+    })
+}
+
+/// Derive a registered name from an image reference: the last path segment
+/// with any tag/digest stripped (e.g. `pytorch/pytorch:2.4.1` -> `pytorch`,
+/// `ghcr.io/org/app@sha256:...` -> `app`).
+fn default_registered_name_from_image(image_ref: &str) -> String {
+    let without_digest = image_ref.split('@').next().unwrap_or(image_ref);
+    let last_segment = without_digest.rsplit('/').next().unwrap_or(without_digest);
+    let name = match last_segment.rsplit_once(':') {
+        Some((repo, tag)) if !tag.is_empty() => repo,
+        _ => last_segment,
+    };
+    if name.is_empty() {
+        "imported-image".to_string()
+    } else {
+        name.to_string()
+    }
 }
 
 fn load_dockerfile_plan(
@@ -1633,6 +1891,7 @@ fn load_dockerfile_text_plan(
         additional_image_references: additional_refs,
         unresolvable_image_references,
         ignored_instructions,
+        import_image_reference: None,
     })
 }
 
@@ -1992,14 +2251,30 @@ fn is_dockerignored(
 
 #[cfg(test)]
 mod tests {
+
+    #[test]
+    fn build_failed_error_names_the_builder_sandbox_and_build() {
+        let error = super::SandboxImageBuildError::BuildFailed {
+            builder_sandbox_id: "rtmmkcw33uvsbep6hn03u".to_string(),
+            build_id: "sandbox_template_build_123".to_string(),
+            source: Box::new(super::SandboxImageBuildError::Other(
+                "rootfs builder exited with status 1".to_string(),
+            )),
+        };
+        let message = error.to_string();
+        assert!(message.contains("builder sandbox: rtmmkcw33uvsbep6hn03u"));
+        assert!(message.contains("build: sandbox_template_build_123"));
+        assert!(message.contains("rootfs builder exited with status 1"));
+    }
     use super::{
         CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
         PreparedSandboxTemplateBuild, build_rootfs_spec, collect_dir_files,
         complete_request_from_metadata, default_registered_name, load_dockerfile_plan,
-        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix, rootfs_builder_env,
-        rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
-        splice_signed_upload, streaming_process_payload,
+        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
+        process_terminal_status, rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes,
+        rootfs_disk_bytes_to_mb, splice_signed_upload, streaming_process_payload,
     };
+    use crate::sandboxes::models::ProcessInfo;
     use serde_json::{Value, json};
     use std::io::Write;
 
@@ -2022,6 +2297,70 @@ mod tests {
     }
 
     #[test]
+    fn plan_image_import_synthesizes_from_and_marks_import() {
+        let plan = super::plan_image_import("ubuntu:24.04", None).unwrap();
+        assert_eq!(plan.dockerfile_text, "FROM ubuntu:24.04\n");
+        assert_eq!(plan.base_image, "ubuntu:24.04");
+        assert_eq!(plan.import_image_reference.as_deref(), Some("ubuntu:24.04"));
+        assert!(plan.additional_image_references.is_empty());
+        // Last path segment with the tag stripped.
+        assert_eq!(plan.registered_name, "ubuntu");
+    }
+
+    #[test]
+    fn plan_image_import_honors_explicit_name_and_rejects_empty() {
+        let plan = super::plan_image_import("ghcr.io/org/app:v1", Some("my-image")).unwrap();
+        assert_eq!(plan.registered_name, "my-image");
+        assert!(super::plan_image_import("   ", None).is_err());
+    }
+
+    #[test]
+    fn default_registered_name_from_image_strips_path_tag_and_digest() {
+        assert_eq!(
+            super::default_registered_name_from_image("pytorch/pytorch:2.4.1-runtime"),
+            "pytorch"
+        );
+        assert_eq!(
+            super::default_registered_name_from_image(&format!(
+                "ghcr.io/org/app@sha256:{}",
+                "a".repeat(64)
+            )),
+            "app"
+        );
+        assert_eq!(
+            super::default_registered_name_from_image("ubuntu"),
+            "ubuntu"
+        );
+    }
+
+    #[test]
+    fn build_rootfs_spec_sets_import_reference_for_import_plans() {
+        let prepared_spec = json!({});
+        let prepared: super::PreparedSandboxTemplateBuild = serde_json::from_value(json!({
+            "buildId": "build-1",
+            "snapshotId": "snap-1",
+            "snapshotUri": "s3://bucket/snap-1",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "cpus": 2.0,
+                "memoryMb": 2048,
+                "diskMb": 20480
+            },
+            "parent": null
+        }))
+        .unwrap();
+        let plan = super::plan_image_import("ubuntu:24.04", None).unwrap();
+
+        let spec =
+            super::build_rootfs_spec(&prepared_spec, &prepared, &plan, Some(10240), None).unwrap();
+        assert_eq!(spec["importImageReference"], "ubuntu:24.04");
+        assert_eq!(spec["baseImage"], "ubuntu:24.04");
+        assert_eq!(spec["dockerfile"], "FROM ubuntu:24.04\n");
+    }
+
+    #[test]
     fn load_dockerfile_plan_reads_base_image_and_name() {
         let temp_dir = tempfile::tempdir().unwrap();
         let dockerfile_path = temp_dir.path().join("Dockerfile");
@@ -2039,7 +2378,7 @@ mod tests {
 
     #[test]
     fn load_dockerfile_plan_rejects_unsupported_instructions() {
-        for instruction in ["ONBUILD RUN echo", "SHELL [\"/bin/bash\"]", "USER app"] {
+        for instruction in ["ONBUILD RUN echo", "SHELL [\"/bin/bash\"]"] {
             let temp_dir = tempfile::tempdir().unwrap();
             let dockerfile_path = temp_dir.path().join("Dockerfile");
             std::fs::write(
@@ -2128,8 +2467,6 @@ mod tests {
             "FROM python:3.12-slim\n\
              LABEL maintainer=alice\n\
              EXPOSE 8080\n\
-             CMD [\"python\", \"-m\", \"http.server\"]\n\
-             ENTRYPOINT [\"/usr/bin/env\"]\n\
              HEALTHCHECK CMD echo ok\n\
              STOPSIGNAL SIGTERM\n\
              VOLUME /data\n\
@@ -2145,19 +2482,39 @@ mod tests {
             .collect();
         assert_eq!(
             keywords,
-            vec![
-                "LABEL",
-                "EXPOSE",
-                "CMD",
-                "ENTRYPOINT",
-                "HEALTHCHECK",
-                "STOPSIGNAL",
-                "VOLUME",
-            ]
+            vec!["LABEL", "EXPOSE", "HEALTHCHECK", "STOPSIGNAL", "VOLUME",]
         );
         // Dockerfile text is preserved verbatim so the rootfs builder still
         // sees the same instructions.
         assert!(plan.dockerfile_text.contains("EXPOSE 8080"));
+    }
+
+    #[test]
+    fn load_dockerfile_plan_accepts_user_cmd_entrypoint() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile_path,
+            "FROM python:3.12-slim\n\
+             USER app\n\
+             CMD [\"python\", \"-m\", \"http.server\"]\n\
+             ENTRYPOINT [\"/usr/bin/env\"]\n\
+             RUN echo hi\n",
+        )
+        .unwrap();
+
+        // USER, CMD, and ENTRYPOINT are now supported: the plan loads without
+        // error and none of them land in the ignored set.
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+        let keywords: Vec<&str> = plan
+            .ignored_instructions
+            .iter()
+            .map(|(_, kw)| kw.as_str())
+            .collect();
+        assert!(
+            keywords.is_empty(),
+            "expected no ignored instructions, got {keywords:?}",
+        );
     }
 
     #[test]
@@ -2410,6 +2767,7 @@ mod tests {
             base_image_is_internal_stage: false,
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
+            import_image_reference: None,
         };
 
         let spec = build_rootfs_spec(
@@ -2442,6 +2800,7 @@ mod tests {
             base_image_is_internal_stage: false,
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
+            import_image_reference: None,
         };
 
         let spec = build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None).unwrap();
@@ -2708,6 +3067,28 @@ mod tests {
             files,
             vec![".dockerignore", "cache/keep.txt", "included.txt"]
         );
+    }
+
+    #[test]
+    fn process_terminal_status_detects_oom_killed_process() {
+        let info = ProcessInfo {
+            handle: Some(1),
+            pid: 42,
+            status: "oom_killed".to_string(),
+            exit_code: None,
+            signal: Some(9),
+            oom_killed: true,
+            stdin_writable: false,
+            command: "/usr/local/bin/tl-rootfs-build".to_string(),
+            args: Vec::new(),
+            started_at: json!(123),
+            ended_at: Some(json!(456)),
+            managed: None,
+        };
+
+        let status = process_terminal_status(&info).unwrap();
+        assert_eq!(status.code, -9);
+        assert!(status.oom_killed);
     }
 
     fn prepared_build(rootfs_node_kind: &str) -> PreparedSandboxTemplateBuild {

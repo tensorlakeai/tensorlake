@@ -13,6 +13,12 @@ import {
   SandboxConnectionError,
   SandboxNotFoundError,
 } from "./errors.js";
+import {
+  nowMs,
+  logSdkTimingEvent,
+  logSdkTiming,
+  sdkTimingPayloadsEnabled,
+} from "./sdk-timings.js";
 
 const REQUEST_TIMEOUT_HEADER = "X-Tensorlake-Request-Timeout-Ms";
 
@@ -254,10 +260,19 @@ export class HttpClient {
     const { traceparent, traceId } = HttpClient.makeTraceparent();
     headers["traceparent"] = traceparent;
     let lastError: Error | undefined;
+    const operationStart = nowMs();
+    const timingPath = sdkTimingPayloadsEnabled() ? path : stripPathPayload(path);
 
     for (let attempt = 0; attempt <= this.maxRetries; attempt++) {
       if (attempt > 0) {
         const delay = this.retryBackoffMs * Math.pow(2, attempt - 1);
+        logSdkTimingEvent("http.request", "retry_sleep_start", {
+          method,
+          path: timingPath,
+          attempt,
+          delay_ms: delay,
+          server_trace_id: traceId,
+        });
         await sleep(delay);
       }
 
@@ -277,6 +292,7 @@ export class HttpClient {
         ? anySignal([signal, this.abortController.signal])
         : this.abortController.signal;
 
+      const attemptStart = nowMs();
       try {
         const response = (await undiciFetch(url, {
           method,
@@ -286,8 +302,24 @@ export class HttpClient {
         })) as Response;
 
         if (timeoutId != null) clearTimeout(timeoutId);
+        logSdkTiming("http.request", "headers", attemptStart, {
+          method,
+          path: timingPath,
+          status: response.status,
+          attempt,
+          server_trace_id: traceId,
+        });
 
-        if (response.ok) return { response, traceId };
+        if (response.ok) {
+          logSdkTiming("http.request", "complete", operationStart, {
+            method,
+            path: timingPath,
+            status: response.status,
+            attempts: attempt + 1,
+            server_trace_id: traceId,
+          });
+          return { response, traceId };
+        }
 
         // Check if retryable
         if (
@@ -298,10 +330,24 @@ export class HttpClient {
             response.status,
             await response.text().catch(() => ""),
           );
+          logSdkTimingEvent("http.request", "retryable_status", {
+            method,
+            path: timingPath,
+            status: response.status,
+            attempt,
+            server_trace_id: traceId,
+          });
           continue;
         }
 
         if (allowHttpErrors || allowedErrorStatusCodes.has(response.status)) {
+          logSdkTiming("http.request", "complete", operationStart, {
+            method,
+            path: timingPath,
+            status: response.status,
+            attempts: attempt + 1,
+            server_trace_id: traceId,
+          });
           return { response, traceId };
         }
 
@@ -329,6 +375,13 @@ export class HttpClient {
 
         // Network / timeout error
         lastError = err instanceof Error ? err : new Error(String(err));
+        logSdkTiming("http.request", "error", attemptStart, {
+          method,
+          path: timingPath,
+          attempt,
+          server_trace_id: traceId,
+          error: timedOut ? `request timed out after ${this.timeoutMs}ms` : describeError(err),
+        });
 
         if (attempt >= this.maxRetries) {
           // Surface the real inner cause; for our own deadline, say so plainly.
@@ -362,6 +415,11 @@ function normalizeRequestBody(
     return Uint8Array.from(body).buffer as ArrayBuffer;
   }
   return body as UndiciBodyInit;
+}
+
+function stripPathPayload(path: string): string {
+  const queryStart = path.search(/[?#]/);
+  return queryStart === -1 ? path : path.slice(0, queryStart);
 }
 
 /** Map HTTP status codes to specific error types. */

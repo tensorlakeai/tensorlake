@@ -8,6 +8,9 @@
  *   TENSORLAKE_API_KEY=... npm run test:integration
  */
 
+import { mkdir, writeFile } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   PoolInUseError,
@@ -19,6 +22,8 @@ import {
   type SandboxInfo,
   type SandboxPoolInfo,
   type PoolContainerInfo,
+  createSandboxImage,
+  deleteSandboxImage,
 } from "../src/index.js";
 import { Sandbox } from "../src/sandbox.js";
 
@@ -122,6 +127,10 @@ function claimedContainers(
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function randomSuffix(): string {
+  return Math.random().toString(36).slice(2, 10);
 }
 
 function createTestClient(): SandboxClient {
@@ -231,6 +240,44 @@ beforeAll(async () => {
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
+
+describe("Sandbox Images", () => {
+  it(
+    "creates and deletes a sandbox image",
+    async () => {
+      const registeredName = `sdk-ts-delete-test-${randomSuffix()}`;
+      const tempDir = await mkdir(
+        path.join(os.tmpdir(), `tensorlake-image-${registeredName}`),
+        { recursive: true },
+      );
+      const dockerfilePath = path.join(tempDir, "Dockerfile");
+      await writeFile(
+        dockerfilePath,
+        "FROM tensorlake/ubuntu-minimal\nRUN printf 'ts delete acceptance\\n' > /tmp/ts-delete-acceptance\n",
+        "utf8",
+      );
+
+      let created = false;
+      try {
+        await createSandboxImage(dockerfilePath, {
+          registeredName,
+          cpus: 1.0,
+          memoryMb: 1024,
+        });
+        created = true;
+
+        await deleteSandboxImage(registeredName);
+      } finally {
+        if (created) {
+          await deleteSandboxImage(registeredName).catch(() => {});
+        }
+      }
+
+      expect(created).toBe(true);
+    },
+    SANDBOX_SUITE_TIMEOUT_MS,
+  );
+});
 
 describe(
   "Sandbox Lifecycle",
