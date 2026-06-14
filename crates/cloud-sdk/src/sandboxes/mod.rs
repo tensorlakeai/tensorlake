@@ -24,7 +24,7 @@ use models::{
     ListArchivedSandboxesResponse, ListDirectoryResponse, ListProcessesResponse,
     ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse, OutputEvent,
     OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxPoolInfo, SandboxPoolRequest,
-    SendSignalResponse, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
+    SendSignalResponse, SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
 };
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
@@ -663,6 +663,23 @@ impl SandboxProxyClient {
 
     pub async fn info(&self) -> Result<Traced<DaemonInfo>, SdkError> {
         let req = self.request(Method::GET, "/api/v1/info").build()?;
+        self.client.execute_json(req).await
+    }
+
+    /// Ask the sandbox proxy to mint a builder-compatible blob signing spec.
+    ///
+    /// Used during the versioned-response rollout: platform-api now returns
+    /// `snapshotRelPath` instead of a pre-signed `upload` block, and the CLI
+    /// calls this endpoint to resolve the artifact rel-path into a concrete
+    /// upload spec. Parent snapshot downloads use the same endpoint with a
+    /// full blob URI. The response is a `serde_json::Value` because most
+    /// fields splice verbatim into the rootfs build spec consumed by the
+    /// in-sandbox builder.
+    pub async fn sign_blob(&self, request: &SignBlobRequest) -> Result<Traced<Value>, SdkError> {
+        let req = self
+            .request(Method::POST, "/api/v1/blob/sign")
+            .json(request)
+            .build()?;
         self.client.execute_json(req).await
     }
 }

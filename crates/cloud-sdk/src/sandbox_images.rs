@@ -19,7 +19,10 @@ use crate::{
     resolve_sandbox_lifecycle_url,
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
-        models::{CreateSandboxRequest, CreateSandboxResources, ProcessInfo, SandboxInfo},
+        models::{
+            CreateSandboxRequest, CreateSandboxResources, MultipartHint, ProcessInfo, SandboxInfo,
+            SignBlobOp, SignBlobRequest, SignBlobTarget,
+        },
     },
 };
 
@@ -226,10 +229,25 @@ enum UnresolvableImageReferenceReason {
 struct PreparedSandboxTemplateBuild {
     build_id: String,
     snapshot_id: String,
-    snapshot_uri: String,
+    /// Optional during and after the versioned-response rollout: platform-api
+    /// is moving the snapshot location off of a pre-baked `snapshotUri` and
+    /// onto `snapshotRelPath` (resolved client-side via
+    /// `SandboxProxyClient::sign_blob`). On that new path, the signed upload
+    /// response carries the final URI and the CLI copies it into the build
+    /// spec before the in-sandbox builder writes `metadata.json`.
+    #[serde(default)]
+    snapshot_uri: Option<String>,
     rootfs_node_kind: String,
     builder: PreparedRootfsBuilder,
     parent: Option<PreparedRootfsParent>,
+    /// New-path marker: when present, platform-api stopped pre-signing S3 and
+    /// the CLI must call `SandboxProxyClient::sign_blob` to mint the upload
+    /// spec. When absent, the response carries an embedded `upload` block in
+    /// the raw passthrough `Value` (legacy path). Apart from the top-level
+    /// `snapshotUri` handoff, the prepared spec stays opaque to preserve the
+    /// platform-api ↔ in-sandbox-builder forward-compat property.
+    #[serde(default)]
+    snapshot_rel_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -323,7 +341,7 @@ where
         "Preparing rootfs build...".to_string(),
     ));
     let platform_client = platform_client(&ctx)?;
-    let (prepared, prepared_spec) =
+    let (prepared, mut prepared_spec) =
         prepare_rootfs_build(&ctx, &platform_client, &plan, options.is_public).await?;
     emit(SandboxImageBuildEvent::Status(format!(
         "Build mode: Rootfs{}",
@@ -391,6 +409,73 @@ where
             routing_hint,
         )?;
         wait_for_proxy_ready(&proxy).await?;
+
+        // Versioned-response bridge: on the new path, platform-api returns
+        // `snapshotRelPath` instead of a pre-signed `upload` block, and we
+        // ask the sandbox proxy to mint the upload spec. Splice the result
+        // into the raw prepared spec so `upload_build_inputs` /
+        // `build_rootfs_spec` see an `upload` key regardless of which path
+        // produced it — preserving the platform-api ↔ in-sandbox-builder
+        // passthrough property.
+        //
+        // The CLI doesn't know the final snapshot file size until the
+        // in-sandbox builder finishes and writes metadata.json, so the
+        // provider-neutral upload request includes a capacity hint derived
+        // from the rootfs disk budget (`rootfsDiskBytes`). Clamp to
+        // [1, MULTIPART_MAX_PARTS] so a 0 MB hint still produces a valid
+        // request and absurd inputs don't blow past S3's 10,000-part ceiling.
+        //
+        // Legacy path: `snapshot_rel_path` is absent, the upload block is
+        // already in `prepared_spec`, and we do nothing here.
+        let signed_snapshot_uri = if let Some(rel_path) = prepared.snapshot_rel_path.clone() {
+            let disk_mb = rootfs_disk_bytes_to_mb(rootfs_disk_bytes)?;
+            let parts: u32 = disk_mb
+                .div_ceil(MULTIPART_PART_SIZE_MB)
+                .clamp(1, MULTIPART_MAX_PARTS as u64) as u32;
+            let signed = proxy
+                .sign_blob(&SignBlobRequest {
+                    target: SignBlobTarget::Artifact { rel_path },
+                    op: SignBlobOp::PutArtifact {
+                        multipart_hint: Some(MultipartHint {
+                            max_parts: parts,
+                            part_size_bytes: MULTIPART_PART_SIZE_BYTES,
+                        }),
+                    },
+                })
+                .await
+                .map_err(SandboxImageBuildError::Sdk)?
+                .into_inner();
+            let snapshot_uri = splice_signed_upload(&mut prepared_spec, signed)?;
+
+            if let Some(parent) = prepared.parent.as_ref() {
+                let signed = proxy
+                    .sign_blob(&SignBlobRequest {
+                        target: SignBlobTarget::Blob {
+                            uri: parent.parent_manifest_uri.clone(),
+                        },
+                        op: SignBlobOp::GetBlob,
+                    })
+                    .await
+                    .map_err(SandboxImageBuildError::Sdk)?
+                    .into_inner();
+                prepared_spec
+                    .as_object_mut()
+                    .ok_or_else(|| {
+                        SandboxImageBuildError::other("prepared spec is not a JSON object")
+                    })?
+                    .get_mut("parent")
+                    .and_then(Value::as_object_mut)
+                    .ok_or_else(|| {
+                        SandboxImageBuildError::other("prepared parent is not a JSON object")
+                    })?
+                    .insert("download".to_string(), signed);
+            }
+
+            Some(snapshot_uri)
+        } else {
+            None
+        };
+
         upload_build_inputs(
             &proxy,
             &plan,
@@ -416,7 +501,8 @@ where
         builder_result?;
 
         let metadata = read_build_metadata(&proxy).await?;
-        let complete_request = complete_request_from_metadata(&prepared, &metadata)?;
+        let complete_request =
+            complete_request_from_metadata(&prepared, &metadata, signed_snapshot_uri.as_deref())?;
 
         emit(SandboxImageBuildEvent::Status(
             "Completing image registration...".to_string(),
@@ -578,7 +664,23 @@ async fn wait_for_sandbox_status(
             )));
         }
 
-        let info = sandboxes.get(sandbox_id).await?;
+        // A sandbox that is still `pending` isn't routable yet, so the
+        // lifecycle gateway can return a transient proxy error (502 /
+        // "Failed to proxy request") until it starts — in slower environments
+        // that window is a minute or two. Treat those as retryable, the same
+        // way `wait_for_proxy_ready` does, and let the deadline above bound
+        // the total wait. Non-transient errors still fail the build.
+        let info = match sandboxes.get(sandbox_id).await {
+            Ok(info) => info,
+            Err(error) => {
+                let error = SandboxImageBuildError::from(error);
+                if is_transient_proxy_error(&error) {
+                    tokio::time::sleep(SANDBOX_WAIT_POLL_INTERVAL).await;
+                    continue;
+                }
+                return Err(error);
+            }
+        };
         let current_status = info.status.clone();
         if current_status == target_status {
             return Ok(info.into_inner());
@@ -810,10 +912,9 @@ fn sandbox_proxy_client(
 ) -> Result<SandboxProxyClient> {
     let (proxy_base, host_override) =
         sandbox_proxy_base(&ctx.api_url, sandbox_id, ingress_endpoint);
-    let sandbox_id_header = host_override.is_none().then(|| sandbox_id.to_string());
     Ok(
         SandboxProxyClient::new(client.with_base_url(&proxy_base), host_override)
-            .with_sandbox_id(sandbox_id_header)
+            .with_sandbox_id(Some(sandbox_id.to_string()))
             .with_routing_hint(routing_hint),
     )
 }
@@ -935,6 +1036,26 @@ fn build_rootfs_spec(
     Ok(spec)
 }
 
+fn splice_signed_upload(prepared_spec: &mut Value, signed_upload: Value) -> Result<String> {
+    let snapshot_uri = signed_upload
+        .get("uri")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            SandboxImageBuildError::other("dataplane signed upload response is missing uri")
+        })?
+        .to_string();
+
+    let object = prepared_spec
+        .as_object_mut()
+        .ok_or_else(|| SandboxImageBuildError::other("prepared spec is not a JSON object"))?;
+    object.insert(
+        "snapshotUri".to_string(),
+        Value::String(snapshot_uri.clone()),
+    );
+    object.insert("upload".to_string(), signed_upload);
+    Ok(snapshot_uri)
+}
+
 fn rootfs_disk_bytes(disk_mb: Option<u64>, prepared: &PreparedSandboxTemplateBuild) -> Result<u64> {
     if let Some(disk_mb) = disk_mb {
         return disk_mb.checked_mul(1024 * 1024).ok_or_else(|| {
@@ -961,6 +1082,16 @@ fn rootfs_disk_bytes_to_mb(rootfs_disk_bytes: u64) -> Result<u64> {
         })
         .map(|bytes| bytes / (1024 * 1024))
 }
+
+/// Part size used when the new-path `sign_blob` flow sends an upload capacity
+/// hint to the proxy. Used directly by the splice in `build_sandbox_image`.
+const MULTIPART_PART_SIZE_MB: u64 = 64;
+const MULTIPART_PART_SIZE_BYTES: u64 = MULTIPART_PART_SIZE_MB * 1024 * 1024;
+
+/// S3 caps a multipart upload at 10,000 parts. The dataplane's `sign_blob`
+/// endpoint enforces the same ceiling (`MAX_MULTIPART_PARTS` in
+/// `indexify/crates/dataplane/src/sign_blob.rs`); keep these in sync.
+const MULTIPART_MAX_PARTS: u32 = 10_000;
 
 async fn resolved_docker_config_json() -> Result<Option<String>> {
     let docker_config = DockerConfig::load().await.map_err(|error| {
@@ -1086,6 +1217,7 @@ async fn read_build_metadata(proxy: &SandboxProxyClient) -> Result<Value> {
 fn complete_request_from_metadata(
     prepared: &PreparedSandboxTemplateBuild,
     metadata: &Value,
+    signed_snapshot_uri: Option<&str>,
 ) -> Result<CompleteSandboxTemplateBuildRequest> {
     let rootfs_node_kind = metadata_string(metadata, "rootfs_node_kind", "rootfsNodeKind")
         .unwrap_or_else(|| prepared.rootfs_node_kind.clone());
@@ -1110,8 +1242,7 @@ fn complete_request_from_metadata(
     Ok(CompleteSandboxTemplateBuildRequest {
         snapshot_id: metadata_string(metadata, "snapshot_id", "snapshotId")
             .unwrap_or_else(|| prepared.snapshot_id.clone()),
-        snapshot_uri: metadata_string(metadata, "snapshot_uri", "snapshotUri")
-            .unwrap_or_else(|| prepared.snapshot_uri.clone()),
+        snapshot_uri: completion_snapshot_uri(prepared, metadata, signed_snapshot_uri)?,
         snapshot_format_version: required_metadata_string(
             metadata,
             "snapshot_format_version",
@@ -1126,6 +1257,38 @@ fn complete_request_from_metadata(
         rootfs_node_kind,
         parent_manifest_uri,
     })
+}
+
+fn completion_snapshot_uri(
+    prepared: &PreparedSandboxTemplateBuild,
+    metadata: &Value,
+    signed_snapshot_uri: Option<&str>,
+) -> Result<String> {
+    if let Some(signed_snapshot_uri) = signed_snapshot_uri {
+        if let Some(metadata_snapshot_uri) =
+            metadata_string(metadata, "snapshot_uri", "snapshotUri")
+            && metadata_snapshot_uri != signed_snapshot_uri
+        {
+            return Err(SandboxImageBuildError::other(format!(
+                "rootfs builder metadata snapshot_uri {} did not match dataplane signed uri {}",
+                metadata_snapshot_uri, signed_snapshot_uri
+            )));
+        }
+
+        return Ok(signed_snapshot_uri.to_string());
+    }
+
+    if let Some(snapshot_uri) = metadata_string(metadata, "snapshot_uri", "snapshotUri") {
+        return Ok(snapshot_uri);
+    }
+
+    if let Some(snapshot_uri) = prepared.snapshot_uri.clone() {
+        return Ok(snapshot_uri);
+    }
+
+    Err(SandboxImageBuildError::other(
+        "rootfs build completed without snapshot_uri",
+    ))
 }
 
 fn required_metadata_string(metadata: &Value, snake_key: &str, camel_key: &str) -> Result<String> {
@@ -2109,7 +2272,7 @@ mod tests {
         complete_request_from_metadata, default_registered_name, load_dockerfile_plan,
         load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
         process_terminal_status, rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes,
-        rootfs_disk_bytes_to_mb, streaming_process_payload,
+        rootfs_disk_bytes_to_mb, splice_signed_upload, streaming_process_payload,
     };
     use crate::sandboxes::models::ProcessInfo;
     use serde_json::{Value, json};
@@ -2495,6 +2658,78 @@ mod tests {
     }
 
     #[test]
+    fn prepared_deserializes_snapshot_rel_path() {
+        let with_rel_path: PreparedSandboxTemplateBuild = serde_json::from_value(json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "snapshotUri": "s3://bucket/snapshot.tlsnap",
+            "snapshotRelPath": "snapshots/abc.tlsnap",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "cpus": 2,
+                "memoryMb": 4096,
+                "diskMb": 30720
+            }
+        }))
+        .unwrap();
+        assert_eq!(
+            with_rel_path.snapshot_rel_path.as_deref(),
+            Some("snapshots/abc.tlsnap")
+        );
+
+        // Legacy-shape fixture (no snapshotRelPath) must still deserialize
+        // and default to None — that's how the CLI tells the two paths
+        // apart at runtime.
+        let without_rel_path: PreparedSandboxTemplateBuild = serde_json::from_value(json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "snapshotUri": "s3://bucket/snapshot.tlsnap",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "cpus": 2,
+                "memoryMb": 4096,
+                "diskMb": 30720
+            }
+        }))
+        .unwrap();
+        assert!(without_rel_path.snapshot_rel_path.is_none());
+        assert_eq!(
+            without_rel_path.snapshot_uri.as_deref(),
+            Some("s3://bucket/snapshot.tlsnap")
+        );
+    }
+
+    #[test]
+    fn prepared_deserializes_without_snapshot_uri() {
+        // Forward-compat with platform-api dropping `snapshotUri` once the
+        // versioned-response rollout finishes: the CLI must still accept
+        // the response and fill the final URI from dataplane signing.
+        let prepared: PreparedSandboxTemplateBuild = serde_json::from_value(json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "snapshotRelPath": "snapshots/abc.tlsnap",
+            "rootfsNodeKind": "base",
+            "builder": {
+                "image": "tensorlake/rootfs-builder",
+                "command": "tl-rootfs-build",
+                "cpus": 2,
+                "memoryMb": 4096,
+                "diskMb": 30720
+            }
+        }))
+        .unwrap();
+        assert!(prepared.snapshot_uri.is_none());
+        assert_eq!(
+            prepared.snapshot_rel_path.as_deref(),
+            Some("snapshots/abc.tlsnap")
+        );
+    }
+
+    #[test]
     fn build_rootfs_spec_adds_builder_inputs() {
         let prepared_spec = json!({
             "buildId": "build-1",
@@ -2573,6 +2808,54 @@ mod tests {
     }
 
     #[test]
+    fn splice_signed_upload_uses_dataplane_uri_for_snapshot_uri() {
+        let mut prepared_spec = json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "snapshotUri": "s3://platform/stale.tlsnap",
+            "rootfsNodeKind": "base",
+        });
+        let signed_upload = json!({
+            "kind": "s3_multipart",
+            "uri": "s3://dataplane/final.tlsnap",
+            "uploadId": "upload-1",
+            "partSizeBytes": 67_108_864,
+            "partUrls": []
+        });
+
+        let snapshot_uri = splice_signed_upload(&mut prepared_spec, signed_upload).unwrap();
+
+        assert_eq!(snapshot_uri, "s3://dataplane/final.tlsnap");
+        assert_eq!(prepared_spec["snapshotUri"], "s3://dataplane/final.tlsnap");
+        assert_eq!(
+            prepared_spec["upload"]["uri"],
+            "s3://dataplane/final.tlsnap"
+        );
+        assert_eq!(prepared_spec["upload"]["uploadId"], "upload-1");
+    }
+
+    #[test]
+    fn splice_signed_upload_requires_dataplane_uri() {
+        let mut prepared_spec = json!({
+            "buildId": "build-1",
+            "snapshotId": "snapshot-1",
+            "rootfsNodeKind": "base",
+        });
+        let signed_upload = json!({
+            "kind": "s3_multipart",
+            "uploadId": "upload-1",
+            "partSizeBytes": 67_108_864,
+            "partUrls": []
+        });
+
+        let error = splice_signed_upload(&mut prepared_spec, signed_upload).unwrap_err();
+        assert!(
+            error.to_string().contains("missing uri"),
+            "expected signed upload uri error, got: {error}"
+        );
+    }
+
+    #[test]
     fn rootfs_builder_command_uses_installed_path_and_tool_path() {
         assert_eq!(
             rootfs_builder_executable("tl-rootfs-build"),
@@ -2644,7 +2927,7 @@ mod tests {
             "parent_manifest_uri": "s3://bucket/parent.tlsnap"
         });
 
-        let request = complete_request_from_metadata(&prepared, &metadata).unwrap();
+        let request = complete_request_from_metadata(&prepared, &metadata, None).unwrap();
         let body = serde_json::to_value(&request).unwrap();
         assert_eq!(body["snapshotId"], "snapshot-1");
         assert_eq!(body["snapshotUri"], "s3://bucket/child.tlsnap");
@@ -2652,6 +2935,91 @@ mod tests {
         assert_eq!(body["snapshotSizeBytes"], 1234);
         assert_eq!(body["rootfsNodeKind"], "diff");
         assert_eq!(body["parentManifestUri"], "s3://bucket/parent.tlsnap");
+    }
+
+    #[test]
+    fn complete_request_uses_signed_uri_when_provided() {
+        let mut prepared = prepared_build("base");
+        prepared.parent = None;
+        prepared.snapshot_uri = None;
+        let metadata = json!({
+            "snapshot_uri": "s3://bucket/from-signed.tlsnap",
+            "snapshot_format_version": "durable_archive_v1",
+            "snapshot_size_bytes": 1234,
+            "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
+        });
+
+        let request = complete_request_from_metadata(
+            &prepared,
+            &metadata,
+            Some("s3://bucket/from-signed.tlsnap"),
+        )
+        .unwrap();
+        assert_eq!(request.snapshot_uri, "s3://bucket/from-signed.tlsnap");
+    }
+
+    #[test]
+    fn complete_request_uses_signed_uri_when_metadata_omits_snapshot_uri() {
+        let mut prepared = prepared_build("base");
+        prepared.parent = None;
+        prepared.snapshot_uri = Some("s3://bucket/stale-prepared.tlsnap".to_string());
+        let metadata = json!({
+            "snapshot_format_version": "durable_archive_v1",
+            "snapshot_size_bytes": 1234,
+            "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
+        });
+
+        let request = complete_request_from_metadata(
+            &prepared,
+            &metadata,
+            Some("s3://bucket/from-signed.tlsnap"),
+        )
+        .unwrap();
+        assert_eq!(request.snapshot_uri, "s3://bucket/from-signed.tlsnap");
+    }
+
+    #[test]
+    fn complete_request_rejects_metadata_uri_mismatch_when_signed_uri_provided() {
+        let mut prepared = prepared_build("base");
+        prepared.parent = None;
+        prepared.snapshot_uri = None;
+        let metadata = json!({
+            "snapshot_uri": "s3://bucket/from-metadata.tlsnap",
+            "snapshot_format_version": "durable_archive_v1",
+            "snapshot_size_bytes": 1234,
+            "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
+        });
+
+        let error = complete_request_from_metadata(
+            &prepared,
+            &metadata,
+            Some("s3://bucket/from-signed.tlsnap"),
+        )
+        .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("did not match dataplane signed uri"),
+            "expected signed URI mismatch error, got: {error}"
+        );
+    }
+
+    #[test]
+    fn complete_request_errors_when_snapshot_uri_missing_from_both_sources() {
+        let mut prepared = prepared_build("base");
+        prepared.parent = None;
+        prepared.snapshot_uri = None;
+        let metadata = json!({
+            "snapshot_format_version": "durable_archive_v1",
+            "snapshot_size_bytes": 1234,
+            "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
+        });
+
+        let error = complete_request_from_metadata(&prepared, &metadata, None).unwrap_err();
+        assert!(
+            error.to_string().contains("snapshot_uri"),
+            "expected snapshot_uri error, got: {error}"
+        );
     }
 
     #[test]
@@ -2663,7 +3031,7 @@ mod tests {
             "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
         });
 
-        let request = complete_request_from_metadata(&prepared, &metadata).unwrap();
+        let request = complete_request_from_metadata(&prepared, &metadata, None).unwrap();
         assert_eq!(request.snapshot_id, "snapshot-prepared");
         assert_eq!(request.snapshot_uri, "s3://bucket/prepared.tlsnap");
         assert_eq!(
@@ -2727,7 +3095,7 @@ mod tests {
         PreparedSandboxTemplateBuild {
             build_id: "build-1".to_string(),
             snapshot_id: "snapshot-prepared".to_string(),
-            snapshot_uri: "s3://bucket/prepared.tlsnap".to_string(),
+            snapshot_uri: Some("s3://bucket/prepared.tlsnap".to_string()),
             rootfs_node_kind: rootfs_node_kind.to_string(),
             builder: PreparedRootfsBuilder {
                 image: "tensorlake/rootfs-builder".to_string(),
@@ -2740,6 +3108,7 @@ mod tests {
                 parent_manifest_uri: "s3://bucket/parent.tlsnap".to_string(),
                 rootfs_disk_bytes: Some(20 * 1024 * 1024 * 1024),
             }),
+            snapshot_rel_path: None,
         }
     }
 
