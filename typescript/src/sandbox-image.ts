@@ -59,10 +59,10 @@ export interface CreateSandboxImageDeps {
 
 // --- Native binding loader -------------------------------------------------
 
-interface NativeBindingOptions {
+/** Auth/context + resource fields shared by the build and import bindings. */
+interface NativeBindingCommonOptions {
   apiUrl: string;
   bearerToken: string;
-  dockerfilePath: string;
   registeredName?: string | undefined | null;
   diskMb?: number | undefined | null;
   builderDiskMb?: number | undefined | null;
@@ -74,9 +74,16 @@ interface NativeBindingOptions {
   namespace?: string | undefined | null;
   useScopeHeaders?: boolean | undefined | null;
   userAgent?: string | undefined | null;
+}
+
+interface NativeBindingOptions extends NativeBindingCommonOptions {
+  dockerfilePath: string;
   dockerfileText?: string | undefined | null;
   contextDir?: string | undefined | null;
-  importImageReference?: string | undefined | null;
+}
+
+interface NativeBindingImportOptions extends NativeBindingCommonOptions {
+  imageReference: string;
 }
 
 interface NativeBindingEvent {
@@ -88,6 +95,10 @@ interface NativeBindingEvent {
 interface NativeBinding {
   buildSandboxImage(
     options: NativeBindingOptions,
+    emit?: ((event: NativeBindingEvent) => void) | null | undefined,
+  ): Promise<string>;
+  importSandboxImage(
+    options: NativeBindingImportOptions,
     emit?: ((event: NativeBindingEvent) => void) | null | undefined,
   ): Promise<string>;
 }
@@ -388,13 +399,11 @@ export async function importSandboxImage(
 
   const binding = loadNativeBinding();
   let emitError: unknown;
-  const resultJson = await binding.buildSandboxImage(
+  const resultJson = await binding.importSandboxImage(
     {
       apiUrl: context.apiUrl,
       bearerToken,
-      // Unused on the import path, but the native option struct is shared with
-      // the Dockerfile build flow.
-      dockerfilePath: "",
+      imageReference: reference,
       registeredName: effectiveName,
       diskMb: options.diskMb,
       builderDiskMb: options.builderDiskMb,
@@ -407,9 +416,6 @@ export async function importSandboxImage(
       useScopeHeaders:
         context.personalAccessToken != null && context.apiKey == null,
       userAgent: undefined,
-      dockerfileText: undefined,
-      contextDir: undefined,
-      importImageReference: reference,
     },
     (event) => {
       try {

@@ -1,5 +1,5 @@
 use tensorlake::sandbox_images::{
-    SandboxImageBuildEvent, SandboxImageBuildOptions, build_sandbox_image,
+    CommonBuildOptions, SandboxImageBuildEvent, SandboxImageImportOptions, import_sandbox_image,
 };
 
 use crate::{
@@ -22,32 +22,29 @@ pub async fn run(
     is_public: bool,
     output_json: bool,
 ) -> Result<()> {
-    let options = SandboxImageBuildOptions {
-        api_url: ctx.api_url.clone(),
-        bearer_token: ctx.bearer_token()?,
-        use_scope_headers: ctx.personal_access_token.is_some() && ctx.api_key.is_none(),
-        organization_id: ctx.effective_organization_id(),
-        project_id: ctx.effective_project_id(),
-        namespace: ctx.namespace.clone(),
-        // Unused on the import path, but the option struct is shared with the
-        // Dockerfile build flow.
-        dockerfile_path: std::path::PathBuf::new(),
-        dockerfile_text: None,
-        context_dir: None,
-        import_image_reference: Some(image_reference.to_string()),
-        registered_name: registered_name.map(str::to_string),
-        disk_mb,
-        builder_disk_mb,
-        cpus,
-        memory_mb,
-        is_public,
-        user_agent: Some(format!(
-            "Tensorlake CLI (rust/{})",
-            env!("CARGO_PKG_VERSION")
-        )),
+    let options = SandboxImageImportOptions {
+        common: CommonBuildOptions {
+            api_url: ctx.api_url.clone(),
+            bearer_token: ctx.bearer_token()?,
+            use_scope_headers: ctx.personal_access_token.is_some() && ctx.api_key.is_none(),
+            organization_id: ctx.effective_organization_id(),
+            project_id: ctx.effective_project_id(),
+            namespace: ctx.namespace.clone(),
+            registered_name: registered_name.map(str::to_string),
+            disk_mb,
+            builder_disk_mb,
+            cpus,
+            memory_mb,
+            is_public,
+            user_agent: Some(format!(
+                "Tensorlake CLI (rust/{})",
+                env!("CARGO_PKG_VERSION")
+            )),
+        },
+        image_reference: image_reference.to_string(),
     };
 
-    let registered = build_sandbox_image(options, |event| match event {
+    let registered = import_sandbox_image(options, |event| match event {
         SandboxImageBuildEvent::Status(message) => eprintln!("⚙️  {message}"),
         SandboxImageBuildEvent::BuildLog { message, .. } => eprintln!("{message}"),
         SandboxImageBuildEvent::Warning(message) => eprintln!("⚠️  {message}"),

@@ -38,6 +38,18 @@ def _make_build_patches(ctx):
     )
 
 
+def _make_import_patches(ctx):
+    """Common mock bundle for exercising import_sandbox_image without networking."""
+    return (
+        patch.object(sbm, "_build_context_from_env", return_value=ctx),
+        patch.object(
+            sbm,
+            "_rust_import_sandbox_image",
+            return_value='{"id":"tpl-1","snapshot_id":"snap-1"}',
+        ),
+    )
+
+
 class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
     def test_registers_snapshot_from_dockerfile(self):
         ctx = _make_ctx()
@@ -77,7 +89,6 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             "default",
             False,
             sbm.USER_AGENT,
-            None,
             None,
             None,
             ANY,
@@ -122,7 +133,6 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             "default",
             False,
             sbm.USER_AGENT,
-            None,
             None,
             None,
             ANY,
@@ -197,18 +207,20 @@ class TestImportSandboxImage(unittest.TestCase):
     def test_imports_registry_image_with_reference_and_no_dockerfile(self):
         ctx = _make_ctx()
 
-        build_ctx, rust_builder = _make_build_patches(ctx)
-        with build_ctx, rust_builder as rust_builder_mock:
+        build_ctx, rust_importer = _make_import_patches(ctx)
+        with build_ctx, rust_importer as rust_importer_mock:
             sbm.import_sandbox_image(
                 "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",
                 cpus=BUILD_CPUS,
                 memory_mb=BUILD_MEMORY_MB,
             )
 
-        rust_builder_mock.assert_called_once_with(
+        # The import path delegates to the dedicated Rust entry point with no
+        # Dockerfile fields — the image reference is a first-class argument.
+        rust_importer_mock.assert_called_once_with(
             "https://api.tensorlake.test",
             "tl_apiKey_abc",
-            "",  # no dockerfile path on the import path
+            "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",  # image_reference
             "pytorch",  # default name derived from the reference
             None,
             None,
@@ -220,9 +232,6 @@ class TestImportSandboxImage(unittest.TestCase):
             "default",
             False,
             sbm.USER_AGENT,
-            None,  # dockerfile_text
-            None,  # context_dir
-            "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",  # import_image_reference
             ANY,
         )
 
@@ -242,13 +251,13 @@ class TestImportSandboxImage(unittest.TestCase):
 
     def test_explicit_registered_name_overrides_default(self):
         ctx = _make_ctx()
-        build_ctx, rust_builder = _make_build_patches(ctx)
-        with build_ctx, rust_builder as rust_builder_mock:
+        build_ctx, rust_importer = _make_import_patches(ctx)
+        with build_ctx, rust_importer as rust_importer_mock:
             sbm.import_sandbox_image(
                 "pytorch/pytorch:2.4.1",
                 registered_name="override",
             )
-        self.assertEqual(rust_builder_mock.call_args.args[3], "override")
+        self.assertEqual(rust_importer_mock.call_args.args[3], "override")
 
     def test_empty_reference_raises_build_error(self):
         with self.assertRaises(sbm.SandboxImageBuildError):

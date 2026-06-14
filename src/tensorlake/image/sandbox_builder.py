@@ -110,6 +110,17 @@ def _rust_build_sandbox_image(*args, **kwargs) -> str:
     return rust_build_sandbox_image(*args, **kwargs)
 
 
+def _rust_import_sandbox_image(*args, **kwargs) -> str:
+    try:
+        from tensorlake._cloud_sdk import (
+            import_sandbox_image as rust_import_sandbox_image,
+        )
+    except ImportError:
+        from _cloud_sdk import import_sandbox_image as rust_import_sandbox_image
+
+    return rust_import_sandbox_image(*args, **kwargs)
+
+
 def _rust_delete_sandbox_image(
     api_url: str,
     token: str,
@@ -143,7 +154,6 @@ def _run_rust_image_create(
     *,
     dockerfile_text: str | None,
     context_dir: str | None,
-    import_image_reference: str | None = None,
     cpus: float,
     memory_mb: int,
     disk_mb: int | None,
@@ -151,28 +161,9 @@ def _run_rust_image_create(
     is_public: bool,
     emit: EmitFn,
 ) -> dict:
-    ctx = _build_context_from_env()
-    token = ctx.api_key or ctx.personal_access_token
-    if not token:
-        raise SandboxImageBuildError(
-            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
-        )
+    ctx, token = _resolve_build_credentials()
 
-    if import_image_reference:
-        emit(
-            {
-                "type": "status",
-                "message": (
-                    f"Importing image '{import_image_reference}' "
-                    f"as '{registered_name}'..."
-                ),
-            }
-        )
-    else:
-        emit({"type": "status", "message": f"Building image '{registered_name}'..."})
-
-    def forward_event(event: dict) -> None:
-        emit(dict(event))
+    emit({"type": "status", "message": f"Building image '{registered_name}'..."})
 
     result_json = _rust_build_sandbox_image(
         ctx.api_url,
@@ -191,9 +182,73 @@ def _run_rust_image_create(
         USER_AGENT,
         dockerfile_text,
         context_dir,
-        import_image_reference,
-        forward_event,
+        _forwarder(emit),
     )
+    return _finish_image_registration(result_json, registered_name, emit)
+
+
+def _run_rust_image_import(
+    image_reference: str,
+    registered_name: str,
+    *,
+    cpus: float,
+    memory_mb: int,
+    disk_mb: int | None,
+    builder_disk_mb: int | None,
+    is_public: bool,
+    emit: EmitFn,
+) -> dict:
+    ctx, token = _resolve_build_credentials()
+
+    emit(
+        {
+            "type": "status",
+            "message": (
+                f"Importing image '{image_reference}' as '{registered_name}'..."
+            ),
+        }
+    )
+
+    result_json = _rust_import_sandbox_image(
+        ctx.api_url,
+        token,
+        image_reference,
+        registered_name,
+        disk_mb,
+        builder_disk_mb,
+        cpus,
+        memory_mb,
+        is_public,
+        ctx.organization_id,
+        ctx.project_id,
+        ctx.namespace,
+        ctx.personal_access_token is not None and ctx.api_key is None,
+        USER_AGENT,
+        _forwarder(emit),
+    )
+    return _finish_image_registration(result_json, registered_name, emit)
+
+
+def _resolve_build_credentials() -> tuple[Context, str]:
+    ctx = _build_context_from_env()
+    token = ctx.api_key or ctx.personal_access_token
+    if not token:
+        raise SandboxImageBuildError(
+            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
+        )
+    return ctx, token
+
+
+def _forwarder(emit: EmitFn) -> EmitFn:
+    def forward_event(event: dict) -> None:
+        emit(dict(event))
+
+    return forward_event
+
+
+def _finish_image_registration(
+    result_json: str, registered_name: str, emit: EmitFn
+) -> dict:
     try:
         result = json.loads(result_json) if result_json.strip() else {}
     except json.JSONDecodeError as exc:
@@ -411,12 +466,9 @@ def import_sandbox_image(
         )
 
     try:
-        return _run_rust_image_create(
-            "",
+        return _run_rust_image_import(
+            image_reference,
             effective_registered_name,
-            dockerfile_text=None,
-            context_dir=None,
-            import_image_reference=image_reference,
             cpus=cpus,
             memory_mb=memory_mb,
             disk_mb=disk_mb,

@@ -19,22 +19,22 @@ function makeFakeBinding(opts: {
   events?: Array<{ eventType: string; stream?: string | null; message: string }>;
 } = {}) {
   const captured: CapturedCall = { options: {} };
+  const handler = async (
+    options: Record<string, unknown>,
+    emit?:
+      | ((event: { eventType: string; stream?: string | null; message: string }) => void)
+      | null,
+  ) => {
+    captured.options = options;
+    captured.emit = emit;
+    if (emit && opts.events) {
+      for (const event of opts.events) emit(event);
+    }
+    return opts.resultJson ?? '{"id":"tpl-1","snapshot_id":"snap-1"}';
+  };
   const binding = {
-    buildSandboxImage: vi.fn(
-      async (
-        options: Record<string, unknown>,
-        emit?:
-          | ((event: { eventType: string; stream?: string | null; message: string }) => void)
-          | null,
-      ) => {
-        captured.options = options;
-        captured.emit = emit;
-        if (emit && opts.events) {
-          for (const event of opts.events) emit(event);
-        }
-        return opts.resultJson ?? '{"id":"tpl-1","snapshot_id":"snap-1"}';
-      },
-    ),
+    buildSandboxImage: vi.fn(handler),
+    importSandboxImage: vi.fn(handler),
   };
   __setNativeBindingForTest(binding);
   return { binding, captured };
@@ -327,24 +327,25 @@ describe("importSandboxImage", () => {
     vi.restoreAllMocks();
   });
 
-  it("delegates an image reference to the native binding via importImageReference", async () => {
+  it("delegates an image reference to the native import binding", async () => {
     const { binding, captured } = makeFakeBinding();
     const result = await importSandboxImage(
       "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",
       { isPublic: true },
     );
 
-    expect(binding.buildSandboxImage).toHaveBeenCalledOnce();
+    expect(binding.importSandboxImage).toHaveBeenCalledOnce();
+    expect(binding.buildSandboxImage).not.toHaveBeenCalled();
     expect(captured.options).toMatchObject({
       apiUrl: "https://api.tensorlake.test",
       bearerToken: "tl_key_test",
-      importImageReference: "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",
+      imageReference: "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",
       registeredName: "pytorch",
       isPublic: true,
-      dockerfilePath: "",
-      dockerfileText: undefined,
-      contextDir: undefined,
     });
+    // The import option shape carries no Dockerfile fields.
+    expect(captured.options).not.toHaveProperty("dockerfilePath");
+    expect(captured.options).not.toHaveProperty("importImageReference");
     expect(result).toEqual({ id: "tpl-1", snapshot_id: "snap-1" });
   });
 
