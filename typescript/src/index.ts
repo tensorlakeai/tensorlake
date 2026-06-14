@@ -6,7 +6,11 @@ export { Desktop } from "./desktop.js";
 export { TcpTunnel } from "./tunnel.js";
 export { CloudClient } from "./cloud-client.js";
 export { APIClient } from "./api-client.js";
-export { createSandboxImage, deleteSandboxImage } from "./sandbox-image.js";
+export {
+  createSandboxImage,
+  importSandboxImage,
+  deleteSandboxImage,
+} from "./sandbox-image.js";
 export { Image, dockerfileContent, ImageBuildOperationType } from "./image.js";
 export { sandboxUrlFromIngressEndpoint } from "./url.js";
 
@@ -137,6 +141,7 @@ export type {
 
 export type {
   CreateSandboxImageOptions,
+  ImportSandboxImageOptions,
   SandboxImageSource,
 } from "./sandbox-image.js";
 

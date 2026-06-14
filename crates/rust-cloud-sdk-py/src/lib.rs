@@ -2813,6 +2813,7 @@ fn create_image_context_file(
     user_agent=None,
     dockerfile_text=None,
     context_dir=None,
+    import_image_reference=None,
     emit=None,
 ))]
 fn build_sandbox_image(
@@ -2833,6 +2834,7 @@ fn build_sandbox_image(
     user_agent: Option<String>,
     dockerfile_text: Option<String>,
     context_dir: Option<String>,
+    import_image_reference: Option<String>,
     emit: Option<Py<PyAny>>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageBuildOptions {
@@ -2845,7 +2847,7 @@ fn build_sandbox_image(
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text,
         context_dir: context_dir.map(PathBuf::from),
-        import_image_reference: None,
+        import_image_reference,
         registered_name,
         disk_mb,
         builder_disk_mb,

@@ -32,6 +32,25 @@ export interface CreateSandboxImageOptions {
   verbose?: boolean;
 }
 
+export interface ImportSandboxImageOptions {
+  /**
+   * Name to register the image under. Defaults to the image reference's last
+   * path segment with any tag/digest stripped (e.g. `pytorch/pytorch:2.4.1`
+   * -> `pytorch`).
+   */
+  registeredName?: string;
+  cpus?: number;
+  memoryMb?: number;
+  diskMb?: number;
+  builderDiskMb?: number;
+  isPublic?: boolean;
+  /**
+   * Print build progress to stderr. Ignored when an explicit `emit` is
+   * passed via `deps`. Defaults to false.
+   */
+  verbose?: boolean;
+}
+
 export type SandboxImageSource = string | Image;
 
 export interface CreateSandboxImageDeps {
@@ -57,6 +76,7 @@ interface NativeBindingOptions {
   userAgent?: string | undefined | null;
   dockerfileText?: string | undefined | null;
   contextDir?: string | undefined | null;
+  importImageReference?: string | undefined | null;
 }
 
 interface NativeBindingEvent {
@@ -164,6 +184,23 @@ function defaultRegisteredName(dockerfilePath: string): string {
     return parentName || "sandbox-image";
   }
   return parsed.name || "sandbox-image";
+}
+
+/**
+ * Mirror the Rust core's default name derivation for image imports: the last
+ * path segment of the reference with any tag/digest stripped
+ * (e.g. `pytorch/pytorch:2.4.1` -> `pytorch`, `ghcr.io/org/app@sha256:...`
+ * -> `app`).
+ */
+function defaultRegisteredNameFromImage(imageReference: string): string {
+  const withoutDigest = imageReference.split("@", 1)[0] ?? imageReference;
+  const lastSegment = withoutDigest.split("/").pop() ?? withoutDigest;
+  const colonIndex = lastSegment.lastIndexOf(":");
+  const name =
+    colonIndex > 0 && colonIndex < lastSegment.length - 1
+      ? lastSegment.slice(0, colonIndex)
+      : lastSegment;
+  return name || "imported-image";
 }
 
 // --- Emit helpers ----------------------------------------------------------
@@ -303,6 +340,106 @@ export async function createSandboxImage(
   return result;
 }
 
+/**
+ * Import a registry image directly into a sandbox image — no Docker.
+ *
+ * Unlike {@link createSandboxImage}, there is no Dockerfile and no build
+ * context: the builder pulls the referenced image's layers and applies them
+ * straight into the rootfs (via `oci-image-to-ext4`), bypassing the Docker
+ * daemon entirely. This is the programmatic backend for the
+ * `tl sbx image import` CLI command. The import is always a fresh base from
+ * the registry — the reference is never resolved against the template
+ * registry.
+ */
+export async function importSandboxImage(
+  imageReference: string,
+  options: ImportSandboxImageOptions = {},
+  deps: CreateSandboxImageDeps = {},
+): Promise<Record<string, unknown>> {
+  const emit = deps.emit ?? (options.verbose ? stderrEmit : noopEmit);
+
+  if (typeof imageReference !== "string" || imageReference.trim().length === 0) {
+    throw new Error("image reference to import must not be empty");
+  }
+  const reference = imageReference.trim();
+
+  const context = buildContextFromEnv();
+  const effectiveName =
+    options.registeredName ?? defaultRegisteredNameFromImage(reference);
+
+  if (effectiveName === DEFAULT_IMAGE_NAME) {
+    // eslint-disable-next-line no-console
+    console.warn(
+      `Importing sandbox image with the default name "${DEFAULT_IMAGE_NAME}". ` +
+        "Pass `registeredName` to avoid collisions with other default-named " +
+        "images in this project.",
+    );
+  }
+
+  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  if (!bearerToken) {
+    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
+  }
+
+  emit({
+    type: "status",
+    message: `Importing image '${reference}' as '${effectiveName}'...`,
+  });
+
+  const binding = loadNativeBinding();
+  let emitError: unknown;
+  const resultJson = await binding.buildSandboxImage(
+    {
+      apiUrl: context.apiUrl,
+      bearerToken,
+      // Unused on the import path, but the native option struct is shared with
+      // the Dockerfile build flow.
+      dockerfilePath: "",
+      registeredName: effectiveName,
+      diskMb: options.diskMb,
+      builderDiskMb: options.builderDiskMb,
+      cpus: options.cpus,
+      memoryMb: options.memoryMb,
+      isPublic: options.isPublic ?? false,
+      organizationId: context.organizationId,
+      projectId: context.projectId,
+      namespace: context.namespace,
+      useScopeHeaders:
+        context.personalAccessToken != null && context.apiKey == null,
+      userAgent: undefined,
+      dockerfileText: undefined,
+      contextDir: undefined,
+      importImageReference: reference,
+    },
+    (event) => {
+      try {
+        emit(eventToEmitDict(event));
+      } catch (error) {
+        emitError ??= error;
+      }
+    },
+  );
+
+  if (emitError != null) {
+    throw emitError;
+  }
+
+  let result: Record<string, unknown> = {};
+  if (resultJson.trim().length > 0) {
+    result = JSON.parse(resultJson) as Record<string, unknown>;
+  }
+  emit({
+    type: "image_registered",
+    name: effectiveName,
+    image_id:
+      (typeof result.id === "string" && result.id) ||
+      (typeof result.templateId === "string" && result.templateId) ||
+      "",
+  });
+  emit({ type: "done" });
+  return result;
+}
+
 export async function deleteSandboxImage(imageName: string): Promise<void> {
   if (typeof imageName !== "string" || imageName.length === 0) {
     throw new TypeError("imageName must be a non-empty string");
@@ -376,6 +513,66 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
 
   await createSandboxImage(
     dockerfilePath,
+    {
+      registeredName: parsed.values.name,
+      cpus,
+      memoryMb,
+      diskMb,
+      builderDiskMb,
+      isPublic: parsed.values.public,
+    },
+    { emit: ndjsonStdoutEmit },
+  );
+}
+
+export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
+  const parsed = parseArgs({
+    args: argv,
+    allowPositionals: true,
+    options: {
+      name: { type: "string", short: "n" },
+      cpus: { type: "string" },
+      memory: { type: "string" },
+      disk_mb: { type: "string" },
+      builder_disk_mb: { type: "string" },
+      public: { type: "boolean", default: false },
+    },
+  });
+
+  const imageReference = parsed.positionals[0];
+  if (!imageReference) {
+    throw new Error(
+      "Usage: tensorlake-import-sandbox-image <image_reference> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--builder_disk_mb MB] [--public]",
+    );
+  }
+
+  const cpus =
+    parsed.values.cpus != null ? Number(parsed.values.cpus) : undefined;
+  const memoryMb =
+    parsed.values.memory != null ? Number(parsed.values.memory) : undefined;
+  const diskMb =
+    parsed.values.disk_mb != null ? Number(parsed.values.disk_mb) : undefined;
+  const builderDiskMb =
+    parsed.values.builder_disk_mb != null
+      ? Number(parsed.values.builder_disk_mb)
+      : undefined;
+  if (cpus != null && !Number.isFinite(cpus)) {
+    throw new Error(`Invalid --cpus value: ${parsed.values.cpus}`);
+  }
+  if (memoryMb != null && !Number.isInteger(memoryMb)) {
+    throw new Error(`Invalid --memory value: ${parsed.values.memory}`);
+  }
+  if (diskMb != null && !Number.isInteger(diskMb)) {
+    throw new Error(`Invalid --disk_mb value: ${parsed.values.disk_mb}`);
+  }
+  if (builderDiskMb != null && !Number.isInteger(builderDiskMb)) {
+    throw new Error(
+      `Invalid --builder_disk_mb value: ${parsed.values.builder_disk_mb}`,
+    );
+  }
+
+  await importSandboxImage(
+    imageReference,
     {
       registeredName: parsed.values.name,
       cpus,

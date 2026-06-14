@@ -79,6 +79,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             sbm.USER_AGENT,
             None,
             None,
+            None,
             ANY,
         )
 
@@ -121,6 +122,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             "default",
             False,
             sbm.USER_AGENT,
+            None,
             None,
             None,
             ANY,
@@ -189,6 +191,74 @@ class TestDeleteSandboxImage(unittest.TestCase):
         with patch.object(sbm, "_build_context_from_env", return_value=ctx):
             with self.assertRaises(sbm.SandboxImageDeleteError):
                 sbm.delete_sandbox_image("image")
+
+
+class TestImportSandboxImage(unittest.TestCase):
+    def test_imports_registry_image_with_reference_and_no_dockerfile(self):
+        ctx = _make_ctx()
+
+        build_ctx, rust_builder = _make_build_patches(ctx)
+        with build_ctx, rust_builder as rust_builder_mock:
+            sbm.import_sandbox_image(
+                "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",
+                cpus=BUILD_CPUS,
+                memory_mb=BUILD_MEMORY_MB,
+            )
+
+        rust_builder_mock.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_apiKey_abc",
+            "",  # no dockerfile path on the import path
+            "pytorch",  # default name derived from the reference
+            None,
+            None,
+            BUILD_CPUS,
+            BUILD_MEMORY_MB,
+            False,
+            "org_1",
+            "proj_1",
+            "default",
+            False,
+            sbm.USER_AGENT,
+            None,  # dockerfile_text
+            None,  # context_dir
+            "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",  # import_image_reference
+            ANY,
+        )
+
+    def test_default_name_strips_registry_path_and_digest(self):
+        self.assertEqual(
+            sbm._default_registered_name_from_image("ghcr.io/org/app@sha256:abc"),
+            "app",
+        )
+        self.assertEqual(
+            sbm._default_registered_name_from_image("pytorch/pytorch:2.4.1"),
+            "pytorch",
+        )
+        self.assertEqual(
+            sbm._default_registered_name_from_image("ubuntu"),
+            "ubuntu",
+        )
+
+    def test_explicit_registered_name_overrides_default(self):
+        ctx = _make_ctx()
+        build_ctx, rust_builder = _make_build_patches(ctx)
+        with build_ctx, rust_builder as rust_builder_mock:
+            sbm.import_sandbox_image(
+                "pytorch/pytorch:2.4.1",
+                registered_name="override",
+            )
+        self.assertEqual(rust_builder_mock.call_args.args[3], "override")
+
+    def test_empty_reference_raises_build_error(self):
+        with self.assertRaises(sbm.SandboxImageBuildError):
+            sbm.import_sandbox_image("   ")
+
+    def test_requires_credentials(self):
+        ctx = _make_ctx(api_key=None, personal_access_token=None)
+        with patch.object(sbm, "_build_context_from_env", return_value=ctx):
+            with self.assertRaises(sbm.SandboxImageBuildError):
+                sbm.import_sandbox_image("pytorch/pytorch:2.4.1")
 
 
 class TestBuildSandboxImageFromImage(unittest.TestCase):

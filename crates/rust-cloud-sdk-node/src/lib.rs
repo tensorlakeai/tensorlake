@@ -43,6 +43,9 @@ pub struct SandboxImageBuildOptionsJs {
     pub user_agent: Option<String>,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<String>,
+    /// When set, import this registry image reference directly into a rootfs
+    /// (no Dockerfile, no Docker daemon) instead of running a Dockerfile build.
+    pub import_image_reference: Option<String>,
 }
 
 #[napi(object)]
@@ -96,7 +99,7 @@ pub async fn build_sandbox_image(
         dockerfile_path: PathBuf::from(options.dockerfile_path),
         dockerfile_text: options.dockerfile_text,
         context_dir: options.context_dir.map(PathBuf::from),
-        import_image_reference: None,
+        import_image_reference: options.import_image_reference,
         registered_name: options.registered_name,
         disk_mb: options.disk_mb.map(u64::from),
         builder_disk_mb: options.builder_disk_mb.map(u64::from),
