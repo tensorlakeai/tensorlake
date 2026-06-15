@@ -48,11 +48,20 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Zig
+        uses: mlugg/setup-zig@v2
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust-no-bin
           cache-bin: false
+
+      - name: Install cargo-zigbuild
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Install Rust target
+        run: rustup target add x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
 
       - name: Install dependencies
         run: npm ci
@@ -66,8 +75,42 @@ jobs:
       - name: Run snapshot-focused SDK unit tests
         run: npm test -- tests/client.test.ts tests/sandbox-image.test.ts
 
-      - name: Build native binding (smoke)
+      - name: Build native binding (glibc compatibility smoke)
         run: npm run build:native
+        env:
+          TENSORLAKE_NODE_TARGET_ID: linux-x64
+          TENSORLAKE_NODE_TARGET_TRIPLE: x86_64-unknown-linux-gnu.2.28
+          TENSORLAKE_NODE_BUILD_TOOL: cargo-zigbuild
+
+      - name: Verify native glibc floor
+        run: |
+          set -euo pipefail
+          binding="dist/native/linux-x64/tensorlake-node.node"
+          required_versions="$(readelf --version-info "$binding" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu || true)"
+          max_glibc="$(printf '%s\n' "$required_versions" | tail -n1)"
+          echo "Maximum required glibc: ${max_glibc:-none}"
+          if [ -n "$max_glibc" ] && [ "$(printf '%s\n%s\n' "GLIBC_2.28" "$max_glibc" | sort -V | tail -n1)" != "GLIBC_2.28" ]; then
+            echo "Native binding requires $max_glibc, above the GLIBC_2.28 compatibility floor."
+            exit 1
+          fi
+
+      - name: Build native binding (musl smoke)
+        run: npm run build:native
+        env:
+          TENSORLAKE_NODE_TARGET_ID: linux-x64-musl
+          TENSORLAKE_NODE_TARGET_TRIPLE: x86_64-unknown-linux-musl
+          TENSORLAKE_NODE_BUILD_TOOL: cargo-zigbuild
+
+      - name: Verify musl native binding does not require glibc
+        run: |
+          set -euo pipefail
+          binding="dist/native/linux-x64-musl/tensorlake-node.node"
+          required_versions="$(readelf --version-info "$binding" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu || true)"
+          if [ -n "$required_versions" ]; then
+            echo "Musl native binding unexpectedly references glibc symbols:"
+            printf '%s\n' "$required_versions"
+            exit 1
+          fi
 
   integration-tests:
     name: Integration tests
