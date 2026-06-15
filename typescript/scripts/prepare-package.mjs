@@ -7,10 +7,65 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const packageRoot = path.resolve(__dirname, "..");
 const repoRoot = path.resolve(packageRoot, "..");
-const outputDir = path.join(packageRoot, "dist", "bin", `${process.platform}-${process.arch}`);
-const extension = process.platform === "win32" ? ".exe" : "";
+const cliPackageName = "tensorlake-cli";
+const targetId =
+  process.env.TENSORLAKE_CLI_TARGET_ID ?? `${process.platform}-${process.arch}`;
+const targetTriple = process.env.TENSORLAKE_CLI_TARGET_TRIPLE || undefined;
+const buildTool = process.env.TENSORLAKE_CLI_BUILD_TOOL ?? "cargo";
+const outputDir = path.join(packageRoot, "dist", "bin", targetId);
+const targetPlatform = targetId.split("-")[0];
+const extension = targetPlatform === "win32" ? ".exe" : "";
 
-const cargo = spawnSync("cargo", ["build", "--release", "-p", "tensorlake-cli"], {
+function cargoTargetRoot() {
+  if (!process.env.CARGO_TARGET_DIR) {
+    return path.join(repoRoot, "target");
+  }
+  return path.resolve(repoRoot, process.env.CARGO_TARGET_DIR);
+}
+
+function cargoReleaseDirs() {
+  if (!targetTriple) {
+    return [path.join(cargoTargetRoot(), "release")];
+  }
+
+  const targetDirNames = [
+    targetTriple.replace(/\.\d+(?:\.\d+)?$/, ""),
+    targetTriple,
+  ];
+  return [...new Set(targetDirNames)].map((targetDirName) =>
+    path.join(cargoTargetRoot(), targetDirName, "release"),
+  );
+}
+
+const cargoSubcommand =
+  buildTool === "cargo-zigbuild"
+    ? "zigbuild"
+    : buildTool === "cargo"
+      ? "build"
+      : undefined;
+
+if (!cargoSubcommand) {
+  console.error(
+    `Unsupported TENSORLAKE_CLI_BUILD_TOOL '${buildTool}'. Expected 'cargo' or 'cargo-zigbuild'.`,
+  );
+  process.exit(1);
+}
+
+const cargoArgs = [
+  cargoSubcommand,
+  "--release",
+  "-p",
+  cliPackageName,
+  ...(targetTriple ? ["--target", targetTriple] : []),
+];
+
+console.log(
+  `Building CLI binaries for ${targetId}${
+    targetTriple ? ` (${targetTriple})` : ""
+  } with cargo ${cargoSubcommand}`,
+);
+
+const cargo = spawnSync("cargo", cargoArgs, {
   cwd: repoRoot,
   stdio: "inherit",
   env: process.env,
@@ -23,14 +78,20 @@ if (cargo.status !== 0) {
 mkdirSync(outputDir, { recursive: true });
 
 for (const binaryName of ["tl", "tensorlake"]) {
-  const source = path.join(repoRoot, "target", "release", `${binaryName}${extension}`);
+  const source = cargoReleaseDirs()
+    .map((releaseDir) => path.join(releaseDir, `${binaryName}${extension}`))
+    .find((candidate) => existsSync(candidate));
   const destination = path.join(outputDir, `${binaryName}${extension}`);
-  if (!existsSync(source)) {
-    console.error(`Expected compiled binary at ${source}`);
+  if (!source) {
+    console.error(
+      `Expected compiled binary in one of: ${cargoReleaseDirs()
+        .map((releaseDir) => path.join(releaseDir, `${binaryName}${extension}`))
+        .join(", ")}`,
+    );
     process.exit(1);
   }
   copyFileSync(source, destination);
-  if (process.platform !== "win32") {
+  if (targetPlatform !== "win32") {
     chmodSync(destination, 0o755);
   }
 }
