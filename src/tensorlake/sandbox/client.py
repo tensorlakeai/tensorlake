@@ -137,12 +137,11 @@ def _build_gpu_resources(
     gpus: int | None,
     gpu_model: str | None,
 ) -> list[GPUResources] | None:
-    if gpus is None and gpu_model is None:
+    if gpus is None:
         return None
-    if gpus is None or gpu_model is None:
-        raise SandboxError("gpus and gpu_model must be provided together")
     if gpus < 1:
         raise SandboxError("gpus must be at least 1")
+    gpu_model = gpu_model or "A10"
     if gpu_model != "A10":
         raise SandboxError("only A10 GPU sandboxes are supported for now")
     return [GPUResources(count=gpus, model=gpu_model)]
@@ -450,9 +449,9 @@ class SandboxClient:
             memory_mb: Memory in megabytes
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
-            gpus: Number of GPUs to allocate. Must be provided with
-                ``gpu_model``.
-            gpu_model: GPU model to allocate, such as ``A10``.
+            gpus: Number of GPUs to allocate. When provided, defaults to
+                ``A10`` unless ``gpu_model`` is set.
+            gpu_model: GPU model to allocate. Only ``A10`` is supported.
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
             allow_internet_access: If True (default), outbound traffic is
@@ -1321,9 +1320,9 @@ class SandboxClient:
             memory_mb: Memory in megabytes
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
-            gpus: Number of GPUs to allocate. Must be provided with
-                ``gpu_model``.
-            gpu_model: GPU model to allocate, such as ``A10``.
+            gpus: Number of GPUs to allocate. When provided, defaults to
+                ``A10`` unless ``gpu_model`` is set.
+            gpu_model: GPU model to allocate. Only ``A10`` is supported.
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
             allow_internet_access: If True (default), outbound traffic is

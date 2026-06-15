@@ -109,14 +109,12 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
     } = args;
 
     let cloud_init_base64 = cloud_init.map(encode_cloud_init_source).transpose()?;
-    let gpu = match (gpu_count, gpu_model) {
-        (Some(count), Some(model)) => Some(GpuRequest { count, model }),
-        (None, None) => None,
-        _ => {
-            return Err(CliError::usage(
-                "--gpus and --gpu-model must be provided together",
-            ));
-        }
+    let gpu = match gpu_count {
+        Some(count) => Some(GpuRequest {
+            count,
+            model: gpu_model.unwrap_or("A10"),
+        }),
+        None => None,
     };
 
     let mut body = build_create_request_body(

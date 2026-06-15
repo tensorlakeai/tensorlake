@@ -71,13 +71,11 @@ function gpuRequest(
   gpus: number | undefined,
   gpuModel: string | undefined,
 ): Array<{ count: number; model: string }> | undefined {
-  if (gpus == null && gpuModel == null) return undefined;
-  if (gpus == null || gpuModel == null) {
-    throw new SandboxError("gpus and gpuModel must be provided together");
-  }
+  if (gpus == null) return undefined;
   if (!Number.isInteger(gpus) || gpus < 1) {
     throw new SandboxError("gpus must be a positive integer");
   }
+  gpuModel = gpuModel ?? "A10";
   if (gpuModel !== "A10") {
     throw new SandboxError("only A10 GPU sandboxes are supported for now");
   }

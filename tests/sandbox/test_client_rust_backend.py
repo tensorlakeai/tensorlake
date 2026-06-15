@@ -523,7 +523,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             request_json["resources"]["gpus"], [{"count": 1, "model": "A10"}]
         )
 
-    def test_create_rejects_partial_gpu_request(self):
+    def test_create_sends_gpu_request_with_default_model(self):
         fake = _FakeRustClient()
         with (
             patch("tensorlake.sandbox.client._RUST_SANDBOX_CLIENT_AVAILABLE", True),
@@ -533,10 +533,12 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             ),
         ):
             client = SandboxClient(api_url="http://localhost:8900", api_key="k")
-            with self.assertRaisesRegex(SandboxError, "gpus and gpu_model"):
-                client.create(gpus=1)
+            client.create(gpus=1)
 
-        self.assertIsNone(fake.create_request_json)
+        request_json = json.loads(fake.create_request_json)
+        self.assertEqual(
+            request_json["resources"]["gpus"], [{"count": 1, "model": "A10"}]
+        )
 
     def test_create_rejects_non_a10_gpu_request(self):
         fake = _FakeRustClient()

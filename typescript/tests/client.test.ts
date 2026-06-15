@@ -89,22 +89,28 @@ describe("SandboxClient", () => {
       });
 
       const client = SandboxClient.forLocalhost();
-      const result = await client.create({ gpus: 1, gpuModel: "A10" });
+      const result = await client.create({ gpus: 1 });
       expect(result.sandboxId).toBe("sbx-gpu");
       client.close();
     });
 
-    it("rejects partial GPU resources", async () => {
+    it("does not send GPU resources when only the model is provided", async () => {
       installNativeStub({
         client: {
-          createSandbox: vi.fn(),
+          createSandbox: vi.fn(async (json: string) => {
+            const body = JSON.parse(json);
+            expect(body.resources.gpus).toBeUndefined();
+            return {
+              traceId: "t",
+              json: JSON.stringify({ sandbox_id: "sbx-cpu", status: "pending" }),
+            };
+          }),
         },
       });
 
       const client = SandboxClient.forLocalhost();
-      await expect(client.create({ gpus: 1 })).rejects.toThrow(
-        "gpus and gpuModel",
-      );
+      const result = await client.create({ gpuModel: "A10" });
+      expect(result.sandboxId).toBe("sbx-cpu");
       client.close();
     });
 

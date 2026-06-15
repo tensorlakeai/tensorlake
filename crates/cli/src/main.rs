@@ -425,11 +425,11 @@ enum SbxCommands {
         disk_mb: Option<u64>,
 
         /// Number of GPUs to request
-        #[arg(long = "gpus", requires = "gpu_model", value_parser = clap::value_parser!(u32).range(1..))]
+        #[arg(long = "gpus", hide = true, value_parser = clap::value_parser!(u32).range(1..))]
         gpus: Option<u32>,
 
         /// GPU model to request
-        #[arg(long = "gpu-model", value_enum, requires = "gpus")]
+        #[arg(long = "gpu-model", value_enum, hide = true, requires = "gpus")]
         gpu_model: Option<GpuModelArg>,
 
         /// Deprecated: root disk size in GB
@@ -1906,7 +1906,31 @@ mod tests {
     }
 
     #[test]
-    fn sbx_create_parses_gpu_request() {
+    fn sbx_create_parses_gpu_request_with_default_model() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "create",
+            "--gpus",
+            "1",
+            "--image",
+            "tensorlake/ubuntu-minimal",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Commands::Sbx(SbxCommands::Create {
+                gpus, gpu_model, ..
+            })) => {
+                assert_eq!(gpus, Some(1));
+                assert!(gpu_model.is_none());
+            }
+            _ => panic!("expected sbx create command"),
+        }
+    }
+
+    #[test]
+    fn sbx_create_parses_gpu_request_with_explicit_model() {
         let cli = Cli::try_parse_from([
             "tl",
             "sbx",
@@ -1932,8 +1956,8 @@ mod tests {
     }
 
     #[test]
-    fn sbx_create_rejects_gpu_without_model() {
-        let result = Cli::try_parse_from(["tl", "sbx", "create", "--gpus", "1"]);
+    fn sbx_create_rejects_gpu_model_without_gpu_count() {
+        let result = Cli::try_parse_from(["tl", "sbx", "create", "--gpu-model", "A10"]);
 
         assert!(result.is_err());
     }

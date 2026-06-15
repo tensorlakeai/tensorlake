@@ -242,9 +242,9 @@ class Sandbox:
             memory_mb: Memory in megabytes.
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
-            gpus: Number of GPUs to allocate. Must be provided with
-                ``gpu_model``.
-            gpu_model: GPU model to allocate, such as ``A10``.
+            gpus: Number of GPUs to allocate. When provided, defaults to
+                ``A10`` unless ``gpu_model`` is set.
+            gpu_model: GPU model to allocate. Only ``A10`` is supported.
             timeout_secs: Sandbox timeout in seconds.
             entrypoint: Custom entrypoint command.
             allow_internet_access: If True (default), outbound traffic is allowed.
