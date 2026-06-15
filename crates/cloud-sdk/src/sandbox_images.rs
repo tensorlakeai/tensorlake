@@ -124,22 +124,18 @@ impl SandboxImageBuildError {
     }
 }
 
+/// Auth/context and resource fields shared by every sandbox-image build mode
+/// (Dockerfile build and registry import). The mode-specific public option
+/// structs (`SandboxImageBuildOptions`, `SandboxImageImportOptions`) each carry
+/// their own copy of these and hand them to the shared `run_build_plan` runner.
 #[derive(Debug, Clone)]
-pub struct SandboxImageBuildOptions {
+pub struct CommonBuildOptions {
     pub api_url: String,
     pub bearer_token: String,
     pub use_scope_headers: bool,
     pub organization_id: Option<String>,
     pub project_id: Option<String>,
     pub namespace: String,
-    pub dockerfile_path: PathBuf,
-    pub dockerfile_text: Option<String>,
-    pub context_dir: Option<PathBuf>,
-    /// When set, import this registry image reference directly into a rootfs
-    /// (no Dockerfile, no Docker daemon — the builder runs
-    /// `indexify-rootfs-materialize oci-image-to-ext4`). Mutually exclusive
-    /// with the Dockerfile build path.
-    pub import_image_reference: Option<String>,
     pub registered_name: Option<String>,
     pub disk_mb: Option<u64>,
     pub builder_disk_mb: Option<u64>,
@@ -147,6 +143,34 @@ pub struct SandboxImageBuildOptions {
     pub memory_mb: Option<i64>,
     pub is_public: bool,
     pub user_agent: Option<String>,
+}
+
+/// Options for building a sandbox image from a Dockerfile. This is the
+/// Dockerfile build path only — to import a registry image directly into a
+/// rootfs without a Dockerfile, use [`SandboxImageImportOptions`] /
+/// [`import_sandbox_image`] instead. Keeping the two modes in separate structs
+/// means a caller cannot construct an ambiguous mix of a Dockerfile and an
+/// import reference.
+#[derive(Debug, Clone)]
+pub struct SandboxImageBuildOptions {
+    pub common: CommonBuildOptions,
+    pub dockerfile_path: PathBuf,
+    pub dockerfile_text: Option<String>,
+    pub context_dir: Option<PathBuf>,
+}
+
+/// Options for importing a registry image directly into a rootfs (no
+/// Dockerfile, no Docker daemon — the builder runs
+/// `indexify-rootfs-materialize oci-image-to-ext4`). The reference is always
+/// pulled fresh from the registry; it is never resolved against the Tensorlake
+/// template registry.
+#[derive(Debug, Clone)]
+pub struct SandboxImageImportOptions {
+    pub common: CommonBuildOptions,
+    /// The registry image reference to import, e.g.
+    /// `pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime` or
+    /// `ghcr.io/org/app@sha256:...`.
+    pub image_reference: String,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -281,30 +305,65 @@ struct CompleteSandboxTemplateBuildRequest {
     parent_manifest_uri: Option<String>,
 }
 
+/// Build a sandbox image from a Dockerfile (path or inline text). To import a
+/// registry image directly into a rootfs without a Dockerfile, use
+/// [`import_sandbox_image`] instead.
 pub async fn build_sandbox_image<F>(options: SandboxImageBuildOptions, mut emit: F) -> Result<Value>
 where
     F: FnMut(SandboxImageBuildEvent),
 {
-    let plan = if let Some(image_ref) = &options.import_image_reference {
-        emit(SandboxImageBuildEvent::Status(format!(
-            "Importing registry image {image_ref}..."
-        )));
-        plan_image_import(image_ref, options.registered_name.as_deref())?
+    emit(SandboxImageBuildEvent::Status(
+        "Loading Dockerfile...".to_string(),
+    ));
+    let plan = if let Some(dockerfile_text) = &options.dockerfile_text {
+        load_dockerfile_text_plan(
+            &options.dockerfile_path,
+            options.context_dir.as_deref(),
+            dockerfile_text.clone(),
+            options.common.registered_name.as_deref(),
+        )?
     } else {
-        emit(SandboxImageBuildEvent::Status(
-            "Loading Dockerfile...".to_string(),
-        ));
-        if let Some(dockerfile_text) = &options.dockerfile_text {
-            load_dockerfile_text_plan(
-                &options.dockerfile_path,
-                options.context_dir.as_deref(),
-                dockerfile_text.clone(),
-                options.registered_name.as_deref(),
-            )?
-        } else {
-            load_dockerfile_plan(&options.dockerfile_path, options.registered_name.as_deref())?
-        }
+        load_dockerfile_plan(
+            &options.dockerfile_path,
+            options.common.registered_name.as_deref(),
+        )?
     };
+    run_build_plan(plan, options.common, emit).await
+}
+
+/// Import a registry image directly into a rootfs (no Dockerfile, no Docker
+/// daemon). The reference is always pulled fresh from the registry; it is
+/// never resolved against the Tensorlake template registry.
+pub async fn import_sandbox_image<F>(
+    options: SandboxImageImportOptions,
+    mut emit: F,
+) -> Result<Value>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
+    emit(SandboxImageBuildEvent::Status(format!(
+        "Importing registry image {}...",
+        options.image_reference
+    )));
+    let plan = plan_image_import(
+        &options.image_reference,
+        options.common.registered_name.as_deref(),
+    )?;
+    run_build_plan(plan, options.common, emit).await
+}
+
+/// Shared build pipeline: provision the rootfs-builder sandbox, materialize the
+/// filesystem from `plan`, and register the resulting snapshot. Both the
+/// Dockerfile build and registry import paths funnel through here once they
+/// have produced a [`DockerfileBuildPlan`].
+async fn run_build_plan<F>(
+    plan: DockerfileBuildPlan,
+    options: CommonBuildOptions,
+    mut emit: F,
+) -> Result<Value>
+where
+    F: FnMut(SandboxImageBuildEvent),
+{
     emit(SandboxImageBuildEvent::Status(format!(
         "Selected image name: {}",
         plan.registered_name
@@ -537,7 +596,7 @@ where
     })
 }
 
-async fn resolve_build_context(options: SandboxImageBuildOptions) -> Result<ResolvedBuildContext> {
+async fn resolve_build_context(options: CommonBuildOptions) -> Result<ResolvedBuildContext> {
     let client = unscoped_client(&options)?;
     let (organization_id, project_id) = if options.use_scope_headers {
         match (options.organization_id.clone(), options.project_id.clone()) {
@@ -587,7 +646,7 @@ async fn introspect_scope(client: &Client) -> Result<IntrospectScope> {
     response.json().await.map_err(Into::into)
 }
 
-fn unscoped_client(options: &SandboxImageBuildOptions) -> Result<Client> {
+fn unscoped_client(options: &CommonBuildOptions) -> Result<Client> {
     client_builder(
         &options.api_url,
         &options.bearer_token,

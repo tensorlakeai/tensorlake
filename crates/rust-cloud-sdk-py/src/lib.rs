@@ -2836,23 +2836,24 @@ fn build_sandbox_image(
     emit: Option<Py<PyAny>>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageBuildOptions {
-        api_url,
-        bearer_token: token,
-        use_scope_headers,
-        organization_id,
-        project_id,
-        namespace: namespace.unwrap_or_else(|| "default".to_string()),
+        common: common_build_options(
+            api_url,
+            token,
+            use_scope_headers,
+            organization_id,
+            project_id,
+            namespace,
+            registered_name,
+            disk_mb,
+            builder_disk_mb,
+            cpus,
+            memory_mb,
+            is_public,
+            user_agent,
+        ),
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text,
         context_dir: context_dir.map(PathBuf::from),
-        import_image_reference: None,
-        registered_name,
-        disk_mb,
-        builder_disk_mb,
-        cpus,
-        memory_mb,
-        is_public,
-        user_agent,
     };
 
     let result = py
@@ -2881,6 +2882,124 @@ fn build_sandbox_image(
             error.to_string(),
         ))
     })
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    api_url,
+    token,
+    image_reference,
+    registered_name=None,
+    disk_mb=None,
+    builder_disk_mb=None,
+    cpus=None,
+    memory_mb=None,
+    is_public=false,
+    organization_id=None,
+    project_id=None,
+    namespace=None,
+    use_scope_headers=false,
+    user_agent=None,
+    emit=None,
+))]
+fn import_sandbox_image(
+    py: Python<'_>,
+    api_url: String,
+    token: String,
+    image_reference: String,
+    registered_name: Option<String>,
+    disk_mb: Option<u64>,
+    builder_disk_mb: Option<u64>,
+    cpus: Option<f64>,
+    memory_mb: Option<i64>,
+    is_public: bool,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    use_scope_headers: bool,
+    user_agent: Option<String>,
+    emit: Option<Py<PyAny>>,
+) -> PyResult<String> {
+    let options = tensorlake::sandbox_images::SandboxImageImportOptions {
+        common: common_build_options(
+            api_url,
+            token,
+            use_scope_headers,
+            organization_id,
+            project_id,
+            namespace,
+            registered_name,
+            disk_mb,
+            builder_disk_mb,
+            cpus,
+            memory_mb,
+            is_public,
+            user_agent,
+        ),
+        image_reference,
+    };
+
+    let result = py
+        .detach(move || {
+            shared_runtime().block_on(async move {
+                tensorlake::sandbox_images::import_sandbox_image(options, |event| {
+                    if let Some(callback) = emit.as_ref() {
+                        emit_sandbox_image_event(callback, event);
+                    }
+                })
+                .await
+            })
+        })
+        .map_err(|error| {
+            CloudSandboxClientError::new_err((
+                "sandbox_image_import",
+                Option::<u16>::None,
+                error.to_string(),
+            ))
+        })?;
+
+    serde_json::to_string(&result).map_err(|error| {
+        CloudSandboxClientError::new_err((
+            "sandbox_image_import",
+            Option::<u16>::None,
+            error.to_string(),
+        ))
+    })
+}
+
+/// Assemble the auth/context + resource fields shared by the Dockerfile build
+/// and registry import paths.
+#[allow(clippy::too_many_arguments)]
+fn common_build_options(
+    api_url: String,
+    token: String,
+    use_scope_headers: bool,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    registered_name: Option<String>,
+    disk_mb: Option<u64>,
+    builder_disk_mb: Option<u64>,
+    cpus: Option<f64>,
+    memory_mb: Option<i64>,
+    is_public: bool,
+    user_agent: Option<String>,
+) -> tensorlake::sandbox_images::CommonBuildOptions {
+    tensorlake::sandbox_images::CommonBuildOptions {
+        api_url,
+        bearer_token: token,
+        use_scope_headers,
+        organization_id,
+        project_id,
+        namespace: namespace.unwrap_or_else(|| "default".to_string()),
+        registered_name,
+        disk_mb,
+        builder_disk_mb,
+        cpus,
+        memory_mb,
+        is_public,
+        user_agent,
+    }
 }
 
 fn emit_sandbox_image_event(callback: &Py<PyAny>, event: SandboxImageBuildEvent) {
@@ -2929,5 +3048,6 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudDocumentAIClient>()?;
     module.add_function(wrap_pyfunction!(create_image_context_file, module)?)?;
     module.add_function(wrap_pyfunction!(build_sandbox_image, module)?)?;
+    module.add_function(wrap_pyfunction!(import_sandbox_image, module)?)?;
     Ok(())
 }

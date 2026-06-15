@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 
 use tensorlake::sandbox_images::{
-    SandboxImageBuildEvent, SandboxImageBuildOptions, build_sandbox_image,
+    CommonBuildOptions, SandboxImageBuildEvent, SandboxImageBuildOptions, build_sandbox_image,
 };
 
 use crate::{
@@ -22,26 +22,27 @@ pub async fn run(
     output_json: bool,
 ) -> Result<()> {
     let options = SandboxImageBuildOptions {
-        api_url: ctx.api_url.clone(),
-        bearer_token: ctx.bearer_token()?,
-        use_scope_headers: ctx.personal_access_token.is_some() && ctx.api_key.is_none(),
-        organization_id: ctx.effective_organization_id(),
-        project_id: ctx.effective_project_id(),
-        namespace: ctx.namespace.clone(),
+        common: CommonBuildOptions {
+            api_url: ctx.api_url.clone(),
+            bearer_token: ctx.bearer_token()?,
+            use_scope_headers: ctx.personal_access_token.is_some() && ctx.api_key.is_none(),
+            organization_id: ctx.effective_organization_id(),
+            project_id: ctx.effective_project_id(),
+            namespace: ctx.namespace.clone(),
+            registered_name: registered_name.map(str::to_string),
+            disk_mb,
+            builder_disk_mb,
+            cpus,
+            memory_mb,
+            is_public,
+            user_agent: Some(format!(
+                "Tensorlake CLI (rust/{})",
+                env!("CARGO_PKG_VERSION")
+            )),
+        },
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text: None,
         context_dir: None,
-        import_image_reference: None,
-        registered_name: registered_name.map(str::to_string),
-        disk_mb,
-        builder_disk_mb,
-        cpus,
-        memory_mb,
-        is_public,
-        user_agent: Some(format!(
-            "Tensorlake CLI (rust/{})",
-            env!("CARGO_PKG_VERSION")
-        )),
     };
 
     let registered = build_sandbox_image(options, |event| match event {

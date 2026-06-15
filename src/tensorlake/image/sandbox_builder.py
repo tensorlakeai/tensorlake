@@ -110,6 +110,17 @@ def _rust_build_sandbox_image(*args, **kwargs) -> str:
     return rust_build_sandbox_image(*args, **kwargs)
 
 
+def _rust_import_sandbox_image(*args, **kwargs) -> str:
+    try:
+        from tensorlake._cloud_sdk import (
+            import_sandbox_image as rust_import_sandbox_image,
+        )
+    except ImportError:
+        from _cloud_sdk import import_sandbox_image as rust_import_sandbox_image
+
+    return rust_import_sandbox_image(*args, **kwargs)
+
+
 def _rust_delete_sandbox_image(
     api_url: str,
     token: str,
@@ -150,17 +161,9 @@ def _run_rust_image_create(
     is_public: bool,
     emit: EmitFn,
 ) -> dict:
-    ctx = _build_context_from_env()
-    token = ctx.api_key or ctx.personal_access_token
-    if not token:
-        raise SandboxImageBuildError(
-            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
-        )
+    ctx, token = _resolve_build_credentials()
 
     emit({"type": "status", "message": f"Building image '{registered_name}'..."})
-
-    def forward_event(event: dict) -> None:
-        emit(dict(event))
 
     result_json = _rust_build_sandbox_image(
         ctx.api_url,
@@ -179,8 +182,73 @@ def _run_rust_image_create(
         USER_AGENT,
         dockerfile_text,
         context_dir,
-        forward_event,
+        _forwarder(emit),
     )
+    return _finish_image_registration(result_json, registered_name, emit)
+
+
+def _run_rust_image_import(
+    image_reference: str,
+    registered_name: str,
+    *,
+    cpus: float,
+    memory_mb: int,
+    disk_mb: int | None,
+    builder_disk_mb: int | None,
+    is_public: bool,
+    emit: EmitFn,
+) -> dict:
+    ctx, token = _resolve_build_credentials()
+
+    emit(
+        {
+            "type": "status",
+            "message": (
+                f"Importing image '{image_reference}' as '{registered_name}'..."
+            ),
+        }
+    )
+
+    result_json = _rust_import_sandbox_image(
+        ctx.api_url,
+        token,
+        image_reference,
+        registered_name,
+        disk_mb,
+        builder_disk_mb,
+        cpus,
+        memory_mb,
+        is_public,
+        ctx.organization_id,
+        ctx.project_id,
+        ctx.namespace,
+        ctx.personal_access_token is not None and ctx.api_key is None,
+        USER_AGENT,
+        _forwarder(emit),
+    )
+    return _finish_image_registration(result_json, registered_name, emit)
+
+
+def _resolve_build_credentials() -> tuple[Context, str]:
+    ctx = _build_context_from_env()
+    token = ctx.api_key or ctx.personal_access_token
+    if not token:
+        raise SandboxImageBuildError(
+            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
+        )
+    return ctx, token
+
+
+def _forwarder(emit: EmitFn) -> EmitFn:
+    def forward_event(event: dict) -> None:
+        emit(dict(event))
+
+    return forward_event
+
+
+def _finish_image_registration(
+    result_json: str, registered_name: str, emit: EmitFn
+) -> dict:
     try:
         result = json.loads(result_json) if result_json.strip() else {}
     except json.JSONDecodeError as exc:
@@ -334,6 +402,86 @@ def build_sandbox_image(
         raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
 
 
+def import_sandbox_image(
+    image_reference: str,
+    *,
+    registered_name: str | None = None,
+    cpus: float = 2.0,
+    memory_mb: int = 4096,
+    disk_mb: int | None = None,
+    builder_disk_mb: int | None = None,
+    is_public: bool = False,
+    verbose: bool = False,
+    emit: EmitFn | None = None,
+) -> dict:
+    """Import a registry image directly into a sandbox image — no Docker.
+
+    Unlike :func:`build_sandbox_image`, there is no Dockerfile and no build
+    context: the builder pulls the referenced image's layers and applies them
+    straight into the rootfs (via ``oci-image-to-ext4``), bypassing the Docker
+    daemon entirely. This is the programmatic backend for the
+    ``tl sbx image import`` CLI command. The import is always a fresh base from
+    the registry — the reference is never resolved against the template
+    registry.
+
+    Args:
+        image_reference: The registry image reference to import, e.g.
+            ``pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime`` or
+            ``ghcr.io/org/app@sha256:...``.
+        registered_name: Name to register the image under. Defaults to the
+            image reference's last path segment with any tag/digest stripped
+            (e.g. ``pytorch/pytorch:2.4.1`` -> ``pytorch``).
+        cpus: CPUs for the build sandbox.
+        memory_mb: Memory for the build sandbox in MB.
+        disk_mb: Root disk size for the generated sandbox image in MB.
+        builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
+        is_public: Make the registered image publicly accessible.
+        verbose: Print progress to stderr. Ignored if ``emit`` is provided.
+        emit: Callback invoked for each build event. Takes precedence over
+            ``verbose``.
+
+    Returns:
+        The registered sandbox template JSON response.
+
+    Raises:
+        SandboxImageBuildError: The image reference is empty, or the import
+            failed during provisioning, materialization, or registration.
+    """
+    if emit is None:
+        emit = _stderr_emit if verbose else _noop_emit
+
+    if not isinstance(image_reference, str) or not image_reference.strip():
+        raise SandboxImageBuildError("image reference to import must not be empty")
+
+    image_reference = image_reference.strip()
+    effective_registered_name = registered_name or _default_registered_name_from_image(
+        image_reference
+    )
+    if effective_registered_name == _DEFAULT_IMAGE_NAME:
+        warnings.warn(
+            f"Importing sandbox image with the default name {_DEFAULT_IMAGE_NAME!r}. "
+            "Pass `registered_name=...` to avoid collisions with other "
+            "default-named images in this project.",
+            stacklevel=2,
+        )
+
+    try:
+        return _run_rust_image_import(
+            image_reference,
+            effective_registered_name,
+            cpus=cpus,
+            memory_mb=memory_mb,
+            disk_mb=disk_mb,
+            builder_disk_mb=builder_disk_mb,
+            is_public=is_public,
+            emit=emit,
+        )
+    except SandboxImageError:
+        raise
+    except Exception as e:
+        raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
+
+
 def build_sandbox_application_image(
     image: Image,
     *,
@@ -407,3 +555,18 @@ def _default_registered_name(dockerfile_path: str) -> str:
         parent_name = path.parent.name.strip()
         return parent_name or "sandbox-image"
     return stem or "sandbox-image"
+
+
+def _default_registered_name_from_image(image_reference: str) -> str:
+    """Mirror the Rust core's default name derivation for image imports.
+
+    Returns the last path segment of the reference with any tag/digest
+    stripped (e.g. ``pytorch/pytorch:2.4.1`` -> ``pytorch``,
+    ``ghcr.io/org/app@sha256:...`` -> ``app``). Computed here so the
+    ``_DEFAULT_IMAGE_NAME`` warning can trigger before the Rust call.
+    """
+    without_digest = image_reference.split("@", 1)[0]
+    last_segment = without_digest.rsplit("/", 1)[-1]
+    repo, sep, tag = last_segment.rpartition(":")
+    name = repo if sep and tag else last_segment
+    return name or "imported-image"
