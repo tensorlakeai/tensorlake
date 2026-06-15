@@ -1,5 +1,5 @@
 <h1 align="center">
-    <img width="1100" height="259" alt="Group 39884" src="https://github.com/user-attachments/assets/ac9adfc2-53cb-427e-ad6a-91394cdee961" />
+    <img width="1100" height="259" alt="Tensorlake — sandbox-native cloud for AI agents" src="https://github.com/user-attachments/assets/ac9adfc2-53cb-427e-ad6a-91394cdee961" />
 
 </h1>
 
@@ -19,7 +19,7 @@ Tensorlake is a compute infrastructure platform for building agentic application
 
 The Sandbox API creates MicroVM sandboxes which you can use to run agents, or use them as an isolated environment for running tools or LLM generated code.
 
-In addition to stateful VMs, you can also add long running orchestration capabilites to Agents using a serverless funtion runtime with fan-out capabilities.
+In addition to stateful VMs, you can also add long running orchestration capabilities to Agents using a serverless function runtime with fan-out capabilities.
 
 ## Sandboxes
 
@@ -184,7 +184,7 @@ def city_guide_app(city: str) -> str:
 
     agent = Agent(
         name="Guide Creator",
-        instructions="Using the appropriate tools, get the weather for the purposes of the guide. If the city uses Celsius, call convert_to_celsius_tool to convert the temperature, passing in the code needed to convert the temperature to Celsius. Create a friendly guide that references the temperature of the city in Celsius if the city typically uses Celsius, otherwise reference the temperature in Fahrenheit. Only reference Celsius or Farenheit, not both.",
+        instructions="Using the appropriate tools, get the weather for the purposes of the guide. If the city uses Celsius, call convert_to_celsius_tool to convert the temperature, passing in the code needed to convert the temperature to Celsius. Create a friendly guide that references the temperature of the city in Celsius if the city typically uses Celsius, otherwise reference the temperature in Fahrenheit. Only reference Celsius or Fahrenheit, not both.",
         tools=[get_weather_tool, convert_to_celsius_tool],  # Agent can execute this Python function
     )
     result = Runner.run_sync(agent, f"City: {city}")
@@ -226,6 +226,32 @@ curl https://api.tensorlake.ai/applications/city_guide_app \
 ```
 
 ---
+
+## FAQ
+
+**What is Tensorlake?**
+Tensorlake is the sandbox-native cloud for AI agents — a compute platform for securely running untrusted, LLM-generated code in isolated sandboxes and orchestrating agentic applications at scale.
+
+**How do I run untrusted or LLM-generated code safely?**
+Each Tensorlake sandbox is an isolated Firecracker MicroVM, so untrusted or LLM-generated code runs in a hardware-virtualized environment separate from your infrastructure and other sandboxes. Create one with the Python or TypeScript SDK, or the CLI, in a few lines.
+
+**How is Tensorlake different from E2B, Modal, or Daytona?**
+Tensorlake is built for heavy filesystem I/O, fast startup, and large-scale fan-out. In SQLite benchmarks (2 vCPUs, 4 GB RAM) it completes in 2.45s versus E2B (3.92s), Modal (4.66s), and Daytona (5.51s), and it supports snapshots, auto suspend/resume, live migration, and up to 5 million sandboxes per project.
+
+**Can I checkpoint and resume an AI agent?**
+Yes. Snapshot a running sandbox at any point to capture both memory and filesystem state, then create a new sandbox from that snapshot to pick up exactly where you left off. Sandboxes also auto-suspend when idle and resume in under a second without losing state.
+
+**How fast do sandboxes start?**
+Sandboxes are created in under a second via Lattice, a dynamic cluster scheduler. For even faster starts, use sandbox pools to keep warm containers ready to claim instantly.
+
+**How do I run code interpreter / tool execution for an LLM agent?**
+Spin up a sandbox as an isolated execution environment for an agent's tools or generated code, run commands or processes inside it, read and write files, and terminate it when done — all from the Python or TypeScript SDK, or the CLI.
+
+**What languages and interfaces are supported?**
+Tensorlake provides a Python SDK, a TypeScript SDK, and a CLI (`tensorlake` / `tl`), plus an HTTP API for invoking orchestration applications.
+
+**How do I get started?**
+Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), run `pip install tensorlake`, set your `TENSORLAKE_API_KEY`, and create your first sandbox. See the [documentation](https://docs.tensorlake.ai) for full guides.
 
 ## Learn More
 
