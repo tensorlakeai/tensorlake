@@ -19,8 +19,9 @@ use napi::{
 };
 use napi_derive::napi;
 use tensorlake::sandbox_images::{
-    SandboxImageBuildEvent, SandboxImageBuildOptions,
-    build_sandbox_image as rust_build_sandbox_image,
+    CommonBuildOptions, SandboxImageBuildEvent, SandboxImageBuildOptions,
+    SandboxImageImportOptions, build_sandbox_image as rust_build_sandbox_image,
+    import_sandbox_image as rust_import_sandbox_image,
 };
 
 #[napi(object)]
@@ -43,6 +44,29 @@ pub struct SandboxImageBuildOptionsJs {
     pub user_agent: Option<String>,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<String>,
+}
+
+#[napi(object)]
+pub struct SandboxImageImportOptionsJs {
+    pub api_url: String,
+    pub bearer_token: String,
+    /// Registry image reference to import directly into a rootfs (no
+    /// Dockerfile, no Docker daemon), e.g. `pytorch/pytorch:2.4.1` or
+    /// `ghcr.io/org/app@sha256:...`.
+    pub image_reference: String,
+    pub registered_name: Option<String>,
+    /// Root disk size for the generated sandbox image in MB. Capped at u32
+    /// max (~4 PiB) for napi compatibility — well above the 10 GiB default.
+    pub disk_mb: Option<u32>,
+    pub builder_disk_mb: Option<u32>,
+    pub cpus: Option<f64>,
+    pub memory_mb: Option<i64>,
+    pub is_public: Option<bool>,
+    pub organization_id: Option<String>,
+    pub project_id: Option<String>,
+    pub namespace: Option<String>,
+    pub use_scope_headers: Option<bool>,
+    pub user_agent: Option<String>,
 }
 
 #[napi(object)]
@@ -87,26 +111,69 @@ pub async fn build_sandbox_image(
     emit: Option<ThreadsafeFunction<SandboxImageBuildEventJs, ErrorStrategy::Fatal>>,
 ) -> Result<String> {
     let build_options = SandboxImageBuildOptions {
-        api_url: options.api_url,
-        bearer_token: options.bearer_token,
-        use_scope_headers: options.use_scope_headers.unwrap_or(false),
-        organization_id: options.organization_id,
-        project_id: options.project_id,
-        namespace: options.namespace.unwrap_or_else(|| "default".to_string()),
+        common: CommonBuildOptions {
+            api_url: options.api_url,
+            bearer_token: options.bearer_token,
+            use_scope_headers: options.use_scope_headers.unwrap_or(false),
+            organization_id: options.organization_id,
+            project_id: options.project_id,
+            namespace: options.namespace.unwrap_or_else(|| "default".to_string()),
+            registered_name: options.registered_name,
+            disk_mb: options.disk_mb.map(u64::from),
+            builder_disk_mb: options.builder_disk_mb.map(u64::from),
+            cpus: options.cpus,
+            memory_mb: options.memory_mb,
+            is_public: options.is_public.unwrap_or(false),
+            user_agent: options.user_agent,
+        },
         dockerfile_path: PathBuf::from(options.dockerfile_path),
         dockerfile_text: options.dockerfile_text,
         context_dir: options.context_dir.map(PathBuf::from),
-        import_image_reference: None,
-        registered_name: options.registered_name,
-        disk_mb: options.disk_mb.map(u64::from),
-        builder_disk_mb: options.builder_disk_mb.map(u64::from),
-        cpus: options.cpus,
-        memory_mb: options.memory_mb,
-        is_public: options.is_public.unwrap_or(false),
-        user_agent: options.user_agent,
     };
 
     let result = rust_build_sandbox_image(build_options, move |event| {
+        if let Some(tsfn) = emit.as_ref() {
+            tsfn.call(event_to_js(event), ThreadsafeFunctionCallMode::Blocking);
+        }
+    })
+    .await
+    .map_err(|error| Error::from_reason(error.to_string()))?;
+
+    serde_json::to_string(&result).map_err(|error| Error::from_reason(error.to_string()))
+}
+
+/// Import a registry image directly into a sandbox image (no Dockerfile, no
+/// Docker daemon). Returns a JSON-encoded string with the registered
+/// sandbox-template metadata; the TS SDK is expected to parse it.
+///
+/// `emit`, if provided, is invoked for each progress event. The TypeScript
+/// wrapper must catch user callback exceptions before they cross this napi
+/// threadsafe callback boundary.
+#[napi]
+pub async fn import_sandbox_image(
+    options: SandboxImageImportOptionsJs,
+    emit: Option<ThreadsafeFunction<SandboxImageBuildEventJs, ErrorStrategy::Fatal>>,
+) -> Result<String> {
+    let import_options = SandboxImageImportOptions {
+        common: CommonBuildOptions {
+            api_url: options.api_url,
+            bearer_token: options.bearer_token,
+            use_scope_headers: options.use_scope_headers.unwrap_or(false),
+            organization_id: options.organization_id,
+            project_id: options.project_id,
+            namespace: options.namespace.unwrap_or_else(|| "default".to_string()),
+            registered_name: options.registered_name,
+            disk_mb: options.disk_mb.map(u64::from),
+            builder_disk_mb: options.builder_disk_mb.map(u64::from),
+            cpus: options.cpus,
+            memory_mb: options.memory_mb,
+            is_public: options.is_public.unwrap_or(false),
+            user_agent: options.user_agent,
+        },
+        image_reference: options.image_reference,
+    };
+
+    let result = rust_import_sandbox_image(import_options, move |event| {
         if let Some(tsfn) = emit.as_ref() {
             tsfn.call(event_to_js(event), ThreadsafeFunctionCallMode::Blocking);
         }

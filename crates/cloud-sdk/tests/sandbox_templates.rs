@@ -44,7 +44,9 @@ async fn delete_sandbox_template_sends_encoded_delete_request() {
 #[cfg_attr(not(feature = "integration-tests"), ignore)]
 async fn test_create_then_delete_sandbox_image() {
     use std::env;
-    use tensorlake::sandbox_images::{SandboxImageBuildOptions, build_sandbox_image};
+    use tensorlake::sandbox_images::{
+        CommonBuildOptions, SandboxImageBuildOptions, build_sandbox_image,
+    };
 
     let sdk = match common::create_sdk() {
         Ok(sdk) => sdk,
@@ -86,23 +88,24 @@ async fn test_create_then_delete_sandbox_image() {
     let result: Result<(), String> = async {
         build_sandbox_image(
             SandboxImageBuildOptions {
-                api_url,
-                bearer_token,
-                use_scope_headers: false,
-                organization_id: Some(organization_id),
-                project_id: Some(project_id),
-                namespace,
+                common: CommonBuildOptions {
+                    api_url,
+                    bearer_token,
+                    use_scope_headers: false,
+                    organization_id: Some(organization_id),
+                    project_id: Some(project_id),
+                    namespace,
+                    registered_name: Some(image_name.clone()),
+                    disk_mb: None,
+                    builder_disk_mb: None,
+                    cpus: Some(1.0),
+                    memory_mb: Some(1024),
+                    is_public: false,
+                    user_agent: None,
+                },
                 dockerfile_path,
                 dockerfile_text: None,
                 context_dir: None,
-                import_image_reference: None,
-                registered_name: Some(image_name.clone()),
-                disk_mb: None,
-                builder_disk_mb: None,
-                cpus: Some(1.0),
-                memory_mb: Some(1024),
-                is_public: false,
-                user_agent: None,
             },
             |_| {},
         )
