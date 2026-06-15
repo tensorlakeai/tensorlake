@@ -76,6 +76,15 @@ const cargoArgs = [
   ...(targetTriple ? ["--target", targetTriple] : []),
 ];
 
+const cargoEnv = { ...process.env };
+if (targetTriple?.endsWith("-linux-musl")) {
+  // Node addons are shared libraries loaded by Node with dlopen(). Rust's musl
+  // targets default to a static C runtime, which disables cdylib output.
+  cargoEnv.RUSTFLAGS = [cargoEnv.RUSTFLAGS, "-C target-feature=-crt-static"]
+    .filter(Boolean)
+    .join(" ");
+}
+
 console.log(
   `Building native binding for ${targetId}${
     targetTriple ? ` (${targetTriple})` : ""
@@ -85,7 +94,7 @@ console.log(
 const cargo = spawnSync("cargo", cargoArgs, {
   cwd: repoRoot,
   stdio: "inherit",
-  env: process.env,
+  env: cargoEnv,
 });
 
 if (cargo.status !== 0) {
