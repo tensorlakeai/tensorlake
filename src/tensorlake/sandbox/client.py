@@ -31,6 +31,7 @@ from .models import (
     CreateSandboxResources,
     CreateSandboxResponse,
     CreateSnapshotResponse,
+    GPUResources,
     ListArchivedSandboxesResponse,
     ListSandboxesResponse,
     ListSandboxPoolsResponse,
@@ -130,6 +131,21 @@ def _raise_as_sandbox_error(e: Exception) -> NoReturn:
         raise SandboxError(message) from None
 
     raise SandboxError(str(e)) from e
+
+
+def _build_gpu_resources(
+    gpus: int | None,
+    gpu_model: str | None,
+) -> list[GPUResources] | None:
+    if gpus is None and gpu_model is None:
+        return None
+    if gpus is None or gpu_model is None:
+        raise SandboxError("gpus and gpu_model must be provided together")
+    if gpus < 1:
+        raise SandboxError("gpus must be at least 1")
+    if gpu_model != "A10":
+        raise SandboxError("only A10 GPU sandboxes are supported for now")
+    return [GPUResources(count=gpus, model=gpu_model)]
 
 
 def _unsupported_request_timeout_kwarg(e: TypeError) -> bool:
@@ -413,6 +429,8 @@ class SandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -432,6 +450,9 @@ class SandboxClient:
             memory_mb: Memory in megabytes
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
+            gpus: Number of GPUs to allocate. Must be provided with
+                ``gpu_model``.
+            gpu_model: GPU model to allocate, such as ``A10``.
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
             allow_internet_access: If True (default), outbound traffic is
@@ -473,6 +494,7 @@ class SandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
+                gpus=_build_gpu_resources(gpus, gpu_model),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -1270,6 +1292,8 @@ class SandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -1297,6 +1321,9 @@ class SandboxClient:
             memory_mb: Memory in megabytes
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
+            gpus: Number of GPUs to allocate. Must be provided with
+                ``gpu_model``.
+            gpu_model: GPU model to allocate, such as ``A10``.
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
             allow_internet_access: If True (default), outbound traffic is
@@ -1349,6 +1376,8 @@ class SandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
+                gpus=gpus,
+                gpu_model=gpu_model,
                 timeout_secs=timeout_secs,
                 entrypoint=entrypoint,
                 allow_internet_access=allow_internet_access,

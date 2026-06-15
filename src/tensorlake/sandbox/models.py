@@ -149,12 +149,20 @@ class ContainerResourcesInfo(BaseModel):
     ephemeral_disk_mb: int
 
 
+class GPUResources(BaseModel):
+    """GPU resource request."""
+
+    count: int
+    model: str
+
+
 class CreateSandboxResources(BaseModel):
     """Resource overrides accepted when creating a sandbox."""
 
     cpus: float
     memory_mb: int
     disk_mb: int | None = None
+    gpus: list[GPUResources] | None = None
 
 
 class NetworkConfig(BaseModel):

@@ -506,6 +506,53 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(request_json["resources"]["cpus"], 2.0)
         self.assertEqual(request_json["resources"]["memory_mb"], 1024)
 
+    def test_create_sends_gpu_request(self):
+        fake = _FakeRustClient()
+        with (
+            patch("tensorlake.sandbox.client._RUST_SANDBOX_CLIENT_AVAILABLE", True),
+            patch(
+                "tensorlake.sandbox.client.RustCloudSandboxClient",
+                return_value=fake,
+            ),
+        ):
+            client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+            client.create(gpus=1, gpu_model="A10")
+
+        request_json = json.loads(fake.create_request_json)
+        self.assertEqual(
+            request_json["resources"]["gpus"], [{"count": 1, "model": "A10"}]
+        )
+
+    def test_create_rejects_partial_gpu_request(self):
+        fake = _FakeRustClient()
+        with (
+            patch("tensorlake.sandbox.client._RUST_SANDBOX_CLIENT_AVAILABLE", True),
+            patch(
+                "tensorlake.sandbox.client.RustCloudSandboxClient",
+                return_value=fake,
+            ),
+        ):
+            client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+            with self.assertRaisesRegex(SandboxError, "gpus and gpu_model"):
+                client.create(gpus=1)
+
+        self.assertIsNone(fake.create_request_json)
+
+    def test_create_rejects_non_a10_gpu_request(self):
+        fake = _FakeRustClient()
+        with (
+            patch("tensorlake.sandbox.client._RUST_SANDBOX_CLIENT_AVAILABLE", True),
+            patch(
+                "tensorlake.sandbox.client.RustCloudSandboxClient",
+                return_value=fake,
+            ),
+        ):
+            client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+            with self.assertRaisesRegex(SandboxError, "only A10"):
+                client.create(gpus=1, gpu_model="H100")
+
+        self.assertIsNone(fake.create_request_json)
+
     def test_create_sends_disk_override_when_provided(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         fake = _FakeRustClient()

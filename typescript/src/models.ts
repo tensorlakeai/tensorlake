@@ -71,6 +71,11 @@ export interface ContainerResourcesInfo {
   ephemeralDiskMb: number;
 }
 
+export interface GPUResources {
+  count: number;
+  model: string;
+}
+
 export interface NetworkConfig {
   allowInternetAccess: boolean;
   allowOut: string[];
@@ -86,6 +91,10 @@ export interface CreateSandboxOptions {
   memoryMb?: number;
   /** Root disk size in megabytes. When omitted, the server uses its default disk size. */
   diskMb?: number;
+  /** Number of GPUs to allocate. Must be provided with gpuModel. */
+  gpus?: number;
+  /** GPU model to allocate, such as "A10". */
+  gpuModel?: string;
   timeoutSecs?: number;
   entrypoint?: string[];
   allowInternetAccess?: boolean;

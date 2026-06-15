@@ -10,6 +10,12 @@ const DEFAULT_SANDBOX_CPUS: f64 = 1.0;
 const DEFAULT_SANDBOX_MEMORY_MB: i64 = 1024;
 const MAX_CLOUD_INIT_USER_DATA_BYTES: usize = 16 * 1024;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GpuRequest<'a> {
+    pub count: u32,
+    pub model: &'a str,
+}
+
 pub async fn create_with_request(
     ctx: &CliContext,
     body: serde_json::Value,
@@ -66,6 +72,8 @@ pub struct CreateArgs<'a> {
     pub cpus: Option<f64>,
     pub memory: Option<i64>,
     pub disk_mb: Option<u64>,
+    pub gpu_count: Option<u32>,
+    pub gpu_model: Option<&'a str>,
     pub timeout: Option<i64>,
     pub entrypoint: &'a [String],
     pub snapshot_id: Option<&'a str>,
@@ -85,6 +93,8 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         cpus,
         memory,
         disk_mb,
+        gpu_count,
+        gpu_model,
         timeout,
         entrypoint,
         snapshot_id,
@@ -99,11 +109,21 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
     } = args;
 
     let cloud_init_base64 = cloud_init.map(encode_cloud_init_source).transpose()?;
+    let gpu = match (gpu_count, gpu_model) {
+        (Some(count), Some(model)) => Some(GpuRequest { count, model }),
+        (None, None) => None,
+        _ => {
+            return Err(CliError::usage(
+                "--gpus and --gpu-model must be provided together",
+            ));
+        }
+    };
 
     let mut body = build_create_request_body(
         cpus,
         memory,
         disk_mb,
+        gpu,
         timeout,
         entrypoint,
         snapshot_id,
@@ -224,6 +244,7 @@ fn build_create_request_body(
     cpus: Option<f64>,
     memory: Option<i64>,
     disk_mb: Option<u64>,
+    gpu: Option<GpuRequest<'_>>,
     timeout: Option<i64>,
     entrypoint: &[String],
     snapshot_id: Option<&str>,
@@ -243,6 +264,12 @@ fn build_create_request_body(
         if let Some(disk_mb) = disk_mb {
             resources.insert("disk_mb".to_string(), serde_json::json!(disk_mb));
         }
+        if let Some(gpu) = gpu {
+            resources.insert(
+                "gpus".to_string(),
+                serde_json::json!([{ "count": gpu.count, "model": gpu.model }]),
+            );
+        }
         if !resources.is_empty() {
             body["resources"] = serde_json::Value::Object(resources);
         }
@@ -254,6 +281,10 @@ fn build_create_request_body(
         });
         if let Some(disk_mb) = disk_mb {
             body["resources"]["disk_mb"] = serde_json::json!(disk_mb);
+        }
+        if let Some(gpu) = gpu {
+            body["resources"]["gpus"] =
+                serde_json::json!([{ "count": gpu.count, "model": gpu.model }]);
         }
     }
 
@@ -327,11 +358,13 @@ fn encode_cloud_init_source(source: &str) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_create_request_body, encode_cloud_init_source, format_ready_message};
+    use super::{
+        GpuRequest, build_create_request_body, encode_cloud_init_source, format_ready_message,
+    };
 
     #[test]
     fn create_body_uses_defaults_without_snapshot() {
-        let body = build_create_request_body(None, None, None, None, &[], None, None, None);
+        let body = build_create_request_body(None, None, None, None, None, &[], None, None, None);
 
         assert_eq!(body["resources"]["cpus"], 1.0);
         assert_eq!(body["resources"]["memory_mb"], 1024);
@@ -341,8 +374,17 @@ mod tests {
 
     #[test]
     fn create_body_omits_resources_for_snapshot_without_overrides() {
-        let body =
-            build_create_request_body(None, None, None, None, &[], Some("snap-1"), None, None);
+        let body = build_create_request_body(
+            None,
+            None,
+            None,
+            None,
+            None,
+            &[],
+            Some("snap-1"),
+            None,
+            None,
+        );
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert!(body.get("resources").is_none());
@@ -350,8 +392,17 @@ mod tests {
 
     #[test]
     fn create_body_includes_only_explicit_snapshot_overrides() {
-        let body =
-            build_create_request_body(Some(2.5), None, None, None, &[], Some("snap-1"), None, None);
+        let body = build_create_request_body(
+            Some(2.5),
+            None,
+            None,
+            None,
+            None,
+            &[],
+            Some("snap-1"),
+            None,
+            None,
+        );
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert_eq!(body["resources"]["cpus"], 2.5);
@@ -360,8 +411,17 @@ mod tests {
 
     #[test]
     fn create_body_includes_disk_override_without_snapshot() {
-        let body =
-            build_create_request_body(None, None, Some(25 * 1024), None, &[], None, None, None);
+        let body = build_create_request_body(
+            None,
+            None,
+            Some(25 * 1024),
+            None,
+            None,
+            &[],
+            None,
+            None,
+            None,
+        );
 
         assert_eq!(body["resources"]["cpus"], 1.0);
         assert_eq!(body["resources"]["memory_mb"], 1024);
@@ -374,6 +434,7 @@ mod tests {
             None,
             None,
             Some(25 * 1024),
+            None,
             None,
             &[],
             Some("snap-1"),
@@ -394,6 +455,7 @@ mod tests {
             None,
             Some(25 * 1024),
             None,
+            None,
             &[],
             None,
             Some("tensorlake/ubuntu-minimal"),
@@ -406,8 +468,53 @@ mod tests {
     }
 
     #[test]
+    fn create_body_includes_gpu_request_without_snapshot() {
+        let body = build_create_request_body(
+            None,
+            None,
+            None,
+            Some(GpuRequest {
+                count: 1,
+                model: "A10",
+            }),
+            None,
+            &[],
+            None,
+            Some("tensorlake/ubuntu-minimal"),
+            None,
+        );
+
+        assert_eq!(body["resources"]["gpus"][0]["count"], 1);
+        assert_eq!(body["resources"]["gpus"][0]["model"], "A10");
+    }
+
+    #[test]
+    fn create_body_includes_gpu_request_for_snapshot_restore() {
+        let body = build_create_request_body(
+            None,
+            None,
+            None,
+            Some(GpuRequest {
+                count: 1,
+                model: "A10",
+            }),
+            None,
+            &[],
+            Some("snap-1"),
+            None,
+            None,
+        );
+
+        assert_eq!(body["snapshot_id"], "snap-1");
+        assert_eq!(body["resources"]["gpus"][0]["count"], 1);
+        assert_eq!(body["resources"]["gpus"][0]["model"], "A10");
+        assert!(body["resources"].get("cpus").is_none());
+    }
+
+    #[test]
     fn create_body_includes_cloud_init_user_data_base64() {
         let body = build_create_request_body(
+            None,
             None,
             None,
             None,
@@ -424,6 +531,7 @@ mod tests {
     #[test]
     fn create_body_allows_snapshot_with_cloud_init_user_data_base64() {
         let body = build_create_request_body(
+            None,
             None,
             None,
             None,

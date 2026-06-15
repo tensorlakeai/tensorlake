@@ -9,11 +9,19 @@ pub struct ContainerResourcesInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GPUResources {
+    pub count: u32,
+    pub model: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxResources {
     pub cpus: f64,
     pub memory_mb: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_mb: Option<u64>,
+    #[serde(rename = "gpus", skip_serializing_if = "Option::is_none")]
+    pub gpu_configs: Option<Vec<GPUResources>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
