@@ -64,23 +64,28 @@ struct ProcessTerminalStatus {
     oom_killed: bool,
 }
 
-/// Dockerfile instructions rejected during sandbox-image build. `ONBUILD`
-/// registers deferred triggers that only fire when the image is used as a base
-/// in a downstream build, and `SHELL` changes the shell used for shell-form
-/// `RUN`/`CMD`/`ENTRYPOINT`; neither has a meaningful effect on the rootfs path
-/// (`docker build --output type=tar` discards image config and there is no
-/// child build), so we reject them rather than accept a silent no-op.
-// ARG used to be in this list; it is accepted at top-level scope so a
-// Dockerfile can declare global defaults that Docker resolves at build time,
-// but the SDK does not substitute ARG values at parse time.
-const UNSUPPORTED_DOCKERFILE_INSTRUCTIONS: &[&str] = &["ONBUILD", "SHELL"];
-
-/// Dockerfile instructions that affect image config (exposed ports, labels,
-/// etc.) rather than the filesystem. `docker build --output type=tar` discards
-/// the image config, so these are effectively no-ops on the rootfs path — we
-/// warn to surface that to the user and pass them through to the builder.
-const IGNORED_DOCKERFILE_INSTRUCTIONS: &[&str] =
-    &["EXPOSE", "HEALTHCHECK", "LABEL", "STOPSIGNAL", "VOLUME"];
+/// Dockerfile instructions that run as usual during the rootfs builder's
+/// `docker build`, but have no effect when a sandbox is later run from the
+/// image. The builder preserves the built image's OCI config, yet the
+/// sandbox runtime only honors `ENV`/`WORKDIR`/`USER`/`ENTRYPOINT`/`CMD`; the
+/// rest of the image config is never read at runtime. `ONBUILD` triggers only
+/// fire in a downstream build (there is no child build here) and `SHELL` only
+/// changes the shell for build-time shell-form `RUN`/`CMD`/`ENTRYPOINT`. We
+/// accept all of these and warn, rather than reject, so a Dockerfile that works
+/// with `docker build` also works here.
+//
+// ARG is not in this list; it is accepted at top-level scope so a Dockerfile
+// can declare global defaults that Docker resolves at build time, but the SDK
+// does not substitute ARG values at parse time.
+const IGNORED_DOCKERFILE_INSTRUCTIONS: &[&str] = &[
+    "ONBUILD",
+    "SHELL",
+    "EXPOSE",
+    "HEALTHCHECK",
+    "LABEL",
+    "STOPSIGNAL",
+    "VOLUME",
+];
 
 #[derive(Debug, Error)]
 pub enum SandboxImageBuildError {
@@ -371,8 +376,8 @@ where
 
     for (_line_number, keyword) in &plan.ignored_instructions {
         emit(SandboxImageBuildEvent::Warning(format!(
-            "Skipping Dockerfile instruction '{}' during snapshot materialization. \
-             It is still preserved in the registered Dockerfile.",
+            "Dockerfile instruction '{}' is applied during the image build but has no \
+             effect when running sandboxes from this image.",
             keyword
         )));
     }
@@ -1910,12 +1915,6 @@ fn load_dockerfile_text_plan(
             }
             continue;
         }
-        if UNSUPPORTED_DOCKERFILE_INSTRUCTIONS.contains(&keyword.as_str()) {
-            return Err(SandboxImageBuildError::other(format!(
-                "line {}: Dockerfile instruction '{}' is not supported for sandbox image creation",
-                line_number, keyword
-            )));
-        }
         if IGNORED_DOCKERFILE_INSTRUCTIONS.contains(&keyword.as_str()) {
             ignored_instructions.push((line_number, keyword));
         }
@@ -2436,8 +2435,11 @@ mod tests {
     }
 
     #[test]
-    fn load_dockerfile_plan_rejects_unsupported_instructions() {
-        for instruction in ["ONBUILD RUN echo", "SHELL [\"/bin/bash\"]"] {
+    fn load_dockerfile_plan_accepts_onbuild_and_shell() {
+        // ONBUILD and SHELL are no longer rejected: they run during the build
+        // but have no runtime effect, so they land in the ignored set alongside
+        // EXPOSE/LABEL/etc. rather than failing the build.
+        for instruction in ["ONBUILD RUN echo", "SHELL [\"/bin/bash\", \"-c\"]"] {
             let temp_dir = tempfile::tempdir().unwrap();
             let dockerfile_path = temp_dir.path().join("Dockerfile");
             std::fs::write(
@@ -2446,15 +2448,17 @@ mod tests {
             )
             .unwrap();
 
-            let error = load_dockerfile_plan(&dockerfile_path, None).unwrap_err();
+            let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
             let keyword = instruction.split_whitespace().next().unwrap();
-            let expected = format!(
-                "line 2: Dockerfile instruction '{}' is not supported for sandbox image creation",
-                keyword
-            );
-            assert!(
-                error.to_string().contains(&expected),
-                "instruction {instruction}: expected {expected:?} in {error}",
+            let keywords: Vec<&str> = plan
+                .ignored_instructions
+                .iter()
+                .map(|(_, kw)| kw.as_str())
+                .collect();
+            assert_eq!(
+                keywords,
+                vec![keyword],
+                "instruction {instruction}: expected {keyword:?} in the ignored set",
             );
         }
     }
@@ -2524,6 +2528,8 @@ mod tests {
         std::fs::write(
             &dockerfile_path,
             "FROM python:3.12-slim\n\
+             ONBUILD RUN echo build\n\
+             SHELL [\"/bin/bash\", \"-c\"]\n\
              LABEL maintainer=alice\n\
              EXPOSE 8080\n\
              HEALTHCHECK CMD echo ok\n\
@@ -2541,7 +2547,15 @@ mod tests {
             .collect();
         assert_eq!(
             keywords,
-            vec!["LABEL", "EXPOSE", "HEALTHCHECK", "STOPSIGNAL", "VOLUME",]
+            vec![
+                "ONBUILD",
+                "SHELL",
+                "LABEL",
+                "EXPOSE",
+                "HEALTHCHECK",
+                "STOPSIGNAL",
+                "VOLUME",
+            ]
         );
         // Dockerfile text is preserved verbatim so the rootfs builder still
         // sees the same instructions.
