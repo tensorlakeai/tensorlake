@@ -38,6 +38,7 @@ const SANDBOX_LIFECYCLE_TIMEOUT_MS = 360_000;
 const SANDBOX_CREATE_TIMEOUT_MS = 180_000;
 const SANDBOX_SETUP_TIMEOUT_MS = 300_000;
 const SANDBOX_SUITE_TIMEOUT_MS = 420_000;
+const SANDBOX_IMAGE_SUITE_TIMEOUT_MS = 900_000;
 const STALE_RESOURCE_GRACE_MS =
   Number(process.env.TENSORLAKE_TEST_CLEANUP_GRACE_SECS ?? "60") * 1000;
 const CLEANUP_ALL_TEST_RESOURCES = ["1", "true", "yes"].includes(
@@ -243,39 +244,96 @@ beforeAll(async () => {
 
 describe("Sandbox Images", () => {
   it(
-    "creates and deletes a sandbox image",
+    "creates, runs, and deletes sandbox images",
     async () => {
-      const registeredName = `sdk-ts-delete-test-${randomSuffix()}`;
-      const tempDir = await mkdir(
-        path.join(os.tmpdir(), `tensorlake-image-${registeredName}`),
-        { recursive: true },
-      );
-      const dockerfilePath = path.join(tempDir, "Dockerfile");
-      await writeFile(
-        dockerfilePath,
-        "FROM tensorlake/ubuntu-minimal\nRUN printf 'ts delete acceptance\\n' > /tmp/ts-delete-acceptance\n",
-        "utf8",
-      );
-
-      let created = false;
+      const suffix = randomSuffix();
+      const scenarios = [
+        {
+          label: "regular",
+          registeredName: `sdk-ts-delete-test-${suffix}`,
+          dockerCompat: false,
+          markerPath: "/tmp/ts-delete-acceptance",
+          markerText: "ts regular build acceptance",
+        },
+        {
+          label: "docker-compat",
+          registeredName: `sdk-ts-docker-compat-delete-test-${suffix}`,
+          dockerCompat: true,
+          markerPath: "/tmp/ts-docker-compat-delete-acceptance",
+          markerText: "ts docker compat build acceptance",
+        },
+      ];
+      const client = createTestClient();
+      const createdImages: string[] = [];
       try {
-        await createSandboxImage(dockerfilePath, {
-          registeredName,
-          cpus: 1.0,
-          memoryMb: 1024,
-        });
-        created = true;
+        for (const scenario of scenarios) {
+          const tempDir = await mkdir(
+            path.join(os.tmpdir(), `tensorlake-image-${scenario.registeredName}`),
+            { recursive: true },
+          );
+          const dockerfilePath = path.join(tempDir, "Dockerfile");
+          await writeFile(
+            dockerfilePath,
+            `FROM tensorlake/ubuntu-minimal\nRUN printf '${scenario.markerText}\\n' > ${scenario.markerPath}\n`,
+            "utf8",
+          );
 
-        await deleteSandboxImage(registeredName);
+          await createSandboxImage(dockerfilePath, {
+            registeredName: scenario.registeredName,
+            cpus: 1.0,
+            memoryMb: 1024,
+            dockerCompat: scenario.dockerCompat,
+          });
+          createdImages.push(scenario.registeredName);
+
+          let sandbox: Sandbox | undefined;
+          try {
+            sandbox = await createAndConnectWithStartupRetry(client, {
+              image: scenario.registeredName,
+              cpus: 1.0,
+              memoryMb: 1024,
+              diskMb: SANDBOX_DISK_MB,
+              entrypoint: ["sleep", "300"],
+              requestTimeout: 120,
+            });
+            const result = await sandbox.run("cat", {
+              args: [scenario.markerPath],
+            });
+            expect(
+              result.exitCode,
+              `${scenario.label} sandbox ${sandbox.sandboxId}: exitCode`,
+            ).toBe(0);
+            expect(
+              result.stdout.trim(),
+              `${scenario.label} sandbox ${sandbox.sandboxId}: stdout`,
+            ).toBe(scenario.markerText);
+          } finally {
+            if (sandbox != null) {
+              const sandboxId = sandbox.sandboxId;
+              await sandbox.terminate();
+              await pollSandboxStatus(
+                client,
+                sandboxId,
+                SandboxStatus.TERMINATED,
+                30,
+              );
+            }
+          }
+
+          await deleteSandboxImage(scenario.registeredName);
+          const imageIndex = createdImages.indexOf(scenario.registeredName);
+          if (imageIndex >= 0) createdImages.splice(imageIndex, 1);
+        }
       } finally {
-        if (created) {
+        client.close();
+        for (const registeredName of createdImages) {
           await deleteSandboxImage(registeredName).catch(() => {});
         }
       }
 
-      expect(created).toBe(true);
+      expect(createdImages).toHaveLength(0);
     },
-    SANDBOX_SUITE_TIMEOUT_MS,
+    SANDBOX_IMAGE_SUITE_TIMEOUT_MS,
   );
 });
 

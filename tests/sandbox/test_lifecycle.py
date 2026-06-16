@@ -248,34 +248,86 @@ class TestSandboxImages(BaseSandboxTest):
                 except Exception:
                     pass
 
-    def test_create_then_delete_sandbox_image(self):
-        registered_name = f"sdk-python-delete-test-{uuid4().hex[:8]}"
+    def test_create_run_then_delete_sandbox_images(self):
+        suffix = uuid4().hex[:8]
+        scenarios = [
+            (
+                "regular",
+                f"sdk-python-delete-test-{suffix}",
+                False,
+                "/tmp/python-delete-acceptance",
+                "python regular build acceptance",
+            ),
+            (
+                "docker-compat",
+                f"sdk-python-docker-compat-delete-test-{suffix}",
+                True,
+                "/tmp/python-docker-compat-delete-acceptance",
+                "python docker compat build acceptance",
+            ),
+        ]
 
-        with tempfile.TemporaryDirectory() as tmpdir:
-            dockerfile_path = Path(tmpdir) / "Dockerfile"
-            dockerfile_path.write_text(
-                "FROM tensorlake/ubuntu-minimal\n"
-                "RUN printf 'python delete acceptance\\n' > /tmp/python-delete-acceptance\n",
-                encoding="utf-8",
-            )
-
-            created = False
-            try:
-                build_sandbox_image(
-                    str(dockerfile_path),
-                    registered_name=registered_name,
-                    cpus=1.0,
-                    memory_mb=1024,
-                )
-                created = True
-
-                delete_sandbox_image(registered_name)
-            finally:
-                if created:
+        created_images: list[str] = []
+        try:
+            for (
+                label,
+                registered_name,
+                docker_compat,
+                marker_path,
+                marker_text,
+            ) in scenarios:
+                with self.subTest(label=label):
                     try:
-                        delete_sandbox_image(registered_name)
-                    except Exception:
-                        pass
+                        with tempfile.TemporaryDirectory() as tmpdir:
+                            dockerfile_path = Path(tmpdir) / "Dockerfile"
+                            dockerfile_path.write_text(
+                                "FROM tensorlake/ubuntu-minimal\n"
+                                f"RUN printf '{marker_text}\\n' > {marker_path}\n",
+                                encoding="utf-8",
+                            )
+
+                            build_sandbox_image(
+                                str(dockerfile_path),
+                                registered_name=registered_name,
+                                cpus=1.0,
+                                memory_mb=1024,
+                                docker_compat=docker_compat,
+                            )
+                            created_images.append(registered_name)
+
+                            sandbox: Sandbox | None = None
+                            try:
+                                sandbox = self.client.create_and_connect(
+                                    image=registered_name,
+                                    cpus=1.0,
+                                    memory_mb=1024,
+                                    disk_mb=_SANDBOX_DISK_MB,
+                                    entrypoint=["sleep", "300"],
+                                    request_timeout=120,
+                                )
+                                result = sandbox.run("cat", args=[marker_path])
+                                self.assertEqual(result.exit_code, 0)
+                                self.assertEqual(result.stdout.strip(), marker_text)
+                            finally:
+                                if sandbox is not None:
+                                    sandbox_id = sandbox.sandbox_id
+                                    sandbox.terminate()
+                                    _poll_sandbox_status(
+                                        self.client,
+                                        sandbox_id,
+                                        SandboxStatus.TERMINATED,
+                                        timeout=30,
+                                    )
+                    finally:
+                        if registered_name in created_images:
+                            delete_sandbox_image(registered_name)
+                            created_images.remove(registered_name)
+        finally:
+            for registered_name in created_images:
+                try:
+                    delete_sandbox_image(registered_name)
+                except Exception:
+                    pass
 
     def test_build_failure_reports_builder_disk_space_advice(self):
         self._assert_failed_build_advice(
