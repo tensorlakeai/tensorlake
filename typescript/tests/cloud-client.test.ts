@@ -119,8 +119,14 @@ describe("CloudClient", () => {
         "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/tensorlake%2Ftest%3A1",
       );
       expect(init?.method).toBe("GET");
+      // The platform API emits snake_case keys; the client must convert them.
       return new Response(
-        JSON.stringify({ id: "tpl-1", name: "tensorlake/test:1", snapshotId: "snap-1" }),
+        JSON.stringify({
+          id: "tpl-1",
+          name: "tensorlake/test:1",
+          snapshot_id: "snap-1",
+          rootfs_disk_bytes: 1024,
+        }),
         { status: 200, headers: { "Content-Type": "application/json" } },
       );
     });
@@ -135,6 +141,7 @@ describe("CloudClient", () => {
       id: "tpl-1",
       name: "tensorlake/test:1",
       snapshotId: "snap-1",
+      rootfsDiskBytes: 1024,
     });
     client.close();
   });
@@ -160,12 +167,13 @@ describe("CloudClient", () => {
     const requested: string[] = [];
     mockFetch((url) => {
       requested.push(url);
+      // The platform API emits snake_case keys; the client must convert them.
       if (url === `${base}?pageSize=100`) {
         return new Response(
           JSON.stringify({
             items: [
-              { id: "tpl-1", name: "image-a", snapshotId: "snap-a" },
-              { id: "tpl-2", name: "image-b", snapshotId: "snap-b" },
+              { id: "tpl-1", name: "image-a", snapshot_id: "snap-a", rootfs_disk_bytes: 1 },
+              { id: "tpl-2", name: "image-b", snapshot_id: "snap-b", rootfs_disk_bytes: 2 },
             ],
             pagination: { next: `${base}?pageSize=100&cursor=abc` },
           }),
@@ -174,7 +182,7 @@ describe("CloudClient", () => {
       }
       return new Response(
         JSON.stringify({
-          items: [{ id: "tpl-3", name: "image-c", snapshotId: "snap-c" }],
+          items: [{ id: "tpl-3", name: "image-c", snapshot_id: "snap-c", rootfs_disk_bytes: 3 }],
           pagination: { next: null },
         }),
         { status: 200, headers: { "Content-Type": "application/json" } },
@@ -192,6 +200,13 @@ describe("CloudClient", () => {
       "image-b",
       "image-c",
     ]);
+    // Confirm snake_case keys from each page were converted to camelCase.
+    expect(images.map((image) => image.snapshotId)).toEqual([
+      "snap-a",
+      "snap-b",
+      "snap-c",
+    ]);
+    expect(images.map((image) => image.rootfsDiskBytes)).toEqual([1, 2, 3]);
     expect(requested).toEqual([
       `${base}?pageSize=100`,
       `${base}?pageSize=100&cursor=abc`,
