@@ -16,7 +16,11 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from uuid import uuid4
 
-from tensorlake.image.sandbox_builder import build_sandbox_image, delete_sandbox_image
+from tensorlake.image.sandbox_builder import (
+    SandboxImageBuildError,
+    build_sandbox_image,
+    delete_sandbox_image,
+)
 from tensorlake.sandbox import (
     PoolContainerInfo,
     PoolInUseError,
@@ -214,6 +218,36 @@ class BaseSandboxTest(unittest.TestCase):
 
 
 class TestSandboxImages(BaseSandboxTest):
+    def _assert_failed_build_advice(
+        self,
+        dockerfile_text: str,
+        expected_advice: str,
+        *,
+        memory_mb: int = 1024,
+        builder_disk_mb: int | None = None,
+    ):
+        registered_name = f"sdk-python-failed-build-test-{uuid4().hex[:8]}"
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dockerfile_path = Path(tmpdir) / "Dockerfile"
+            dockerfile_path.write_text(dockerfile_text, encoding="utf-8")
+
+            try:
+                with self.assertRaises(SandboxImageBuildError) as cm:
+                    build_sandbox_image(
+                        str(dockerfile_path),
+                        registered_name=registered_name,
+                        cpus=1.0,
+                        memory_mb=memory_mb,
+                        builder_disk_mb=builder_disk_mb,
+                    )
+                self.assertIn(expected_advice, str(cm.exception))
+            finally:
+                try:
+                    delete_sandbox_image(registered_name)
+                except Exception:
+                    pass
+
     def test_create_then_delete_sandbox_image(self):
         registered_name = f"sdk-python-delete-test-{uuid4().hex[:8]}"
 
@@ -242,6 +276,29 @@ class TestSandboxImages(BaseSandboxTest):
                         delete_sandbox_image(registered_name)
                     except Exception:
                         pass
+
+    def test_build_failure_reports_builder_disk_space_advice(self):
+        self._assert_failed_build_advice(
+            "FROM tensorlake/ubuntu-minimal\n"
+            "RUN dd if=/dev/zero of=/tmp/tensorlake-diagnostic-disk-fill bs=1M count=50000\n",
+            "The builder sandbox ran out of disk space.",
+            builder_disk_mb=30720,
+        )
+
+    def test_build_failure_reports_builder_memory_advice(self):
+        self._assert_failed_build_advice(
+            "FROM python:3.12-slim\n"
+            "RUN python - <<'PY'\n"
+            "chunks = []\n"
+            "while True:\n"
+            "    chunk = bytearray(128 * 1024 * 1024)\n"
+            "    for index in range(0, len(chunk), 4096):\n"
+            "        chunk[index] = 1\n"
+            "    chunks.append(chunk)\n"
+            "PY\n",
+            "The builder sandbox ran out of memory.",
+            memory_mb=1024,
+        )
 
 
 # ---------------------------------------------------------------------------
