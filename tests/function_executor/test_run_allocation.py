@@ -1157,6 +1157,10 @@ class TestRunAllocation(unittest.TestCase):
                     initialize_response.failure_reason,
                     InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
                 )
+                self.assertIn(
+                    "Exception: This function fails on initialization",
+                    initialize_response.error_message,
+                )
 
         fe_stdout = process.read_stdout()
         # Check FE logs in stdout

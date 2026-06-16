@@ -99,6 +99,7 @@ enum InitializationFailureReason {
 message InitializeResponse {
     optional InitializationOutcomeCode outcome_code = 1;
     optional InitializationFailureReason failure_reason = 2;
+    optional string error_message = 3;
 }
 
 message ListAllocationsRequest {}

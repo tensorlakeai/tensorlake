@@ -194,6 +194,7 @@ class Service(FunctionExecutorServicer):
             return InitializeResponse(
                 outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_FAILURE,
                 failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
+                error_message=f"{type(e).__name__}: {e}",
             )
 
         available_cpu_count: int = int(self._function._function_config.cpu)

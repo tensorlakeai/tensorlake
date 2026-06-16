@@ -163,7 +163,9 @@ class FunctionExecutorServicer(object):
         raise NotImplementedError("Method not implemented!")
 
     def get_allocation_execution_log_batch(self, request, context):
-        """Allocation execution log. Allocation execution log is a strictly ordered append only sequence of events
+        """Allocation execution and event log protocol is available for FEs starting from version 0.1.3.
+
+        Allocation execution log. Allocation execution log is a strictly ordered append only sequence of events
         describing what happened in the allocation while executing its function call. If the user code in the function call
         is deterministic then its allocation execution log is the same across different allocation runs of the same
         function call.

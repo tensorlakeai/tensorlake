@@ -217,15 +217,18 @@ class InitializeRequest(_message.Message):
     ) -> None: ...
 
 class InitializeResponse(_message.Message):
-    __slots__ = ("outcome_code", "failure_reason")
+    __slots__ = ("outcome_code", "failure_reason", "error_message")
     OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
     FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
+    ERROR_MESSAGE_FIELD_NUMBER: _ClassVar[int]
     outcome_code: InitializationOutcomeCode
     failure_reason: InitializationFailureReason
+    error_message: str
     def __init__(
         self,
         outcome_code: _Optional[_Union[InitializationOutcomeCode, str]] = ...,
         failure_reason: _Optional[_Union[InitializationFailureReason, str]] = ...,
+        error_message: _Optional[str] = ...,
     ) -> None: ...
 
 class ListAllocationsRequest(_message.Message):
