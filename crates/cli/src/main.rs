@@ -200,8 +200,10 @@ enum SecretsCommands {
     Ls,
     /// Set one or more secrets (KEY=VALUE)
     Set {
+        /// Path to an env file containing KEY=VALUE entries
+        #[arg(long = "env-file", value_name = "PATH")]
+        env_file: Option<std::path::PathBuf>,
         /// Secret key-value pairs (KEY=VALUE)
-        #[arg(required = true)]
         secrets: Vec<String>,
     },
     /// Remove one or more secrets
@@ -1112,7 +1114,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             ensure_auth_and_project(ctx).await?;
             match subcmd {
                 SecretsCommands::Ls => commands::secrets::list(ctx).await,
-                SecretsCommands::Set { secrets } => commands::secrets::set(ctx, &secrets).await,
+                SecretsCommands::Set { env_file, secrets } => {
+                    commands::secrets::set(ctx, env_file.as_deref(), &secrets).await
+                }
                 SecretsCommands::Rm { secret_names } => {
                     commands::secrets::unset(ctx, &secret_names).await
                 }

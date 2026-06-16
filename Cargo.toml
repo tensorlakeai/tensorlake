@@ -88,6 +88,7 @@ dialoguer = "0.12"
 open = "5"
 crossterm = "0.29"
 gethostname = "0.5"
+env-file-reader = "0.3.0"
 
 # Python bindings
 pyo3 = { version = "0.28.2", features = ["abi3-py310", "extension-module"] }
