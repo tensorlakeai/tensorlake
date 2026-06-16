@@ -1298,6 +1298,7 @@ fn rootfs_builder_env() -> Map<String, Value> {
 struct BuilderFailureDiagnostics {
     oom_killed: bool,
     disk_usage_percent: Option<u8>,
+    disk_error_output: bool,
 }
 
 impl BuilderFailureDiagnostics {
@@ -1311,6 +1312,7 @@ impl BuilderFailureDiagnostics {
         if self
             .disk_usage_percent
             .is_some_and(|usage| usage >= BUILDER_DISK_USAGE_DIAGNOSTIC_THRESHOLD_PERCENT)
+            || self.disk_error_output
         {
             messages.push(
                 "The builder sandbox ran out of disk space. Retry with a larger `builder_disk_mb` / `builderDiskMb` / `--builder_disk_mb` value.",
@@ -1324,7 +1326,7 @@ async fn decorate_builder_failure(
     proxy: &SandboxProxyClient,
     source: SandboxImageBuildError,
 ) -> SandboxImageBuildError {
-    let diagnostics = diagnose_builder_failure(proxy).await;
+    let diagnostics = diagnose_builder_failure(proxy, &source.to_string()).await;
     let messages = diagnostics.advice_messages();
     if messages.is_empty() {
         return source;
@@ -1336,7 +1338,10 @@ async fn decorate_builder_failure(
     }
 }
 
-async fn diagnose_builder_failure(proxy: &SandboxProxyClient) -> BuilderFailureDiagnostics {
+async fn diagnose_builder_failure(
+    proxy: &SandboxProxyClient,
+    failure_output: &str,
+) -> BuilderFailureDiagnostics {
     let dmesg_output = run_diagnostic_command_stdout(proxy, "dmesg 2>/dev/null || true").await;
     let disk_output = run_diagnostic_command_stdout(
         proxy,
@@ -1352,6 +1357,7 @@ async fn diagnose_builder_failure(proxy: &SandboxProxyClient) -> BuilderFailureD
             .as_deref()
             .is_some_and(contains_oom_killer_evidence),
         disk_usage_percent: disk_output.as_deref().and_then(parse_df_max_usage_percent),
+        disk_error_output: contains_disk_space_evidence(failure_output),
     }
 }
 
@@ -1386,6 +1392,11 @@ fn contains_oom_killer_evidence(output: &str) -> bool {
     output.contains("out of memory")
         || output.contains("oom-kill")
         || output.contains("killed process")
+}
+
+fn contains_disk_space_evidence(output: &str) -> bool {
+    let output = output.to_ascii_lowercase();
+    output.contains("enospc") || output.contains("no space")
 }
 
 fn parse_df_max_usage_percent(output: &str) -> Option<u8> {
@@ -2456,8 +2467,8 @@ mod tests {
         BuilderFailureDiagnostics, CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder,
         PreparedRootfsParent, PreparedSandboxTemplateBuild, SandboxImageBuildError,
         build_rootfs_spec, collect_dir_files, complete_request_from_metadata,
-        contains_oom_killer_evidence, default_registered_name, load_dockerfile_plan,
-        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
+        contains_disk_space_evidence, contains_oom_killer_evidence, default_registered_name,
+        load_dockerfile_plan, load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
         parse_df_line_usage_percent, parse_df_max_usage_percent, process_terminal_status,
         rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
         splice_signed_upload, streaming_process_payload,
@@ -2512,11 +2523,25 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
     }
 
     #[test]
+    fn disk_space_parser_detects_enospc_and_no_space_output() {
+        assert!(contains_disk_space_evidence(
+            "fallocate: fallocate failed: No space left on device"
+        ));
+        assert!(contains_disk_space_evidence(
+            "failed to write layer: ENOSPC"
+        ));
+        assert!(!contains_disk_space_evidence(
+            "rootfs builder exited with status 1"
+        ));
+    }
+
+    #[test]
     fn diagnostics_advice_uses_thresholds() {
         assert!(
             BuilderFailureDiagnostics {
                 oom_killed: false,
                 disk_usage_percent: Some(94),
+                disk_error_output: false,
             }
             .advice_messages()
             .is_empty()
@@ -2525,12 +2550,22 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         let messages = BuilderFailureDiagnostics {
             oom_killed: true,
             disk_usage_percent: Some(95),
+            disk_error_output: false,
         }
         .advice_messages();
         assert_eq!(messages.len(), 2);
         assert!(messages[0].contains("larger `memory_mb`"));
         assert!(messages[1].contains("larger `builder_disk_mb`"));
         assert!(messages[1].contains("--builder_disk_mb"));
+
+        let messages = BuilderFailureDiagnostics {
+            oom_killed: false,
+            disk_usage_percent: Some(10),
+            disk_error_output: true,
+        }
+        .advice_messages();
+        assert_eq!(messages.len(), 1);
+        assert!(messages[0].contains("larger `builder_disk_mb`"));
     }
 
     #[test]
@@ -2542,6 +2577,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             messages: BuilderFailureDiagnostics {
                 oom_killed: true,
                 disk_usage_percent: Some(99),
+                disk_error_output: false,
             }
             .advice_messages()
             .join("\n"),
