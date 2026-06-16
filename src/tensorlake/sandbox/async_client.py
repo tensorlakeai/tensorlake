@@ -23,6 +23,7 @@ from . import _defaults
 from .client import (
     _RUST_SANDBOX_CLIENT_AVAILABLE,
     RustCloudSandboxClient,
+    _build_gpu_resources,
     _normalize_user_ports,
     _parse_rust_client_error_fields,
     _raise_as_sandbox_error,
@@ -207,6 +208,8 @@ class AsyncSandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -227,7 +230,10 @@ class AsyncSandboxClient:
         request_model = CreateSandboxRequest(
             image=image,
             resources=CreateSandboxResources(
-                cpus=cpus, memory_mb=memory_mb, disk_mb=disk_mb
+                cpus=cpus,
+                memory_mb=memory_mb,
+                disk_mb=disk_mb,
+                gpus=_build_gpu_resources(gpus, gpu_model),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -727,6 +733,8 @@ class AsyncSandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -762,6 +770,8 @@ class AsyncSandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
+                gpus=gpus,
+                gpu_model=gpu_model,
                 timeout_secs=timeout_secs,
                 entrypoint=entrypoint,
                 allow_internet_access=allow_internet_access,

@@ -347,6 +347,20 @@ enum ApplicationsCommands {
     Ls,
 }
 
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum GpuModelArg {
+    #[value(name = "A10")]
+    A10,
+}
+
+impl GpuModelArg {
+    fn as_wire_value(self) -> &'static str {
+        match self {
+            Self::A10 => "A10",
+        }
+    }
+}
+
 #[derive(Subcommand)]
 enum SbxCommands {
     /// List all sandboxes
@@ -409,6 +423,14 @@ enum SbxCommands {
         /// Root disk size in MB (default: 10240 for new sandboxes)
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
+
+        /// Number of GPUs to request
+        #[arg(long = "gpus", hide = true, value_parser = clap::value_parser!(u32).range(1..))]
+        gpus: Option<u32>,
+
+        /// GPU model to request
+        #[arg(long = "gpu-model", value_enum, hide = true, requires = "gpus")]
+        gpu_model: Option<GpuModelArg>,
 
         /// Deprecated: root disk size in GB
         #[arg(long = "disk", hide = true, conflicts_with = "disk_mb")]
@@ -1132,6 +1154,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         cpus,
                         memory,
                         disk_mb,
+                        gpus,
+                        gpu_model,
                         disk_gb,
                         timeout,
                         entrypoint,
@@ -1163,6 +1187,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 cpus,
                                 memory,
                                 disk_mb,
+                                gpu_count: gpus,
+                                gpu_model: gpu_model.map(GpuModelArg::as_wire_value),
                                 timeout,
                                 entrypoint: &entrypoint,
                                 snapshot_id: snapshot.as_deref(),
@@ -1877,6 +1903,63 @@ mod tests {
             }
             _ => panic!("expected sbx create command"),
         }
+    }
+
+    #[test]
+    fn sbx_create_parses_gpu_request_with_default_model() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "create",
+            "--gpus",
+            "1",
+            "--image",
+            "tensorlake/ubuntu-minimal",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Commands::Sbx(SbxCommands::Create {
+                gpus, gpu_model, ..
+            })) => {
+                assert_eq!(gpus, Some(1));
+                assert!(gpu_model.is_none());
+            }
+            _ => panic!("expected sbx create command"),
+        }
+    }
+
+    #[test]
+    fn sbx_create_parses_gpu_request_with_explicit_model() {
+        let cli = Cli::try_parse_from([
+            "tl",
+            "sbx",
+            "create",
+            "--gpus",
+            "1",
+            "--gpu-model",
+            "A10",
+            "--image",
+            "tensorlake/ubuntu-minimal",
+        ])
+        .unwrap();
+
+        match cli.command {
+            Some(Commands::Sbx(SbxCommands::Create {
+                gpus, gpu_model, ..
+            })) => {
+                assert_eq!(gpus, Some(1));
+                assert_eq!(gpu_model.map(GpuModelArg::as_wire_value), Some("A10"));
+            }
+            _ => panic!("expected sbx create command"),
+        }
+    }
+
+    #[test]
+    fn sbx_create_rejects_gpu_model_without_gpu_count() {
+        let result = Cli::try_parse_from(["tl", "sbx", "create", "--gpu-model", "A10"]);
+
+        assert!(result.is_err());
     }
 
     #[test]

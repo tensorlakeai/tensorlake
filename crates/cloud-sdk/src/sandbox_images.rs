@@ -428,6 +428,7 @@ where
         cpus: options.cpus.unwrap_or(prepared.builder.cpus),
         memory_mb: options.memory_mb.unwrap_or(prepared.builder.memory_mb),
         disk_mb: Some(builder_disk_mb),
+        gpu_configs: None,
     };
 
     emit(SandboxImageBuildEvent::Status(format!(

@@ -94,6 +94,7 @@ export type {
   CopiedSandboxResponse,
   CopySandboxResponse,
   CreateSandboxOptions,
+  GPUResources,
   CreateSandboxResponse,
   SandboxInfo,
   SandboxPortAccess,

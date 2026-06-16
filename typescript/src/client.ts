@@ -67,6 +67,21 @@ function cloudInitIncludeData(source: string): Buffer | undefined {
   return undefined;
 }
 
+function gpuRequest(
+  gpus: number | undefined,
+  gpuModel: string | undefined,
+): Array<{ count: number; model: string }> | undefined {
+  if (gpus == null) return undefined;
+  if (!Number.isInteger(gpus) || gpus < 1) {
+    throw new SandboxError("gpus must be a positive integer");
+  }
+  gpuModel = gpuModel ?? "A10";
+  if (gpuModel !== "A10") {
+    throw new SandboxError("only A10 GPU sandboxes are supported for now");
+  }
+  return [{ count: gpus, model: gpuModel }];
+}
+
 async function readCloudInitBase64(
   cloudInit: string | URL | undefined,
 ): Promise<string | undefined> {
@@ -222,11 +237,13 @@ export class SandboxClient {
   /** Create a new sandbox. Returns immediately; the sandbox may still be starting. Use `createAndConnect()` for a blocking, ready-to-use handle. */
   async create(options?: CreateSandboxOptions): Promise<Traced<CreateSandboxResponse>> {
     const cloudInitBase64 = await readCloudInitBase64(options?.cloudInit);
+    const gpuResources = gpuRequest(options?.gpus, options?.gpuModel);
     const body: Record<string, unknown> = {
       resources: {
         cpus: options?.cpus ?? 1.0,
         memory_mb: options?.memoryMb ?? 1024,
         ...(options?.diskMb != null ? { disk_mb: options.diskMb } : {}),
+        ...(gpuResources != null ? { gpus: gpuResources } : {}),
       },
     };
 

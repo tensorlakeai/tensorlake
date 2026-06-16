@@ -210,6 +210,8 @@ class Sandbox:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -240,6 +242,9 @@ class Sandbox:
             memory_mb: Memory in megabytes.
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
+            gpus: Number of GPUs to allocate. When provided, defaults to
+                ``A10`` unless ``gpu_model`` is set.
+            gpu_model: GPU model to allocate. Only ``A10`` is supported.
             timeout_secs: Sandbox timeout in seconds.
             entrypoint: Custom entrypoint command.
             allow_internet_access: If True (default), outbound traffic is allowed.
@@ -290,6 +295,8 @@ class Sandbox:
             cpus=cpus,
             memory_mb=memory_mb,
             disk_mb=disk_mb,
+            gpus=gpus,
+            gpu_model=gpu_model,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             allow_internet_access=allow_internet_access,

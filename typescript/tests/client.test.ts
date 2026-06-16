@@ -74,6 +74,60 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("creates a sandbox with GPU resources", async () => {
+      installNativeStub({
+        client: {
+          createSandbox: vi.fn(async (json: string) => {
+            const body = JSON.parse(json);
+            expect(body.resources.gpus).toEqual([{ count: 1, model: "A10" }]);
+            return {
+              traceId: "t",
+              json: JSON.stringify({ sandbox_id: "sbx-gpu", status: "pending" }),
+            };
+          }),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const result = await client.create({ gpus: 1 });
+      expect(result.sandboxId).toBe("sbx-gpu");
+      client.close();
+    });
+
+    it("does not send GPU resources when only the model is provided", async () => {
+      installNativeStub({
+        client: {
+          createSandbox: vi.fn(async (json: string) => {
+            const body = JSON.parse(json);
+            expect(body.resources.gpus).toBeUndefined();
+            return {
+              traceId: "t",
+              json: JSON.stringify({ sandbox_id: "sbx-cpu", status: "pending" }),
+            };
+          }),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const result = await client.create({ gpuModel: "A10" });
+      expect(result.sandboxId).toBe("sbx-cpu");
+      client.close();
+    });
+
+    it("rejects non-A10 GPU resources", async () => {
+      installNativeStub({
+        client: {
+          createSandbox: vi.fn(),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.create({ gpus: 1, gpuModel: "H100" })).rejects.toThrow(
+        "only A10",
+      );
+      client.close();
+    });
+
     it("creates a sandbox with custom options", async () => {
       installNativeStub({
         client: {
