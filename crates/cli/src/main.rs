@@ -452,10 +452,6 @@ enum SbxCommands {
         #[arg(short, long, conflicts_with = "snapshot")]
         image: Option<String>,
 
-        /// Local cloud-init file path or HTTP(S) URL for the sandbox
-        #[arg(long = "cloud-init", value_name = "PATH_OR_URL")]
-        cloud_init: Option<String>,
-
         /// Return immediately after creation instead of waiting for the sandbox to be running
         #[arg(short, long)]
         no_wait: bool,
@@ -798,7 +794,7 @@ enum ImageCommands {
         #[arg(short, long)]
         public: bool,
 
-        /// Use Docker/BuildKit export compatibility mode for rootfs materialization
+        /// Use Docker/BuildKit max compatibility mode
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
@@ -839,7 +835,7 @@ enum ImageCommands {
         #[arg(short, long)]
         public: bool,
 
-        /// Use Docker/BuildKit export compatibility mode for rootfs materialization
+        /// Use Docker/BuildKit max compatibility mode
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
@@ -1169,7 +1165,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         entrypoint,
                         snapshot,
                         image,
-                        cloud_init,
                         no_wait,
                         ports,
                         allow_unauthenticated_access,
@@ -1201,7 +1196,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 entrypoint: &entrypoint,
                                 snapshot_id: snapshot.as_deref(),
                                 image_name: image.as_deref(),
-                                cloud_init: cloud_init.as_deref(),
                                 wait: !no_wait,
                                 ports: &ports,
                                 allow_unauthenticated_access,

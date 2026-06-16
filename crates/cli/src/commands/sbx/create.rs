@@ -4,11 +4,9 @@ use crate::commands::sbx::{
     sandbox_proxy_base, wait_for_sandbox_status,
 };
 use crate::error::{CliError, Result};
-use base64::{Engine, engine::general_purpose::STANDARD as BASE64_STANDARD};
 
 const DEFAULT_SANDBOX_CPUS: f64 = 1.0;
 const DEFAULT_SANDBOX_MEMORY_MB: i64 = 1024;
-const MAX_CLOUD_INIT_USER_DATA_BYTES: usize = 16 * 1024;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuRequest<'a> {
@@ -78,7 +76,6 @@ pub struct CreateArgs<'a> {
     pub entrypoint: &'a [String],
     pub snapshot_id: Option<&'a str>,
     pub image_name: Option<&'a str>,
-    pub cloud_init: Option<&'a str>,
     pub wait: bool,
     pub ports: &'a [u16],
     pub allow_unauthenticated_access: bool,
@@ -99,7 +96,6 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         entrypoint,
         snapshot_id,
         image_name,
-        cloud_init,
         wait,
         ports,
         allow_unauthenticated_access,
@@ -108,7 +104,6 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         network_deny,
     } = args;
 
-    let cloud_init_base64 = cloud_init.map(encode_cloud_init_source).transpose()?;
     let gpu = match gpu_count {
         Some(count) => Some(GpuRequest {
             count,
@@ -126,7 +121,6 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         entrypoint,
         snapshot_id,
         image_name,
-        cloud_init_base64.as_deref(),
     );
     if let Some(n) = name {
         body["name"] = serde_json::Value::String(n.to_string());
@@ -247,7 +241,6 @@ fn build_create_request_body(
     entrypoint: &[String],
     snapshot_id: Option<&str>,
     image_name: Option<&str>,
-    cloud_init_base64: Option<&str>,
 ) -> serde_json::Value {
     let mut body = serde_json::json!({});
 
@@ -295,74 +288,16 @@ fn build_create_request_body(
     if !entrypoint.is_empty() {
         body["entrypoint"] = serde_json::json!(entrypoint);
     }
-    if let Some(user_data) = cloud_init_base64 {
-        body["cloud_init_base64"] = serde_json::Value::String(user_data.to_string());
-    }
-
     body
-}
-
-fn cloud_init_include_data(source: &str) -> Result<Option<Vec<u8>>> {
-    if is_windows_absolute_path(source) {
-        return Ok(None);
-    }
-
-    match url::Url::parse(source) {
-        Ok(url) if matches!(url.scheme(), "http" | "https") && url.host_str().is_some() => {
-            Ok(Some(format!("#include\n{source}\n").into_bytes()))
-        }
-        Ok(_) => Err(CliError::usage(
-            "cloud-init URL must be an absolute HTTP(S) URL with a host",
-        )),
-        Err(_) if source.contains("://") => Err(CliError::usage(
-            "cloud-init URL must be an absolute HTTP(S) URL with a host",
-        )),
-        Err(_) => Ok(None),
-    }
-}
-
-fn is_windows_absolute_path(source: &str) -> bool {
-    let bytes = source.as_bytes();
-    bytes.len() >= 3
-        && bytes[0].is_ascii_alphabetic()
-        && bytes[1] == b':'
-        && matches!(bytes[2], b'\\' | b'/')
-}
-
-fn encode_cloud_init_source(source: &str) -> Result<String> {
-    let data = if let Some(data) = cloud_init_include_data(source)? {
-        data
-    } else {
-        std::fs::read(source).map_err(|error| {
-            CliError::Other(anyhow::anyhow!(
-                "failed to read cloud-init file {}: {}",
-                source,
-                error
-            ))
-        })?
-    };
-
-    if data.is_empty() {
-        return Err(CliError::usage("cloud-init user data must not be empty"));
-    }
-    if data.len() > MAX_CLOUD_INIT_USER_DATA_BYTES {
-        return Err(CliError::usage(format!(
-            "cloud-init user data exceeds {} byte limit",
-            MAX_CLOUD_INIT_USER_DATA_BYTES
-        )));
-    }
-    Ok(BASE64_STANDARD.encode(data))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        GpuRequest, build_create_request_body, encode_cloud_init_source, format_ready_message,
-    };
+    use super::{GpuRequest, build_create_request_body, format_ready_message};
 
     #[test]
     fn create_body_uses_defaults_without_snapshot() {
-        let body = build_create_request_body(None, None, None, None, None, &[], None, None, None);
+        let body = build_create_request_body(None, None, None, None, None, &[], None, None);
 
         assert_eq!(body["resources"]["cpus"], 1.0);
         assert_eq!(body["resources"]["memory_mb"], 1024);
@@ -372,17 +307,8 @@ mod tests {
 
     #[test]
     fn create_body_omits_resources_for_snapshot_without_overrides() {
-        let body = build_create_request_body(
-            None,
-            None,
-            None,
-            None,
-            None,
-            &[],
-            Some("snap-1"),
-            None,
-            None,
-        );
+        let body =
+            build_create_request_body(None, None, None, None, None, &[], Some("snap-1"), None);
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert!(body.get("resources").is_none());
@@ -390,17 +316,8 @@ mod tests {
 
     #[test]
     fn create_body_includes_only_explicit_snapshot_overrides() {
-        let body = build_create_request_body(
-            Some(2.5),
-            None,
-            None,
-            None,
-            None,
-            &[],
-            Some("snap-1"),
-            None,
-            None,
-        );
+        let body =
+            build_create_request_body(Some(2.5), None, None, None, None, &[], Some("snap-1"), None);
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert_eq!(body["resources"]["cpus"], 2.5);
@@ -409,17 +326,8 @@ mod tests {
 
     #[test]
     fn create_body_includes_disk_override_without_snapshot() {
-        let body = build_create_request_body(
-            None,
-            None,
-            Some(25 * 1024),
-            None,
-            None,
-            &[],
-            None,
-            None,
-            None,
-        );
+        let body =
+            build_create_request_body(None, None, Some(25 * 1024), None, None, &[], None, None);
 
         assert_eq!(body["resources"]["cpus"], 1.0);
         assert_eq!(body["resources"]["memory_mb"], 1024);
@@ -436,7 +344,6 @@ mod tests {
             None,
             &[],
             Some("snap-1"),
-            None,
             None,
         );
 
@@ -457,7 +364,6 @@ mod tests {
             &[],
             None,
             Some("tensorlake/ubuntu-minimal"),
-            None,
         );
 
         assert_eq!(body["image"], "tensorlake/ubuntu-minimal");
@@ -479,7 +385,6 @@ mod tests {
             &[],
             None,
             Some("tensorlake/ubuntu-minimal"),
-            None,
         );
 
         assert_eq!(body["resources"]["gpus"][0]["count"], 1);
@@ -500,64 +405,12 @@ mod tests {
             &[],
             Some("snap-1"),
             None,
-            None,
         );
 
         assert_eq!(body["snapshot_id"], "snap-1");
         assert_eq!(body["resources"]["gpus"][0]["count"], 1);
         assert_eq!(body["resources"]["gpus"][0]["model"], "A10");
         assert!(body["resources"].get("cpus").is_none());
-    }
-
-    #[test]
-    fn create_body_includes_cloud_init_user_data_base64() {
-        let body = build_create_request_body(
-            None,
-            None,
-            None,
-            None,
-            None,
-            &[],
-            None,
-            Some("tensorlake/cloud-init"),
-            Some("I2Nsb3VkLWNvbmZpZwo="),
-        );
-
-        assert_eq!(body["cloud_init_base64"], "I2Nsb3VkLWNvbmZpZwo=");
-    }
-
-    #[test]
-    fn create_body_allows_snapshot_with_cloud_init_user_data_base64() {
-        let body = build_create_request_body(
-            None,
-            None,
-            None,
-            None,
-            None,
-            &[],
-            Some("snap-fs"),
-            None,
-            Some("I2Nsb3VkLWNvbmZpZwo="),
-        );
-
-        assert_eq!(body["snapshot_id"], "snap-fs");
-        assert_eq!(body["cloud_init_base64"], "I2Nsb3VkLWNvbmZpZwo=");
-    }
-
-    #[test]
-    fn cloud_init_rejects_invalid_url() {
-        let err = encode_cloud_init_source("ftp://example.com/cloud-init.yaml")
-            .expect_err("unsupported URL scheme should fail");
-
-        assert!(err.to_string().contains("HTTP(S) URL"));
-    }
-
-    #[test]
-    fn cloud_init_treats_windows_absolute_paths_as_files() {
-        let err = encode_cloud_init_source(r"C:\cloud-init.yaml")
-            .expect_err("missing Windows path should be treated as a file path");
-
-        assert!(err.to_string().contains("failed to read cloud-init file"));
     }
 
     #[test]

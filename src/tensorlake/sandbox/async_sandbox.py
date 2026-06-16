@@ -159,7 +159,6 @@ class AsyncSandbox:
         request_timeout: float | None = None,
         startup_timeout: float | None = None,
         name: str | None = None,
-        cloud_init: str | os.PathLike[str] | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
         organization_id: str | None = None,
@@ -203,7 +202,6 @@ class AsyncSandbox:
             proxy_url=proxy_url,
             request_timeout=effective_request_timeout,
             name=name,
-            cloud_init=cloud_init,
         )
 
     @classmethod

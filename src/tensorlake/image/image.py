@@ -120,8 +120,7 @@ class Image:
             disk_mb: Root disk size for the generated sandbox image in MB.
             builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
             is_public: Make the registered image publicly accessible.
-            docker_compat: Use Docker/BuildKit export compatibility mode for
-                rootfs materialization.
+            docker_compat: Use Docker/BuildKit max compatibility mode.
             context_dir: Directory used to resolve relative COPY/ADD paths.
                 Defaults to the current working directory.
             verbose: If True, print build progress to stderr.

@@ -460,7 +460,6 @@ where
             network: None,
             snapshot_id: None,
             name: None,
-            cloud_init_base64: None,
         })
         .await?;
     let sandbox_id = created.sandbox_id.clone();

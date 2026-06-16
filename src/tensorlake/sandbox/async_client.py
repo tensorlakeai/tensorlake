@@ -27,7 +27,6 @@ from .client import (
     _normalize_user_ports,
     _parse_rust_client_error_fields,
     _raise_as_sandbox_error,
-    _read_cloud_init_config,
     _resolve_sandbox_identifier,
     _rust_status_code,
     _startup_failure_message,
@@ -217,7 +216,6 @@ class AsyncSandboxClient:
         deny_out: list[str] | None = None,
         snapshot_id: str | None = None,
         name: str | None = None,
-        cloud_init: str | os.PathLike[str] | None = None,
     ) -> Traced[CreateSandboxResponse]:
         network = None
         if not allow_internet_access or allow_out is not None or deny_out is not None:
@@ -226,7 +224,6 @@ class AsyncSandboxClient:
                 allow_out=allow_out or [],
                 deny_out=deny_out or [],
             )
-        cloud_init_base64 = _read_cloud_init_config(cloud_init=cloud_init)
         request_model = CreateSandboxRequest(
             image=image,
             resources=CreateSandboxResources(
@@ -240,7 +237,6 @@ class AsyncSandboxClient:
             network=network,
             snapshot_id=snapshot_id,
             name=name,
-            cloud_init_base64=cloud_init_base64,
         )
         try:
             trace_id, response_json = await self._rust_client.create_sandbox_async(
@@ -746,7 +742,6 @@ class AsyncSandboxClient:
         request_timeout: float | None = None,
         startup_timeout: float | None = None,
         name: str | None = None,
-        cloud_init: str | os.PathLike[str] | None = None,
     ) -> "AsyncSandbox":
         wait_timeout = (
             request_timeout
@@ -760,8 +755,6 @@ class AsyncSandboxClient:
         request_client = self._with_request_timeout(wait_timeout)
 
         requested_name = None if pool_id is not None else name
-        if pool_id is not None and cloud_init is not None:
-            raise SandboxError("cloud-init cannot be used with `pool_id`.")
         if pool_id is not None:
             result = await request_client.claim(pool_id)
         else:
@@ -779,7 +772,6 @@ class AsyncSandboxClient:
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
                 name=name,
-                cloud_init=cloud_init,
             )
 
         if result.status == SandboxStatus.RUNNING:
