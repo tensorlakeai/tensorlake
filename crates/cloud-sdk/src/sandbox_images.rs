@@ -20,8 +20,8 @@ use crate::{
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
         models::{
-            CreateSandboxRequest, CreateSandboxResources, MultipartHint, ProcessInfo, SandboxInfo,
-            SignBlobOp, SignBlobRequest, SignBlobTarget,
+            CreateSandboxRequest, CreateSandboxResources, MultipartHint, ProcessInfo,
+            RunProcessEvent, SandboxInfo, SignBlobOp, SignBlobRequest, SignBlobTarget,
         },
     },
 };
@@ -57,6 +57,8 @@ const ROOTFS_BUILDER_BIN_DIR: &str = "/usr/local/bin";
 const ROOTFS_BUILDER_PATH: &str = "/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin";
 const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
 const ROOTFS_BUILDER_PROCESS_USER: &str = "root";
+const DIAGNOSTIC_COMMAND_TIMEOUT_SECS: i64 = 5;
+const BUILDER_DISK_USAGE_DIAGNOSTIC_THRESHOLD_PERCENT: u8 = 95;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProcessTerminalStatus {
@@ -98,6 +100,12 @@ pub enum SandboxImageBuildError {
         build_id: String,
         #[source]
         source: Box<SandboxImageBuildError>,
+    },
+    #[error("{source}\n{messages}")]
+    WithDiagnostics {
+        #[source]
+        source: Box<SandboxImageBuildError>,
+        messages: String,
     },
     #[error("{0}")]
     Usage(String),
@@ -475,116 +483,128 @@ where
         )?;
         wait_for_proxy_ready(&proxy).await?;
 
-        // Versioned-response bridge: on the new path, platform-api returns
-        // `snapshotRelPath` instead of a pre-signed `upload` block, and we
-        // ask the sandbox proxy to mint the upload spec. Splice the result
-        // into the raw prepared spec so `upload_build_inputs` /
-        // `build_rootfs_spec` see an `upload` key regardless of which path
-        // produced it — preserving the platform-api ↔ in-sandbox-builder
-        // passthrough property.
-        //
-        // The CLI doesn't know the final snapshot file size until the
-        // in-sandbox builder finishes and writes metadata.json, so the
-        // provider-neutral upload request includes a capacity hint derived
-        // from the rootfs disk budget (`rootfsDiskBytes`). Clamp to
-        // [1, MULTIPART_MAX_PARTS] so a 0 MB hint still produces a valid
-        // request and absurd inputs don't blow past S3's 10,000-part ceiling.
-        //
-        // Legacy path: `snapshot_rel_path` is absent, the upload block is
-        // already in `prepared_spec`, and we do nothing here.
-        let signed_snapshot_uri = if let Some(rel_path) = prepared.snapshot_rel_path.clone() {
-            let disk_mb = rootfs_disk_bytes_to_mb(rootfs_disk_bytes)?;
-            let parts: u32 = disk_mb
-                .div_ceil(MULTIPART_PART_SIZE_MB)
-                .clamp(1, MULTIPART_MAX_PARTS as u64) as u32;
-            let signed = proxy
-                .sign_blob(&SignBlobRequest {
-                    target: SignBlobTarget::Artifact { rel_path },
-                    op: SignBlobOp::PutArtifact {
-                        multipart_hint: Some(MultipartHint {
-                            max_parts: parts,
-                            part_size_bytes: MULTIPART_PART_SIZE_BYTES,
-                        }),
-                    },
-                })
-                .await
-                .map_err(SandboxImageBuildError::Sdk)?
-                .into_inner();
-            let snapshot_uri = splice_signed_upload(&mut prepared_spec, signed)?;
-
-            if let Some(parent) = prepared.parent.as_ref() {
+        let post_proxy_result: Result<Value> = async {
+            // Versioned-response bridge: on the new path, platform-api returns
+            // `snapshotRelPath` instead of a pre-signed `upload` block, and we
+            // ask the sandbox proxy to mint the upload spec. Splice the result
+            // into the raw prepared spec so `upload_build_inputs` /
+            // `build_rootfs_spec` see an `upload` key regardless of which path
+            // produced it — preserving the platform-api ↔ in-sandbox-builder
+            // passthrough property.
+            //
+            // The CLI doesn't know the final snapshot file size until the
+            // in-sandbox builder finishes and writes metadata.json, so the
+            // provider-neutral upload request includes a capacity hint derived
+            // from the rootfs disk budget (`rootfsDiskBytes`). Clamp to
+            // [1, MULTIPART_MAX_PARTS] so a 0 MB hint still produces a valid
+            // request and absurd inputs don't blow past S3's 10,000-part ceiling.
+            //
+            // Legacy path: `snapshot_rel_path` is absent, the upload block is
+            // already in `prepared_spec`, and we do nothing here.
+            let signed_snapshot_uri = if let Some(rel_path) = prepared.snapshot_rel_path.clone() {
+                let disk_mb = rootfs_disk_bytes_to_mb(rootfs_disk_bytes)?;
+                let parts: u32 = disk_mb
+                    .div_ceil(MULTIPART_PART_SIZE_MB)
+                    .clamp(1, MULTIPART_MAX_PARTS as u64) as u32;
                 let signed = proxy
                     .sign_blob(&SignBlobRequest {
-                        target: SignBlobTarget::Blob {
-                            uri: parent.parent_manifest_uri.clone(),
+                        target: SignBlobTarget::Artifact { rel_path },
+                        op: SignBlobOp::PutArtifact {
+                            multipart_hint: Some(MultipartHint {
+                                max_parts: parts,
+                                part_size_bytes: MULTIPART_PART_SIZE_BYTES,
+                            }),
                         },
-                        op: SignBlobOp::GetBlob,
                     })
                     .await
                     .map_err(SandboxImageBuildError::Sdk)?
                     .into_inner();
-                prepared_spec
-                    .as_object_mut()
-                    .ok_or_else(|| {
-                        SandboxImageBuildError::other("prepared spec is not a JSON object")
-                    })?
-                    .get_mut("parent")
-                    .and_then(Value::as_object_mut)
-                    .ok_or_else(|| {
-                        SandboxImageBuildError::other("prepared parent is not a JSON object")
-                    })?
-                    .insert("download".to_string(), signed);
-            }
+                let snapshot_uri = splice_signed_upload(&mut prepared_spec, signed)?;
 
-            Some(snapshot_uri)
-        } else {
-            None
-        };
+                if let Some(parent) = prepared.parent.as_ref() {
+                    let signed = proxy
+                        .sign_blob(&SignBlobRequest {
+                            target: SignBlobTarget::Blob {
+                                uri: parent.parent_manifest_uri.clone(),
+                            },
+                            op: SignBlobOp::GetBlob,
+                        })
+                        .await
+                        .map_err(SandboxImageBuildError::Sdk)?
+                        .into_inner();
+                    prepared_spec
+                        .as_object_mut()
+                        .ok_or_else(|| {
+                            SandboxImageBuildError::other("prepared spec is not a JSON object")
+                        })?
+                        .get_mut("parent")
+                        .and_then(Value::as_object_mut)
+                        .ok_or_else(|| {
+                            SandboxImageBuildError::other("prepared parent is not a JSON object")
+                        })?
+                        .insert("download".to_string(), signed);
+                }
 
-        upload_build_inputs(
-            &proxy,
-            &plan,
-            &prepared,
-            &prepared_spec,
-            options.disk_mb,
-            &mut emit,
-        )
-        .await?;
+                Some(snapshot_uri)
+            } else {
+                None
+            };
 
-        emit(SandboxImageBuildEvent::Status(
-            "Running offline rootfs builder...".to_string(),
-        ));
-        // The rootfs builder runs entirely inside the sandbox and can stay
-        // silent for minutes at a time (e.g. a single large `RUN dd ...` step
-        // in the user's Dockerfile produces no client traffic). Keep the
-        // sandbox visibly alive while that step is in flight so the Platform
-        // doesn't suspend it out from under us. Aborted as soon as the
-        // builder returns, regardless of outcome.
-        let keepalive_task = spawn_builder_keepalive(proxy.clone());
-        let builder_result = run_rootfs_builder(&proxy, &prepared.builder.command, &mut emit).await;
-        keepalive_task.abort();
-        builder_result?;
+            upload_build_inputs(
+                &proxy,
+                &plan,
+                &prepared,
+                &prepared_spec,
+                options.disk_mb,
+                &mut emit,
+            )
+            .await?;
 
-        let metadata = read_build_metadata(&proxy).await?;
-        let complete_request =
-            complete_request_from_metadata(&prepared, &metadata, signed_snapshot_uri.as_deref())?;
+            emit(SandboxImageBuildEvent::Status(
+                "Running offline rootfs builder...".to_string(),
+            ));
+            // The rootfs builder runs entirely inside the sandbox and can stay
+            // silent for minutes at a time (e.g. a single large `RUN dd ...` step
+            // in the user's Dockerfile produces no client traffic). Keep the
+            // sandbox visibly alive while that step is in flight so the Platform
+            // doesn't suspend it out from under us. Aborted as soon as the
+            // builder returns, regardless of outcome.
+            let keepalive_task = spawn_builder_keepalive(proxy.clone());
+            let builder_result =
+                run_rootfs_builder(&proxy, &prepared.builder.command, &mut emit).await;
+            keepalive_task.abort();
+            builder_result?;
 
-        emit(SandboxImageBuildEvent::Status(
-            "Completing image registration...".to_string(),
-        ));
-        let registered = complete_rootfs_build(
-            &ctx,
-            &platform_client,
-            &prepared.build_id,
-            &complete_request,
-        )
-        .await?;
-        let template_id = registered.get("id").and_then(Value::as_str).unwrap_or("-");
-        emit(SandboxImageBuildEvent::Status(format!(
-            "Image '{}' registered ({})",
-            plan.registered_name, template_id
-        )));
-        Ok(registered)
+            let metadata = read_build_metadata(&proxy).await?;
+            let complete_request = complete_request_from_metadata(
+                &prepared,
+                &metadata,
+                signed_snapshot_uri.as_deref(),
+            )?;
+
+            emit(SandboxImageBuildEvent::Status(
+                "Completing image registration...".to_string(),
+            ));
+            let registered = complete_rootfs_build(
+                &ctx,
+                &platform_client,
+                &prepared.build_id,
+                &complete_request,
+            )
+            .await?;
+            let template_id = registered.get("id").and_then(Value::as_str).unwrap_or("-");
+            emit(SandboxImageBuildEvent::Status(format!(
+                "Image '{}' registered ({})",
+                plan.registered_name, template_id
+            )));
+            Ok(registered)
+        }
+        .await;
+
+        match post_proxy_result {
+            Ok(registered) => Ok(registered),
+            Err(source) => Err(decorate_builder_failure(&proxy, source).await),
+        }
     }
     .await;
 
@@ -1272,6 +1292,113 @@ fn rootfs_builder_env() -> Map<String, Value> {
         Value::String(ROOTFS_BUILDER_PATH.to_string()),
     );
     env
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct BuilderFailureDiagnostics {
+    oom_killed: bool,
+    disk_usage_percent: Option<u8>,
+}
+
+impl BuilderFailureDiagnostics {
+    fn advice_messages(&self) -> Vec<&'static str> {
+        let mut messages = Vec::new();
+        if self.oom_killed {
+            messages.push(
+                "The builder sandbox ran out of memory. Retry with a larger `memory_mb` / `memoryMb` / `--memory` value.",
+            );
+        }
+        if self
+            .disk_usage_percent
+            .is_some_and(|usage| usage >= BUILDER_DISK_USAGE_DIAGNOSTIC_THRESHOLD_PERCENT)
+        {
+            messages.push(
+                "The builder sandbox ran out of disk space. Retry with a larger `builder_disk_mb` / `builderDiskMb` / `--builder_disk_mb` value.",
+            );
+        }
+        messages
+    }
+}
+
+async fn decorate_builder_failure(
+    proxy: &SandboxProxyClient,
+    source: SandboxImageBuildError,
+) -> SandboxImageBuildError {
+    let diagnostics = diagnose_builder_failure(proxy).await;
+    let messages = diagnostics.advice_messages();
+    if messages.is_empty() {
+        return source;
+    }
+
+    SandboxImageBuildError::WithDiagnostics {
+        source: Box::new(source),
+        messages: messages.join("\n"),
+    }
+}
+
+async fn diagnose_builder_failure(proxy: &SandboxProxyClient) -> BuilderFailureDiagnostics {
+    let dmesg_output = run_diagnostic_command_stdout(proxy, "dmesg 2>/dev/null || true").await;
+    let disk_output = run_diagnostic_command_stdout(
+        proxy,
+        &format!(
+            "for path in '{}' /var/lib/docker /; do if [ -e \"$path\" ]; then df -P \"$path\"; fi; done 2>/dev/null || true",
+            REMOTE_BUILD_DIR
+        ),
+    )
+    .await;
+
+    BuilderFailureDiagnostics {
+        oom_killed: dmesg_output
+            .as_deref()
+            .is_some_and(contains_oom_killer_evidence),
+        disk_usage_percent: disk_output.as_deref().and_then(parse_df_max_usage_percent),
+    }
+}
+
+async fn run_diagnostic_command_stdout(proxy: &SandboxProxyClient, script: &str) -> Option<String> {
+    let mut payload = streaming_process_payload(
+        "/bin/sh",
+        vec!["-lc".to_string(), script.to_string()],
+        None,
+        None,
+        true,
+    );
+    payload.as_object_mut()?.insert(
+        "timeout".to_string(),
+        json!(DIAGNOSTIC_COMMAND_TIMEOUT_SECS),
+    );
+
+    let events = proxy.run_process(&payload).await.ok()?.into_inner();
+    let mut output = String::new();
+    for event in events {
+        if let RunProcessEvent::Output(event) = event
+            && event.stream.as_deref() != Some("stderr")
+        {
+            output.push_str(&event.line);
+            output.push('\n');
+        }
+    }
+    Some(output)
+}
+
+fn contains_oom_killer_evidence(output: &str) -> bool {
+    let output = output.to_ascii_lowercase();
+    output.contains("out of memory")
+        || output.contains("oom-kill")
+        || output.contains("killed process")
+}
+
+fn parse_df_max_usage_percent(output: &str) -> Option<u8> {
+    output.lines().filter_map(parse_df_line_usage_percent).max()
+}
+
+fn parse_df_line_usage_percent(line: &str) -> Option<u8> {
+    let mut fields = line.split_whitespace();
+    let _filesystem = fields.next()?;
+    let _blocks = fields.next()?;
+    let _used = fields.next()?;
+    let _available = fields.next()?;
+    fields.next()?.strip_suffix('%')?.parse().ok()
 }
 
 async fn read_build_metadata(proxy: &SandboxProxyClient) -> Result<Value> {
@@ -2326,16 +2453,104 @@ mod tests {
         assert!(message.contains("rootfs builder exited with status 1"));
     }
     use super::{
-        CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder, PreparedRootfsParent,
-        PreparedSandboxTemplateBuild, build_rootfs_spec, collect_dir_files,
-        complete_request_from_metadata, default_registered_name, load_dockerfile_plan,
+        BuilderFailureDiagnostics, CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder,
+        PreparedRootfsParent, PreparedSandboxTemplateBuild, SandboxImageBuildError,
+        build_rootfs_spec, collect_dir_files, complete_request_from_metadata,
+        contains_oom_killer_evidence, default_registered_name, load_dockerfile_plan,
         load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
-        process_terminal_status, rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes,
-        rootfs_disk_bytes_to_mb, splice_signed_upload, streaming_process_payload,
+        parse_df_line_usage_percent, parse_df_max_usage_percent, process_terminal_status,
+        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
+        splice_signed_upload, streaming_process_payload,
     };
     use crate::sandboxes::models::ProcessInfo;
     use serde_json::{Value, json};
     use std::io::Write;
+
+    #[test]
+    fn oom_dmesg_parser_detects_kernel_oom_entries() {
+        assert!(contains_oom_killer_evidence(
+            "[ 123.4] Out of memory: Killed process 99 (python) total-vm:1234kB"
+        ));
+        assert!(contains_oom_killer_evidence(
+            "memory: oom-kill:constraint=CONSTRAINT_MEMCG,nodemask=(null)"
+        ));
+        assert!(contains_oom_killer_evidence(
+            "Killed process 42 (cc1plus), UID 0, total-vm:1234kB"
+        ));
+    }
+
+    #[test]
+    fn oom_dmesg_parser_ignores_unrelated_entries() {
+        assert!(!contains_oom_killer_evidence(
+            "[ 123.4] eth0: link becomes ready\n[ 124.0] EXT4-fs mounted"
+        ));
+    }
+
+    #[test]
+    fn df_parser_extracts_usage_percent() {
+        assert_eq!(
+            parse_df_line_usage_percent("/dev/vda1 10485760 9961472 524288 95% /"),
+            Some(95)
+        );
+        assert_eq!(
+            parse_df_line_usage_percent(
+                "Filesystem 1024-blocks Used Available Capacity Mounted on"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn df_parser_returns_max_usage_across_multiple_filesystems() {
+        let output = "\
+Filesystem 1024-blocks Used Available Capacity Mounted on
+/dev/vda1 10485760 5242880 5242880 50% /
+Filesystem 1024-blocks Used Available Capacity Mounted on
+/dev/vdb1 10485760 10066329 419431 96% /var/lib/docker
+";
+        assert_eq!(parse_df_max_usage_percent(output), Some(96));
+    }
+
+    #[test]
+    fn diagnostics_advice_uses_thresholds() {
+        assert!(
+            BuilderFailureDiagnostics {
+                oom_killed: false,
+                disk_usage_percent: Some(94),
+            }
+            .advice_messages()
+            .is_empty()
+        );
+
+        let messages = BuilderFailureDiagnostics {
+            oom_killed: true,
+            disk_usage_percent: Some(95),
+        }
+        .advice_messages();
+        assert_eq!(messages.len(), 2);
+        assert!(messages[0].contains("larger `memory_mb`"));
+        assert!(messages[1].contains("larger `builder_disk_mb`"));
+        assert!(messages[1].contains("--builder_disk_mb"));
+    }
+
+    #[test]
+    fn diagnostic_error_wrapper_preserves_source_message() {
+        let error = SandboxImageBuildError::WithDiagnostics {
+            source: Box::new(SandboxImageBuildError::Other(
+                "rootfs builder exited with status 1".to_string(),
+            )),
+            messages: BuilderFailureDiagnostics {
+                oom_killed: true,
+                disk_usage_percent: Some(99),
+            }
+            .advice_messages()
+            .join("\n"),
+        };
+        let message = error.to_string();
+        assert!(message.contains("rootfs builder exited with status 1"));
+        assert!(message.contains("The builder sandbox ran out of memory"));
+        assert!(message.contains("The builder sandbox ran out of disk space"));
+    }
 
     #[test]
     fn default_registered_name_uses_parent_for_dockerfile() {
