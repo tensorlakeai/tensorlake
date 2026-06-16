@@ -483,6 +483,7 @@ where
         )?;
         wait_for_proxy_ready(&proxy).await?;
 
+        let mut builder_failure_diagnostics = BuilderFailureDiagnostics::default();
         let post_proxy_result: Result<Value> = async {
             // Versioned-response bridge: on the new path, platform-api returns
             // `snapshotRelPath` instead of a pre-signed `upload` block, and we
@@ -571,7 +572,11 @@ where
             // builder returns, regardless of outcome.
             let keepalive_task = spawn_builder_keepalive(proxy.clone());
             let builder_result =
-                run_rootfs_builder(&proxy, &prepared.builder.command, &mut emit).await;
+                run_rootfs_builder(&proxy, &prepared.builder.command, &mut |event| {
+                    builder_failure_diagnostics.observe_build_event(&event);
+                    emit(event);
+                })
+                .await;
             keepalive_task.abort();
             builder_result?;
 
@@ -603,7 +608,9 @@ where
 
         match post_proxy_result {
             Ok(registered) => Ok(registered),
-            Err(source) => Err(decorate_builder_failure(&proxy, source).await),
+            Err(source) => {
+                Err(decorate_builder_failure(&proxy, source, &builder_failure_diagnostics).await)
+            }
         }
     }
     .await;
@@ -1302,6 +1309,20 @@ struct BuilderFailureDiagnostics {
 }
 
 impl BuilderFailureDiagnostics {
+    fn observe_build_event(&mut self, event: &SandboxImageBuildEvent) {
+        if let SandboxImageBuildEvent::BuildLog { message, .. } = event
+            && contains_disk_space_evidence(message)
+        {
+            self.disk_error_output = true;
+        }
+    }
+
+    fn merge(&mut self, other: &BuilderFailureDiagnostics) {
+        self.oom_killed |= other.oom_killed;
+        self.disk_error_output |= other.disk_error_output;
+        self.disk_usage_percent = self.disk_usage_percent.max(other.disk_usage_percent);
+    }
+
     fn advice_messages(&self) -> Vec<&'static str> {
         let mut messages = Vec::new();
         if self.oom_killed {
@@ -1325,8 +1346,10 @@ impl BuilderFailureDiagnostics {
 async fn decorate_builder_failure(
     proxy: &SandboxProxyClient,
     source: SandboxImageBuildError,
+    observed: &BuilderFailureDiagnostics,
 ) -> SandboxImageBuildError {
-    let diagnostics = diagnose_builder_failure(proxy, &source.to_string()).await;
+    let mut diagnostics = diagnose_builder_failure(proxy, &source.to_string()).await;
+    diagnostics.merge(observed);
     let messages = diagnostics.advice_messages();
     if messages.is_empty() {
         return source;
@@ -2466,11 +2489,12 @@ mod tests {
     use super::{
         BuilderFailureDiagnostics, CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder,
         PreparedRootfsParent, PreparedSandboxTemplateBuild, SandboxImageBuildError,
-        build_rootfs_spec, collect_dir_files, complete_request_from_metadata,
-        contains_disk_space_evidence, contains_oom_killer_evidence, default_registered_name,
-        load_dockerfile_plan, load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
-        parse_df_line_usage_percent, parse_df_max_usage_percent, process_terminal_status,
-        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
+        SandboxImageBuildEvent, build_rootfs_spec, collect_dir_files,
+        complete_request_from_metadata, contains_disk_space_evidence, contains_oom_killer_evidence,
+        default_registered_name, load_dockerfile_plan, load_dockerfile_text_plan,
+        logical_dockerfile_lines, normalize_posix, parse_df_line_usage_percent,
+        parse_df_max_usage_percent, process_terminal_status, rootfs_builder_env,
+        rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
         splice_signed_upload, streaming_process_payload,
     };
     use crate::sandboxes::models::ProcessInfo;
@@ -2533,6 +2557,23 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         assert!(!contains_disk_space_evidence(
             "rootfs builder exited with status 1"
         ));
+    }
+
+    #[test]
+    fn diagnostics_observe_disk_space_build_log_events() {
+        let mut diagnostics = BuilderFailureDiagnostics::default();
+        diagnostics.observe_build_event(&SandboxImageBuildEvent::BuildLog {
+            stream: "stderr".to_string(),
+            message: "dd: error writing '/tmp/fill': No space left on device".to_string(),
+        });
+
+        assert!(diagnostics.disk_error_output);
+        assert!(
+            diagnostics
+                .advice_messages()
+                .iter()
+                .any(|message| message.contains("larger `builder_disk_mb`"))
+        );
     }
 
     #[test]
