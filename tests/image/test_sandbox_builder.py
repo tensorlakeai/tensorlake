@@ -203,6 +203,129 @@ class TestDeleteSandboxImage(unittest.TestCase):
                 sbm.delete_sandbox_image("image")
 
 
+class TestFindSandboxImageByName(unittest.TestCase):
+    def test_returns_template_dict_with_env_context(self):
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm,
+                "_rust_find_sandbox_image_by_name",
+                # The Rust core proxies the platform API verbatim, which uses
+                # camelCase keys (e.g. snapshotId, rootfsDiskBytes).
+                return_value=(
+                    '{"id":"tpl-1","name":"tensorlake/test:1",'
+                    '"snapshotId":"snap-1","rootfsDiskBytes":1024}'
+                ),
+            ) as rust_find,
+        ):
+            result = sbm.find_sandbox_image_by_name("tensorlake/test:1")
+
+        # The public Python API normalizes keys to snake_case.
+        self.assertEqual(
+            result,
+            {
+                "id": "tpl-1",
+                "name": "tensorlake/test:1",
+                "snapshot_id": "snap-1",
+                "rootfs_disk_bytes": 1024,
+            },
+        )
+        rust_find.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_apiKey_abc",
+            "tensorlake/test:1",
+            "org_1",
+            "proj_1",
+            "default",
+        )
+
+    def test_returns_none_when_not_found(self):
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(sbm, "_rust_find_sandbox_image_by_name", return_value=None),
+        ):
+            self.assertIsNone(sbm.find_sandbox_image_by_name("missing"))
+
+    def test_requires_credentials(self):
+        ctx = _make_ctx(api_key=None, personal_access_token=None)
+
+        with patch.object(sbm, "_build_context_from_env", return_value=ctx):
+            with self.assertRaises(sbm.SandboxImageLookupError):
+                sbm.find_sandbox_image_by_name("image")
+
+    def test_requires_org_and_project_context(self):
+        ctx = _make_ctx(organization_id=None, project_id=None)
+
+        with patch.object(sbm, "_build_context_from_env", return_value=ctx):
+            with self.assertRaises(sbm.SandboxImageLookupError):
+                sbm.find_sandbox_image_by_name("image")
+
+    def test_empty_name_raises_type_error(self):
+        with self.assertRaises(TypeError):
+            sbm.find_sandbox_image_by_name("")
+
+
+class TestListSandboxImages(unittest.TestCase):
+    def test_returns_template_list_with_env_context(self):
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm,
+                "_rust_list_sandbox_images",
+                # The Rust core proxies the platform API verbatim, which uses
+                # camelCase keys (e.g. snapshotId).
+                return_value='[{"id":"tpl-1","name":"image-a","snapshotId":"snap-a"},'
+                '{"id":"tpl-2","name":"image-b","snapshotId":"snap-b"}]',
+            ) as rust_list,
+        ):
+            result = sbm.list_sandbox_images()
+
+        # The public Python API normalizes keys to snake_case.
+        self.assertEqual(
+            result,
+            [
+                {"id": "tpl-1", "name": "image-a", "snapshot_id": "snap-a"},
+                {"id": "tpl-2", "name": "image-b", "snapshot_id": "snap-b"},
+            ],
+        )
+        rust_list.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_apiKey_abc",
+            "org_1",
+            "proj_1",
+            "default",
+        )
+
+    def test_returns_empty_list_when_no_images(self):
+        ctx = _make_ctx()
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(sbm, "_rust_list_sandbox_images", return_value="[]"),
+        ):
+            self.assertEqual(sbm.list_sandbox_images(), [])
+
+    def test_requires_credentials(self):
+        ctx = _make_ctx(api_key=None, personal_access_token=None)
+
+        with patch.object(sbm, "_build_context_from_env", return_value=ctx):
+            with self.assertRaises(sbm.SandboxImageLookupError):
+                sbm.list_sandbox_images()
+
+    def test_requires_org_and_project_context(self):
+        ctx = _make_ctx(organization_id=None, project_id=None)
+
+        with patch.object(sbm, "_build_context_from_env", return_value=ctx):
+            with self.assertRaises(sbm.SandboxImageLookupError):
+                sbm.list_sandbox_images()
+
+
 class TestImportSandboxImage(unittest.TestCase):
     def test_imports_registry_image_with_reference_and_no_dockerfile(self):
         ctx = _make_ctx()

@@ -41,6 +41,66 @@ async fn delete_sandbox_template_sends_encoded_delete_request() {
 }
 
 #[tokio::test]
+async fn list_sandbox_templates_follows_pagination() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let base_path = "/platform/v1/organizations/org-1/projects/proj-1/sandbox-templates";
+
+    let server = tokio::spawn(async move {
+        // Page 1: two templates and a `next` link pointing at page 2.
+        let (mut socket, _) = listener.accept().await.expect("accept page 1");
+        let request_1 = read_http_request(&mut socket).await;
+        let page_1 = serde_json::json!({
+            "items": [
+                { "id": "tpl-1", "name": "image-a", "snapshotId": "snap-a" },
+                { "id": "tpl-2", "name": "image-b", "snapshotId": "snap-b" }
+            ],
+            "pagination": {
+                "next": "/platform/v1/organizations/org-1/projects/proj-1/sandbox-templates?pageSize=100&cursor=abc"
+            }
+        })
+        .to_string();
+        write_json_response(&mut socket, &page_1).await;
+
+        // Page 2: one template and no further pages.
+        let (mut socket, _) = listener.accept().await.expect("accept page 2");
+        let request_2 = read_http_request(&mut socket).await;
+        let page_2 = serde_json::json!({
+            "items": [
+                { "id": "tpl-3", "name": "image-c", "snapshotId": "snap-c" }
+            ],
+            "pagination": { "next": serde_json::Value::Null }
+        })
+        .to_string();
+        write_json_response(&mut socket, &page_2).await;
+
+        (request_1, request_2)
+    });
+
+    let client = ClientBuilder::new(&format!("http://{}", address))
+        .build()
+        .expect("build client");
+    let templates = SandboxTemplatesClient::new(client, "org-1", "proj-1");
+
+    let listed = templates.list().await.expect("list sandbox templates");
+    let names: Vec<String> = listed
+        .iter()
+        .filter_map(|template| template.name.clone())
+        .collect();
+    assert_eq!(names, vec!["image-a", "image-b", "image-c"]);
+
+    let (request_1, request_2) = server.await.expect("server join");
+    let request_1_text = String::from_utf8_lossy(&request_1);
+    let request_2_text = String::from_utf8_lossy(&request_2);
+    assert!(request_1_text.starts_with(&format!("GET {base_path}?pageSize=100 HTTP/1.1\r\n")));
+    assert!(request_2_text.starts_with(&format!(
+        "GET {base_path}?pageSize=100&cursor=abc HTTP/1.1\r\n"
+    )));
+}
+
+#[tokio::test]
 #[cfg_attr(not(feature = "integration-tests"), ignore)]
 async fn test_create_then_delete_sandbox_image() {
     use std::env;
@@ -127,6 +187,18 @@ async fn test_create_then_delete_sandbox_image() {
     if let Err(err) = result {
         panic!("{err}");
     }
+}
+
+async fn write_json_response(socket: &mut tokio::net::TcpStream, body: &str) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .expect("write response");
 }
 
 async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {

@@ -3,6 +3,7 @@ import path from "node:path";
 import { existsSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { CloudClient } from "./cloud-client.js";
+import type { SandboxTemplate } from "./cloud-models.js";
 import { Image, dockerfileContent } from "./image.js";
 
 /**
@@ -466,6 +467,84 @@ export async function deleteSandboxImage(imageName: string): Promise<void> {
   });
   try {
     await client.deleteSandboxImage(imageName);
+  } finally {
+    client.close();
+  }
+}
+
+/**
+ * Look up a registered sandbox image by its registered name.
+ *
+ * Returns the registered sandbox template, or `null` if no image with that
+ * name exists. Uses the same environment-based Tensorlake auth as
+ * `createSandboxImage`, and requires organization/project context
+ * (`TENSORLAKE_ORGANIZATION_ID` and `TENSORLAKE_PROJECT_ID`) since the lookup
+ * is routed through the platform sandbox-templates API.
+ */
+export async function findSandboxImageByName(
+  imageName: string,
+): Promise<SandboxTemplate | null> {
+  if (typeof imageName !== "string" || imageName.length === 0) {
+    throw new TypeError("imageName must be a non-empty string");
+  }
+
+  const context = buildContextFromEnv();
+  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  if (!bearerToken) {
+    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
+  }
+  if (!context.organizationId || !context.projectId) {
+    throw new Error(
+      "Looking up a sandbox image by name requires organization and project " +
+        "context (TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID).",
+    );
+  }
+
+  const client = new CloudClient({
+    apiUrl: context.apiUrl,
+    apiKey: bearerToken,
+    organizationId: context.organizationId,
+    projectId: context.projectId,
+    namespace: context.namespace,
+  });
+  try {
+    return await client.findSandboxImageByName(imageName);
+  } finally {
+    client.close();
+  }
+}
+
+/**
+ * List all registered sandbox images for the current project.
+ *
+ * Returns the registered sandbox templates (each with `id`, `name`,
+ * `snapshotId`, `public`, etc.). Uses the same environment-based Tensorlake
+ * auth as `createSandboxImage`, and requires organization/project context
+ * (`TENSORLAKE_ORGANIZATION_ID` and `TENSORLAKE_PROJECT_ID`) since the listing
+ * is routed through the platform sandbox-templates API.
+ */
+export async function listSandboxImages(): Promise<SandboxTemplate[]> {
+  const context = buildContextFromEnv();
+  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  if (!bearerToken) {
+    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
+  }
+  if (!context.organizationId || !context.projectId) {
+    throw new Error(
+      "Listing sandbox images requires organization and project context " +
+        "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID).",
+    );
+  }
+
+  const client = new CloudClient({
+    apiUrl: context.apiUrl,
+    apiKey: bearerToken,
+    organizationId: context.organizationId,
+    projectId: context.projectId,
+    namespace: context.namespace,
+  });
+  try {
+    return await client.listSandboxImages();
   } finally {
     client.close();
   }

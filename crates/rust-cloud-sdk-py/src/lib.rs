@@ -28,6 +28,7 @@ use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, CreateSandboxRequest, ListArchivedSandboxesParams,
     SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
 };
+use tensorlake::sandbox_templates::SandboxTemplatesClient;
 use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
 };
@@ -149,6 +150,56 @@ impl CloudApiClient {
                 let request = client.request(Method::DELETE, &path).build()?;
                 let _response = client.execute(request).await?;
                 Ok(())
+            }
+        })
+    }
+
+    /// Look up a registered sandbox image (template) by name.
+    ///
+    /// Returns the template JSON, or `None` when no image with that name
+    /// exists. Routed through the platform sandbox-templates API, which
+    /// requires the organization/project scope passed here.
+    fn find_sandbox_image_by_name(
+        &self,
+        organization_id: String,
+        project_id: String,
+        image_name: String,
+    ) -> PyResult<Option<String>> {
+        self.run_with_retry(5, move |client| {
+            let organization_id = organization_id.clone();
+            let project_id = project_id.clone();
+            let image_name = image_name.clone();
+            async move {
+                let templates =
+                    SandboxTemplatesClient::new(client, organization_id, project_id);
+                match templates.find_by_name(&image_name).await? {
+                    Some(traced) => {
+                        let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                        Ok(Some(json))
+                    }
+                    None => Ok(None),
+                }
+            }
+        })
+    }
+
+    /// List all registered sandbox images (templates) for the given scope.
+    ///
+    /// Returns a JSON array of templates. Routed through the platform
+    /// sandbox-templates API, which requires the organization/project scope.
+    fn list_sandbox_images(
+        &self,
+        organization_id: String,
+        project_id: String,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let organization_id = organization_id.clone();
+            let project_id = project_id.clone();
+            async move {
+                let templates =
+                    SandboxTemplatesClient::new(client, organization_id, project_id);
+                let traced = templates.list().await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
             }
         })
     }
