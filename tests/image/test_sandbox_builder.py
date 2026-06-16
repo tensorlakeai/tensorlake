@@ -89,6 +89,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             "default",
             False,
             sbm.USER_AGENT,
+            False,
             None,
             None,
             ANY,
@@ -133,6 +134,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             "default",
             False,
             sbm.USER_AGENT,
+            False,
             None,
             None,
             ANY,
@@ -141,6 +143,19 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
     def test_missing_dockerfile_raises_load_error(self):
         with self.assertRaises(sbm.SandboxImageLoadError):
             sbm.build_sandbox_image("/nonexistent/Dockerfile")
+
+    def test_docker_compat_is_forwarded(self):
+        ctx = _make_ctx()
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dockerfile_path = Path(tmpdir) / "Dockerfile"
+            dockerfile_path.write_text("FROM python:3.12-slim\n", encoding="utf-8")
+
+            build_ctx, rust_builder = _make_build_patches(ctx)
+            with build_ctx, rust_builder as rust_builder_mock:
+                sbm.build_sandbox_image(str(dockerfile_path), docker_compat=True)
+
+        self.assertIs(rust_builder_mock.call_args.args[14], True)
 
     def test_rust_builder_events_are_forwarded_to_emit(self):
         ctx = _make_ctx()
@@ -166,6 +181,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
                 dockerfile_text=None,
                 context_dir=None,
                 is_public=False,
+                docker_compat=False,
                 emit=emitted.append,
             )
 
@@ -355,6 +371,7 @@ class TestImportSandboxImage(unittest.TestCase):
             "default",
             False,
             sbm.USER_AGENT,
+            False,
             ANY,
         )
 
@@ -382,6 +399,13 @@ class TestImportSandboxImage(unittest.TestCase):
             )
         self.assertEqual(rust_importer_mock.call_args.args[3], "override")
 
+    def test_docker_compat_is_forwarded(self):
+        ctx = _make_ctx()
+        build_ctx, rust_importer = _make_import_patches(ctx)
+        with build_ctx, rust_importer as rust_importer_mock:
+            sbm.import_sandbox_image("pytorch/pytorch:2.4.1", docker_compat=True)
+        self.assertIs(rust_importer_mock.call_args.args[14], True)
+
     def test_empty_reference_raises_build_error(self):
         with self.assertRaises(sbm.SandboxImageBuildError):
             sbm.import_sandbox_image("   ")
@@ -403,8 +427,8 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             def fake_rust_builder(*args, **_kwargs):
                 captured["args"] = args
                 captured["dockerfile_path"] = args[2]
-                captured["dockerfile_text"] = args[14]
-                captured["context_dir"] = args[15]
+                captured["dockerfile_text"] = args[15]
+                captured["context_dir"] = args[16]
                 return '{"id":"tpl-1","snapshot_id":"snap-1"}'
 
             rust_builder_mock.side_effect = fake_rust_builder
@@ -488,7 +512,7 @@ class TestBuildSandboxApplicationImage(unittest.TestCase):
         with build_ctx, rust_builder as rust_builder_mock:
 
             def fake_rust_builder(*args, **_kwargs):
-                captured["dockerfile_text"] = args[14]
+                captured["dockerfile_text"] = args[15]
                 return '{"id":"tpl-1","snapshot_id":"snap-1"}'
 
             rust_builder_mock.side_effect = fake_rust_builder

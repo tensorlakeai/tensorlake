@@ -156,6 +156,7 @@ pub struct CommonBuildOptions {
     pub memory_mb: Option<i64>,
     pub is_public: bool,
     pub user_agent: Option<String>,
+    pub docker_compat: bool,
 }
 
 /// Options for building a sandbox image from a Dockerfile. This is the
@@ -406,6 +407,13 @@ where
             unresolvable.line_number, unresolvable.reference, detail, unresolvable.reference,
         )));
     }
+    if options.docker_compat {
+        emit(SandboxImageBuildEvent::Warning(
+            "Docker compatibility mode is enabled. This uses Docker/BuildKit export for rootfs \
+             materialization, which can be slower and may require a larger builder sandbox disk."
+                .to_string(),
+        ));
+    }
 
     let ctx = resolve_build_context(options.clone()).await?;
 
@@ -557,6 +565,7 @@ where
                 &prepared,
                 &prepared_spec,
                 options.disk_mb,
+                options.docker_compat,
                 &mut emit,
             )
             .await?;
@@ -1053,6 +1062,7 @@ async fn upload_build_inputs(
     prepared: &PreparedSandboxTemplateBuild,
     prepared_spec: &Value,
     disk_mb: Option<u64>,
+    docker_compat: bool,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
     // Pre-create REMOTE_BUILD_DIR with permissive mode as root so the
@@ -1074,7 +1084,14 @@ async fn upload_build_inputs(
     }
 
     let docker_config_json = resolved_docker_config_json().await?;
-    let spec = build_rootfs_spec(prepared_spec, prepared, plan, disk_mb, docker_config_json)?;
+    let spec = build_rootfs_spec(
+        prepared_spec,
+        prepared,
+        plan,
+        disk_mb,
+        docker_config_json,
+        docker_compat,
+    )?;
     ensure_remote_parent_dir(proxy, REMOTE_SPEC_PATH).await?;
     proxy
         .write_file(REMOTE_SPEC_PATH, serde_json::to_vec_pretty(&spec)?)
@@ -1088,6 +1105,7 @@ fn build_rootfs_spec(
     plan: &DockerfileBuildPlan,
     disk_mb: Option<u64>,
     docker_config_json: Option<String>,
+    docker_compat: bool,
 ) -> Result<Value> {
     let mut spec = prepared_spec.clone();
     let object = spec.as_object_mut().ok_or_else(|| {
@@ -1123,6 +1141,9 @@ fn build_rootfs_spec(
             "dockerConfigJson".to_string(),
             Value::String(docker_config_json),
         );
+    }
+    if docker_compat {
+        object.insert("dockerCompat".to_string(), Value::Bool(true));
     }
 
     Ok(spec)
@@ -2705,10 +2726,12 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         let plan = super::plan_image_import("ubuntu:24.04", None).unwrap();
 
         let spec =
-            super::build_rootfs_spec(&prepared_spec, &prepared, &plan, Some(10240), None).unwrap();
+            super::build_rootfs_spec(&prepared_spec, &prepared, &plan, Some(10240), None, false)
+                .unwrap();
         assert_eq!(spec["importImageReference"], "ubuntu:24.04");
         assert_eq!(spec["baseImage"], "ubuntu:24.04");
         assert_eq!(spec["dockerfile"], "FROM ubuntu:24.04\n");
+        assert!(spec.get("dockerCompat").is_none());
     }
 
     #[test]
@@ -3142,6 +3165,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             &plan,
             Some(2048),
             Some("{}".to_string()),
+            true,
         )
         .unwrap();
         assert_eq!(spec["dockerfile"], "FROM alpine\nRUN echo hi\n");
@@ -3151,6 +3175,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         );
         assert_eq!(spec["rootfsDiskBytes"], 2048_u64 * 1024 * 1024);
         assert_eq!(spec["dockerConfigJson"], "{}");
+        assert_eq!(spec["dockerCompat"], true);
     }
 
     #[test]
@@ -3169,8 +3194,9 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             import_image_reference: None,
         };
 
-        let spec = build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None).unwrap();
+        let spec = build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None, false).unwrap();
         assert_eq!(spec["rootfsDiskBytes"], 20_u64 * 1024 * 1024 * 1024);
+        assert!(spec.get("dockerCompat").is_none());
     }
 
     #[test]

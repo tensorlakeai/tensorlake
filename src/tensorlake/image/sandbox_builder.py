@@ -219,6 +219,7 @@ def _run_rust_image_create(
     disk_mb: int | None,
     builder_disk_mb: int | None,
     is_public: bool,
+    docker_compat: bool,
     emit: EmitFn,
 ) -> dict:
     ctx, token = _resolve_build_credentials()
@@ -240,6 +241,7 @@ def _run_rust_image_create(
         ctx.namespace,
         ctx.personal_access_token is not None and ctx.api_key is None,
         USER_AGENT,
+        docker_compat,
         dockerfile_text,
         context_dir,
         _forwarder(emit),
@@ -256,6 +258,7 @@ def _run_rust_image_import(
     disk_mb: int | None,
     builder_disk_mb: int | None,
     is_public: bool,
+    docker_compat: bool,
     emit: EmitFn,
 ) -> dict:
     ctx, token = _resolve_build_credentials()
@@ -284,6 +287,7 @@ def _run_rust_image_import(
         ctx.namespace,
         ctx.personal_access_token is not None and ctx.api_key is None,
         USER_AGENT,
+        docker_compat,
         _forwarder(emit),
     )
     return _finish_image_registration(result_json, registered_name, emit)
@@ -497,6 +501,7 @@ def build_sandbox_image(
     disk_mb: int | None = None,
     builder_disk_mb: int | None = None,
     is_public: bool = False,
+    docker_compat: bool = False,
     context_dir: str | None = None,
     verbose: bool = False,
     emit: EmitFn | None = None,
@@ -517,6 +522,9 @@ def build_sandbox_image(
         disk_mb: Root disk size for the generated sandbox image in MB.
         builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
         is_public: Make the registered image publicly accessible.
+        docker_compat: Use Docker/BuildKit export compatibility mode for
+            rootfs materialization. Slower and may require a larger builder
+            sandbox disk.
         context_dir: Directory used to resolve relative COPY/ADD sources.
             Ignored when ``source`` is a Dockerfile path (the Dockerfile's
             parent directory is used instead).
@@ -582,6 +590,7 @@ def build_sandbox_image(
             disk_mb=disk_mb,
             builder_disk_mb=builder_disk_mb,
             is_public=is_public,
+            docker_compat=docker_compat,
             emit=emit,
         )
     except SandboxImageError:
@@ -599,6 +608,7 @@ def import_sandbox_image(
     disk_mb: int | None = None,
     builder_disk_mb: int | None = None,
     is_public: bool = False,
+    docker_compat: bool = False,
     verbose: bool = False,
     emit: EmitFn | None = None,
 ) -> dict:
@@ -624,6 +634,9 @@ def import_sandbox_image(
         disk_mb: Root disk size for the generated sandbox image in MB.
         builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
         is_public: Make the registered image publicly accessible.
+        docker_compat: Use Docker/BuildKit export compatibility mode for
+            rootfs materialization. Slower and may require a larger builder
+            sandbox disk.
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
         emit: Callback invoked for each build event. Takes precedence over
             ``verbose``.
@@ -662,6 +675,7 @@ def import_sandbox_image(
             disk_mb=disk_mb,
             builder_disk_mb=builder_disk_mb,
             is_public=is_public,
+            docker_compat=docker_compat,
             emit=emit,
         )
     except SandboxImageError:
@@ -722,6 +736,7 @@ def build_sandbox_application_image(
             disk_mb=disk_mb,
             builder_disk_mb=builder_disk_mb,
             is_public=is_public,
+            docker_compat=False,
             emit=emit,
         )
     except SandboxImageError:

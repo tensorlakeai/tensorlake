@@ -798,6 +798,10 @@ enum ImageCommands {
         #[arg(short, long)]
         public: bool,
 
+        /// Use Docker/BuildKit export compatibility mode for rootfs materialization
+        #[arg(long = "docker_compat")]
+        docker_compat: bool,
+
         /// Print the registered sandbox image JSON response to stdout
         #[arg(long = "json", hide = true)]
         json: bool,
@@ -834,6 +838,10 @@ enum ImageCommands {
         /// Make this sandbox image publicly accessible
         #[arg(short, long)]
         public: bool,
+
+        /// Use Docker/BuildKit export compatibility mode for rootfs materialization
+        #[arg(long = "docker_compat")]
+        docker_compat: bool,
 
         /// Print the registered sandbox image JSON response to stdout
         #[arg(long = "json", hide = true)]
@@ -1414,6 +1422,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             cpus,
                             memory,
                             public,
+                            docker_compat,
                             json,
                         } => {
                             let disk_mb = if let Some(value) = disk_mb {
@@ -1436,6 +1445,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 cpus,
                                 memory,
                                 public,
+                                docker_compat,
                                 json,
                             )
                             .await
@@ -1448,6 +1458,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             cpus,
                             memory,
                             public,
+                            docker_compat,
                             json,
                         } => {
                             commands::sbx::image::import::run(
@@ -1459,6 +1470,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 cpus,
                                 memory,
                                 public,
+                                docker_compat,
                                 json,
                             )
                             .await
@@ -2013,6 +2025,40 @@ mod tests {
                 assert_eq!(builder_disk_mb, Some(65536));
             }
             _ => panic!("expected sbx image create command"),
+        }
+    }
+
+    #[test]
+    fn image_create_parses_docker_compat() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "image",
+            "create",
+            "./Dockerfile",
+            "--docker_compat",
+        ]) {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Create { docker_compat, .. })) => {
+                assert!(docker_compat)
+            }
+            _ => panic!("expected sbx image create command"),
+        }
+    }
+
+    #[test]
+    fn image_import_parses_docker_compat() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "image",
+            "import",
+            "ubuntu:24.04",
+            "--docker_compat",
+        ]) {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Import { docker_compat, .. })) => {
+                assert!(docker_compat)
+            }
+            _ => panic!("expected sbx image import command"),
         }
     }
 

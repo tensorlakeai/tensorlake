@@ -24,11 +24,11 @@ use tensorlake::document_ai::DocumentAiClient;
 use tensorlake::images::ImagesClient;
 use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
 use tensorlake::sandbox_images::SandboxImageBuildEvent;
+use tensorlake::sandbox_templates::SandboxTemplatesClient;
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, CreateSandboxRequest, ListArchivedSandboxesParams,
     SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
 };
-use tensorlake::sandbox_templates::SandboxTemplatesClient;
 use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
 };
@@ -170,8 +170,7 @@ impl CloudApiClient {
             let project_id = project_id.clone();
             let image_name = image_name.clone();
             async move {
-                let templates =
-                    SandboxTemplatesClient::new(client, organization_id, project_id);
+                let templates = SandboxTemplatesClient::new(client, organization_id, project_id);
                 match templates.find_by_name(&image_name).await? {
                     Some(traced) => {
                         let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
@@ -187,17 +186,12 @@ impl CloudApiClient {
     ///
     /// Returns a JSON array of templates. Routed through the platform
     /// sandbox-templates API, which requires the organization/project scope.
-    fn list_sandbox_images(
-        &self,
-        organization_id: String,
-        project_id: String,
-    ) -> PyResult<String> {
+    fn list_sandbox_images(&self, organization_id: String, project_id: String) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let organization_id = organization_id.clone();
             let project_id = project_id.clone();
             async move {
-                let templates =
-                    SandboxTemplatesClient::new(client, organization_id, project_id);
+                let templates = SandboxTemplatesClient::new(client, organization_id, project_id);
                 let traced = templates.list().await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
             }
@@ -2862,6 +2856,7 @@ fn create_image_context_file(
     namespace=None,
     use_scope_headers=false,
     user_agent=None,
+    docker_compat=false,
     dockerfile_text=None,
     context_dir=None,
     emit=None,
@@ -2882,6 +2877,7 @@ fn build_sandbox_image(
     namespace: Option<String>,
     use_scope_headers: bool,
     user_agent: Option<String>,
+    docker_compat: bool,
     dockerfile_text: Option<String>,
     context_dir: Option<String>,
     emit: Option<Py<PyAny>>,
@@ -2901,6 +2897,7 @@ fn build_sandbox_image(
             memory_mb,
             is_public,
             user_agent,
+            docker_compat,
         ),
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text,
@@ -2951,6 +2948,7 @@ fn build_sandbox_image(
     namespace=None,
     use_scope_headers=false,
     user_agent=None,
+    docker_compat=false,
     emit=None,
 ))]
 fn import_sandbox_image(
@@ -2969,6 +2967,7 @@ fn import_sandbox_image(
     namespace: Option<String>,
     use_scope_headers: bool,
     user_agent: Option<String>,
+    docker_compat: bool,
     emit: Option<Py<PyAny>>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageImportOptions {
@@ -2986,6 +2985,7 @@ fn import_sandbox_image(
             memory_mb,
             is_public,
             user_agent,
+            docker_compat,
         ),
         image_reference,
     };
@@ -3035,6 +3035,7 @@ fn common_build_options(
     memory_mb: Option<i64>,
     is_public: bool,
     user_agent: Option<String>,
+    docker_compat: bool,
 ) -> tensorlake::sandbox_images::CommonBuildOptions {
     tensorlake::sandbox_images::CommonBuildOptions {
         api_url,
@@ -3050,6 +3051,7 @@ fn common_build_options(
         memory_mb,
         is_public,
         user_agent,
+        docker_compat,
     }
 }
 
