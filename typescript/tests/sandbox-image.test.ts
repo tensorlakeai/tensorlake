@@ -75,6 +75,7 @@ describe("createSandboxImage", () => {
       dockerfilePath: path.resolve(dockerfilePath),
       registeredName: "sandbox-image",
       isPublic: true,
+      dockerCompat: false,
       dockerfileText: undefined,
       contextDir: undefined,
     });
@@ -106,6 +107,20 @@ describe("createSandboxImage", () => {
     // is responsible for parsing/validating it).
     const expectedDockerfile = `${dockerfileContent(image)}\n`;
     expect(captured.options.dockerfileText).toBe(expectedDockerfile);
+  });
+
+  it("forwards dockerCompat to the native build binding", async () => {
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-compat`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM python:3.12-slim\n", "utf8");
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(dockerfilePath, { dockerCompat: true });
+
+    expect(captured.options.dockerCompat).toBe(true);
   });
 
   it("forwards native events back through the user emit callback", async () => {
@@ -342,6 +357,7 @@ describe("importSandboxImage", () => {
       imageReference: "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",
       registeredName: "pytorch",
       isPublic: true,
+      dockerCompat: false,
     });
     // The import option shape carries no Dockerfile fields.
     expect(captured.options).not.toHaveProperty("dockerfilePath");
@@ -361,6 +377,14 @@ describe("importSandboxImage", () => {
       registeredName: "override",
     });
     expect(captured.options.registeredName).toBe("override");
+  });
+
+  it("forwards dockerCompat to the native import binding", async () => {
+    const { captured } = makeFakeBinding();
+    await importSandboxImage("pytorch/pytorch:2.4.1", {
+      dockerCompat: true,
+    });
+    expect(captured.options.dockerCompat).toBe(true);
   });
 
   it("forwards native events back through the user emit callback", async () => {

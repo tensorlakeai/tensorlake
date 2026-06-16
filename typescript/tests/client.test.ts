@@ -1,7 +1,4 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { SandboxClient } from "../src/client.js";
 import { SandboxStatus, SnapshotStatus } from "../src/models.js";
 import { clearNativeStub, installNativeStub } from "./native-stub.js";
@@ -14,23 +11,10 @@ function nativeError(status: number, message: string): Error {
 }
 
 describe("SandboxClient", () => {
-  let tempDirs: string[] = [];
-
   afterEach(() => {
     clearNativeStub();
     vi.restoreAllMocks();
-    const dirs = tempDirs;
-    tempDirs = [];
-    return Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })));
   });
-
-  async function tempFile(contents: string | Uint8Array): Promise<string> {
-    const dir = await mkdtemp(join(tmpdir(), "tensorlake-sdk-test-"));
-    tempDirs.push(dir);
-    const path = join(dir, "cloud-init.yaml");
-    await writeFile(path, contents);
-    return path;
-  }
 
   describe("construction", () => {
     it("creates cloud client with defaults", () => {
@@ -230,120 +214,6 @@ describe("SandboxClient", () => {
       client.close();
     });
 
-    it("reads cloudInit file path and sends cloud_init_base64", async () => {
-      const path = await tempFile("#cloud-config\n");
-      installNativeStub({
-        client: {
-          createSandbox: vi.fn(async (json: string) => {
-            const body = JSON.parse(json);
-            expect(body.cloud_init_base64).toBe(
-              Buffer.from("#cloud-config\n").toString("base64"),
-            );
-            return {
-              traceId: "t",
-              json: JSON.stringify({ sandbox_id: "sbx-cloud-init", status: "pending" }),
-            };
-          }),
-        },
-      });
-
-      const client = SandboxClient.forLocalhost();
-      await client.create({ cloudInit: path });
-      client.close();
-    });
-
-    it("encodes cloudInit URL as include user-data", async () => {
-      installNativeStub({
-        client: {
-          createSandbox: vi.fn(async (json: string) => {
-            const body = JSON.parse(json);
-            expect(body.cloud_init_base64).toBe(
-              Buffer.from("#include\nhttps://example.com/cloud-init.yaml\n").toString(
-                "base64",
-              ),
-            );
-            return {
-              traceId: "t",
-              json: JSON.stringify({ sandbox_id: "sbx-cloud-init-url", status: "pending" }),
-            };
-          }),
-        },
-      });
-
-      const client = SandboxClient.forLocalhost();
-      await client.create({ cloudInit: "https://example.com/cloud-init.yaml" });
-      client.close();
-    });
-
-    it("rejects invalid cloudInit URLs before sending a request", async () => {
-      const createSandbox = vi.fn(async () => {
-        throw new Error("request should not be sent");
-      });
-      installNativeStub({ client: { createSandbox } });
-
-      const client = SandboxClient.forLocalhost();
-      await expect(
-        client.create({ cloudInit: "ftp://example.com/cloud-init.yaml" }),
-      ).rejects.toThrow("HTTP(S) URL");
-      expect(createSandbox).not.toHaveBeenCalled();
-      client.close();
-    });
-
-    it("sends cloudInit file with snapshotId", async () => {
-      const path = await tempFile("#cloud-config\n");
-      installNativeStub({
-        client: {
-          createSandbox: vi.fn(async (json: string) => {
-            const body = JSON.parse(json);
-            expect(body.snapshot_id).toBe("snap-1");
-            expect(body.cloud_init_base64).toBe(
-              Buffer.from("#cloud-config\n").toString("base64"),
-            );
-            return {
-              traceId: "t",
-              json: JSON.stringify({
-                sandbox_id: "sbx-cloud-init-snapshot",
-                status: "pending",
-              }),
-            };
-          }),
-        },
-      });
-
-      const client = SandboxClient.forLocalhost();
-      await client.create({ snapshotId: "snap-1", cloudInit: path });
-      client.close();
-    });
-
-    it("sends cloudInit URL with snapshotId", async () => {
-      installNativeStub({
-        client: {
-          createSandbox: vi.fn(async (json: string) => {
-            const body = JSON.parse(json);
-            expect(body.snapshot_id).toBe("snap-1");
-            expect(body.cloud_init_base64).toBe(
-              Buffer.from("#include\nhttps://example.com/cloud-init.yaml\n").toString(
-                "base64",
-              ),
-            );
-            return {
-              traceId: "t",
-              json: JSON.stringify({
-                sandbox_id: "sbx-cloud-init-url-snapshot",
-                status: "pending",
-              }),
-            };
-          }),
-        },
-      });
-
-      const client = SandboxClient.forLocalhost();
-      await client.create({
-        snapshotId: "snap-1",
-        cloudInit: "https://example.com/cloud-init.yaml",
-      });
-      client.close();
-    });
   });
 
   describe("get", () => {

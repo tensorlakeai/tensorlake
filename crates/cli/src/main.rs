@@ -452,10 +452,6 @@ enum SbxCommands {
         #[arg(short, long, conflicts_with = "snapshot")]
         image: Option<String>,
 
-        /// Local cloud-init file path or HTTP(S) URL for the sandbox
-        #[arg(long = "cloud-init", value_name = "PATH_OR_URL")]
-        cloud_init: Option<String>,
-
         /// Return immediately after creation instead of waiting for the sandbox to be running
         #[arg(short, long)]
         no_wait: bool,
@@ -798,6 +794,10 @@ enum ImageCommands {
         #[arg(short, long)]
         public: bool,
 
+        /// Use Docker/BuildKit max compatibility mode (build is slower and uses more memory and disk space on builder sandbox)
+        #[arg(long = "docker_compat")]
+        docker_compat: bool,
+
         /// Print the registered sandbox image JSON response to stdout
         #[arg(long = "json", hide = true)]
         json: bool,
@@ -834,6 +834,10 @@ enum ImageCommands {
         /// Make this sandbox image publicly accessible
         #[arg(short, long)]
         public: bool,
+
+        /// Use Docker/BuildKit max compatibility mode (import is slower and uses more memory and disk space on builder sandbox)
+        #[arg(long = "docker_compat")]
+        docker_compat: bool,
 
         /// Print the registered sandbox image JSON response to stdout
         #[arg(long = "json", hide = true)]
@@ -1161,7 +1165,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         entrypoint,
                         snapshot,
                         image,
-                        cloud_init,
                         no_wait,
                         ports,
                         allow_unauthenticated_access,
@@ -1193,7 +1196,6 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 entrypoint: &entrypoint,
                                 snapshot_id: snapshot.as_deref(),
                                 image_name: image.as_deref(),
-                                cloud_init: cloud_init.as_deref(),
                                 wait: !no_wait,
                                 ports: &ports,
                                 allow_unauthenticated_access,
@@ -1414,6 +1416,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             cpus,
                             memory,
                             public,
+                            docker_compat,
                             json,
                         } => {
                             let disk_mb = if let Some(value) = disk_mb {
@@ -1436,6 +1439,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 cpus,
                                 memory,
                                 public,
+                                docker_compat,
                                 json,
                             )
                             .await
@@ -1448,6 +1452,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             cpus,
                             memory,
                             public,
+                            docker_compat,
                             json,
                         } => {
                             commands::sbx::image::import::run(
@@ -1459,6 +1464,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 cpus,
                                 memory,
                                 public,
+                                docker_compat,
                                 json,
                             )
                             .await
@@ -2013,6 +2019,40 @@ mod tests {
                 assert_eq!(builder_disk_mb, Some(65536));
             }
             _ => panic!("expected sbx image create command"),
+        }
+    }
+
+    #[test]
+    fn image_create_parses_docker_compat() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "image",
+            "create",
+            "./Dockerfile",
+            "--docker_compat",
+        ]) {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Create { docker_compat, .. })) => {
+                assert!(docker_compat)
+            }
+            _ => panic!("expected sbx image create command"),
+        }
+    }
+
+    #[test]
+    fn image_import_parses_docker_compat() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "image",
+            "import",
+            "ubuntu:24.04",
+            "--docker_compat",
+        ]) {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Import { docker_compat, .. })) => {
+                assert!(docker_compat)
+            }
+            _ => panic!("expected sbx image import command"),
         }
     }
 

@@ -26,6 +26,11 @@ export interface CreateSandboxImageOptions {
   isPublic?: boolean;
   contextDir?: string;
   /**
+   * Use Docker/BuildKit max compatibility mode (build is slower and uses more
+   * memory and disk space on builder sandbox).
+   */
+  dockerCompat?: boolean;
+  /**
    * Print build progress to stderr. Ignored when an explicit `emit` is
    * passed via `deps`. Defaults to false — `createSandboxImage` is silent
    * by default when invoked programmatically (e.g. `Image.build()`).
@@ -45,6 +50,11 @@ export interface ImportSandboxImageOptions {
   diskMb?: number;
   builderDiskMb?: number;
   isPublic?: boolean;
+  /**
+   * Use Docker/BuildKit max compatibility mode (import is slower and uses more
+   * memory and disk space on builder sandbox).
+   */
+  dockerCompat?: boolean;
   /**
    * Print build progress to stderr. Ignored when an explicit `emit` is
    * passed via `deps`. Defaults to false.
@@ -75,6 +85,7 @@ interface NativeBindingCommonOptions {
   namespace?: string | undefined | null;
   useScopeHeaders?: boolean | undefined | null;
   userAgent?: string | undefined | null;
+  dockerCompat?: boolean | undefined | null;
 }
 
 interface NativeBindingOptions extends NativeBindingCommonOptions {
@@ -320,6 +331,7 @@ export async function createSandboxImage(
       useScopeHeaders:
         context.personalAccessToken != null && context.apiKey == null,
       userAgent: undefined,
+      dockerCompat: options.dockerCompat ?? false,
       dockerfileText,
       contextDir: nativeContextDir,
     },
@@ -417,6 +429,7 @@ export async function importSandboxImage(
       useScopeHeaders:
         context.personalAccessToken != null && context.apiKey == null,
       userAgent: undefined,
+      dockerCompat: options.dockerCompat ?? false,
     },
     (event) => {
       try {
@@ -560,6 +573,7 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       memory: { type: "string" },
       disk_mb: { type: "string" },
       builder_disk_mb: { type: "string" },
+      docker_compat: { type: "boolean", default: false },
       public: { type: "boolean", default: false },
     },
   });
@@ -567,7 +581,7 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
   const dockerfilePath = parsed.positionals[0];
   if (!dockerfilePath) {
     throw new Error(
-      "Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--builder_disk_mb MB] [--public]",
+      "Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--builder_disk_mb MB] [--docker_compat] [--public]",
     );
   }
 
@@ -604,6 +618,7 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       memoryMb,
       diskMb,
       builderDiskMb,
+      dockerCompat: parsed.values.docker_compat,
       isPublic: parsed.values.public,
     },
     { emit: ndjsonStdoutEmit },
@@ -620,6 +635,7 @@ export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
       memory: { type: "string" },
       disk_mb: { type: "string" },
       builder_disk_mb: { type: "string" },
+      docker_compat: { type: "boolean", default: false },
       public: { type: "boolean", default: false },
     },
   });
@@ -627,7 +643,7 @@ export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
   const imageReference = parsed.positionals[0];
   if (!imageReference) {
     throw new Error(
-      "Usage: tensorlake-import-sandbox-image <image_reference> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--builder_disk_mb MB] [--public]",
+      "Usage: tensorlake-import-sandbox-image <image_reference> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--builder_disk_mb MB] [--docker_compat] [--public]",
     );
   }
 
@@ -664,6 +680,7 @@ export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
       memoryMb,
       diskMb,
       builderDiskMb,
+      dockerCompat: parsed.values.docker_compat,
       isPublic: parsed.values.public,
     },
     { emit: ndjsonStdoutEmit },

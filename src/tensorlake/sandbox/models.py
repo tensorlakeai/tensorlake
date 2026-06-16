@@ -214,7 +214,6 @@ class CreateSandboxRequest(BaseModel):
     network: NetworkConfig | None = None
     snapshot_id: str | None = None
     name: str | None = None
-    cloud_init_base64: str | None = None
 
 
 class UpdateSandboxRequest(BaseModel):

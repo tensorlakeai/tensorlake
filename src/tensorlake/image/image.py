@@ -104,6 +104,7 @@ class Image:
         disk_mb: int | None = None,
         builder_disk_mb: int | None = None,
         is_public: bool = False,
+        docker_compat: bool = False,
         context_dir: str | None = None,
         verbose: bool = False,
     ) -> dict:
@@ -119,6 +120,9 @@ class Image:
             disk_mb: Root disk size for the generated sandbox image in MB.
             builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
             is_public: Make the registered image publicly accessible.
+            docker_compat: Use Docker/BuildKit max compatibility mode (build
+                is slower and uses more memory and disk space on builder
+                sandbox).
             context_dir: Directory used to resolve relative COPY/ADD paths.
                 Defaults to the current working directory.
             verbose: If True, print build progress to stderr.
@@ -136,6 +140,7 @@ class Image:
             disk_mb=disk_mb,
             builder_disk_mb=builder_disk_mb,
             is_public=is_public,
+            docker_compat=docker_compat,
             context_dir=context_dir,
             verbose=verbose,
         )

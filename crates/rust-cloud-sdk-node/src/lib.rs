@@ -42,6 +42,7 @@ pub struct SandboxImageBuildOptionsJs {
     pub namespace: Option<String>,
     pub use_scope_headers: Option<bool>,
     pub user_agent: Option<String>,
+    pub docker_compat: Option<bool>,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<String>,
 }
@@ -67,6 +68,7 @@ pub struct SandboxImageImportOptionsJs {
     pub namespace: Option<String>,
     pub use_scope_headers: Option<bool>,
     pub user_agent: Option<String>,
+    pub docker_compat: Option<bool>,
 }
 
 #[napi(object)]
@@ -125,6 +127,7 @@ pub async fn build_sandbox_image(
             memory_mb: options.memory_mb,
             is_public: options.is_public.unwrap_or(false),
             user_agent: options.user_agent,
+            docker_compat: options.docker_compat.unwrap_or(false),
         },
         dockerfile_path: PathBuf::from(options.dockerfile_path),
         dockerfile_text: options.dockerfile_text,
@@ -169,6 +172,7 @@ pub async fn import_sandbox_image(
             memory_mb: options.memory_mb,
             is_public: options.is_public.unwrap_or(false),
             user_agent: options.user_agent,
+            docker_compat: options.docker_compat.unwrap_or(false),
         },
         image_reference: options.image_reference,
     };
