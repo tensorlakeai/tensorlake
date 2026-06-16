@@ -1,4 +1,5 @@
 use reqwest::{Method, StatusCode};
+use serde::Deserialize;
 
 use crate::{
     client::{Client, Traced},
@@ -8,6 +9,40 @@ use crate::{
 pub mod models;
 
 use models::{CreateSandboxTemplateRequest, SandboxTemplate};
+
+/// One page of the paginated sandbox-templates list response.
+#[derive(Debug, Default, Deserialize)]
+struct SandboxTemplatesPage {
+    #[serde(default)]
+    items: Vec<SandboxTemplate>,
+    #[serde(default)]
+    pagination: Option<Pagination>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct Pagination {
+    #[serde(default)]
+    next: Option<String>,
+}
+
+/// Reduce a `pagination.next` link to a base-URL-relative request path.
+///
+/// The server may hand back either an absolute URL or an absolute path; the
+/// SDK client always prepends its base URL, so absolute URLs must be reduced
+/// to their path+query first.
+fn next_request_path(next: &str) -> String {
+    if let Some(idx) = next.find("://") {
+        let after = &next[idx + 3..];
+        match after.find('/') {
+            Some(slash) => after[slash..].to_string(),
+            None => "/".to_string(),
+        }
+    } else if next.starts_with('/') {
+        next.to_string()
+    } else {
+        format!("/{next}")
+    }
+}
 
 #[derive(Clone)]
 pub struct SandboxTemplatesClient {
@@ -46,6 +81,29 @@ impl SandboxTemplatesClient {
         self.client.execute_json(req).await
     }
 
+    /// List all registered sandbox templates, following pagination to the end.
+    ///
+    /// Pages through `?pageSize=100` results, accumulating every entry. The
+    /// returned `Traced` carries the trace id of the final page request.
+    pub async fn list(&self) -> Result<Traced<Vec<SandboxTemplate>>, SdkError> {
+        let mut path = format!("{}?pageSize=100", self.endpoint());
+        let mut items: Vec<SandboxTemplate> = Vec::new();
+        loop {
+            let req = self.client.build_get_json_request(&path, None)?;
+            let traced = self
+                .client
+                .execute_json::<SandboxTemplatesPage>(req)
+                .await?;
+            let trace_id = traced.trace_id.clone();
+            let page = traced.into_inner();
+            items.extend(page.items);
+            match page.pagination.and_then(|p| p.next) {
+                Some(next) if !next.is_empty() => path = next_request_path(&next),
+                _ => return Ok(Traced::new(trace_id, items)),
+            }
+        }
+    }
+
     /// Look up a sandbox template by its registered name.
     ///
     /// Returns `Ok(None)` when no template with that name is found. The
@@ -81,5 +139,31 @@ impl SandboxTemplatesClient {
             .execute_traced(req)
             .await
             .map(|traced| traced.map(|_| ()))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::next_request_path;
+
+    #[test]
+    fn next_request_path_keeps_absolute_path_and_query() {
+        let next = "/platform/v1/organizations/org/projects/proj/sandbox-templates?pageSize=100&next=abc";
+        assert_eq!(next_request_path(next), next);
+    }
+
+    #[test]
+    fn next_request_path_reduces_absolute_url_to_path_and_query() {
+        let next =
+            "https://api.tensorlake.ai/platform/v1/organizations/org/projects/proj/sandbox-templates?next=abc";
+        assert_eq!(
+            next_request_path(next),
+            "/platform/v1/organizations/org/projects/proj/sandbox-templates?next=abc"
+        );
+    }
+
+    #[test]
+    fn next_request_path_prefixes_bare_relative_links() {
+        assert_eq!(next_request_path("sandbox-templates?next=abc"), "/sandbox-templates?next=abc");
     }
 }

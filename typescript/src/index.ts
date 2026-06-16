@@ -10,6 +10,8 @@ export {
   createSandboxImage,
   importSandboxImage,
   deleteSandboxImage,
+  findSandboxImageByName,
+  listSandboxImages,
 } from "./sandbox-image.js";
 export { Image, dockerfileContent, ImageBuildOperationType } from "./image.js";
 export { sandboxUrlFromIngressEndpoint } from "./url.js";
@@ -85,6 +87,7 @@ export type {
   ApplicationBuildContext,
   ApplicationBuildImageResult,
   ApplicationBuildResponse,
+  SandboxTemplate,
 } from "./cloud-models.js";
 
 export type {

@@ -17,9 +17,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import warnings
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 from tensorlake._tracing import USER_AGENT
 from tensorlake.cli._common import Context
@@ -50,6 +51,10 @@ class SandboxImageBuildError(SandboxImageError):
 
 class SandboxImageDeleteError(SandboxImageError):
     """Deleting a registered sandbox image failed."""
+
+
+class SandboxImageLookupError(SandboxImageError):
+    """Looking up a registered sandbox image failed."""
 
 
 # --- Emit helpers -----------------------------------------------------------
@@ -144,6 +149,61 @@ def _rust_delete_sandbox_image(
     )
     try:
         client.delete_sandbox_image(image_name)
+    finally:
+        client.close()
+
+
+def _rust_find_sandbox_image_by_name(
+    api_url: str,
+    token: str,
+    image_name: str,
+    organization_id: str,
+    project_id: str,
+    namespace: str | None,
+) -> str | None:
+    try:
+        from tensorlake._cloud_sdk import CloudApiClient
+    except ImportError:
+        from _cloud_sdk import CloudApiClient
+
+    client = CloudApiClient(
+        api_url=api_url,
+        api_key=token,
+        organization_id=organization_id,
+        project_id=project_id,
+        namespace=namespace,
+        user_agent=USER_AGENT,
+    )
+    try:
+        return client.find_sandbox_image_by_name(
+            organization_id, project_id, image_name
+        )
+    finally:
+        client.close()
+
+
+def _rust_list_sandbox_images(
+    api_url: str,
+    token: str,
+    organization_id: str,
+    project_id: str,
+    namespace: str | None,
+) -> str:
+    try:
+        from tensorlake._cloud_sdk import CloudApiClient
+    except ImportError:
+        from _cloud_sdk import CloudApiClient
+
+    client = CloudApiClient(
+        api_url=api_url,
+        api_key=token,
+        organization_id=organization_id,
+        project_id=project_id,
+        namespace=namespace,
+        user_agent=USER_AGENT,
+    )
+    try:
+        return client.list_sandbox_images(organization_id, project_id)
     finally:
         client.close()
 
@@ -298,6 +358,134 @@ def delete_sandbox_image(image_name: str) -> None:
         raise
     except Exception as e:
         raise SandboxImageDeleteError(f"{type(e).__name__}: {e}") from e
+
+
+_CAMEL_TO_SNAKE_RE = re.compile(r"(?<!^)(?<![A-Z])([A-Z])")
+
+
+def _camel_to_snake(name: str) -> str:
+    """Convert a single camelCase key to snake_case."""
+    return _CAMEL_TO_SNAKE_RE.sub(r"_\1", name).lower()
+
+
+def _snake_case_keys(value: Any) -> Any:
+    """Recursively rewrite dict keys from camelCase to snake_case.
+
+    The platform sandbox-templates API (and therefore the Rust core that
+    proxies it) emits camelCase field names such as ``snapshotId`` and
+    ``rootfsDiskBytes``. The Python SDK conventionally exposes snake_case keys,
+    so normalize the template payloads before handing them back to callers.
+    """
+    if isinstance(value, dict):
+        return {
+            _camel_to_snake(key): _snake_case_keys(val) for key, val in value.items()
+        }
+    if isinstance(value, list):
+        return [_snake_case_keys(item) for item in value]
+    return value
+
+
+def find_sandbox_image_by_name(image_name: str) -> dict | None:
+    """Look up a registered sandbox image by its registered name.
+
+    Returns the registered sandbox template as a dict, or ``None`` if no image
+    with that name exists. Uses the same environment-based Tensorlake auth as
+    :func:`build_sandbox_image`, and requires organization/project context
+    (``TENSORLAKE_ORGANIZATION_ID`` and ``TENSORLAKE_PROJECT_ID``) since the
+    lookup is routed through the platform sandbox-templates API.
+
+    Raises:
+        TypeError: ``image_name`` is not a non-empty string.
+        SandboxImageLookupError: Credentials or project context are missing, or
+            the lookup request failed.
+    """
+    if not isinstance(image_name, str) or not image_name:
+        raise TypeError("image_name must be a non-empty string")
+
+    ctx = _build_context_from_env()
+    token = ctx.api_key or ctx.personal_access_token
+    if not token:
+        raise SandboxImageLookupError(
+            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
+        )
+    if not ctx.organization_id or not ctx.project_id:
+        raise SandboxImageLookupError(
+            "Looking up a sandbox image by name requires organization and "
+            "project context (TENSORLAKE_ORGANIZATION_ID and "
+            "TENSORLAKE_PROJECT_ID)."
+        )
+
+    try:
+        result_json = _rust_find_sandbox_image_by_name(
+            ctx.api_url,
+            token,
+            image_name,
+            ctx.organization_id,
+            ctx.project_id,
+            ctx.namespace,
+        )
+    except SandboxImageError:
+        raise
+    except Exception as e:
+        raise SandboxImageLookupError(f"{type(e).__name__}: {e}") from e
+
+    if not result_json:
+        return None
+    try:
+        return _snake_case_keys(json.loads(result_json))
+    except json.JSONDecodeError as exc:
+        raise SandboxImageLookupError(
+            f"Rust image lookup returned invalid JSON: {result_json.strip()}"
+        ) from exc
+
+
+def list_sandbox_images() -> list[dict]:
+    """List all registered sandbox images for the current project.
+
+    Returns the registered sandbox templates as a list of dicts (each with
+    ``id``, ``name``, ``snapshot_id``, ``public``, etc.). Uses the same
+    environment-based Tensorlake auth as :func:`build_sandbox_image`, and
+    requires organization/project context (``TENSORLAKE_ORGANIZATION_ID`` and
+    ``TENSORLAKE_PROJECT_ID``) since the listing is routed through the platform
+    sandbox-templates API.
+
+    Raises:
+        SandboxImageLookupError: Credentials or project context are missing, or
+            the list request failed.
+    """
+    ctx = _build_context_from_env()
+    token = ctx.api_key or ctx.personal_access_token
+    if not token:
+        raise SandboxImageLookupError(
+            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
+        )
+    if not ctx.organization_id or not ctx.project_id:
+        raise SandboxImageLookupError(
+            "Listing sandbox images requires organization and project context "
+            "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID)."
+        )
+
+    try:
+        result_json = _rust_list_sandbox_images(
+            ctx.api_url,
+            token,
+            ctx.organization_id,
+            ctx.project_id,
+            ctx.namespace,
+        )
+    except SandboxImageError:
+        raise
+    except Exception as e:
+        raise SandboxImageLookupError(f"{type(e).__name__}: {e}") from e
+
+    if not result_json:
+        return []
+    try:
+        return _snake_case_keys(json.loads(result_json))
+    except json.JSONDecodeError as exc:
+        raise SandboxImageLookupError(
+            f"Rust image list returned invalid JSON: {result_json.strip()}"
+        ) from exc
 
 
 def build_sandbox_image(
