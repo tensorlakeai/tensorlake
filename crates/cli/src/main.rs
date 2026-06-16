@@ -794,7 +794,7 @@ enum ImageCommands {
         #[arg(short, long)]
         public: bool,
 
-        /// Use Docker/BuildKit max compatibility mode
+        /// Use Docker/BuildKit max compatibility mode (build is slower and uses more memory and disk space on builder sandbox)
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
@@ -835,7 +835,7 @@ enum ImageCommands {
         #[arg(short, long)]
         public: bool,
 
-        /// Use Docker/BuildKit max compatibility mode
+        /// Use Docker/BuildKit max compatibility mode (import is slower and uses more memory and disk space on builder sandbox)
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 

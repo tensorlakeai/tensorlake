@@ -522,8 +522,8 @@ def build_sandbox_image(
         disk_mb: Root disk size for the generated sandbox image in MB.
         builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
         is_public: Make the registered image publicly accessible.
-        docker_compat: Use Docker/BuildKit max compatibility mode. Slower and
-            may require a larger builder sandbox disk.
+        docker_compat: Use Docker/BuildKit max compatibility mode (build is
+            slower and uses more memory and disk space on builder sandbox).
         context_dir: Directory used to resolve relative COPY/ADD sources.
             Ignored when ``source`` is a Dockerfile path (the Dockerfile's
             parent directory is used instead).
@@ -633,8 +633,8 @@ def import_sandbox_image(
         disk_mb: Root disk size for the generated sandbox image in MB.
         builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
         is_public: Make the registered image publicly accessible.
-        docker_compat: Use Docker/BuildKit max compatibility mode. Slower and
-            may require a larger builder sandbox disk.
+        docker_compat: Use Docker/BuildKit max compatibility mode (import is
+            slower and uses more memory and disk space on builder sandbox).
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
         emit: Callback invoked for each build event. Takes precedence over
             ``verbose``.

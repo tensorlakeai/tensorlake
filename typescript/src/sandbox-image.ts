@@ -25,6 +25,10 @@ export interface CreateSandboxImageOptions {
   builderDiskMb?: number;
   isPublic?: boolean;
   contextDir?: string;
+  /**
+   * Use Docker/BuildKit max compatibility mode (build is slower and uses more
+   * memory and disk space on builder sandbox).
+   */
   dockerCompat?: boolean;
   /**
    * Print build progress to stderr. Ignored when an explicit `emit` is
@@ -46,6 +50,10 @@ export interface ImportSandboxImageOptions {
   diskMb?: number;
   builderDiskMb?: number;
   isPublic?: boolean;
+  /**
+   * Use Docker/BuildKit max compatibility mode (import is slower and uses more
+   * memory and disk space on builder sandbox).
+   */
   dockerCompat?: boolean;
   /**
    * Print build progress to stderr. Ignored when an explicit `emit` is
