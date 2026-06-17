@@ -99,6 +99,10 @@ enum InitializationFailureReason {
 message InitializeResponse {
     optional InitializationOutcomeCode outcome_code = 1;
     optional InitializationFailureReason failure_reason = 2;
+    // Customer-visible and human-readable when failure_reason is
+    // INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR. Other failure reasons are
+    // diagnostic and not guaranteed to be suitable for customer display.
+    optional string error_message = 3;
 }
 
 message ListAllocationsRequest {}
