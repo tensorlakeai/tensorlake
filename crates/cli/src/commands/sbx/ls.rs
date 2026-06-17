@@ -19,7 +19,10 @@ pub async fn run(
     }
 
     let client = ctx.client()?;
-    let url = sandbox_endpoint(ctx, "sandboxes");
+    let mut url = sandbox_endpoint(ctx, "sandboxes");
+    if running_only {
+        url = url_with_query_param(&url, "status", "running");
+    }
 
     let mut count = 0usize;
     let mut terminated_hidden = 0usize;
@@ -518,6 +521,22 @@ mod tests {
             Some(
                 "https://sandbox.tensorlake.ai/archived-sandboxes?limit=100&cursor=abc".to_string()
             )
+        );
+    }
+
+    #[test]
+    fn top_level_next_cursor_preserves_running_status_filter() {
+        let body = json!({
+            "sandboxes": [],
+            "next_cursor": "abc"
+        });
+
+        assert_eq!(
+            next_sandbox_list_url(
+                "https://sandbox.tensorlake.ai/sandboxes?status=running",
+                &body
+            ),
+            Some("https://sandbox.tensorlake.ai/sandboxes?status=running&cursor=abc".to_string())
         );
     }
 
