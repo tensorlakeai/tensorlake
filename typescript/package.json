@@ -69,6 +69,12 @@
     "vitest": "^2.0.0"
   },
   "dependencies": {
+    "picomatch": "4.0.4",
+    "esbuild": "0.28.1",
+    "vite": "6.4.3",
+    "postcss": "8.5.10",
+    "js-yaml": "4.2.0",
+    "ws": "8.21.0",
     "undici": "8.3.0",
     "ws": "^8.20.0"
   }
