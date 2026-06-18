@@ -2467,7 +2467,7 @@ mod tests {
         let prepared = PreparedSandboxTemplateBuild {
             build_id: "build-1".to_string(),
             snapshot_id: "snapshot-1".to_string(),
-            snapshot_uri: "s3://bucket/projects/p/sandbox-template-builds/b/snapshot-1.ext4"
+            snapshot_uri: "s3://bucket/projects/p/sandbox-template-builds/b/snapshot-1.pack"
                 .to_string(),
             rootfs_node_kind: "base".to_string(),
             rootfs_format: Some("cas-streaming".to_string()),
@@ -2480,13 +2480,14 @@ mod tests {
             },
             parent: None,
         };
-        // ext4-everywhere: the builder uploads a plain ext4 image and reports
-        // only the staged-artifact kind + declared sizes; the registered
-        // identity (tlsnap URI + image digest) comes from the platform's
-        // trusted verify-and-admit, not the builder.
+        // ext4-everywhere: the builder structure-chunks on its own CPUs and
+        // stages a candidate manifest + content pack, reporting only the
+        // staged-artifact kind + declared sizes; the registered identity (tlsnap
+        // URI + image digest) comes from the platform's trusted verify-and-admit,
+        // not the builder.
         let metadata = json!({
             "rootfsFormat": "cas-streaming",
-            "stagedArtifact": "ext4-image",
+            "stagedArtifact": "chunked-ext4",
             "snapshotId": "snapshot-1",
             "imageSizeBytes": 600_000_000u64,
         });
