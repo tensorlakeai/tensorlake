@@ -70,6 +70,11 @@
   },
   "dependencies": {
     "undici": "8.3.0",
-    "ws": "^8.20.0"
+    "ws": "^8.21.0",
+    "picomatch": "^4.0.4",
+    "esbuild": "^0.28.1",
+    "vite": "^6.4.3",
+    "postcss": "^8.5.10",
+    "vitest": "^3.2.6"
   }
 }
