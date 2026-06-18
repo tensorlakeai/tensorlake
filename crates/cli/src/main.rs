@@ -648,14 +648,14 @@ enum ImageCommands {
         public: bool,
 
         /// Print the registered sandbox image JSON response to stdout
-        #[arg(long = "json", hide = true)]
+        #[arg(long = "json")]
         json: bool,
     },
 
     /// List all sandbox images
     Ls {
         /// Print the sandbox image list as JSON to stdout
-        #[arg(long = "json", hide = true)]
+        #[arg(long = "json")]
         json: bool,
     },
 
