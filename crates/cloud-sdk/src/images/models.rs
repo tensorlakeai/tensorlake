@@ -399,16 +399,21 @@ impl Image {
             lines.push(render_build_operation(op));
         }
 
-        if sdk_version.starts_with("~=")
+        let tensorlake_spec = if sdk_version.starts_with("~=")
             || sdk_version.starts_with(">=")
             || sdk_version.starts_with("<=")
             || sdk_version.starts_with("!=")
             || sdk_version.starts_with("==")
         {
-            lines.push(format!("RUN pip install tensorlake{}", sdk_version));
+            format!("tensorlake{sdk_version}")
         } else {
-            lines.push(format!("RUN pip install tensorlake=={}", sdk_version));
-        }
+            format!("tensorlake=={sdk_version}")
+        };
+        lines.push("USER root".to_string());
+        let install_command = format!(
+            "RUN PIP_USER=false python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir {tensorlake_spec} && test -x /usr/local/bin/function-executor"
+        );
+        lines.push(install_command);
 
         lines.join("\n")
     }
@@ -662,6 +667,28 @@ mod tests {
         assert_eq!(
             rendered,
             "COPY --chmod=755 --chown=1000:1000 --from=builder src/ /app/"
+        );
+    }
+
+    #[test]
+    fn test_dockerfile_installs_sdk_with_python3_module_pip() {
+        let image = Image::builder()
+            .name("test")
+            .base_image("tensorlake/ubuntu-minimal")
+            .build()
+            .unwrap();
+
+        let dockerfile = image.dockerfile_content("1.2.3", None);
+        assert!(dockerfile.contains("python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir tensorlake==1.2.3"));
+        assert!(!dockerfile.contains("--prefix=/usr/local"));
+        assert!(!dockerfile.contains("sudo"));
+        assert!(!dockerfile.contains("id -u"));
+        assert!(dockerfile.contains("\nUSER root\nRUN PIP_USER=false python3 -m pip install"));
+        assert!(dockerfile.contains("&& test -x /usr/local/bin/function-executor"));
+        assert!(
+            image
+                .dockerfile_content(">=1.2.3", None)
+                .contains("python3 -m pip install --break-system-packages --force-reinstall --no-cache-dir tensorlake>=1.2.3")
         );
     }
 

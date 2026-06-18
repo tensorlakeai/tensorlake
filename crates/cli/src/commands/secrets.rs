@@ -1,4 +1,5 @@
 use comfy_table::Cell;
+use std::path::Path;
 use tensorlake::error::SdkError;
 use tensorlake::secrets::SecretsClient;
 use tensorlake::secrets::models::{
@@ -37,7 +38,44 @@ pub async fn list(ctx: &CliContext) -> Result<()> {
     Ok(())
 }
 
-pub async fn set(ctx: &CliContext, pairs: &[String]) -> Result<()> {
+pub async fn set(ctx: &CliContext, env_file: Option<&Path>, pairs: &[String]) -> Result<()> {
+    let mut entries = Vec::new();
+    if let Some(path) = env_file {
+        entries.extend(read_env_file(path)?);
+    }
+    entries.extend(pairs.iter().cloned());
+
+    if entries.is_empty() {
+        return Err(CliError::usage(
+            "provide at least one secret as KEY=VALUE or pass --env-file",
+        ));
+    }
+
+    let upsert_secrets = parse_secret_pairs(&entries)?;
+
+    let (organization_id, project_id) = org_and_project(ctx)?;
+    let request = UpsertSecretRequest::builder()
+        .organization_id(organization_id)
+        .project_id(project_id)
+        .secrets(UpsertSecret::Multiple(upsert_secrets.clone()))
+        .build()
+        .map_err(|e| CliError::usage(e.to_string()))?;
+
+    secrets_client(ctx)?
+        .upsert(request)
+        .await
+        .map_err(map_set_sdk_error)?;
+
+    let count = upsert_secrets.len();
+    if count == 1 {
+        println!("1 secret set");
+    } else {
+        println!("{} secrets set", count);
+    }
+    Ok(())
+}
+
+fn parse_secret_pairs(pairs: &[String]) -> Result<Vec<NewSecret>> {
     let mut upsert_secrets: Vec<NewSecret> = Vec::new();
     let mut seen_names = std::collections::HashSet::new();
 
@@ -70,26 +108,19 @@ pub async fn set(ctx: &CliContext, pairs: &[String]) -> Result<()> {
         });
     }
 
-    let (organization_id, project_id) = org_and_project(ctx)?;
-    let request = UpsertSecretRequest::builder()
-        .organization_id(organization_id)
-        .project_id(project_id)
-        .secrets(UpsertSecret::Multiple(upsert_secrets.clone()))
-        .build()
-        .map_err(|e| CliError::usage(e.to_string()))?;
+    Ok(upsert_secrets)
+}
 
-    secrets_client(ctx)?
-        .upsert(request)
-        .await
-        .map_err(map_set_sdk_error)?;
-
-    let count = upsert_secrets.len();
-    if count == 1 {
-        println!("1 secret set");
-    } else {
-        println!("{} secrets set", count);
-    }
-    Ok(())
+fn read_env_file(path: &Path) -> Result<Vec<String>> {
+    let variables = env_file_reader::read_file(path).map_err(|e| {
+        CliError::usage(format!("failed to read env file {}: {}", path.display(), e))
+    })?;
+    let mut pairs = variables
+        .into_iter()
+        .map(|(name, value)| format!("{}={}", name, value))
+        .collect::<Vec<_>>();
+    pairs.sort();
+    Ok(pairs)
 }
 
 pub async fn unset(ctx: &CliContext, names: &[String]) -> Result<()> {
@@ -247,7 +278,7 @@ fn map_unset_sdk_error(error: SdkError) -> CliError {
 
 #[cfg(test)]
 mod tests {
-    use super::secrets_http_client;
+    use super::{parse_secret_pairs, read_env_file, secrets_http_client};
     use crate::auth::context::CliContext;
     use crate::config::resolver::ResolvedConfig;
     use std::io::{Read, Write};
@@ -271,7 +302,6 @@ mod tests {
             organization_id: organization_id.map(str::to_string),
             project_id: project_id.map(str::to_string),
             debug: false,
-            show_trace_id: false,
         })
     }
 
@@ -346,5 +376,48 @@ mod tests {
         );
         assert!(!raw_request.contains("x-forwarded-organization-id:"));
         assert!(!raw_request.contains("x-forwarded-project-id:"));
+    }
+
+    #[test]
+    fn read_env_file_returns_secret_pairs() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(".env");
+        std::fs::write(
+            &path,
+            "
+            # ignored
+            export SECRET_B=two
+            SECRET_A=one
+            SECRET_EMPTY=
+            ",
+        )
+        .unwrap();
+
+        let pairs = read_env_file(&path).unwrap();
+
+        assert_eq!(
+            pairs,
+            vec![
+                "SECRET_A=one".to_string(),
+                "SECRET_B=two".to_string(),
+                "SECRET_EMPTY=".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_secret_pairs_rejects_duplicates_across_sources() {
+        let pairs = vec![
+            "FROM_FILE=value".to_string(),
+            "FROM_FILE=override".to_string(),
+        ];
+
+        let error = parse_secret_pairs(&pairs).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate secret name: FROM_FILE")
+        );
     }
 }

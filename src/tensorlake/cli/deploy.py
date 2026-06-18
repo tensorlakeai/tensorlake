@@ -4,10 +4,14 @@ import json
 import os
 import sys
 import traceback
-from urllib.parse import urlparse
+from dataclasses import dataclass
+from pathlib import Path
 
-from tensorlake.applications import Function, SDKUsageError, TensorlakeError
-from tensorlake.applications.applications import filter_applications
+from tensorlake.applications import Function, Image, SDKUsageError, TensorlakeError
+from tensorlake.applications.applications import (
+    filter_applications,
+    functions_for_application,
+)
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.curl_command import example_application_curl_command
@@ -19,13 +23,19 @@ from tensorlake.applications.validation import (
     has_error_message,
     validate_loaded_applications,
 )
-from tensorlake.builder import collect_application_build_request
-from tensorlake.builder.client_v2 import (
-    ApplicationImageBuildError,
-    ImageBuilderV2Client,
-)
-from tensorlake.builder.client_v3 import ImageBuilderV3Client
 from tensorlake.cli._common import Context
+from tensorlake.image.sandbox_builder import (
+    SandboxImageBuildError,
+    build_sandbox_application_image,
+)
+
+_DEFAULT_APPLICATION_IMAGE_NAME = "default"
+
+
+@dataclass(frozen=True)
+class _ApplicationImageBuild:
+    image: Image
+    registered_name: str
 
 
 def _emit(obj):
@@ -121,34 +131,9 @@ def _onprem_enabled() -> bool:
     }
 
 
-def mk_builder(version: str, auth: Context):
-    default_build_service_path = (
-        "/images/v3/applications" if version == "v3" else "/images/v2"
-    )
-    build_service = (
-        os.getenv("TENSORLAKE_BUILD_SERVICE")
-        or f"{auth.api_url}{default_build_service_path}"
-    )
-    parsed = urlparse(build_service)
-    build_service_path = parsed.path.rstrip("/") or default_build_service_path
-    if version == "v3":
-        return ImageBuilderV3Client(
-            cloud_client=auth.cloud_client,
-            build_service_path=build_service_path,
-        )
-    return ImageBuilderV2Client(
-        cloud_client=auth.cloud_client,
-        build_service_path=build_service_path,
-        on_build_start=lambda image, _function_name: _emit(
-            {"type": "build_start", "image": image.name}
-        ),
-    )
-
-
 def deploy(
     application_file_path: str,
     upgrade_running_requests: bool,
-    image_builder_version: str = "v3",
     build_envs: list[tuple[str, str]] | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
@@ -214,9 +199,14 @@ def deploy(
     if missing:
         _emit({"type": "missing_secrets", "count": len(missing), "names": missing})
 
-    builder = mk_builder(image_builder_version, auth)
     try:
-        asyncio.run(_prepare_images(builder, functions, build_envs))
+        asyncio.run(
+            _prepare_images(
+                functions,
+                context_dir=str(Path(application_file_path).parent),
+                build_envs=build_envs,
+            )
+        )
     except KeyboardInterrupt:
         _emit({"type": "error", "message": "build cancelled by user"})
         sys.exit(1)
@@ -234,34 +224,99 @@ def deploy(
 
 
 async def _prepare_images(
-    builder,
     functions: list[Function],
+    context_dir: str,
     build_envs: list[tuple[str, str]] | None = None,
 ):
-    for application in filter_applications(functions):
+    image_builds = _application_images(functions)
+    for image_build in image_builds:
+        image = image_build.image
+        image_name = image_build.registered_name
+        _emit({"type": "build_start", "image": image_name})
         try:
-            await builder.build(
-                collect_application_build_request(
-                    application,
-                    functions,
-                    build_env_vars=build_envs,
-                )
+            await asyncio.to_thread(
+                build_sandbox_application_image,
+                image,
+                registered_name=image_name,
+                build_env_vars=build_envs,
+                context_dir=context_dir,
+                emit=_emit,
             )
         except (asyncio.CancelledError, KeyboardInterrupt) as error:
             raise error
-        except ApplicationImageBuildError as error:
+        except SandboxImageBuildError as error:
             _emit(
                 {
                     "type": "build_failed",
-                    "image": error.image_name,
-                    "error": _format_build_failure_message(
-                        error.image_name, error.error
-                    ),
+                    "image": image_name,
+                    "error": _format_build_failure_message(image_name, error),
                 }
             )
             sys.exit(1)
 
     _emit({"type": "build_done"})
+
+
+def default_application_image_name(
+    application_name: str, application_version: str
+) -> str:
+    return f"applications/{application_name}/versions/{application_version}/default"
+
+
+def _append_image_build(
+    image_builds: list[_ApplicationImageBuild],
+    seen_image_ids: set[str],
+    seen_registered_names: dict[str, str],
+    image: Image,
+    registered_name: str,
+) -> None:
+    previous_image_id = seen_registered_names.get(registered_name)
+    if previous_image_id is not None and previous_image_id != image._id:
+        raise SDKUsageError(
+            f"multiple different Image objects use the name '{registered_name}'. "
+            "Use unique Image(name=...) values so each function resolves "
+            "to the intended sandbox image."
+        )
+    seen_registered_names[registered_name] = image._id
+    if image._id in seen_image_ids:
+        return
+    seen_image_ids.add(image._id)
+    image_builds.append(
+        _ApplicationImageBuild(image=image, registered_name=registered_name)
+    )
+
+
+def _application_images(functions: list[Function]) -> list[_ApplicationImageBuild]:
+    image_builds: list[_ApplicationImageBuild] = []
+    seen_image_ids: set[str] = set()
+    seen_image_names: dict[str, str] = {}
+    for application in filter_applications(functions):
+        default_image: Image | None = None
+        default_registered_name = default_application_image_name(
+            application._function_config.function_name,
+            application._application_config.version,
+        )
+        for function in functions_for_application(application, functions):
+            image = function._function_config.image
+            if image is None:
+                if default_image is None:
+                    default_image = Image(name=_DEFAULT_APPLICATION_IMAGE_NAME)
+                _append_image_build(
+                    image_builds,
+                    seen_image_ids,
+                    seen_image_names,
+                    default_image,
+                    default_registered_name,
+                )
+                continue
+            _append_image_build(
+                image_builds,
+                seen_image_ids,
+                seen_image_names,
+                image,
+                image.name,
+            )
+    return image_builds
 
 
 def _deploy_applications(
@@ -330,12 +385,6 @@ def deploy_entrypoint():
         help="Upgrade requests that are already queued or running",
     )
     parser.add_argument(
-        "--image-builder-version",
-        choices=["v2", "v3"],
-        default="v3",
-        help="Select image builder version",
-    )
-    parser.add_argument(
         "--build-env",
         action="append",
         default=[],
@@ -348,7 +397,6 @@ def deploy_entrypoint():
         deploy(
             application_file_path=args.application_file_path,
             upgrade_running_requests=args.upgrade_running_requests,
-            image_builder_version=args.image_builder_version,
             build_envs=_parse_build_envs(args.build_env),
         )
     except SystemExit:

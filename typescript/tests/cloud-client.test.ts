@@ -99,6 +99,121 @@ describe("CloudClient", () => {
     client.close();
   });
 
+  it("deletes sandbox images through the namespaced image route", async () => {
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8900/v1/namespaces/default/sandbox-images/tensorlake%2Ftest%3A1",
+      );
+      expect(init?.method).toBe("DELETE");
+      return new Response(null, { status: 204 });
+    });
+
+    const client = new CloudClient({ apiUrl: "http://localhost:8900" });
+    await client.deleteSandboxImage("tensorlake/test:1");
+    client.close();
+  });
+
+  it("finds a sandbox image by name through the platform templates route", async () => {
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/sandbox-templates/by-name/tensorlake%2Ftest%3A1",
+      );
+      expect(init?.method).toBe("GET");
+      // The platform API emits snake_case keys; the client must convert them.
+      return new Response(
+        JSON.stringify({
+          id: "tpl-1",
+          name: "tensorlake/test:1",
+          snapshot_id: "snap-1",
+          rootfs_disk_bytes: 1024,
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const client = new CloudClient({
+      apiUrl: "http://localhost:8900",
+      organizationId: "org-1",
+      projectId: "proj-1",
+    });
+    const template = await client.findSandboxImageByName("tensorlake/test:1");
+    expect(template).toEqual({
+      id: "tpl-1",
+      name: "tensorlake/test:1",
+      snapshotId: "snap-1",
+      rootfsDiskBytes: 1024,
+    });
+    client.close();
+  });
+
+  it("returns null when a sandbox image is not found", async () => {
+    mockFetch(
+      () => new Response(JSON.stringify({ message: "not found" }), { status: 404 }),
+    );
+
+    const client = new CloudClient({
+      apiUrl: "http://localhost:8900",
+      organizationId: "org-1",
+      projectId: "proj-1",
+    });
+    const template = await client.findSandboxImageByName("missing");
+    expect(template).toBeNull();
+    client.close();
+  });
+
+  it("lists sandbox images following pagination through the platform route", async () => {
+    const base =
+      "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/sandbox-templates";
+    const requested: string[] = [];
+    mockFetch((url) => {
+      requested.push(url);
+      // The platform API emits snake_case keys; the client must convert them.
+      if (url === `${base}?pageSize=100`) {
+        return new Response(
+          JSON.stringify({
+            items: [
+              { id: "tpl-1", name: "image-a", snapshot_id: "snap-a", rootfs_disk_bytes: 1 },
+              { id: "tpl-2", name: "image-b", snapshot_id: "snap-b", rootfs_disk_bytes: 2 },
+            ],
+            pagination: { next: `${base}?pageSize=100&cursor=abc` },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          items: [{ id: "tpl-3", name: "image-c", snapshot_id: "snap-c", rootfs_disk_bytes: 3 }],
+          pagination: { next: null },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const client = new CloudClient({
+      apiUrl: "http://localhost:8900",
+      organizationId: "org-1",
+      projectId: "proj-1",
+    });
+    const images = await client.listSandboxImages();
+    expect(images.map((image) => image.name)).toEqual([
+      "image-a",
+      "image-b",
+      "image-c",
+    ]);
+    // Confirm snake_case keys from each page were converted to camelCase.
+    expect(images.map((image) => image.snapshotId)).toEqual([
+      "snap-a",
+      "snap-b",
+      "snap-c",
+    ]);
+    expect(images.map((image) => image.rootfsDiskBytes)).toEqual([1, 2, 3]);
+    expect(requested).toEqual([
+      `${base}?pageSize=100`,
+      `${base}?pageSize=100&cursor=abc`,
+    ]);
+    client.close();
+  });
+
   it("streams build logs as camel-cased events", async () => {
     mockFetch(() =>
       new Response(

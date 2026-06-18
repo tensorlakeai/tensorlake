@@ -23,6 +23,7 @@ from .exceptions import (
 from .models import (
     CheckpointType,
     CommandResult,
+    CopySandboxResponse,
     DaemonInfo,
     HealthResponse,
     ListDirectoryResponse,
@@ -30,9 +31,11 @@ from .models import (
     OutputEvent,
     OutputMode,
     OutputResponse,
+    ProcessHealthCheck,
     ProcessInfo,
     ProcessUser,
     ProcessUserSpec,
+    RestartPolicyConfig,
     SandboxInfo,
     SandboxStatus,
     SendSignalResponse,
@@ -132,6 +135,7 @@ class Sandbox:
         *,
         sandbox_id: str | None = None,
         routing_hint: str | None = None,
+        request_timeout: float | None = None,
         _proxy_rust_client: object | None = None,
     ):
         if identifier and sandbox_id and identifier != sandbox_id:
@@ -154,6 +158,7 @@ class Sandbox:
         self._api_key = api_key
         self._organization_id = organization_id
         self._project_id = project_id
+        self._request_timeout = request_timeout
         parsed_proxy = urlparse(proxy_url)
         self._host_header = None
         if parsed_proxy.hostname in ("localhost", "127.0.0.1"):
@@ -180,15 +185,18 @@ class Sandbox:
             )
         else:
             try:
-                self._rust_client = RustCloudSandboxProxyClient(
-                    proxy_url=proxy_url,
-                    sandbox_id=sandbox_identifier,
-                    api_key=api_key,
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    routing_hint=routing_hint,
-                    user_agent=USER_AGENT,
-                )
+                kwargs = {
+                    "proxy_url": proxy_url,
+                    "sandbox_id": sandbox_identifier,
+                    "api_key": api_key,
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "routing_hint": routing_hint,
+                    "user_agent": USER_AGENT,
+                }
+                if request_timeout is not None:
+                    kwargs["request_timeout_sec"] = request_timeout
+                self._rust_client = RustCloudSandboxProxyClient(**kwargs)
                 self._base_url = self._rust_client.base_url()
             except Exception as e:
                 _raise_as_sandbox_error(e)
@@ -202,7 +210,8 @@ class Sandbox:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -211,7 +220,8 @@ class Sandbox:
         pool_id: str | None = None,
         snapshot_id: str | None = None,
         proxy_url: str | None = None,
-        startup_timeout: float = 60,
+        request_timeout: float | None = None,
+        startup_timeout: float | None = None,
         name: str | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
@@ -231,7 +241,9 @@ class Sandbox:
             memory_mb: Memory in megabytes.
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
-            secret_names: List of secret names to inject.
+            gpus: Number of GPUs to allocate. When provided, defaults to
+                ``A10`` unless ``gpu_model`` is set.
+            gpu_model: GPU model to allocate. Only ``A10`` is supported.
             timeout_secs: Sandbox timeout in seconds.
             entrypoint: Custom entrypoint command.
             allow_internet_access: If True (default), outbound traffic is allowed.
@@ -240,7 +252,8 @@ class Sandbox:
             pool_id: Pool ID to claim a warm container from.
             snapshot_id: Restore from this snapshot ID.
             proxy_url: Override the sandbox proxy URL.
-            startup_timeout: Max seconds to wait for Running status (default 60).
+            request_timeout: Max seconds to wait for HTTP operations.
+            startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name; named sandboxes support suspend/resume.
             api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
             api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
@@ -256,12 +269,22 @@ class Sandbox:
         """
         from .client import SandboxClient
 
+        effective_request_timeout = (
+            startup_timeout
+            if startup_timeout is not None
+            else (
+                request_timeout
+                if request_timeout is not None
+                else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+            )
+        )
         client = SandboxClient(
             api_url=api_url,
             api_key=api_key,
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=effective_request_timeout,
             _internal=True,
         )
         return client.create_and_connect(
@@ -269,7 +292,8 @@ class Sandbox:
             cpus=cpus,
             memory_mb=memory_mb,
             disk_mb=disk_mb,
-            secret_names=secret_names,
+            gpus=gpus,
+            gpu_model=gpu_model,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             allow_internet_access=allow_internet_access,
@@ -278,7 +302,7 @@ class Sandbox:
             pool_id=pool_id,
             snapshot_id=snapshot_id,
             proxy_url=proxy_url,
-            startup_timeout=startup_timeout,
+            request_timeout=effective_request_timeout,
             name=name,
         )
 
@@ -294,12 +318,13 @@ class Sandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        request_timeout: float | None = None,
     ) -> "Sandbox":
         """Attach to an existing sandbox and return a connected handle.
 
-        Returns immediately without contacting the server. Call ``sandbox.info()``
-        to fetch the current state on demand.  Does **not** auto-resume a
-        suspended sandbox — call ``sandbox.resume()`` explicitly.
+        When ``proxy_url`` is omitted, resolves the sandbox first so the handle
+        uses the correct cloud/region ingress endpoint. Does **not** auto-resume
+        a suspended sandbox — call ``sandbox.resume()`` explicitly.
 
         Args:
             sandbox_id: ID or name of the sandbox to attach to.
@@ -322,12 +347,18 @@ class Sandbox:
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=(
+                request_timeout
+                if request_timeout is not None
+                else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+            ),
             _internal=True,
         )
         return client.connect(
             sandbox_id,
             proxy_url=proxy_url,
             routing_hint=routing_hint,
+            request_timeout=request_timeout,
         )
 
     # --- Class-level snapshot management ---
@@ -341,6 +372,7 @@ class Sandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> SnapshotInfo:
         """Get information about a snapshot by ID.
 
@@ -365,6 +397,7 @@ class Sandbox:
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=request_timeout,
             _internal=True,
         )
         return client.get_snapshot(snapshot_id).value
@@ -378,6 +411,7 @@ class Sandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> None:
         """Delete a snapshot by ID.
 
@@ -399,6 +433,7 @@ class Sandbox:
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=request_timeout,
             _internal=True,
         )
         client.delete_snapshot(snapshot_id)
@@ -411,6 +446,7 @@ class Sandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> TracedIterator[SandboxInfo]:
         """List all sandboxes in the namespace.
 
@@ -434,6 +470,7 @@ class Sandbox:
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=request_timeout,
             _internal=True,
         )
         return client.list()
@@ -497,6 +534,29 @@ class Sandbox:
         self._require_lifecycle_client("resume")
         self._lifecycle_client.resume(
             self.sandbox_id, wait=wait, timeout=timeout, poll_interval=poll_interval
+        )
+
+    def copy(
+        self,
+        *,
+        times: int = 1,
+        request_timeout: float | None = None,
+    ) -> Traced[CopySandboxResponse]:
+        """Live-copy this running sandbox.
+
+        Args:
+            times: Number of running copies to create. Must be at least 1.
+            request_timeout: Optional HTTP request timeout in seconds for this
+                blocking copy request.
+
+        Returns:
+            Traced[CopySandboxResponse] with copy results.
+        """
+        self._require_lifecycle_client("copy")
+        return self._lifecycle_client.copy(
+            self._lifecycle_identifier(),
+            times=times,
+            request_timeout=request_timeout,
         )
 
     def checkpoint(
@@ -711,8 +771,13 @@ class Sandbox:
 
     @staticmethod
     def _normalize_process_user(
-        user: ProcessUser,
+        user: ProcessUser | None,
     ) -> str | dict[str, Any] | None:
+        if user is None:
+            # Caller did not request a specific user: omit the field so the
+            # sandbox resolves the image's configured user (e.g. the image
+            # ``USER`` directive, falling back to root).
+            return None
         if isinstance(user, str):
             value = user
         elif isinstance(user, ProcessUserSpec):
@@ -741,6 +806,44 @@ class Sandbox:
             raise SandboxError("process user name must not be empty")
         return payload
 
+    @staticmethod
+    def _normalize_restart_config(
+        restart: RestartPolicyConfig | Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if restart is None:
+            return None
+        try:
+            if isinstance(restart, RestartPolicyConfig):
+                config = restart
+            elif isinstance(restart, Mapping):
+                config = RestartPolicyConfig.model_validate(dict(restart))
+            else:
+                raise SandboxError(
+                    "process restart must be a RestartPolicyConfig or dict"
+                )
+        except ValidationError as exc:
+            raise SandboxError(f"invalid process restart config: {exc}") from exc
+        return config.model_dump(mode="json", exclude_none=True)
+
+    @staticmethod
+    def _normalize_health_check(
+        health_check: ProcessHealthCheck | Mapping[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if health_check is None:
+            return None
+        try:
+            if isinstance(health_check, ProcessHealthCheck):
+                config = health_check
+            elif isinstance(health_check, Mapping):
+                config = ProcessHealthCheck.model_validate(dict(health_check))
+            else:
+                raise SandboxError(
+                    "process health_check must be a ProcessHealthCheck or dict"
+                )
+        except ValidationError as exc:
+            raise SandboxError(f"invalid process health_check config: {exc}") from exc
+        return config.model_dump(mode="json", exclude_none=True)
+
     # --- High-level convenience ---
 
     def run(
@@ -750,7 +853,7 @@ class Sandbox:
         env: dict[str, str] | None = None,
         working_dir: str | None = None,
         timeout: float | None = None,
-        user: ProcessUser = "tl-user",
+        user: ProcessUser | None = None,
     ) -> Traced[CommandResult]:
         """Run a command to completion and return its output.
 
@@ -764,9 +867,10 @@ class Sandbox:
             env: Environment variables
             working_dir: Working directory
             timeout: Maximum seconds to wait (enforced server-side; None = no limit)
-            user: Process user. Defaults to ``"tl-user"``. Pass a username
-                such as ``"root"``, a Docker-style id string like ``"1000:1000"``,
-                or ``ProcessUserSpec(uid=1000, gid=1000)``.
+            user: Process user. Defaults to ``None``, which runs as the image's
+                configured user (the image ``USER`` directive, falling back to
+                root). Pass a username such as ``"root"``, a Docker-style id
+                string like ``"1000:1000"``, or ``ProcessUserSpec(uid=1000, gid=1000)``.
 
         Returns:
             Traced[CommandResult] — access ``.trace_id`` for the W3C trace ID
@@ -832,7 +936,10 @@ class Sandbox:
         stdin_mode: StdinMode = StdinMode.CLOSED,
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
-        user: ProcessUser = "tl-user",
+        user: ProcessUser | None = None,
+        name: str | None = None,
+        restart: RestartPolicyConfig | Mapping[str, Any] | None = None,
+        health_check: ProcessHealthCheck | Mapping[str, Any] | None = None,
     ) -> Traced[ProcessInfo]:
         """Start a new process in the sandbox.
 
@@ -844,15 +951,24 @@ class Sandbox:
             stdin_mode: StdinMode.CLOSED or StdinMode.PIPE
             stdout_mode: OutputMode.CAPTURE or OutputMode.DISCARD
             stderr_mode: OutputMode.CAPTURE or OutputMode.DISCARD
-            user: Process user. Defaults to ``"tl-user"``. Pass a username
-                such as ``"root"``, a Docker-style id string like ``"1000:1000"``,
-                or ``ProcessUserSpec(uid=1000, gid=1000)``.
+            user: Process user. Defaults to ``None``, which runs as the image's
+                configured user (the image ``USER`` directive, falling back to
+                root). Pass a username such as ``"root"``, a Docker-style id
+                string like ``"1000:1000"``, or ``ProcessUserSpec(uid=1000, gid=1000)``.
+            name: Optional managed-process name. Supplying this opts the process
+                into daemon management.
+            restart: Optional restart policy. Supplying this opts the process
+                into daemon management.
+            health_check: Optional HTTP or TCP health check. Supplying this opts
+                the process into daemon management.
 
         Returns:
             Traced[ProcessInfo] — access ``.trace_id`` for the W3C trace ID
             and ``.pid`` / ``.status`` directly (or via ``.value``).
         """
         process_user = self._normalize_process_user(user)
+        restart_payload = self._normalize_restart_config(restart)
+        health_check_payload = self._normalize_health_check(health_check)
         payload = self._build_command_payload(
             command,
             args,
@@ -862,6 +978,9 @@ class Sandbox:
             stdout_mode=stdout_mode if stdout_mode != OutputMode.CAPTURE else None,
             stderr_mode=stderr_mode if stderr_mode != OutputMode.CAPTURE else None,
             user=process_user,
+            name=name,
+            restart=restart_payload,
+            health_check=health_check_payload,
         )
 
         try:
@@ -894,6 +1013,14 @@ class Sandbox:
         try:
             trace_id = self._rust_client.kill_process(pid=pid)
             return Traced(trace_id, None)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def restart_process(self, pid: int) -> Traced[ProcessInfo]:
+        """Restart a managed process by PID."""
+        try:
+            trace_id, response_json = self._rust_client.restart_process_json(pid=pid)
+            return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 

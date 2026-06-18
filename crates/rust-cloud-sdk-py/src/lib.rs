@@ -24,6 +24,7 @@ use tensorlake::document_ai::DocumentAiClient;
 use tensorlake::images::ImagesClient;
 use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
 use tensorlake::sandbox_images::SandboxImageBuildEvent;
+use tensorlake::sandbox_templates::SandboxTemplatesClient;
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, CreateSandboxRequest, ListArchivedSandboxesParams,
     SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
@@ -38,7 +39,7 @@ create_exception!(_cloud_sdk, CloudApiClientError, PyException);
 create_exception!(_cloud_sdk, CloudSandboxClientError, PyException);
 create_exception!(_cloud_sdk, CloudDocumentAIClientError, PyException);
 
-const DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: f64 = 5.0;
+const DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: f64 = 300.0;
 
 // Single tokio runtime for the whole process: pyo3-async-runtimes' runtime,
 // which `future_into_py` already drives. Routing sync `block_on` through here
@@ -136,6 +137,63 @@ impl CloudApiClient {
                 let request = client.request(Method::DELETE, &path).build()?;
                 let _response = client.execute(request).await?;
                 Ok(())
+            }
+        })
+    }
+
+    fn delete_sandbox_image(&self, image_name: String) -> PyResult<()> {
+        let namespace = self.namespace.clone();
+        self.run_with_retry(5, move |client| {
+            let encoded_image = urlencoding::encode(&image_name).into_owned();
+            let path = format!("/v1/namespaces/{namespace}/sandbox-images/{encoded_image}");
+            async move {
+                let request = client.request(Method::DELETE, &path).build()?;
+                let _response = client.execute(request).await?;
+                Ok(())
+            }
+        })
+    }
+
+    /// Look up a registered sandbox image (template) by name.
+    ///
+    /// Returns the template JSON, or `None` when no image with that name
+    /// exists. Routed through the platform sandbox-templates API, which
+    /// requires the organization/project scope passed here.
+    fn find_sandbox_image_by_name(
+        &self,
+        organization_id: String,
+        project_id: String,
+        image_name: String,
+    ) -> PyResult<Option<String>> {
+        self.run_with_retry(5, move |client| {
+            let organization_id = organization_id.clone();
+            let project_id = project_id.clone();
+            let image_name = image_name.clone();
+            async move {
+                let templates = SandboxTemplatesClient::new(client, organization_id, project_id);
+                match templates.find_by_name(&image_name).await? {
+                    Some(traced) => {
+                        let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                        Ok(Some(json))
+                    }
+                    None => Ok(None),
+                }
+            }
+        })
+    }
+
+    /// List all registered sandbox images (templates) for the given scope.
+    ///
+    /// Returns a JSON array of templates. Routed through the platform
+    /// sandbox-templates API, which requires the organization/project scope.
+    fn list_sandbox_images(&self, organization_id: String, project_id: String) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let organization_id = organization_id.clone();
+            let project_id = project_id.clone();
+            async move {
+                let templates = SandboxTemplatesClient::new(client, organization_id, project_id);
+                let traced = templates.list().await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
             }
         })
     }
@@ -388,7 +446,7 @@ impl CloudApiClient {
                 let response = images_client
                     .create_application_build(&build_service_path, &request, &image_contexts)
                     .await?;
-                Ok(serde_json::to_string(&*response).map_err(SdkError::from)?)
+                serde_json::to_string(&*response).map_err(SdkError::from)
             }
         })
     }
@@ -406,7 +464,7 @@ impl CloudApiClient {
                 let response = images_client
                     .application_build_info(&build_service_path, &application_build_id)
                     .await?;
-                Ok(serde_json::to_string(&*response).map_err(SdkError::from)?)
+                serde_json::to_string(&*response).map_err(SdkError::from)
             }
         })
     }
@@ -424,7 +482,7 @@ impl CloudApiClient {
                 let response = images_client
                     .cancel_application_build(&build_service_path, &application_build_id)
                     .await?;
-                Ok(serde_json::to_string(&*response).map_err(SdkError::from)?)
+                serde_json::to_string(&*response).map_err(SdkError::from)
             }
         })
     }
@@ -538,7 +596,7 @@ pub struct CloudSandboxClient {
 #[pymethods]
 impl CloudSandboxClient {
     #[new]
-    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None, user_agent=None))]
+    #[pyo3(signature = (api_url, api_key=None, organization_id=None, project_id=None, namespace=None, user_agent=None, request_timeout_sec=None))]
     fn new(
         api_url: String,
         api_key: Option<String>,
@@ -546,6 +604,7 @@ impl CloudSandboxClient {
         project_id: Option<String>,
         namespace: Option<String>,
         user_agent: Option<String>,
+        request_timeout_sec: Option<f64>,
     ) -> PyResult<Self> {
         let lifecycle_url = resolve_sandbox_lifecycle_url(&api_url);
         let mut builder = ClientBuilder::new(&lifecycle_url);
@@ -561,6 +620,9 @@ impl CloudSandboxClient {
 
         if let Some(ua) = user_agent.as_deref() {
             builder = builder.user_agent(ua);
+        }
+        if let Some(seconds) = request_timeout_sec {
+            builder = builder.timeout(duration_from_seconds("request_timeout_sec", seconds)?);
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
@@ -582,27 +644,39 @@ impl CloudSandboxClient {
 
     fn create_sandbox(&self, request_json: String) -> PyResult<(String, String)> {
         let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
-        self.run_with_retry(5, move |client| {
-            let request = request.clone();
-            async move {
+        let client = self.client.clone();
+        shared_runtime()
+            .block_on(async move {
                 let traced = client.create(&request).await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
                 Ok((trace_id, json))
-            }
-        })
+            })
+            .map_err(into_sandbox_py_error)
     }
 
     fn claim_sandbox(&self, pool_id: String) -> PyResult<(String, String)> {
-        self.run_with_retry(5, move |client| {
-            let pool_id = pool_id.clone();
-            async move {
+        let client = self.client.clone();
+        shared_runtime()
+            .block_on(async move {
                 let traced = client.claim(&pool_id).await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
                 Ok((trace_id, json))
-            }
-        })
+            })
+            .map_err(into_sandbox_py_error)
+    }
+
+    fn copy_sandbox(&self, sandbox_id: String, times: usize) -> PyResult<(String, String)> {
+        let client = self.client.clone();
+        shared_runtime()
+            .block_on(async move {
+                let traced = client.copy(&sandbox_id, times).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            })
+            .map_err(into_sandbox_py_error)
     }
 
     fn get_sandbox_json(&self, sandbox_id: String) -> PyResult<(String, String)> {
@@ -824,12 +898,10 @@ impl CloudSandboxClient {
         let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| {
-                let request = request.clone();
-                async move { c.create(&request).await }
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced = client
+                .create(&request)
+                .await
+                .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
@@ -843,12 +915,28 @@ impl CloudSandboxClient {
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| {
-                let pool_id = pool_id.clone();
-                async move { c.claim(&pool_id).await }
-            })
-            .await
-            .map_err(into_sandbox_py_error)?;
+            let traced = client
+                .claim(&pool_id)
+                .await
+                .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn copy_sandbox_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+        times: usize,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = client
+                .copy(&sandbox_id, times)
+                .await
+                .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
@@ -1178,16 +1266,30 @@ impl CloudSandboxClient {
     /// pool. All proxy clients created this way reuse the same underlying reqwest::Client,
     /// so HTTP/2 connections can be coalesced: only the first sandbox in a session pays the
     /// TCP+TLS handshake cost.
-    #[pyo3(signature = (proxy_url, sandbox_id, routing_hint=None))]
+    #[pyo3(signature = (proxy_url, sandbox_id, routing_hint=None, request_timeout_sec=None))]
     fn connect_proxy(
         &self,
         proxy_url: String,
         sandbox_id: String,
         routing_hint: Option<String>,
+        request_timeout_sec: Option<f64>,
     ) -> PyResult<CloudSandboxProxyClient> {
         let (base_url, host_override, sandbox_id_header) =
             resolve_proxy_target(&proxy_url, &sandbox_id)?;
-        let shared_client = self.client.http_client().with_base_url(&base_url);
+        let shared_client = if let Some(seconds) = request_timeout_sec {
+            self.client
+                .http_client()
+                .with_base_url_and_timeout(
+                    &base_url,
+                    Some(duration_from_seconds("request_timeout_sec", seconds)?),
+                )
+                .map_err(into_sandbox_py_error)?
+        } else {
+            self.client
+                .http_client()
+                .with_base_url_without_timeout(&base_url)
+                .map_err(into_sandbox_py_error)?
+        };
         let proxy = SandboxProxyClient::new(shared_client, host_override)
             .with_sandbox_id(sandbox_id_header)
             .with_routing_hint(routing_hint);
@@ -1223,7 +1325,7 @@ pub struct CloudSandboxProxyClient {
 #[pymethods]
 impl CloudSandboxProxyClient {
     #[new]
-    #[pyo3(signature = (proxy_url, sandbox_id, api_key=None, organization_id=None, project_id=None, routing_hint=None, user_agent=None))]
+    #[pyo3(signature = (proxy_url, sandbox_id, api_key=None, organization_id=None, project_id=None, routing_hint=None, user_agent=None, request_timeout_sec=None))]
     fn new(
         proxy_url: String,
         sandbox_id: String,
@@ -1232,6 +1334,7 @@ impl CloudSandboxProxyClient {
         project_id: Option<String>,
         routing_hint: Option<String>,
         user_agent: Option<String>,
+        request_timeout_sec: Option<f64>,
     ) -> PyResult<Self> {
         let (base_url, host_override, sandbox_id_header) =
             resolve_proxy_target(&proxy_url, &sandbox_id)?;
@@ -1249,6 +1352,9 @@ impl CloudSandboxProxyClient {
 
         if let Some(ua) = user_agent.as_deref() {
             builder = builder.user_agent(ua);
+        }
+        if let Some(seconds) = request_timeout_sec {
+            builder = builder.timeout(duration_from_seconds("request_timeout_sec", seconds)?);
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
@@ -1309,6 +1415,15 @@ impl CloudSandboxProxyClient {
         self.run_with_retry(5, move |client| async move {
             let traced = client.kill_process(pid).await?;
             Ok(traced.trace_id)
+        })
+    }
+
+    fn restart_process_json(&self, pid: i64) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| async move {
+            let traced = client.restart_process(pid).await?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+            Ok((trace_id, json))
         })
     }
 
@@ -1574,6 +1689,26 @@ impl CloudSandboxProxyClient {
             .await
             .map_err(into_sandbox_py_error)?;
             Ok(trace_id)
+        })
+    }
+
+    fn restart_process_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        pid: i64,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(
+                client,
+                5,
+                move |c| async move { c.restart_process(pid).await },
+            )
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
         })
     }
 
@@ -2112,7 +2247,7 @@ impl CloudDocumentAIClient {
             let body_json = body_json.clone();
             async move {
                 let response = client.request(method, &path, body_json.as_ref()).await?;
-                Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
+                serde_json::to_string(&response).map_err(SdkError::from)
             }
         })
     }
@@ -2123,7 +2258,7 @@ impl CloudDocumentAIClient {
             let content = content.clone();
             async move {
                 let response = client.upload_file(&file_name, content).await?;
-                Ok(serde_json::to_string(&response).map_err(SdkError::from)?)
+                serde_json::to_string(&response).map_err(SdkError::from)
             }
         })
     }
@@ -2600,7 +2735,7 @@ fn parse_archived_sandboxes_params(
 ///
 /// Returns `(base_url, host_override, sandbox_id_header)`:
 /// - localhost: `base_url` = proxy URL as-is; `host_override` = `{sandbox_id}.local`; no sandbox_id header
-/// - cloud: `base_url` = apex proxy domain (no sandbox subdomain); `sandbox_id_header` = sandbox_id for `X-Tensorlake-Sandbox-Id` header
+/// - cloud: `base_url` = the server-selected ingress endpoint; `sandbox_id_header` = sandbox_id for `X-Tensorlake-Sandbox-Id` header
 fn resolve_proxy_target(
     proxy_url: &str,
     sandbox_id: &str,
@@ -2645,18 +2780,17 @@ fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
     if is_localhost_api_url(api_url) {
         return api_url.to_string();
     }
-    if let Ok(mut parsed) = reqwest::Url::parse(api_url) {
-        if let Some(host) = parsed.host_str() {
-            if let Some(rest) = host.strip_prefix("api.") {
-                let new_host = format!("sandbox.{rest}");
-                if parsed.set_host(Some(&new_host)).is_ok() {
-                    let mut result = parsed.to_string();
-                    if result.ends_with('/') {
-                        result.pop();
-                    }
-                    return result;
-                }
+    if let Ok(mut parsed) = reqwest::Url::parse(api_url)
+        && let Some(host) = parsed.host_str()
+        && let Some(rest) = host.strip_prefix("api.")
+    {
+        let new_host = format!("sandbox.{rest}");
+        if parsed.set_host(Some(&new_host)).is_ok() {
+            let mut result = parsed.to_string();
+            if result.ends_with('/') {
+                result.pop();
             }
+            return result;
         }
     }
     "https://sandbox.tensorlake.ai".to_string()
@@ -2722,6 +2856,7 @@ fn create_image_context_file(
     namespace=None,
     use_scope_headers=false,
     user_agent=None,
+    docker_compat=false,
     dockerfile_text=None,
     context_dir=None,
     emit=None,
@@ -2742,27 +2877,31 @@ fn build_sandbox_image(
     namespace: Option<String>,
     use_scope_headers: bool,
     user_agent: Option<String>,
+    docker_compat: bool,
     dockerfile_text: Option<String>,
     context_dir: Option<String>,
     emit: Option<Py<PyAny>>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageBuildOptions {
-        api_url,
-        bearer_token: token,
-        use_scope_headers,
-        organization_id,
-        project_id,
-        namespace: namespace.unwrap_or_else(|| "default".to_string()),
+        common: common_build_options(
+            api_url,
+            token,
+            use_scope_headers,
+            organization_id,
+            project_id,
+            namespace,
+            registered_name,
+            disk_mb,
+            builder_disk_mb,
+            cpus,
+            memory_mb,
+            is_public,
+            user_agent,
+            docker_compat,
+        ),
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text,
         context_dir: context_dir.map(PathBuf::from),
-        registered_name,
-        disk_mb,
-        builder_disk_mb,
-        cpus,
-        memory_mb,
-        is_public,
-        user_agent,
     };
 
     let result = py
@@ -2791,6 +2930,129 @@ fn build_sandbox_image(
             error.to_string(),
         ))
     })
+}
+
+#[pyfunction]
+#[pyo3(signature = (
+    api_url,
+    token,
+    image_reference,
+    registered_name=None,
+    disk_mb=None,
+    builder_disk_mb=None,
+    cpus=None,
+    memory_mb=None,
+    is_public=false,
+    organization_id=None,
+    project_id=None,
+    namespace=None,
+    use_scope_headers=false,
+    user_agent=None,
+    docker_compat=false,
+    emit=None,
+))]
+fn import_sandbox_image(
+    py: Python<'_>,
+    api_url: String,
+    token: String,
+    image_reference: String,
+    registered_name: Option<String>,
+    disk_mb: Option<u64>,
+    builder_disk_mb: Option<u64>,
+    cpus: Option<f64>,
+    memory_mb: Option<i64>,
+    is_public: bool,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    use_scope_headers: bool,
+    user_agent: Option<String>,
+    docker_compat: bool,
+    emit: Option<Py<PyAny>>,
+) -> PyResult<String> {
+    let options = tensorlake::sandbox_images::SandboxImageImportOptions {
+        common: common_build_options(
+            api_url,
+            token,
+            use_scope_headers,
+            organization_id,
+            project_id,
+            namespace,
+            registered_name,
+            disk_mb,
+            builder_disk_mb,
+            cpus,
+            memory_mb,
+            is_public,
+            user_agent,
+            docker_compat,
+        ),
+        image_reference,
+    };
+
+    let result = py
+        .detach(move || {
+            shared_runtime().block_on(async move {
+                tensorlake::sandbox_images::import_sandbox_image(options, |event| {
+                    if let Some(callback) = emit.as_ref() {
+                        emit_sandbox_image_event(callback, event);
+                    }
+                })
+                .await
+            })
+        })
+        .map_err(|error| {
+            CloudSandboxClientError::new_err((
+                "sandbox_image_import",
+                Option::<u16>::None,
+                error.to_string(),
+            ))
+        })?;
+
+    serde_json::to_string(&result).map_err(|error| {
+        CloudSandboxClientError::new_err((
+            "sandbox_image_import",
+            Option::<u16>::None,
+            error.to_string(),
+        ))
+    })
+}
+
+/// Assemble the auth/context + resource fields shared by the Dockerfile build
+/// and registry import paths.
+#[allow(clippy::too_many_arguments)]
+fn common_build_options(
+    api_url: String,
+    token: String,
+    use_scope_headers: bool,
+    organization_id: Option<String>,
+    project_id: Option<String>,
+    namespace: Option<String>,
+    registered_name: Option<String>,
+    disk_mb: Option<u64>,
+    builder_disk_mb: Option<u64>,
+    cpus: Option<f64>,
+    memory_mb: Option<i64>,
+    is_public: bool,
+    user_agent: Option<String>,
+    docker_compat: bool,
+) -> tensorlake::sandbox_images::CommonBuildOptions {
+    tensorlake::sandbox_images::CommonBuildOptions {
+        api_url,
+        bearer_token: token,
+        use_scope_headers,
+        organization_id,
+        project_id,
+        namespace: namespace.unwrap_or_else(|| "default".to_string()),
+        registered_name,
+        disk_mb,
+        builder_disk_mb,
+        cpus,
+        memory_mb,
+        is_public,
+        user_agent,
+        docker_compat,
+    }
 }
 
 fn emit_sandbox_image_event(callback: &Py<PyAny>, event: SandboxImageBuildEvent) {
@@ -2839,5 +3101,6 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudDocumentAIClient>()?;
     module.add_function(wrap_pyfunction!(create_image_context_file, module)?)?;
     module.add_function(wrap_pyfunction!(build_sandbox_image, module)?)?;
+    module.add_function(wrap_pyfunction!(import_sandbox_image, module)?)?;
     Ok(())
 }

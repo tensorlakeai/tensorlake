@@ -8,9 +8,18 @@ from tensorlake.sandbox import (
     SnapshotStatus,
     SnapshotType,
     SnapshotWaitCondition,
+    _defaults,
 )
 from tensorlake.sandbox.async_client import AsyncSandboxClient
 from tensorlake.sandbox.exceptions import SandboxError
+
+
+class _FakeAsyncRustProxyClient:
+    def __init__(self, base_url: str):
+        self._base_url = base_url
+
+    def base_url(self):
+        return self._base_url
 
 
 class _FakeAsyncRustClient:
@@ -19,6 +28,7 @@ class _FakeAsyncRustClient:
         self.update_request_json: str = ""
         self.last_get_sandbox_id: str = ""
         self.create_snapshot_calls: list[tuple[str, str | None]] = []
+        self.copy_calls: list[tuple[str, int]] = []
         self.suspend_calls: list[str] = []
         self.resume_calls: list[str] = []
         self.connect_proxy_calls: list[dict] = []
@@ -34,7 +44,7 @@ class _FakeAsyncRustClient:
                 "routing_hint": routing_hint,
             }
         )
-        return None
+        return _FakeAsyncRustProxyClient(proxy_url)
 
     async def suspend_sandbox_async(self, *, sandbox_id):
         self.suspend_calls.append(sandbox_id)
@@ -67,6 +77,25 @@ class _FakeAsyncRustClient:
             '{"sandbox_id":"sbx-1","status":"pending"}',
         )
 
+    async def copy_sandbox_async(self, *, sandbox_id, times):
+        self.copy_calls.append((sandbox_id, times))
+        return (
+            "trace-copy-sandbox",
+            json.dumps(
+                {
+                    "source_sandbox_id": sandbox_id,
+                    "sandboxes": [
+                        {"sandbox_id": "copy-1", "status": "running"},
+                        {
+                            "sandbox_id": "copy-2",
+                            "status": "failed",
+                            "reason": "no capacity",
+                        },
+                    ],
+                }
+            ),
+        )
+
     async def list_sandboxes_json_async(self):
         return (
             "trace-list-sandboxes",
@@ -81,8 +110,7 @@ class _FakeAsyncRustClient:
         "cpus": 1.0,
         "memory_mb": 512,
         "ephemeral_disk_mb": 1024
-      },
-      "secret_names": []
+      }
     }
   ]
 }
@@ -103,9 +131,9 @@ class _FakeAsyncRustClient:
     "memory_mb": 512,
     "ephemeral_disk_mb": 1024
   },
-  "secret_names": [],
   "allow_unauthenticated_access": false,
   "exposed_ports": [8080],
+  "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
   "sandbox_url": "https://sbx-1.sandbox.tensorlake.ai"
 }
 """,
@@ -124,15 +152,50 @@ class _FakeAsyncRustClient:
                 "memory_mb": 512,
                 "ephemeral_disk_mb": 1024,
             },
-            "secret_names": [],
             "name": payload.get("name"),
             "allow_unauthenticated_access": payload.get(
                 "allow_unauthenticated_access", False
             ),
             "exposed_ports": payload.get("exposed_ports", []),
+            "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
             "sandbox_url": f"https://{sandbox_id}.sandbox.tensorlake.ai",
         }
         return ("trace-update-sandbox", json.dumps(response))
+
+
+class _FakeProxyClient:
+    def base_url(self):
+        return "https://sandbox.tensorlake.ai"
+
+    def close(self):
+        return None
+
+
+class _RecordingCreateRustClient:
+    instances = []
+
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+        self.create_calls = 0
+        self.delete_calls: list[str] = []
+        type(self).instances.append(self)
+
+    def close(self):
+        return None
+
+    async def create_sandbox_async(self, *, request_json):
+        self.create_calls += 1
+        return (
+            "trace-create-sandbox",
+            '{"sandbox_id":"sbx-1","status":"running"}',
+        )
+
+    def connect_proxy(self, *, proxy_url, sandbox_id, routing_hint=None):
+        return _FakeProxyClient()
+
+    async def delete_sandbox_async(self, *, sandbox_id):
+        self.delete_calls.append(sandbox_id)
+        return "trace-delete"
 
 
 def _make_client(fake: object | None = None) -> AsyncSandboxClient:
@@ -168,13 +231,278 @@ class _StatusSequenceRustClient(_FakeAsyncRustClient):
                         "memory_mb": 512,
                         "ephemeral_disk_mb": 1024,
                     },
-                    "secret_names": [],
                 }
             ),
         )
 
 
 class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        _RecordingCreateRustClient.instances = []
+
+    async def test_constructor_passes_default_request_timeout_to_rust_backend(self):
+        class _RecordingRustClient:
+            kwargs = None
+
+            def __init__(self, **kwargs):
+                type(self).kwargs = kwargs
+
+            def close(self):
+                return None
+
+        with patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+            _RecordingRustClient,
+        ):
+            AsyncSandboxClient(
+                api_url="http://localhost:8900", api_key="k", _internal=True
+            )
+
+        self.assertEqual(
+            _RecordingRustClient.kwargs["request_timeout_sec"],
+            _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
+        )
+
+    async def test_constructor_passes_custom_request_timeout_to_rust_backend(self):
+        class _RecordingRustClient:
+            kwargs = None
+
+            def __init__(self, **kwargs):
+                type(self).kwargs = kwargs
+
+            def close(self):
+                return None
+
+        with patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+            _RecordingRustClient,
+        ):
+            AsyncSandboxClient(
+                api_url="http://localhost:8900",
+                api_key="k",
+                request_timeout=123.0,
+                _internal=True,
+            )
+
+        self.assertEqual(_RecordingRustClient.kwargs["request_timeout_sec"], 123.0)
+
+    async def test_create_and_connect_uses_per_call_request_timeout_for_initial_create(
+        self,
+    ):
+        with patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+            _RecordingCreateRustClient,
+        ):
+            client = AsyncSandboxClient(
+                api_url="http://localhost:8900",
+                api_key="k",
+                request_timeout=300.0,
+                _internal=True,
+            )
+            await client.create_and_connect(image="python:3.11", request_timeout=10.0)
+
+        self.assertEqual(len(_RecordingCreateRustClient.instances), 2)
+        self.assertEqual(
+            _RecordingCreateRustClient.instances[0].kwargs["request_timeout_sec"],
+            300.0,
+        )
+        self.assertEqual(
+            _RecordingCreateRustClient.instances[1].kwargs["request_timeout_sec"],
+            10.0,
+        )
+        self.assertEqual(_RecordingCreateRustClient.instances[1].create_calls, 1)
+
+    async def test_sandbox_create_uses_startup_timeout_for_initial_create(self):
+        from tensorlake.sandbox.async_sandbox import AsyncSandbox
+
+        with patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+            _RecordingCreateRustClient,
+        ):
+            await AsyncSandbox.create(
+                image="python:3.11",
+                api_url="http://localhost:8900",
+                api_key="k",
+                startup_timeout=10.0,
+            )
+
+        self.assertEqual(len(_RecordingCreateRustClient.instances), 1)
+        self.assertEqual(
+            _RecordingCreateRustClient.instances[0].kwargs["request_timeout_sec"],
+            10.0,
+        )
+        self.assertEqual(_RecordingCreateRustClient.instances[0].create_calls, 1)
+
+    async def test_sandbox_create_uses_default_request_timeout_when_unspecified(self):
+        from tensorlake.sandbox.async_sandbox import AsyncSandbox
+
+        with patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+            _RecordingCreateRustClient,
+        ):
+            await AsyncSandbox.create(
+                image="python:3.11",
+                api_url="http://localhost:8900",
+                api_key="k",
+            )
+
+        self.assertEqual(len(_RecordingCreateRustClient.instances), 1)
+        self.assertEqual(
+            _RecordingCreateRustClient.instances[0].kwargs["request_timeout_sec"],
+            _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
+        )
+        self.assertEqual(_RecordingCreateRustClient.instances[0].create_calls, 1)
+
+    async def test_sandbox_proxy_client_does_not_receive_default_request_timeout(self):
+        from tensorlake.sandbox.async_sandbox import AsyncSandbox
+
+        class _RecordingProxyRustClient:
+            kwargs = None
+
+            def __init__(self, **kwargs):
+                type(self).kwargs = kwargs
+
+            def base_url(self):
+                return "https://sbx-1.sandbox.tensorlake.ai"
+
+        with patch(
+            "tensorlake.sandbox.async_sandbox.RustCloudSandboxProxyClient",
+            _RecordingProxyRustClient,
+        ):
+            AsyncSandbox(
+                identifier="sbx-1",
+                proxy_url="https://sandbox.tensorlake.ai",
+                api_key="k",
+            )
+
+        self.assertNotIn("request_timeout_sec", _RecordingProxyRustClient.kwargs)
+
+    async def test_sandbox_proxy_client_receives_explicit_request_timeout(self):
+        from tensorlake.sandbox.async_sandbox import AsyncSandbox
+
+        class _RecordingProxyRustClient:
+            kwargs = None
+
+            def __init__(self, **kwargs):
+                type(self).kwargs = kwargs
+
+            def base_url(self):
+                return "https://sbx-1.sandbox.tensorlake.ai"
+
+        with patch(
+            "tensorlake.sandbox.async_sandbox.RustCloudSandboxProxyClient",
+            _RecordingProxyRustClient,
+        ):
+            AsyncSandbox(
+                identifier="sbx-1",
+                proxy_url="https://sandbox.tensorlake.ai",
+                api_key="k",
+                request_timeout=10.0,
+            )
+
+        self.assertEqual(
+            _RecordingProxyRustClient.kwargs["request_timeout_sec"],
+            10.0,
+        )
+
+    async def test_sandbox_connect_forwards_explicit_proxy_request_timeout(self):
+        from tensorlake.sandbox.async_sandbox import AsyncSandbox
+
+        class _RecordingRustClient:
+            connect_proxy_kwargs = None
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def close(self):
+                return None
+
+            def connect_proxy(self, **kwargs):
+                type(self).connect_proxy_kwargs = kwargs
+                return _FakeProxyClient()
+
+        with patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+            _RecordingRustClient,
+        ):
+            sandbox = await AsyncSandbox.connect(
+                "sbx-1",
+                api_url="http://localhost:8900",
+                api_key="k",
+                proxy_url="https://sandbox.tensorlake.ai",
+                request_timeout=10.0,
+            )
+            sandbox.close()
+
+        self.assertEqual(
+            _RecordingRustClient.connect_proxy_kwargs["request_timeout_sec"],
+            10.0,
+        )
+
+    async def test_sandbox_connect_does_not_forward_default_proxy_request_timeout(self):
+        from tensorlake.sandbox.async_sandbox import AsyncSandbox
+
+        class _RecordingRustClient:
+            connect_proxy_kwargs = None
+
+            def __init__(self, **kwargs):
+                self.kwargs = kwargs
+
+            def close(self):
+                return None
+
+            def connect_proxy(self, **kwargs):
+                type(self).connect_proxy_kwargs = kwargs
+                return _FakeProxyClient()
+
+        with patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+            _RecordingRustClient,
+        ):
+            sandbox = await AsyncSandbox.connect(
+                "sbx-1",
+                api_url="http://localhost:8900",
+                api_key="k",
+                proxy_url="https://sandbox.tensorlake.ai",
+            )
+            sandbox.close()
+
+        self.assertNotIn(
+            "request_timeout_sec",
+            _RecordingRustClient.connect_proxy_kwargs,
+        )
+
+    async def test_create_and_connect_deletes_sandbox_from_timeout_response(self):
+        class _TimeoutCreateRustClient(_RecordingCreateRustClient):
+            async def create_sandbox_async(self, *, request_json):
+                self.create_calls += 1
+                return (
+                    "trace-create-sandbox",
+                    '{"sandbox_id":"sbx-timeout","status":"timeout"}',
+                )
+
+        with patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+            _TimeoutCreateRustClient,
+        ):
+            client = AsyncSandboxClient(
+                api_url="http://localhost:8900",
+                api_key="k",
+                request_timeout=300.0,
+                _internal=True,
+            )
+            with self.assertRaisesRegex(SandboxError, "did not start"):
+                await client.create_and_connect(
+                    image="python:3.11",
+                    request_timeout=10.0,
+                )
+
+        self.assertEqual(len(_TimeoutCreateRustClient.instances), 2)
+        self.assertEqual(
+            _TimeoutCreateRustClient.instances[1].delete_calls,
+            ["sbx-timeout"],
+        )
+
     async def test_connect_accepts_sandbox_name(self):
         client = _make_client()
 
@@ -194,6 +522,25 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
 
         with self.assertRaisesRegex(SandboxError, "Provide only one of"):
             await client.connect("stable-name", sandbox_id="sbx-123")
+
+    async def test_connect_resolves_ingress_endpoint_when_proxy_url_omitted(self):
+        fake = _FakeAsyncRustClient()
+        client = _make_client(fake)
+
+        sandbox = await client.connect("stable-name")
+
+        self.assertEqual(fake.last_get_sandbox_id, "stable-name")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": None,
+                }
+            ],
+        )
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
 
     async def test_create_uses_rust_backend(self):
         fake = _FakeAsyncRustClient()
@@ -233,7 +580,6 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
     "memory_mb": 512,
     "ephemeral_disk_mb": 1024
   },
-  "secret_names": [],
   "error_details": {
     "message": "failed to pull image tensorlake/missing-image"
   }
@@ -251,6 +597,39 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             "terminated during startup: failed to pull image tensorlake/missing-image",
         ):
             await client.create_and_connect(image="tensorlake/missing-image")
+
+    async def test_create_and_connect_uses_ingress_endpoint_from_running_response(self):
+        class _RunningRustClient(_FakeAsyncRustClient):
+            async def create_sandbox_async(self, *, request_json):
+                self.create_request_json = request_json
+                return (
+                    "trace-create-sandbox",
+                    json.dumps(
+                        {
+                            "sandbox_id": "sbx-1",
+                            "status": "running",
+                            "routing_hint": "hint-1",
+                            "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                        }
+                    ),
+                )
+
+        fake = _RunningRustClient()
+        client = _make_client(fake)
+
+        sandbox = await client.create_and_connect(image="python:3.11")
+
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": "hint-1",
+                }
+            ],
+        )
 
     async def test_create_and_connect_polls_until_running(self):
         fake = _StatusSequenceRustClient(["pending", "running"])
@@ -277,6 +656,26 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sandboxes_list[0].sandbox_id, "sbx-1")
         self.assertEqual(sandboxes_list[0].status, "running")
 
+    async def test_copy_uses_rust_backend_and_allows_partial_failures(self):
+        fake = _FakeAsyncRustClient()
+        client = _make_client(fake)
+
+        response = await client.copy("sbx-1", times=2)
+
+        self.assertEqual(response.trace_id, "trace-copy-sandbox")
+        self.assertEqual(fake.copy_calls, [("sbx-1", 2)])
+        self.assertEqual(response.source_sandbox_id, "sbx-1")
+        self.assertEqual(response.sandboxes[0].sandbox_id, "copy-1")
+        self.assertEqual(response.sandboxes[0].status, "running")
+        self.assertEqual(response.sandboxes[1].status, "failed")
+        self.assertEqual(response.sandboxes[1].reason, "no capacity")
+
+    async def test_copy_rejects_invalid_times(self):
+        client = _make_client()
+
+        with self.assertRaisesRegex(SandboxError, "times must be a positive integer"):
+            await client.copy("sbx-1", times=0)
+
     async def test_update_sandbox_sends_port_access_fields(self):
         fake = _FakeAsyncRustClient()
         client = _make_client(fake)
@@ -302,6 +701,10 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(access.allow_unauthenticated_access)
         self.assertEqual(access.exposed_ports, [8080])
+        self.assertEqual(
+            access.ingress_endpoint,
+            "https://sandbox.us-east-1.aws.tensorlake.ai",
+        )
         self.assertEqual(access.sandbox_url, "https://sbx-1.sandbox.tensorlake.ai")
 
     async def test_expose_ports_merges_existing_ports(self):

@@ -99,10 +99,24 @@ pub async fn run(
         &sandbox_id,
         command,
         args,
-        timeout,
-        workdir,
-        env,
-        user,
+        crate::commands::sbx::exec::ExecOptions {
+            timeout,
+            workdir,
+            env,
+            user,
+            detach: false,
+            name: None,
+            restart_policy: None,
+            max_restarts: None,
+            initial_backoff_ms: None,
+            max_backoff_ms: None,
+            health_http: None,
+            health_tcp: None,
+            health_initial_delay_ms: None,
+            health_interval_ms: None,
+            health_timeout_ms: None,
+            health_failure_threshold: None,
+        },
     )
     .await;
 

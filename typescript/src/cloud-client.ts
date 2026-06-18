@@ -17,6 +17,7 @@ import type {
   RequestInput,
   RequestMetadata,
   RequestOutput,
+  SandboxTemplate,
   Secret,
   SecretsList,
   StartImageBuildRequest,
@@ -79,6 +80,63 @@ export class CloudClient {
       "DELETE",
       this.namespacePath(`applications/${encodeURIComponent(applicationName)}`),
     );
+  }
+
+  async deleteSandboxImage(imageName: string): Promise<void> {
+    await this.http.requestResponse(
+      "DELETE",
+      this.namespacePath(`sandbox-images/${encodeURIComponent(imageName)}`),
+    );
+  }
+
+  /**
+   * Look up a registered sandbox image (template) by its registered name.
+   *
+   * Returns the template, or `null` when no image with that name exists.
+   * Routed through the platform sandbox-templates API, which requires the
+   * organization/project scope (from the client or the `options` override).
+   */
+  async findSandboxImageByName(
+    imageName: string,
+    options?: { organizationId?: string; projectId?: string },
+  ): Promise<SandboxTemplate | null> {
+    const scope = this.resolveScope(options?.organizationId, options?.projectId);
+    const response = await this.http.requestResponse(
+      "GET",
+      `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/sandbox-templates/by-name/${encodeURIComponent(imageName)}`,
+      { allowedErrorStatusCodes: new Set([404]) },
+    );
+    if (response.status === 404) {
+      return null;
+    }
+    const raw = await parseJsonResponse<Record<string, unknown>>(response);
+    return fromSnakeKeys(raw) as SandboxTemplate;
+  }
+
+  /**
+   * List all registered sandbox images (templates), following pagination to
+   * the end. Routed through the platform sandbox-templates API, which requires
+   * the organization/project scope (from the client or the `options` override).
+   */
+  async listSandboxImages(
+    options?: { organizationId?: string; projectId?: string },
+  ): Promise<SandboxTemplate[]> {
+    const scope = this.resolveScope(options?.organizationId, options?.projectId);
+    const base = `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/sandbox-templates`;
+    let path: string | null = `${base}?pageSize=100`;
+    const templates: SandboxTemplate[] = [];
+    while (path !== null) {
+      const page: SandboxTemplatesPage = await this.http.requestJson<SandboxTemplatesPage>(
+        "GET",
+        path,
+      );
+      for (const item of page.items ?? []) {
+        templates.push(fromSnakeKeys(item) as SandboxTemplate);
+      }
+      const next = page.pagination?.next;
+      path = next ? nextRequestPath(next) : null;
+    }
+    return templates;
   }
 
   async applications(): Promise<ApplicationSummary[]> {
@@ -426,6 +484,28 @@ function createApplicationBuildForm(
 
 function trimTrailingSlashes(value: string): string {
   return value.endsWith("/") ? value.slice(0, -1) : value;
+}
+
+/** One page of the paginated sandbox-templates list response. */
+interface SandboxTemplatesPage {
+  items?: Record<string, unknown>[];
+  pagination?: { next?: string };
+}
+
+/**
+ * Reduce a `pagination.next` link to a base-URL-relative request path. The
+ * server may return either an absolute URL or an absolute path; the HTTP
+ * client always prepends its base URL, so absolute URLs must be reduced to
+ * their path+query first.
+ */
+function nextRequestPath(next: string): string {
+  const schemeIndex = next.indexOf("://");
+  if (schemeIndex !== -1) {
+    const afterScheme = next.slice(schemeIndex + 3);
+    const slashIndex = afterScheme.indexOf("/");
+    return slashIndex === -1 ? "/" : afterScheme.slice(slashIndex);
+  }
+  return next.startsWith("/") ? next : `/${next}`;
 }
 
 function toBlobPart(data: BinaryPayload): string | Blob | ArrayBuffer {

@@ -9,16 +9,20 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Mapping
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
-from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
+import httpx
+
+from tensorlake._tracing import USER_AGENT, Traced, TracedIterator, inject_traceparent
 
 from . import _defaults
-from .exceptions import SandboxConnectionError, SandboxError
+from .exceptions import RemoteAPIError, SandboxConnectionError, SandboxError
 from .models import (
     CheckpointType,
     CommandResult,
+    CopySandboxResponse,
     DaemonInfo,
     HealthResponse,
     ListDirectoryResponse,
@@ -26,8 +30,10 @@ from .models import (
     OutputEvent,
     OutputMode,
     OutputResponse,
+    ProcessHealthCheck,
     ProcessInfo,
     ProcessUser,
+    RestartPolicyConfig,
     SandboxInfo,
     SandboxStatus,
     SendSignalResponse,
@@ -65,6 +71,7 @@ class AsyncSandbox:
         *,
         sandbox_id: str | None = None,
         routing_hint: str | None = None,
+        request_timeout: float | None = None,
         _proxy_rust_client: object | None = None,
     ) -> None:
         if identifier and sandbox_id and identifier != sandbox_id:
@@ -87,6 +94,7 @@ class AsyncSandbox:
         self._api_key = api_key
         self._organization_id = organization_id
         self._project_id = project_id
+        self._request_timeout = request_timeout
         parsed_proxy = urlparse(proxy_url)
         self._host_header = None
         if parsed_proxy.hostname in ("localhost", "127.0.0.1"):
@@ -113,15 +121,18 @@ class AsyncSandbox:
             )
         else:
             try:
-                self._rust_client = RustCloudSandboxProxyClient(
-                    proxy_url=proxy_url,
-                    sandbox_id=sandbox_identifier,
-                    api_key=api_key,
-                    organization_id=organization_id,
-                    project_id=project_id,
-                    routing_hint=routing_hint,
-                    user_agent=USER_AGENT,
-                )
+                kwargs = {
+                    "proxy_url": proxy_url,
+                    "sandbox_id": sandbox_identifier,
+                    "api_key": api_key,
+                    "organization_id": organization_id,
+                    "project_id": project_id,
+                    "routing_hint": routing_hint,
+                    "user_agent": USER_AGENT,
+                }
+                if request_timeout is not None:
+                    kwargs["request_timeout_sec"] = request_timeout
+                self._rust_client = RustCloudSandboxProxyClient(**kwargs)
                 self._base_url = self._rust_client.base_url()
             except Exception as e:
                 _raise_as_sandbox_error(e)
@@ -135,7 +146,8 @@ class AsyncSandbox:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -144,7 +156,8 @@ class AsyncSandbox:
         pool_id: str | None = None,
         snapshot_id: str | None = None,
         proxy_url: str | None = None,
-        startup_timeout: float = 60,
+        request_timeout: float | None = None,
+        startup_timeout: float | None = None,
         name: str | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
@@ -154,12 +167,22 @@ class AsyncSandbox:
     ) -> "AsyncSandbox":
         from .async_client import AsyncSandboxClient
 
+        effective_request_timeout = (
+            startup_timeout
+            if startup_timeout is not None
+            else (
+                request_timeout
+                if request_timeout is not None
+                else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+            )
+        )
         client = AsyncSandboxClient(
             api_url=api_url,
             api_key=api_key,
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=effective_request_timeout,
             _internal=True,
         )
         return await client.create_and_connect(
@@ -167,7 +190,8 @@ class AsyncSandbox:
             cpus=cpus,
             memory_mb=memory_mb,
             disk_mb=disk_mb,
-            secret_names=secret_names,
+            gpus=gpus,
+            gpu_model=gpu_model,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             allow_internet_access=allow_internet_access,
@@ -176,7 +200,7 @@ class AsyncSandbox:
             pool_id=pool_id,
             snapshot_id=snapshot_id,
             proxy_url=proxy_url,
-            startup_timeout=startup_timeout,
+            request_timeout=effective_request_timeout,
             name=name,
         )
 
@@ -192,6 +216,7 @@ class AsyncSandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        request_timeout: float | None = None,
     ) -> "AsyncSandbox":
         from .async_client import AsyncSandboxClient
 
@@ -201,10 +226,18 @@ class AsyncSandbox:
             organization_id=organization_id,
             project_id=project_id,
             namespace=namespace,
+            request_timeout=(
+                request_timeout
+                if request_timeout is not None
+                else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+            ),
             _internal=True,
         )
         return await client.connect(
-            sandbox_id, proxy_url=proxy_url, routing_hint=routing_hint
+            sandbox_id,
+            proxy_url=proxy_url,
+            routing_hint=routing_hint,
+            request_timeout=request_timeout,
         )
 
     # --- Lifecycle ---
@@ -243,6 +276,19 @@ class AsyncSandbox:
             wait=wait,
             timeout=timeout,
             poll_interval=poll_interval,
+        )
+
+    async def copy(
+        self,
+        *,
+        times: int = 1,
+        request_timeout: float | None = None,
+    ) -> Traced[CopySandboxResponse]:
+        self._require_lifecycle_client("copy")
+        return await self._lifecycle_client.copy(
+            self._lifecycle_identifier(),
+            times=times,
+            request_timeout=request_timeout,
         )
 
     async def checkpoint(
@@ -369,7 +415,7 @@ class AsyncSandbox:
         env: dict[str, str] | None = None,
         working_dir: str | None = None,
         timeout: float | None = None,
-        user: ProcessUser = "tl-user",
+        user: ProcessUser | None = None,
     ) -> Traced[CommandResult]:
         process_user = Sandbox._normalize_process_user(user)
         payload = Sandbox._build_command_payload(
@@ -426,9 +472,14 @@ class AsyncSandbox:
         stdin_mode: StdinMode = StdinMode.CLOSED,
         stdout_mode: OutputMode = OutputMode.CAPTURE,
         stderr_mode: OutputMode = OutputMode.CAPTURE,
-        user: ProcessUser = "tl-user",
+        user: ProcessUser | None = None,
+        name: str | None = None,
+        restart: RestartPolicyConfig | Mapping[str, object] | None = None,
+        health_check: ProcessHealthCheck | Mapping[str, object] | None = None,
     ) -> Traced[ProcessInfo]:
         process_user = Sandbox._normalize_process_user(user)
+        restart_payload = Sandbox._normalize_restart_config(restart)
+        health_check_payload = Sandbox._normalize_health_check(health_check)
         payload = Sandbox._build_command_payload(
             command,
             args,
@@ -438,6 +489,9 @@ class AsyncSandbox:
             stdout_mode=stdout_mode if stdout_mode != OutputMode.CAPTURE else None,
             stderr_mode=stderr_mode if stderr_mode != OutputMode.CAPTURE else None,
             user=process_user,
+            name=name,
+            restart=restart_payload,
+            health_check=health_check_payload,
         )
         try:
             trace_id, response_json = await self._rust_client.start_process_json_async(
@@ -470,6 +524,15 @@ class AsyncSandbox:
         try:
             trace_id = await self._rust_client.kill_process_async(pid=pid)
             return Traced(trace_id, None)
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    async def restart_process(self, pid: int) -> Traced[ProcessInfo]:
+        try:
+            trace_id, response_json = (
+                await self._rust_client.restart_process_json_async(pid=pid)
+            )
+            return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -606,6 +669,135 @@ class AsyncSandbox:
             )
         except Exception as e:
             _raise_as_sandbox_error(e)
+
+    # --- PTY sessions ---
+
+    async def create_pty_session(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        working_dir: str | None = None,
+        rows: int = 24,
+        cols: int = 80,
+    ) -> Traced[dict]:
+        """Create an interactive PTY session.
+
+        Returns a Traced dict with ``session_id`` and ``token`` for WebSocket
+        connection via :meth:`pty_ws_url`.
+        """
+        payload: dict = {"command": command, "rows": rows, "cols": cols}
+        if args is not None:
+            payload["args"] = args
+        if env is not None:
+            payload["env"] = env
+        if working_dir is not None:
+            payload["working_dir"] = working_dir
+
+        try:
+            trace_id, response_json = (
+                await self._rust_client.create_pty_session_json_async(
+                    json.dumps(payload)
+                )
+            )
+            return Traced(trace_id, json.loads(response_json))
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def pty_ws_url(self, session_id: str, token: str) -> str:
+        """Construct the WebSocket URL for a PTY session.
+
+        The token is NOT included in the URL query string to avoid leaking it
+        into proxy/CDN access logs. Callers should send the token via the
+        ``X-PTY-Token`` header on the WebSocket upgrade request instead.
+        """
+        base = self._base_url.rstrip("/")
+        if base.startswith("https://"):
+            ws_base = "wss://" + base[8:]
+        elif base.startswith("http://"):
+            ws_base = "ws://" + base[7:]
+        else:
+            ws_base = base
+        return f"{ws_base}/api/v1/pty/{session_id}/ws"
+
+    async def connect_pty(
+        self,
+        session_id: str,
+        token: str,
+        *,
+        on_data=None,
+        on_exit=None,
+        connect_timeout: float = 10.0,
+    ):
+        """Attach to an existing PTY session and return a connected async handle."""
+        from .pty import build_async_pty_connection
+
+        pty = build_async_pty_connection(
+            session_id=session_id,
+            token=token,
+            ws_url=self.pty_ws_url(session_id, token),
+            http_url=f"{self._base_url.rstrip('/')}/api/v1/pty/{session_id}",
+            ws_headers=self._proxy_headers,
+            http_headers=self._proxy_headers,
+            connect_timeout=connect_timeout,
+        )
+        if on_data is not None:
+            pty.on_data(on_data)
+        if on_exit is not None:
+            pty.on_exit(on_exit)
+        return await pty.connect()
+
+    async def _delete_pty_session(
+        self, session_id: str, *, timeout: float = 10.0
+    ) -> None:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            response = await client.delete(
+                f"{self._base_url.rstrip('/')}/api/v1/pty/{session_id}",
+                headers=inject_traceparent(self._proxy_headers),
+            )
+        if response.is_success or response.status_code == 404:
+            return
+        raise RemoteAPIError(response.status_code, response.text)
+
+    async def create_pty(
+        self,
+        command: str,
+        args: list[str] | None = None,
+        env: dict[str, str] | None = None,
+        working_dir: str | None = None,
+        rows: int = 24,
+        cols: int = 80,
+        *,
+        on_data=None,
+        on_exit=None,
+        connect_timeout: float = 10.0,
+    ):
+        """Create a PTY session, connect immediately, and return its handle."""
+        traced_session = await self.create_pty_session(
+            command=command,
+            args=args,
+            env=env,
+            working_dir=working_dir,
+            rows=rows,
+            cols=cols,
+        )
+        session = traced_session.value
+        try:
+            return await self.connect_pty(
+                session["session_id"],
+                session["token"],
+                on_data=on_data,
+                on_exit=on_exit,
+                connect_timeout=connect_timeout,
+            )
+        except Exception:
+            try:
+                await self._delete_pty_session(
+                    session["session_id"], timeout=connect_timeout
+                )
+            except Exception:
+                pass
+            raise
 
     # --- Health and info ---
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import time
 import warnings
 from typing import NoReturn
@@ -22,11 +23,13 @@ from .exceptions import (
 from .models import (
     ArchivedSandboxInfo,
     ContainerResourcesInfo,
+    CopySandboxResponse,
     CreateSandboxPoolResponse,
     CreateSandboxRequest,
     CreateSandboxResources,
     CreateSandboxResponse,
     CreateSnapshotResponse,
+    GPUResources,
     ListArchivedSandboxesResponse,
     ListSandboxesResponse,
     ListSandboxPoolsResponse,
@@ -128,6 +131,24 @@ def _raise_as_sandbox_error(e: Exception) -> NoReturn:
     raise SandboxError(str(e)) from e
 
 
+def _build_gpu_resources(
+    gpus: int | None,
+    gpu_model: str | None,
+) -> list[GPUResources] | None:
+    if gpus is None:
+        return None
+    if gpus < 1:
+        raise SandboxError("gpus must be at least 1")
+    gpu_model = gpu_model or "A10"
+    if gpu_model != "A10":
+        raise SandboxError("only A10 GPU sandboxes are supported for now")
+    return [GPUResources(count=gpus, model=gpu_model)]
+
+
+def _unsupported_request_timeout_kwarg(e: TypeError) -> bool:
+    return "request_timeout_sec" in str(e)
+
+
 _RESERVED_SANDBOX_MANAGEMENT_PORT = 9501
 
 
@@ -207,6 +228,7 @@ class SandboxClient:
         namespace: str | None = _defaults.NAMESPACE,
         max_retries: int = _defaults.MAX_RETRIES,
         retry_backoff_sec: float = _defaults.RETRY_BACKOFF_SEC,
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
         _internal: bool = False,
     ):
         if not _internal:
@@ -222,21 +244,30 @@ class SandboxClient:
         self._namespace: str | None = namespace
         self._max_retries = max_retries
         self._retry_backoff_sec = retry_backoff_sec
+        self._request_timeout = request_timeout
         if not _RUST_SANDBOX_CLIENT_AVAILABLE:
             raise SandboxError(
                 "Rust Cloud SDK sandbox client is required but unavailable. "
                 "Build/install it with `make build_rust_py_client`."
             )
 
+        kwargs = {
+            "api_url": self._api_url,
+            "api_key": self._api_key,
+            "organization_id": self._organization_id,
+            "project_id": self._project_id,
+            "namespace": self._namespace,
+            "user_agent": USER_AGENT,
+            "request_timeout_sec": self._request_timeout,
+        }
         try:
-            self._rust_client = RustCloudSandboxClient(
-                api_url=self._api_url,
-                api_key=self._api_key,
-                organization_id=self._organization_id,
-                project_id=self._project_id,
-                namespace=self._namespace,
-                user_agent=USER_AGENT,
-            )
+            try:
+                self._rust_client = RustCloudSandboxClient(**kwargs)
+            except TypeError as e:
+                if not _unsupported_request_timeout_kwarg(e):
+                    raise
+                kwargs.pop("request_timeout_sec")
+                self._rust_client = RustCloudSandboxClient(**kwargs)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -247,6 +278,7 @@ class SandboxClient:
         organization_id: str | None = None,
         project_id: str | None = None,
         api_url: str = "https://api.tensorlake.ai",
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> "SandboxClient":
         """Create a client for the Tensorlake cloud platform.
 
@@ -265,6 +297,7 @@ class SandboxClient:
             api_key=api_key,
             organization_id=organization_id,
             project_id=project_id,
+            request_timeout=request_timeout,
         )
 
     @classmethod
@@ -272,6 +305,7 @@ class SandboxClient:
         cls,
         api_url: str = "http://localhost:8900",
         namespace: str = "default",
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> "SandboxClient":
         """Create a client for a local Indexify server.
 
@@ -282,7 +316,9 @@ class SandboxClient:
             api_url: Local server URL
             namespace: Namespace for resource scoping
         """
-        return cls(api_url=api_url, namespace=namespace)
+        return cls(
+            api_url=api_url, namespace=namespace, request_timeout=request_timeout
+        )
 
     def __enter__(self) -> "SandboxClient":
         """Context manager entry."""
@@ -327,13 +363,29 @@ class SandboxClient:
             return f"{parsed.scheme}://{proxy_host}"
         return _defaults.SANDBOX_PROXY_URL
 
+    def _with_request_timeout(self, request_timeout: float) -> "SandboxClient":
+        if request_timeout == self._request_timeout:
+            return self
+        return SandboxClient(
+            api_url=self._api_url,
+            api_key=self._api_key,
+            organization_id=self._organization_id,
+            project_id=self._project_id,
+            namespace=self._namespace,
+            max_retries=self._max_retries,
+            retry_backoff_sec=self._retry_backoff_sec,
+            request_timeout=request_timeout,
+            _internal=True,
+        )
+
     def create(
         self,
         image: str | None = None,
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -352,7 +404,9 @@ class SandboxClient:
             memory_mb: Memory in megabytes
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
-            secret_names: List of secret names to inject
+            gpus: Number of GPUs to allocate. When provided, defaults to
+                ``A10`` unless ``gpu_model`` is set.
+            gpu_model: GPU model to allocate. Only ``A10`` is supported.
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
             allow_internet_access: If True (default), outbound traffic is
@@ -364,8 +418,8 @@ class SandboxClient:
             deny_out: Destination IPs/CIDRs to deny
                 (e.g. ``["192.168.1.0/24"]``).
             snapshot_id: ID of a completed snapshot to restore from.
-                When set, image, resources, entrypoint, and secrets
-                are inherited from the snapshot unless explicitly
+                When set, image, resources, and entrypoint are
+                inherited from the snapshot unless explicitly
                 overridden.
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
@@ -391,8 +445,8 @@ class SandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
+                gpus=_build_gpu_resources(gpus, gpu_model),
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             network=network,
@@ -432,6 +486,53 @@ class SandboxClient:
                 trace_id, CreateSandboxResponse.model_validate_json(response_json)
             )
         except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    def copy(
+        self,
+        sandbox_id: str,
+        *,
+        times: int = 1,
+        request_timeout: float | None = None,
+    ) -> Traced[CopySandboxResponse]:
+        """Live-copy a running sandbox.
+
+        The server creates ``times`` running copies from the source sandbox. A
+        partial response can include failed copies; inspect each returned
+        sandbox's ``status`` and ``reason``.
+
+        Args:
+            sandbox_id: Source sandbox ID or name.
+            times: Number of copies to create. Must be at least 1.
+            request_timeout: Optional HTTP request timeout in seconds for this
+                blocking copy request.
+
+        Returns:
+            Traced[CopySandboxResponse] with the source sandbox ID and copy
+            results.
+
+        Raises:
+            SandboxNotFoundError: If the source sandbox doesn't exist.
+            SandboxError: If ``times`` is invalid or the API request fails.
+        """
+        if isinstance(times, bool) or not isinstance(times, int) or times < 1:
+            raise SandboxError("times must be a positive integer")
+        client = (
+            self._with_request_timeout(request_timeout)
+            if request_timeout is not None
+            else self
+        )
+        try:
+            trace_id, response_json = client._rust_client.copy_sandbox(
+                sandbox_id=sandbox_id,
+                times=times,
+            )
+            return Traced(
+                trace_id, CopySandboxResponse.model_validate_json(response_json)
+            )
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
     def get(self, sandbox_id: str) -> Traced[SandboxInfo]:
@@ -600,6 +701,7 @@ class SandboxClient:
         port_access = SandboxPortAccess(
             allow_unauthenticated_access=traced.allow_unauthenticated_access,
             exposed_ports=sorted(set(traced.exposed_ports or [])),
+            ingress_endpoint=traced.ingress_endpoint,
             sandbox_url=traced.sandbox_url,
         )
         return Traced(traced.trace_id, port_access)
@@ -906,7 +1008,6 @@ class SandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         ephemeral_disk_mb: int = 1024,
-        secret_names: list[str] | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -920,7 +1021,6 @@ class SandboxClient:
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
             ephemeral_disk_mb: Ephemeral disk space in megabytes
-            secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (default: 0 = no timeout)
             entrypoint: Custom entrypoint command (optional)
             max_containers: Maximum number of containers in pool
@@ -938,7 +1038,6 @@ class SandboxClient:
             resources=ContainerResourcesInfo(
                 cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             max_containers=max_containers,
@@ -1001,7 +1100,6 @@ class SandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         ephemeral_disk_mb: int = 1024,
-        secret_names: list[str] | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -1016,7 +1114,6 @@ class SandboxClient:
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
             ephemeral_disk_mb: Ephemeral disk space in megabytes
-            secret_names: List of secret names to inject
             timeout_secs: Timeout in seconds (default: 0 = no timeout)
             entrypoint: Custom entrypoint command (optional)
             max_containers: Maximum number of containers in pool
@@ -1035,7 +1132,6 @@ class SandboxClient:
             resources=ContainerResourcesInfo(
                 cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             max_containers=max_containers,
@@ -1085,6 +1181,7 @@ class SandboxClient:
         proxy_url: str | None = None,
         sandbox_id: str | None = None,
         routing_hint: str | None = None,
+        request_timeout: float | None = None,
     ) -> "Sandbox":
         """Connect to a running sandbox for process and file operations.
 
@@ -1106,17 +1203,25 @@ class SandboxClient:
             parameter_name="identifier",
         )
 
+        info: Traced[SandboxInfo] | None = None
+        proxy_sandbox_id = sandbox_identifier
         if proxy_url is None:
-            proxy_url = self._resolve_proxy_url()
+            info = self.get(sandbox_identifier)
+            proxy_url = info.ingress_endpoint or self._resolve_proxy_url()
+            proxy_sandbox_id = info.sandbox_id
+            routing_hint = routing_hint or info.routing_hint
 
-        proxy_rust_client = self._rust_client.connect_proxy(
-            proxy_url=proxy_url,
-            sandbox_id=sandbox_identifier,
-            routing_hint=routing_hint,
-        )
+        connect_proxy_kwargs = {
+            "proxy_url": proxy_url,
+            "sandbox_id": proxy_sandbox_id,
+            "routing_hint": routing_hint,
+        }
+        if request_timeout is not None:
+            connect_proxy_kwargs["request_timeout_sec"] = request_timeout
+        proxy_rust_client = self._rust_client.connect_proxy(**connect_proxy_kwargs)
 
         sandbox = Sandbox(
-            identifier=sandbox_identifier,
+            identifier=proxy_sandbox_id,
             proxy_url=proxy_url,
             api_key=self._api_key,
             organization_id=self._organization_id,
@@ -1125,6 +1230,10 @@ class SandboxClient:
             _proxy_rust_client=proxy_rust_client,
         )
         sandbox._lifecycle_client = self
+        if info is not None:
+            sandbox._sandbox_id = info.sandbox_id
+            sandbox._cached_info = info.value
+            sandbox._trace_id = info.trace_id
         return sandbox
 
     def create_and_connect(
@@ -1133,7 +1242,8 @@ class SandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -1142,7 +1252,8 @@ class SandboxClient:
         pool_id: str | None = None,
         snapshot_id: str | None = None,
         proxy_url: str | None = None,
-        startup_timeout: float = 60,
+        request_timeout: float | None = None,
+        startup_timeout: float | None = None,
         name: str | None = None,
     ) -> "Sandbox":
         """Create a sandbox, wait for it to start, and return a connected Sandbox.
@@ -1159,7 +1270,9 @@ class SandboxClient:
             memory_mb: Memory in megabytes
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
-            secret_names: List of secret names to inject
+            gpus: Number of GPUs to allocate. When provided, defaults to
+                ``A10`` unless ``gpu_model`` is set.
+            gpu_model: GPU model to allocate. Only ``A10`` is supported.
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
             allow_internet_access: If True (default), outbound traffic is
@@ -1173,7 +1286,9 @@ class SandboxClient:
             pool_id: Pool ID to use for warm containers (optional)
             snapshot_id: ID of a completed snapshot to restore from
             proxy_url: Override the sandbox proxy URL
-            startup_timeout: Max seconds to wait for Running status (default 60)
+            request_timeout: Max seconds to wait for Running status.
+                Defaults to the client request timeout.
+            startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
 
@@ -1184,18 +1299,30 @@ class SandboxClient:
             SandboxError: If sandbox fails to start or times out
             SandboxConnectionError: If the server is unreachable
         """
+        wait_timeout = (
+            request_timeout
+            if request_timeout is not None
+            else (
+                startup_timeout
+                if startup_timeout is not None
+                else self._request_timeout
+            )
+        )
+        request_client = self._with_request_timeout(wait_timeout)
+
         # claim() never sends `name` to the server, so only the create() path
         # may fall back to the requested name when caching info locally.
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
-            result = self.claim(pool_id)
+            result = request_client.claim(pool_id)
         else:
-            result = self.create(
+            result = request_client.create(
                 image=image,
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                secret_names=secret_names,
+                gpus=gpus,
+                gpu_model=gpu_model,
                 timeout_secs=timeout_secs,
                 entrypoint=entrypoint,
                 allow_internet_access=allow_internet_access,
@@ -1209,18 +1336,21 @@ class SandboxClient:
         # and a short-lived routing hint. Use it immediately to skip an extra poll RTT
         # and let the proxy route the first request without a placement lookup.
         if result.status == SandboxStatus.RUNNING:
-            sandbox = self.connect(
+            sandbox = request_client.connect(
                 result.sandbox_id,
-                proxy_url=proxy_url,
+                proxy_url=proxy_url
+                or result.ingress_endpoint
+                or self._resolve_proxy_url(),
                 routing_hint=result.routing_hint,
             )
             sandbox._sandbox_id = result.sandbox_id
             sandbox._owns_sandbox = True
-            sandbox._lifecycle_client = self
+            sandbox._lifecycle_client = request_client
             sandbox._trace_id = result.trace_id
             sandbox._cached_info = SandboxInfo.model_construct(
                 sandbox_id=result.sandbox_id,
                 status=result.status,
+                ingress_endpoint=result.ingress_endpoint,
                 name=result.name or requested_name,
             )
             return sandbox
@@ -1233,20 +1363,30 @@ class SandboxClient:
                     termination_reason=result.termination_reason,
                 )
             )
+        if result.status == SandboxStatus.TIMEOUT:
+            try:
+                request_client.delete(result.sandbox_id)
+            except Exception:
+                pass
+            raise SandboxError(
+                f"Sandbox {result.sandbox_id} did not start within {wait_timeout}s"
+            )
 
-        deadline = time.time() + startup_timeout
+        deadline = time.time() + wait_timeout
         while time.time() < deadline:
-            info = self.get(result.sandbox_id)
+            info = request_client.get(result.sandbox_id)
             if info.status == SandboxStatus.RUNNING:
-                sandbox = self.connect(
+                sandbox = request_client.connect(
                     result.sandbox_id,
-                    proxy_url=proxy_url,
+                    proxy_url=proxy_url
+                    or info.ingress_endpoint
+                    or self._resolve_proxy_url(),
                     routing_hint=info.routing_hint,
                 )
                 sandbox._sandbox_id = info.sandbox_id
-                sandbox._cached_info = info
+                sandbox._cached_info = info.value
                 sandbox._owns_sandbox = True
-                sandbox._lifecycle_client = self
+                sandbox._lifecycle_client = request_client
                 sandbox._trace_id = result.trace_id
                 return sandbox
             if info.status in (SandboxStatus.SUSPENDED, SandboxStatus.TERMINATED):
@@ -1263,9 +1403,9 @@ class SandboxClient:
 
         # Timed out — clean up the pending sandbox
         try:
-            self.delete(result.sandbox_id)
+            request_client.delete(result.sandbox_id)
         except Exception:
             pass
         raise SandboxError(
-            f"Sandbox {result.sandbox_id} did not start within {startup_timeout}s"
+            f"Sandbox {result.sandbox_id} did not start within {wait_timeout}s"
         )

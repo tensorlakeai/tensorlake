@@ -7,6 +7,7 @@ export enum SandboxStatus {
   SUSPENDING = "suspending",
   SUSPENDED = "suspended",
   TERMINATED = "terminated",
+  TIMEOUT = "timeout",
 }
 
 export enum SnapshotStatus {
@@ -44,6 +45,7 @@ export enum ProcessStatus {
   RUNNING = "running",
   EXITED = "exited",
   SIGNALED = "signaled",
+  OOM_KILLED = "oom_killed",
 }
 
 export enum StdinMode {
@@ -69,6 +71,11 @@ export interface ContainerResourcesInfo {
   ephemeralDiskMb: number;
 }
 
+export interface GPUResources {
+  count: number;
+  model: string;
+}
+
 export interface NetworkConfig {
   allowInternetAccess: boolean;
   allowOut: string[];
@@ -84,7 +91,10 @@ export interface CreateSandboxOptions {
   memoryMb?: number;
   /** Root disk size in megabytes. When omitted, the server uses its default disk size. */
   diskMb?: number;
-  secretNames?: string[];
+  /** Number of GPUs to allocate. When provided, defaults to A10 unless gpuModel is set. */
+  gpus?: number;
+  /** GPU model to allocate. Only "A10" is supported. */
+  gpuModel?: string;
   timeoutSecs?: number;
   entrypoint?: string[];
   allowInternetAccess?: boolean;
@@ -107,10 +117,36 @@ export interface UpdateSandboxOptions {
 export interface CreateSandboxResponse {
   sandboxId: string;
   status: SandboxStatus;
+  reason?: string;
   routingHint?: string;
+  ingressEndpoint?: string;
   name?: string | null;
   terminationReason?: string;
   errorDetails?: unknown;
+}
+
+export interface CopySandboxOptions {
+  /** Number of running copies to create. Defaults to 1. */
+  times?: number;
+  /** Per-request timeout in seconds for the blocking live-copy request. */
+  requestTimeout?: number;
+}
+
+export interface CopiedSandboxResponse {
+  sandboxId: string;
+  /** Raw server status. Partial copy responses can include statuses such as `"failed"`. */
+  status: string;
+  reason?: string;
+  routingHint?: string;
+  ingressEndpoint?: string;
+  name?: string | null;
+  terminationReason?: string;
+  errorDetails?: unknown;
+}
+
+export interface CopySandboxResponse {
+  sourceSandboxId: string;
+  sandboxes: CopiedSandboxResponse[];
 }
 
 export interface SandboxInfo {
@@ -120,7 +156,6 @@ export interface SandboxInfo {
   /** Resolved sandbox image name. */
   image?: string;
   resources: ContainerResourcesInfo;
-  secretNames: string[];
   timeoutSecs?: number;
   entrypoint?: string[];
   network?: NetworkConfig;
@@ -133,6 +168,7 @@ export interface SandboxInfo {
   name?: string;
   allowUnauthenticatedAccess?: boolean;
   exposedPorts?: number[];
+  ingressEndpoint?: string;
   sandboxUrl?: string;
   routingHint?: string;
 }
@@ -140,6 +176,7 @@ export interface SandboxInfo {
 export interface SandboxPortAccess {
   allowUnauthenticatedAccess: boolean;
   exposedPorts: number[];
+  ingressEndpoint?: string;
   sandboxUrl?: string;
 }
 
@@ -209,7 +246,6 @@ export interface CreatePoolOptions {
   cpus?: number;
   memoryMb?: number;
   ephemeralDiskMb?: number;
-  secretNames?: string[];
   timeoutSecs?: number;
   entrypoint?: string[];
   maxContainers?: number;
@@ -222,7 +258,6 @@ export interface UpdatePoolOptions {
   cpus?: number;
   memoryMb?: number;
   ephemeralDiskMb?: number;
-  secretNames?: string[];
   timeoutSecs?: number;
   entrypoint?: string[];
   maxContainers?: number;
@@ -247,7 +282,6 @@ export interface SandboxPoolInfo {
   /** Sandbox image name backing the pool. */
   image: string;
   resources: ContainerResourcesInfo;
-  secretNames: string[];
   timeoutSecs: number;
   entrypoint?: string[];
   maxContainers?: number;
@@ -267,6 +301,60 @@ export interface ProcessUserSpec {
 
 export type ProcessUser = string | ProcessUserSpec;
 
+export type RestartPolicy = "never" | "on_failure" | "always";
+
+export interface RestartPolicyConfig {
+  policy?: RestartPolicy;
+  maxRestarts?: number;
+  initialBackoffMs?: number;
+  maxBackoffMs?: number;
+}
+
+export type ProcessHealthCheckType = "http" | "tcp";
+
+export interface ProcessHealthCheck {
+  type: ProcessHealthCheckType;
+  port: number;
+  path?: string;
+  initialDelayMs?: number;
+  intervalMs?: number;
+  timeoutMs?: number;
+  failureThreshold?: number;
+}
+
+export type ManagedProcessStatus =
+  | "starting"
+  | "running"
+  | "backing_off"
+  | "stopped";
+
+export type ManagedProcessHealthStatus =
+  | "disabled"
+  | "starting"
+  | "healthy"
+  | "unhealthy";
+
+export interface ManagedProcessExit {
+  exitCode?: number;
+  signal?: number;
+  oomKilled: boolean;
+  endedAt: Date;
+}
+
+export interface ManagedProcessInfo {
+  id: string;
+  name?: string;
+  status: ManagedProcessStatus;
+  restartCount: number;
+  restart: RestartPolicyConfig;
+  healthCheck?: ProcessHealthCheck;
+  healthStatus: ManagedProcessHealthStatus;
+  consecutiveHealthFailures: number;
+  lastExit?: ManagedProcessExit;
+  lastError?: string;
+  nextRestartAt?: Date;
+}
+
 export interface StartProcessOptions {
   args?: string[];
   env?: Record<string, string>;
@@ -275,9 +363,16 @@ export interface StartProcessOptions {
   stdoutMode?: OutputMode;
   stderrMode?: OutputMode;
   user?: ProcessUser;
+  /** Optional managed-process name. Supplying this opts into managed process behavior. */
+  name?: string;
+  /** Optional restart behavior. Supplying this opts into managed process behavior. */
+  restart?: RestartPolicyConfig;
+  /** Optional HTTP/TCP health check. Supplying this opts into managed process behavior. */
+  healthCheck?: ProcessHealthCheck;
 }
 
 export interface ProcessInfo {
+  handle?: number;
   pid: number;
   status: ProcessStatus;
   exitCode?: number;
@@ -287,6 +382,7 @@ export interface ProcessInfo {
   args: string[];
   startedAt: Date;
   endedAt?: Date;
+  managed?: ManagedProcessInfo;
 }
 
 export interface SendSignalResponse {
@@ -374,6 +470,10 @@ export interface SandboxClientOptions {
   namespace?: string;
   maxRetries?: number;
   retryBackoffMs?: number;
+  /** Total HTTP request timeout in seconds. Default: 300. */
+  requestTimeout?: number;
+  /** @deprecated Use requestTimeout. Total HTTP request timeout in milliseconds. */
+  timeoutMs?: number;
 }
 
 export interface SandboxOptions {
@@ -383,11 +483,27 @@ export interface SandboxOptions {
   organizationId?: string;
   projectId?: string;
   routingHint?: string;
+  resolveProxyInfo?: (
+    identifier: string,
+  ) => Promise<SandboxInfo & { readonly traceId: string }>;
+  /** Optional total HTTP request timeout in seconds for sandbox proxy operations. Omit for no total proxy timeout. */
+  requestTimeout?: number;
+  /** @deprecated Use requestTimeout. Optional total HTTP request timeout in milliseconds for sandbox proxy operations. */
+  timeoutMs?: number;
+  /**
+   * @internal Shared Rust-backed lifecycle client. When provided, the proxy
+   * client is minted via `connectProxy` so it reuses this client's connection
+   * pool (HTTP/2 coalescing across sandboxes).
+   */
+  nativeClient?: import("./native-sandbox.js").NativeSandboxClient;
 }
 
 export interface CreateAndConnectOptions extends CreateSandboxOptions {
   poolId?: string;
   proxyUrl?: string;
+  /** Total HTTP request timeout in seconds for sandbox startup. Default: client requestTimeout. */
+  requestTimeout?: number;
+  /** @deprecated Use requestTimeout. */
   startupTimeout?: number;
 }
 

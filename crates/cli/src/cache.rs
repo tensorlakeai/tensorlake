@@ -35,4 +35,9 @@ impl KvCache {
         let _ = tokio::fs::create_dir_all(&self.ns_dir).await;
         let _ = tokio::fs::write(path, value.as_bytes()).await;
     }
+
+    pub async fn delete(&self, key: &str) {
+        let path = self.key_path(key);
+        let _ = tokio::fs::remove_file(path).await;
+    }
 }

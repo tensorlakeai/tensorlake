@@ -156,3 +156,17 @@ export interface ApplicationBuildResponse {
   finishedAt?: Date;
   imageBuilds: ApplicationBuildImageResult[];
 }
+
+/** A registered sandbox image (template) as returned by the platform API. */
+export interface SandboxTemplate {
+  id?: string;
+  name?: string;
+  snapshotId?: string;
+  snapshotSandboxId?: string;
+  snapshotUri?: string;
+  snapshotFormatVersion?: string;
+  snapshotSizeBytes?: number;
+  rootfsDiskBytes?: number;
+  rootfsNodeKind?: string;
+  public?: boolean;
+}

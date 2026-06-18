@@ -6,8 +6,15 @@ export { Desktop } from "./desktop.js";
 export { TcpTunnel } from "./tunnel.js";
 export { CloudClient } from "./cloud-client.js";
 export { APIClient } from "./api-client.js";
-export { createSandboxImage } from "./sandbox-image.js";
+export {
+  createSandboxImage,
+  importSandboxImage,
+  deleteSandboxImage,
+  findSandboxImageByName,
+  listSandboxImages,
+} from "./sandbox-image.js";
 export { Image, dockerfileContent, ImageBuildOperationType } from "./image.js";
+export { sandboxUrlFromIngressEndpoint } from "./url.js";
 
 export type {
   PtyDataHandler,
@@ -80,12 +87,17 @@ export type {
   ApplicationBuildContext,
   ApplicationBuildImageResult,
   ApplicationBuildResponse,
+  SandboxTemplate,
 } from "./cloud-models.js";
 
 export type {
   ContainerResourcesInfo,
   NetworkConfig,
+  CopySandboxOptions,
+  CopiedSandboxResponse,
+  CopySandboxResponse,
   CreateSandboxOptions,
+  GPUResources,
   CreateSandboxResponse,
   SandboxInfo,
   SandboxPortAccess,
@@ -101,6 +113,14 @@ export type {
   PoolContainerInfo,
   SandboxPoolInfo,
   StartProcessOptions,
+  RestartPolicy,
+  RestartPolicyConfig,
+  ProcessHealthCheckType,
+  ProcessHealthCheck,
+  ManagedProcessStatus,
+  ManagedProcessHealthStatus,
+  ManagedProcessExit,
+  ManagedProcessInfo,
   ProcessUser,
   ProcessUserSpec,
   ProcessInfo,
@@ -125,6 +145,7 @@ export type {
 
 export type {
   CreateSandboxImageOptions,
+  ImportSandboxImageOptions,
   SandboxImageSource,
 } from "./sandbox-image.js";
 

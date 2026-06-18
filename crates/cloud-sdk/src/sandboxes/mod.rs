@@ -4,6 +4,7 @@ pub mod models;
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::Method;
+use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use serde_json::Value;
 use std::path::Path;
@@ -17,13 +18,13 @@ use crate::{
 pub use desktop::SandboxDesktopClient;
 
 use models::{
-    ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CreateSandboxPoolResponse,
-    CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest, CreateSnapshotResponse,
-    DaemonInfo, HealthResponse, ListArchivedSandboxesParams, ListArchivedSandboxesResponse,
-    ListDirectoryResponse, ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse,
-    ListSnapshotsResponse, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo,
-    SandboxPoolInfo, SandboxPoolRequest, SendSignalResponse, SnapshotInfo, SnapshotType,
-    UpdateSandboxRequest,
+    ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CopySandboxResponse,
+    CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
+    CreateSnapshotResponse, DaemonInfo, HealthResponse, ListArchivedSandboxesParams,
+    ListArchivedSandboxesResponse, ListDirectoryResponse, ListProcessesResponse,
+    ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse, OutputEvent,
+    OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxPoolInfo, SandboxPoolRequest,
+    SendSignalResponse, SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
 };
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
@@ -71,13 +72,39 @@ impl SandboxesClient {
         let req = self
             .client
             .build_post_json_request(Method::POST, &uri, request)?;
-        self.client.execute_json(req).await
+        self.client
+            .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
+            .await
     }
 
     pub async fn claim(&self, pool_id: &str) -> Result<Traced<CreateSandboxResponse>, SdkError> {
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}/sandboxes"));
         let req = self.client.request(Method::POST, &uri).build()?;
-        self.client.execute_json(req).await
+        self.client
+            .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
+            .await
+    }
+
+    pub async fn copy(
+        &self,
+        sandbox_id: &str,
+        times: usize,
+    ) -> Result<Traced<CopySandboxResponse>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/copy"));
+        let req = self
+            .client
+            .request(Method::POST, &uri)
+            .query(&[("times", times)])
+            .build()?;
+        self.client
+            .execute_json_allow_status(
+                req,
+                &[
+                    StatusCode::UNPROCESSABLE_ENTITY,
+                    StatusCode::GATEWAY_TIMEOUT,
+                ],
+            )
+            .await
     }
 
     pub async fn get(&self, sandbox_id: &str) -> Result<Traced<SandboxInfo>, SdkError> {
@@ -335,6 +362,13 @@ impl SandboxProxyClient {
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
+    pub async fn restart_process(&self, pid: i64) -> Result<Traced<ProcessInfo>, SdkError> {
+        let req = self
+            .request(Method::POST, &format!("/api/v1/processes/{pid}/restart"))
+            .build()?;
+        self.client.execute_json(req).await
+    }
+
     pub async fn send_signal(
         &self,
         pid: i64,
@@ -387,17 +421,57 @@ impl SandboxProxyClient {
     }
 
     pub async fn follow_stdout(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
-        self.follow_stream(&format!("/api/v1/processes/{pid}/stdout/follow"))
-            .await
+        let mut events = Vec::new();
+        let trace_id = self
+            .follow_stdout_streaming(pid, |event| events.push(event))
+            .await?;
+        Ok(Traced::new(trace_id, events))
     }
 
     pub async fn follow_stderr(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
-        self.follow_stream(&format!("/api/v1/processes/{pid}/stderr/follow"))
-            .await
+        let mut events = Vec::new();
+        let trace_id = self
+            .follow_stderr_streaming(pid, |event| events.push(event))
+            .await?;
+        Ok(Traced::new(trace_id, events))
     }
 
     pub async fn follow_output(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
-        self.follow_stream(&format!("/api/v1/processes/{pid}/output/follow"))
+        let mut events = Vec::new();
+        let trace_id = self
+            .follow_output_streaming(pid, |event| events.push(event))
+            .await?;
+        Ok(Traced::new(trace_id, events))
+    }
+
+    /// Stream stdout output events to `on_event` as they arrive, without
+    /// buffering. Returns the request `trace_id` once the upstream stream
+    /// closes. This is the streaming counterpart to [`follow_stdout`] used by
+    /// language bindings that surface a live event stream to the caller.
+    pub async fn follow_stdout_streaming(
+        &self,
+        pid: i64,
+        on_event: impl FnMut(OutputEvent),
+    ) -> Result<String, SdkError> {
+        self.follow_stream_cb(&format!("/api/v1/processes/{pid}/stdout/follow"), on_event)
+            .await
+    }
+
+    pub async fn follow_stderr_streaming(
+        &self,
+        pid: i64,
+        on_event: impl FnMut(OutputEvent),
+    ) -> Result<String, SdkError> {
+        self.follow_stream_cb(&format!("/api/v1/processes/{pid}/stderr/follow"), on_event)
+            .await
+    }
+
+    pub async fn follow_output_streaming(
+        &self,
+        pid: i64,
+        on_event: impl FnMut(OutputEvent),
+    ) -> Result<String, SdkError> {
+        self.follow_stream_cb(&format!("/api/v1/processes/{pid}/output/follow"), on_event)
             .await
     }
 
@@ -405,6 +479,21 @@ impl SandboxProxyClient {
         &self,
         payload: &Value,
     ) -> Result<Traced<Vec<RunProcessEvent>>, SdkError> {
+        let mut events = Vec::new();
+        let trace_id = self
+            .run_process_streaming(payload, |event| events.push(event))
+            .await?;
+        Ok(Traced::new(trace_id, events))
+    }
+
+    /// Start a process and stream its lifecycle events to `on_event` as they
+    /// arrive. Returns the request `trace_id` once the process exits and the
+    /// stream closes. This is the streaming counterpart to [`run_process`].
+    pub async fn run_process_streaming(
+        &self,
+        payload: &Value,
+        mut on_event: impl FnMut(RunProcessEvent),
+    ) -> Result<String, SdkError> {
         let path = "/api/v1/processes/run";
         let req = self
             .request(Method::POST, path)
@@ -438,6 +527,7 @@ impl SandboxProxyClient {
                             Ok(RunProcessEvent::Exited {
                                 exit_code: None,
                                 signal: None,
+                                ..
                             }) => None,
                             Ok(evt) => Some(Ok(evt)),
                             Err(_) => None,
@@ -447,14 +537,17 @@ impl SandboxProxyClient {
                 }
             });
         futures::pin_mut!(stream);
-        let mut events = Vec::new();
         while let Some(event) = stream.next().await {
-            events.push(event?);
+            on_event(event?);
         }
-        Ok(Traced::new(trace_id, events))
+        Ok(trace_id)
     }
 
-    async fn follow_stream(&self, path: &str) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
+    async fn follow_stream_cb(
+        &self,
+        path: &str,
+        mut on_event: impl FnMut(OutputEvent),
+    ) -> Result<String, SdkError> {
         let req = self
             .request(Method::GET, path)
             .header(ACCEPT, "text/event-stream")
@@ -486,11 +579,10 @@ impl SandboxProxyClient {
                 }
             });
         futures::pin_mut!(stream);
-        let mut events = Vec::new();
         while let Some(event) = stream.next().await {
-            events.push(event?);
+            on_event(event?);
         }
-        Ok(Traced::new(trace_id, events))
+        Ok(trace_id)
     }
 
     pub async fn read_file(&self, path: &str) -> Result<Traced<Vec<u8>>, SdkError> {
@@ -557,6 +649,13 @@ impl SandboxProxyClient {
         self.client.execute_json(req).await
     }
 
+    pub async fn delete_pty_session(&self, session_id: &str) -> Result<Traced<()>, SdkError> {
+        let req = self
+            .request(Method::DELETE, &format!("/api/v1/pty/{session_id}"))
+            .build()?;
+        Ok(self.client.execute_traced(req).await?.map(|_| ()))
+    }
+
     pub async fn health(&self) -> Result<Traced<HealthResponse>, SdkError> {
         let req = self.request(Method::GET, "/api/v1/health").build()?;
         self.client.execute_json(req).await
@@ -564,6 +663,23 @@ impl SandboxProxyClient {
 
     pub async fn info(&self) -> Result<Traced<DaemonInfo>, SdkError> {
         let req = self.request(Method::GET, "/api/v1/info").build()?;
+        self.client.execute_json(req).await
+    }
+
+    /// Ask the sandbox proxy to mint a builder-compatible blob signing spec.
+    ///
+    /// Used during the versioned-response rollout: platform-api now returns
+    /// `snapshotRelPath` instead of a pre-signed `upload` block, and the CLI
+    /// calls this endpoint to resolve the artifact rel-path into a concrete
+    /// upload spec. Parent snapshot downloads use the same endpoint with a
+    /// full blob URI. The response is a `serde_json::Value` because most
+    /// fields splice verbatim into the rootfs build spec consumed by the
+    /// in-sandbox builder.
+    pub async fn sign_blob(&self, request: &SignBlobRequest) -> Result<Traced<Value>, SdkError> {
+        let req = self
+            .request(Method::POST, "/api/v1/blob/sign")
+            .json(request)
+            .build()?;
         self.client.execute_json(req).await
     }
 }

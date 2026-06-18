@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   __setNativeBindingForTest,
   createSandboxImage,
+  importSandboxImage,
 } from "../src/sandbox-image.js";
 import { Image, dockerfileContent } from "../src/image.js";
 
@@ -18,22 +19,22 @@ function makeFakeBinding(opts: {
   events?: Array<{ eventType: string; stream?: string | null; message: string }>;
 } = {}) {
   const captured: CapturedCall = { options: {} };
+  const handler = async (
+    options: Record<string, unknown>,
+    emit?:
+      | ((event: { eventType: string; stream?: string | null; message: string }) => void)
+      | null,
+  ) => {
+    captured.options = options;
+    captured.emit = emit;
+    if (emit && opts.events) {
+      for (const event of opts.events) emit(event);
+    }
+    return opts.resultJson ?? '{"id":"tpl-1","snapshot_id":"snap-1"}';
+  };
   const binding = {
-    buildSandboxImage: vi.fn(
-      async (
-        options: Record<string, unknown>,
-        emit?:
-          | ((event: { eventType: string; stream?: string | null; message: string }) => void)
-          | null,
-      ) => {
-        captured.options = options;
-        captured.emit = emit;
-        if (emit && opts.events) {
-          for (const event of opts.events) emit(event);
-        }
-        return opts.resultJson ?? '{"id":"tpl-1","snapshot_id":"snap-1"}';
-      },
-    ),
+    buildSandboxImage: vi.fn(handler),
+    importSandboxImage: vi.fn(handler),
   };
   __setNativeBindingForTest(binding);
   return { binding, captured };
@@ -74,6 +75,7 @@ describe("createSandboxImage", () => {
       dockerfilePath: path.resolve(dockerfilePath),
       registeredName: "sandbox-image",
       isPublic: true,
+      dockerCompat: false,
       dockerfileText: undefined,
       contextDir: undefined,
     });
@@ -105,6 +107,20 @@ describe("createSandboxImage", () => {
     // is responsible for parsing/validating it).
     const expectedDockerfile = `${dockerfileContent(image)}\n`;
     expect(captured.options.dockerfileText).toBe(expectedDockerfile);
+  });
+
+  it("forwards dockerCompat to the native build binding", async () => {
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-compat`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM python:3.12-slim\n", "utf8");
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(dockerfilePath, { dockerCompat: true });
+
+    expect(captured.options.dockerCompat).toBe(true);
   });
 
   it("forwards native events back through the user emit callback", async () => {
@@ -310,6 +326,109 @@ describe("createSandboxImage", () => {
 
     expect(warn).toHaveBeenCalledOnce();
     expect(warn.mock.calls[0]?.[0]).toMatch(/default name/);
+  });
+});
+
+describe("importSandboxImage", () => {
+  beforeEach(() => {
+    vi.stubEnv("TENSORLAKE_API_URL", "https://api.tensorlake.test");
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_key_test");
+    vi.stubEnv("INDEXIFY_NAMESPACE", "default");
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    __setNativeBindingForTest(undefined);
+    vi.restoreAllMocks();
+  });
+
+  it("delegates an image reference to the native import binding", async () => {
+    const { binding, captured } = makeFakeBinding();
+    const result = await importSandboxImage(
+      "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",
+      { isPublic: true },
+    );
+
+    expect(binding.importSandboxImage).toHaveBeenCalledOnce();
+    expect(binding.buildSandboxImage).not.toHaveBeenCalled();
+    expect(captured.options).toMatchObject({
+      apiUrl: "https://api.tensorlake.test",
+      bearerToken: "tl_key_test",
+      imageReference: "pytorch/pytorch:2.4.1-cuda12.1-cudnn9-runtime",
+      registeredName: "pytorch",
+      isPublic: true,
+      dockerCompat: false,
+    });
+    // The import option shape carries no Dockerfile fields.
+    expect(captured.options).not.toHaveProperty("dockerfilePath");
+    expect(captured.options).not.toHaveProperty("importImageReference");
+    expect(result).toEqual({ id: "tpl-1", snapshot_id: "snap-1" });
+  });
+
+  it("derives the registered name from the reference, stripping tag and registry path", async () => {
+    const { captured } = makeFakeBinding();
+    await importSandboxImage("ghcr.io/org/app@sha256:abc123");
+    expect(captured.options.registeredName).toBe("app");
+  });
+
+  it("uses the explicit registeredName when provided", async () => {
+    const { captured } = makeFakeBinding();
+    await importSandboxImage("pytorch/pytorch:2.4.1", {
+      registeredName: "override",
+    });
+    expect(captured.options.registeredName).toBe("override");
+  });
+
+  it("forwards dockerCompat to the native import binding", async () => {
+    const { captured } = makeFakeBinding();
+    await importSandboxImage("pytorch/pytorch:2.4.1", {
+      dockerCompat: true,
+    });
+    expect(captured.options.dockerCompat).toBe(true);
+  });
+
+  it("forwards native events back through the user emit callback", async () => {
+    makeFakeBinding({
+      events: [
+        { eventType: "status", message: "Pulling layers..." },
+        { eventType: "build_log", stream: "stdout", message: "applied layer" },
+      ],
+    });
+
+    const events: Array<Record<string, unknown>> = [];
+    await importSandboxImage(
+      "pytorch/pytorch:2.4.1",
+      {},
+      { emit: (e) => events.push(e) },
+    );
+
+    expect(events).toEqual([
+      {
+        type: "status",
+        message: "Importing image 'pytorch/pytorch:2.4.1' as 'pytorch'...",
+      },
+      { type: "status", message: "Pulling layers..." },
+      { type: "build_log", stream: "stdout", message: "applied layer" },
+      { type: "image_registered", name: "pytorch", image_id: "tpl-1" },
+      { type: "done" },
+    ]);
+  });
+
+  it("throws on an empty image reference", async () => {
+    makeFakeBinding();
+    await expect(importSandboxImage("   ")).rejects.toThrow(
+      /image reference to import must not be empty/,
+    );
+  });
+
+  it("throws when no credentials are configured", async () => {
+    vi.stubEnv("TENSORLAKE_API_KEY", "");
+    vi.stubEnv("TENSORLAKE_PAT", "");
+    makeFakeBinding();
+
+    await expect(importSandboxImage("pytorch/pytorch:2.4.1")).rejects.toThrow(
+      /Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT/,
+    );
   });
 });
 

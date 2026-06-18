@@ -14,12 +14,59 @@ export class SandboxError extends SandboxException {
   }
 }
 
-/** Raised when the client cannot connect to the API server. */
+/**
+ * Raised when the client cannot complete a request against the API server.
+ *
+ * The original transport error (typically undici's `TypeError: fetch failed`,
+ * whose real reason — `ECONNREFUSED`, `UND_ERR_CONNECT_TIMEOUT`, `EMFILE`, … —
+ * lives in `.cause`) is preserved on this error's {@link cause} for programmatic
+ * inspection, and its full chain is folded into the message so it survives
+ * wrappers that only forward `error.message`. No interpretation of the failure
+ * (client vs server) is applied — the raw inner error is surfaced as-is so the
+ * reader can judge.
+ */
 export class SandboxConnectionError extends SandboxError {
-  constructor(message: string) {
+  constructor(message: string, options?: { cause?: unknown }) {
     super(`Connection error: ${message}`);
     this.name = "SandboxConnectionError";
+    if (options?.cause !== undefined) this.cause = options.cause;
   }
+}
+
+/**
+ * Flatten an error and its `cause` chain into a single readable line, appending
+ * each level's `code` when it is not already present in the message. undici
+ * reports `fetch failed` at the top and the real reason one or more levels down
+ * in `.cause`, so this surfaces the part that actually identifies the failure.
+ *
+ * @example "fetch failed: connect ECONNREFUSED 10.0.0.1:443"
+ * @example "fetch failed: Connect Timeout Error (UND_ERR_CONNECT_TIMEOUT)"
+ */
+export function describeError(err: unknown): string {
+  const parts: string[] = [];
+  const seen = new Set<unknown>();
+  let current: unknown = err;
+
+  for (let depth = 0; depth < 6; depth++) {
+    if (current == null || typeof current !== "object" || seen.has(current)) {
+      break;
+    }
+    seen.add(current);
+    const e = current as { message?: unknown; code?: unknown; cause?: unknown };
+    const message = typeof e.message === "string" ? e.message.trim() : "";
+    const code = typeof e.code === "string" ? e.code : undefined;
+
+    let segment = message;
+    if (code && (!message || !message.includes(code))) {
+      segment = segment ? `${segment} (${code})` : code;
+    }
+    if (segment && !parts.includes(segment)) parts.push(segment);
+
+    current = e.cause;
+  }
+
+  if (parts.length > 0) return parts.join(": ");
+  return err instanceof Error ? err.message : String(err);
 }
 
 /** Raised when a sandbox is not found. */

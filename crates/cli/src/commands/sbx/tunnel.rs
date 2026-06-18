@@ -14,7 +14,7 @@ use tokio_tungstenite::tungstenite::{self, Message, client::IntoClientRequest};
 use url::Url;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::sandbox_proxy_base;
+use crate::commands::sbx::{ResolvedSandboxProxyTarget, resolve_sandbox_proxy_target};
 use crate::error::{CliError, Result};
 
 const TUNNEL_BUFFER_SIZE: usize = 16 * 1024;
@@ -26,9 +26,9 @@ pub async fn run(
     listen_port: Option<u16>,
 ) -> Result<()> {
     let listen_port = listen_port.unwrap_or(remote_port);
-    let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
-    let ws_url = build_tunnel_url(&proxy_base, remote_port)?;
-    let headers = build_proxy_headers(ctx, sandbox_id, host_override.as_deref())?;
+    let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
+    let ws_url = build_tunnel_url(&target.proxy_base, remote_port)?;
+    let headers = build_proxy_headers(ctx, &target)?;
 
     let listen_addr = format!("127.0.0.1:{listen_port}");
     let listener = TcpListener::bind(&listen_addr).await.map_err(|error| {
@@ -84,11 +84,7 @@ fn build_tunnel_url(proxy_base: &str, remote_port: u16) -> Result<String> {
     Ok(url.to_string())
 }
 
-fn build_proxy_headers(
-    ctx: &CliContext,
-    sandbox_id: &str,
-    host_override: Option<&str>,
-) -> Result<HeaderMap> {
+fn build_proxy_headers(ctx: &CliContext, target: &ResolvedSandboxProxyTarget) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
         AUTHORIZATION,
@@ -114,7 +110,7 @@ fn build_proxy_headers(
         );
     }
 
-    if let Some(host) = host_override {
+    if let Some(host) = target.host_override.as_deref() {
         headers.insert(
             HOST,
             HeaderValue::from_str(host)
@@ -123,8 +119,16 @@ fn build_proxy_headers(
     } else {
         headers.insert(
             HeaderName::from_static("x-tensorlake-sandbox-id"),
-            HeaderValue::from_str(sandbox_id).map_err(|error| {
+            HeaderValue::from_str(&target.sandbox_id).map_err(|error| {
                 CliError::Other(anyhow!("invalid sandbox id header: {}", error))
+            })?,
+        );
+    }
+    if let Some(hint) = target.routing_hint.as_deref() {
+        headers.insert(
+            HeaderName::from_static("x-tensorlake-route-hint"),
+            HeaderValue::from_str(hint).map_err(|error| {
+                CliError::Other(anyhow!("invalid route hint header: {}", error))
             })?,
         );
     }

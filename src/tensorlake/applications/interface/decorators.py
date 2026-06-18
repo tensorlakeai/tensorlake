@@ -105,7 +105,7 @@ class _FunctionDecorator(_Decorator):
         ephemeral_disk: float,
         gpu: None | str | List[str],
         timeout: int,
-        image: Image,
+        image: Image | None,
         secrets: List[str],
         retries: Retries | None,
         region: str | None,
@@ -120,7 +120,7 @@ class _FunctionDecorator(_Decorator):
         self._ephemeral_disk: float = ephemeral_disk
         self._gpu: None | str | List[str] = gpu
         self._timeout: int = timeout
-        self._image: Image = image
+        self._image: Image | None = image
         self._secrets: List[str] = secrets
         self._retries: Retries | None = retries
         self._region: str | None = region
@@ -172,7 +172,7 @@ _DEFAULT_CPU: float = 1.0
 # So we need a large enough minimal memory limit to ensure stability while running customer
 # functions that consume memory too.
 _DEFAULT_MEMORY_GB: float = 1.0
-_DEFAULT_EPHEMERAL_DISK_GB: float = 2.0  # 2 GB
+_DEFAULT_EPHEMERAL_DISK_GB: float = 10.0  # 10 GB
 _DEFAULT_GPU = None  # No GPU by default
 _DEFAULT_MAX_CONCURRENCY = 1  # No concurrent threads running the function by default
 
@@ -184,7 +184,7 @@ def function(
     ephemeral_disk: float = _DEFAULT_EPHEMERAL_DISK_GB,
     gpu: None | str | List[str] = _DEFAULT_GPU,
     timeout: int = _DEFAULT_TIMEOUT_SEC,
-    image: Image = Image(),
+    image: Image | None = None,
     secrets: List[str] = [],
     retries: Retries | None = None,
     region: Literal["us-east-1", "eu-west-1"] | None = None,

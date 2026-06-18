@@ -6,7 +6,9 @@ use tokio::io::AsyncWriteExt;
 use tokio_util::io::ReaderStream;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_sandbox_path, sandbox_proxy_base, with_sandbox_headers};
+use crate::commands::sbx::{
+    parse_sandbox_path, resolve_sandbox_proxy_target, with_sandbox_headers,
+};
 use crate::error::{CliError, Result};
 
 pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
@@ -26,17 +28,16 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
 
     if let Some(sandbox_id) = src_sbx {
         // Download: sandbox -> local
-        let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
+        let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
         let client = ctx.client()?;
 
         let resp = with_sandbox_headers(
             client.get(format!(
                 "{}/api/v1/files?path={}",
-                proxy_base,
+                target.proxy_base,
                 urlencoding::encode(src_path)
             )),
-            sandbox_id,
-            host_override,
+            &target,
         )
         .send()
         .await
@@ -83,20 +84,19 @@ pub async fn run(ctx: &CliContext, src: &str, dest: &str) -> Result<()> {
         let file = tokio::fs::File::open(src_path).await?;
         let size = file.metadata().await?.len();
         let stream = ReaderStream::new(file);
-        let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
+        let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
         let client = ctx.client()?;
 
         let resp = with_sandbox_headers(
             client
                 .put(format!(
                     "{}/api/v1/files?path={}",
-                    proxy_base,
+                    target.proxy_base,
                     urlencoding::encode(dest_path)
                 ))
                 .header(CONTENT_LENGTH, size)
                 .body(reqwest::Body::wrap_stream(stream)),
-            sandbox_id,
-            host_override,
+            &target,
         )
         .send()
         .await

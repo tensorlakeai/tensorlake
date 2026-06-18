@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import warnings
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
@@ -22,12 +23,14 @@ from . import _defaults
 from .client import (
     _RUST_SANDBOX_CLIENT_AVAILABLE,
     RustCloudSandboxClient,
+    _build_gpu_resources,
     _normalize_user_ports,
     _parse_rust_client_error_fields,
     _raise_as_sandbox_error,
     _resolve_sandbox_identifier,
     _rust_status_code,
     _startup_failure_message,
+    _unsupported_request_timeout_kwarg,
 )
 from .exceptions import (
     PoolInUseError,
@@ -39,6 +42,7 @@ from .exceptions import (
 from .models import (
     ArchivedSandboxInfo,
     ContainerResourcesInfo,
+    CopySandboxResponse,
     CreateSandboxPoolResponse,
     CreateSandboxRequest,
     CreateSandboxResources,
@@ -79,6 +83,7 @@ class AsyncSandboxClient:
         namespace: str | None = _defaults.NAMESPACE,
         max_retries: int = _defaults.MAX_RETRIES,
         retry_backoff_sec: float = _defaults.RETRY_BACKOFF_SEC,
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
         _internal: bool = False,
     ) -> None:
         if not _internal:
@@ -94,20 +99,29 @@ class AsyncSandboxClient:
         self._namespace = namespace
         self._max_retries = max_retries
         self._retry_backoff_sec = retry_backoff_sec
+        self._request_timeout = request_timeout
         if not _RUST_SANDBOX_CLIENT_AVAILABLE:
             raise SandboxError(
                 "Rust Cloud SDK sandbox client is required but unavailable. "
                 "Build/install it with `make build_rust_py_client`."
             )
+        kwargs = {
+            "api_url": api_url,
+            "api_key": api_key,
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "namespace": namespace,
+            "user_agent": USER_AGENT,
+            "request_timeout_sec": self._request_timeout,
+        }
         try:
-            self._rust_client = RustCloudSandboxClient(
-                api_url=api_url,
-                api_key=api_key,
-                organization_id=organization_id,
-                project_id=project_id,
-                namespace=namespace,
-                user_agent=USER_AGENT,
-            )
+            try:
+                self._rust_client = RustCloudSandboxClient(**kwargs)
+            except TypeError as e:
+                if not _unsupported_request_timeout_kwarg(e):
+                    raise
+                kwargs.pop("request_timeout_sec")
+                self._rust_client = RustCloudSandboxClient(**kwargs)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
@@ -118,12 +132,14 @@ class AsyncSandboxClient:
         organization_id: str | None = None,
         project_id: str | None = None,
         api_url: str = "https://api.tensorlake.ai",
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> "AsyncSandboxClient":
         return cls(
             api_url=api_url,
             api_key=api_key,
             organization_id=organization_id,
             project_id=project_id,
+            request_timeout=request_timeout,
             _internal=True,
         )
 
@@ -132,8 +148,14 @@ class AsyncSandboxClient:
         cls,
         api_url: str = "http://localhost:8900",
         namespace: str = "default",
+        request_timeout: float = _defaults.DEFAULT_HTTP_TIMEOUT_SEC,
     ) -> "AsyncSandboxClient":
-        return cls(api_url=api_url, namespace=namespace, _internal=True)
+        return cls(
+            api_url=api_url,
+            namespace=namespace,
+            request_timeout=request_timeout,
+            _internal=True,
+        )
 
     async def __aenter__(self) -> "AsyncSandboxClient":
         return self
@@ -162,6 +184,21 @@ class AsyncSandboxClient:
             return f"{parsed.scheme}://sandbox.{host[4:]}"
         return _defaults.SANDBOX_PROXY_URL
 
+    def _with_request_timeout(self, request_timeout: float) -> "AsyncSandboxClient":
+        if request_timeout == self._request_timeout:
+            return self
+        return AsyncSandboxClient(
+            api_url=self._api_url,
+            api_key=self._api_key,
+            organization_id=self._organization_id,
+            project_id=self._project_id,
+            namespace=self._namespace,
+            max_retries=self._max_retries,
+            retry_backoff_sec=self._retry_backoff_sec,
+            request_timeout=request_timeout,
+            _internal=True,
+        )
+
     # --- Sandbox lifecycle ---
 
     async def create(
@@ -170,7 +207,8 @@ class AsyncSandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -189,9 +227,11 @@ class AsyncSandboxClient:
         request_model = CreateSandboxRequest(
             image=image,
             resources=CreateSandboxResources(
-                cpus=cpus, memory_mb=memory_mb, disk_mb=disk_mb
+                cpus=cpus,
+                memory_mb=memory_mb,
+                disk_mb=disk_mb,
+                gpus=_build_gpu_resources(gpus, gpu_model),
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             network=network,
@@ -217,6 +257,39 @@ class AsyncSandboxClient:
                 trace_id, CreateSandboxResponse.model_validate_json(response_json)
             )
         except Exception as e:
+            _raise_as_sandbox_error(e)
+
+    async def copy(
+        self,
+        sandbox_id: str,
+        *,
+        times: int = 1,
+        request_timeout: float | None = None,
+    ) -> Traced[CopySandboxResponse]:
+        """Live-copy a running sandbox.
+
+        The server creates ``times`` running copies from the source sandbox. A
+        partial response can include failed copies; inspect each returned
+        sandbox's ``status`` and ``reason``.
+        """
+        if isinstance(times, bool) or not isinstance(times, int) or times < 1:
+            raise SandboxError("times must be a positive integer")
+        client = (
+            self._with_request_timeout(request_timeout)
+            if request_timeout is not None
+            else self
+        )
+        try:
+            trace_id, response_json = await client._rust_client.copy_sandbox_async(
+                sandbox_id=sandbox_id,
+                times=times,
+            )
+            return Traced(
+                trace_id, CopySandboxResponse.model_validate_json(response_json)
+            )
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
     async def get(self, sandbox_id: str) -> Traced[SandboxInfo]:
@@ -315,6 +388,7 @@ class AsyncSandboxClient:
         port_access = SandboxPortAccess(
             allow_unauthenticated_access=traced.allow_unauthenticated_access,
             exposed_ports=sorted(set(traced.exposed_ports or [])),
+            ingress_endpoint=traced.ingress_endpoint,
             sandbox_url=traced.sandbox_url,
         )
         return Traced(traced.trace_id, port_access)
@@ -511,7 +585,6 @@ class AsyncSandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         ephemeral_disk_mb: int = 1024,
-        secret_names: list[str] | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -522,7 +595,6 @@ class AsyncSandboxClient:
             resources=ContainerResourcesInfo(
                 cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             max_containers=max_containers,
@@ -564,7 +636,6 @@ class AsyncSandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         ephemeral_disk_mb: int = 1024,
-        secret_names: list[str] | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -575,7 +646,6 @@ class AsyncSandboxClient:
             resources=ContainerResourcesInfo(
                 cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
             ),
-            secret_names=secret_names,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             max_containers=max_containers,
@@ -615,21 +685,30 @@ class AsyncSandboxClient:
         proxy_url: str | None = None,
         sandbox_id: str | None = None,
         routing_hint: str | None = None,
+        request_timeout: float | None = None,
     ) -> "AsyncSandbox":
         from .async_sandbox import AsyncSandbox
 
         sandbox_identifier = _resolve_sandbox_identifier(
             identifier, sandbox_id, parameter_name="identifier"
         )
+        info: Traced[SandboxInfo] | None = None
+        proxy_sandbox_id = sandbox_identifier
         if proxy_url is None:
-            proxy_url = self._resolve_proxy_url()
-        proxy_rust_client = self._rust_client.connect_proxy(
-            proxy_url=proxy_url,
-            sandbox_id=sandbox_identifier,
-            routing_hint=routing_hint,
-        )
+            info = await self.get(sandbox_identifier)
+            proxy_url = info.ingress_endpoint or self._resolve_proxy_url()
+            proxy_sandbox_id = info.sandbox_id
+            routing_hint = routing_hint or info.routing_hint
+        connect_proxy_kwargs = {
+            "proxy_url": proxy_url,
+            "sandbox_id": proxy_sandbox_id,
+            "routing_hint": routing_hint,
+        }
+        if request_timeout is not None:
+            connect_proxy_kwargs["request_timeout_sec"] = request_timeout
+        proxy_rust_client = self._rust_client.connect_proxy(**connect_proxy_kwargs)
         sandbox = AsyncSandbox(
-            identifier=sandbox_identifier,
+            identifier=proxy_sandbox_id,
             proxy_url=proxy_url,
             api_key=self._api_key,
             organization_id=self._organization_id,
@@ -638,6 +717,10 @@ class AsyncSandboxClient:
             _proxy_rust_client=proxy_rust_client,
         )
         sandbox._lifecycle_client = self
+        if info is not None:
+            sandbox._sandbox_id = info.sandbox_id
+            sandbox._cached_info = info.value
+            sandbox._trace_id = info.trace_id
         return sandbox
 
     async def create_and_connect(
@@ -646,7 +729,8 @@ class AsyncSandboxClient:
         cpus: float = 1.0,
         memory_mb: int = 1024,
         disk_mb: int | None = None,
-        secret_names: list[str] | None = None,
+        gpus: int | None = None,
+        gpu_model: str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -655,19 +739,32 @@ class AsyncSandboxClient:
         pool_id: str | None = None,
         snapshot_id: str | None = None,
         proxy_url: str | None = None,
-        startup_timeout: float = 60,
+        request_timeout: float | None = None,
+        startup_timeout: float | None = None,
         name: str | None = None,
     ) -> "AsyncSandbox":
+        wait_timeout = (
+            request_timeout
+            if request_timeout is not None
+            else (
+                startup_timeout
+                if startup_timeout is not None
+                else self._request_timeout
+            )
+        )
+        request_client = self._with_request_timeout(wait_timeout)
+
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
-            result = await self.claim(pool_id)
+            result = await request_client.claim(pool_id)
         else:
-            result = await self.create(
+            result = await request_client.create(
                 image=image,
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                secret_names=secret_names,
+                gpus=gpus,
+                gpu_model=gpu_model,
                 timeout_secs=timeout_secs,
                 entrypoint=entrypoint,
                 allow_internet_access=allow_internet_access,
@@ -678,18 +775,21 @@ class AsyncSandboxClient:
             )
 
         if result.status == SandboxStatus.RUNNING:
-            sandbox = await self.connect(
+            sandbox = await request_client.connect(
                 result.sandbox_id,
-                proxy_url=proxy_url,
+                proxy_url=proxy_url
+                or result.ingress_endpoint
+                or self._resolve_proxy_url(),
                 routing_hint=result.routing_hint,
             )
             sandbox._sandbox_id = result.sandbox_id
             sandbox._owns_sandbox = True
-            sandbox._lifecycle_client = self
+            sandbox._lifecycle_client = request_client
             sandbox._trace_id = result.trace_id
             sandbox._cached_info = SandboxInfo.model_construct(
                 sandbox_id=result.sandbox_id,
                 status=result.status,
+                ingress_endpoint=result.ingress_endpoint,
                 name=result.name or requested_name,
             )
             return sandbox
@@ -702,20 +802,30 @@ class AsyncSandboxClient:
                     termination_reason=result.termination_reason,
                 )
             )
+        if result.status == SandboxStatus.TIMEOUT:
+            try:
+                await request_client.delete(result.sandbox_id)
+            except Exception:
+                pass
+            raise SandboxError(
+                f"Sandbox {result.sandbox_id} did not start within {wait_timeout}s"
+            )
 
-        deadline = asyncio.get_running_loop().time() + startup_timeout
+        deadline = asyncio.get_running_loop().time() + wait_timeout
         while asyncio.get_running_loop().time() < deadline:
-            info = await self.get(result.sandbox_id)
+            info = await request_client.get(result.sandbox_id)
             if info.status == SandboxStatus.RUNNING:
-                sandbox = await self.connect(
+                sandbox = await request_client.connect(
                     result.sandbox_id,
-                    proxy_url=proxy_url,
+                    proxy_url=proxy_url
+                    or info.ingress_endpoint
+                    or self._resolve_proxy_url(),
                     routing_hint=info.routing_hint,
                 )
                 sandbox._sandbox_id = info.sandbox_id
                 sandbox._cached_info = info.value
                 sandbox._owns_sandbox = True
-                sandbox._lifecycle_client = self
+                sandbox._lifecycle_client = request_client
                 sandbox._trace_id = result.trace_id
                 return sandbox
             if info.status in (SandboxStatus.SUSPENDED, SandboxStatus.TERMINATED):
@@ -730,9 +840,9 @@ class AsyncSandboxClient:
             await asyncio.sleep(0.5)
 
         try:
-            await self.delete(result.sandbox_id)
+            await request_client.delete(result.sandbox_id)
         except Exception:
             pass
         raise SandboxError(
-            f"Sandbox {result.sandbox_id} did not start within {startup_timeout}s"
+            f"Sandbox {result.sandbox_id} did not start within {wait_timeout}s"
         )

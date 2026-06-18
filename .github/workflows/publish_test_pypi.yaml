@@ -26,7 +26,10 @@ jobs:
         id: version
         run: |
           base=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "version=${base}-dev$(date +%s)" >> $GITHUB_OUTPUT
+          version="${base}-dev$(date +%s)"
+          echo "version=${version}" >> $GITHUB_OUTPUT
+          echo "## TestPyPI release version" >> $GITHUB_STEP_SUMMARY
+          echo "\`${version}\`" >> $GITHUB_STEP_SUMMARY
 
   build-sdist:
     needs: [prepare]
@@ -129,7 +132,7 @@ jobs:
       - name: Verify wheel imports Rust Cloud SDK extension
         if: ${{ !(runner.os == 'Linux' && matrix.platform.target == 'aarch64') }}
         run: |
-          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy tensorlake.cli.build_images
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4

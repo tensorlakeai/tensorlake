@@ -134,15 +134,12 @@ impl ApplicationsClient {
             .header(ACCEPT, "application/json")
             .json(&request.body)
             .build()?;
-        let resp = self.client.execute_json::<serde_json::Value>(req).await?;
+        let resp = self
+            .client
+            .execute_json::<models::InvokeApplicationResponse>(req)
+            .await?;
         let trace_id = resp.trace_id.clone();
-        let request_id = resp["request_id"]
-            .as_str()
-            .ok_or_else(|| SdkError::ServerError {
-                status: reqwest::StatusCode::OK,
-                message: "Missing request_id in response".to_string(),
-            })?
-            .to_string();
+        let request_id = resp.into_inner().request_id;
         Ok(Traced::new(
             trace_id,
             models::InvokeResponse::RequestId(request_id),

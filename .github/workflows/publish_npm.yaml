@@ -57,10 +57,40 @@ jobs:
         include:
           - os: ubuntu-latest
             target_id: linux-x64
+            rust_target: x86_64-unknown-linux-gnu.2.28
+            rust_target_base: x86_64-unknown-linux-gnu
+            libc: gnu
+            cli_build_tool: cargo-zigbuild
+          - os: ubuntu-24.04-arm
+            target_id: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu.2.28
+            rust_target_base: aarch64-unknown-linux-gnu
+            libc: gnu
+            cli_build_tool: cargo-zigbuild
+          - os: ubuntu-latest
+            target_id: linux-x64-musl
+            rust_target: x86_64-unknown-linux-musl
+            rust_target_base: x86_64-unknown-linux-musl
+            libc: musl
+            cli_build_tool: cargo-zigbuild
+          - os: ubuntu-24.04-arm
+            target_id: linux-arm64-musl
+            rust_target: aarch64-unknown-linux-musl
+            rust_target_base: aarch64-unknown-linux-musl
+            libc: musl
+            cli_build_tool: cargo-zigbuild
           - os: macos-14
             target_id: darwin-arm64
+            rust_target: ""
+            rust_target_base: ""
+            libc: ""
+            cli_build_tool: cargo
           - os: windows-latest
             target_id: win32-x64
+            rust_target: ""
+            rust_target_base: ""
+            libc: ""
+            cli_build_tool: cargo
     steps:
       - uses: actions/checkout@v4
 
@@ -74,20 +104,56 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Zig
+        if: matrix.cli_build_tool == 'cargo-zigbuild'
+        uses: mlugg/setup-zig@v2
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust-no-bin
           cache-bin: false
 
+      - name: Install cargo-zigbuild
+        if: matrix.cli_build_tool == 'cargo-zigbuild'
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Install Rust target
+        if: matrix.rust_target_base != ''
+        run: rustup target add ${{ matrix.rust_target_base }}
+
       - name: Install dependencies
         run: npm ci
 
       - name: Build CLI
         run: npm run build:cli
+        env:
+          TENSORLAKE_CLI_TARGET_ID: ${{ matrix.target_id }}
+          TENSORLAKE_CLI_TARGET_TRIPLE: ${{ matrix.rust_target }}
+          TENSORLAKE_CLI_BUILD_TOOL: ${{ matrix.cli_build_tool }}
 
       - name: Verify packaged CLI binary
-        run: node ./bin/tl.cjs --help
+        run: |
+          node -e "const cp = require('node:child_process'); const path = require('node:path'); const ext = process.platform === 'win32' ? '.exe' : ''; const binary = path.join('dist', 'bin', process.env.TARGET_ID, 'tl' + ext); const result = cp.spawnSync(binary, ['--help'], { stdio: 'inherit' }); if (result.error) throw result.error; process.exit(result.status ?? 1);"
+        env:
+          TARGET_ID: ${{ matrix.target_id }}
+
+      - name: Verify Linux CLI libc compatibility
+        if: startsWith(matrix.target_id, 'linux-')
+        run: |
+          set -euo pipefail
+          binary="dist/bin/${{ matrix.target_id }}/tl"
+          required_versions="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu || true)"
+          max_glibc="$(printf '%s\n' "$required_versions" | tail -n1)"
+          echo "Maximum required glibc: ${max_glibc:-none}"
+          if [ "${{ matrix.libc }}" = "musl" ] && [ -n "$max_glibc" ]; then
+            echo "Musl CLI unexpectedly references glibc symbols."
+            exit 1
+          fi
+          if [ "${{ matrix.libc }}" = "gnu" ] && [ -n "$max_glibc" ] && [ "$(printf '%s\n%s\n' "GLIBC_2.28" "$max_glibc" | sort -V | tail -n1)" != "GLIBC_2.28" ]; then
+            echo "CLI requires $max_glibc, above the GLIBC_2.28 compatibility floor."
+            exit 1
+          fi
 
       - name: Upload CLI artifact
         uses: actions/upload-artifact@v4
@@ -104,10 +170,40 @@ jobs:
         include:
           - os: ubuntu-latest
             target_id: linux-x64
+            rust_target: x86_64-unknown-linux-gnu.2.28
+            rust_target_base: x86_64-unknown-linux-gnu
+            libc: gnu
+            native_build_tool: cargo-zigbuild
+          - os: ubuntu-24.04-arm
+            target_id: linux-arm64
+            rust_target: aarch64-unknown-linux-gnu.2.28
+            rust_target_base: aarch64-unknown-linux-gnu
+            libc: gnu
+            native_build_tool: cargo-zigbuild
+          - os: ubuntu-latest
+            target_id: linux-x64-musl
+            rust_target: x86_64-unknown-linux-musl
+            rust_target_base: x86_64-unknown-linux-musl
+            libc: musl
+            native_build_tool: cargo-zigbuild
+          - os: ubuntu-24.04-arm
+            target_id: linux-arm64-musl
+            rust_target: aarch64-unknown-linux-musl
+            rust_target_base: aarch64-unknown-linux-musl
+            libc: musl
+            native_build_tool: cargo-zigbuild
           - os: macos-14
             target_id: darwin-arm64
+            rust_target: ""
+            rust_target_base: ""
+            libc: ""
+            native_build_tool: cargo
           - os: windows-latest
             target_id: win32-x64
+            rust_target: ""
+            rust_target_base: ""
+            libc: ""
+            native_build_tool: cargo
     steps:
       - uses: actions/checkout@v4
 
@@ -121,17 +217,50 @@ jobs:
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Zig
+        if: matrix.native_build_tool == 'cargo-zigbuild'
+        uses: mlugg/setup-zig@v2
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust-no-bin
           cache-bin: false
 
+      - name: Install cargo-zigbuild
+        if: matrix.native_build_tool == 'cargo-zigbuild'
+        run: cargo install cargo-zigbuild --locked
+
+      - name: Install Rust target
+        if: matrix.rust_target_base != ''
+        run: rustup target add ${{ matrix.rust_target_base }}
+
       - name: Install dependencies
         run: npm ci
 
       - name: Build native binding
         run: npm run build:native
+        env:
+          TENSORLAKE_NODE_TARGET_ID: ${{ matrix.target_id }}
+          TENSORLAKE_NODE_TARGET_TRIPLE: ${{ matrix.rust_target }}
+          TENSORLAKE_NODE_BUILD_TOOL: ${{ matrix.native_build_tool }}
+
+      - name: Verify Linux native libc compatibility
+        if: startsWith(matrix.target_id, 'linux-')
+        run: |
+          set -euo pipefail
+          binding="dist/native/${{ matrix.target_id }}/tensorlake-node.node"
+          required_versions="$(readelf --version-info "$binding" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu || true)"
+          max_glibc="$(printf '%s\n' "$required_versions" | tail -n1)"
+          echo "Maximum required glibc: ${max_glibc:-none}"
+          if [ "${{ matrix.libc }}" = "musl" ] && [ -n "$max_glibc" ]; then
+            echo "Musl native binding unexpectedly references glibc symbols."
+            exit 1
+          fi
+          if [ "${{ matrix.libc }}" = "gnu" ] && [ -n "$max_glibc" ] && [ "$(printf '%s\n%s\n' "GLIBC_2.28" "$max_glibc" | sort -V | tail -n1)" != "GLIBC_2.28" ]; then
+            echo "Native binding requires $max_glibc, above the GLIBC_2.28 compatibility floor."
+            exit 1
+          fi
 
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
@@ -177,6 +306,24 @@ jobs:
           name: cli-linux-x64
           path: typescript/dist/bin/linux-x64
 
+      - name: Download Linux arm64 CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-linux-arm64
+          path: typescript/dist/bin/linux-arm64
+
+      - name: Download Linux musl CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-linux-x64-musl
+          path: typescript/dist/bin/linux-x64-musl
+
+      - name: Download Linux arm64 musl CLI artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-linux-arm64-musl
+          path: typescript/dist/bin/linux-arm64-musl
+
       - name: Download macOS arm64 CLI artifact
         uses: actions/download-artifact@v4
         with:
@@ -194,6 +341,24 @@ jobs:
         with:
           name: native-linux-x64
           path: typescript/dist/native/linux-x64
+
+      - name: Download Linux arm64 native artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-arm64
+          path: typescript/dist/native/linux-arm64
+
+      - name: Download Linux musl native artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-x64-musl
+          path: typescript/dist/native/linux-x64-musl
+
+      - name: Download Linux arm64 musl native artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: native-linux-arm64-musl
+          path: typescript/dist/native/linux-arm64-musl
 
       - name: Download macOS arm64 native artifact
         uses: actions/download-artifact@v4

@@ -12,26 +12,75 @@ function binaryTargetId(platform = process.platform, arch = process.arch) {
   return `${platform}-${arch}`;
 }
 
+function linuxLibcFamily(options = {}) {
+  if (options.libc === "gnu" || options.libc === "musl") {
+    return options.libc;
+  }
+
+  try {
+    const report =
+      options.report ?? (process.report?.getReport ? process.report.getReport() : undefined);
+    if (!report) {
+      return "gnu";
+    }
+    if (report?.header?.glibcVersionRuntime) {
+      return "gnu";
+    }
+  } catch {
+    return "gnu";
+  }
+
+  return "musl";
+}
+
+function packageTargetId(platform = process.platform, arch = process.arch, options = {}) {
+  const baseTargetId = binaryTargetId(platform, arch);
+  if (platform !== "linux") {
+    return baseTargetId;
+  }
+  if (!options.libc && !options.report && platform !== process.platform) {
+    return baseTargetId;
+  }
+  return linuxLibcFamily(options) === "musl" ? `${baseTargetId}-musl` : baseTargetId;
+}
+
+function nativeTargetId(platform = process.platform, arch = process.arch, options = {}) {
+  return packageTargetId(platform, arch, options);
+}
+
 function binaryPath(binaryName, options = {}) {
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   const extension = platform === "win32" ? ".exe" : "";
   const root = options.packageRoot ?? packageRoot();
-  return path.join(root, "dist", "bin", binaryTargetId(platform, arch), `${binaryName}${extension}`);
+  return path.join(
+    root,
+    "dist",
+    "bin",
+    packageTargetId(platform, arch, options),
+    `${binaryName}${extension}`,
+  );
 }
 
 function nativeBindingPath(options = {}) {
   const platform = options.platform ?? process.platform;
   const arch = options.arch ?? process.arch;
   const root = options.packageRoot ?? packageRoot();
-  return path.join(root, "dist", "native", binaryTargetId(platform, arch), "tensorlake-node.node");
+  return path.join(
+    root,
+    "dist",
+    "native",
+    nativeTargetId(platform, arch, options),
+    "tensorlake-node.node",
+  );
 }
 
 function loadNative() {
+  const targetId = nativeTargetId();
   const bindingPath = nativeBindingPath();
   if (!fs.existsSync(bindingPath)) {
     throw new Error(
-      `Missing native binding for ${binaryTargetId()}. Run 'npm run build' in tensorlake before packaging or install a package published with support for your platform.`,
+      `Missing native binding for ${targetId}. Run 'npm run build' in tensorlake before packaging or install a package published with support for your platform.`,
     );
   }
   return require(bindingPath);
@@ -46,10 +95,11 @@ function exitWithSpawnResult(result) {
 }
 
 function runBinary(binaryName) {
+  const targetId = packageTargetId();
   const executable = binaryPath(binaryName);
   if (!fs.existsSync(executable)) {
     console.error(
-      `Missing packaged binary '${binaryName}' for ${binaryTargetId()}. Run 'npm run build' in tensorlake before packaging or install a package published with support for your platform.`,
+      `Missing packaged binary '${binaryName}' for ${targetId}. Run 'npm run build' in tensorlake before packaging or install a package published with support for your platform.`,
     );
     process.exit(1);
   }
@@ -108,6 +158,7 @@ module.exports = {
   binaryPath,
   binaryTargetId,
   loadNative,
+  nativeTargetId,
   nativeBindingPath,
   runBinary,
   runPythonModule,

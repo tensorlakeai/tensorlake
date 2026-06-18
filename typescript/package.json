@@ -1,6 +1,6 @@
 {
   "name": "tensorlake",
-  "version": "0.5.18",
+  "version": "0.5.47",
   "description": "TensorLake SDK and CLI for applications, sandboxes, and cloud services",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -11,6 +11,7 @@
     "tensorlake": "./bin/tensorlake.cjs",
     "tensorlake-deploy": "./bin/tensorlake-deploy.cjs",
     "tensorlake-create-sandbox-image": "./bin/tensorlake-create-sandbox-image.cjs",
+    "tensorlake-import-sandbox-image": "./bin/tensorlake-import-sandbox-image.cjs",
     "function-executor": "./bin/function-executor.cjs"
   },
   "exports": {
@@ -68,7 +69,7 @@
     "vitest": "^2.0.0"
   },
   "dependencies": {
-    "undici": "^8.1.0",
+    "undici": "8.3.0",
     "ws": "^8.20.0"
   }
 }

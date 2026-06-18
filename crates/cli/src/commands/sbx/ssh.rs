@@ -2,8 +2,12 @@ use std::io::Read;
 use std::time::Duration;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_env_vars, sandbox_proxy_base, with_sandbox_headers};
+use crate::commands::sbx::pty::cache_pty_token;
+use crate::commands::sbx::{
+    ResolvedSandboxProxyTarget, parse_env_vars, resolve_sandbox_proxy_target, with_sandbox_headers,
+};
 use crate::error::{CliError, Result};
+use reqwest::header::{AUTHORIZATION, HOST, HeaderMap, HeaderName, HeaderValue};
 use tokio::sync::mpsc;
 
 const OP_DATA: u8 = 0x00;
@@ -26,54 +30,10 @@ pub async fn run(
     workdir: Option<&str>,
     env: &[String],
 ) -> Result<()> {
-    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
-        return Err(CliError::usage("ssh requires an interactive terminal"));
-    }
+    ensure_interactive_terminal("ssh")?;
 
     let env_dict = parse_env_vars(env)?;
-    let (proxy_base, host_override) = sandbox_proxy_base(ctx, sandbox_id);
-
-    // Build headers for the WebSocket upgrade (tungstenite bypasses reqwest).
-    // ctx.client() handles auth + traceparent for the HTTP POST below.
-    let mut ws_headers = reqwest::header::HeaderMap::new();
-    if let Ok(token) = ctx.bearer_token() {
-        ws_headers.insert(
-            reqwest::header::AUTHORIZATION,
-            format!("Bearer {}", token).parse().map_err(|e| {
-                CliError::Other(anyhow::anyhow!("invalid bearer token header: {}", e))
-            })?,
-        );
-    }
-    if let Some(org_id) = ctx.effective_organization_id() {
-        ws_headers.insert(
-            "X-Forwarded-Organization-Id",
-            org_id.parse().map_err(|e| {
-                CliError::Other(anyhow::anyhow!("invalid organization id header: {}", e))
-            })?,
-        );
-    }
-    if let Some(proj_id) = ctx.effective_project_id() {
-        ws_headers.insert(
-            "X-Forwarded-Project-Id",
-            proj_id.parse().map_err(|e| {
-                CliError::Other(anyhow::anyhow!("invalid project id header: {}", e))
-            })?,
-        );
-    }
-    if let Some(ref host) = host_override {
-        ws_headers.insert(
-            reqwest::header::HOST,
-            host.parse()
-                .map_err(|e| CliError::Other(anyhow::anyhow!("invalid host header: {}", e)))?,
-        );
-    } else {
-        ws_headers.insert(
-            reqwest::header::HeaderName::from_static("x-tensorlake-sandbox-id"),
-            sandbox_id.parse().map_err(|e| {
-                CliError::Other(anyhow::anyhow!("invalid sandbox id header: {}", e))
-            })?,
-        );
-    }
+    let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
     let client = ctx.client()?;
 
     // Get terminal size
@@ -115,10 +75,9 @@ pub async fn run(
 
     let pty_resp = with_sandbox_headers(
         client
-            .post(format!("{}/api/v1/pty", proxy_base))
+            .post(format!("{}/api/v1/pty", target.proxy_base))
             .json(&pty_payload),
-        sandbox_id,
-        host_override.clone(),
+        &target,
     )
     .send()
     .await
@@ -144,13 +103,119 @@ pub async fn run(
         .and_then(|v| v.as_str())
         .ok_or_else(|| CliError::Other(anyhow::anyhow!("missing token in PTY response")))?;
 
+    cache_pty_token(ctx, &target.sandbox_id, session_id, token).await;
+
+    let resolved_sandbox_id = target.sandbox_id.clone();
+
+    attach_to_session_unchecked(
+        ctx,
+        &resolved_sandbox_id,
+        session_id,
+        token,
+        "ssh",
+        Some(target),
+    )
+    .await
+}
+
+pub(crate) async fn attach_to_session(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    session_id: &str,
+    token: &str,
+    command_name: &str,
+) -> Result<()> {
+    ensure_interactive_terminal(command_name)?;
+    attach_to_session_unchecked(ctx, sandbox_id, session_id, token, command_name, None).await
+}
+
+fn ensure_interactive_terminal(command_name: &str) -> Result<()> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stdin()) {
+        return Err(CliError::usage(format!(
+            "{command_name} requires an interactive terminal"
+        )));
+    }
+
+    Ok(())
+}
+
+fn build_ws_headers(ctx: &CliContext, target: &ResolvedSandboxProxyTarget) -> Result<HeaderMap> {
+    let mut ws_headers = HeaderMap::new();
+
+    if let Ok(token) = ctx.bearer_token() {
+        ws_headers.insert(
+            AUTHORIZATION,
+            HeaderValue::from_str(&format!("Bearer {}", token)).map_err(|e| {
+                CliError::Other(anyhow::anyhow!("invalid bearer token header: {}", e))
+            })?,
+        );
+    }
+    if let Some(org_id) = ctx.effective_organization_id() {
+        ws_headers.insert(
+            HeaderName::from_static("x-forwarded-organization-id"),
+            HeaderValue::from_str(&org_id).map_err(|e| {
+                CliError::Other(anyhow::anyhow!("invalid organization id header: {}", e))
+            })?,
+        );
+    }
+    if let Some(proj_id) = ctx.effective_project_id() {
+        ws_headers.insert(
+            HeaderName::from_static("x-forwarded-project-id"),
+            HeaderValue::from_str(&proj_id).map_err(|e| {
+                CliError::Other(anyhow::anyhow!("invalid project id header: {}", e))
+            })?,
+        );
+    }
+    if let Some(host) = target.host_override.as_deref() {
+        ws_headers.insert(
+            HOST,
+            HeaderValue::from_str(host)
+                .map_err(|e| CliError::Other(anyhow::anyhow!("invalid host header: {}", e)))?,
+        );
+    } else {
+        ws_headers.insert(
+            HeaderName::from_static("x-tensorlake-sandbox-id"),
+            HeaderValue::from_str(&target.sandbox_id).map_err(|e| {
+                CliError::Other(anyhow::anyhow!("invalid sandbox id header: {}", e))
+            })?,
+        );
+    }
+    if let Some(hint) = target.routing_hint.as_deref() {
+        ws_headers.insert(
+            HeaderName::from_static("x-tensorlake-route-hint"),
+            HeaderValue::from_str(hint).map_err(|e| {
+                CliError::Other(anyhow::anyhow!("invalid route hint header: {}", e))
+            })?,
+        );
+    }
+
+    Ok(ws_headers)
+}
+
+fn build_ws_url(proxy_base: &str, session_id: &str, token: &str) -> String {
     // Include the PTY token in both the header and query string for now. The
     // daemon accepts either form, and the query parameter keeps production
     // proxies that don't forward the custom header from breaking SSH.
     let ws_base = proxy_base
         .replace("https://", "wss://")
         .replace("http://", "ws://");
-    let ws_url = format!("{}/api/v1/pty/{}/ws?token={}", ws_base, session_id, token);
+    format!("{}/api/v1/pty/{}/ws?token={}", ws_base, session_id, token)
+}
+
+async fn attach_to_session_unchecked(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    session_id: &str,
+    token: &str,
+    _command_name: &str,
+    target: Option<ResolvedSandboxProxyTarget>,
+) -> Result<()> {
+    let target = match target {
+        Some(target) => target,
+        None => resolve_sandbox_proxy_target(ctx, sandbox_id).await?,
+    };
+    let ws_headers = build_ws_headers(ctx, &target)?;
+    let ws_url = build_ws_url(&target.proxy_base, session_id, token);
 
     // Connect WebSocket
     use tokio_tungstenite::tungstenite;
@@ -467,7 +532,7 @@ async fn wait_for_reader_shutdown(
 mod tests {
     use super::{
         OP_DATA, OP_EXIT, PTY_CLOSE_WAIT_TIMEOUT, PtyBinaryFrame, build_pty_create_payload,
-        parse_legacy_exit_code, parse_pty_binary_frame, wait_for_reader_shutdown,
+        build_ws_url, parse_legacy_exit_code, parse_pty_binary_frame, wait_for_reader_shutdown,
     };
     use std::future::pending;
     use std::time::Duration;
@@ -539,6 +604,18 @@ mod tests {
         assert_eq!(payload["env"]["FOO"], "bar");
         assert_eq!(payload["env"]["TERM"], "screen-256color");
         assert_eq!(payload["env"]["COLORTERM"], "24bit");
+    }
+
+    #[test]
+    fn build_ws_url_uses_websocket_scheme_and_token_query() {
+        assert_eq!(
+            build_ws_url("https://sandbox.tensorlake.ai", "sess-1", "tok-1"),
+            "wss://sandbox.tensorlake.ai/api/v1/pty/sess-1/ws?token=tok-1"
+        );
+        assert_eq!(
+            build_ws_url("http://localhost:9443", "sess-1", "tok-1"),
+            "ws://localhost:9443/api/v1/pty/sess-1/ws?token=tok-1"
+        );
     }
 
     #[tokio::test]

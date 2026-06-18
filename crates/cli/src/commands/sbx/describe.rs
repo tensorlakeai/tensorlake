@@ -177,18 +177,6 @@ fn print_sandbox_details(item: &serde_json::Value) {
         .unwrap_or_default();
     println!("Entrypoint:      {}", entrypoint);
 
-    let secrets = item
-        .get("secret_names")
-        .and_then(|v| v.as_array())
-        .map(|arr| {
-            arr.iter()
-                .filter_map(|v| v.as_str())
-                .collect::<Vec<_>>()
-                .join(", ")
-        })
-        .unwrap_or_default();
-    println!("Secrets:         {}", secrets);
-
     let ports = item
         .get("exposed_ports")
         .or_else(|| item.get("exposedPorts"))

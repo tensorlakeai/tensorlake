@@ -9,11 +9,19 @@ pub struct ContainerResourcesInfo {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct GPUResources {
+    pub count: u32,
+    pub model: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxResources {
     pub cpus: f64,
     pub memory_mb: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_mb: Option<u64>,
+    #[serde(rename = "gpus", skip_serializing_if = "Option::is_none")]
+    pub gpu_configs: Option<Vec<GPUResources>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -35,8 +43,6 @@ pub struct CreateSandboxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     pub resources: CreateSandboxResources,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub secret_names: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<i64>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -66,8 +72,6 @@ pub struct SandboxPoolRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
     pub resources: ContainerResourcesInfo,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub secret_names: Option<Vec<String>>,
     #[serde(default)]
     pub timeout_secs: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -83,13 +87,23 @@ pub struct CreateSandboxResponse {
     pub sandbox_id: String,
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub routing_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub termination_reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub error_details: Option<serde_json::Value>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CopySandboxResponse {
+    pub source_sandbox_id: String,
+    pub sandboxes: Vec<CreateSandboxResponse>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -101,8 +115,6 @@ pub struct SandboxInfo {
     #[serde(default)]
     pub image: Option<String>,
     pub resources: ContainerResourcesInfo,
-    #[serde(default)]
-    pub secret_names: Vec<String>,
     #[serde(default)]
     pub timeout_secs: Option<i64>,
     #[serde(default)]
@@ -128,6 +140,8 @@ pub struct SandboxInfo {
     pub allow_unauthenticated_access: bool,
     #[serde(default)]
     pub exposed_ports: Option<Vec<u16>>,
+    #[serde(default)]
+    pub ingress_endpoint: Option<String>,
     #[serde(default)]
     pub sandbox_url: Option<String>,
 }
@@ -195,8 +209,6 @@ pub struct SandboxPoolInfo {
     pub namespace: String,
     pub image: String,
     pub resources: ContainerResourcesInfo,
-    #[serde(default)]
-    pub secret_names: Vec<String>,
     #[serde(default)]
     pub timeout_secs: i64,
     #[serde(default)]
@@ -269,12 +281,16 @@ pub struct ListSnapshotsResponse {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ProcessInfo {
+    #[serde(default)]
+    pub handle: Option<i64>,
     pub pid: i64,
     pub status: String,
     #[serde(default)]
     pub exit_code: Option<i64>,
     #[serde(default)]
     pub signal: Option<i64>,
+    #[serde(default)]
+    pub oom_killed: bool,
     #[serde(default)]
     pub stdin_writable: bool,
     pub command: String,
@@ -283,11 +299,134 @@ pub struct ProcessInfo {
     pub started_at: serde_json::Value,
     #[serde(default)]
     pub ended_at: Option<serde_json::Value>,
+    #[serde(default)]
+    pub managed: Option<ProcessManagedInfo>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ListProcessesResponse {
     pub processes: Vec<ProcessInfo>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RestartPolicy {
+    Never,
+    OnFailure,
+    Always,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RestartPolicyConfig {
+    #[serde(default = "default_restart_policy")]
+    pub policy: RestartPolicy,
+    #[serde(default)]
+    pub max_restarts: Option<u32>,
+    #[serde(default = "default_restart_initial_backoff_ms")]
+    pub initial_backoff_ms: u64,
+    #[serde(default = "default_restart_max_backoff_ms")]
+    pub max_backoff_ms: u64,
+}
+
+fn default_restart_policy() -> RestartPolicy {
+    RestartPolicy::OnFailure
+}
+
+fn default_restart_initial_backoff_ms() -> u64 {
+    500
+}
+
+fn default_restart_max_backoff_ms() -> u64 {
+    30_000
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessHealthCheckKind {
+    Http,
+    Tcp,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ProcessHealthCheck {
+    #[serde(rename = "type")]
+    pub kind: ProcessHealthCheckKind,
+    pub port: u16,
+    #[serde(default)]
+    pub path: Option<String>,
+    #[serde(default = "default_health_initial_delay_ms")]
+    pub initial_delay_ms: u64,
+    #[serde(default = "default_health_interval_ms")]
+    pub interval_ms: u64,
+    #[serde(default = "default_health_timeout_ms")]
+    pub timeout_ms: u64,
+    #[serde(default = "default_health_failure_threshold")]
+    pub failure_threshold: u32,
+}
+
+fn default_health_initial_delay_ms() -> u64 {
+    5_000
+}
+
+fn default_health_interval_ms() -> u64 {
+    1_000
+}
+
+fn default_health_timeout_ms() -> u64 {
+    500
+}
+
+fn default_health_failure_threshold() -> u32 {
+    3
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisedProcessStatus {
+    Starting,
+    Running,
+    BackingOff,
+    Stopped,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupervisedProcessHealthStatus {
+    Disabled,
+    Starting,
+    Healthy,
+    Unhealthy,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SupervisedProcessExit {
+    #[serde(default)]
+    pub exit_code: Option<i64>,
+    #[serde(default)]
+    pub signal: Option<i64>,
+    #[serde(default)]
+    pub oom_killed: bool,
+    pub ended_at: serde_json::Value,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct ProcessManagedInfo {
+    pub id: String,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub status: SupervisedProcessStatus,
+    pub restart_count: u32,
+    pub restart: RestartPolicyConfig,
+    #[serde(default)]
+    pub health_check: Option<ProcessHealthCheck>,
+    pub health_status: SupervisedProcessHealthStatus,
+    pub consecutive_health_failures: u32,
+    #[serde(default)]
+    pub last_exit: Option<SupervisedProcessExit>,
+    #[serde(default)]
+    pub last_error: Option<String>,
+    #[serde(default)]
+    pub next_restart_at: Option<serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -327,6 +466,8 @@ pub enum RunProcessEvent {
         exit_code: Option<i64>,
         #[serde(default)]
         signal: Option<i64>,
+        #[serde(default)]
+        oom_killed: bool,
     },
 }
 
@@ -359,6 +500,38 @@ pub struct ListDirectoryResponse {
     pub entries: Vec<DirectoryEntry>,
 }
 
+/// Request body for `POST /api/v1/blob/sign`. The proxy converts either an
+/// artifact path returned by platform-api or a full parent snapshot blob URI
+/// into a concrete builder upload/download spec.
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct SignBlobRequest {
+    pub target: SignBlobTarget,
+    pub op: SignBlobOp,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SignBlobTarget {
+    Artifact { rel_path: String },
+    Blob { uri: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum SignBlobOp {
+    PutArtifact {
+        #[serde(skip_serializing_if = "Option::is_none")]
+        multipart_hint: Option<MultipartHint>,
+    },
+    GetBlob,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct MultipartHint {
+    pub max_parts: u32,
+    pub part_size_bytes: u64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -381,6 +554,59 @@ mod tests {
             snapshot_type: None,
         };
         assert_eq!(serde_json::to_string(&body).unwrap(), "{}");
+    }
+
+    #[test]
+    fn sign_blob_put_artifact_serializes_as_adt() {
+        let body = SignBlobRequest {
+            target: SignBlobTarget::Artifact {
+                rel_path: "projects/p/sandbox-template-builds/b/s.tlsnap".to_string(),
+            },
+            op: SignBlobOp::PutArtifact {
+                multipart_hint: Some(MultipartHint {
+                    max_parts: 160,
+                    part_size_bytes: 67_108_864,
+                }),
+            },
+        };
+
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "target": {
+                    "kind": "artifact",
+                    "rel_path": "projects/p/sandbox-template-builds/b/s.tlsnap"
+                },
+                "op": {
+                    "kind": "put_artifact",
+                    "multipart_hint": {
+                        "max_parts": 160,
+                        "part_size_bytes": 67_108_864
+                    }
+                }
+            })
+        );
+    }
+
+    #[test]
+    fn sign_blob_get_blob_serializes_as_adt() {
+        let body = SignBlobRequest {
+            target: SignBlobTarget::Blob {
+                uri: "gs://bucket/path/parent-manifest.json".to_string(),
+            },
+            op: SignBlobOp::GetBlob,
+        };
+
+        assert_eq!(
+            serde_json::to_value(&body).unwrap(),
+            serde_json::json!({
+                "target": {
+                    "kind": "blob",
+                    "uri": "gs://bucket/path/parent-manifest.json"
+                },
+                "op": { "kind": "get_blob" }
+            })
+        );
     }
 
     #[test]
@@ -412,6 +638,7 @@ mod tests {
             RunProcessEvent::Exited {
                 exit_code: Some(0),
                 signal: None,
+                oom_killed: false,
             }
         ));
     }
@@ -425,8 +652,41 @@ mod tests {
             RunProcessEvent::Exited {
                 exit_code: None,
                 signal: Some(9),
+                oom_killed: false,
             }
         ));
+    }
+
+    #[test]
+    fn run_process_event_deserializes_oom_killed() {
+        let json = r#"{"signal": 9, "oom_killed": true}"#;
+        let event: RunProcessEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            event,
+            RunProcessEvent::Exited {
+                exit_code: None,
+                signal: Some(9),
+                oom_killed: true,
+            }
+        ));
+    }
+
+    #[test]
+    fn process_info_deserializes_oom_killed() {
+        let json = r#"{
+            "pid": 42,
+            "status": "oom_killed",
+            "signal": 9,
+            "oom_killed": true,
+            "command": "/usr/local/bin/tl-rootfs-build",
+            "args": [],
+            "started_at": 123,
+            "ended_at": 456
+        }"#;
+        let info: ProcessInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.status, "oom_killed");
+        assert_eq!(info.signal, Some(9));
+        assert!(info.oom_killed);
     }
 
     #[test]
@@ -438,6 +698,18 @@ mod tests {
             serde_json::to_string(&body).unwrap(),
             r#"{"snapshot_type":"filesystem"}"#
         );
+    }
+
+    #[test]
+    fn copy_sandbox_response_deserializes() {
+        let json = r#"{
+            "source_sandbox_id":"source-1",
+            "sandboxes":[{"sandbox_id":"copy-1","status":"running"}]
+        }"#;
+        let response: CopySandboxResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(response.source_sandbox_id, "source-1");
+        assert_eq!(response.sandboxes[0].sandbox_id, "copy-1");
+        assert_eq!(response.sandboxes[0].status, "running");
     }
 
     #[test]

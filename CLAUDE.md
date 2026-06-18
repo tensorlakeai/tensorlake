@@ -34,6 +34,74 @@ cd tests && poetry run python path/to/test_file.py
 make build_proto
 ```
 
+## Manual Cloud Sandbox Validations
+
+For validations that must run inside the real Tensorlake builder image, use a throwaway Python virtualenv with the published `tensorlake` package. Do this for live environment checks, not normal repo tests.
+
+Key points:
+- Install from PyPI in a fresh venv: `python3 -m venv /tmp/tl-validate-venv && /tmp/tl-validate-venv/bin/python -m pip install -q --upgrade pip tensorlake`.
+- Read the token from `~/.config/tensorlake/credentials.toml`, but never print it. The published SDK reads `TENSORLAKE_API_KEY`; `TENSORLAKE_PAT` is not enough for sandbox creation.
+- Read `organization` and `project` from `.tensorlake/config.toml` and pass them explicitly to `SandboxClient.for_cloud(...)`. Relying only on environment variables can produce missing scope headers.
+- Create the throwaway sandbox from `tensorlake/rootfs-builder`, run validation commands, and always delete it with `client.delete(sandbox_id)` in a `finally` block.
+- Commands run as `tl-user` by default. Builder-image checks that start `dockerd` must run as root, e.g. `sudo -n <script>`.
+
+Minimal pattern:
+
+```python
+import os
+from pathlib import Path
+from tensorlake.sandbox import SandboxClient
+
+
+def token_for(endpoint: str) -> str:
+    current = None
+    for raw in (Path.home() / ".config/tensorlake/credentials.toml").read_text().splitlines():
+        line = raw.strip()
+        if line.startswith("["):
+            current = line.strip("[]").strip().strip('"')
+        elif current == endpoint and line.startswith("token"):
+            return line.split("=", 1)[1].strip().strip('"')
+    raise RuntimeError(f"no token for {endpoint}")
+
+
+def local_config() -> dict[str, str]:
+    out = {}
+    for raw in Path(".tensorlake/config.toml").read_text().splitlines():
+        line = raw.strip()
+        if "=" in line:
+            key, value = line.split("=", 1)
+            out[key.strip()] = value.strip().strip('"')
+    return out
+
+
+endpoint = "https://api.tensorlake.ai"
+token = token_for(endpoint)
+cfg = local_config()
+os.environ["TENSORLAKE_API_KEY"] = token
+
+client = SandboxClient.for_cloud(
+    api_key=token,
+    api_url=endpoint,
+    organization_id=cfg["organization"],
+    project_id=cfg["project"],
+)
+sandbox = None
+try:
+    sandbox = client.create_and_connect(image="tensorlake/rootfs-builder")
+    sandbox.write_file("/tmp/validate.sh", b"#!/usr/bin/env bash\nset -euo pipefail\nsudo -n id\n")
+    result = sandbox.run(
+        "sh",
+        ["-lc", "chmod +x /tmp/validate.sh && sudo -n /tmp/validate.sh"],
+        timeout=900,
+    )
+    print(result.stdout)
+    if getattr(result, "exit_code", 0) != 0:
+        raise RuntimeError(result.stderr)
+finally:
+    if sandbox is not None:
+        client.delete(sandbox.sandbox_id)
+```
+
 ## Architecture
 
 ### Three Public APIs
@@ -72,6 +140,19 @@ Two execution modes:
 - **Pydantic v2** for data models throughout.
 - **gRPC stubs** are generated with grpcio-tools 1.60.0 (pinned old version for forward compatibility) and reformatted with Black/isort after generation.
 
+## Releasing / version bumps
+
+**IMPORTANT: After finishing code changes on a branch, before handing back to the user, remind them to bump the version for whatever they touched.** Look at the diff: if Python/Rust files changed, prompt for a Python-SDK bump; if `typescript/` changed, prompt for a TypeScript bump; if both, prompt for both. Don't bump untouched packages — the Python and TypeScript SDKs version independently.
+
+How to bump:
+
+- **Python SDK / CLI release** (Rust workspace + Python wheels): run `python .github/scripts/bump_version.py <new-version>`. It updates the three files used by the PyPI / crates.io / CLI release workflows:
+  - `pyproject.toml` (root, `tensorlake` PyPI package)
+  - `Cargo.toml` (root, workspace version — all crates inherit via `version.workspace = true`)
+  - `crates/rust-cloud-sdk-py/pyproject.toml`
+- **TypeScript SDK release** (npm): manually bump `typescript/package.json`. The `publish_npm.yaml` workflow reads the version from this file. The bump script does NOT touch it.
+- `Cargo.lock` and `typescript/package-lock.json` regenerate on build/install — commit them after they refresh, don't hand-edit.
+
 ## Running Applications tests
 
 **CRITICAL: Always run tests in BOTH local and remote modes.** Do NOT skip remote mode or run only local mode unless the user explicitly says to run local or remote only.
@@ -82,6 +163,7 @@ Most test files use `@parameterized` to run each test case in both modes.
 ### Running remote mode tests
 
 **Before running a test in remote mode you MUST first ensure all remote mode dependencies are available:**
+
 1. Check if indexify-server is running (HTTP ping `http://localhost:8900`)
 2. If not then **stop immediately** and ask the user to run it. **Do not try to run local mode tests to proceed faster**.
 3. Ask user for the command that runs indexify-dataplane. Do not assume that indexify-dataplane is running or not running.
