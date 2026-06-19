@@ -69,7 +69,13 @@
     "vitest": "^2.0.0"
   },
   "dependencies": {
-    "undici": "8.3.0",
+    "undici": "8.5.0",
     "ws": "^8.20.0"
+  },
+  "resolutions": {
+    "picomatch": "^4.0.4",
+    "postcss": "^8.5.10",
+    "vite": "^6.4.3",
+    "launch-editor": "^6.4.3"
   }
 }
