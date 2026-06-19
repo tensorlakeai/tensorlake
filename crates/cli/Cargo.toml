@@ -1,6 +1,6 @@
 [package]
 name = "tensorlake-cli"
-version.workspace = true
+version = "0.5.50"
 edition = "2024"
 license = "Apache-2.0"
 description = "TensorLake CLI"
