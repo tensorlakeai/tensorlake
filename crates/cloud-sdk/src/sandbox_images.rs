@@ -463,10 +463,13 @@ where
         gpu_configs: None,
     };
     emit(SandboxImageBuildEvent::Status(format!(
-        "Builder resources: {:.2} CPU, {}, {} disk (target rootfs {})",
+        "Builder resources: {:.2} CPU, {}, {} disk",
         resources.cpus,
         format_bytes(resources.memory_mb.max(0) as u64 * 1024 * 1024),
         format_bytes(builder_disk_mb * 1024 * 1024),
+    )));
+    emit(SandboxImageBuildEvent::Status(format!(
+        "Target rootfs size: {}",
         format_bytes(rootfs_disk_bytes),
     )));
 
