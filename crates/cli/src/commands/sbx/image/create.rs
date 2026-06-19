@@ -1,13 +1,15 @@
 use std::path::PathBuf;
 
 use tensorlake::sandbox_images::{
-    CommonBuildOptions, SandboxImageBuildEvent, SandboxImageBuildOptions, build_sandbox_image,
+    CommonBuildOptions, SandboxImageBuildOptions, build_sandbox_image,
 };
 
 use crate::{
     auth::context::CliContext,
     error::{CliError, Result},
 };
+
+use super::ImageBuildEventRenderer;
 
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
@@ -47,13 +49,10 @@ pub async fn run(
         context_dir: None,
     };
 
-    let registered = build_sandbox_image(options, |event| match event {
-        SandboxImageBuildEvent::Status(message) => eprintln!("⚙️  {message}"),
-        SandboxImageBuildEvent::BuildLog { message, .. } => eprintln!("{message}"),
-        SandboxImageBuildEvent::Warning(message) => eprintln!("⚠️  {message}"),
-    })
-    .await
-    .map_err(|error| CliError::Other(error.into()))?;
+    let mut renderer = ImageBuildEventRenderer::new();
+    let registered = build_sandbox_image(options, |event| renderer.render(event))
+        .await
+        .map_err(|error| CliError::Other(error.into()))?;
 
     if output_json {
         println!("{}", serde_json::to_string_pretty(&registered)?);
