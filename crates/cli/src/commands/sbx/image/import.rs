@@ -1,11 +1,13 @@
 use tensorlake::sandbox_images::{
-    CommonBuildOptions, SandboxImageBuildEvent, SandboxImageImportOptions, import_sandbox_image,
+    CommonBuildOptions, SandboxImageImportOptions, import_sandbox_image,
 };
 
 use crate::{
     auth::context::CliContext,
     error::{CliError, Result},
 };
+
+use super::ImageBuildEventRenderer;
 
 /// Import a registry image directly into a Tensorlake sandbox image, with no
 /// Dockerfile and no Docker daemon: the builder pulls the image's layers and
@@ -46,13 +48,10 @@ pub async fn run(
         image_reference: image_reference.to_string(),
     };
 
-    let registered = import_sandbox_image(options, |event| match event {
-        SandboxImageBuildEvent::Status(message) => eprintln!("⚙️  {message}"),
-        SandboxImageBuildEvent::BuildLog { message, .. } => eprintln!("{message}"),
-        SandboxImageBuildEvent::Warning(message) => eprintln!("⚠️  {message}"),
-    })
-    .await
-    .map_err(|error| CliError::Other(error.into()))?;
+    let mut renderer = ImageBuildEventRenderer::new();
+    let registered = import_sandbox_image(options, |event| renderer.render(event))
+        .await
+        .map_err(|error| CliError::Other(error.into()))?;
 
     if output_json {
         println!("{}", serde_json::to_string_pretty(&registered)?);

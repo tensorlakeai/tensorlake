@@ -7,7 +7,71 @@ pub mod rm;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
-use tensorlake::{Client, ClientBuilder, sandbox_templates::SandboxTemplatesClient};
+use indicatif::{ProgressBar, ProgressStyle};
+use tensorlake::{
+    Client, ClientBuilder, sandbox_images::SandboxImageBuildEvent,
+    sandbox_templates::SandboxTemplatesClient,
+};
+
+const BUILD_CONTEXT_PROGRESS_PREFIX: &str = "Creating build context archive:";
+const UPLOAD_CONTEXT_PROGRESS_PREFIX: &str = "Uploading build context archive:";
+
+pub struct ImageBuildEventRenderer {
+    progress: Option<ProgressBar>,
+}
+
+impl ImageBuildEventRenderer {
+    pub fn new() -> Self {
+        Self { progress: None }
+    }
+
+    pub fn render(&mut self, event: SandboxImageBuildEvent) {
+        match event {
+            SandboxImageBuildEvent::Status(message) if is_progress_status(&message) => {
+                self.render_progress(&message);
+            }
+            SandboxImageBuildEvent::Status(message) => {
+                self.finish_progress_line();
+                eprintln!("⚙️  {message}");
+            }
+            SandboxImageBuildEvent::BuildLog { message, .. } => {
+                self.finish_progress_line();
+                eprintln!("{message}");
+            }
+            SandboxImageBuildEvent::Warning(message) => {
+                self.finish_progress_line();
+                eprintln!("⚠️  {message}");
+            }
+        }
+    }
+
+    fn render_progress(&mut self, message: &str) {
+        let progress = self.progress.get_or_insert_with(|| {
+            let progress = ProgressBar::new_spinner();
+            progress.set_style(ProgressStyle::with_template("{msg}").unwrap());
+            progress
+        });
+        progress.set_message(format!("⚙️  {message}"));
+        progress.tick();
+    }
+
+    fn finish_progress_line(&mut self) {
+        if let Some(progress) = self.progress.take() {
+            progress.finish_and_clear();
+        }
+    }
+}
+
+impl Drop for ImageBuildEventRenderer {
+    fn drop(&mut self) {
+        self.finish_progress_line();
+    }
+}
+
+fn is_progress_status(message: &str) -> bool {
+    message.starts_with(BUILD_CONTEXT_PROGRESS_PREFIX)
+        || message.starts_with(UPLOAD_CONTEXT_PROGRESS_PREFIX)
+}
 
 /// Build the sandbox-templates API base URL for the current org/project.
 pub fn templates_base_url(ctx: &CliContext) -> Result<(String, String, String)> {
