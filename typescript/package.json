@@ -66,10 +66,13 @@
     "eslint": "^9.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.4.0",
-    "vitest": "^2.0.0"
+    "vitest": "^3.2.6"
   },
   "dependencies": {
-    "undici": "8.3.0",
-    "ws": "^8.20.0"
+    "undici": "^8.5.0",
+    "ws": "^8.21.0",
+    "picomatch": "^4.0.4",
+    "esbuild": "^0.28.1",
+    "vite": "^6.4.3"
   }
 }
