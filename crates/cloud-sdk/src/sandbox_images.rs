@@ -1,5 +1,6 @@
 use std::{
     collections::HashMap,
+    fs::File,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -51,6 +52,7 @@ const PROXY_READY_TIMEOUT: Duration = Duration::from_secs(120);
 const PROXY_READY_POLL_INTERVAL: Duration = Duration::from_secs(1);
 const REMOTE_BUILD_DIR: &str = "/var/lib/tensorlake/rootfs-builder/build";
 const REMOTE_CONTEXT_DIR: &str = "/var/lib/tensorlake/rootfs-builder/build/context";
+const REMOTE_CONTEXT_ARCHIVE_PATH: &str = "/var/lib/tensorlake/rootfs-builder/build/context.tar.gz";
 const REMOTE_SPEC_PATH: &str = "/var/lib/tensorlake/rootfs-builder/build/spec.json";
 const REMOTE_METADATA_PATH: &str = "/var/lib/tensorlake/rootfs-builder/build/metadata.json";
 const ROOTFS_BUILDER_BIN_DIR: &str = "/usr/local/bin";
@@ -1067,11 +1069,7 @@ async fn upload_build_inputs(
     // Pre-create REMOTE_BUILD_DIR with permissive mode as root so the
     // sandbox-user file API can write into it. The path lives under
     // /var/lib/tensorlake/ which is root-owned in the rootfs-builder image,
-    // so a plain `mkdir -p` issued as the sandbox user can't traverse and
-    // create the leaf. Once the build root is world-writable, the per-file
-    // `mkdir -p`s inside `copy_local_path` and the subsequent
-    // `PUT /api/v1/files` calls (both running as the sandbox user) succeed
-    // without further root involvement.
+    // so a plain upload into that tree would fail without this setup.
     ensure_remote_build_root(proxy).await?;
     // Import builds have no local build context — the rootfs comes straight
     // from the registry image — so there is nothing to upload.
@@ -1079,7 +1077,7 @@ async fn upload_build_inputs(
         emit(SandboxImageBuildEvent::Status(
             "Uploading build context...".to_string(),
         ));
-        copy_local_path(proxy, &plan.context_dir, REMOTE_CONTEXT_DIR).await?;
+        upload_context_archive(proxy, &plan.context_dir).await?;
     }
 
     let docker_config_json = resolved_docker_config_json().await?;
@@ -1835,30 +1833,61 @@ fn streaming_process_payload(
     Value::Object(payload)
 }
 
-async fn copy_local_path(
-    proxy: &SandboxProxyClient,
-    local_path: &Path,
-    remote_path: &str,
-) -> Result<()> {
-    if local_path.is_file() {
-        ensure_remote_parent_dir(proxy, remote_path).await?;
-        proxy.upload_file(remote_path, local_path).await?;
-        return Ok(());
+async fn upload_context_archive(proxy: &SandboxProxyClient, context_dir: &Path) -> Result<()> {
+    if !context_dir.is_dir() {
+        return Err(SandboxImageBuildError::other(format!(
+            "Local build context not found: {}",
+            context_dir.display()
+        )));
     }
 
-    if local_path.is_dir() {
-        for (full_path, relative_path) in collect_dir_files(local_path, local_path)? {
-            let remote_destination = join_posix(remote_path, &relative_path);
-            ensure_remote_parent_dir(proxy, &remote_destination).await?;
-            proxy.upload_file(&remote_destination, &full_path).await?;
-        }
-        return Ok(());
-    }
+    let archive = tempfile::Builder::new()
+        .prefix("tensorlake-build-context-")
+        .suffix(".tar.gz")
+        .tempfile()?;
+    create_context_archive(context_dir, archive.path())?;
 
-    Err(SandboxImageBuildError::other(format!(
-        "Local path not found: {}",
-        local_path.display()
-    )))
+    ensure_remote_parent_dir(proxy, REMOTE_CONTEXT_ARCHIVE_PATH).await?;
+    proxy
+        .upload_file(REMOTE_CONTEXT_ARCHIVE_PATH, archive.path())
+        .await?;
+    extract_context_archive(proxy).await
+}
+
+fn create_context_archive(context_dir: &Path, archive_path: &Path) -> Result<()> {
+    let file = File::create(archive_path)?;
+    let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let mut tar = tar::Builder::new(gz);
+
+    for (full_path, relative_path) in collect_dir_files(context_dir, context_dir)? {
+        tar.append_path_with_name(full_path, relative_path)?;
+    }
+    tar.finish()?;
+    tar.into_inner()?.finish()?;
+    Ok(())
+}
+
+async fn extract_context_archive(proxy: &SandboxProxyClient) -> Result<()> {
+    ensure_remote_parent_dir(proxy, &join_posix(REMOTE_CONTEXT_DIR, ".keep")).await?;
+
+    let mut emit = |_| {};
+    run_streaming_process(
+        proxy,
+        "tar",
+        vec![
+            "-xzf".to_string(),
+            REMOTE_CONTEXT_ARCHIVE_PATH.to_string(),
+            "-C".to_string(),
+            REMOTE_CONTEXT_DIR.to_string(),
+        ],
+        None,
+        None,
+        false,
+        &mut emit,
+    )
+    .await?;
+    proxy.delete_file(REMOTE_CONTEXT_ARCHIVE_PATH).await?;
+    Ok(())
 }
 
 /// Create `REMOTE_BUILD_DIR` as root and chmod it 0777 so subsequent
@@ -2511,10 +2540,10 @@ mod tests {
         PreparedRootfsParent, PreparedSandboxTemplateBuild, SandboxImageBuildError,
         SandboxImageBuildEvent, build_rootfs_spec, collect_dir_files,
         complete_request_from_metadata, contains_disk_space_evidence, contains_oom_killer_evidence,
-        default_registered_name, load_dockerfile_plan, load_dockerfile_text_plan,
-        logical_dockerfile_lines, normalize_posix, parse_df_line_usage_percent,
-        parse_df_max_usage_percent, process_terminal_status, rootfs_builder_env,
-        rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
+        create_context_archive, default_registered_name, load_dockerfile_plan,
+        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
+        parse_df_line_usage_percent, parse_df_max_usage_percent, process_terminal_status,
+        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
         splice_signed_upload, streaming_process_payload,
     };
     use crate::sandboxes::models::ProcessInfo;
@@ -3456,6 +3485,43 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
 
         assert_eq!(
             files,
+            vec![".dockerignore", "cache/keep.txt", "included.txt"]
+        );
+    }
+
+    #[test]
+    fn create_context_archive_honors_dockerignore() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        std::fs::write(root.join(".dockerignore"), "ignored.txt\ncache/drop.txt\n").unwrap();
+        std::fs::write(root.join("included.txt"), "included").unwrap();
+        std::fs::write(root.join("ignored.txt"), "ignored").unwrap();
+        std::fs::create_dir(root.join("cache")).unwrap();
+        std::fs::write(root.join("cache/drop.txt"), "drop").unwrap();
+        std::fs::write(root.join("cache/keep.txt"), "keep").unwrap();
+
+        let archive_file = tempfile::NamedTempFile::new().unwrap();
+        create_context_archive(root, archive_file.path()).unwrap();
+
+        let file = std::fs::File::open(archive_file.path()).unwrap();
+        let decoder = flate2::read::GzDecoder::new(file);
+        let mut archive = tar::Archive::new(decoder);
+        let mut entries = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned()
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+
+        assert_eq!(
+            entries,
             vec![".dockerignore", "cache/keep.txt", "included.txt"]
         );
     }
