@@ -98,6 +98,10 @@ impl<R, F> ProgressReader<R, F> {
             on_progress,
         }
     }
+
+    fn bytes_read(&self) -> u64 {
+        self.bytes_read
+    }
 }
 
 impl<R, F> Read for ProgressReader<R, F>
@@ -1950,14 +1954,15 @@ fn create_context_archive(
     let mut last_percent = upload_percent(0, uncompressed_bytes);
     for file in &files {
         let input = File::open(&file.full_path)?;
-        let metadata = std::fs::metadata(&file.full_path)?;
+        let metadata = input.metadata()?;
+        let file_bytes = metadata.len();
         let mut header = tar::Header::new_gnu();
         header.set_metadata(&metadata);
-        header.set_size(file.bytes);
+        header.set_size(file_bytes);
         header.set_cksum();
 
-        {
-            let mut reader = ProgressReader::new(input, |file_archived_bytes| {
+        let bytes_read = {
+            let mut reader = ProgressReader::new(input.take(file_bytes), |file_archived_bytes| {
                 let current_bytes = archived_bytes
                     .saturating_add(file_archived_bytes)
                     .min(uncompressed_bytes);
@@ -1973,9 +1978,18 @@ fn create_context_archive(
                 }
             });
             tar.append_data(&mut header, &file.relative_path, &mut reader)?;
+            reader.bytes_read()
+        };
+        if bytes_read != file_bytes {
+            return Err(SandboxImageBuildError::other(format!(
+                "Build context file changed while archiving: {} (expected {}, read {})",
+                file.full_path.display(),
+                format_bytes(file_bytes),
+                format_bytes(bytes_read),
+            )));
         }
 
-        archived_bytes = archived_bytes.saturating_add(file.bytes);
+        archived_bytes = archived_bytes.saturating_add(file_bytes);
     }
     if last_percent < 100 {
         emit_archive_progress(uncompressed_bytes, uncompressed_bytes, emit);
