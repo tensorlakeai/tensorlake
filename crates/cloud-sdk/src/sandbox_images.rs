@@ -75,6 +75,13 @@ struct ContextArchiveStats {
     compressed_bytes: u64,
 }
 
+#[derive(Debug, Clone)]
+struct ContextArchiveFile {
+    full_path: PathBuf,
+    relative_path: String,
+    bytes: u64,
+}
+
 /// Dockerfile instructions that run as usual during the rootfs builder's
 /// `docker build`, but have no effect when a sandbox is later run from the
 /// image. The builder preserves the built image's OCI config, yet the
@@ -1867,7 +1874,7 @@ async fn upload_context_archive(
         .prefix("tensorlake-build-context-")
         .suffix(".tar.gz")
         .tempfile()?;
-    let stats = create_context_archive(context_dir, archive.path())?;
+    let stats = create_context_archive(context_dir, archive.path(), emit)?;
     emit(SandboxImageBuildEvent::Status(format!(
         "Build context: {} files, {} uncompressed, {} compressed",
         stats.file_count,
@@ -1887,17 +1894,36 @@ async fn upload_context_archive(
     extract_context_archive(proxy, emit).await
 }
 
-fn create_context_archive(context_dir: &Path, archive_path: &Path) -> Result<ContextArchiveStats> {
+fn create_context_archive(
+    context_dir: &Path,
+    archive_path: &Path,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<ContextArchiveStats> {
     let file = File::create(archive_path)?;
     let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
     let mut tar = tar::Builder::new(gz);
 
-    let files = collect_dir_files(context_dir, context_dir)?;
-    let mut uncompressed_bytes = 0_u64;
-    for (full_path, relative_path) in &files {
-        uncompressed_bytes = uncompressed_bytes.saturating_add(std::fs::metadata(full_path)?.len());
-        tar.append_path_with_name(full_path, relative_path)?;
+    let files = collect_context_archive_files(context_dir)?;
+    let uncompressed_bytes = files
+        .iter()
+        .fold(0_u64, |total, file| total.saturating_add(file.bytes));
+    emit_archive_progress(0, uncompressed_bytes, emit);
+
+    let mut archived_bytes = 0_u64;
+    let mut last_percent = upload_percent(0, uncompressed_bytes);
+    for file in &files {
+        tar.append_path_with_name(&file.full_path, &file.relative_path)?;
+        archived_bytes = archived_bytes.saturating_add(file.bytes);
+        let percent = upload_percent(archived_bytes, uncompressed_bytes);
+        if percent == 100 || percent >= last_percent.saturating_add(10) {
+            last_percent = percent;
+            emit_archive_progress(archived_bytes, uncompressed_bytes, emit);
+        }
     }
+    if last_percent < 100 {
+        emit_archive_progress(uncompressed_bytes, uncompressed_bytes, emit);
+    }
+
     tar.finish()?;
     tar.into_inner()?.finish()?;
     let compressed_bytes = std::fs::metadata(archive_path)?.len();
@@ -1906,6 +1932,32 @@ fn create_context_archive(context_dir: &Path, archive_path: &Path) -> Result<Con
         uncompressed_bytes,
         compressed_bytes,
     })
+}
+
+fn collect_context_archive_files(context_dir: &Path) -> Result<Vec<ContextArchiveFile>> {
+    let mut files = Vec::new();
+    for (full_path, relative_path) in collect_dir_files(context_dir, context_dir)? {
+        let bytes = std::fs::metadata(&full_path)?.len();
+        files.push(ContextArchiveFile {
+            full_path,
+            relative_path,
+            bytes,
+        });
+    }
+    Ok(files)
+}
+
+fn emit_archive_progress(
+    archived_bytes: u64,
+    total_bytes: u64,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) {
+    emit(SandboxImageBuildEvent::Status(format!(
+        "Creating build context archive: {}% ({} / {})",
+        upload_percent(archived_bytes, total_bytes),
+        format_bytes(archived_bytes.min(total_bytes)),
+        format_bytes(total_bytes),
+    )));
 }
 
 async fn upload_archive_with_progress(
@@ -3629,7 +3681,17 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         std::fs::write(root.join("cache/keep.txt"), "keep").unwrap();
 
         let archive_file = tempfile::NamedTempFile::new().unwrap();
-        create_context_archive(root, archive_file.path()).unwrap();
+        let mut events = Vec::new();
+        let stats =
+            create_context_archive(root, archive_file.path(), &mut |event| events.push(event))
+                .unwrap();
+
+        assert_eq!(stats.file_count, 3);
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SandboxImageBuildEvent::Status(message)
+                if message.starts_with("Creating build context archive:")
+        )));
 
         let file = std::fs::File::open(archive_file.path()).unwrap();
         let decoder = flate2::read::GzDecoder::new(file);
