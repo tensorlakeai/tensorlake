@@ -40,8 +40,7 @@
     "test": "vitest run --exclude tests/integration.test.ts",
     "test:integration": "vitest run tests/integration.test.ts",
     "test:watch": "vitest",
-    "lint": "eslint src/ tests/",
-    "prepack": "npm run build"
+    "lint": "eslint src/ tests/"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -59,17 +58,18 @@
     "url": "https://github.com/tensorlakeai/tensorlake",
     "directory": "typescript"
   },
+
   "license": "Apache-2.0",
   "devDependencies": {
     "@types/node": "^20.11.0",
     "@types/ws": "^8.18.1",
     "eslint": "^9.0.0",
-    "tsup": "^8.0.0",
+    "tsup": "^8.6.0",
     "typescript": "^5.4.0",
-    "vitest": "^2.0.0"
+    "vitest": "^3.2.6"
   },
   "dependencies": {
-    "undici": "8.3.0",
-    "ws": "^8.20.0"
+    "undici": "8.5.0",
+    "ws": "^8.20.1"
   }
 }
