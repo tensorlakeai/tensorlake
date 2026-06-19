@@ -1936,7 +1936,7 @@ fn create_context_archive(
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<ContextArchiveStats> {
     let file = File::create(archive_path)?;
-    let gz = flate2::write::GzEncoder::new(file, flate2::Compression::default());
+    let gz = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
     let mut tar = tar::Builder::new(gz);
 
     let files = collect_context_archive_files(context_dir)?;
