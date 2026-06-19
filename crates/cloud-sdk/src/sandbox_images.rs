@@ -1,6 +1,7 @@
 use std::{
     collections::HashMap,
     fs::File,
+    io::Read,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -61,6 +62,7 @@ const ROOTFS_BUILDER_COMMAND: &str = "tl-rootfs-build";
 const ROOTFS_BUILDER_PROCESS_USER: &str = "root";
 const DIAGNOSTIC_COMMAND_TIMEOUT_SECS: i64 = 5;
 const BUILDER_DISK_USAGE_DIAGNOSTIC_THRESHOLD_PERCENT: u8 = 95;
+const ARCHIVE_PROGRESS_BYTE_INTERVAL_BYTES: u64 = 64 * 1024 * 1024;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProcessTerminalStatus {
@@ -80,6 +82,37 @@ struct ContextArchiveFile {
     full_path: PathBuf,
     relative_path: String,
     bytes: u64,
+}
+
+struct ProgressReader<R, F> {
+    inner: R,
+    bytes_read: u64,
+    on_progress: F,
+}
+
+impl<R, F> ProgressReader<R, F> {
+    fn new(inner: R, on_progress: F) -> Self {
+        Self {
+            inner,
+            bytes_read: 0,
+            on_progress,
+        }
+    }
+}
+
+impl<R, F> Read for ProgressReader<R, F>
+where
+    R: Read,
+    F: FnMut(u64),
+{
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let read = self.inner.read(buf)?;
+        if read > 0 {
+            self.bytes_read = self.bytes_read.saturating_add(read as u64);
+            (self.on_progress)(self.bytes_read);
+        }
+        Ok(read)
+    }
 }
 
 /// Dockerfile instructions that run as usual during the rootfs builder's
@@ -1913,15 +1946,36 @@ fn create_context_archive(
     emit_archive_progress(0, uncompressed_bytes, emit);
 
     let mut archived_bytes = 0_u64;
+    let mut last_emitted_bytes = 0_u64;
     let mut last_percent = upload_percent(0, uncompressed_bytes);
     for file in &files {
-        tar.append_path_with_name(&file.full_path, &file.relative_path)?;
-        archived_bytes = archived_bytes.saturating_add(file.bytes);
-        let percent = upload_percent(archived_bytes, uncompressed_bytes);
-        if percent == 100 || percent >= last_percent.saturating_add(10) {
-            last_percent = percent;
-            emit_archive_progress(archived_bytes, uncompressed_bytes, emit);
+        let input = File::open(&file.full_path)?;
+        let metadata = std::fs::metadata(&file.full_path)?;
+        let mut header = tar::Header::new_gnu();
+        header.set_metadata(&metadata);
+        header.set_size(file.bytes);
+        header.set_cksum();
+
+        {
+            let mut reader = ProgressReader::new(input, |file_archived_bytes| {
+                let current_bytes = archived_bytes
+                    .saturating_add(file_archived_bytes)
+                    .min(uncompressed_bytes);
+                let percent = upload_percent(current_bytes, uncompressed_bytes);
+                if percent == 100
+                    || percent > last_percent
+                    || current_bytes.saturating_sub(last_emitted_bytes)
+                        >= ARCHIVE_PROGRESS_BYTE_INTERVAL_BYTES
+                {
+                    last_percent = percent;
+                    last_emitted_bytes = current_bytes;
+                    emit_archive_progress(current_bytes, uncompressed_bytes, emit);
+                }
+            });
+            tar.append_data(&mut header, &file.relative_path, &mut reader)?;
         }
+
+        archived_bytes = archived_bytes.saturating_add(file.bytes);
     }
     if last_percent < 100 {
         emit_archive_progress(uncompressed_bytes, uncompressed_bytes, emit);
