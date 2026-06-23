@@ -39,9 +39,9 @@ Once deployed, call it using curl or the Python SDK:
 
 **Using curl:**
 ```bash
-curl -X POST https://api.tensorlake.ai/applications/{function_name} \
+curl https://api.tensorlake.ai/applications/{function_name} \
   -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
-  -d 'World'
+  --json '"World"'
 ```
 
 **Using Python SDK:**
