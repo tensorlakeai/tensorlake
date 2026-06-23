@@ -16,7 +16,7 @@ def {function_name}(name: str) -> str:
     Returns:
         A greeting message
     """
-    return f"Hello, {{name}}!"
+    return f"Hello, {name}!"
 "#;
 
 pub const README_TEMPLATE: &str = r#"# {app_name}
