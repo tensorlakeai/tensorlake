@@ -3,6 +3,7 @@ pub mod cp;
 pub mod create;
 pub mod describe;
 pub mod exec;
+pub mod fs;
 pub mod image;
 pub mod ls;
 pub mod name;

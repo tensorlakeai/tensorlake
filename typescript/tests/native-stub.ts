@@ -86,6 +86,8 @@ function makeClient(proxy: FakeFns): FakeFns {
     deleteSandbox: vi.fn(tracedId()),
     suspendSandbox: vi.fn(tracedId()),
     resumeSandbox: vi.fn(tracedId()),
+    attachFileSystem: vi.fn(tracedJson()),
+    detachFileSystem: vi.fn(tracedJson()),
     createSnapshot: vi.fn(tracedJson()),
     getSnapshot: vi.fn(tracedJson()),
     listSnapshots: vi.fn(tracedJson('{"snapshots":[]}')),

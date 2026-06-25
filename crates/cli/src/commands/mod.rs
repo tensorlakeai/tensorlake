@@ -2,6 +2,7 @@ pub mod applications;
 pub mod build_images;
 pub mod cron;
 pub mod deploy;
+pub mod fs;
 pub mod init;
 pub mod login;
 pub mod new;

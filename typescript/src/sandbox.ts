@@ -23,6 +23,7 @@ import {
   type CreatePtySessionOptions,
   type DaemonInfo,
   type DirectoryEntry,
+  type FileSystemMount,
   type HealthResponse,
   type ListDirectoryResponse,
   type OutputEvent,
@@ -656,6 +657,48 @@ export class Sandbox {
   async copy(options?: CopySandboxOptions): Promise<Traced<CopySandboxResponse>> {
     const client = this.requireLifecycleClient("copy");
     return client.copy(this.lifecycleIdentifier, options);
+  }
+
+  /**
+   * Attach a registered file system to this running sandbox at `mountPath`.
+   *
+   * Returns the updated sandbox info; the new mount appears in `fileSystems`.
+   */
+  async attachFileSystem(
+    fileSystemId: string,
+    mountPath: string,
+  ): Promise<Traced<SandboxInfo>> {
+    const client = this.requireLifecycleClient("attachFileSystem");
+    const info = await client.attachFileSystem(
+      this.lifecycleIdentifier,
+      fileSystemId,
+      mountPath,
+    );
+    this._setLifecycleIdentifier(info.sandboxId);
+    this._setName(info.name ?? null);
+    return info;
+  }
+
+  /**
+   * Detach the file system mounted at `mountPath` from this running sandbox.
+   *
+   * Returns the updated sandbox info with the mount removed from `fileSystems`.
+   */
+  async detachFileSystem(mountPath: string): Promise<Traced<SandboxInfo>> {
+    const client = this.requireLifecycleClient("detachFileSystem");
+    const info = await client.detachFileSystem(this.lifecycleIdentifier, mountPath);
+    this._setLifecycleIdentifier(info.sandboxId);
+    this._setName(info.name ?? null);
+    return info;
+  }
+
+  /** List the file systems currently mounted into this sandbox. */
+  async listFileSystems(): Promise<Traced<FileSystemMount[]>> {
+    const client = this.requireLifecycleClient("listFileSystems");
+    const info = await client.get(this.lifecycleIdentifier);
+    this._setLifecycleIdentifier(info.sandboxId);
+    this._setName(info.name ?? null);
+    return Object.assign(info.fileSystems ?? [], { traceId: info.traceId });
   }
 
   /**

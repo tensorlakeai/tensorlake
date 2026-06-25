@@ -182,7 +182,7 @@ function nonEmpty(value: string | undefined): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
 
-function buildContextFromEnv(): BuildContext {
+export function buildContextFromEnv(): BuildContext {
   const debugRaw = (process.env.TENSORLAKE_DEBUG ?? "").toLowerCase();
   const debug = ["1", "true", "yes", "on"].includes(debugRaw);
   return {

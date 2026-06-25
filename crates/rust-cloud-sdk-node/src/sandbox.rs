@@ -166,7 +166,9 @@ where
 
 fn duration_from_seconds(name: &str, seconds: f64) -> napi::Result<Duration> {
     if !seconds.is_finite() || seconds <= 0.0 {
-        return Err(usage_error(format!("{name} must be a positive finite number")));
+        return Err(usage_error(format!(
+            "{name} must be a positive finite number"
+        )));
     }
     Ok(Duration::from_secs_f64(seconds))
 }
@@ -498,6 +500,48 @@ impl NativeSandboxClient {
         with_retry(self.client.clone(), 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
+        })
+        .await
+    }
+
+    #[napi]
+    pub async fn attach_file_system(
+        &self,
+        sandbox_id: String,
+        file_system_id: String,
+        mount_path: String,
+    ) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let sandbox_id = sandbox_id.clone();
+            let file_system_id = file_system_id.clone();
+            let mount_path = mount_path.clone();
+            async move {
+                let traced = c
+                    .attach_file_system(&sandbox_id, &file_system_id, &mount_path)
+                    .await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
+        })
+        .await
+    }
+
+    #[napi]
+    pub async fn detach_file_system(
+        &self,
+        sandbox_id: String,
+        mount_path: String,
+    ) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let sandbox_id = sandbox_id.clone();
+            let mount_path = mount_path.clone();
+            async move {
+                let traced = c.detach_file_system(&sandbox_id, &mount_path).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
         })
         .await
     }
@@ -889,15 +933,14 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn read_file(&self, path: String) -> napi::Result<TracedBytes> {
-        let (trace_id, data): (String, Vec<u8>) =
-            with_retry(self.client.clone(), 5, move |c| {
-                let path = path.clone();
-                async move {
-                    let traced = c.read_file(&path).await?;
-                    Ok((traced.trace_id.clone(), traced.into_inner()))
-                }
-            })
-            .await?;
+        let (trace_id, data): (String, Vec<u8>) = with_retry(self.client.clone(), 5, move |c| {
+            let path = path.clone();
+            async move {
+                let traced = c.read_file(&path).await?;
+                Ok((traced.trace_id.clone(), traced.into_inner()))
+            }
+        })
+        .await?;
         Ok(TracedBytes {
             trace_id,
             data: data.into(),
@@ -969,11 +1012,7 @@ impl NativeSandboxProxyClient {
     pub async fn delete_pty_session(&self, session_id: String) -> napi::Result<String> {
         with_retry(self.client.clone(), 5, move |c| {
             let session_id = session_id.clone();
-            async move {
-                c.delete_pty_session(&session_id)
-                    .await
-                    .map(|t| t.trace_id)
-            }
+            async move { c.delete_pty_session(&session_id).await.map(|t| t.trace_id) }
         })
         .await
     }

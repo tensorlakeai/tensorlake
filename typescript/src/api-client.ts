@@ -8,6 +8,7 @@ import type {
   ApplicationManifest,
   ApplicationSummary,
   CloudClientOptions,
+  FileSystem,
   RequestInput,
   RequestOutput,
 } from "./cloud-models.js";
@@ -41,6 +42,28 @@ export class APIClient {
 
   async deleteSandboxImage(imageName: string): Promise<void> {
     await this.cloudClient.deleteSandboxImage(imageName);
+  }
+
+  async createFileSystem(
+    name: string,
+    description?: string,
+    options?: { organizationId?: string; projectId?: string },
+  ): Promise<FileSystem> {
+    return this.cloudClient.createFileSystem({ name, description }, options);
+  }
+
+  async listFileSystems(options?: {
+    organizationId?: string;
+    projectId?: string;
+  }): Promise<FileSystem[]> {
+    return this.cloudClient.listFileSystems(options);
+  }
+
+  async deleteFileSystem(
+    fileSystemId: string,
+    options?: { organizationId?: string; projectId?: string },
+  ): Promise<void> {
+    await this.cloudClient.deleteFileSystem(fileSystemId, options);
   }
 
   async applications(): Promise<ApplicationSummary[]> {

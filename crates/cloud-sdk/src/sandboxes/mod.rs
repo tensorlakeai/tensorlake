@@ -20,11 +20,12 @@ pub use desktop::SandboxDesktopClient;
 use models::{
     ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CopySandboxResponse,
     CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
-    CreateSnapshotResponse, DaemonInfo, HealthResponse, ListArchivedSandboxesParams,
-    ListArchivedSandboxesResponse, ListDirectoryResponse, ListProcessesResponse,
-    ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse, OutputEvent,
-    OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxPoolInfo, SandboxPoolRequest,
-    SendSignalResponse, SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
+    CreateSnapshotResponse, DaemonInfo, DetachFileSystemRequest, FileSystemMount, HealthResponse,
+    ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
+    ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
+    OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxPoolInfo,
+    SandboxPoolRequest, SendSignalResponse, SignBlobRequest, SnapshotInfo, SnapshotType,
+    UpdateSandboxRequest,
 };
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
@@ -189,6 +190,46 @@ impl SandboxesClient {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/resume"));
         let req = self.client.request(Method::POST, &uri).build()?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
+    }
+
+    /// Attach a registered file system to a running sandbox at `mount_path`.
+    ///
+    /// The mount completes asynchronously on the dataplane; the returned
+    /// [`SandboxInfo`] already reflects the new entry in `file_systems`.
+    pub async fn attach_file_system(
+        &self,
+        sandbox_id: &str,
+        file_system_id: &str,
+        mount_path: &str,
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
+        let body = FileSystemMount {
+            file_system_id: file_system_id.to_string(),
+            mount_path: mount_path.to_string(),
+        };
+        let req = self
+            .client
+            .build_post_json_request(Method::POST, &uri, &body)?;
+        self.client.execute_json(req).await
+    }
+
+    /// Detach the file system mounted at `mount_path` from a running sandbox.
+    ///
+    /// The unmount completes asynchronously on the dataplane; the returned
+    /// [`SandboxInfo`] already reflects the removed `file_systems` entry.
+    pub async fn detach_file_system(
+        &self,
+        sandbox_id: &str,
+        mount_path: &str,
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
+        let body = DetachFileSystemRequest {
+            mount_path: mount_path.to_string(),
+        };
+        let req = self
+            .client
+            .build_post_json_request(Method::DELETE, &uri, &body)?;
+        self.client.execute_json(req).await
     }
 
     pub async fn snapshot(

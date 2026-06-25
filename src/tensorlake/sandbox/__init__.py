@@ -13,6 +13,11 @@ from .exceptions import (
     SandboxException,
     SandboxNotFoundError,
 )
+from .file_system import (
+    create_file_system,
+    delete_file_system,
+    list_file_systems,
+)
 from .models import (
     ArchivedSandboxInfo,
     CheckpointType,
@@ -25,6 +30,8 @@ from .models import (
     CreateSnapshotResponse,
     DaemonInfo,
     DirectoryEntry,
+    FileSystem,
+    FileSystemMount,
     GPUResources,
     HealthResponse,
     ListArchivedSandboxesResponse,
@@ -87,6 +94,12 @@ __all__ = [
     "ArchivedSandboxInfo",
     "ListArchivedSandboxesResponse",
     "sandbox_url_from_ingress_endpoint",
+    # File system management
+    "FileSystem",
+    "FileSystemMount",
+    "create_file_system",
+    "list_file_systems",
+    "delete_file_system",
     # Snapshot models
     "SnapshotStatus",
     "SnapshotType",

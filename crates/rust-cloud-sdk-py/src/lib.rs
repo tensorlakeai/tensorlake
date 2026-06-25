@@ -21,6 +21,8 @@ use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tensorlake::document_ai::DocumentAiClient;
+use tensorlake::filesystems::FileSystemsClient;
+use tensorlake::filesystems::models::CreateFileSystemRequest;
 use tensorlake::images::ImagesClient;
 use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
 use tensorlake::sandbox_images::SandboxImageBuildEvent;
@@ -194,6 +196,68 @@ impl CloudApiClient {
                 let templates = SandboxTemplatesClient::new(client, organization_id, project_id);
                 let traced = templates.list().await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    /// Register a new ZeroFS file system for the given project scope.
+    ///
+    /// Returns the created `FileSystem` JSON. Routed through the platform
+    /// file-systems API, which requires the organization/project scope.
+    #[pyo3(signature = (organization_id, project_id, name, description=None))]
+    fn create_file_system(
+        &self,
+        organization_id: String,
+        project_id: String,
+        name: String,
+        description: Option<String>,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let organization_id = organization_id.clone();
+            let project_id = project_id.clone();
+            let request = CreateFileSystemRequest {
+                name: name.clone(),
+                description: description.clone(),
+            };
+            async move {
+                let file_systems = FileSystemsClient::new(client, organization_id, project_id);
+                let traced = file_systems.create(&request).await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    /// List all registered file systems for the given project scope.
+    ///
+    /// Returns a JSON array of file systems. Routed through the platform
+    /// file-systems API, which requires the organization/project scope.
+    fn list_file_systems(&self, organization_id: String, project_id: String) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let organization_id = organization_id.clone();
+            let project_id = project_id.clone();
+            async move {
+                let file_systems = FileSystemsClient::new(client, organization_id, project_id);
+                let traced = file_systems.list().await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    /// Delete a registered file system by id for the given project scope.
+    fn delete_file_system(
+        &self,
+        organization_id: String,
+        project_id: String,
+        file_system_id: String,
+    ) -> PyResult<()> {
+        self.run_with_retry(5, move |client| {
+            let organization_id = organization_id.clone();
+            let project_id = project_id.clone();
+            let file_system_id = file_system_id.clone();
+            async move {
+                let file_systems = FileSystemsClient::new(client, organization_id, project_id);
+                file_systems.delete(&file_system_id).await?;
+                Ok(())
             }
         })
     }
@@ -771,6 +835,44 @@ impl CloudSandboxClient {
         })
     }
 
+    fn attach_file_system(
+        &self,
+        sandbox_id: String,
+        file_system_id: String,
+        mount_path: String,
+    ) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            let file_system_id = file_system_id.clone();
+            let mount_path = mount_path.clone();
+            async move {
+                let traced = client
+                    .attach_file_system(&sandbox_id, &file_system_id, &mount_path)
+                    .await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
+    fn detach_file_system(
+        &self,
+        sandbox_id: String,
+        mount_path: String,
+    ) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            let mount_path = mount_path.clone();
+            async move {
+                let traced = client.detach_file_system(&sandbox_id, &mount_path).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
     #[pyo3(signature = (sandbox_id, snapshot_type=None))]
     fn create_snapshot(
         &self,
@@ -1087,6 +1189,53 @@ impl CloudSandboxClient {
             .await
             .map_err(into_sandbox_py_error)?;
             Ok(trace_id)
+        })
+    }
+
+    fn attach_file_system_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+        file_system_id: String,
+        mount_path: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                let file_system_id = file_system_id.clone();
+                let mount_path = mount_path.clone();
+                async move {
+                    c.attach_file_system(&sandbox_id, &file_system_id, &mount_path)
+                        .await
+                }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn detach_file_system_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+        mount_path: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                let mount_path = mount_path.clone();
+                async move { c.detach_file_system(&sandbox_id, &mount_path).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
         })
     }
 
