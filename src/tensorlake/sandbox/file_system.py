@@ -50,9 +50,7 @@ def _require_project_context() -> Context:
     ctx = _build_context_from_env()
     token = ctx.api_key or ctx.personal_access_token
     if not token:
-        raise SandboxError(
-            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
-        )
+        raise SandboxError("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.")
     if not ctx.organization_id or not ctx.project_id:
         raise SandboxError(
             "File system operations require organization and project context "
