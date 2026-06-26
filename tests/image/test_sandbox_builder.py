@@ -448,10 +448,15 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
         _, _, rust_builder, captured = self._run_build(image)
 
         # The registered Dockerfile must match exactly what the TS SDK would
-        # generate — no WORKDIR /app or pip install tensorlake injection.
+        # generate — no WORKDIR /app or pip install tensorlake injection, but
+        # the tl-user runtime account is provisioned right after FROM.
         expected_dockerfile = "\n".join(
             [
                 "FROM python:3.12-slim",
+                "RUN id -u tl-user >/dev/null 2>&1 "
+                "|| useradd -m tl-user >/dev/null 2>&1 "
+                "|| adduser -D tl-user >/dev/null 2>&1 "
+                "|| true",
                 "RUN apt-get update",
                 "WORKDIR /app",
                 'ENV APP_ENV="prod"',

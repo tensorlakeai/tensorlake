@@ -169,8 +169,29 @@ function renderBuildOp(op: ImageBuildOperation): string {
   return `${op.type}${options} ${op.args.join(" ")}`;
 }
 
+// Tensorlake's sandbox runtime runs commands as the `tl-user` account. Provision
+// it so images built from upstream bases (e.g. `python:3.11-slim`) that lack the
+// account don't fail at runtime with `user not found: tl-user`.
+//
+// Best-effort and portable by design:
+//   * no-op when `tl-user` already exists (Tensorlake base images);
+//   * `useradd` for glibc bases (Debian/Ubuntu/Fedora/...);
+//   * BusyBox `adduser -D` fallback for Alpine, which lacks `useradd`;
+//   * trailing `|| true` so a base with a non-root default `USER` (no
+//     permission to edit `/etc/passwd`) or any other failure never aborts a
+//     build that previously succeeded.
+// Must stay byte-identical to the Python SDK's `ENSURE_RUNTIME_USER_COMMAND`.
+const ENSURE_RUNTIME_USER_COMMAND =
+  "id -u tl-user >/dev/null 2>&1 " +
+  "|| useradd -m tl-user >/dev/null 2>&1 " +
+  "|| adduser -D tl-user >/dev/null 2>&1 " +
+  "|| true";
+
 export function dockerfileContent(image: Image): string {
-  const lines = image.baseImage == null ? [] : [`FROM ${image.baseImage}`];
+  const lines =
+    image.baseImage == null
+      ? []
+      : [`FROM ${image.baseImage}`, `RUN ${ENSURE_RUNTIME_USER_COMMAND}`];
   lines.push(...image.buildOperations.map((op) => renderBuildOp(op)));
   return lines.join("\n");
 }

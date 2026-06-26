@@ -446,6 +446,10 @@ describe("dockerfileContent", () => {
     expect(dockerfileContent(image)).toBe(
       [
         "FROM python:3.12-slim",
+        "RUN id -u tl-user >/dev/null 2>&1 " +
+          "|| useradd -m tl-user >/dev/null 2>&1 " +
+          "|| adduser -D tl-user >/dev/null 2>&1 " +
+          "|| true",
         "RUN apt-get update",
         "WORKDIR /app",
         'ENV APP_ENV="prod"',

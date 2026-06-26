@@ -23,6 +23,13 @@ class _ImageBuildOperation:
 
 
 class Image:
+    """A custom sandbox/function image.
+
+    Sandbox commands run as the ``tl-user`` account. When an image is built as a
+    sandbox image, ``tl-user`` is provisioned automatically, so any base image
+    (e.g. ``python:3.11-slim``) works without extra setup.
+    """
+
     def __init__(
         self,
         name: str = "default",

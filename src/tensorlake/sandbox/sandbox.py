@@ -775,8 +775,8 @@ class Sandbox:
     ) -> str | dict[str, Any] | None:
         if user is None:
             # Caller did not request a specific user: omit the field so the
-            # sandbox resolves the image's configured user (e.g. the image
-            # ``USER`` directive, falling back to root).
+            # sandbox resolves the image's configured user (``tl-user`` on
+            # Tensorlake base images).
             return None
         if isinstance(user, str):
             value = user
@@ -868,9 +868,9 @@ class Sandbox:
             working_dir: Working directory
             timeout: Maximum seconds to wait (enforced server-side; None = no limit)
             user: Process user. Defaults to ``None``, which runs as the image's
-                configured user (the image ``USER`` directive, falling back to
-                root). Pass a username such as ``"root"``, a Docker-style id
-                string like ``"1000:1000"``, or ``ProcessUserSpec(uid=1000, gid=1000)``.
+                configured user — ``tl-user`` on Tensorlake base images. Pass a
+                username such as ``"root"``, a Docker-style id string like
+                ``"1000:1000"``, or ``ProcessUserSpec(uid=1000, gid=1000)``.
 
         Returns:
             Traced[CommandResult] — access ``.trace_id`` for the W3C trace ID
@@ -952,9 +952,9 @@ class Sandbox:
             stdout_mode: OutputMode.CAPTURE or OutputMode.DISCARD
             stderr_mode: OutputMode.CAPTURE or OutputMode.DISCARD
             user: Process user. Defaults to ``None``, which runs as the image's
-                configured user (the image ``USER`` directive, falling back to
-                root). Pass a username such as ``"root"``, a Docker-style id
-                string like ``"1000:1000"``, or ``ProcessUserSpec(uid=1000, gid=1000)``.
+                configured user — ``tl-user`` on Tensorlake base images. Pass a
+                username such as ``"root"``, a Docker-style id string like
+                ``"1000:1000"``, or ``ProcessUserSpec(uid=1000, gid=1000)``.
             name: Optional managed-process name. Supplying this opts the process
                 into daemon management.
             restart: Optional restart policy. Supplying this opts the process

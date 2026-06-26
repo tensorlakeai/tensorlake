@@ -11,6 +11,25 @@ import json
 
 from .image import Image, _ImageBuildOperation, _ImageBuildOperationType
 
+# Tensorlake's sandbox runtime runs commands as the ``tl-user`` account. Provision
+# it so images built from upstream bases (e.g. ``python:3.11-slim``) that lack the
+# account don't fail at runtime with ``user not found: tl-user``.
+#
+# Best-effort and portable by design:
+#   * no-op when ``tl-user`` already exists (Tensorlake base images);
+#   * ``useradd`` for glibc bases (Debian/Ubuntu/Fedora/...);
+#   * BusyBox ``adduser -D`` fallback for Alpine, which lacks ``useradd``;
+#   * trailing ``|| true`` so a base with a non-root default ``USER`` (no
+#     permission to edit ``/etc/passwd``) or any other failure never aborts a
+#     build that previously succeeded.
+# Must stay byte-identical to the TypeScript SDK's ``ENSURE_RUNTIME_USER_COMMAND``.
+ENSURE_RUNTIME_USER_COMMAND = (
+    "id -u tl-user >/dev/null 2>&1 "
+    "|| useradd -m tl-user >/dev/null 2>&1 "
+    "|| adduser -D tl-user >/dev/null 2>&1 "
+    "|| true"
+)
+
 
 def render_op_line(op: _ImageBuildOperation) -> str:
     """Format a single build op as a Dockerfile instruction line."""
@@ -31,6 +50,7 @@ def image_to_dockerfile(image: Image) -> str:
     lines: list[str] = []
     if image._base_image:
         lines.append(f"FROM {image._base_image}")
+        lines.append(f"RUN {ENSURE_RUNTIME_USER_COMMAND}")
     for op in image._build_operations:
         lines.append(render_op_line(op))
     return "\n".join(lines)
