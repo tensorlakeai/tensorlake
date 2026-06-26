@@ -494,12 +494,37 @@ def list_sandbox_images() -> list[dict]:
         ) from exc
 
 
-def _op_references_host_files(op: _ImageBuildOperation) -> bool:
-    """True when a build op copies files from the host into the image.
+def _run_op_mounts_context(op: _ImageBuildOperation) -> bool:
+    """True when a ``RUN`` op bind-mounts the build context (reads host files).
 
-    ``COPY --from=<stage>`` and remote ``ADD <url>`` sources don't read host
-    files, so they don't need a build context.
+    A BuildKit ``RUN --mount=type=bind`` reads from the build context unless it
+    mounts ``from=<stage/image>``. ``bind`` is the default mount type, so a
+    mount with no explicit ``type`` counts too. Other mount types
+    (``cache``/``tmpfs``/``secret``/``ssh``) don't read the build context.
     """
+    if op.type is not _ImageBuildOperationType.RUN:
+        return False
+    mount = (op.options or {}).get("mount")
+    if not mount:
+        return False
+    fields: dict[str, str] = {}
+    for token in mount.split(","):
+        key, _, value = token.partition("=")
+        fields[key.strip()] = value.strip()
+    if fields.get("type", "bind") != "bind":
+        return False
+    return "from" not in fields
+
+
+def _op_references_host_files(op: _ImageBuildOperation) -> bool:
+    """True when a build op reads files from the host build context.
+
+    ``COPY``/``ADD`` with host sources need a context; a ``RUN`` with a
+    ``--mount=type=bind`` (the default type) reads it too. ``COPY --from=<stage>``,
+    remote ``ADD <url>``, ``from=`` bind mounts, and non-bind mounts don't.
+    """
+    if op.type is _ImageBuildOperationType.RUN:
+        return _run_op_mounts_context(op)
     if op.type not in (_ImageBuildOperationType.COPY, _ImageBuildOperationType.ADD):
         return False
     if "from" in (op.options or {}):
@@ -512,10 +537,11 @@ def _op_references_host_files(op: _ImageBuildOperation) -> bool:
 
 
 def _image_requires_context(image: Image) -> bool:
-    """True if the image has COPY/ADD ops that read files from the host.
+    """True if the image has ops that read files from the host.
 
-    Such builds need a build context to resolve those sources, so the caller
-    must pass ``context_dir`` (mirroring ``docker build <context>``).
+    Such builds need a build context to resolve those sources (COPY/ADD host
+    sources, or a RUN bind mount), so the caller must pass ``context_dir``
+    (mirroring ``docker build <context>``).
     """
     return any(_op_references_host_files(op) for op in image._build_operations)
 
@@ -586,11 +612,11 @@ def build_sandbox_image(
                 rust_context_dir = str(Path(context_dir).resolve())
             elif _image_requires_context(source):
                 raise SandboxImageBuildError(
-                    "This image uses COPY/ADD to read files from the host, so "
-                    "it needs a build context. Pass `context_dir=...` pointing "
-                    "at the directory that contains those sources; COPY/ADD "
-                    "paths resolve relative to it, like `docker build "
-                    "<context_dir>`."
+                    "This image reads files from the host (via COPY/ADD or a "
+                    "RUN bind mount), so it needs a build context. Pass "
+                    "`context_dir=...` pointing at the directory that contains "
+                    "those sources; they resolve relative to it, like "
+                    "`docker build <context_dir>`."
                 )
             else:
                 # No host-file copies: upload an empty context (just the

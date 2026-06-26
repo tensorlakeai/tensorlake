@@ -266,11 +266,43 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
 }
 
 /**
- * True when a build op copies files from the host into the image.
- * `COPY --from=<stage>` and remote `ADD <url>` sources don't read host files,
- * so they don't need a build context.
+ * True when a `RUN` op bind-mounts the build context (reads host files).
+ * A BuildKit `RUN --mount=type=bind` reads from the build context unless it
+ * mounts `from=<stage/image>`. `bind` is the default mount type, so a mount
+ * with no explicit `type` counts too. Other mount types
+ * (`cache`/`tmpfs`/`secret`/`ssh`) don't read the build context.
+ */
+function runOpMountsContext(op: ImageBuildOperation): boolean {
+  if (op.type !== ImageBuildOperationType.RUN) {
+    return false;
+  }
+  const mount = op.options.mount;
+  if (mount == null || mount === "") {
+    return false;
+  }
+  const fields: Record<string, string> = {};
+  for (const token of mount.split(",")) {
+    const eq = token.indexOf("=");
+    const key = (eq === -1 ? token : token.slice(0, eq)).trim();
+    const value = eq === -1 ? "" : token.slice(eq + 1).trim();
+    fields[key] = value;
+  }
+  if ((fields.type ?? "bind") !== "bind") {
+    return false;
+  }
+  return !("from" in fields);
+}
+
+/**
+ * True when a build op reads files from the host build context.
+ * `COPY`/`ADD` with host sources need a context; a `RUN` with a
+ * `--mount=type=bind` (the default type) reads it too. `COPY --from=<stage>`,
+ * remote `ADD <url>`, `from=` bind mounts, and non-bind mounts don't.
  */
 function opReferencesHostFiles(op: ImageBuildOperation): boolean {
+  if (op.type === ImageBuildOperationType.RUN) {
+    return runOpMountsContext(op);
+  }
   if (
     op.type !== ImageBuildOperationType.COPY &&
     op.type !== ImageBuildOperationType.ADD
@@ -290,9 +322,10 @@ function opReferencesHostFiles(op: ImageBuildOperation): boolean {
 }
 
 /**
- * True if the image has COPY/ADD ops that read files from the host. Such
- * builds need a build context to resolve those sources, so the caller must
- * pass `contextDir` (mirroring `docker build <context>`).
+ * True if the image has ops that read files from the host (COPY/ADD host
+ * sources, or a RUN bind mount). Such builds need a build context to resolve
+ * those sources, so the caller must pass `contextDir` (mirroring
+ * `docker build <context>`).
  */
 function imageRequiresContext(image: Image): boolean {
   return image.buildOperations.some(opReferencesHostFiles);
@@ -330,10 +363,10 @@ export async function createSandboxImage(
       resolvedContext = path.resolve(options.contextDir);
     } else if (imageRequiresContext(source)) {
       throw new Error(
-        "This image uses COPY/ADD to read files from the host, so it needs a " +
-          "build context. Pass `contextDir` pointing at the directory that " +
-          "contains those sources; COPY/ADD paths resolve relative to it, " +
-          "like `docker build <contextDir>`.",
+        "This image reads files from the host (via COPY/ADD or a RUN bind " +
+          "mount), so it needs a build context. Pass `contextDir` pointing at " +
+          "the directory that contains those sources; they resolve relative " +
+          "to it, like `docker build <contextDir>`.",
       );
     } else {
       tempContextDir = mkdtempSync(path.join(os.tmpdir(), "tl-build-context-"));

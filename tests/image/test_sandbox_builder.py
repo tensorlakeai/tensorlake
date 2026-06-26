@@ -560,6 +560,37 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
         _, _, _, captured = self._run_build(image)
         self.assertEqual(captured["context_files"], [])
 
+    def test_run_bind_mount_without_context_dir_raises(self):
+        # A RUN bind mount reads the build context, so it needs a context.
+        # `type=bind` is the default, so omitting it must also be detected.
+        for mount in (
+            "type=bind,source=.,target=/src",
+            "target=/src",
+        ):
+            image = Image(name="mount-image", base_image="python:3.12-slim").run(
+                "make -C /src", options={"mount": mount}
+            )
+            with self.assertRaises(sbm.SandboxImageBuildError) as ctx:
+                self._run_build(image)
+            self.assertIn("context_dir", str(ctx.exception))
+
+    def test_run_mount_from_stage_does_not_require_context(self):
+        # A `from=` bind mount reads another stage/image, not the host.
+        image = Image(name="mount-stage", base_image="python:3.12-slim").run(
+            "make", options={"mount": "type=bind,from=builder,target=/src"}
+        )
+        _, _, _, captured = self._run_build(image)
+        self.assertEqual(captured["context_files"], [])
+
+    def test_run_cache_mount_does_not_require_context(self):
+        # Non-bind mounts (cache/tmpfs/secret/ssh) don't read the build context.
+        image = Image(name="mount-cache", base_image="python:3.12-slim").run(
+            "pip install -r req.txt",
+            options={"mount": "type=cache,target=/root/.cache"},
+        )
+        _, _, _, captured = self._run_build(image)
+        self.assertEqual(captured["context_files"], [])
+
     def test_copy_with_context_dir_uploads_dir_as_is(self):
         # With an explicit context_dir, COPY ops are allowed and the directory
         # is uploaded as-is (resolved), like `docker build <dir>`.

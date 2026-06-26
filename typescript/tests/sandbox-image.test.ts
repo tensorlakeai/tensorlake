@@ -209,6 +209,44 @@ describe("createSandboxImage", () => {
     expect(captured.contextFiles).toEqual([]);
   });
 
+  it("throws when a RUN bind mount reads the context without a contextDir", async () => {
+    // A RUN bind mount reads the build context, so it needs a context.
+    // `type=bind` is the default, so omitting it must also be detected.
+    for (const mount of ["type=bind,source=.,target=/src", "target=/src"]) {
+      const image = new Image({
+        name: "mount-image",
+        baseImage: "python:3.12-slim",
+      }).run("make -C /src", { mount });
+
+      makeFakeBinding();
+      await expect(createSandboxImage(image)).rejects.toThrow(/contextDir/);
+    }
+  });
+
+  it("does not require a context for a RUN mount with from=<stage>", async () => {
+    const image = new Image({
+      name: "mount-stage",
+      baseImage: "python:3.12-slim",
+    }).run("make", { mount: "type=bind,from=builder,target=/src" });
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(image);
+
+    expect(captured.contextFiles).toEqual([]);
+  });
+
+  it("does not require a context for a RUN cache mount", async () => {
+    const image = new Image({
+      name: "mount-cache",
+      baseImage: "python:3.12-slim",
+    }).run("pip install -r req.txt", { mount: "type=cache,target=/root/.cache" });
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(image);
+
+    expect(captured.contextFiles).toEqual([]);
+  });
+
   it("uploads the given directory as-is when contextDir is set with COPY ops", async () => {
     const tempDir = await mkdir(
       path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-ctxcopy`),
