@@ -1,22 +1,11 @@
 import { createRequire } from "node:module";
 import path from "node:path";
 import os from "node:os";
-import {
-  cpSync,
-  existsSync,
-  globSync,
-  mkdirSync,
-  mkdtempSync,
-  rmSync,
-} from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { CloudClient } from "./cloud-client.js";
 import type { SandboxTemplate } from "./cloud-models.js";
-import {
-  Image,
-  ImageBuildOperationType,
-  dockerfileContent,
-} from "./image.js";
+import { Image, ImageBuildOperationType, dockerfileContent } from "./image.js";
 import type { ImageBuildOperation } from "./image.js";
 
 /**
@@ -38,13 +27,13 @@ export interface CreateSandboxImageOptions {
   builderDiskMb?: number;
   isPublic?: boolean;
   /**
-   * Directory uploaded as the build context for an `Image` source. When
-   * omitted, a minimal context is assembled automatically containing only the
-   * files referenced by the image's COPY/ADD ops (resolved relative to cwd),
-   * so cwd is not archived and uploaded wholesale. An image with no host-file
-   * copies yields an empty context. Pass this to upload a specific directory
-   * as-is instead. Ignored when the source is a Dockerfile path (the
-   * Dockerfile's parent directory is used instead).
+   * Build context directory for an `Image` source, used exactly like
+   * `docker build <contextDir>`: it is uploaded as-is and COPY/ADD sources
+   * resolve relative to it. Required when the image has COPY/ADD ops that read
+   * host files — building without it then throws. When the image has no such
+   * ops it may be omitted, and an empty context (just the generated Dockerfile)
+   * is uploaded so cwd is not archived. Ignored when the source is a Dockerfile
+   * path (the Dockerfile's parent directory is used instead).
    */
   contextDir?: string;
   /**
@@ -276,16 +265,10 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
   return out;
 }
 
-const GLOB_CHARS = /[*?[]/;
-
-/** True for ADD sources that are remote URLs rather than host files. */
-function isRemoteSrc(src: string): boolean {
-  return src.startsWith("http://") || src.startsWith("https://");
-}
-
 /**
  * True when a build op copies files from the host into the image.
- * `COPY --from=<stage>` and remote `ADD <url>` sources don't read host files.
+ * `COPY --from=<stage>` and remote `ADD <url>` sources don't read host files,
+ * so they don't need a build context.
  */
 function opReferencesHostFiles(op: ImageBuildOperation): boolean {
   if (
@@ -297,79 +280,22 @@ function opReferencesHostFiles(op: ImageBuildOperation): boolean {
   if (op.options.from != null) {
     return false;
   }
-  if (op.type === ImageBuildOperationType.ADD && isRemoteSrc(op.args[0])) {
+  if (
+    op.type === ImageBuildOperationType.ADD &&
+    (op.args[0].startsWith("http://") || op.args[0].startsWith("https://"))
+  ) {
     return false;
   }
   return true;
 }
 
 /**
- * Copy a single COPY/ADD source from `base` into the minimal context at the
- * same path the rendered Dockerfile instruction expects.
+ * True if the image has COPY/ADD ops that read files from the host. Such
+ * builds need a build context to resolve those sources, so the caller must
+ * pass `contextDir` (mirroring `docker build <context>`).
  */
-function stageSource(src: string, base: string, dest: string): void {
-  // Docker resolves COPY/ADD sources relative to the context root; a leading
-  // "./" or "/" is equivalent to a context-relative path.
-  let pattern = src.replace(/^\/+/, "");
-  if (pattern.startsWith("./")) pattern = pattern.slice(2);
-
-  let matches: string[];
-  if (GLOB_CHARS.test(pattern)) {
-    matches = Array.from(globSync(pattern, { cwd: base })).map((m) =>
-      path.resolve(base, m),
-    );
-    if (matches.length === 0) {
-      throw new Error(
-        `COPY/ADD source "${src}" matched no files under ${base}. ` +
-          "Pass `contextDir` if the sources live elsewhere.",
-      );
-    }
-  } else {
-    const candidate = path.resolve(base, pattern);
-    if (!existsSync(candidate)) {
-      throw new Error(
-        `COPY/ADD source "${src}" not found under ${base}. ` +
-          "Pass `contextDir` if the sources live elsewhere.",
-      );
-    }
-    matches = [candidate];
-  }
-
-  const resolvedBase = path.resolve(base);
-  for (const match of matches) {
-    const rel = path.relative(resolvedBase, match);
-    if (rel.startsWith("..") || path.isAbsolute(rel)) {
-      throw new Error(
-        `COPY/ADD source "${src}" resolves outside the build context base ` +
-          `${base}. Pass an explicit contextDir.`,
-      );
-    }
-    const target = path.join(dest, rel);
-    mkdirSync(path.dirname(target), { recursive: true });
-    // `dereference` so a symlinked source is staged as the file it points to,
-    // at the path the Dockerfile names (a bare symlink would dangle in the
-    // throwaway context).
-    cpSync(match, target, { recursive: true, dereference: true });
-  }
-}
-
-/**
- * Assemble a minimal build context under `dest` containing only the files
- * referenced by the image's COPY/ADD ops, resolved relative to `base`.
- */
-function populateMinimalContext(image: Image, base: string, dest: string): void {
-  for (const op of image.buildOperations) {
-    if (opReferencesHostFiles(op)) {
-      stageSource(op.args[0], base, dest);
-    }
-  }
-  // Carry over the context root's .dockerignore so the native archiver applies
-  // the same exclusions it would for a full-cwd context. Staged files keep
-  // their cwd-relative paths, so the patterns still match.
-  const dockerignore = path.join(base, ".dockerignore");
-  if (existsSync(dockerignore)) {
-    cpSync(dockerignore, path.join(dest, ".dockerignore"));
-  }
+function imageRequiresContext(image: Image): boolean {
+  return image.buildOperations.some(opReferencesHostFiles);
 }
 
 // --- Public API ------------------------------------------------------------
@@ -394,18 +320,23 @@ export async function createSandboxImage(
     if (!source.baseImage) {
       throw new Error("Image must have a baseImage to build");
     }
-    // When the caller passes an explicit contextDir we upload that directory
-    // as-is (an escape hatch for complex layouts). Otherwise we assemble a
-    // minimal throwaway context that contains only the files referenced by the
-    // image's COPY/ADD ops (resolved relative to cwd), so those copies succeed
-    // without archiving and uploading the whole cwd. An image with no host-file
-    // copies yields an empty context.
+    // With an explicit contextDir we upload that directory as-is, like
+    // `docker build <dir>`. Without one, an image that reads host files via
+    // COPY/ADD can't be built (there is no context to resolve them against);
+    // images without such ops get an empty context (just the Dockerfile) so
+    // the whole cwd is not archived.
     let resolvedContext: string;
     if (options.contextDir != null) {
       resolvedContext = path.resolve(options.contextDir);
+    } else if (imageRequiresContext(source)) {
+      throw new Error(
+        "This image uses COPY/ADD to read files from the host, so it needs a " +
+          "build context. Pass `contextDir` pointing at the directory that " +
+          "contains those sources; COPY/ADD paths resolve relative to it, " +
+          "like `docker build <contextDir>`.",
+      );
     } else {
       tempContextDir = mkdtempSync(path.join(os.tmpdir(), "tl-build-context-"));
-      populateMinimalContext(source, process.cwd(), tempContextDir);
       resolvedContext = tempContextDir;
     }
     dockerfilePath = path.join(resolvedContext, "Dockerfile");

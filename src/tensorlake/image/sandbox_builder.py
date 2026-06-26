@@ -16,11 +16,9 @@ sandbox runs from the image (``ONBUILD``/``SHELL``/``EXPOSE``/``HEALTHCHECK``/
 from __future__ import annotations
 
 import contextlib
-import glob as globlib
 import json
 import os
 import re
-import shutil
 import tempfile
 import warnings
 from pathlib import Path
@@ -496,110 +494,30 @@ def list_sandbox_images() -> list[dict]:
         ) from exc
 
 
-_GLOB_CHARS = ("*", "?", "[")
-
-
-def _is_remote_src(src: str) -> bool:
-    """True for ADD sources that are remote URLs rather than host files."""
-    return src.startswith(("http://", "https://"))
-
-
 def _op_references_host_files(op: _ImageBuildOperation) -> bool:
     """True when a build op copies files from the host into the image.
 
     ``COPY --from=<stage>`` and remote ``ADD <url>`` sources don't read host
-    files, so they don't need anything staged into the build context.
+    files, so they don't need a build context.
     """
     if op.type not in (_ImageBuildOperationType.COPY, _ImageBuildOperationType.ADD):
         return False
     if "from" in (op.options or {}):
         return False
-    if op.type == _ImageBuildOperationType.ADD and _is_remote_src(op.args[0]):
+    if op.type == _ImageBuildOperationType.ADD and op.args[0].startswith(
+        ("http://", "https://")
+    ):
         return False
     return True
 
 
-def _stage_source(src: str, base: Path, dest: Path) -> None:
-    """Copy a single COPY/ADD source from ``base`` into the minimal context.
+def _image_requires_context(image: Image) -> bool:
+    """True if the image has COPY/ADD ops that read files from the host.
 
-    The source is preserved at the same path (relative to the context root)
-    that the rendered Dockerfile instruction expects, so the staged context is
-    a faithful subset of ``base`` containing only the referenced files.
+    Such builds need a build context to resolve those sources, so the caller
+    must pass ``context_dir`` (mirroring ``docker build <context>``).
     """
-    # Docker resolves COPY/ADD sources relative to the context root; a leading
-    # "./" or "/" is equivalent to a context-relative path.
-    pattern = src.lstrip("/")
-    if pattern.startswith("./"):
-        pattern = pattern[2:]
-
-    if any(ch in pattern for ch in _GLOB_CHARS):
-        matches = [Path(p) for p in globlib.glob(str(base / pattern), recursive=True)]
-        if not matches:
-            raise SandboxImageBuildError(
-                f"COPY/ADD source {src!r} matched no files under {base}. "
-                "Pass `context_dir=...` if the sources live elsewhere."
-            )
-    else:
-        candidate = base / pattern
-        if not candidate.exists():
-            raise SandboxImageBuildError(
-                f"COPY/ADD source {src!r} not found under {base}. "
-                "Pass `context_dir=...` if the sources live elsewhere."
-            )
-        matches = [candidate]
-
-    for match in matches:
-        # Path (relative to the context root) that the rendered Dockerfile
-        # instruction refers to. Collapse ".." lexically but DO NOT follow
-        # symlinks: the Dockerfile names the source path, so the staged file
-        # must live at that same path even when the source is a symlink
-        # (resolving it would stage the link target's path instead).
-        normalized = Path(os.path.normpath(match))
-        try:
-            rel = normalized.relative_to(base)
-        except ValueError as exc:
-            raise SandboxImageBuildError(
-                f"COPY/ADD source {src!r} resolves outside the build context "
-                f"base {base}. Pass an explicit `context_dir`."
-            ) from exc
-        target = dest / rel
-        if match.is_dir():
-            shutil.copytree(match, target, dirs_exist_ok=True)
-        else:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copy2(match, target)
-
-
-def _image_context_dir(
-    image: Image,
-    context_dir: str | None,
-    stack: contextlib.ExitStack,
-) -> str:
-    """Resolve the build-context directory for an :class:`Image` build.
-
-    When the caller passes an explicit ``context_dir`` we upload that directory
-    as-is (an escape hatch for complex layouts). Otherwise we assemble a
-    *minimal* throwaway context that contains only the files referenced by the
-    image's COPY/ADD ops — resolved relative to the current working directory —
-    so those copies succeed without archiving and uploading the whole cwd. An
-    image with no host-file copies yields an empty context. The temp dir is
-    cleaned up when ``stack`` closes.
-    """
-    if context_dir is not None:
-        return str(Path(context_dir).resolve())
-    temp = stack.enter_context(tempfile.TemporaryDirectory(prefix="tl-build-context-"))
-    base = Path(os.getcwd()).resolve()
-    dest = Path(temp)
-    for op in image._build_operations:
-        if _op_references_host_files(op):
-            _stage_source(op.args[0], base, dest)
-    # Carry over the context root's .dockerignore so the Rust archiver applies
-    # the same exclusions it would for a full-cwd context. Staged files keep
-    # their cwd-relative paths, so the patterns still match.
-    dockerignore = base / ".dockerignore"
-    if dockerignore.is_file():
-        shutil.copy2(dockerignore, dest / ".dockerignore")
-    return temp
+    return any(_op_references_host_files(op) for op in image._build_operations)
 
 
 def build_sandbox_image(
@@ -634,13 +552,14 @@ def build_sandbox_image(
         is_public: Make the registered image publicly accessible.
         docker_compat: Use Docker/BuildKit max compatibility mode (build is
             slower and uses more memory and disk space on builder sandbox).
-        context_dir: Directory uploaded as the build context for an
-            :class:`Image` source. When omitted, a minimal context is assembled
-            automatically containing only the files referenced by the image's
-            COPY/ADD ops (resolved relative to the current working directory),
-            so cwd is not archived and uploaded wholesale. Pass this to upload a
-            specific directory as-is instead. Ignored when ``source`` is a
-            Dockerfile path (the Dockerfile's parent directory is used instead).
+        context_dir: Build context directory for an :class:`Image` source,
+            used exactly like ``docker build <context_dir>``: it is uploaded
+            as-is and COPY/ADD sources resolve relative to it. Required when
+            the image has COPY/ADD ops that read host files — building without
+            it then raises. When the image has no such ops it may be omitted,
+            and an empty context (just the generated Dockerfile) is uploaded so
+            cwd is not archived. Ignored when ``source`` is a Dockerfile path
+            (the Dockerfile's parent directory is used instead).
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
         emit: Callback invoked for each build event. Takes precedence over
             ``verbose``. Use this to integrate the builder into custom UIs.
@@ -662,7 +581,23 @@ def build_sandbox_image(
         if isinstance(source, Image):
             if not source._base_image:
                 raise SandboxImageLoadError("Image must have a base_image to build")
-            rust_context_dir = _image_context_dir(source, context_dir, stack)
+            if context_dir is not None:
+                # Upload the given directory as-is, like `docker build <dir>`.
+                rust_context_dir = str(Path(context_dir).resolve())
+            elif _image_requires_context(source):
+                raise SandboxImageBuildError(
+                    "This image uses COPY/ADD to read files from the host, so "
+                    "it needs a build context. Pass `context_dir=...` pointing "
+                    "at the directory that contains those sources; COPY/ADD "
+                    "paths resolve relative to it, like `docker build "
+                    "<context_dir>`."
+                )
+            else:
+                # No host-file copies: upload an empty context (just the
+                # generated Dockerfile) instead of archiving the whole cwd.
+                rust_context_dir = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="tl-build-context-")
+                )
             rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
             dockerfile_text = image_to_dockerfile(source)
             if not dockerfile_text.endswith("\n"):
@@ -832,31 +767,30 @@ def build_sandbox_application_image(
             stacklevel=2,
         )
 
-    with contextlib.ExitStack() as stack:
-        rust_context_dir = _image_context_dir(image, context_dir, stack)
-        rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
-        dockerfile_text = dockerfile_content(image, extra_env_vars=build_env_vars)
-        if not dockerfile_text.endswith("\n"):
-            dockerfile_text += "\n"
+    rust_context_dir = str(Path(context_dir or os.getcwd()).resolve())
+    rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
+    dockerfile_text = dockerfile_content(image, extra_env_vars=build_env_vars)
+    if not dockerfile_text.endswith("\n"):
+        dockerfile_text += "\n"
 
-        try:
-            return _run_rust_image_create(
-                rust_dockerfile_path,
-                effective_registered_name,
-                dockerfile_text=dockerfile_text,
-                context_dir=rust_context_dir,
-                cpus=cpus,
-                memory_mb=memory_mb,
-                disk_mb=disk_mb,
-                builder_disk_mb=builder_disk_mb,
-                is_public=is_public,
-                docker_compat=False,
-                emit=emit,
-            )
-        except SandboxImageError:
-            raise
-        except Exception as e:
-            raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
+    try:
+        return _run_rust_image_create(
+            rust_dockerfile_path,
+            effective_registered_name,
+            dockerfile_text=dockerfile_text,
+            context_dir=rust_context_dir,
+            cpus=cpus,
+            memory_mb=memory_mb,
+            disk_mb=disk_mb,
+            builder_disk_mb=builder_disk_mb,
+            is_public=is_public,
+            docker_compat=False,
+            emit=emit,
+        )
+    except SandboxImageError:
+        raise
+    except Exception as e:
+        raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
 
 
 def _default_registered_name(dockerfile_path: str) -> str:

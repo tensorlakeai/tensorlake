@@ -123,12 +123,13 @@ class Image:
             docker_compat: Use Docker/BuildKit max compatibility mode (build
                 is slower and uses more memory and disk space on builder
                 sandbox).
-            context_dir: Directory uploaded as the build context. When omitted,
-                a minimal context is assembled automatically containing only
-                the files referenced by this image's COPY/ADD ops (resolved
-                relative to the current working directory), so the cwd is not
-                uploaded wholesale. Pass this to upload a specific directory
-                as-is instead.
+            context_dir: Build context directory, used exactly like
+                ``docker build <context_dir>``: it is uploaded as-is and
+                ``copy()``/``add()`` sources resolve relative to it. Required
+                when this image has ``copy()``/``add()`` ops that read host
+                files — building without it then raises. When the image has no
+                such ops it may be omitted, and an empty context (just the
+                generated Dockerfile) is uploaded so the cwd is not archived.
             verbose: If True, print build progress to stderr.
 
         Returns:
