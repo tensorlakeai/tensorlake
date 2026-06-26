@@ -38,11 +38,13 @@ export interface CreateSandboxImageOptions {
   builderDiskMb?: number;
   isPublic?: boolean;
   /**
-   * Directory used to resolve relative COPY/ADD sources for an `Image` source.
-   * Required when the image has COPY/ADD ops; omitting it then throws. For
-   * images without COPY/ADD ops it may be omitted and an empty build context
-   * is used so cwd is not archived and uploaded. Ignored when the source is a
-   * Dockerfile path (the Dockerfile's parent directory is used instead).
+   * Directory uploaded as the build context for an `Image` source. When
+   * omitted, a minimal context is assembled automatically containing only the
+   * files referenced by the image's COPY/ADD ops (resolved relative to cwd),
+   * so cwd is not archived and uploaded wholesale. An image with no host-file
+   * copies yields an empty context. Pass this to upload a specific directory
+   * as-is instead. Ignored when the source is a Dockerfile path (the
+   * Dockerfile's parent directory is used instead).
    */
   contextDir?: string;
   /**
