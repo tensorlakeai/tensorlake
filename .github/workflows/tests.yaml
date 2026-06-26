@@ -2,15 +2,6 @@ name: Tests
 
 on:
   workflow_dispatch:
-    inputs:
-      environment:
-        description: "Environment to run the sandbox tests against"
-        required: true
-        default: dev
-        type: choice
-        options:
-          - dev
-          - prod
 
   push:
     branches:
@@ -235,7 +226,7 @@ jobs:
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    environment: ${{ github.event_name == 'workflow_dispatch' && inputs.environment || 'prod' }}
+    environment: prod
     steps:
       - uses: actions/checkout@v4
 
@@ -267,7 +258,5 @@ jobs:
       - name: Run Sandbox integration tests
         run: make test_sandbox
         env:
-          TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
-          TENSORLAKE_TEST_CLEANUP_ALL: ${{ (github.event_name == 'workflow_dispatch' && inputs.environment == 'dev') && '1' || '0' }}
           TENSORLAKE_TEST_CLEANUP_GRACE_SECS: "60"
