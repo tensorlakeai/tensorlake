@@ -124,7 +124,10 @@ class Image:
                 is slower and uses more memory and disk space on builder
                 sandbox).
             context_dir: Directory used to resolve relative COPY/ADD paths.
-                Defaults to the current working directory.
+                When omitted, an empty build context is used (the generated
+                Dockerfile needs no host files), so the current working
+                directory is not uploaded. Pass this explicitly only when the
+                image copies local files.
             verbose: If True, print build progress to stderr.
 
         Returns:

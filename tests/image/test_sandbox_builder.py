@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 import warnings
@@ -481,6 +482,26 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             self.assertEqual(captured["context_dir"], str(Path(tmpdir).resolve()))
 
         self.assertEqual(generated, [])
+
+    def test_default_context_is_empty_not_cwd(self):
+        # Without an explicit context_dir, an Image build must NOT upload the
+        # current working directory (which has no Dockerfile in it). It uses a
+        # throwaway empty temp dir instead, so only the generated Dockerfile
+        # text is built — nothing from cwd is archived.
+        image = Image(name="no-context-image", base_image="python:3.12-slim").run(
+            "pip install numpy"
+        )
+        _, _, _, captured = self._run_build(image)
+
+        context_dir = captured["context_dir"]
+        self.assertIsInstance(context_dir, str)
+        self.assertNotEqual(
+            Path(str(context_dir)).resolve(),
+            Path(os.getcwd()).resolve(),
+            "Image build must not default its build context to cwd",
+        )
+        # The temp dir is cleaned up once the build returns.
+        self.assertFalse(Path(str(context_dir)).exists())
 
     def test_warns_on_default_name(self):
         image = Image(base_image="python:3.12-slim")

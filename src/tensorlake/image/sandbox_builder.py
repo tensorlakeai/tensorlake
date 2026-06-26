@@ -15,9 +15,11 @@ sandbox runs from the image (``ONBUILD``/``SHELL``/``EXPOSE``/``HEALTHCHECK``/
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Any, Callable
@@ -492,6 +494,21 @@ def list_sandbox_images() -> list[dict]:
         ) from exc
 
 
+def _image_context_dir(context_dir: str | None, stack: contextlib.ExitStack) -> str:
+    """Resolve the build-context directory for an :class:`Image` build.
+
+    Image objects render their Dockerfile from text and (by design) don't copy
+    host files, so there is no build context to upload. When the caller doesn't
+    pass an explicit ``context_dir`` we use a throwaway empty temp dir rather
+    than the current working directory — otherwise the whole cwd (which has no
+    Dockerfile in it) gets archived and uploaded. The temp dir is cleaned up
+    when ``stack`` closes.
+    """
+    if context_dir is not None:
+        return str(Path(context_dir).resolve())
+    return stack.enter_context(tempfile.TemporaryDirectory(prefix="tl-build-context-"))
+
+
 def build_sandbox_image(
     source: Image | str,
     *,
@@ -524,9 +541,11 @@ def build_sandbox_image(
         is_public: Make the registered image publicly accessible.
         docker_compat: Use Docker/BuildKit max compatibility mode (build is
             slower and uses more memory and disk space on builder sandbox).
-        context_dir: Directory used to resolve relative COPY/ADD sources.
-            Ignored when ``source`` is a Dockerfile path (the Dockerfile's
-            parent directory is used instead).
+        context_dir: Directory used to resolve relative COPY/ADD sources for
+            an :class:`Image` source. When omitted, an empty build context is
+            used rather than the current working directory, so cwd is not
+            archived and uploaded. Ignored when ``source`` is a Dockerfile path
+            (the Dockerfile's parent directory is used instead).
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
         emit: Callback invoked for each build event. Takes precedence over
             ``verbose``. Use this to integrate the builder into custom UIs.
@@ -544,58 +563,59 @@ def build_sandbox_image(
     if emit is None:
         emit = _stderr_emit if verbose else _noop_emit
 
-    if isinstance(source, Image):
-        if not source._base_image:
-            raise SandboxImageLoadError("Image must have a base_image to build")
-        rust_context_dir = str(Path(context_dir or os.getcwd()).resolve())
-        rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
-        dockerfile_text = image_to_dockerfile(source)
-        if not dockerfile_text.endswith("\n"):
-            dockerfile_text += "\n"
-        effective_registered_name = registered_name or source.name
-    elif isinstance(source, (str, os.PathLike)):
-        path = Path(os.fspath(source)).resolve()
-        if not path.is_file():
-            raise SandboxImageLoadError(f"Dockerfile not found: {source}")
-        rust_dockerfile_path = str(path)
-        rust_context_dir = None
-        dockerfile_text = None
-        effective_registered_name = registered_name or _default_registered_name(
-            str(path)
-        )
-    else:
-        # Programmer error — propagate directly rather than wrapping.
-        raise TypeError(
-            "source must be an Image or a Dockerfile path, got "
-            f"{type(source).__name__}"
-        )
+    with contextlib.ExitStack() as stack:
+        if isinstance(source, Image):
+            if not source._base_image:
+                raise SandboxImageLoadError("Image must have a base_image to build")
+            rust_context_dir = _image_context_dir(context_dir, stack)
+            rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
+            dockerfile_text = image_to_dockerfile(source)
+            if not dockerfile_text.endswith("\n"):
+                dockerfile_text += "\n"
+            effective_registered_name = registered_name or source.name
+        elif isinstance(source, (str, os.PathLike)):
+            path = Path(os.fspath(source)).resolve()
+            if not path.is_file():
+                raise SandboxImageLoadError(f"Dockerfile not found: {source}")
+            rust_dockerfile_path = str(path)
+            rust_context_dir = None
+            dockerfile_text = None
+            effective_registered_name = registered_name or _default_registered_name(
+                str(path)
+            )
+        else:
+            # Programmer error — propagate directly rather than wrapping.
+            raise TypeError(
+                "source must be an Image or a Dockerfile path, got "
+                f"{type(source).__name__}"
+            )
 
-    if effective_registered_name == _DEFAULT_IMAGE_NAME:
-        warnings.warn(
-            f"Building sandbox image with the default name {_DEFAULT_IMAGE_NAME!r}. "
-            "Pass `registered_name=...` or `Image(name=...)` to avoid collisions "
-            "with other default-named images in this project.",
-            stacklevel=2,
-        )
+        if effective_registered_name == _DEFAULT_IMAGE_NAME:
+            warnings.warn(
+                f"Building sandbox image with the default name {_DEFAULT_IMAGE_NAME!r}. "
+                "Pass `registered_name=...` or `Image(name=...)` to avoid collisions "
+                "with other default-named images in this project.",
+                stacklevel=2,
+            )
 
-    try:
-        return _run_rust_image_create(
-            rust_dockerfile_path,
-            effective_registered_name,
-            dockerfile_text=dockerfile_text,
-            context_dir=rust_context_dir,
-            cpus=cpus,
-            memory_mb=memory_mb,
-            disk_mb=disk_mb,
-            builder_disk_mb=builder_disk_mb,
-            is_public=is_public,
-            docker_compat=docker_compat,
-            emit=emit,
-        )
-    except SandboxImageError:
-        raise
-    except Exception as e:
-        raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
+        try:
+            return _run_rust_image_create(
+                rust_dockerfile_path,
+                effective_registered_name,
+                dockerfile_text=dockerfile_text,
+                context_dir=rust_context_dir,
+                cpus=cpus,
+                memory_mb=memory_mb,
+                disk_mb=disk_mb,
+                builder_disk_mb=builder_disk_mb,
+                is_public=is_public,
+                docker_compat=docker_compat,
+                emit=emit,
+            )
+        except SandboxImageError:
+            raise
+        except Exception as e:
+            raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
 
 
 def import_sandbox_image(
@@ -717,30 +737,31 @@ def build_sandbox_application_image(
             stacklevel=2,
         )
 
-    rust_context_dir = str(Path(context_dir or os.getcwd()).resolve())
-    rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
-    dockerfile_text = dockerfile_content(image, extra_env_vars=build_env_vars)
-    if not dockerfile_text.endswith("\n"):
-        dockerfile_text += "\n"
+    with contextlib.ExitStack() as stack:
+        rust_context_dir = _image_context_dir(context_dir, stack)
+        rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
+        dockerfile_text = dockerfile_content(image, extra_env_vars=build_env_vars)
+        if not dockerfile_text.endswith("\n"):
+            dockerfile_text += "\n"
 
-    try:
-        return _run_rust_image_create(
-            rust_dockerfile_path,
-            effective_registered_name,
-            dockerfile_text=dockerfile_text,
-            context_dir=rust_context_dir,
-            cpus=cpus,
-            memory_mb=memory_mb,
-            disk_mb=disk_mb,
-            builder_disk_mb=builder_disk_mb,
-            is_public=is_public,
-            docker_compat=False,
-            emit=emit,
-        )
-    except SandboxImageError:
-        raise
-    except Exception as e:
-        raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
+        try:
+            return _run_rust_image_create(
+                rust_dockerfile_path,
+                effective_registered_name,
+                dockerfile_text=dockerfile_text,
+                context_dir=rust_context_dir,
+                cpus=cpus,
+                memory_mb=memory_mb,
+                disk_mb=disk_mb,
+                builder_disk_mb=builder_disk_mb,
+                is_public=is_public,
+                docker_compat=False,
+                emit=emit,
+            )
+        except SandboxImageError:
+            raise
+        except Exception as e:
+            raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
 
 
 def _default_registered_name(dockerfile_path: str) -> str:
