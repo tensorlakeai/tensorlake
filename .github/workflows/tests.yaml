@@ -258,5 +258,6 @@ jobs:
       - name: Run Sandbox integration tests
         run: make test_sandbox
         env:
+          TENSORLAKE_API_URL: https://api.tensorlake.ai
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
           TENSORLAKE_TEST_CLEANUP_GRACE_SECS: "60"
