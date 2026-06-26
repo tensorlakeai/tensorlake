@@ -123,11 +123,12 @@ class Image:
             docker_compat: Use Docker/BuildKit max compatibility mode (build
                 is slower and uses more memory and disk space on builder
                 sandbox).
-            context_dir: Directory used to resolve relative COPY/ADD paths.
-                When omitted, an empty build context is used (the generated
-                Dockerfile needs no host files), so the current working
-                directory is not uploaded. Pass this explicitly only when the
-                image copies local files.
+            context_dir: Directory uploaded as the build context. When omitted,
+                a minimal context is assembled automatically containing only
+                the files referenced by this image's COPY/ADD ops (resolved
+                relative to the current working directory), so the cwd is not
+                uploaded wholesale. Pass this to upload a specific directory
+                as-is instead.
             verbose: If True, print build progress to stderr.
 
         Returns:

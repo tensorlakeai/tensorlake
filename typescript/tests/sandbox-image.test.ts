@@ -1,4 +1,5 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { existsSync, readdirSync } from "node:fs";
+import { mkdir, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -12,6 +13,9 @@ import { Image, dockerfileContent } from "../src/image.js";
 interface CapturedCall {
   options: Record<string, unknown>;
   emit?: ((event: { eventType: string; stream?: string | null; message: string }) => void) | null;
+  // Files staged into the build context, relative + posix-normalized, sorted.
+  // Snapshotted at call time since the temp context is removed once build returns.
+  contextFiles?: string[] | null;
 }
 
 function makeFakeBinding(opts: {
@@ -27,6 +31,19 @@ function makeFakeBinding(opts: {
   ) => {
     captured.options = options;
     captured.emit = emit;
+    const contextDir = options.contextDir as string | undefined;
+    captured.contextFiles =
+      contextDir != null
+        ? readdirSync(contextDir, { recursive: true, withFileTypes: true })
+            .filter((d) => d.isFile())
+            .map((d) =>
+              path
+                .relative(contextDir, path.join(d.parentPath, d.name))
+                .split(path.sep)
+                .join("/"),
+            )
+            .sort()
+        : null;
     if (emit && opts.events) {
       for (const event of opts.events) emit(event);
     }
@@ -107,6 +124,172 @@ describe("createSandboxImage", () => {
     // is responsible for parsing/validating it).
     const expectedDockerfile = `${dockerfileContent(image)}\n`;
     expect(captured.options.dockerfileText).toBe(expectedDockerfile);
+  });
+
+  it("uses an empty build context (not cwd) when contextDir is omitted", async () => {
+    // Without an explicit contextDir, an Image build must NOT upload the
+    // current working directory (which has no Dockerfile in it). It uses a
+    // throwaway empty temp dir instead, so only the generated Dockerfile text
+    // is built — nothing from cwd is archived — and that temp dir is cleaned
+    // up once the build returns.
+    const image = new Image({
+      name: "no-context-image",
+      baseImage: "python:3.12-slim",
+    }).run("pip install numpy");
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(image);
+
+    const contextDir = captured.options.contextDir as string;
+    expect(typeof contextDir).toBe("string");
+    expect(path.resolve(contextDir)).not.toBe(path.resolve(process.cwd()));
+    // The temp dir is removed once the build returns.
+    expect(existsSync(contextDir)).toBe(false);
+  });
+
+  it("stages only referenced files into the minimal context (no contextDir)", async () => {
+    // Without contextDir, the build context is assembled from just the
+    // COPY/ADD sources (resolved against cwd) — unrelated files in cwd must
+    // NOT be uploaded.
+    const tempCwd = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-mincopy`),
+      { recursive: true },
+    );
+    await writeFile(path.join(tempCwd, "requirements.txt"), "flask\n", "utf8");
+    await writeFile(path.join(tempCwd, "secret.env"), "nope", "utf8");
+
+    const image = new Image({
+      name: "copy-image",
+      baseImage: "python:3.12-slim",
+    }).copy("requirements.txt", "/tmp/requirements.txt");
+
+    const { captured } = makeFakeBinding();
+    const spy = vi.spyOn(process, "cwd").mockReturnValue(tempCwd as string);
+    try {
+      await createSandboxImage(image);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(captured.contextFiles).toEqual(["requirements.txt"]);
+  });
+
+  it("expands globs and copies directories into the minimal context", async () => {
+    const tempCwd = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-globdir`),
+      { recursive: true },
+    );
+    await writeFile(path.join(tempCwd, "a.txt"), "a", "utf8");
+    await writeFile(path.join(tempCwd, "b.txt"), "b", "utf8");
+    await writeFile(path.join(tempCwd, "skip.md"), "m", "utf8");
+    await mkdir(path.join(tempCwd, "src", "pkg"), { recursive: true });
+    await writeFile(path.join(tempCwd, "src", "main.py"), "print()", "utf8");
+    await writeFile(path.join(tempCwd, "src", "pkg", "util.py"), "x=1", "utf8");
+    await writeFile(path.join(tempCwd, "ignored.py"), "nope", "utf8");
+
+    const image = new Image({
+      name: "glob-image",
+      baseImage: "python:3.12-slim",
+    })
+      .copy("*.txt", "/app/")
+      .copy("./src", "/app/src");
+
+    const { captured } = makeFakeBinding();
+    const spy = vi.spyOn(process, "cwd").mockReturnValue(tempCwd as string);
+    try {
+      await createSandboxImage(image);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(captured.contextFiles).toEqual([
+      "a.txt",
+      "b.txt",
+      "src/main.py",
+      "src/pkg/util.py",
+    ]);
+  });
+
+  it("stages a symlinked source at the path the Dockerfile names", async () => {
+    // A COPY source that is a symlink must be staged at the link path the
+    // Dockerfile references (with the target's contents), not left as a
+    // dangling link in the throwaway context.
+    const tempCwd = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-symlink`),
+      { recursive: true },
+    );
+    await writeFile(path.join(tempCwd, "target.txt"), "payload", "utf8");
+    await symlink(
+      path.join(tempCwd, "target.txt"),
+      path.join(tempCwd, "link.txt"),
+    );
+
+    const image = new Image({
+      name: "link-image",
+      baseImage: "python:3.12-slim",
+    }).copy("link.txt", "/app/link.txt");
+
+    const { captured } = makeFakeBinding();
+    const spy = vi.spyOn(process, "cwd").mockReturnValue(tempCwd as string);
+    try {
+      await createSandboxImage(image);
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(captured.contextFiles).toEqual(["link.txt"]);
+  });
+
+  it("carries cwd's .dockerignore into the minimal context", async () => {
+    // Without contextDir the staged context must include cwd's .dockerignore
+    // so the native archiver applies the same exclusions it would for a
+    // full-cwd context.
+    const tempCwd = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-dockerignore`),
+      { recursive: true },
+    );
+    await mkdir(path.join(tempCwd, "src"), { recursive: true });
+    await writeFile(path.join(tempCwd, "src", "main.py"), "print()", "utf8");
+    await writeFile(path.join(tempCwd, "src", "secret.env"), "nope", "utf8");
+    await writeFile(path.join(tempCwd, ".dockerignore"), "src/secret.env\n", "utf8");
+
+    const image = new Image({
+      name: "ignore-image",
+      baseImage: "python:3.12-slim",
+    }).copy("./src", "/app/src");
+
+    const { captured } = makeFakeBinding();
+    const spy = vi.spyOn(process, "cwd").mockReturnValue(tempCwd as string);
+    try {
+      await createSandboxImage(image);
+    } finally {
+      spy.mockRestore();
+    }
+
+    // The .dockerignore is staged at the context root; the actual exclusion is
+    // enforced by the native archiver, which reads it from there.
+    expect(captured.contextFiles).toContain(".dockerignore");
+  });
+
+  it("throws when a COPY source does not exist", async () => {
+    const tempCwd = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-missing`),
+      { recursive: true },
+    );
+    const image = new Image({
+      name: "missing-image",
+      baseImage: "python:3.12-slim",
+    }).copy("does-not-exist.txt", "/tmp/x");
+
+    makeFakeBinding();
+    const spy = vi.spyOn(process, "cwd").mockReturnValue(tempCwd as string);
+    try {
+      await expect(createSandboxImage(image)).rejects.toThrow(
+        /does-not-exist\.txt/,
+      );
+    } finally {
+      spy.mockRestore();
+    }
   });
 
   it("forwards dockerCompat to the native build binding", async () => {

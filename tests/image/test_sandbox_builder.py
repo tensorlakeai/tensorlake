@@ -1,3 +1,4 @@
+import contextlib
 import os
 import tempfile
 import unittest
@@ -429,7 +430,19 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
                 captured["args"] = args
                 captured["dockerfile_path"] = args[2]
                 captured["dockerfile_text"] = args[15]
-                captured["context_dir"] = args[16]
+                context_dir = args[16]
+                captured["context_dir"] = context_dir
+                # Snapshot the staged context now — the temp dir is removed once
+                # build_sandbox_image returns.
+                captured["context_files"] = (
+                    sorted(
+                        str(p.relative_to(context_dir))
+                        for p in Path(context_dir).rglob("*")
+                        if p.is_file()
+                    )
+                    if context_dir is not None
+                    else None
+                )
                 return '{"id":"tpl-1","snapshot_id":"snap-1"}'
 
             rust_builder_mock.side_effect = fake_rust_builder
@@ -446,7 +459,8 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             .copy("./src", "/app/src")
         )
 
-        _, _, rust_builder, captured = self._run_build(image)
+        # COPY ops require an explicit context_dir.
+        _, _, rust_builder, captured = self._run_build(image, context_dir=".")
 
         # The registered Dockerfile must match exactly what the TS SDK would
         # generate — no WORKDIR /app or pip install tensorlake injection.
@@ -502,6 +516,106 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
         )
         # The temp dir is cleaned up once the build returns.
         self.assertFalse(Path(str(context_dir)).exists())
+
+    @contextlib.contextmanager
+    def _cwd(self, path: str):
+        old = os.getcwd()
+        os.chdir(path)
+        try:
+            yield
+        finally:
+            os.chdir(old)
+
+    def test_minimal_context_stages_only_referenced_files(self):
+        # Without context_dir, the build context is assembled from just the
+        # COPY/ADD sources (resolved against cwd) — unrelated files in cwd must
+        # NOT be uploaded.
+        image = Image(name="copy-image", base_image="python:3.12-slim").copy(
+            "requirements.txt", "/tmp/requirements.txt"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "requirements.txt").write_text("flask\n", encoding="utf-8")
+            Path(tmp, "secret.env").write_text("nope", encoding="utf-8")
+            os.mkdir(Path(tmp, "big"))
+            Path(tmp, "big", "data.bin").write_text("x" * 100, encoding="utf-8")
+            with self._cwd(tmp):
+                _, _, _, captured = self._run_build(image)
+
+        self.assertEqual(captured["context_files"], ["requirements.txt"])
+
+    def test_minimal_context_expands_globs(self):
+        image = Image(name="glob-image", base_image="python:3.12-slim").copy(
+            "*.txt", "/app/"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "a.txt").write_text("a", encoding="utf-8")
+            Path(tmp, "b.txt").write_text("b", encoding="utf-8")
+            Path(tmp, "skip.md").write_text("m", encoding="utf-8")
+            with self._cwd(tmp):
+                _, _, _, captured = self._run_build(image)
+
+        self.assertEqual(captured["context_files"], ["a.txt", "b.txt"])
+
+    def test_minimal_context_copies_directories(self):
+        image = Image(name="dir-image", base_image="python:3.12-slim").copy(
+            "./src", "/app/src"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(Path(tmp, "src", "pkg"))
+            Path(tmp, "src", "main.py").write_text("print()", encoding="utf-8")
+            Path(tmp, "src", "pkg", "util.py").write_text("x=1", encoding="utf-8")
+            Path(tmp, "ignored.py").write_text("nope", encoding="utf-8")
+            with self._cwd(tmp):
+                _, _, _, captured = self._run_build(image)
+
+        self.assertEqual(
+            captured["context_files"],
+            [str(Path("src", "main.py")), str(Path("src", "pkg", "util.py"))],
+        )
+
+    def test_minimal_context_stages_symlink_at_source_path(self):
+        # A COPY source that is a symlink must be staged at the path the
+        # Dockerfile references (the link name), not the resolved target path,
+        # otherwise the build can't find it.
+        image = Image(name="link-image", base_image="python:3.12-slim").copy(
+            "link.txt", "/app/link.txt"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "target.txt").write_text("payload", encoding="utf-8")
+            os.symlink(Path(tmp, "target.txt"), Path(tmp, "link.txt"))
+            with self._cwd(tmp):
+                _, _, _, captured = self._run_build(image)
+
+        self.assertEqual(captured["context_files"], ["link.txt"])
+
+    def test_minimal_context_carries_dockerignore(self):
+        # Without context_dir the staged context must include cwd's
+        # .dockerignore so the Rust archiver applies the same exclusions it
+        # would for a full-cwd context.
+        image = Image(name="ignore-image", base_image="python:3.12-slim").copy(
+            "./src", "/app/src"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            os.makedirs(Path(tmp, "src"))
+            Path(tmp, "src", "main.py").write_text("print()", encoding="utf-8")
+            Path(tmp, "src", "secret.env").write_text("nope", encoding="utf-8")
+            Path(tmp, ".dockerignore").write_text("src/secret.env\n", encoding="utf-8")
+            with self._cwd(tmp):
+                _, _, _, captured = self._run_build(image)
+
+        # The .dockerignore is staged at the context root; the actual exclusion
+        # is enforced by the Rust archiver, which reads it from there.
+        self.assertIn(".dockerignore", captured["context_files"])
+
+    def test_missing_copy_source_raises(self):
+        image = Image(name="missing-image", base_image="python:3.12-slim").copy(
+            "does-not-exist.txt", "/tmp/x"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with self._cwd(tmp):
+                with self.assertRaises(sbm.SandboxImageBuildError) as ctx:
+                    self._run_build(image)
+        self.assertIn("does-not-exist.txt", str(ctx.exception))
 
     def test_warns_on_default_name(self):
         image = Image(base_image="python:3.12-slim")
