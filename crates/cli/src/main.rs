@@ -184,6 +184,10 @@ enum Commands {
     #[command(subcommand, name = "ssh-keys", alias = "ssh-key", hide = true)]
     SshKeys(SshKeysCommands),
 
+    /// Manage Artifact Storage Git repositories
+    #[command(subcommand)]
+    Git(GitCommands),
+
     /// List applications
     #[command(hide = true)]
     #[command(name = "ls")]
@@ -232,6 +236,110 @@ enum SshKeysCommands {
         /// Key ids (`ssh_key_…`) or unique names to remove
         #[arg(required = true)]
         keys: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GitCommands {
+    /// Mint a short-lived Git credential for this project
+    Token {
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+        /// Print the full token instead of a masked token
+        #[arg(long)]
+        show_token: bool,
+    },
+    /// Print the Git remote URL for a repo
+    Url {
+        /// Repo name
+        repo: String,
+    },
+    /// Manage repositories
+    #[command(subcommand, alias = "repos")]
+    Repo(GitRepoCommands),
+    /// Manage branches
+    #[command(subcommand, alias = "branches")]
+    Branch(GitBranchCommands),
+    /// List all refs in a repo
+    Refs {
+        /// Repo name
+        repo: String,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List operation history using an admin-capable Git credential
+    Ops {
+        /// Repo name
+        repo: String,
+        /// Git username for the admin-capable credential
+        #[arg(long, default_value = "t")]
+        git_username: String,
+        /// Git token/password for the admin-capable credential
+        #[arg(long, env = "TENSORLAKE_GIT_TOKEN")]
+        git_token: String,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GitRepoCommands {
+    /// Create an empty repo
+    Create {
+        /// Repo name
+        repo: String,
+        /// Default branch name
+        #[arg(long, default_value = "main")]
+        default_branch: String,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List repos in the current project
+    #[command(name = "ls", alias = "list")]
+    Ls {
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a repo
+    #[command(name = "rm", alias = "delete")]
+    Rm {
+        /// Repo name
+        repo: String,
+    },
+    /// Fork a repo
+    Fork {
+        /// New repo name
+        repo: String,
+        /// Base repo name
+        base_repo: String,
+    },
+    /// Archive a repo so it rejects pushes but still allows reads
+    Archive {
+        /// Repo name
+        repo: String,
+    },
+    /// Restore an archived repo
+    Restore {
+        /// Repo name
+        repo: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum GitBranchCommands {
+    /// List branches in a repo
+    #[command(name = "ls", alias = "list")]
+    Ls {
+        /// Repo name
+        repo: String,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1132,6 +1240,10 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             ensure_auth(ctx).await?;
             run_ssh_keys_command(ctx, subcmd).await
         }
+        Commands::Git(subcmd) => {
+            ensure_auth_and_project(ctx).await?;
+            run_git_command(ctx, subcmd).await
+        }
         Commands::Applications(app_args) => run_applications_command(ctx, app_args).await,
         Commands::Sbx(subcmd) => match subcmd {
             SbxCommands::Ssh(ssh_args)
@@ -1565,6 +1677,44 @@ async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> erro
     }
 }
 
+async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result<()> {
+    match subcmd {
+        GitCommands::Token { json, show_token } => {
+            commands::git::mint_token(ctx, json, show_token).await
+        }
+        GitCommands::Url { repo } => {
+            println!("{}", commands::git::repo_url(ctx, &repo)?);
+            Ok(())
+        }
+        GitCommands::Repo(repo_cmd) => match repo_cmd {
+            GitRepoCommands::Create {
+                repo,
+                default_branch,
+                json,
+            } => commands::git::create_repo(ctx, &repo, Some(&default_branch), json).await,
+            GitRepoCommands::Ls { json } => commands::git::list_repos(ctx, json).await,
+            GitRepoCommands::Rm { repo } => commands::git::delete_repo(ctx, &repo).await,
+            GitRepoCommands::Fork { repo, base_repo } => {
+                commands::git::fork_repo(ctx, &repo, &base_repo).await
+            }
+            GitRepoCommands::Archive { repo } => commands::git::archive_repo(ctx, &repo).await,
+            GitRepoCommands::Restore { repo } => commands::git::restore_repo(ctx, &repo).await,
+        },
+        GitCommands::Branch(branch_cmd) => match branch_cmd {
+            GitBranchCommands::Ls { repo, json } => {
+                commands::git::list_branches(ctx, &repo, json).await
+            }
+        },
+        GitCommands::Refs { repo, json } => commands::git::list_refs(ctx, &repo, json).await,
+        GitCommands::Ops {
+            repo,
+            git_username,
+            git_token,
+            json,
+        } => commands::git::list_operations(ctx, &repo, &git_username, &git_token, json).await,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1638,6 +1788,53 @@ mod tests {
     fn app_aliases_parse() {
         assert!(Cli::try_parse_from(["tl", "apps", "ls"]).is_ok());
         assert!(Cli::try_parse_from(["tl", "orchestrate", "ls"]).is_ok());
+    }
+
+    #[test]
+    fn git_commands_parse() {
+        match parse_command([
+            "tl",
+            "git",
+            "repo",
+            "create",
+            "demo",
+            "--default-branch",
+            "trunk",
+        ]) {
+            Commands::Git(GitCommands::Repo(GitRepoCommands::Create {
+                repo,
+                default_branch,
+                json,
+            })) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(default_branch, "trunk");
+                assert!(!json);
+            }
+            _ => panic!("expected git repo create command"),
+        }
+
+        match parse_command(["tl", "git", "branch", "ls", "demo", "--json"]) {
+            Commands::Git(GitCommands::Branch(GitBranchCommands::Ls { repo, json })) => {
+                assert_eq!(repo, "demo");
+                assert!(json);
+            }
+            _ => panic!("expected git branch ls command"),
+        }
+
+        match parse_command(["tl", "git", "ops", "demo", "--git-token", "secret"]) {
+            Commands::Git(GitCommands::Ops {
+                repo,
+                git_username,
+                git_token,
+                json,
+            }) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(git_username, "t");
+                assert_eq!(git_token, "secret");
+                assert!(!json);
+            }
+            _ => panic!("expected git ops command"),
+        }
     }
 
     #[test]
