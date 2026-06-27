@@ -15,9 +15,11 @@ sandbox runs from the image (``ONBUILD``/``SHELL``/``EXPOSE``/``HEALTHCHECK``/
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
+import tempfile
 import warnings
 from pathlib import Path
 from typing import Any, Callable
@@ -26,7 +28,7 @@ from tensorlake._tracing import USER_AGENT
 from tensorlake.cli._common import Context
 
 from ._dockerfile import image_to_dockerfile
-from .image import Image
+from .image import Image, _ImageBuildOperation, _ImageBuildOperationType
 from .utils import dockerfile_content
 
 EmitFn = Callable[[dict], None]
@@ -492,6 +494,58 @@ def list_sandbox_images() -> list[dict]:
         ) from exc
 
 
+def _run_op_mounts_context(op: _ImageBuildOperation) -> bool:
+    """True when a ``RUN`` op bind-mounts the build context (reads host files).
+
+    A BuildKit ``RUN --mount=type=bind`` reads from the build context unless it
+    mounts ``from=<stage/image>``. ``bind`` is the default mount type, so a
+    mount with no explicit ``type`` counts too. Other mount types
+    (``cache``/``tmpfs``/``secret``/``ssh``) don't read the build context.
+    """
+    if op.type is not _ImageBuildOperationType.RUN:
+        return False
+    mount = (op.options or {}).get("mount")
+    if not mount:
+        return False
+    fields: dict[str, str] = {}
+    for token in mount.split(","):
+        key, _, value = token.partition("=")
+        fields[key.strip()] = value.strip()
+    if fields.get("type", "bind") != "bind":
+        return False
+    return "from" not in fields
+
+
+def _op_references_host_files(op: _ImageBuildOperation) -> bool:
+    """True when a build op reads files from the host build context.
+
+    ``COPY``/``ADD`` with host sources need a context; a ``RUN`` with a
+    ``--mount=type=bind`` (the default type) reads it too. ``COPY --from=<stage>``,
+    remote ``ADD <url>``, ``from=`` bind mounts, and non-bind mounts don't.
+    """
+    if op.type is _ImageBuildOperationType.RUN:
+        return _run_op_mounts_context(op)
+    if op.type not in (_ImageBuildOperationType.COPY, _ImageBuildOperationType.ADD):
+        return False
+    if "from" in (op.options or {}):
+        return False
+    if op.type == _ImageBuildOperationType.ADD and op.args[0].startswith(
+        ("http://", "https://")
+    ):
+        return False
+    return True
+
+
+def _image_requires_context(image: Image) -> bool:
+    """True if the image has ops that read files from the host.
+
+    Such builds need a build context to resolve those sources (COPY/ADD host
+    sources, or a RUN bind mount), so the caller must pass ``context_dir``
+    (mirroring ``docker build <context>``).
+    """
+    return any(_op_references_host_files(op) for op in image._build_operations)
+
+
 def build_sandbox_image(
     source: Image | str,
     *,
@@ -524,9 +578,14 @@ def build_sandbox_image(
         is_public: Make the registered image publicly accessible.
         docker_compat: Use Docker/BuildKit max compatibility mode (build is
             slower and uses more memory and disk space on builder sandbox).
-        context_dir: Directory used to resolve relative COPY/ADD sources.
-            Ignored when ``source`` is a Dockerfile path (the Dockerfile's
-            parent directory is used instead).
+        context_dir: Build context directory for an :class:`Image` source,
+            used exactly like ``docker build <context_dir>``: it is uploaded
+            as-is and COPY/ADD sources resolve relative to it. Required when
+            the image has COPY/ADD ops that read host files — building without
+            it then raises. When the image has no such ops it may be omitted,
+            and an empty context (just the generated Dockerfile) is uploaded so
+            cwd is not archived. Ignored when ``source`` is a Dockerfile path
+            (the Dockerfile's parent directory is used instead).
         verbose: Print progress to stderr. Ignored if ``emit`` is provided.
         emit: Callback invoked for each build event. Takes precedence over
             ``verbose``. Use this to integrate the builder into custom UIs.
@@ -544,58 +603,75 @@ def build_sandbox_image(
     if emit is None:
         emit = _stderr_emit if verbose else _noop_emit
 
-    if isinstance(source, Image):
-        if not source._base_image:
-            raise SandboxImageLoadError("Image must have a base_image to build")
-        rust_context_dir = str(Path(context_dir or os.getcwd()).resolve())
-        rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
-        dockerfile_text = image_to_dockerfile(source)
-        if not dockerfile_text.endswith("\n"):
-            dockerfile_text += "\n"
-        effective_registered_name = registered_name or source.name
-    elif isinstance(source, (str, os.PathLike)):
-        path = Path(os.fspath(source)).resolve()
-        if not path.is_file():
-            raise SandboxImageLoadError(f"Dockerfile not found: {source}")
-        rust_dockerfile_path = str(path)
-        rust_context_dir = None
-        dockerfile_text = None
-        effective_registered_name = registered_name or _default_registered_name(
-            str(path)
-        )
-    else:
-        # Programmer error — propagate directly rather than wrapping.
-        raise TypeError(
-            "source must be an Image or a Dockerfile path, got "
-            f"{type(source).__name__}"
-        )
+    with contextlib.ExitStack() as stack:
+        if isinstance(source, Image):
+            if not source._base_image:
+                raise SandboxImageLoadError("Image must have a base_image to build")
+            if context_dir is not None:
+                # Upload the given directory as-is, like `docker build <dir>`.
+                rust_context_dir = str(Path(context_dir).resolve())
+            elif _image_requires_context(source):
+                raise SandboxImageBuildError(
+                    "This image reads files from the host (via COPY/ADD or a "
+                    "RUN bind mount), so it needs a build context. Pass "
+                    "`context_dir=...` pointing at the directory that contains "
+                    "those sources; they resolve relative to it, like "
+                    "`docker build <context_dir>`."
+                )
+            else:
+                # No host-file copies: upload an empty context (just the
+                # generated Dockerfile) instead of archiving the whole cwd.
+                rust_context_dir = stack.enter_context(
+                    tempfile.TemporaryDirectory(prefix="tl-build-context-")
+                )
+            rust_dockerfile_path = str(Path(rust_context_dir) / "Dockerfile")
+            dockerfile_text = image_to_dockerfile(source)
+            if not dockerfile_text.endswith("\n"):
+                dockerfile_text += "\n"
+            effective_registered_name = registered_name or source.name
+        elif isinstance(source, (str, os.PathLike)):
+            path = Path(os.fspath(source)).resolve()
+            if not path.is_file():
+                raise SandboxImageLoadError(f"Dockerfile not found: {source}")
+            rust_dockerfile_path = str(path)
+            rust_context_dir = None
+            dockerfile_text = None
+            effective_registered_name = registered_name or _default_registered_name(
+                str(path)
+            )
+        else:
+            # Programmer error — propagate directly rather than wrapping.
+            raise TypeError(
+                "source must be an Image or a Dockerfile path, got "
+                f"{type(source).__name__}"
+            )
 
-    if effective_registered_name == _DEFAULT_IMAGE_NAME:
-        warnings.warn(
-            f"Building sandbox image with the default name {_DEFAULT_IMAGE_NAME!r}. "
-            "Pass `registered_name=...` or `Image(name=...)` to avoid collisions "
-            "with other default-named images in this project.",
-            stacklevel=2,
-        )
+        if effective_registered_name == _DEFAULT_IMAGE_NAME:
+            warnings.warn(
+                f"Building sandbox image with the default name {_DEFAULT_IMAGE_NAME!r}. "
+                "Pass `registered_name=...` or `Image(name=...)` to avoid collisions "
+                "with other default-named images in this project.",
+                stacklevel=2,
+            )
 
-    try:
-        return _run_rust_image_create(
-            rust_dockerfile_path,
-            effective_registered_name,
-            dockerfile_text=dockerfile_text,
-            context_dir=rust_context_dir,
-            cpus=cpus,
-            memory_mb=memory_mb,
-            disk_mb=disk_mb,
-            builder_disk_mb=builder_disk_mb,
-            is_public=is_public,
-            docker_compat=docker_compat,
-            emit=emit,
-        )
-    except SandboxImageError:
-        raise
-    except Exception as e:
-        raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
+        try:
+            return _run_rust_image_create(
+                rust_dockerfile_path,
+                effective_registered_name,
+                dockerfile_text=dockerfile_text,
+                context_dir=rust_context_dir,
+                cpus=cpus,
+                memory_mb=memory_mb,
+                disk_mb=disk_mb,
+                builder_disk_mb=builder_disk_mb,
+                is_public=is_public,
+                docker_compat=docker_compat,
+                emit=emit,
+            )
+        except SandboxImageError:
+            raise
+        except Exception as e:
+            raise SandboxImageBuildError(f"{type(e).__name__}: {e}") from e
 
 
 def import_sandbox_image(

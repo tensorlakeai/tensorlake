@@ -1,3 +1,4 @@
+import { existsSync, readdirSync } from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -12,6 +13,9 @@ import { Image, dockerfileContent } from "../src/image.js";
 interface CapturedCall {
   options: Record<string, unknown>;
   emit?: ((event: { eventType: string; stream?: string | null; message: string }) => void) | null;
+  // Files staged into the build context, relative + posix-normalized, sorted.
+  // Snapshotted at call time since the temp context is removed once build returns.
+  contextFiles?: string[] | null;
 }
 
 function makeFakeBinding(opts: {
@@ -27,6 +31,19 @@ function makeFakeBinding(opts: {
   ) => {
     captured.options = options;
     captured.emit = emit;
+    const contextDir = options.contextDir as string | undefined;
+    captured.contextFiles =
+      contextDir != null
+        ? readdirSync(contextDir, { recursive: true, withFileTypes: true })
+            .filter((d) => d.isFile())
+            .map((d) =>
+              path
+                .relative(contextDir, path.join(d.parentPath, d.name))
+                .split(path.sep)
+                .join("/"),
+            )
+            .sort()
+        : null;
     if (emit && opts.events) {
       for (const event of opts.events) emit(event);
     }
@@ -107,6 +124,145 @@ describe("createSandboxImage", () => {
     // is responsible for parsing/validating it).
     const expectedDockerfile = `${dockerfileContent(image)}\n`;
     expect(captured.options.dockerfileText).toBe(expectedDockerfile);
+  });
+
+  it("uses an empty build context (not cwd) when contextDir is omitted", async () => {
+    // Without an explicit contextDir, an Image build must NOT upload the
+    // current working directory (which has no Dockerfile in it). It uses a
+    // throwaway empty temp dir instead, so only the generated Dockerfile text
+    // is built — nothing from cwd is archived — and that temp dir is cleaned
+    // up once the build returns.
+    const image = new Image({
+      name: "no-context-image",
+      baseImage: "python:3.12-slim",
+    }).run("pip install numpy");
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(image);
+
+    const contextDir = captured.options.contextDir as string;
+    expect(typeof contextDir).toBe("string");
+    expect(path.resolve(contextDir)).not.toBe(path.resolve(process.cwd()));
+    // The temp dir is removed once the build returns.
+    expect(existsSync(contextDir)).toBe(false);
+  });
+
+  it("uses an empty context for an image with no COPY/ADD ops", async () => {
+    const image = new Image({
+      name: "no-copy-image",
+      baseImage: "python:3.12-slim",
+    }).run("pip install numpy");
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(image);
+
+    expect(captured.contextFiles).toEqual([]);
+  });
+
+  it("throws when COPY reads host files without a contextDir", async () => {
+    // COPY/ADD that reads host files needs a context. Without contextDir the
+    // build must fail fast with a clear, actionable message rather than
+    // guessing or uploading the whole cwd.
+    const image = new Image({
+      name: "copy-image",
+      baseImage: "python:3.12-slim",
+    }).copy("requirements.txt", "/tmp/requirements.txt");
+
+    makeFakeBinding();
+    await expect(createSandboxImage(image)).rejects.toThrow(/contextDir/);
+  });
+
+  it("throws when ADD reads host files without a contextDir", async () => {
+    const image = new Image({
+      name: "add-image",
+      baseImage: "python:3.12-slim",
+    }).add("./data", "/app/data");
+
+    makeFakeBinding();
+    await expect(createSandboxImage(image)).rejects.toThrow(/contextDir/);
+  });
+
+  it("does not require a context for a remote ADD <url>", async () => {
+    // A remote ADD <url> reads nothing from the host, so it builds with an
+    // empty context.
+    const image = new Image({
+      name: "url-image",
+      baseImage: "python:3.12-slim",
+    }).add("https://example.com/data.tar.gz", "/app/data.tar.gz");
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(image);
+
+    expect(captured.contextFiles).toEqual([]);
+  });
+
+  it("does not require a context for COPY --from=<stage>", async () => {
+    // COPY --from reads from another build stage, not the host.
+    const image = new Image({
+      name: "stage-image",
+      baseImage: "python:3.12-slim",
+    }).copy("/build/app", "/app", { from: "builder" });
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(image);
+
+    expect(captured.contextFiles).toEqual([]);
+  });
+
+  it("throws when a RUN bind mount reads the context without a contextDir", async () => {
+    // A RUN bind mount reads the build context, so it needs a context.
+    // `type=bind` is the default, so omitting it must also be detected.
+    for (const mount of ["type=bind,source=.,target=/src", "target=/src"]) {
+      const image = new Image({
+        name: "mount-image",
+        baseImage: "python:3.12-slim",
+      }).run("make -C /src", { mount });
+
+      makeFakeBinding();
+      await expect(createSandboxImage(image)).rejects.toThrow(/contextDir/);
+    }
+  });
+
+  it("does not require a context for a RUN mount with from=<stage>", async () => {
+    const image = new Image({
+      name: "mount-stage",
+      baseImage: "python:3.12-slim",
+    }).run("make", { mount: "type=bind,from=builder,target=/src" });
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(image);
+
+    expect(captured.contextFiles).toEqual([]);
+  });
+
+  it("does not require a context for a RUN cache mount", async () => {
+    const image = new Image({
+      name: "mount-cache",
+      baseImage: "python:3.12-slim",
+    }).run("pip install -r req.txt", { mount: "type=cache,target=/root/.cache" });
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(image);
+
+    expect(captured.contextFiles).toEqual([]);
+  });
+
+  it("uploads the given directory as-is when contextDir is set with COPY ops", async () => {
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-ctxcopy`),
+      { recursive: true },
+    );
+    await writeFile(path.join(tempDir, "requirements.txt"), "flask\n", "utf8");
+
+    const image = new Image({
+      name: "copy-image",
+      baseImage: "python:3.12-slim",
+    }).copy("requirements.txt", "/tmp/requirements.txt");
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(image, { contextDir: tempDir as string });
+
+    expect(captured.options.contextDir).toBe(path.resolve(tempDir as string));
   });
 
   it("forwards dockerCompat to the native build binding", async () => {
