@@ -19,7 +19,6 @@ pub async fn mint_token(
     ctx: &CliContext,
     repo: Option<&str>,
     output_json: bool,
-    show_token: bool,
 ) -> Result<()> {
     let project_id = project_id(ctx)?;
     let credential = artifact_storage_client(ctx)?
@@ -34,13 +33,21 @@ pub async fn mint_token(
     println!("project: {project_id}");
     println!("repo: {}", credential.repo_pattern);
     println!("username: {}", credential.git_username);
-    if show_token {
-        println!("password: {}", credential.token);
-    } else {
-        println!("password: {}", mask_token(&credential.token));
-    }
+    println!("password: {}", credential.token);
     println!("expires: {}", credential.expires_at);
     println!("scopes: {}", credential.scopes.join(", "));
+
+    if credential.repo_pattern != "*" {
+        let remote_url =
+            artifact_storage_client(ctx)?.git_repo_url(&project_id, &credential.repo_pattern);
+        println!();
+        println!("Use this as a Git credential for:");
+        println!("  {remote_url}");
+        println!();
+        println!("When Git asks for credentials:");
+        println!("  username: {}", credential.git_username);
+        println!("  password: the token above");
+    }
     Ok(())
 }
 
@@ -262,14 +269,6 @@ fn print_operations_table(response: &ListOperationsResponse) {
 fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
-}
-
-fn mask_token(token: &str) -> String {
-    match token.len() {
-        0..=4 => "****".to_string(),
-        5..=8 => format!("{}...{}", &token[..2], &token[token.len() - 2..]),
-        _ => format!("{}...{}", &token[..4], &token[token.len() - 4..]),
-    }
 }
 
 fn map_sdk_error(error: tensorlake::error::SdkError) -> CliError {

@@ -20,12 +20,7 @@ struct PtySessionSummary {
 
 const PTY_TOKEN_CACHE_NAMESPACE: &str = "pty_tokens";
 
-pub async fn list(
-    ctx: &CliContext,
-    sandbox_id: &str,
-    show_token: bool,
-    output_json: bool,
-) -> Result<()> {
+pub async fn list(ctx: &CliContext, sandbox_id: &str, output_json: bool) -> Result<()> {
     let client = ctx.client()?;
     let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
     let resp = with_sandbox_headers(
@@ -83,7 +78,7 @@ pub async fn list(
             Cell::new(display_value(session.status.as_deref())),
             Cell::new(display_value(session.clients.as_deref())),
             Cell::new(display_value(session.created.as_deref())),
-            Cell::new(display_token(session.token.as_deref(), show_token)),
+            Cell::new(display_token(session.token.as_deref())),
         ]);
     }
 
@@ -261,20 +256,10 @@ fn display_value(value: Option<&str>) -> &str {
     value.unwrap_or("-")
 }
 
-fn display_token(token: Option<&str>, show_token: bool) -> String {
+fn display_token(token: Option<&str>) -> String {
     match token {
-        Some(token) if show_token => token.to_string(),
-        Some(token) => mask_token(token),
+        Some(token) => token.to_string(),
         None => "-".to_string(),
-    }
-}
-
-fn mask_token(token: &str) -> String {
-    match token.len() {
-        0 => String::new(),
-        1..=4 => "****".to_string(),
-        5..=8 => format!("{}...{}", &token[..2], &token[token.len() - 2..]),
-        _ => format!("{}...{}", &token[..4], &token[token.len() - 4..]),
     }
 }
 
@@ -355,7 +340,7 @@ fn pty_token_cache_key(ctx: &CliContext, sandbox_id: &str, session_id: &str) -> 
 #[cfg(test)]
 mod tests {
     use super::{
-        PtySessionSummary, display_token, mask_token, parse_session_listing, sessions_to_json_value,
+        PtySessionSummary, display_token, parse_session_listing, sessions_to_json_value,
     };
 
     #[test]
@@ -419,17 +404,9 @@ mod tests {
     }
 
     #[test]
-    fn mask_token_masks_middle_of_long_tokens() {
-        assert_eq!(mask_token("tok-12345678"), "tok-...5678");
-        assert_eq!(mask_token("token12"), "to...12");
-        assert_eq!(mask_token("abcd"), "****");
-    }
-
-    #[test]
-    fn display_token_hides_or_reveals_tokens() {
-        assert_eq!(display_token(Some("tok-12345678"), false), "tok-...5678");
-        assert_eq!(display_token(Some("tok-12345678"), true), "tok-12345678");
-        assert_eq!(display_token(None, false), "-");
+    fn display_token_reveals_tokens() {
+        assert_eq!(display_token(Some("tok-12345678")), "tok-12345678");
+        assert_eq!(display_token(None), "-");
     }
 
     #[test]

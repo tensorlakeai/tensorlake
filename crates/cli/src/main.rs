@@ -249,9 +249,6 @@ enum GitCommands {
         /// Output JSON
         #[arg(long)]
         json: bool,
-        /// Print the full token instead of a masked token
-        #[arg(long)]
-        show_token: bool,
     },
     /// Print the Git remote URL for a repo
     Url {
@@ -1077,10 +1074,6 @@ enum PtyCommands {
         /// Sandbox ID or name
         sandbox_id: String,
 
-        /// Show the full PTY token instead of a masked token
-        #[arg(long)]
-        show_token: bool,
-
         /// Emit JSON suitable for scripting. Includes the full token.
         #[arg(long = "json")]
         output_json: bool,
@@ -1496,12 +1489,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     SbxCommands::Pty(pty_cmd) => match pty_cmd {
                         PtyCommands::Ls {
                             sandbox_id,
-                            show_token,
                             output_json,
-                        } => {
-                            commands::sbx::pty::list(ctx, &sandbox_id, show_token, output_json)
-                                .await
-                        }
+                        } => commands::sbx::pty::list(ctx, &sandbox_id, output_json).await,
                         PtyCommands::Attach {
                             sandbox_id,
                             session_id,
@@ -1682,11 +1671,9 @@ async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> erro
 
 async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result<()> {
     match subcmd {
-        GitCommands::Token {
-            repo,
-            json,
-            show_token,
-        } => commands::git::mint_token(ctx, repo.as_deref(), json, show_token).await,
+        GitCommands::Token { repo, json } => {
+            commands::git::mint_token(ctx, repo.as_deref(), json).await
+        }
         GitCommands::Url { repo } => {
             println!("{}", commands::git::repo_url(ctx, &repo)?);
             Ok(())
@@ -1841,15 +1828,10 @@ mod tests {
             _ => panic!("expected git ops command"),
         }
 
-        match parse_command(["tl", "git", "token", "--repo", "demo", "--show-token"]) {
-            Commands::Git(GitCommands::Token {
-                repo,
-                json,
-                show_token,
-            }) => {
+        match parse_command(["tl", "git", "token", "--repo", "demo"]) {
+            Commands::Git(GitCommands::Token { repo, json }) => {
                 assert_eq!(repo.as_deref(), Some("demo"));
                 assert!(!json);
-                assert!(show_token);
             }
             _ => panic!("expected git token command"),
         }
@@ -2441,11 +2423,9 @@ mod tests {
         match parse_command(["tl", "sbx", "pty", "ls", "sbx-123"]) {
             Commands::Sbx(SbxCommands::Pty(PtyCommands::Ls {
                 sandbox_id,
-                show_token,
                 output_json,
             })) => {
                 assert_eq!(sandbox_id, "sbx-123");
-                assert!(!show_token);
                 assert!(!output_json);
             }
             _ => panic!("expected sbx pty ls command"),
@@ -2453,23 +2433,13 @@ mod tests {
     }
 
     #[test]
-    fn sbx_pty_ls_with_token_flags_parses() {
-        match parse_command([
-            "tl",
-            "sbx",
-            "pty",
-            "ls",
-            "sbx-123",
-            "--show-token",
-            "--json",
-        ]) {
+    fn sbx_pty_ls_with_json_parses() {
+        match parse_command(["tl", "sbx", "pty", "ls", "sbx-123", "--json"]) {
             Commands::Sbx(SbxCommands::Pty(PtyCommands::Ls {
                 sandbox_id,
-                show_token,
                 output_json,
             })) => {
                 assert_eq!(sandbox_id, "sbx-123");
-                assert!(show_token);
                 assert!(output_json);
             }
             _ => panic!("expected sbx pty ls command"),
