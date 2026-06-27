@@ -167,6 +167,46 @@ pub async fn list_refs(ctx: &CliContext, repo: &str, output_json: bool) -> Resul
     Ok(())
 }
 
+pub async fn status(ctx: &CliContext, repo: &str, output_json: bool) -> Result<()> {
+    let project_id = project_id(ctx)?;
+    let client = artifact_storage_client(ctx)?;
+    let branches = client
+        .list_branches(&project_id, repo)
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner();
+    let refs = client
+        .list_refs(&project_id, repo)
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner();
+    let remote_url = client.git_repo_url(&project_id, repo);
+
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "repo": repo,
+                "url": remote_url,
+                "branches": branches.branches,
+                "refs": refs.refs,
+            }))?
+        );
+        return Ok(());
+    }
+
+    println!("repo: {repo}");
+    println!("url: {remote_url}");
+    println!("branches: {}", branches.branches.len());
+    if branches.branches.is_empty() {
+        println!("no branches found");
+    } else {
+        print_branches_table(&branches);
+    }
+    println!("refs: {}", refs.refs.len());
+    Ok(())
+}
+
 pub async fn list_operations(
     ctx: &CliContext,
     repo: &str,

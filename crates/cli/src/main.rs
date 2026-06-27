@@ -255,6 +255,14 @@ enum GitCommands {
         /// Repo name
         repo: String,
     },
+    /// Print remote repository state after a push or failed push
+    Status {
+        /// Repo name
+        repo: String,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// Manage repositories
     #[command(subcommand, alias = "repos")]
     Repo(GitRepoCommands),
@@ -1678,6 +1686,7 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
             println!("{}", commands::git::repo_url(ctx, &repo)?);
             Ok(())
         }
+        GitCommands::Status { repo, json } => commands::git::status(ctx, &repo, json).await,
         GitCommands::Repo(repo_cmd) => match repo_cmd {
             GitRepoCommands::Create {
                 repo,
@@ -1834,6 +1843,14 @@ mod tests {
                 assert!(!json);
             }
             _ => panic!("expected git token command"),
+        }
+
+        match parse_command(["tl", "git", "status", "demo", "--json"]) {
+            Commands::Git(GitCommands::Status { repo, json }) => {
+                assert_eq!(repo, "demo");
+                assert!(json);
+            }
+            _ => panic!("expected git status command"),
         }
     }
 
