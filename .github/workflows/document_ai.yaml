@@ -2,15 +2,6 @@ name: Document AI Tests
 
 on:
   workflow_dispatch:
-    inputs:
-      environment:
-        description: "Environment to run the tests against"
-        required: true
-        default: prod
-        type: choice
-        options:
-          - dev
-          - prod
 
   push:
     branches:
@@ -27,7 +18,7 @@ permissions:
 jobs:
   test_document_ai_dispatch:
     if: github.event_name == 'workflow_dispatch'
-    environment: ${{ inputs.environment }}
+    environment: prod
     name: Document AI Tests (manual)
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -62,7 +53,6 @@ jobs:
       - name: Run Document AI tests
         run: make test_document_ai
         env:
-          TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
 
   test_document_ai_main:
@@ -102,5 +92,4 @@ jobs:
       - name: Run Document AI tests
         run: make test_document_ai
         env:
-          TENSORLAKE_API_URL: ${{ secrets.TENSORLAKE_API_URL }}
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}

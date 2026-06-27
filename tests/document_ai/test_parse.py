@@ -16,10 +16,7 @@ PUBLIC_TEST_PDF_URL = "https://raw.githubusercontent.com/tensorlakeai/tensorlake
 
 class TestParse(unittest.TestCase):
     def setUp(self):
-        server_url = os.getenv("TENSORLAKE_API_URL")
-        self.assertIsNotNone(
-            server_url, "TENSORLAKE_API_URL environment variable is not set."
-        )
+        server_url = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
 
         api_key = os.getenv("TENSORLAKE_API_KEY")
         self.assertIsNotNone(
@@ -433,7 +430,7 @@ class TestParse(unittest.TestCase):
 
     def test_invalid_api_key_raises_document_ai_error(self):
         invalid_doc_ai = DocumentAI(
-            server_url=os.getenv("TENSORLAKE_API_URL"),
+            server_url=os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai"),
             api_key="invalid_api_key",
         )
         self.addCleanup(invalid_doc_ai.close)
