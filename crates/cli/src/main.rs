@@ -243,6 +243,9 @@ enum SshKeysCommands {
 enum GitCommands {
     /// Mint a short-lived Git credential for this project
     Token {
+        /// Limit the credential to one repository and grant only Git read/write scopes
+        #[arg(long)]
+        repo: Option<String>,
         /// Output JSON
         #[arg(long)]
         json: bool,
@@ -1679,9 +1682,11 @@ async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> erro
 
 async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result<()> {
     match subcmd {
-        GitCommands::Token { json, show_token } => {
-            commands::git::mint_token(ctx, json, show_token).await
-        }
+        GitCommands::Token {
+            repo,
+            json,
+            show_token,
+        } => commands::git::mint_token(ctx, repo.as_deref(), json, show_token).await,
         GitCommands::Url { repo } => {
             println!("{}", commands::git::repo_url(ctx, &repo)?);
             Ok(())
@@ -1834,6 +1839,19 @@ mod tests {
                 assert!(!json);
             }
             _ => panic!("expected git ops command"),
+        }
+
+        match parse_command(["tl", "git", "token", "--repo", "demo", "--show-token"]) {
+            Commands::Git(GitCommands::Token {
+                repo,
+                json,
+                show_token,
+            }) => {
+                assert_eq!(repo.as_deref(), Some("demo"));
+                assert!(!json);
+                assert!(show_token);
+            }
+            _ => panic!("expected git token command"),
         }
     }
 

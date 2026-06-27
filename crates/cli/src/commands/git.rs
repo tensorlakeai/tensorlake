@@ -15,10 +15,15 @@ pub fn repo_url(ctx: &CliContext, repo: &str) -> Result<String> {
     Ok(client.git_repo_url(&project_id, repo))
 }
 
-pub async fn mint_token(ctx: &CliContext, output_json: bool, show_token: bool) -> Result<()> {
+pub async fn mint_token(
+    ctx: &CliContext,
+    repo: Option<&str>,
+    output_json: bool,
+    show_token: bool,
+) -> Result<()> {
     let project_id = project_id(ctx)?;
     let credential = artifact_storage_client(ctx)?
-        .mint_token(&project_id)
+        .mint_token_for_repo(&project_id, repo)
         .await?
         .into_inner();
     if output_json {
@@ -26,6 +31,8 @@ pub async fn mint_token(ctx: &CliContext, output_json: bool, show_token: bool) -
         return Ok(());
     }
 
+    println!("project: {project_id}");
+    println!("repo: {}", credential.repo_pattern);
     println!("username: {}", credential.git_username);
     if show_token {
         println!("password: {}", credential.token);

@@ -10,7 +10,7 @@ pub mod models;
 
 use models::{
     CreateRepoRequest, GitCredential, ListBranchesResponse, ListOperationsResponse,
-    ListRefsResponse, ListReposResponse,
+    ListRefsResponse, ListReposResponse, MintGitTokenRequest,
 };
 
 #[derive(Clone)]
@@ -45,13 +45,24 @@ impl ArtifactStorageClient {
     }
 
     pub async fn mint_token(&self, project_id: &str) -> Result<Traced<GitCredential>, SdkError> {
+        self.mint_token_for_repo(project_id, None).await
+    }
+
+    pub async fn mint_token_for_repo(
+        &self,
+        project_id: &str,
+        repo: Option<&str>,
+    ) -> Result<Traced<GitCredential>, SdkError> {
         // Ingress authenticates the bearer token and forwards the authorized project id to Artifact
         // Storage. Callers should build the SDK with `ClientBuilder::scope(...)` when using PATs.
         let _ = project_id;
         let path = "/artifact-storage/v1/token";
-        let req =
-            self.api_client
-                .build_post_json_request(Method::POST, path, &serde_json::json!({}))?;
+        let body = MintGitTokenRequest {
+            repo: repo.map(str::to_string),
+        };
+        let req = self
+            .api_client
+            .build_post_json_request(Method::POST, path, &body)?;
         self.api_client.execute_json(req).await
     }
 
@@ -241,7 +252,7 @@ impl ArtifactStorageClient {
         project_id: &str,
         repo: &str,
     ) -> Result<Traced<ListRefsResponse>, SdkError> {
-        let credential = self.mint_token(project_id).await?;
+        let credential = self.mint_token_for_repo(project_id, Some(repo)).await?;
         self.list_refs_with_credential(
             project_id,
             repo,
@@ -275,7 +286,7 @@ impl ArtifactStorageClient {
         project_id: &str,
         repo: &str,
     ) -> Result<Traced<ListBranchesResponse>, SdkError> {
-        let credential = self.mint_token(project_id).await?;
+        let credential = self.mint_token_for_repo(project_id, Some(repo)).await?;
         self.list_branches_with_credential(
             project_id,
             repo,
