@@ -52,8 +52,7 @@ pub async fn create_with_request(
         )));
     }
 
-    let mut create_result: CreateSandboxResult = resp.json().await.map_err(CliError::Http)?;
-    create_result.normalize_endpoints();
+    let create_result: CreateSandboxResult = resp.json().await.map_err(CliError::Http)?;
     let is_running = create_result.status.as_deref() == Some("running");
 
     if wait && !is_running {
@@ -241,19 +240,6 @@ fn print_post_create_tip(
     eprintln!("Docs: https://docs.tensorlake.ai/sandboxes");
 }
 
-impl CreateSandboxResult {
-    fn normalize_endpoints(&mut self) {
-        self.sandbox_url = normalize_endpoint(self.sandbox_url.take());
-        self.ingress_endpoint = normalize_endpoint(self.ingress_endpoint.take());
-    }
-}
-
-fn normalize_endpoint(value: Option<String>) -> Option<String> {
-    value
-        .filter(|value| !value.is_empty())
-        .map(|value| trim_trailing_slashes(&value))
-}
-
 fn post_create_proxy_base(
     ctx: &CliContext,
     create_result: &CreateSandboxResult,
@@ -298,10 +284,6 @@ fn sandbox_url_from_ingress_endpoint(ingress_endpoint: &str, sandbox_id: &str) -
         host,
         port
     ))
-}
-
-fn trim_trailing_slashes(value: &str) -> String {
-    value.trim_end_matches('/').to_string()
 }
 
 fn build_create_request_body(
@@ -519,14 +501,13 @@ mod tests {
 
     #[test]
     fn create_result_reads_endpoint_fields_from_typed_create_response() {
-        let mut response: CreateSandboxResult = serde_json::from_value(serde_json::json!({
+        let response: CreateSandboxResult = serde_json::from_value(serde_json::json!({
             "sandbox_id": "sbx-123",
             "status": "running",
             "sandbox_url": "https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai/",
             "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai/"
         }))
         .unwrap();
-        response.normalize_endpoints();
 
         assert_eq!(
             response,
@@ -534,9 +515,9 @@ mod tests {
                 sandbox_id: "sbx-123".to_string(),
                 status: Some("running".to_string()),
                 sandbox_url: Some(
-                    "https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai".to_string()
+                    "https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai/".to_string()
                 ),
-                ingress_endpoint: Some("https://sandbox.us-east-1.aws.tensorlake.ai".to_string()),
+                ingress_endpoint: Some("https://sandbox.us-east-1.aws.tensorlake.ai/".to_string()),
             }
         );
     }
