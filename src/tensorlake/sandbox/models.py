@@ -538,7 +538,13 @@ class ManagedProcessExit(BaseModel):
 
 
 class ManagedProcessInfo(BaseModel):
-    """Managed-process metadata embedded into ProcessInfo."""
+    """Managed-process metadata embedded into ProcessInfo.
+
+    A managed process is addressable by either its current PID or, if a ``name`` was given
+    at creation, that name (process APIs accept a PID or process name). ``id`` is a stable
+    daemon-local identifier: it equals ``name`` when one was set, otherwise a daemon-assigned
+    opaque id (the process is then addressable only by PID, not by ``id``).
+    """
 
     id: str
     name: str | None = None

@@ -132,9 +132,9 @@ fn build_process_payload(
         body["user"] = Value::String(user.to_string());
     }
     if let Some(name) = options.name {
-        if name.trim().is_empty() {
-            return Err(CliError::usage("--name must not be empty"));
-        }
+        // Single source-of-truth rule shared with the SDK + daemon (URL-safe, not a number).
+        tensorlake::sandboxes::validate_managed_name(name)
+            .map_err(|e| CliError::usage(e.to_string()))?;
         body["name"] = Value::String(name.to_string());
     }
     if let Some(restart) = build_restart_config(options) {

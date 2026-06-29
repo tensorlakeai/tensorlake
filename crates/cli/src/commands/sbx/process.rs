@@ -6,11 +6,16 @@ use crate::commands::sbx::{
 };
 use crate::error::{CliError, Result};
 
-pub async fn ps(ctx: &CliContext, sandbox_id: &str, pid: Option<i64>, json: bool) -> Result<()> {
+pub async fn ps(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    process: Option<&str>,
+    json: bool,
+) -> Result<()> {
     let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
     let client = ctx.client()?;
-    let path = match pid {
-        Some(pid) => format!("/api/v1/processes/{pid}"),
+    let path = match process {
+        Some(process) => format!("/api/v1/processes/{process}"),
         None => "/api/v1/processes".to_string(),
     };
     let body = send_process_request(
@@ -24,7 +29,7 @@ pub async fn ps(ctx: &CliContext, sandbox_id: &str, pid: Option<i64>, json: bool
         return Ok(());
     }
 
-    if pid.is_some() {
+    if process.is_some() {
         print_process_table(std::slice::from_ref(&body));
     } else {
         let processes = body
@@ -41,31 +46,33 @@ pub async fn ps(ctx: &CliContext, sandbox_id: &str, pid: Option<i64>, json: bool
     Ok(())
 }
 
-pub async fn restart(ctx: &CliContext, sandbox_id: &str, pid: i64) -> Result<()> {
+pub async fn restart(ctx: &CliContext, sandbox_id: &str, process: &str) -> Result<()> {
     let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
     let client = ctx.client()?;
     let body = send_process_request(
         &target,
         client.post(format!(
-            "{}/api/v1/processes/{pid}/restart",
+            "{}/api/v1/processes/{process}/restart",
             target.proxy_base
         )),
     )
     .await?;
-    let next_pid = body.get("pid").and_then(Value::as_i64).unwrap_or(pid);
-    println!("{next_pid}");
+    match body.get("pid").and_then(Value::as_i64) {
+        Some(next_pid) => println!("{next_pid}"),
+        None => println!("{process}"),
+    }
     Ok(())
 }
 
-pub async fn kill(ctx: &CliContext, sandbox_id: &str, pid: i64) -> Result<()> {
+pub async fn kill(ctx: &CliContext, sandbox_id: &str, process: &str) -> Result<()> {
     let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
     let client = ctx.client()?;
     send_process_request(
         &target,
-        client.delete(format!("{}/api/v1/processes/{pid}", target.proxy_base)),
+        client.delete(format!("{}/api/v1/processes/{process}", target.proxy_base)),
     )
     .await?;
-    println!("Killed process {pid}.");
+    println!("Killed process {process}.");
     Ok(())
 }
 

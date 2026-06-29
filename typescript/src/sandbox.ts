@@ -775,7 +775,12 @@ export class Sandbox {
     if (options?.stderrMode != null && options.stderrMode !== OutputMode.CAPTURE) {
       payload.stderr_mode = options.stderrMode;
     }
-    if (options?.name != null) payload.name = options.name;
+    if (options?.name != null) {
+      // Validate the managed name client-side (throws) via the single source-of-truth rule
+      // in the Rust core. The daemon re-validates as the authority.
+      loadNativeSandboxBinding().validateManagedName(options.name);
+      payload.name = options.name;
+    }
     if (options?.restart != null) payload.restart = toSnakeKeys(options.restart);
     if (options?.healthCheck != null) {
       payload.health_check = toSnakeKeys(options.healthCheck);
@@ -802,35 +807,42 @@ export class Sandbox {
     return Object.assign(processes, { traceId });
   }
 
-  /** Get current status and metadata for a process by PID. */
-  async getProcess(pid: number): Promise<Traced<ProcessInfo>> {
-    const proxy = await this.proxy.client();
-    const { traceId, json } = await callNative(() => proxy.getProcess(pid), {
-      sandboxId: this.sandboxId,
-    });
-    return Object.assign(fromSnakeKeys(JSON.parse(json)) as ProcessInfo, { traceId });
-  }
-
-  /** Send SIGKILL to a process. */
-  async killProcess(pid: number): Promise<void> {
-    const proxy = await this.proxy.client();
-    await callNative(() => proxy.killProcess(pid), { sandboxId: this.sandboxId });
-  }
-
-  /** Restart a managed process by PID. */
-  async restartProcess(pid: number): Promise<Traced<ProcessInfo>> {
-    const proxy = await this.proxy.client();
-    const { traceId, json } = await callNative(() => proxy.restartProcess(pid), {
-      sandboxId: this.sandboxId,
-    });
-    return Object.assign(fromSnakeKeys(JSON.parse(json)) as ProcessInfo, { traceId });
-  }
-
-  /** Send an arbitrary signal to a process (e.g. `15` for SIGTERM, `9` for SIGKILL). */
-  async sendSignal(pid: number, signal: number): Promise<Traced<SendSignalResponse>> {
+  /** Get current status and metadata for a process. `process` is a PID or process name given on creation. */
+  async getProcess(process: number | string): Promise<Traced<ProcessInfo>> {
     const proxy = await this.proxy.client();
     const { traceId, json } = await callNative(
-      () => proxy.sendSignal(pid, signal),
+      () => proxy.getProcess(String(process)),
+      { sandboxId: this.sandboxId },
+    );
+    return Object.assign(fromSnakeKeys(JSON.parse(json)) as ProcessInfo, { traceId });
+  }
+
+  /** Send SIGKILL to a process (or stop a managed process). `process` is a PID or process name given on creation. */
+  async killProcess(process: number | string): Promise<void> {
+    const proxy = await this.proxy.client();
+    await callNative(() => proxy.killProcess(String(process)), {
+      sandboxId: this.sandboxId,
+    });
+  }
+
+  /** Restart a managed process. `process` is a PID or process name given on creation. */
+  async restartProcess(process: number | string): Promise<Traced<ProcessInfo>> {
+    const proxy = await this.proxy.client();
+    const { traceId, json } = await callNative(
+      () => proxy.restartProcess(String(process)),
+      { sandboxId: this.sandboxId },
+    );
+    return Object.assign(fromSnakeKeys(JSON.parse(json)) as ProcessInfo, { traceId });
+  }
+
+  /** Send an arbitrary signal (e.g. `15` for SIGTERM, `9` for SIGKILL). `process` is a PID or process name given on creation. */
+  async sendSignal(
+    process: number | string,
+    signal: number,
+  ): Promise<Traced<SendSignalResponse>> {
+    const proxy = await this.proxy.client();
+    const { traceId, json } = await callNative(
+      () => proxy.sendSignal(String(process), signal),
       { sandboxId: this.sandboxId },
     );
     return Object.assign(fromSnakeKeys(JSON.parse(json)) as SendSignalResponse, {
@@ -840,57 +852,62 @@ export class Sandbox {
 
   // --- Process I/O ---
 
-  /** Write bytes to a process's stdin. The process must have been started with `stdinMode: StdinMode.PIPE`. */
-  async writeStdin(pid: number, data: Uint8Array): Promise<void> {
+  /** Write bytes to a process's stdin (must be started with `stdinMode: StdinMode.PIPE`). `process` is a PID or process name given on creation. */
+  async writeStdin(process: number | string, data: Uint8Array): Promise<void> {
     const proxy = await this.proxy.client();
-    await callNative(() => proxy.writeStdin(pid, Buffer.from(data)), {
+    await callNative(() => proxy.writeStdin(String(process), Buffer.from(data)), {
       sandboxId: this.sandboxId,
     });
   }
 
-  /** Close a process's stdin pipe, signalling EOF to the process. */
-  async closeStdin(pid: number): Promise<void> {
+  /** Close a process's stdin pipe, signalling EOF. `process` is a PID or process name given on creation. */
+  async closeStdin(process: number | string): Promise<void> {
     const proxy = await this.proxy.client();
-    await callNative(() => proxy.closeStdin(pid), { sandboxId: this.sandboxId });
-  }
-
-  /** Return all captured stdout lines produced so far by a process. */
-  async getStdout(pid: number): Promise<Traced<OutputResponse>> {
-    const proxy = await this.proxy.client();
-    const { traceId, json } = await callNative(() => proxy.getStdout(pid), {
+    await callNative(() => proxy.closeStdin(String(process)), {
       sandboxId: this.sandboxId,
     });
+  }
+
+  /** Return all captured stdout lines produced so far. `process` is a PID or process name given on creation. */
+  async getStdout(process: number | string): Promise<Traced<OutputResponse>> {
+    const proxy = await this.proxy.client();
+    const { traceId, json } = await callNative(
+      () => proxy.getStdout(String(process)),
+      { sandboxId: this.sandboxId },
+    );
     return Object.assign(fromSnakeKeys(JSON.parse(json)) as OutputResponse, { traceId });
   }
 
-  /** Return all captured stderr lines produced so far by a process. */
-  async getStderr(pid: number): Promise<Traced<OutputResponse>> {
+  /** Return all captured stderr lines produced so far. `process` is a PID or process name given on creation. */
+  async getStderr(process: number | string): Promise<Traced<OutputResponse>> {
     const proxy = await this.proxy.client();
-    const { traceId, json } = await callNative(() => proxy.getStderr(pid), {
-      sandboxId: this.sandboxId,
-    });
+    const { traceId, json } = await callNative(
+      () => proxy.getStderr(String(process)),
+      { sandboxId: this.sandboxId },
+    );
     return Object.assign(fromSnakeKeys(JSON.parse(json)) as OutputResponse, { traceId });
   }
 
-  /** Return all captured stdout+stderr lines produced so far by a process. */
-  async getOutput(pid: number): Promise<Traced<OutputResponse>> {
+  /** Return all captured stdout+stderr lines produced so far. `process` is a PID or process name given on creation. */
+  async getOutput(process: number | string): Promise<Traced<OutputResponse>> {
     const proxy = await this.proxy.client();
-    const { traceId, json } = await callNative(() => proxy.getOutput(pid), {
-      sandboxId: this.sandboxId,
-    });
+    const { traceId, json } = await callNative(
+      () => proxy.getOutput(String(process)),
+      { sandboxId: this.sandboxId },
+    );
     return Object.assign(fromSnakeKeys(JSON.parse(json)) as OutputResponse, { traceId });
   }
 
   // --- Streaming (SSE) ---
 
-  /** Stream stdout events from a process until it exits. Yields one `OutputEvent` per line. */
+  /** Stream stdout events until the process exits. `process` is a PID or process name given on creation. */
   async *followStdout(
-    pid: number,
+    process: number | string,
     options?: { signal?: AbortSignal },
   ): AsyncIterable<OutputEvent> {
     const proxy = await this.proxy.client();
     for await (const raw of nativeEventStream(
-      (emit) => proxy.followStdout(pid, emit),
+      (emit) => proxy.followStdout(String(process), emit),
       { sandboxId: this.sandboxId },
       options?.signal,
     )) {
@@ -898,14 +915,14 @@ export class Sandbox {
     }
   }
 
-  /** Stream stderr events from a process until it exits. Yields one `OutputEvent` per line. */
+  /** Stream stderr events until the process exits. `process` is a PID or process name given on creation. */
   async *followStderr(
-    pid: number,
+    process: number | string,
     options?: { signal?: AbortSignal },
   ): AsyncIterable<OutputEvent> {
     const proxy = await this.proxy.client();
     for await (const raw of nativeEventStream(
-      (emit) => proxy.followStderr(pid, emit),
+      (emit) => proxy.followStderr(String(process), emit),
       { sandboxId: this.sandboxId },
       options?.signal,
     )) {
@@ -913,14 +930,14 @@ export class Sandbox {
     }
   }
 
-  /** Stream combined stdout+stderr events from a process until it exits. Yields one `OutputEvent` per line. */
+  /** Stream combined stdout+stderr events until the process exits. `process` is a PID or process name given on creation. */
   async *followOutput(
-    pid: number,
+    process: number | string,
     options?: { signal?: AbortSignal },
   ): AsyncIterable<OutputEvent> {
     const proxy = await this.proxy.client();
     for await (const raw of nativeEventStream(
-      (emit) => proxy.followOutput(pid, emit),
+      (emit) => proxy.followOutput(String(process), emit),
       { sandboxId: this.sandboxId },
       options?.signal,
     )) {

@@ -121,6 +121,15 @@ export function installNativeStub(overrides?: {
   };
 
   const binding: NativeSandboxBinding = {
+    // Mirrors the Rust `validate_managed_name` rule so tests drive accept/reject: reject
+    // only empty, names containing '/', and all-digit names (reserved for PID).
+    validateManagedName: (name: string) => {
+      if (name === "" || name.includes("/") || /^[0-9]+$/.test(name)) {
+        throw new Error(
+          `managed process name must not be empty, contain '/', or be all digits: ${name}`,
+        );
+      }
+    },
     NativeSandboxClient: class {
       constructor(...args: unknown[]) {
         stub.clientCtorArgs = args;
