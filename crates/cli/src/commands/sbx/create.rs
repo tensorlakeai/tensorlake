@@ -4,6 +4,7 @@ use crate::commands::sbx::{
     sandbox_proxy_base, wait_for_sandbox_status,
 };
 use crate::error::{CliError, Result};
+use serde::Deserialize;
 
 const DEFAULT_SANDBOX_CPUS: f64 = 1.0;
 const DEFAULT_SANDBOX_MEMORY_MB: i64 = 1024;
@@ -19,6 +20,17 @@ pub struct CreateSandboxResult {
     pub sandbox_id: String,
     pub sandbox_url: Option<String>,
     pub ingress_endpoint: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CreateSandboxResponse {
+    #[serde(alias = "sandboxId", alias = "id")]
+    sandbox_id: Option<String>,
+    status: Option<String>,
+    #[serde(default, alias = "sandboxUrl")]
+    sandbox_url: Option<String>,
+    #[serde(default, alias = "ingressEndpoint")]
+    ingress_endpoint: Option<String>,
 }
 
 pub async fn create_with_request(
@@ -46,14 +58,11 @@ pub async fn create_with_request(
         )));
     }
 
-    let result: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
-    let create_result = create_result_from_response(&result);
-    let status = result
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let result: CreateSandboxResponse = resp.json().await.map_err(CliError::Http)?;
+    let is_running = result.status.as_deref() == Some("running");
+    let create_result = CreateSandboxResult::from(result);
 
-    if wait && status != "running" {
+    if wait && !is_running {
         wait_for_sandbox_status(
             ctx,
             &create_result.sandbox_id,
@@ -238,31 +247,19 @@ fn print_post_create_tip(
     eprintln!("Docs: https://docs.tensorlake.ai/sandboxes");
 }
 
-fn create_result_from_response(response: &serde_json::Value) -> CreateSandboxResult {
-    let sandbox_id = response
-        .get("sandbox_id")
-        .or_else(|| response.get("sandboxId"))
-        .or_else(|| response.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let sandbox_url = response
-        .get("sandbox_url")
-        .or_else(|| response.get("sandboxUrl"))
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .map(trim_trailing_slashes);
-    let ingress_endpoint = response
-        .get("ingress_endpoint")
-        .or_else(|| response.get("ingressEndpoint"))
-        .and_then(|value| value.as_str())
-        .filter(|value| !value.is_empty())
-        .map(trim_trailing_slashes);
-
-    CreateSandboxResult {
-        sandbox_id,
-        sandbox_url,
-        ingress_endpoint,
+impl From<CreateSandboxResponse> for CreateSandboxResult {
+    fn from(response: CreateSandboxResponse) -> Self {
+        Self {
+            sandbox_id: response.sandbox_id.unwrap_or_else(|| "unknown".to_string()),
+            sandbox_url: response
+                .sandbox_url
+                .filter(|value| !value.is_empty())
+                .map(|value| trim_trailing_slashes(&value)),
+            ingress_endpoint: response
+                .ingress_endpoint
+                .filter(|value| !value.is_empty())
+                .map(|value| trim_trailing_slashes(&value)),
+        }
     }
 }
 
@@ -378,7 +375,7 @@ fn build_create_request_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateSandboxResult, GpuRequest, build_create_request_body, create_result_from_response,
+        CreateSandboxResponse, CreateSandboxResult, GpuRequest, build_create_request_body,
         format_ready_message, post_create_proxy_base, sandbox_url_from_ingress_endpoint,
     };
     use crate::auth::context::CliContext;
@@ -530,15 +527,16 @@ mod tests {
     }
 
     #[test]
-    fn create_result_reads_endpoint_fields_from_create_response() {
-        let response = serde_json::json!({
+    fn create_result_reads_endpoint_fields_from_typed_create_response() {
+        let response: CreateSandboxResponse = serde_json::from_value(serde_json::json!({
             "sandbox_id": "sbx-123",
             "sandbox_url": "https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai/",
             "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai/"
-        });
+        }))
+        .unwrap();
 
         assert_eq!(
-            create_result_from_response(&response),
+            CreateSandboxResult::from(response),
             CreateSandboxResult {
                 sandbox_id: "sbx-123".to_string(),
                 sandbox_url: Some(
