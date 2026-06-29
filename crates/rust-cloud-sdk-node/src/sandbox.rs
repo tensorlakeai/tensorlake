@@ -714,94 +714,117 @@ impl NativeSandboxProxyClient {
         .await
     }
 
+    // `process` is the pid-or-name path segment (the TS layer stringifies). Cloned per retry
+    // attempt because `with_retry` may invoke the closure more than once.
     #[napi]
-    pub async fn get_process(&self, pid: i32) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
-            let traced = c.get_process(pid as i64).await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&*traced)?;
-            Ok(TracedJson { trace_id, json })
+    pub async fn get_process(&self, process: String) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let process = process.clone();
+            async move {
+                let traced = c.get_process(process).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
         })
         .await
     }
 
     #[napi]
-    pub async fn kill_process(&self, pid: i32) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| async move {
-            c.kill_process(pid as i64).await.map(|t| t.trace_id)
+    pub async fn kill_process(&self, process: String) -> napi::Result<String> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let process = process.clone();
+            async move { c.kill_process(process).await.map(|t| t.trace_id) }
         })
         .await
     }
 
     #[napi]
-    pub async fn restart_process(&self, pid: i32) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
-            let traced = c.restart_process(pid as i64).await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&*traced)?;
-            Ok(TracedJson { trace_id, json })
+    pub async fn restart_process(&self, process: String) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let process = process.clone();
+            async move {
+                let traced = c.restart_process(process).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
         })
         .await
     }
 
     #[napi]
-    pub async fn send_signal(&self, pid: i32, signal: i32) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
-            let traced = c.send_signal(pid as i64, signal as i64).await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&*traced)?;
-            Ok(TracedJson { trace_id, json })
+    pub async fn send_signal(&self, process: String, signal: i32) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let process = process.clone();
+            async move {
+                let traced = c.send_signal(process, signal as i64).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
         })
         .await
     }
 
     #[napi]
-    pub async fn write_stdin(&self, pid: i32, data: Buffer) -> napi::Result<String> {
+    pub async fn write_stdin(&self, process: String, data: Buffer) -> napi::Result<String> {
         let bytes = data.to_vec();
         with_retry(self.client.clone(), 5, move |c| {
+            let process = process.clone();
             let bytes = bytes.clone();
-            async move { c.write_stdin(pid as i64, bytes).await.map(|t| t.trace_id) }
+            async move { c.write_stdin(process, bytes).await.map(|t| t.trace_id) }
         })
         .await
     }
 
     #[napi]
-    pub async fn close_stdin(&self, pid: i32) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| async move {
-            c.close_stdin(pid as i64).await.map(|t| t.trace_id)
+    pub async fn close_stdin(&self, process: String) -> napi::Result<String> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let process = process.clone();
+            async move { c.close_stdin(process).await.map(|t| t.trace_id) }
         })
         .await
     }
 
     #[napi]
-    pub async fn get_stdout(&self, pid: i32) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
-            let traced = c.get_stdout(pid as i64).await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&*traced)?;
-            Ok(TracedJson { trace_id, json })
+    pub async fn get_stdout(&self, process: String) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let process = process.clone();
+            async move {
+                let traced = c.get_stdout(process).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
         })
         .await
     }
 
     #[napi]
-    pub async fn get_stderr(&self, pid: i32) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
-            let traced = c.get_stderr(pid as i64).await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&*traced)?;
-            Ok(TracedJson { trace_id, json })
+    pub async fn get_stderr(&self, process: String) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let process = process.clone();
+            async move {
+                let traced = c.get_stderr(process).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
         })
         .await
     }
 
     #[napi]
-    pub async fn get_output(&self, pid: i32) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
-            let traced = c.get_output(pid as i64).await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&*traced)?;
-            Ok(TracedJson { trace_id, json })
+    pub async fn get_output(&self, process: String) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let process = process.clone();
+            async move {
+                let traced = c.get_output(process).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
         })
         .await
     }
@@ -811,12 +834,12 @@ impl NativeSandboxProxyClient {
     #[napi]
     pub async fn follow_stdout(
         &self,
-        pid: i32,
+        process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> napi::Result<String> {
         self.client
             .clone()
-            .follow_stdout_streaming(pid as i64, move |event| emit_event(&emit, event))
+            .follow_stdout_streaming(process, move |event| emit_event(&emit, event))
             .await
             .map_err(into_napi_error)
     }
@@ -824,12 +847,12 @@ impl NativeSandboxProxyClient {
     #[napi]
     pub async fn follow_stderr(
         &self,
-        pid: i32,
+        process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> napi::Result<String> {
         self.client
             .clone()
-            .follow_stderr_streaming(pid as i64, move |event| emit_event(&emit, event))
+            .follow_stderr_streaming(process, move |event| emit_event(&emit, event))
             .await
             .map_err(into_napi_error)
     }
@@ -837,12 +860,12 @@ impl NativeSandboxProxyClient {
     #[napi]
     pub async fn follow_output(
         &self,
-        pid: i32,
+        process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> napi::Result<String> {
         self.client
             .clone()
-            .follow_output_streaming(pid as i64, move |event| emit_event(&emit, event))
+            .follow_output_streaming(process, move |event| emit_event(&emit, event))
             .await
             .map_err(into_napi_error)
     }
@@ -999,6 +1022,13 @@ impl NativeSandboxProxyClient {
         })
         .await
     }
+}
+
+/// Validate a managed-process name client-side; throws on failure. Wraps the single
+/// source-of-truth rule in the Rust cloud SDK so the TS layer need not reimplement it.
+#[napi]
+pub fn validate_managed_name(name: String) -> napi::Result<()> {
+    tensorlake::sandboxes::validate_managed_name(&name).map_err(into_napi_error)
 }
 
 /// Serialize one streaming event and push it across the napi threadsafe

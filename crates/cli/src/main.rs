@@ -698,30 +698,30 @@ enum SbxCommands {
         /// Sandbox ID or name
         sandbox_id: String,
 
-        /// Optional process PID to inspect
-        pid: Option<i64>,
+        /// Optional process to inspect: PID or process name given on creation
+        process: Option<String>,
 
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
 
-    /// Restart a managed sandbox process by PID
+    /// Restart a managed sandbox process
     Restart {
         /// Sandbox ID or name
         sandbox_id: String,
 
-        /// Process PID
-        pid: i64,
+        /// PID or process name given on creation
+        process: String,
     },
 
-    /// Kill a sandbox process by PID
+    /// Kill a sandbox process (or stop a managed process)
     Kill {
         /// Sandbox ID or name
         sandbox_id: String,
 
-        /// Process PID
-        pid: i64,
+        /// PID or process name given on creation
+        process: String,
     },
 
     /// Copy files between local and sandbox
@@ -1391,15 +1391,17 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     }
                     SbxCommands::Ps {
                         sandbox_id,
-                        pid,
+                        process,
                         json,
-                    } => commands::sbx::process::ps(ctx, &sandbox_id, pid, json).await,
-                    SbxCommands::Restart { sandbox_id, pid } => {
-                        commands::sbx::process::restart(ctx, &sandbox_id, pid).await
-                    }
-                    SbxCommands::Kill { sandbox_id, pid } => {
-                        commands::sbx::process::kill(ctx, &sandbox_id, pid).await
-                    }
+                    } => commands::sbx::process::ps(ctx, &sandbox_id, process.as_deref(), json).await,
+                    SbxCommands::Restart {
+                        sandbox_id,
+                        process,
+                    } => commands::sbx::process::restart(ctx, &sandbox_id, &process).await,
+                    SbxCommands::Kill {
+                        sandbox_id,
+                        process,
+                    } => commands::sbx::process::kill(ctx, &sandbox_id, &process).await,
                     SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
                     SbxCommands::Copy {
                         sandbox_id,
@@ -2069,29 +2071,35 @@ mod tests {
 
     #[test]
     fn sbx_process_lifecycle_commands_parse() {
-        match parse_command(["tl", "sbx", "ps", "sbx-123", "42", "--json"]) {
+        match parse_command(["tl", "sbx", "ps", "sbx-123", "web", "--json"]) {
             Commands::Sbx(SbxCommands::Ps {
                 sandbox_id,
-                pid,
+                process,
                 json,
             }) => {
                 assert_eq!(sandbox_id, "sbx-123");
-                assert_eq!(pid, Some(42));
+                assert_eq!(process.as_deref(), Some("web"));
                 assert!(json);
             }
             _ => panic!("expected sbx ps command"),
         }
         match parse_command(["tl", "sbx", "restart", "sbx-123", "42"]) {
-            Commands::Sbx(SbxCommands::Restart { sandbox_id, pid }) => {
+            Commands::Sbx(SbxCommands::Restart {
+                sandbox_id,
+                process,
+            }) => {
                 assert_eq!(sandbox_id, "sbx-123");
-                assert_eq!(pid, 42);
+                assert_eq!(process, "42");
             }
             _ => panic!("expected sbx restart command"),
         }
-        match parse_command(["tl", "sbx", "kill", "sbx-123", "42"]) {
-            Commands::Sbx(SbxCommands::Kill { sandbox_id, pid }) => {
+        match parse_command(["tl", "sbx", "kill", "sbx-123", "web"]) {
+            Commands::Sbx(SbxCommands::Kill {
+                sandbox_id,
+                process,
+            }) => {
                 assert_eq!(sandbox_id, "sbx-123");
-                assert_eq!(pid, 42);
+                assert_eq!(process, "web");
             }
             _ => panic!("expected sbx kill command"),
         }

@@ -61,47 +61,47 @@ class _FakeAsyncRustProxyClient:
     async def list_processes_json_async(self):
         return _TRACE_ID, json.dumps({"processes": [_process_info_dict()]})
 
-    async def get_process_json_async(self, *, pid):
-        return _TRACE_ID, json.dumps(_process_info_dict(pid))
+    async def get_process_json_async(self, process):
+        return _TRACE_ID, json.dumps(_process_info_dict())
 
-    async def kill_process_async(self, *, pid):
-        self.kill_calls.append(pid)
+    async def kill_process_async(self, process):
+        self.kill_calls.append(process)
         return _TRACE_ID
 
-    async def send_signal_json_async(self, *, pid, signal):
-        self.signal_calls.append((pid, signal))
+    async def send_signal_json_async(self, process, signal):
+        self.signal_calls.append((process, signal))
         return _TRACE_ID, json.dumps({"success": True})
 
-    async def write_stdin_async(self, *, pid, data):
-        self.write_stdin_calls.append((pid, data))
+    async def write_stdin_async(self, process, data):
+        self.write_stdin_calls.append((process, data))
         return _TRACE_ID
 
-    async def close_stdin_async(self, *, pid):
-        self.close_stdin_calls.append(pid)
+    async def close_stdin_async(self, process):
+        self.close_stdin_calls.append(process)
         return _TRACE_ID
 
-    async def get_stdout_json_async(self, *, pid):
-        return _TRACE_ID, json.dumps({"pid": pid, "lines": ["a", "b"], "line_count": 2})
+    async def get_stdout_json_async(self, process):
+        return _TRACE_ID, json.dumps({"pid": 101, "lines": ["a", "b"], "line_count": 2})
 
-    async def get_stderr_json_async(self, *, pid):
-        return _TRACE_ID, json.dumps({"pid": pid, "lines": ["err"], "line_count": 1})
+    async def get_stderr_json_async(self, process):
+        return _TRACE_ID, json.dumps({"pid": 101, "lines": ["err"], "line_count": 1})
 
-    async def get_output_json_async(self, *, pid):
+    async def get_output_json_async(self, process):
         return _TRACE_ID, json.dumps(
-            {"pid": pid, "lines": ["a", "b", "err"], "line_count": 3}
+            {"pid": 101, "lines": ["a", "b", "err"], "line_count": 3}
         )
 
-    async def follow_stdout_json_async(self, *, pid):
+    async def follow_stdout_json_async(self, process):
         return _TRACE_ID, [
             json.dumps({"line": "out", "timestamp": 1_700_000_000, "stream": "stdout"})
         ]
 
-    async def follow_stderr_json_async(self, *, pid):
+    async def follow_stderr_json_async(self, process):
         return _TRACE_ID, [
             json.dumps({"line": "err", "timestamp": 1_700_000_001, "stream": "stderr"})
         ]
 
-    async def follow_output_json_async(self, *, pid):
+    async def follow_output_json_async(self, process):
         return _TRACE_ID, [
             json.dumps(
                 {"line": "hello", "timestamp": 1_700_000_000, "stream": "stdout"}
@@ -368,7 +368,7 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
 
         traced = await sandbox.write_stdin(101, b"hello")
 
-        self.assertEqual(fake.write_stdin_calls, [(101, b"hello")])
+        self.assertEqual(fake.write_stdin_calls, [("101", b"hello")])
         self.assertEqual(traced.trace_id, _TRACE_ID)
 
     async def test_close_stdin_forwards_pid(self):
@@ -376,21 +376,21 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
 
         await sandbox.close_stdin(101)
 
-        self.assertEqual(fake.close_stdin_calls, [101])
+        self.assertEqual(fake.close_stdin_calls, ["101"])
 
     async def test_kill_process_forwards_pid(self):
         sandbox, fake = _make_async_sandbox()
 
         await sandbox.kill_process(101)
 
-        self.assertEqual(fake.kill_calls, [101])
+        self.assertEqual(fake.kill_calls, ["101"])
 
     async def test_send_signal_forwards_pid_and_signal(self):
         sandbox, fake = _make_async_sandbox()
 
         traced = await sandbox.send_signal(101, 15)
 
-        self.assertEqual(fake.signal_calls, [(101, 15)])
+        self.assertEqual(fake.signal_calls, [("101", 15)])
         self.assertTrue(traced.success)
 
     async def test_get_stdout_returns_traced_response(self):

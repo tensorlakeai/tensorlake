@@ -48,19 +48,20 @@ export interface NativeSandboxProxyClient {
 
   startProcess(payloadJson: string): Promise<TracedJson>;
   listProcesses(): Promise<TracedJson>;
-  getProcess(pid: number): Promise<TracedJson>;
-  killProcess(pid: number): Promise<string>;
-  restartProcess(pid: number): Promise<TracedJson>;
-  sendSignal(pid: number, signal: number): Promise<TracedJson>;
-  writeStdin(pid: number, data: Buffer): Promise<string>;
-  closeStdin(pid: number): Promise<string>;
-  getStdout(pid: number): Promise<TracedJson>;
-  getStderr(pid: number): Promise<TracedJson>;
-  getOutput(pid: number): Promise<TracedJson>;
+  // `process` is the pid-or-name path segment (the TS layer stringifies the number|string arg).
+  getProcess(process: string): Promise<TracedJson>;
+  killProcess(process: string): Promise<string>;
+  restartProcess(process: string): Promise<TracedJson>;
+  sendSignal(process: string, signal: number): Promise<TracedJson>;
+  writeStdin(process: string, data: Buffer): Promise<string>;
+  closeStdin(process: string): Promise<string>;
+  getStdout(process: string): Promise<TracedJson>;
+  getStderr(process: string): Promise<TracedJson>;
+  getOutput(process: string): Promise<TracedJson>;
 
-  followStdout(pid: number, emit: NativeEmit): Promise<string>;
-  followStderr(pid: number, emit: NativeEmit): Promise<string>;
-  followOutput(pid: number, emit: NativeEmit): Promise<string>;
+  followStdout(process: string, emit: NativeEmit): Promise<string>;
+  followStderr(process: string, emit: NativeEmit): Promise<string>;
+  followOutput(process: string, emit: NativeEmit): Promise<string>;
   runProcess(payloadJson: string): Promise<TracedEvents>;
   runProcessStreaming(payloadJson: string, emit: NativeEmit): Promise<string>;
 
@@ -141,6 +142,8 @@ interface NativeSandboxProxyClientCtor {
 export interface NativeSandboxBinding {
   NativeSandboxClient: NativeSandboxClientCtor;
   NativeSandboxProxyClient: NativeSandboxProxyClientCtor;
+  /** Validate a managed-process name; throws on failure. Single source-of-truth rule in Rust. */
+  validateManagedName: (name: string) => void;
 }
 
 // ---- Binding loader -------------------------------------------------------

@@ -49,6 +49,7 @@ function installFakeBinding(overrides: ProxyOverrides = {}): {
   Object.assign(proxy, overrides);
 
   const binding: NativeSandboxBinding = {
+    validateManagedName: vi.fn(),
     NativeSandboxClient: class {
       connectProxy() {
         return proxy as unknown as NativeSandboxProxyClient;
@@ -101,11 +102,11 @@ describe("Sandbox native proxy path", () => {
   });
 
   it("parses getProcess JSON from snake_case into camelCase", async () => {
-    installFakeBinding({
-      getProcess: vi.fn(async (pid: number) => ({
+    const { proxy } = installFakeBinding({
+      getProcess: vi.fn(async (process: string) => ({
         traceId: "tr-proc",
         json: JSON.stringify({
-          pid,
+          pid: Number(process),
           status: "running",
           command: "sleep",
           args: ["1"],
@@ -116,6 +117,7 @@ describe("Sandbox native proxy path", () => {
     });
     const sbx = makeSandbox();
     const proc = await sbx.getProcess(42);
+    expect(proxy.getProcess).toHaveBeenCalledWith("42");
     expect(proc.pid).toBe(42);
     // fromSnakeKeys maps started_at -> startedAt (and coerces the timestamp,
     // same as the previous undici path).
@@ -147,8 +149,8 @@ describe("Sandbox native proxy path", () => {
   });
 
   it("streams followStdout events live via the emit bridge", async () => {
-    installFakeBinding({
-      followStdout: vi.fn(async (_pid: number, emit: (e: string) => void) => {
+    const { proxy } = installFakeBinding({
+      followStdout: vi.fn(async (_process: string, emit: (e: string) => void) => {
         emit(JSON.stringify({ line: "a", timestamp: 1 }));
         emit(JSON.stringify({ line: "b", timestamp: 2 }));
         return "tr-follow";
@@ -159,6 +161,7 @@ describe("Sandbox native proxy path", () => {
     for await (const event of sbx.followStdout(7)) {
       lines.push(event.line);
     }
+    expect(proxy.followStdout).toHaveBeenCalledWith("7", expect.any(Function));
     expect(lines).toEqual(["a", "b"]);
     sbx.close();
   });
