@@ -82,6 +82,17 @@ export interface NetworkConfig {
   denyOut: string[];
 }
 
+/**
+ * One ZeroFS file system mounted into a sandbox at an absolute guest path.
+ *
+ * `fileSystemId` is the registered file system's id (e.g. `file_system_...`)
+ * and `mountPath` is an absolute, unique guest path (e.g. `/mnt/skills`).
+ */
+export interface FileSystemMount {
+  fileSystemId: string;
+  mountPath: string;
+}
+
 // --- Sandbox lifecycle ---
 
 export interface CreateSandboxOptions {
@@ -103,6 +114,8 @@ export interface CreateSandboxOptions {
   snapshotId?: string;
   /** Optional name for the sandbox. Named sandboxes support suspend/resume. When absent the sandbox is ephemeral. */
   name?: string;
+  /** ZeroFS file systems to mount into the sandbox at boot, each at its own absolute, unique guest mount path. */
+  fileSystems?: FileSystemMount[];
 }
 
 export interface UpdateSandboxOptions {
@@ -171,6 +184,8 @@ export interface SandboxInfo {
   ingressEndpoint?: string;
   sandboxUrl?: string;
   routingHint?: string;
+  /** ZeroFS file systems currently mounted into the sandbox, each at its own guest mount path. Empty when none are mounted. */
+  fileSystems?: FileSystemMount[];
 }
 
 export interface SandboxPortAccess {

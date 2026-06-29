@@ -214,6 +214,108 @@ describe("CloudClient", () => {
     client.close();
   });
 
+  it("creates a file system through the platform file-systems route", async () => {
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems",
+      );
+      expect(init?.method).toBe("POST");
+      const headers = init?.headers as Record<string, string>;
+      expect(headers["Content-Type"]).toBe("application/json");
+      expect(init?.body).toBe('{"name":"skills","description":"shared"}');
+      return new Response(
+        JSON.stringify({
+          id: "file_system_abc",
+          name: "skills",
+          region: "us-east-1",
+          status: "ready",
+          createdAt: "2026-06-25T00:00:00Z",
+          updatedAt: "2026-06-25T00:00:00Z",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const client = new CloudClient({
+      apiUrl: "http://localhost:8900",
+      organizationId: "org-1",
+      projectId: "proj-1",
+    });
+    const fs = await client.createFileSystem({
+      name: "skills",
+      description: "shared",
+    });
+    expect(fs.id).toBe("file_system_abc");
+    expect(fs.name).toBe("skills");
+    expect(fs.region).toBe("us-east-1");
+    expect(fs.status).toBe("ready");
+    expect(fs.createdAt).toBeInstanceOf(Date);
+    client.close();
+  });
+
+  it("lists file systems following pagination through the platform route", async () => {
+    const base =
+      "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems";
+    const requested: string[] = [];
+    mockFetch((url) => {
+      requested.push(url);
+      if (url === `${base}?pageSize=100`) {
+        return new Response(
+          JSON.stringify({
+            items: [
+              { id: "file_system_a", name: "fs-a", status: "ready" },
+              { id: "file_system_b", name: "fs-b", status: "ready" },
+            ],
+            pagination: { next: `${base}?pageSize=100&cursor=abc` },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(
+        JSON.stringify({
+          items: [{ id: "file_system_c", name: "fs-c", status: "ready" }],
+          pagination: { next: null },
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const client = new CloudClient({
+      apiUrl: "http://localhost:8900",
+      organizationId: "org-1",
+      projectId: "proj-1",
+    });
+    const fileSystems = await client.listFileSystems();
+    expect(fileSystems.map((fs) => fs.id)).toEqual([
+      "file_system_a",
+      "file_system_b",
+      "file_system_c",
+    ]);
+    expect(requested).toEqual([
+      `${base}?pageSize=100`,
+      `${base}?pageSize=100&cursor=abc`,
+    ]);
+    client.close();
+  });
+
+  it("deletes a file system through the platform file-systems route", async () => {
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems/file_system_abc",
+      );
+      expect(init?.method).toBe("DELETE");
+      return new Response(null, { status: 204 });
+    });
+
+    const client = new CloudClient({
+      apiUrl: "http://localhost:8900",
+      organizationId: "org-1",
+      projectId: "proj-1",
+    });
+    await client.deleteFileSystem("file_system_abc");
+    client.close();
+  });
+
   it("streams build logs as camel-cased events", async () => {
     mockFetch(() =>
       new Response(

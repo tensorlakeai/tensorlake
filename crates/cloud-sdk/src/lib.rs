@@ -71,6 +71,7 @@ pub mod artifact_storage;
 pub mod cron;
 pub mod document_ai;
 pub mod error;
+pub mod filesystems;
 pub mod images;
 pub mod sandbox_images;
 pub mod sandbox_templates;
@@ -80,6 +81,7 @@ use applications::*;
 use artifact_storage::*;
 use cron::*;
 use document_ai::*;
+use filesystems::*;
 use images::*;
 use sandbox_templates::*;
 use sandboxes::*;
@@ -285,6 +287,15 @@ impl Sdk {
         project_id: &str,
     ) -> SandboxTemplatesClient {
         SandboxTemplatesClient::new(
+            self.client.clone(),
+            organization_id.to_string(),
+            project_id.to_string(),
+        )
+    }
+
+    /// Get a client for managing the project-scoped ZeroFS file-system registry.
+    pub fn file_systems(&self, organization_id: &str, project_id: &str) -> FileSystemsClient {
+        FileSystemsClient::new(
             self.client.clone(),
             organization_id.to_string(),
             project_id.to_string(),
