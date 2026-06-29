@@ -25,8 +25,8 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use tensorlake::sandboxes::models::{
-    ArchivedSandboxesPaginationDirection, CreateSandboxRequest, ListArchivedSandboxesParams,
-    SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
+    ArchivedSandboxesPaginationDirection, CreateSandboxRequest, GetSandboxLogsRequest,
+    ListArchivedSandboxesParams, SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{SandboxProxyClient, SandboxesClient};
 use tensorlake::{ClientBuilder, error::SdkError};
@@ -166,7 +166,9 @@ where
 
 fn duration_from_seconds(name: &str, seconds: f64) -> napi::Result<Duration> {
     if !seconds.is_finite() || seconds <= 0.0 {
-        return Err(usage_error(format!("{name} must be a positive finite number")));
+        return Err(usage_error(format!(
+            "{name} must be a positive finite number"
+        )));
     }
     Ok(Duration::from_secs_f64(seconds))
 }
@@ -290,29 +292,37 @@ impl NativeSandboxClient {
         request_timeout_sec: Option<f64>,
     ) -> napi::Result<Self> {
         let lifecycle_url = resolve_sandbox_lifecycle_url(&api_url);
-        let mut builder = ClientBuilder::new(&lifecycle_url);
+        let mut lifecycle_builder = ClientBuilder::new(&lifecycle_url);
+        let mut api_builder = ClientBuilder::new(&api_url);
         if let Some(token) = api_key.as_deref() {
-            builder = builder.bearer_token(token);
+            lifecycle_builder = lifecycle_builder.bearer_token(token);
+            api_builder = api_builder.bearer_token(token);
         }
         if let (Some(org_id), Some(project_id)) =
             (organization_id.as_deref(), project_id.as_deref())
         {
-            builder = builder.scope(org_id, project_id);
+            lifecycle_builder = lifecycle_builder.scope(org_id, project_id);
+            api_builder = api_builder.scope(org_id, project_id);
         }
         if let Some(ua) = user_agent.as_deref() {
-            builder = builder.user_agent(ua);
+            lifecycle_builder = lifecycle_builder.user_agent(ua);
+            api_builder = api_builder.user_agent(ua);
         }
         if let Some(seconds) = request_timeout_sec {
-            builder = builder.timeout(duration_from_seconds("request_timeout_sec", seconds)?);
+            let timeout = duration_from_seconds("request_timeout_sec", seconds)?;
+            lifecycle_builder = lifecycle_builder.timeout(timeout);
+            api_builder = api_builder.timeout(timeout);
         }
 
-        let client = builder.build().map_err(into_napi_error)?;
+        let client = lifecycle_builder.build().map_err(into_napi_error)?;
+        let log_client = api_builder.build().map_err(into_napi_error)?;
         let use_namespaced_endpoints = is_localhost_api_url(&api_url);
         let sandboxes_client = SandboxesClient::new(
             client,
             namespace.unwrap_or_else(|| "default".to_string()),
             use_namespaced_endpoints,
-        );
+        )
+        .with_log_client(log_client);
 
         Ok(Self {
             client: sandboxes_client,
@@ -447,6 +457,35 @@ impl NativeSandboxClient {
             let sandbox_id = sandbox_id.clone();
             async move {
                 let traced = c.get_archived(&sandbox_id).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
+        })
+        .await
+    }
+
+    #[napi]
+    pub async fn get_sandbox_logs(&self, request_json: String) -> napi::Result<TracedJson> {
+        let request: GetSandboxLogsRequest = parse_json_payload(&request_json)?;
+        with_retry(self.client.clone(), 5, move |c| {
+            let request = request.clone();
+            async move {
+                let traced = c.get_logs(&request).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
+        })
+        .await
+    }
+
+    #[napi]
+    pub async fn list_sandbox_log_processes(&self, sandbox_id: String) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let sandbox_id = sandbox_id.clone();
+            async move {
+                let traced = c.list_log_processes(&sandbox_id).await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced)?;
                 Ok(TracedJson { trace_id, json })
@@ -912,15 +951,14 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn read_file(&self, path: String) -> napi::Result<TracedBytes> {
-        let (trace_id, data): (String, Vec<u8>) =
-            with_retry(self.client.clone(), 5, move |c| {
-                let path = path.clone();
-                async move {
-                    let traced = c.read_file(&path).await?;
-                    Ok((traced.trace_id.clone(), traced.into_inner()))
-                }
-            })
-            .await?;
+        let (trace_id, data): (String, Vec<u8>) = with_retry(self.client.clone(), 5, move |c| {
+            let path = path.clone();
+            async move {
+                let traced = c.read_file(&path).await?;
+                Ok((traced.trace_id.clone(), traced.into_inner()))
+            }
+        })
+        .await?;
         Ok(TracedBytes {
             trace_id,
             data: data.into(),
@@ -992,11 +1030,7 @@ impl NativeSandboxProxyClient {
     pub async fn delete_pty_session(&self, session_id: String) -> napi::Result<String> {
         with_retry(self.client.clone(), 5, move |c| {
             let session_id = session_id.clone();
-            async move {
-                c.delete_pty_session(&session_id)
-                    .await
-                    .map(|t| t.trace_id)
-            }
+            async move { c.delete_pty_session(&session_id).await.map(|t| t.trace_id) }
         })
         .await
     }

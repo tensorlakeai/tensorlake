@@ -23,6 +23,7 @@ import {
   type CreatePtySessionOptions,
   type DaemonInfo,
   type DirectoryEntry,
+  type GetSandboxLogsOptions,
   type HealthResponse,
   type ListDirectoryResponse,
   type OutputEvent,
@@ -34,7 +35,9 @@ import {
   type RunOptions,
   type SandboxClientOptions,
   type SandboxInfo,
+  type SandboxLogsResponse,
   type SandboxOptions,
+  type SandboxProcessLogFiltersResponse,
   type SendSignalResponse,
   type SnapshotInfo,
   type StartProcessOptions,
@@ -805,6 +808,22 @@ export class Sandbox {
       (p) => fromSnakeKeys(p) as ProcessInfo,
     );
     return Object.assign(processes, { traceId });
+  }
+
+  /** Read persisted logs for this sandbox from the log service. */
+  async getLogs(
+    options?: GetSandboxLogsOptions,
+  ): Promise<Traced<SandboxLogsResponse>> {
+    const client = this.requireLifecycleClient("get_logs");
+    const info = await this.info();
+    return client.getLogs(info.sandboxId, options);
+  }
+
+  /** List processes available as persisted-log filters for this sandbox. */
+  async listLogProcesses(): Promise<Traced<SandboxProcessLogFiltersResponse>> {
+    const client = this.requireLifecycleClient("list_log_processes");
+    const info = await this.info();
+    return client.listLogProcesses(info.sandboxId);
   }
 
   /** Get current status and metadata for a process. `process` is a PID or process name given on creation. */

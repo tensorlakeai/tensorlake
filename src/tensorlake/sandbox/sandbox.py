@@ -37,6 +37,9 @@ from .models import (
     ProcessUserSpec,
     RestartPolicyConfig,
     SandboxInfo,
+    SandboxLogLevel,
+    SandboxLogsResponse,
+    SandboxProcessLogFiltersResponse,
     SandboxStatus,
     SendSignalResponse,
     SnapshotInfo,
@@ -657,6 +660,37 @@ class Sandbox:
         my_id = self.sandbox_id
         filtered = [s for s in all_snaps if s.sandbox_id == my_id]
         return TracedIterator(all_snaps.trace_id, filtered)
+
+    def get_logs(
+        self,
+        *,
+        levels: list[SandboxLogLevel | str] | None = None,
+        process_ids: list[str] | None = None,
+        next_token: str | None = None,
+        head: int | None = None,
+        tail: int | None = None,
+        body: str | None = None,
+    ) -> Traced[SandboxLogsResponse]:
+        """Read persisted logs for this sandbox."""
+        self._require_lifecycle_client("get_logs")
+        traced = self._lifecycle_client.get_logs(
+            self.sandbox_id,
+            levels=levels,
+            process_ids=process_ids,
+            next_token=next_token,
+            head=head,
+            tail=tail,
+            body=body,
+        )
+        self._trace_id = traced.trace_id
+        return traced
+
+    def list_log_processes(self) -> Traced[SandboxProcessLogFiltersResponse]:
+        """List processes available as persisted-log filters for this sandbox."""
+        self._require_lifecycle_client("list_log_processes")
+        traced = self._lifecycle_client.list_log_processes(self.sandbox_id)
+        self._trace_id = traced.trace_id
+        return traced
 
     def _fetch_info(self) -> SandboxInfo:
         """Fetch and cache sandbox info from the server (lazy, once per instance)."""

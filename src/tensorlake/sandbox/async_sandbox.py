@@ -35,6 +35,9 @@ from .models import (
     ProcessUser,
     RestartPolicyConfig,
     SandboxInfo,
+    SandboxLogLevel,
+    SandboxLogsResponse,
+    SandboxProcessLogFiltersResponse,
     SandboxStatus,
     SendSignalResponse,
     SnapshotInfo,
@@ -326,6 +329,37 @@ class AsyncSandbox:
         all_snaps = await self._lifecycle_client.list_snapshots()
         filtered = [s for s in all_snaps if s.sandbox_id == my_id]
         return TracedIterator(all_snaps.trace_id, filtered)
+
+    async def get_logs(
+        self,
+        *,
+        levels: list[SandboxLogLevel | str] | None = None,
+        process_ids: list[str] | None = None,
+        next_token: str | None = None,
+        head: int | None = None,
+        tail: int | None = None,
+        body: str | None = None,
+    ) -> Traced[SandboxLogsResponse]:
+        self._require_lifecycle_client("get_logs")
+        sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
+        traced = await self._lifecycle_client.get_logs(
+            sandbox_id,
+            levels=levels,
+            process_ids=process_ids,
+            next_token=next_token,
+            head=head,
+            tail=tail,
+            body=body,
+        )
+        self._trace_id = traced.trace_id
+        return traced
+
+    async def list_log_processes(self) -> Traced[SandboxProcessLogFiltersResponse]:
+        self._require_lifecycle_client("list_log_processes")
+        sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
+        traced = await self._lifecycle_client.list_log_processes(sandbox_id)
+        self._trace_id = traced.trace_id
+        return traced
 
     async def _fetch_info(self) -> SandboxInfo:
         if self._cached_info is None:

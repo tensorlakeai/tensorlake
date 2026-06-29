@@ -4,6 +4,7 @@ use crate::commands::sbx::{
     sandbox_proxy_base, wait_for_sandbox_status,
 };
 use crate::error::{CliError, Result};
+use serde::Deserialize;
 
 const DEFAULT_SANDBOX_CPUS: f64 = 1.0;
 const DEFAULT_SANDBOX_MEMORY_MB: i64 = 1024;
@@ -14,11 +15,23 @@ pub struct GpuRequest<'a> {
     pub model: &'a str,
 }
 
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct CreateSandboxResult {
+    #[serde(alias = "sandboxId", alias = "id")]
+    pub sandbox_id: String,
+    #[serde(default)]
+    pub status: Option<String>,
+    #[serde(default, alias = "sandboxUrl")]
+    pub sandbox_url: Option<String>,
+    #[serde(default, alias = "ingressEndpoint")]
+    pub ingress_endpoint: Option<String>,
+}
+
 pub async fn create_with_request(
     ctx: &CliContext,
     body: serde_json::Value,
     wait: bool,
-) -> Result<String> {
+) -> Result<CreateSandboxResult> {
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, "sandboxes");
 
@@ -39,22 +52,13 @@ pub async fn create_with_request(
         )));
     }
 
-    let result: serde_json::Value = resp.json().await.map_err(CliError::Http)?;
-    let sandbox_id = result
-        .get("sandbox_id")
-        .or_else(|| result.get("id"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown")
-        .to_string();
-    let status = result
-        .get("status")
-        .and_then(|v| v.as_str())
-        .unwrap_or("unknown");
+    let create_result: CreateSandboxResult = resp.json().await.map_err(CliError::Http)?;
+    let is_running = create_result.status.as_deref() == Some("running");
 
-    if wait && status != "running" {
+    if wait && !is_running {
         wait_for_sandbox_status(
             ctx,
-            &sandbox_id,
+            &create_result.sandbox_id,
             "Waiting for sandbox to start",
             "running",
             DEFAULT_SANDBOX_WAIT_TIMEOUT,
@@ -62,7 +66,7 @@ pub async fn create_with_request(
         .await?;
     }
 
-    Ok(sandbox_id)
+    Ok(create_result)
 }
 
 pub struct CreateArgs<'a> {
@@ -143,7 +147,8 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         body["network"] = network;
     }
 
-    let sandbox_id = create_with_request(ctx, body, wait).await?;
+    let create_result = create_with_request(ctx, body, wait).await?;
+    let sandbox_id = create_result.sandbox_id.clone();
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let display_id = name.unwrap_or(&sandbox_id);
     if is_tty {
@@ -153,7 +158,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         println!("{}", sandbox_id);
     }
     if is_tty {
-        print_post_create_tip(ctx, &sandbox_id, display_id, name.is_none());
+        print_post_create_tip(ctx, &create_result, display_id, name.is_none());
     }
     Ok(())
 }
@@ -165,10 +170,13 @@ fn format_ready_message(name: Option<&str>, sandbox_id: &str) -> String {
     }
 }
 
-fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, display_id: &str, is_ephemeral: bool) {
-    // Use the name as the proxy subdomain when available; it's a stable human-readable identifier.
-    let proxy_key = if is_ephemeral { sandbox_id } else { display_id };
-    let (proxy_url, host_header) = sandbox_proxy_base(ctx, proxy_key);
+fn print_post_create_tip(
+    ctx: &CliContext,
+    create_result: &CreateSandboxResult,
+    display_id: &str,
+    is_ephemeral: bool,
+) {
+    let (proxy_url, host_header) = post_create_proxy_base(ctx, create_result, display_id);
     let host_flag = host_header
         .as_deref()
         .map(|h| format!(" \\\n     -H \"Host: {}\"", h))
@@ -232,6 +240,52 @@ fn print_post_create_tip(ctx: &CliContext, sandbox_id: &str, display_id: &str, i
     eprintln!("Docs: https://docs.tensorlake.ai/sandboxes");
 }
 
+fn post_create_proxy_base(
+    ctx: &CliContext,
+    create_result: &CreateSandboxResult,
+    display_id: &str,
+) -> (String, Option<String>) {
+    if let Some(sandbox_url) = create_result.sandbox_url.clone() {
+        return (sandbox_url, None);
+    }
+
+    if let Some(sandbox_url) = create_result
+        .ingress_endpoint
+        .as_deref()
+        .and_then(|endpoint| sandbox_url_from_ingress_endpoint(endpoint, &create_result.sandbox_id))
+    {
+        return (sandbox_url, None);
+    }
+
+    let proxy_key = if create_result.sandbox_id == display_id {
+        create_result.sandbox_id.as_str()
+    } else {
+        display_id
+    };
+    sandbox_proxy_base(ctx, proxy_key)
+}
+
+fn sandbox_url_from_ingress_endpoint(ingress_endpoint: &str, sandbox_id: &str) -> Option<String> {
+    let parsed = url::Url::parse(ingress_endpoint).ok()?;
+    let host = parsed.host_str()?;
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let port = parsed
+        .port()
+        .map(|port| format!(":{port}"))
+        .unwrap_or_default();
+    Some(format!(
+        "{}://{}.{}{}",
+        parsed.scheme(),
+        sandbox_id,
+        host,
+        port
+    ))
+}
+
 fn build_create_request_body(
     cpus: Option<f64>,
     memory: Option<i64>,
@@ -293,7 +347,25 @@ fn build_create_request_body(
 
 #[cfg(test)]
 mod tests {
-    use super::{GpuRequest, build_create_request_body, format_ready_message};
+    use super::{
+        CreateSandboxResult, GpuRequest, build_create_request_body, format_ready_message,
+        post_create_proxy_base, sandbox_url_from_ingress_endpoint,
+    };
+    use crate::auth::context::CliContext;
+    use crate::config::resolver::ResolvedConfig;
+
+    fn test_ctx() -> CliContext {
+        CliContext::from_resolved(ResolvedConfig {
+            api_url: "https://api.tensorlake.ai".to_string(),
+            cloud_url: "https://cloud.tensorlake.ai".to_string(),
+            namespace: "default".to_string(),
+            api_key: None,
+            personal_access_token: None,
+            organization_id: None,
+            project_id: None,
+            debug: false,
+        })
+    }
 
     #[test]
     fn create_body_uses_defaults_without_snapshot() {
@@ -425,5 +497,74 @@ mod tests {
         let output = format_ready_message(None, "sbx-123");
 
         assert_eq!(output, "Sandbox sbx-123 is ready.\n");
+    }
+
+    #[test]
+    fn create_result_reads_endpoint_fields_from_typed_create_response() {
+        let response: CreateSandboxResult = serde_json::from_value(serde_json::json!({
+            "sandbox_id": "sbx-123",
+            "status": "running",
+            "sandbox_url": "https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai/",
+            "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai/"
+        }))
+        .unwrap();
+
+        assert_eq!(
+            response,
+            CreateSandboxResult {
+                sandbox_id: "sbx-123".to_string(),
+                status: Some("running".to_string()),
+                sandbox_url: Some(
+                    "https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai/".to_string()
+                ),
+                ingress_endpoint: Some("https://sandbox.us-east-1.aws.tensorlake.ai/".to_string()),
+            }
+        );
+    }
+
+    #[test]
+    fn sandbox_url_is_derived_from_returned_ingress_endpoint() {
+        assert_eq!(
+            sandbox_url_from_ingress_endpoint(
+                "https://sandbox.us-east-1.aws.tensorlake.ai",
+                "sbx-123"
+            ),
+            Some("https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai".to_string())
+        );
+    }
+
+    #[test]
+    fn post_create_tip_prefers_sandbox_url_from_create_response() {
+        let ctx = test_ctx();
+        let create_result = CreateSandboxResult {
+            sandbox_id: "sbx-123".to_string(),
+            status: Some("running".to_string()),
+            sandbox_url: Some("https://returned.example.com".to_string()),
+            ingress_endpoint: Some("https://ingress.example.com".to_string()),
+        };
+
+        assert_eq!(
+            post_create_proxy_base(&ctx, &create_result, "sbx-123"),
+            ("https://returned.example.com".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn post_create_tip_uses_ingress_endpoint_from_create_response() {
+        let ctx = test_ctx();
+        let create_result = CreateSandboxResult {
+            sandbox_id: "sbx-123".to_string(),
+            status: Some("running".to_string()),
+            sandbox_url: None,
+            ingress_endpoint: Some("https://sandbox.us-east-1.aws.tensorlake.ai".to_string()),
+        };
+
+        assert_eq!(
+            post_create_proxy_base(&ctx, &create_result, "sbx-123"),
+            (
+                "https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai".to_string(),
+                None
+            )
+        );
     }
 }

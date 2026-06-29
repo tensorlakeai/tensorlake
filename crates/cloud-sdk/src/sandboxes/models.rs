@@ -1,4 +1,110 @@
+use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxLogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+}
+
+impl SandboxLogLevel {
+    pub fn as_i8(self) -> i8 {
+        match self {
+            SandboxLogLevel::Trace => 1,
+            SandboxLogLevel::Debug => 2,
+            SandboxLogLevel::Info => 3,
+            SandboxLogLevel::Warn => 4,
+            SandboxLogLevel::Error => 5,
+            SandboxLogLevel::Fatal => 6,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SandboxLogSignal {
+    pub timestamp: u64,
+    pub uuid: uuid::Uuid,
+    pub namespace: String,
+    pub application: String,
+    #[serde(default, rename = "sandboxId")]
+    pub sandbox_id: Option<String>,
+    #[serde(default, rename = "resourceAttributes")]
+    pub resource_attributes: Vec<(String, String)>,
+    pub body: String,
+    #[serde(rename = "logAttributes")]
+    pub log_attributes: String,
+    #[serde(default)]
+    pub allocations: Vec<String>,
+    #[serde(default, rename = "functionRuns")]
+    pub function_runs: Vec<String>,
+    #[serde(default)]
+    pub level: Option<i8>,
+    #[serde(default)]
+    pub retention: Option<i8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxLogsResponse {
+    pub logs: Vec<SandboxLogSignal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_token: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxProcessLogFilter {
+    #[serde(rename = "processId")]
+    pub process_id: String,
+    #[serde(rename = "processPid")]
+    pub process_pid: String,
+    #[serde(rename = "processCommand")]
+    pub process_command: String,
+    #[serde(rename = "processManagedId")]
+    pub process_managed_id: String,
+    #[serde(rename = "processManagedName")]
+    pub process_managed_name: String,
+    #[serde(rename = "firstSeen")]
+    pub first_seen: i64,
+    #[serde(rename = "lastSeen")]
+    pub last_seen: i64,
+    #[serde(rename = "logCount")]
+    pub log_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SandboxProcessLogFiltersResponse {
+    pub processes: Vec<SandboxProcessLogFilter>,
+}
+
+#[derive(Builder, Clone, Debug, Default, Deserialize)]
+pub struct GetSandboxLogsRequest {
+    #[builder(setter(into))]
+    pub sandbox_id: String,
+    #[builder(default, setter(into))]
+    pub levels: Vec<SandboxLogLevel>,
+    #[builder(default, setter(into))]
+    pub process_ids: Vec<String>,
+    #[builder(default, setter(into, strip_option))]
+    pub next_token: Option<String>,
+    #[builder(default, setter(strip_option))]
+    pub head: Option<usize>,
+    #[builder(default, setter(strip_option))]
+    pub tail: Option<usize>,
+    #[builder(default, setter(into, strip_option))]
+    pub body: Option<String>,
+}
+
+impl GetSandboxLogsRequest {
+    pub fn builder() -> GetSandboxLogsRequestBuilder {
+        GetSandboxLogsRequestBuilder::default()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContainerResourcesInfo {

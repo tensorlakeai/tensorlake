@@ -20,11 +20,12 @@ pub use desktop::SandboxDesktopClient;
 use models::{
     ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CopySandboxResponse,
     CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
-    CreateSnapshotResponse, DaemonInfo, HealthResponse, ListArchivedSandboxesParams,
-    ListArchivedSandboxesResponse, ListDirectoryResponse, ListProcessesResponse,
-    ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse, OutputEvent,
-    OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxPoolInfo, SandboxPoolRequest,
-    SendSignalResponse, SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
+    CreateSnapshotResponse, DaemonInfo, GetSandboxLogsRequest, HealthResponse,
+    ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
+    ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
+    OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxLogsResponse,
+    SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse,
+    SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
 };
 
 /// A reference to a sandbox process: either its OS **pid** or a managed-process **name**
@@ -120,6 +121,7 @@ pub fn validate_managed_name(name: &str) -> Result<(), SdkError> {
 #[derive(Clone)]
 pub struct SandboxesClient {
     client: Client,
+    log_client: Client,
     namespace: String,
     use_namespaced_endpoints: bool,
 }
@@ -135,10 +137,17 @@ impl SandboxesClient {
         use_namespaced_endpoints: bool,
     ) -> Self {
         Self {
+            log_client: client.clone(),
             client,
             namespace: namespace.into(),
             use_namespaced_endpoints,
         }
+    }
+
+    /// Use a separate client/base URL for log-reader endpoints.
+    pub fn with_log_client(mut self, log_client: Client) -> Self {
+        self.log_client = log_client;
+        self
     }
 
     pub fn http_client(&self) -> &Client {
@@ -151,6 +160,10 @@ impl SandboxesClient {
         } else {
             format!("/{endpoint}")
         }
+    }
+
+    fn log_endpoint(&self, endpoint: &str) -> String {
+        format!("/v1/namespaces/{}/{}", self.namespace, endpoint)
     }
 
     pub async fn create(
@@ -248,6 +261,45 @@ impl SandboxesClient {
         let uri = self.endpoint(&format!("archived-sandboxes/{sandbox_id}"));
         let req = self.client.request(Method::GET, &uri).build()?;
         self.client.execute_json(req).await
+    }
+
+    pub async fn get_logs(
+        &self,
+        request: &GetSandboxLogsRequest,
+    ) -> Result<Traced<SandboxLogsResponse>, SdkError> {
+        let uri = self.log_endpoint(&format!("sandboxes/{}/logs", request.sandbox_id));
+        let mut req_builder = self.log_client.request(Method::GET, &uri);
+
+        for level in &request.levels {
+            req_builder = req_builder.query(&[("level", level.as_i8())]);
+        }
+        for process_id in &request.process_ids {
+            req_builder = req_builder.query(&[("processId", process_id)]);
+        }
+        if let Some(ref param_value) = request.next_token {
+            req_builder = req_builder.query(&[("nextToken", param_value)]);
+        }
+        if let Some(param_value) = request.head {
+            req_builder = req_builder.query(&[("head", param_value)]);
+        }
+        if let Some(param_value) = request.tail {
+            req_builder = req_builder.query(&[("tail", param_value)]);
+        }
+        if let Some(ref param_value) = request.body {
+            req_builder = req_builder.query(&[("body", param_value)]);
+        }
+
+        let req = req_builder.build()?;
+        self.log_client.execute_json(req).await
+    }
+
+    pub async fn list_log_processes(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Traced<SandboxProcessLogFiltersResponse>, SdkError> {
+        let uri = self.log_endpoint(&format!("sandboxes/{sandbox_id}/processes"));
+        let req = self.log_client.request(Method::GET, &uri).build()?;
+        self.log_client.execute_json(req).await
     }
 
     pub async fn update(
@@ -849,21 +901,36 @@ impl SandboxProxyClient {
 
 #[cfg(test)]
 mod process_ref_tests {
-    use super::{validate_managed_name, ProcessRef};
+    use super::{ProcessRef, validate_managed_name};
 
     #[test]
     fn validate_managed_name_rules() {
         // Only three rejections: empty, contains '/', and all-digits (reserved for PID).
         let long_digits = "9".repeat(100);
         for bad in ["", "123", "0", "a/b", "worker/api", &long_digits] {
-            assert!(validate_managed_name(bad).is_err(), "expected {bad:?} rejected");
+            assert!(
+                validate_managed_name(bad).is_err(),
+                "expected {bad:?} rejected"
+            );
         }
         // Permissive: spaces, punctuation, leading/trailing whitespace, and unicode are all
         // allowed now (clients percent-encode the path segment).
         for ok in [
-            "web", "web1", "1web", "my-app_v.2", "web 1", " web ", "a?b", "a%b", "a#b", "café",
+            "web",
+            "web1",
+            "1web",
+            "my-app_v.2",
+            "web 1",
+            " web ",
+            "a?b",
+            "a%b",
+            "a#b",
+            "café",
         ] {
-            assert!(validate_managed_name(ok).is_ok(), "expected {ok:?} accepted");
+            assert!(
+                validate_managed_name(ok).is_ok(),
+                "expected {ok:?} accepted"
+            );
         }
     }
 
