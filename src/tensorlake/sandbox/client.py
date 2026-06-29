@@ -62,6 +62,7 @@ def _normalize_log_levels(
         for level in levels
     ]
 
+
 try:
     from tensorlake._cloud_sdk import CloudSandboxClient as RustCloudSandboxClient
     from tensorlake._cloud_sdk import (
@@ -805,7 +806,9 @@ class SandboxClient:
             trace_id, response_json = self._rust_client.get_sandbox_logs_json(
                 json.dumps(payload)
             )
-            return Traced(trace_id, SandboxLogsResponse.model_validate_json(response_json))
+            return Traced(
+                trace_id, SandboxLogsResponse.model_validate_json(response_json)
+            )
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None

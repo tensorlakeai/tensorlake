@@ -466,10 +466,12 @@ class AsyncSandboxClient:
             "body": body,
         }
         try:
-            trace_id, response_json = await self._rust_client.get_sandbox_logs_json_async(
-                json.dumps(payload)
+            trace_id, response_json = (
+                await self._rust_client.get_sandbox_logs_json_async(json.dumps(payload))
             )
-            return Traced(trace_id, SandboxLogsResponse.model_validate_json(response_json))
+            return Traced(
+                trace_id, SandboxLogsResponse.model_validate_json(response_json)
+            )
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
