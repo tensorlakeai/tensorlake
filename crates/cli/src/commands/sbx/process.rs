@@ -6,6 +6,16 @@ use crate::commands::sbx::{
 };
 use crate::error::{CliError, Result};
 
+pub struct LogsArgs<'a> {
+    pub levels: Vec<i8>,
+    pub process_ids: Vec<String>,
+    pub next_token: Option<&'a str>,
+    pub head: Option<usize>,
+    pub tail: Option<usize>,
+    pub body: Option<&'a str>,
+    pub json: bool,
+}
+
 pub async fn ps(
     ctx: &CliContext,
     sandbox_id: &str,
@@ -42,6 +52,85 @@ pub async fn ps(
         } else {
             print_process_table(processes);
         }
+    }
+    Ok(())
+}
+
+pub async fn logs(ctx: &CliContext, sandbox_id: &str, args: LogsArgs<'_>) -> Result<()> {
+    let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
+    let client = ctx.client()?;
+    let url = format!(
+        "{}/v1/namespaces/{}/sandboxes/{}/logs",
+        ctx.api_url.trim_end_matches('/'),
+        ctx.namespace,
+        target.sandbox_id
+    );
+    let mut request = client.get(url);
+    for level in args.levels {
+        request = request.query(&[("level", level)]);
+    }
+    for process_id in args.process_ids {
+        request = request.query(&[("processId", process_id)]);
+    }
+    if let Some(next_token) = args.next_token {
+        request = request.query(&[("nextToken", next_token)]);
+    }
+    if let Some(head) = args.head {
+        request = request.query(&[("head", head)]);
+    }
+    if let Some(tail) = args.tail {
+        request = request.query(&[("tail", tail)]);
+    }
+    if let Some(body) = args.body {
+        request = request.query(&[("body", body)]);
+    }
+
+    let body = send_api_request(request, "sandbox logs").await?;
+    if args.json {
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    let logs = body
+        .get("logs")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    for log in logs {
+        if let Some(line) = log.get("body").and_then(Value::as_str) {
+            println!("{line}");
+        }
+    }
+    if let Some(next_token) = body.get("nextToken").and_then(Value::as_str) {
+        eprintln!("nextToken: {next_token}");
+    }
+    Ok(())
+}
+
+pub async fn log_processes(ctx: &CliContext, sandbox_id: &str, json: bool) -> Result<()> {
+    let target = resolve_sandbox_proxy_target(ctx, sandbox_id).await?;
+    let client = ctx.client()?;
+    let url = format!(
+        "{}/v1/namespaces/{}/sandboxes/{}/processes",
+        ctx.api_url.trim_end_matches('/'),
+        ctx.namespace,
+        target.sandbox_id
+    );
+    let body = send_api_request(client.get(url), "sandbox log processes").await?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&body)?);
+        return Ok(());
+    }
+
+    let processes = body
+        .get("processes")
+        .and_then(Value::as_array)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
+    if processes.is_empty() {
+        println!("No process logs found.");
+    } else {
+        print_log_process_table(processes);
     }
     Ok(())
 }
@@ -100,6 +189,24 @@ async fn send_process_request(
     serde_json::from_slice(&bytes).map_err(Into::into)
 }
 
+async fn send_api_request(request: reqwest::RequestBuilder, label: &str) -> Result<Value> {
+    let resp = request.send().await.map_err(CliError::Http)?;
+    if !resp.status().is_success() {
+        let status = resp.status();
+        let body = resp.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "{label} request failed (HTTP {}): {}",
+            status,
+            body
+        )));
+    }
+    let bytes = resp.bytes().await.map_err(CliError::Http)?;
+    if bytes.is_empty() {
+        return Ok(Value::Null);
+    }
+    serde_json::from_slice(&bytes).map_err(Into::into)
+}
+
 fn print_process_table(processes: &[Value]) {
     println!("PID\tStatus\tManaged\tName\tRestarts\tHealth\tCommand");
     for process in processes {
@@ -131,6 +238,31 @@ fn print_process_table(processes: &[Value]) {
             .unwrap_or("");
         println!("{pid}\t{status}\t{managed_flag}\t{name}\t{restarts}\t{health}\t{command}");
     }
+}
+
+fn print_log_process_table(processes: &[Value]) {
+    println!("Process ID\tPID\tManaged ID\tName\tLogs\tCommand");
+    for process in processes {
+        let process_id = string_field(process, "processId");
+        let pid = string_field(process, "processPid");
+        let managed_id = string_field(process, "processManagedId");
+        let name = string_field(process, "processManagedName");
+        let command = string_field(process, "processCommand");
+        let log_count = process
+            .get("logCount")
+            .and_then(Value::as_u64)
+            .map(|value| value.to_string())
+            .unwrap_or_default();
+        println!("{process_id}\t{pid}\t{managed_id}\t{name}\t{log_count}\t{command}");
+    }
+}
+
+fn string_field(value: &Value, key: &str) -> String {
+    value
+        .get(key)
+        .and_then(Value::as_str)
+        .unwrap_or("")
+        .to_string()
 }
 
 fn format_command(process: &Value) -> String {

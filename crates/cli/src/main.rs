@@ -706,6 +706,50 @@ enum SbxCommands {
         json: bool,
     },
 
+    /// Read persisted sandbox logs
+    Logs {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Filter by log level
+        #[arg(long, value_enum)]
+        level: Vec<SandboxLogLevelArg>,
+
+        /// Filter by stable process ID from `sbx log-processes`
+        #[arg(long = "process-id")]
+        process_id: Vec<String>,
+
+        /// Pagination token returned by a previous response
+        #[arg(long)]
+        next_token: Option<String>,
+
+        /// Read the oldest N logs
+        #[arg(long, conflicts_with = "tail")]
+        head: Option<usize>,
+
+        /// Read the newest N logs
+        #[arg(long)]
+        tail: Option<usize>,
+
+        /// Case-insensitive body text search
+        #[arg(long)]
+        body: Option<String>,
+
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List process IDs available for persisted sandbox log filtering
+    LogProcesses {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Restart a managed sandbox process
     Restart {
         /// Sandbox ID or name
@@ -1011,6 +1055,29 @@ enum RestartPolicyArg {
     Never,
     OnFailure,
     Always,
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum SandboxLogLevelArg {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+}
+
+impl SandboxLogLevelArg {
+    fn as_query_value(self) -> i8 {
+        match self {
+            SandboxLogLevelArg::Trace => 1,
+            SandboxLogLevelArg::Debug => 2,
+            SandboxLogLevelArg::Info => 3,
+            SandboxLogLevelArg::Warn => 4,
+            SandboxLogLevelArg::Error => 5,
+            SandboxLogLevelArg::Fatal => 6,
+        }
+    }
 }
 
 impl RestartPolicyArg {
@@ -1393,7 +1460,37 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         sandbox_id,
                         process,
                         json,
-                    } => commands::sbx::process::ps(ctx, &sandbox_id, process.as_deref(), json).await,
+                    } => {
+                        commands::sbx::process::ps(ctx, &sandbox_id, process.as_deref(), json).await
+                    }
+                    SbxCommands::Logs {
+                        sandbox_id,
+                        level,
+                        process_id,
+                        next_token,
+                        head,
+                        tail,
+                        body,
+                        json,
+                    } => {
+                        commands::sbx::process::logs(
+                            ctx,
+                            &sandbox_id,
+                            commands::sbx::process::LogsArgs {
+                                levels: level.iter().map(|level| level.as_query_value()).collect(),
+                                process_ids: process_id,
+                                next_token: next_token.as_deref(),
+                                head,
+                                tail,
+                                body: body.as_deref(),
+                                json,
+                            },
+                        )
+                        .await
+                    }
+                    SbxCommands::LogProcesses { sandbox_id, json } => {
+                        commands::sbx::process::log_processes(ctx, &sandbox_id, json).await
+                    }
                     SbxCommands::Restart {
                         sandbox_id,
                         process,

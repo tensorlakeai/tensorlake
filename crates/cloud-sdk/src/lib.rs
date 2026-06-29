@@ -307,6 +307,7 @@ impl Sdk {
             namespace.to_string(),
             use_namespaced_endpoints,
         )
+        .with_log_client(self.client.clone())
     }
 
     /// Get a client for Document AI APIs.

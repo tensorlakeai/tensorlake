@@ -25,6 +25,7 @@ from .client import (
     RustCloudSandboxClient,
     _build_gpu_resources,
     _normalize_user_ports,
+    _normalize_log_levels,
     _parse_rust_client_error_fields,
     _raise_as_sandbox_error,
     _resolve_sandbox_identifier,
@@ -54,7 +55,10 @@ from .models import (
     ListSnapshotsResponse,
     NetworkConfig,
     SandboxInfo,
+    SandboxLogLevel,
+    SandboxLogsResponse,
     SandboxPoolInfo,
+    SandboxProcessLogFiltersResponse,
     SandboxPoolRequest,
     SandboxPortAccess,
     SandboxStatus,
@@ -436,6 +440,55 @@ class AsyncSandboxClient:
                 sandbox_id=sandbox_id
             )
             return Traced(trace_id, None)
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    async def get_logs(
+        self,
+        sandbox_id: str,
+        *,
+        levels: list[SandboxLogLevel | str] | None = None,
+        process_ids: list[str] | None = None,
+        next_token: str | None = None,
+        head: int | None = None,
+        tail: int | None = None,
+        body: str | None = None,
+    ) -> Traced[SandboxLogsResponse]:
+        payload = {
+            "sandbox_id": sandbox_id,
+            "levels": _normalize_log_levels(levels),
+            "process_ids": process_ids or [],
+            "next_token": next_token,
+            "head": head,
+            "tail": tail,
+            "body": body,
+        }
+        try:
+            trace_id, response_json = await self._rust_client.get_sandbox_logs_json_async(
+                json.dumps(payload)
+            )
+            return Traced(trace_id, SandboxLogsResponse.model_validate_json(response_json))
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    async def list_log_processes(
+        self, sandbox_id: str
+    ) -> Traced[SandboxProcessLogFiltersResponse]:
+        try:
+            (
+                trace_id,
+                response_json,
+            ) = await self._rust_client.list_sandbox_log_processes_json_async(
+                sandbox_id
+            )
+            return Traced(
+                trace_id,
+                SandboxProcessLogFiltersResponse.model_validate_json(response_json),
+            )
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None

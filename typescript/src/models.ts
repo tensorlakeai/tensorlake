@@ -238,6 +238,60 @@ export interface SnapshotAndWaitOptions extends SnapshotOptions {
   waitUntil?: SnapshotWaitCondition;
 }
 
+// --- Persisted sandbox logs ---
+
+export type SandboxLogLevel =
+  | "trace"
+  | "debug"
+  | "info"
+  | "warn"
+  | "error"
+  | "fatal";
+
+export interface GetSandboxLogsOptions {
+  levels?: SandboxLogLevel[];
+  processIds?: string[];
+  nextToken?: string;
+  head?: number;
+  tail?: number;
+  body?: string;
+}
+
+export interface SandboxLogSignal {
+  timestamp: number;
+  uuid: string;
+  namespace: string;
+  application: string;
+  sandboxId?: string;
+  resourceAttributes: Array<[string, string]>;
+  body: string;
+  logAttributes: string;
+  allocations?: string[];
+  functionRuns?: string[];
+  level?: number;
+  retention?: number;
+}
+
+export interface SandboxLogsResponse {
+  logs: SandboxLogSignal[];
+  nextToken?: string;
+}
+
+export interface SandboxProcessLogFilter {
+  processId: string;
+  processPid: string;
+  processCommand: string;
+  processManagedId: string;
+  processManagedName: string;
+  firstSeen: number;
+  lastSeen: number;
+  logCount: number;
+}
+
+export interface SandboxProcessLogFiltersResponse {
+  processes: SandboxProcessLogFilter[];
+}
+
 // --- Pools ---
 
 export interface CreatePoolOptions {

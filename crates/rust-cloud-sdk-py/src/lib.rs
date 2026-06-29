@@ -26,8 +26,8 @@ use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuild
 use tensorlake::sandbox_images::SandboxImageBuildEvent;
 use tensorlake::sandbox_templates::SandboxTemplatesClient;
 use tensorlake::sandboxes::models::{
-    ArchivedSandboxesPaginationDirection, CreateSandboxRequest, ListArchivedSandboxesParams,
-    SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
+    ArchivedSandboxesPaginationDirection, CreateSandboxRequest, GetSandboxLogsRequest,
+    ListArchivedSandboxesParams, SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
@@ -607,31 +607,39 @@ impl CloudSandboxClient {
         request_timeout_sec: Option<f64>,
     ) -> PyResult<Self> {
         let lifecycle_url = resolve_sandbox_lifecycle_url(&api_url);
-        let mut builder = ClientBuilder::new(&lifecycle_url);
+        let mut lifecycle_builder = ClientBuilder::new(&lifecycle_url);
+        let mut api_builder = ClientBuilder::new(&api_url);
         if let Some(token) = api_key.as_deref() {
-            builder = builder.bearer_token(token);
+            lifecycle_builder = lifecycle_builder.bearer_token(token);
+            api_builder = api_builder.bearer_token(token);
         }
 
         if let (Some(org_id), Some(project_id)) =
             (organization_id.as_deref(), project_id.as_deref())
         {
-            builder = builder.scope(org_id, project_id);
+            lifecycle_builder = lifecycle_builder.scope(org_id, project_id);
+            api_builder = api_builder.scope(org_id, project_id);
         }
 
         if let Some(ua) = user_agent.as_deref() {
-            builder = builder.user_agent(ua);
+            lifecycle_builder = lifecycle_builder.user_agent(ua);
+            api_builder = api_builder.user_agent(ua);
         }
         if let Some(seconds) = request_timeout_sec {
-            builder = builder.timeout(duration_from_seconds("request_timeout_sec", seconds)?);
+            let timeout = duration_from_seconds("request_timeout_sec", seconds)?;
+            lifecycle_builder = lifecycle_builder.timeout(timeout);
+            api_builder = api_builder.timeout(timeout);
         }
 
-        let client = builder.build().map_err(into_sandbox_py_error)?;
+        let client = lifecycle_builder.build().map_err(into_sandbox_py_error)?;
+        let log_client = api_builder.build().map_err(into_sandbox_py_error)?;
         let use_namespaced_endpoints = is_localhost_api_url(&api_url);
         let sandboxes_client = SandboxesClient::new(
             client,
             namespace.unwrap_or_else(|| "default".to_string()),
             use_namespaced_endpoints,
-        );
+        )
+        .with_log_client(log_client);
 
         Ok(Self {
             client: sandboxes_client,
@@ -725,6 +733,31 @@ impl CloudSandboxClient {
             let sandbox_id = sandbox_id.clone();
             async move {
                 let traced = client.get_archived(&sandbox_id).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
+    fn get_sandbox_logs_json(&self, request_json: String) -> PyResult<(String, String)> {
+        let request: GetSandboxLogsRequest = parse_json_payload(&request_json)?;
+        self.run_with_retry(5, move |client| {
+            let request = request.clone();
+            async move {
+                let traced = client.get_logs(&request).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
+    fn list_sandbox_log_processes_json(&self, sandbox_id: String) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            async move {
+                let traced = client.list_log_processes(&sandbox_id).await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
                 Ok((trace_id, json))
@@ -1008,6 +1041,45 @@ impl CloudSandboxClient {
             let traced = retry_async_op(client, 5, move |c| {
                 let sandbox_id = sandbox_id.clone();
                 async move { c.get_archived(&sandbox_id).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn get_sandbox_logs_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        request_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let request: GetSandboxLogsRequest = parse_json_payload(&request_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let request = request.clone();
+                async move { c.get_logs(&request).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    fn list_sandbox_log_processes_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move { c.list_log_processes(&sandbox_id).await }
             })
             .await
             .map_err(into_sandbox_py_error)?;
