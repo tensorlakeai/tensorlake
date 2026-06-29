@@ -8,7 +8,7 @@ mod output;
 mod project;
 mod python_ast;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::num::NonZeroUsize;
 
 use auth::context::CliContext;
@@ -707,48 +707,7 @@ enum SbxCommands {
     },
 
     /// Read persisted sandbox logs
-    Logs {
-        /// Sandbox ID or name
-        sandbox_id: String,
-
-        /// Filter by log level
-        #[arg(long, value_enum)]
-        level: Vec<SandboxLogLevelArg>,
-
-        /// Filter by stable process ID from `sbx log-processes`
-        #[arg(long = "process-id")]
-        process_id: Vec<String>,
-
-        /// Pagination token returned by a previous response
-        #[arg(long)]
-        next_token: Option<String>,
-
-        /// Read the oldest N logs
-        #[arg(long, conflicts_with = "tail")]
-        head: Option<usize>,
-
-        /// Read the newest N logs
-        #[arg(long)]
-        tail: Option<usize>,
-
-        /// Case-insensitive body text search
-        #[arg(long)]
-        body: Option<String>,
-
-        /// Print JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// List process IDs available for persisted sandbox log filtering
-    LogProcesses {
-        /// Sandbox ID or name
-        sandbox_id: String,
-
-        /// Print JSON
-        #[arg(long)]
-        json: bool,
-    },
+    Logs(LogsCliArgs),
 
     /// Restart a managed sandbox process
     Restart {
@@ -1055,6 +1014,56 @@ enum RestartPolicyArg {
     Never,
     OnFailure,
     Always,
+}
+
+#[derive(Args, Clone, Debug)]
+struct LogsCliArgs {
+    #[command(subcommand)]
+    command: Option<LogsCommands>,
+
+    /// Sandbox ID or name
+    sandbox_id: Option<String>,
+
+    /// Filter by log level
+    #[arg(long, value_enum)]
+    level: Vec<SandboxLogLevelArg>,
+
+    /// Filter by stable process ID from `sbx logs streams`
+    #[arg(long = "process-id")]
+    process_id: Vec<String>,
+
+    /// Pagination token returned by a previous response
+    #[arg(long)]
+    next_token: Option<String>,
+
+    /// Read the oldest N logs
+    #[arg(long, conflicts_with = "tail")]
+    head: Option<usize>,
+
+    /// Read the newest N logs
+    #[arg(long)]
+    tail: Option<usize>,
+
+    /// Case-insensitive body text search
+    #[arg(long)]
+    body: Option<String>,
+
+    /// Print JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+enum LogsCommands {
+    /// List streams available for persisted sandbox log filtering
+    Streams {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
@@ -1463,34 +1472,36 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     } => {
                         commands::sbx::process::ps(ctx, &sandbox_id, process.as_deref(), json).await
                     }
-                    SbxCommands::Logs {
-                        sandbox_id,
-                        level,
-                        process_id,
-                        next_token,
-                        head,
-                        tail,
-                        body,
-                        json,
-                    } => {
-                        commands::sbx::process::logs(
-                            ctx,
-                            &sandbox_id,
-                            commands::sbx::process::LogsArgs {
-                                levels: level.iter().map(|level| level.as_query_value()).collect(),
-                                process_ids: process_id,
-                                next_token: next_token.as_deref(),
-                                head,
-                                tail,
-                                body: body.as_deref(),
-                                json,
-                            },
-                        )
-                        .await
-                    }
-                    SbxCommands::LogProcesses { sandbox_id, json } => {
-                        commands::sbx::process::log_processes(ctx, &sandbox_id, json).await
-                    }
+                    SbxCommands::Logs(args) => match args.command.clone() {
+                        Some(LogsCommands::Streams { sandbox_id, json }) => {
+                            commands::sbx::process::log_processes(ctx, &sandbox_id, json).await
+                        }
+                        None => {
+                            let sandbox_id = args.sandbox_id.ok_or_else(|| {
+                                CliError::Other(anyhow::anyhow!(
+                                    "logs requires a sandbox ID or the 'streams' subcommand"
+                                ))
+                            })?;
+                            commands::sbx::process::logs(
+                                ctx,
+                                &sandbox_id,
+                                commands::sbx::process::LogsArgs {
+                                    levels: args
+                                        .level
+                                        .iter()
+                                        .map(|level| level.as_query_value())
+                                        .collect(),
+                                    process_ids: args.process_id,
+                                    next_token: args.next_token.as_deref(),
+                                    head: args.head,
+                                    tail: args.tail,
+                                    body: args.body.as_deref(),
+                                    json: args.json,
+                                },
+                            )
+                            .await
+                        }
+                    },
                     SbxCommands::Restart {
                         sandbox_id,
                         process,
@@ -2199,6 +2210,47 @@ mod tests {
                 assert_eq!(process, "web");
             }
             _ => panic!("expected sbx kill command"),
+        }
+    }
+
+    #[test]
+    fn sbx_logs_commands_parse() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "logs",
+            "sbx-123",
+            "--level",
+            "info",
+            "--process-id",
+            "proc-1",
+            "--tail",
+            "25",
+            "--json",
+        ]) {
+            Commands::Sbx(SbxCommands::Logs(args)) => {
+                assert_eq!(args.sandbox_id.as_deref(), Some("sbx-123"));
+                assert_eq!(args.command, None);
+                assert_eq!(args.level, vec![SandboxLogLevelArg::Info]);
+                assert_eq!(args.process_id, vec!["proc-1"]);
+                assert_eq!(args.tail, Some(25));
+                assert!(args.json);
+            }
+            _ => panic!("expected sbx logs command"),
+        }
+
+        match parse_command(["tl", "sbx", "logs", "streams", "sbx-123", "--json"]) {
+            Commands::Sbx(SbxCommands::Logs(args)) => {
+                assert_eq!(args.sandbox_id, None);
+                match args.command {
+                    Some(LogsCommands::Streams { sandbox_id, json }) => {
+                        assert_eq!(sandbox_id, "sbx-123");
+                        assert!(json);
+                    }
+                    _ => panic!("expected sbx logs streams command"),
+                }
+            }
+            _ => panic!("expected sbx logs command"),
         }
     }
 
