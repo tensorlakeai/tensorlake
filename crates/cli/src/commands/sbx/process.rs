@@ -1,4 +1,8 @@
 use serde_json::Value;
+use tensorlake::sandboxes::models::{
+    SandboxLogSignal, SandboxLogsResponse, SandboxProcessLogFilter,
+    SandboxProcessLogFiltersResponse,
+};
 
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
@@ -85,23 +89,16 @@ pub async fn logs(ctx: &CliContext, sandbox_id: &str, args: LogsArgs<'_>) -> Res
         request = request.query(&[("body", body)]);
     }
 
-    let body = send_api_request(request, "sandbox logs").await?;
+    let body: SandboxLogsResponse = send_api_request(request, "sandbox logs").await?;
     if args.json {
         println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
     }
 
-    let logs = body
-        .get("logs")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    for log in logs {
-        if let Some(line) = log.get("body").and_then(Value::as_str) {
-            println!("{line}");
-        }
+    for log in &body.logs {
+        println!("{}", default_log_line(log));
     }
-    if let Some(next_token) = body.get("nextToken").and_then(Value::as_str) {
+    if let Some(next_token) = body.next_token {
         eprintln!("nextToken: {next_token}");
     }
     Ok(())
@@ -116,21 +113,17 @@ pub async fn log_processes(ctx: &CliContext, sandbox_id: &str, json: bool) -> Re
         ctx.namespace,
         target.sandbox_id
     );
-    let body = send_api_request(client.get(url), "sandbox log processes").await?;
+    let body: SandboxProcessLogFiltersResponse =
+        send_api_request(client.get(url), "sandbox log processes").await?;
     if json {
         println!("{}", serde_json::to_string_pretty(&body)?);
         return Ok(());
     }
 
-    let processes = body
-        .get("processes")
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
-    if processes.is_empty() {
+    if body.processes.is_empty() {
         println!("No process logs found.");
     } else {
-        print_log_process_table(processes);
+        print_log_process_table(&body.processes);
     }
     Ok(())
 }
@@ -189,7 +182,10 @@ async fn send_process_request(
     serde_json::from_slice(&bytes).map_err(Into::into)
 }
 
-async fn send_api_request(request: reqwest::RequestBuilder, label: &str) -> Result<Value> {
+async fn send_api_request<T>(request: reqwest::RequestBuilder, label: &str) -> Result<T>
+where
+    T: serde::de::DeserializeOwned,
+{
     let resp = request.send().await.map_err(CliError::Http)?;
     if !resp.status().is_success() {
         let status = resp.status();
@@ -201,10 +197,20 @@ async fn send_api_request(request: reqwest::RequestBuilder, label: &str) -> Resu
         )));
     }
     let bytes = resp.bytes().await.map_err(CliError::Http)?;
-    if bytes.is_empty() {
-        return Ok(Value::Null);
-    }
     serde_json::from_slice(&bytes).map_err(Into::into)
+}
+
+fn default_log_line(log: &SandboxLogSignal) -> &str {
+    let log_attributes = log.log_attributes.trim();
+    if has_log_attributes(log_attributes) {
+        log_attributes
+    } else {
+        &log.body
+    }
+}
+
+fn has_log_attributes(log_attributes: &str) -> bool {
+    !matches!(log_attributes, "" | "{}" | "null")
 }
 
 fn print_process_table(processes: &[Value]) {
@@ -240,29 +246,19 @@ fn print_process_table(processes: &[Value]) {
     }
 }
 
-fn print_log_process_table(processes: &[Value]) {
+fn print_log_process_table(processes: &[SandboxProcessLogFilter]) {
     println!("Process ID\tPID\tManaged ID\tName\tLogs\tCommand");
     for process in processes {
-        let process_id = string_field(process, "processId");
-        let pid = string_field(process, "processPid");
-        let managed_id = string_field(process, "processManagedId");
-        let name = string_field(process, "processManagedName");
-        let command = string_field(process, "processCommand");
-        let log_count = process
-            .get("logCount")
-            .and_then(Value::as_u64)
-            .map(|value| value.to_string())
-            .unwrap_or_default();
-        println!("{process_id}\t{pid}\t{managed_id}\t{name}\t{log_count}\t{command}");
+        println!(
+            "{}\t{}\t{}\t{}\t{}\t{}",
+            process.process_id,
+            process.process_pid,
+            process.process_managed_id,
+            process.process_managed_name,
+            process.log_count,
+            process.process_command
+        );
     }
-}
-
-fn string_field(value: &Value, key: &str) -> String {
-    value
-        .get(key)
-        .and_then(Value::as_str)
-        .unwrap_or("")
-        .to_string()
 }
 
 fn format_command(process: &Value) -> String {
@@ -274,4 +270,47 @@ fn format_command(process: &Value) -> String {
         parts.extend(args.iter().filter_map(Value::as_str).map(str::to_string));
     }
     parts.join(" ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn log_signal(body: &str, log_attributes: &str) -> SandboxLogSignal {
+        serde_json::from_str(&format!(
+            r#"{{
+                "timestamp": 1,
+                "uuid": "018f06cc-0ba2-7def-86f4-3b5f64f847d0",
+                "namespace": "default",
+                "application": "",
+                "sandboxId": "sbx",
+                "resourceAttributes": [],
+                "body": {body:?},
+                "logAttributes": {log_attributes:?},
+                "allocations": [],
+                "functionRuns": []
+            }}"#
+        ))
+        .unwrap()
+    }
+
+    #[test]
+    fn default_log_line_prefers_log_attributes() {
+        let log = log_signal("fallback body", r#"{"event":"started"}"#);
+
+        assert_eq!(default_log_line(&log), r#"{"event":"started"}"#);
+    }
+
+    #[test]
+    fn default_log_line_falls_back_to_body_without_log_attributes() {
+        assert_eq!(default_log_line(&log_signal("from body", "")), "from body");
+        assert_eq!(
+            default_log_line(&log_signal("from body", "{}")),
+            "from body"
+        );
+        assert_eq!(
+            default_log_line(&log_signal("from body", "null")),
+            "from body"
+        );
+    }
 }
