@@ -20,7 +20,7 @@ permissions:
 jobs:
   integration-test:
     name: Integration test against TestPyPI
-    environment: dev
+    environment: prod
     runs-on: ubuntu-latest
     steps:
       - name: Write test application

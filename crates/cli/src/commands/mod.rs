@@ -3,6 +3,7 @@ pub mod build_images;
 pub mod cron;
 pub mod deploy;
 pub mod fs;
+pub mod git;
 pub mod init;
 pub mod login;
 pub mod new;

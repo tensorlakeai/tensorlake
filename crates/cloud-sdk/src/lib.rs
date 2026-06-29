@@ -67,6 +67,7 @@
 //! ```
 
 pub mod applications;
+pub mod artifact_storage;
 pub mod cron;
 pub mod document_ai;
 pub mod error;
@@ -77,6 +78,7 @@ pub mod sandbox_templates;
 pub mod sandboxes;
 pub mod secrets;
 use applications::*;
+use artifact_storage::*;
 use cron::*;
 use document_ai::*;
 use filesystems::*;
@@ -102,6 +104,13 @@ pub fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
         }
     }
     "https://sandbox.tensorlake.ai".to_string()
+}
+
+/// Derive the Artifact Storage Git base URL from the API URL.
+///
+/// Converts `api.tensorlake.*` -> `git.tensorlake.*`. Localhost is unchanged.
+pub fn resolve_artifact_storage_url(api_url: &str) -> String {
+    artifact_storage::resolve_artifact_storage_url(api_url)
 }
 
 /// The main entry point for the Tensorlake Cloud SDK.
@@ -253,6 +262,22 @@ impl Sdk {
     /// ```
     pub fn images(&self) -> ImagesClient {
         ImagesClient::new(self.client.clone())
+    }
+
+    /// Get a client for Artifact Storage repositories and Git credentials.
+    pub fn artifact_storage(&self) -> Result<ArtifactStorageClient, error::SdkError> {
+        ArtifactStorageClient::new(
+            self.client.clone(),
+            resolve_artifact_storage_url(&self.api_url),
+        )
+    }
+
+    /// Get a client for Artifact Storage using an explicit Git/data-plane base URL.
+    pub fn artifact_storage_with_url(
+        &self,
+        git_base_url: &str,
+    ) -> Result<ArtifactStorageClient, error::SdkError> {
+        ArtifactStorageClient::new(self.client.clone(), git_base_url)
     }
 
     /// Get a client for managing snapshot-backed sandbox image registrations.

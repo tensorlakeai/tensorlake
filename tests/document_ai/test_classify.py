@@ -7,10 +7,7 @@ from tensorlake.documentai import DocumentAI, PageClassConfig, ParseStatus
 
 class TestClassify(unittest.TestCase):
     def setUp(self):
-        server_url = os.getenv("TENSORLAKE_API_URL")
-        self.assertIsNotNone(
-            server_url, "TENSORLAKE_API_URL environment variable is not set."
-        )
+        server_url = os.getenv("TENSORLAKE_API_URL", "https://api.tensorlake.ai")
 
         api_key = os.getenv("TENSORLAKE_API_KEY")
         self.assertIsNotNone(
