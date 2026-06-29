@@ -148,14 +148,14 @@ mod tests {
 
     #[test]
     fn next_request_path_keeps_absolute_path_and_query() {
-        let next = "/platform/v1/organizations/org/projects/proj/sandbox-templates?pageSize=100&next=abc";
+        let next =
+            "/platform/v1/organizations/org/projects/proj/sandbox-templates?pageSize=100&next=abc";
         assert_eq!(next_request_path(next), next);
     }
 
     #[test]
     fn next_request_path_reduces_absolute_url_to_path_and_query() {
-        let next =
-            "https://api.tensorlake.ai/platform/v1/organizations/org/projects/proj/sandbox-templates?next=abc";
+        let next = "https://api.tensorlake.ai/platform/v1/organizations/org/projects/proj/sandbox-templates?next=abc";
         assert_eq!(
             next_request_path(next),
             "/platform/v1/organizations/org/projects/proj/sandbox-templates?next=abc"
@@ -164,6 +164,9 @@ mod tests {
 
     #[test]
     fn next_request_path_prefixes_bare_relative_links() {
-        assert_eq!(next_request_path("sandbox-templates?next=abc"), "/sandbox-templates?next=abc");
+        assert_eq!(
+            next_request_path("sandbox-templates?next=abc"),
+            "/sandbox-templates?next=abc"
+        );
     }
 }

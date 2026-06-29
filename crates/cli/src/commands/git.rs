@@ -1,4 +1,5 @@
 use comfy_table::Cell;
+use console::style;
 use tensorlake::artifact_storage::ArtifactStorageClient;
 use tensorlake::artifact_storage::models::{
     ListBranchesResponse, ListOperationsResponse, ListRefsResponse, ListReposResponse,
@@ -15,11 +16,7 @@ pub fn repo_url(ctx: &CliContext, repo: &str) -> Result<String> {
     Ok(client.git_repo_url(&project_id, repo))
 }
 
-pub async fn mint_token(
-    ctx: &CliContext,
-    repo: Option<&str>,
-    output_json: bool,
-) -> Result<()> {
+pub async fn mint_token(ctx: &CliContext, repo: Option<&str>, output_json: bool) -> Result<()> {
     let project_id = project_id(ctx)?;
     let credential = artifact_storage_client(ctx)?
         .mint_token_for_repo(&project_id, repo)
@@ -30,23 +27,32 @@ pub async fn mint_token(
         return Ok(());
     }
 
-    println!("project: {project_id}");
-    println!("repo: {}", credential.repo_pattern);
-    println!("username: {}", credential.git_username);
-    println!("password: {}", credential.token);
-    println!("expires: {}", credential.expires_at);
-    println!("scopes: {}", credential.scopes.join(", "));
+    print_field("project", &project_id);
+    print_field("repo", &credential.repo_pattern);
+    print_field("username", &credential.git_username);
+    println!(
+        "{} {}",
+        style("password:").dim(),
+        style(&credential.token).yellow()
+    );
+    print_field("expires", &credential.expires_at);
+    print_field("scopes", &credential.scopes.join(", "));
 
     if credential.repo_pattern != "*" {
         let remote_url =
             artifact_storage_client(ctx)?.git_repo_url(&project_id, &credential.repo_pattern);
         println!();
-        println!("Use this as a Git credential for:");
-        println!("  {remote_url}");
+        println!("{}", style("Remote URL").bold().green());
+        println!("  {}", style(&remote_url).cyan());
         println!();
-        println!("When Git asks for credentials:");
-        println!("  username: {}", credential.git_username);
-        println!("  password: the token above");
+        println!(
+            "{}",
+            style("Use this credential with Git or SDK clients")
+                .bold()
+                .green()
+        );
+        println!("  {} {}", style("username:").dim(), credential.git_username);
+        println!("  {} {}", style("password:").dim(), "the token above");
     }
     Ok(())
 }
@@ -152,6 +158,16 @@ pub async fn list_branches(ctx: &CliContext, repo: &str, output_json: bool) -> R
     Ok(())
 }
 
+pub async fn delete_branch(ctx: &CliContext, repo: &str, branch: &str) -> Result<()> {
+    let project_id = project_id(ctx)?;
+    artifact_storage_client(ctx)?
+        .delete_branch(&project_id, repo, branch)
+        .await
+        .map_err(map_sdk_error)?;
+    println!("deleted branch {branch} from {repo}");
+    Ok(())
+}
+
 pub async fn list_refs(ctx: &CliContext, repo: &str, output_json: bool) -> Result<()> {
     let project_id = project_id(ctx)?;
     let response = artifact_storage_client(ctx)?
@@ -245,6 +261,10 @@ fn artifact_storage_client(ctx: &CliContext) -> Result<ArtifactStorageClient> {
 fn project_id(ctx: &CliContext) -> Result<String> {
     ctx.effective_project_id()
         .ok_or_else(|| CliError::auth("missing project ID; run `tl init`"))
+}
+
+fn print_field(label: &str, value: &str) {
+    println!("{} {}", style(format!("{label}:")).dim(), value);
 }
 
 fn print_repos_table(response: &ListReposResponse) {

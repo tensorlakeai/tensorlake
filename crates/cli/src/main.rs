@@ -241,6 +241,47 @@ enum SshKeysCommands {
 
 #[derive(Subcommand)]
 enum GitCommands {
+    /// Create an empty repo
+    Create {
+        /// Repo name
+        repo: String,
+        /// Default branch name
+        #[arg(long, default_value = "main")]
+        default_branch: String,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// List repos in the current project
+    #[command(alias = "list")]
+    Ls {
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a repo
+    #[command(alias = "delete")]
+    Rm {
+        /// Repo name
+        repo: String,
+    },
+    /// Fork a repo
+    Fork {
+        /// New repo name
+        repo: String,
+        /// Base repo name
+        base_repo: String,
+    },
+    /// Archive a repo so it rejects pushes but still allows reads
+    Archive {
+        /// Repo name
+        repo: String,
+    },
+    /// Restore an archived repo
+    Restore {
+        /// Repo name
+        repo: String,
+    },
     /// Mint a short-lived Git credential for this project
     Token {
         /// Limit the credential to one repository and grant only Git read/write scopes
@@ -255,8 +296,9 @@ enum GitCommands {
         /// Repo name
         repo: String,
     },
-    /// Print remote repository state after a push or failed push
-    Status {
+    /// Print repo information
+    #[command(alias = "status")]
+    Info {
         /// Repo name
         repo: String,
         /// Output JSON
@@ -264,12 +306,19 @@ enum GitCommands {
         json: bool,
     },
     /// Manage repositories
-    #[command(subcommand, alias = "repos")]
+    #[command(subcommand, hide = true, alias = "repos")]
     Repo(GitRepoCommands),
     /// Manage branches
     #[command(subcommand, alias = "branches")]
     Branch(GitBranchCommands),
+    /// Inspect refs
+    #[command(subcommand)]
+    Ref(GitRefCommands),
+    /// Inspect operation history
+    #[command(subcommand)]
+    Op(GitOpCommands),
     /// List all refs in a repo
+    #[command(hide = true)]
     Refs {
         /// Repo name
         repo: String,
@@ -278,6 +327,7 @@ enum GitCommands {
         json: bool,
     },
     /// List operation history using an admin-capable Git credential
+    #[command(hide = true)]
     Ops {
         /// Repo name
         repo: String,
@@ -345,6 +395,46 @@ enum GitBranchCommands {
     Ls {
         /// Repo name
         repo: String,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete a branch in a repo
+    #[command(name = "rm", alias = "delete")]
+    Rm {
+        /// Repo name
+        repo: String,
+        /// Branch name
+        branch: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum GitRefCommands {
+    /// List all refs in a repo
+    #[command(name = "ls")]
+    Ls {
+        /// Repo name
+        repo: String,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GitOpCommands {
+    /// List operation history using an admin-capable Git credential
+    #[command(name = "ls")]
+    Ls {
+        /// Repo name
+        repo: String,
+        /// Git username for the admin-capable credential
+        #[arg(long, default_value = "t")]
+        git_username: String,
+        /// Git token/password for the admin-capable credential
+        #[arg(long, env = "TENSORLAKE_GIT_TOKEN")]
+        git_token: String,
         /// Output JSON
         #[arg(long)]
         json: bool,
@@ -1679,6 +1769,18 @@ async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> erro
 
 async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result<()> {
     match subcmd {
+        GitCommands::Create {
+            repo,
+            default_branch,
+            json,
+        } => commands::git::create_repo(ctx, &repo, Some(&default_branch), json).await,
+        GitCommands::Ls { json } => commands::git::list_repos(ctx, json).await,
+        GitCommands::Rm { repo } => commands::git::delete_repo(ctx, &repo).await,
+        GitCommands::Fork { repo, base_repo } => {
+            commands::git::fork_repo(ctx, &repo, &base_repo).await
+        }
+        GitCommands::Archive { repo } => commands::git::archive_repo(ctx, &repo).await,
+        GitCommands::Restore { repo } => commands::git::restore_repo(ctx, &repo).await,
         GitCommands::Token { repo, json } => {
             commands::git::mint_token(ctx, repo.as_deref(), json).await
         }
@@ -1686,7 +1788,7 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
             println!("{}", commands::git::repo_url(ctx, &repo)?);
             Ok(())
         }
-        GitCommands::Status { repo, json } => commands::git::status(ctx, &repo, json).await,
+        GitCommands::Info { repo, json } => commands::git::status(ctx, &repo, json).await,
         GitCommands::Repo(repo_cmd) => match repo_cmd {
             GitRepoCommands::Create {
                 repo,
@@ -1705,6 +1807,20 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
             GitBranchCommands::Ls { repo, json } => {
                 commands::git::list_branches(ctx, &repo, json).await
             }
+            GitBranchCommands::Rm { repo, branch } => {
+                commands::git::delete_branch(ctx, &repo, &branch).await
+            }
+        },
+        GitCommands::Ref(ref_cmd) => match ref_cmd {
+            GitRefCommands::Ls { repo, json } => commands::git::list_refs(ctx, &repo, json).await,
+        },
+        GitCommands::Op(op_cmd) => match op_cmd {
+            GitOpCommands::Ls {
+                repo,
+                git_username,
+                git_token,
+                json,
+            } => commands::git::list_operations(ctx, &repo, &git_username, &git_token, json).await,
         },
         GitCommands::Refs { repo, json } => commands::git::list_refs(ctx, &repo, json).await,
         GitCommands::Ops {
@@ -1793,25 +1909,31 @@ mod tests {
 
     #[test]
     fn git_commands_parse() {
-        match parse_command([
-            "tl",
-            "git",
-            "repo",
-            "create",
-            "demo",
-            "--default-branch",
-            "trunk",
-        ]) {
-            Commands::Git(GitCommands::Repo(GitRepoCommands::Create {
+        match parse_command(["tl", "git", "create", "demo", "--default-branch", "trunk"]) {
+            Commands::Git(GitCommands::Create {
                 repo,
                 default_branch,
                 json,
-            })) => {
+            }) => {
                 assert_eq!(repo, "demo");
                 assert_eq!(default_branch, "trunk");
                 assert!(!json);
             }
-            _ => panic!("expected git repo create command"),
+            _ => panic!("expected git create command"),
+        }
+
+        match parse_command(["tl", "git", "ls", "--json"]) {
+            Commands::Git(GitCommands::Ls { json }) => {
+                assert!(json);
+            }
+            _ => panic!("expected git ls command"),
+        }
+
+        match parse_command(["tl", "git", "rm", "demo"]) {
+            Commands::Git(GitCommands::Rm { repo }) => {
+                assert_eq!(repo, "demo");
+            }
+            _ => panic!("expected git rm command"),
         }
 
         match parse_command(["tl", "git", "branch", "ls", "demo", "--json"]) {
@@ -1820,6 +1942,97 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected git branch ls command"),
+        }
+
+        match parse_command(["tl", "git", "branch", "rm", "demo", "feature-a"]) {
+            Commands::Git(GitCommands::Branch(GitBranchCommands::Rm { repo, branch })) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(branch, "feature-a");
+            }
+            _ => panic!("expected git branch rm command"),
+        }
+
+        match parse_command(["tl", "git", "ref", "ls", "demo", "--json"]) {
+            Commands::Git(GitCommands::Ref(GitRefCommands::Ls { repo, json })) => {
+                assert_eq!(repo, "demo");
+                assert!(json);
+            }
+            _ => panic!("expected git ref ls command"),
+        }
+
+        match parse_command(["tl", "git", "op", "ls", "demo", "--git-token", "secret"]) {
+            Commands::Git(GitCommands::Op(GitOpCommands::Ls {
+                repo,
+                git_username,
+                git_token,
+                json,
+            })) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(git_username, "t");
+                assert_eq!(git_token, "secret");
+                assert!(!json);
+            }
+            _ => panic!("expected git op ls command"),
+        }
+
+        match parse_command(["tl", "git", "token", "--repo", "demo"]) {
+            Commands::Git(GitCommands::Token { repo, json }) => {
+                assert_eq!(repo.as_deref(), Some("demo"));
+                assert!(!json);
+            }
+            _ => panic!("expected git token command"),
+        }
+
+        match parse_command(["tl", "git", "info", "demo", "--json"]) {
+            Commands::Git(GitCommands::Info { repo, json }) => {
+                assert_eq!(repo, "demo");
+                assert!(json);
+            }
+            _ => panic!("expected git info command"),
+        }
+
+        match parse_command(["tl", "git", "status", "demo", "--json"]) {
+            Commands::Git(GitCommands::Info { repo, json }) => {
+                assert_eq!(repo, "demo");
+                assert!(json);
+            }
+            _ => panic!("expected git status alias"),
+        }
+
+        match parse_command(["tl", "git", "repo", "create", "demo"]) {
+            Commands::Git(GitCommands::Repo(GitRepoCommands::Create { repo, .. })) => {
+                assert_eq!(repo, "demo");
+            }
+            _ => panic!("expected legacy git repo create command"),
+        }
+
+        match parse_command(["tl", "git", "repos", "list", "--json"]) {
+            Commands::Git(GitCommands::Repo(GitRepoCommands::Ls { json })) => {
+                assert!(json);
+            }
+            _ => panic!("expected legacy git repos list alias"),
+        }
+
+        match parse_command(["tl", "git", "repo", "delete", "demo"]) {
+            Commands::Git(GitCommands::Repo(GitRepoCommands::Rm { repo })) => {
+                assert_eq!(repo, "demo");
+            }
+            _ => panic!("expected legacy git repo delete alias"),
+        }
+
+        match parse_command(["tl", "git", "branches", "list", "demo"]) {
+            Commands::Git(GitCommands::Branch(GitBranchCommands::Ls { repo, .. })) => {
+                assert_eq!(repo, "demo");
+            }
+            _ => panic!("expected legacy git branches list alias"),
+        }
+
+        match parse_command(["tl", "git", "refs", "demo", "--json"]) {
+            Commands::Git(GitCommands::Refs { repo, json }) => {
+                assert_eq!(repo, "demo");
+                assert!(json);
+            }
+            _ => panic!("expected legacy git refs command"),
         }
 
         match parse_command(["tl", "git", "ops", "demo", "--git-token", "secret"]) {
@@ -1834,24 +2047,10 @@ mod tests {
                 assert_eq!(git_token, "secret");
                 assert!(!json);
             }
-            _ => panic!("expected git ops command"),
+            _ => panic!("expected legacy git ops command"),
         }
 
-        match parse_command(["tl", "git", "token", "--repo", "demo"]) {
-            Commands::Git(GitCommands::Token { repo, json }) => {
-                assert_eq!(repo.as_deref(), Some("demo"));
-                assert!(!json);
-            }
-            _ => panic!("expected git token command"),
-        }
-
-        match parse_command(["tl", "git", "status", "demo", "--json"]) {
-            Commands::Git(GitCommands::Status { repo, json }) => {
-                assert_eq!(repo, "demo");
-                assert!(json);
-            }
-            _ => panic!("expected git status command"),
-        }
+        assert!(Cli::try_parse_from(["tl", "git", "push", "demo"]).is_err());
     }
 
     #[test]
