@@ -86,6 +86,32 @@ pub struct CreateArgs<'a> {
     pub no_internet: bool,
     pub network_allow: &'a [String],
     pub network_deny: &'a [String],
+    /// Boot-time shared file system mounts, each as `<file_system_id>:<mount_path>`.
+    pub shared_file_systems: &'a [String],
+}
+
+/// Parse `--shared-file-system <id>:<path>` flags into the request
+/// `file_systems` array. Splits on the first `:` (shared file system ids and
+/// absolute mount paths never contain one).
+fn parse_shared_file_system_mounts(raw: &[String]) -> Result<Vec<serde_json::Value>> {
+    raw.iter()
+        .map(|entry| {
+            let (file_system_id, mount_path) = entry.split_once(':').ok_or_else(|| {
+                CliError::usage(format!(
+                    "--shared-file-system must be <file_system_id>:<mount_path>, got {entry:?}"
+                ))
+            })?;
+            if file_system_id.is_empty() || mount_path.is_empty() {
+                return Err(CliError::usage(format!(
+                    "--shared-file-system must be <file_system_id>:<mount_path>, got {entry:?}"
+                )));
+            }
+            Ok(serde_json::json!({
+                "file_system_id": file_system_id,
+                "mount_path": mount_path,
+            }))
+        })
+        .collect()
 }
 
 pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
@@ -106,6 +132,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         no_internet,
         network_allow,
         network_deny,
+        shared_file_systems,
     } = args;
 
     let gpu = match gpu_count {
@@ -145,6 +172,11 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
             network["deny_out"] = serde_json::json!(network_deny);
         }
         body["network"] = network;
+    }
+
+    let shared_file_system_mounts = parse_shared_file_system_mounts(shared_file_systems)?;
+    if !shared_file_system_mounts.is_empty() {
+        body["file_systems"] = serde_json::Value::Array(shared_file_system_mounts);
     }
 
     let create_result = create_with_request(ctx, body, wait).await?;
@@ -349,7 +381,8 @@ fn build_create_request_body(
 mod tests {
     use super::{
         CreateSandboxResult, GpuRequest, build_create_request_body, format_ready_message,
-        post_create_proxy_base, sandbox_url_from_ingress_endpoint,
+        parse_shared_file_system_mounts, post_create_proxy_base,
+        sandbox_url_from_ingress_endpoint,
     };
     use crate::auth::context::CliContext;
     use crate::config::resolver::ResolvedConfig;
@@ -365,6 +398,30 @@ mod tests {
             project_id: None,
             debug: false,
         })
+    }
+
+    #[test]
+    fn parse_shared_file_system_mounts_builds_wire_objects() {
+        let raw = vec![
+            "file_system_abc:/mnt/skills".to_string(),
+            "file_system_def:/data".to_string(),
+        ];
+        let mounts = parse_shared_file_system_mounts(&raw).unwrap();
+        assert_eq!(mounts.len(), 2);
+        assert_eq!(mounts[0]["file_system_id"], "file_system_abc");
+        assert_eq!(mounts[0]["mount_path"], "/mnt/skills");
+        assert_eq!(mounts[1]["mount_path"], "/data");
+    }
+
+    #[test]
+    fn parse_shared_file_system_mounts_rejects_missing_colon() {
+        assert!(parse_shared_file_system_mounts(&["file_system_abc".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_shared_file_system_mounts_rejects_empty_sides() {
+        assert!(parse_shared_file_system_mounts(&[":/mnt".to_string()]).is_err());
+        assert!(parse_shared_file_system_mounts(&["file_system_abc:".to_string()]).is_err());
     }
 
     #[test]

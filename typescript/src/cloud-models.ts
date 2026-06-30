@@ -170,3 +170,14 @@ export interface SandboxTemplate {
   rootfsNodeKind?: string;
   public?: boolean;
 }
+
+/** A registered shared file system as returned by the platform API. */
+export interface SharedFileSystem {
+  id?: string;
+  name?: string;
+  description?: string;
+  region?: string;
+  status?: string;
+  createdAt?: Date;
+  updatedAt?: Date;
+}

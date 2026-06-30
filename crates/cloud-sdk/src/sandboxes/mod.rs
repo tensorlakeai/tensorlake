@@ -20,12 +20,13 @@ pub use desktop::SandboxDesktopClient;
 use models::{
     ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CopySandboxResponse,
     CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
-    CreateSnapshotResponse, DaemonInfo, GetSandboxLogsRequest, HealthResponse,
-    ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
-    ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
-    OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxLogsResponse,
-    SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse,
-    SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
+    CreateSnapshotResponse, DaemonInfo, DetachSharedFileSystemRequest, GetSandboxLogsRequest,
+    HealthResponse, ListArchivedSandboxesParams, ListArchivedSandboxesResponse,
+    ListDirectoryResponse, ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse,
+    ListSnapshotsResponse, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo,
+    SandboxLogsResponse, SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse,
+    SendSignalResponse, SharedFileSystemMount, SignBlobRequest, SnapshotInfo, SnapshotType,
+    UpdateSandboxRequest,
 };
 
 /// A reference to a sandbox process: either its OS **pid** or a managed-process **name**
@@ -330,6 +331,46 @@ impl SandboxesClient {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/resume"));
         let req = self.client.request(Method::POST, &uri).build()?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
+    }
+
+    /// Attach a registered shared file system to a running sandbox at `mount_path`.
+    ///
+    /// The mount completes asynchronously on the dataplane; the returned
+    /// [`SandboxInfo`] already reflects the new entry in `shared_file_systems`.
+    pub async fn attach_shared_file_system(
+        &self,
+        sandbox_id: &str,
+        file_system_id: &str,
+        mount_path: &str,
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
+        let body = SharedFileSystemMount {
+            file_system_id: file_system_id.to_string(),
+            mount_path: mount_path.to_string(),
+        };
+        let req = self
+            .client
+            .build_post_json_request(Method::POST, &uri, &body)?;
+        self.client.execute_json(req).await
+    }
+
+    /// Detach the shared file system mounted at `mount_path` from a running sandbox.
+    ///
+    /// The unmount completes asynchronously on the dataplane; the returned
+    /// [`SandboxInfo`] already reflects the removed `shared_file_systems` entry.
+    pub async fn detach_shared_file_system(
+        &self,
+        sandbox_id: &str,
+        mount_path: &str,
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
+        let body = DetachSharedFileSystemRequest {
+            mount_path: mount_path.to_string(),
+        };
+        let req = self
+            .client
+            .build_post_json_request(Method::DELETE, &uri, &body)?;
+        self.client.execute_json(req).await
     }
 
     pub async fn snapshot(

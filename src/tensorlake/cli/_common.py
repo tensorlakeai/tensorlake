@@ -1,5 +1,6 @@
 import importlib.metadata
 import json
+import os
 import sys
 from dataclasses import dataclass
 
@@ -133,3 +134,26 @@ class Context:
             organization_id_value=organization_id,
             project_id_value=project_id,
         )
+
+
+def debug_enabled() -> bool:
+    """Whether ``TENSORLAKE_DEBUG`` is set to a truthy value."""
+    return os.environ.get("TENSORLAKE_DEBUG", "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+
+
+def build_context_from_env() -> Context:
+    """Resolve auth + project context from the Tensorlake env vars set by the CLI."""
+    return Context.default(
+        api_url=os.environ.get("TENSORLAKE_API_URL"),
+        api_key=os.environ.get("TENSORLAKE_API_KEY"),
+        personal_access_token=os.environ.get("TENSORLAKE_PAT"),
+        namespace=os.environ.get("INDEXIFY_NAMESPACE"),
+        organization_id=os.environ.get("TENSORLAKE_ORGANIZATION_ID"),
+        project_id=os.environ.get("TENSORLAKE_PROJECT_ID"),
+        debug=debug_enabled(),
+    )

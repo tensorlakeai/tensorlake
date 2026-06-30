@@ -1,4 +1,5 @@
 use reqwest::header::{HeaderMap, HeaderValue};
+use tensorlake::{Client, ClientBuilder};
 
 use crate::config::resolver::ResolvedConfig;
 use crate::error::{CliError, Result};
@@ -107,6 +108,25 @@ impl CliContext {
             .or(self.personal_access_token.as_ref())
             .cloned()
             .ok_or_else(|| CliError::auth("No authentication configured"))
+    }
+
+    /// Build a cloud SDK client scoped to the current org/project.
+    ///
+    /// Scope headers are only attached for personal-access-token auth, since
+    /// project API keys are already implicitly scoped.
+    pub fn scoped_cloud_client(&self) -> Result<Client> {
+        let token = self.bearer_token()?;
+        let mut builder = ClientBuilder::new(&self.api_url).bearer_token(&token);
+        let use_scope_headers = self.personal_access_token.is_some() && self.api_key.is_none();
+
+        if use_scope_headers
+            && let (Some(organization_id), Some(project_id)) =
+                (self.effective_organization_id(), self.effective_project_id())
+        {
+            builder = builder.scope(&organization_id, &project_id);
+        }
+
+        builder.build().map_err(Into::into)
     }
 
     pub fn has_authentication(&self) -> bool {

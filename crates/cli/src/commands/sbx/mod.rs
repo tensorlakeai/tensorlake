@@ -12,6 +12,7 @@ pub mod process;
 pub mod pty;
 pub mod resume;
 pub mod run;
+pub mod shared_fs;
 pub mod snapshot;
 pub mod snapshot_ls;
 pub mod snapshot_rm;

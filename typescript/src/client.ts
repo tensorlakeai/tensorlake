@@ -198,6 +198,15 @@ export class SandboxClient {
     if (options?.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options?.snapshotId != null) body.snapshot_id = options.snapshotId;
     if (options?.name != null) body.name = options.name;
+    if (
+      options?.sharedFileSystems != null &&
+      options.sharedFileSystems.length > 0
+    ) {
+      body.file_systems = options.sharedFileSystems.map((fs) => ({
+        file_system_id: fs.fileSystemId,
+        mount_path: fs.mountPath,
+      }));
+    }
 
     if (
       options?.allowInternetAccess === false ||
@@ -431,6 +440,42 @@ export class SandboxClient {
       await sleep(pollInterval * 1000);
     }
     throw new SandboxError(`Sandbox ${sandboxId} did not resume within ${timeout}s`);
+  }
+
+  /**
+   * Attach a registered shared file system to a running sandbox at `mountPath`.
+   *
+   * The mount completes asynchronously on the dataplane; the returned
+   * `SandboxInfo` already reflects the new entry in `sharedFileSystems`.
+   */
+  async attachSharedFileSystem(
+    sandboxId: string,
+    fileSystemId: string,
+    mountPath: string,
+  ): Promise<Traced<SandboxInfo>> {
+    return this.tracedJson<SandboxInfo>(
+      () =>
+        this.native.attachSharedFileSystem(sandboxId, fileSystemId, mountPath),
+      "sandboxId",
+      { sandboxId, notFoundKind: "sandbox" },
+    );
+  }
+
+  /**
+   * Detach the shared file system mounted at `mountPath` from a running sandbox.
+   *
+   * The unmount completes asynchronously on the dataplane; the returned
+   * `SandboxInfo` already reflects the removed `sharedFileSystems` entry.
+   */
+  async detachSharedFileSystem(
+    sandboxId: string,
+    mountPath: string,
+  ): Promise<Traced<SandboxInfo>> {
+    return this.tracedJson<SandboxInfo>(
+      () => this.native.detachSharedFileSystem(sandboxId, mountPath),
+      "sandboxId",
+      { sandboxId, notFoundKind: "sandbox" },
+    );
   }
 
   /** Claim a warm sandbox from a pool, creating one if no warm containers are available. */

@@ -542,6 +542,50 @@ impl NativeSandboxClient {
     }
 
     #[napi]
+    pub async fn attach_shared_file_system(
+        &self,
+        sandbox_id: String,
+        file_system_id: String,
+        mount_path: String,
+    ) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let sandbox_id = sandbox_id.clone();
+            let file_system_id = file_system_id.clone();
+            let mount_path = mount_path.clone();
+            async move {
+                let traced = c
+                    .attach_shared_file_system(&sandbox_id, &file_system_id, &mount_path)
+                    .await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
+        })
+        .await
+    }
+
+    #[napi]
+    pub async fn detach_shared_file_system(
+        &self,
+        sandbox_id: String,
+        mount_path: String,
+    ) -> napi::Result<TracedJson> {
+        with_retry(self.client.clone(), 5, move |c| {
+            let sandbox_id = sandbox_id.clone();
+            let mount_path = mount_path.clone();
+            async move {
+                let traced = c
+                    .detach_shared_file_system(&sandbox_id, &mount_path)
+                    .await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
+        })
+        .await
+    }
+
+    #[napi]
     pub async fn create_snapshot(
         &self,
         sandbox_id: String,

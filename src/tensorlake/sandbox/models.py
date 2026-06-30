@@ -201,6 +201,42 @@ class NetworkConfig(BaseModel):
     )
 
 
+# --- Shared file system models ---
+
+
+class SharedFileSystemMount(BaseModel):
+    """A shared file system mounted into a sandbox at a guest path.
+
+    ``file_system_id`` is the registered shared file system's id (e.g.
+    ``file_system_...``) and ``mount_path`` is an absolute, unique guest path
+    (e.g. ``/mnt/skills``).
+    """
+
+    file_system_id: str
+    mount_path: str
+
+
+class SharedFileSystem(BaseModel):
+    """A registered shared file system.
+
+    Shared file systems are project-scoped resources managed through the
+    platform API. Register one with
+    :func:`tensorlake.create_shared_file_system`, then mount it into a sandbox
+    at boot (``Sandbox.create(shared_file_systems=[...])``) or attach it to a
+    running sandbox (:meth:`Sandbox.attach_shared_file_system`).
+    """
+
+    id: str | None = None
+    name: str | None = None
+    description: str | None = None
+    region: str | None = None
+    status: str | None = None
+    created_at: str | None = Field(default=None, alias="createdAt")
+    updated_at: str | None = Field(default=None, alias="updatedAt")
+
+    model_config = {"populate_by_name": True}
+
+
 # --- Request models ---
 
 
@@ -214,6 +250,11 @@ class CreateSandboxRequest(BaseModel):
     network: NetworkConfig | None = None
     snapshot_id: str | None = None
     name: str | None = None
+    shared_file_systems: list[SharedFileSystemMount] | None = Field(
+        default=None, alias="file_systems"
+    )
+
+    model_config = {"populate_by_name": True}
 
 
 class UpdateSandboxRequest(BaseModel):
@@ -298,6 +339,9 @@ class SandboxInfo(BaseModel):
     ingress_endpoint: str | None = None
     sandbox_url: str | None = None
     routing_hint: str | None = None
+    shared_file_systems: list[SharedFileSystemMount] = Field(
+        default_factory=list, alias="file_systems"
+    )
 
     model_config = {"populate_by_name": True}
 

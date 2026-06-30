@@ -9,5 +9,6 @@ pub mod new;
 pub mod parse;
 pub mod sbx;
 pub mod secrets;
+pub mod shared_fs;
 pub mod ssh_keys;
 pub mod whoami;

@@ -62,6 +62,7 @@ from .models import (
     SandboxPortAccess,
     SandboxProcessLogFiltersResponse,
     SandboxStatus,
+    SharedFileSystemMount,
     SnapshotInfo,
     SnapshotStatus,
     SnapshotType,
@@ -220,6 +221,7 @@ class AsyncSandboxClient:
         deny_out: list[str] | None = None,
         snapshot_id: str | None = None,
         name: str | None = None,
+        shared_file_systems: list[SharedFileSystemMount] | None = None,
     ) -> Traced[CreateSandboxResponse]:
         network = None
         if not allow_internet_access or allow_out is not None or deny_out is not None:
@@ -241,10 +243,13 @@ class AsyncSandboxClient:
             network=network,
             snapshot_id=snapshot_id,
             name=name,
+            shared_file_systems=shared_file_systems,
         )
         try:
             trace_id, response_json = await self._rust_client.create_sandbox_async(
-                request_json=request_model.model_dump_json(exclude_none=True)
+                request_json=request_model.model_dump_json(
+                    by_alias=True, exclude_none=True
+                )
             )
             return Traced(
                 trace_id, CreateSandboxResponse.model_validate_json(response_json)
@@ -380,6 +385,55 @@ class AsyncSandboxClient:
             trace_id, response_json = await self._rust_client.update_sandbox_async(
                 sandbox_id=sandbox_id,
                 request_json=request.model_dump_json(exclude_none=True),
+            )
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    async def attach_shared_file_system(
+        self,
+        sandbox_id: str,
+        file_system_id: str,
+        mount_path: str,
+    ) -> Traced[SandboxInfo]:
+        """Attach a registered shared file system to a running sandbox.
+
+        The returned ``SandboxInfo`` already reflects the new
+        ``shared_file_systems`` entry; the mount completes asynchronously on the
+        dataplane.
+        """
+        try:
+            trace_id, response_json = (
+                await self._rust_client.attach_shared_file_system_async(
+                    sandbox_id=sandbox_id,
+                    file_system_id=file_system_id,
+                    mount_path=mount_path,
+                )
+            )
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    async def detach_shared_file_system(
+        self,
+        sandbox_id: str,
+        mount_path: str,
+    ) -> Traced[SandboxInfo]:
+        """Detach the shared file system mounted at ``mount_path`` from a sandbox.
+
+        The returned ``SandboxInfo`` already reflects the removed
+        ``shared_file_systems`` entry; the unmount completes asynchronously.
+        """
+        try:
+            trace_id, response_json = (
+                await self._rust_client.detach_shared_file_system_async(
+                    sandbox_id=sandbox_id,
+                    mount_path=mount_path,
+                )
             )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:
@@ -797,6 +851,7 @@ class AsyncSandboxClient:
         request_timeout: float | None = None,
         startup_timeout: float | None = None,
         name: str | None = None,
+        shared_file_systems: list[SharedFileSystemMount] | None = None,
     ) -> "AsyncSandbox":
         wait_timeout = (
             request_timeout
@@ -827,6 +882,7 @@ class AsyncSandboxClient:
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
                 name=name,
+                shared_file_systems=shared_file_systems,
             )
 
         if result.status == SandboxStatus.RUNNING:

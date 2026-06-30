@@ -144,6 +144,17 @@ fn default_allow_internet_access() -> bool {
     true
 }
 
+/// One shared file system mounted into a sandbox at an absolute guest path.
+///
+/// `file_system_id` is the registered shared file system's id (e.g.
+/// `file_system_...`) and `mount_path` is an absolute, unique guest path
+/// (e.g. `/mnt/skills`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SharedFileSystemMount {
+    pub file_system_id: String,
+    pub mount_path: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -161,6 +172,22 @@ pub struct CreateSandboxRequest {
     /// When absent the sandbox is ephemeral.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Shared file systems to mount into the sandbox at boot, each at its own
+    /// absolute, unique guest mount path.
+    #[serde(
+        rename = "file_systems",
+        default,
+        skip_serializing_if = "Vec::is_empty"
+    )]
+    pub shared_file_systems: Vec<SharedFileSystemMount>,
+}
+
+/// Request body for detaching a shared file system from a running sandbox. The
+/// mount path is sent in the body (rather than the URL) so its slashes don't
+/// need URL-encoding.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DetachSharedFileSystemRequest {
+    pub mount_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -250,6 +277,10 @@ pub struct SandboxInfo {
     pub ingress_endpoint: Option<String>,
     #[serde(default)]
     pub sandbox_url: Option<String>,
+    /// Shared file systems currently mounted into the sandbox, each at its own
+    /// guest mount path. Empty when no shared file systems are mounted.
+    #[serde(rename = "file_systems", default)]
+    pub shared_file_systems: Vec<SharedFileSystemMount>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

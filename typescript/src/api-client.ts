@@ -10,6 +10,7 @@ import type {
   CloudClientOptions,
   RequestInput,
   RequestOutput,
+  SharedFileSystem,
 } from "./cloud-models.js";
 
 export class APIClient {
@@ -41,6 +42,28 @@ export class APIClient {
 
   async deleteSandboxImage(imageName: string): Promise<void> {
     await this.cloudClient.deleteSandboxImage(imageName);
+  }
+
+  async createSharedFileSystem(
+    name: string,
+    description?: string,
+    options?: { organizationId?: string; projectId?: string },
+  ): Promise<SharedFileSystem> {
+    return this.cloudClient.createSharedFileSystem({ name, description }, options);
+  }
+
+  async listSharedFileSystems(options?: {
+    organizationId?: string;
+    projectId?: string;
+  }): Promise<SharedFileSystem[]> {
+    return this.cloudClient.listSharedFileSystems(options);
+  }
+
+  async deleteSharedFileSystem(
+    fileSystemId: string,
+    options?: { organizationId?: string; projectId?: string },
+  ): Promise<void> {
+    await this.cloudClient.deleteSharedFileSystem(fileSystemId, options);
   }
 
   async applications(): Promise<ApplicationSummary[]> {

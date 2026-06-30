@@ -39,6 +39,7 @@ import {
   type SandboxOptions,
   type SandboxProcessLogFiltersResponse,
   type SendSignalResponse,
+  type SharedFileSystemMount,
   type SnapshotInfo,
   type StartProcessOptions,
   SandboxStatus,
@@ -659,6 +660,54 @@ export class Sandbox {
   async copy(options?: CopySandboxOptions): Promise<Traced<CopySandboxResponse>> {
     const client = this.requireLifecycleClient("copy");
     return client.copy(this.lifecycleIdentifier, options);
+  }
+
+  /**
+   * Attach a registered shared file system to this running sandbox at `mountPath`.
+   *
+   * Returns the updated sandbox info; the new mount appears in
+   * `sharedFileSystems`.
+   */
+  async attachSharedFileSystem(
+    fileSystemId: string,
+    mountPath: string,
+  ): Promise<Traced<SandboxInfo>> {
+    const client = this.requireLifecycleClient("attachSharedFileSystem");
+    const info = await client.attachSharedFileSystem(
+      this.lifecycleIdentifier,
+      fileSystemId,
+      mountPath,
+    );
+    this._setLifecycleIdentifier(info.sandboxId);
+    this._setName(info.name ?? null);
+    return info;
+  }
+
+  /**
+   * Detach the shared file system mounted at `mountPath` from this running
+   * sandbox.
+   *
+   * Returns the updated sandbox info with the mount removed from
+   * `sharedFileSystems`.
+   */
+  async detachSharedFileSystem(mountPath: string): Promise<Traced<SandboxInfo>> {
+    const client = this.requireLifecycleClient("detachSharedFileSystem");
+    const info = await client.detachSharedFileSystem(
+      this.lifecycleIdentifier,
+      mountPath,
+    );
+    this._setLifecycleIdentifier(info.sandboxId);
+    this._setName(info.name ?? null);
+    return info;
+  }
+
+  /** List the shared file systems currently mounted into this sandbox. */
+  async listSharedFileSystems(): Promise<Traced<SharedFileSystemMount[]>> {
+    const client = this.requireLifecycleClient("listSharedFileSystems");
+    const info = await client.get(this.lifecycleIdentifier);
+    this._setLifecycleIdentifier(info.sandboxId);
+    this._setName(info.name ?? null);
+    return Object.assign(info.sharedFileSystems ?? [], { traceId: info.traceId });
   }
 
   /**

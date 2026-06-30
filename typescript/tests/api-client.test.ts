@@ -88,4 +88,45 @@ describe("APIClient", () => {
     );
     client.close();
   });
+
+  it("creates a shared file system through the scoped platform route", async () => {
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems",
+      );
+      expect(init?.method).toBe("POST");
+      expect(init?.body).toBe('{"name":"skills"}');
+      return new Response(
+        JSON.stringify({ id: "file_system_abc", name: "skills" }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const client = new APIClient({
+      apiUrl: "http://localhost:8900",
+      organizationId: "org-1",
+      projectId: "proj-1",
+    });
+    const fs = await client.createSharedFileSystem("skills");
+    expect(fs.id).toBe("file_system_abc");
+    client.close();
+  });
+
+  it("deletes a shared file system through the scoped platform route", async () => {
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems/file_system_abc",
+      );
+      expect(init?.method).toBe("DELETE");
+      return new Response(null, { status: 204 });
+    });
+
+    const client = new APIClient({
+      apiUrl: "http://localhost:8900",
+      organizationId: "org-1",
+      projectId: "proj-1",
+    });
+    await client.deleteSharedFileSystem("file_system_abc");
+    client.close();
+  });
 });
