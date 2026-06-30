@@ -385,14 +385,31 @@ describe("Sandbox", () => {
       expect(proc.managed?.healthCheck?.intervalMs).toBe(5000);
       sbx.close();
     });
+
+    it("rejects a numeric managed-process name client-side", async () => {
+      installNativeStub();
+      const sbx = makeSandbox();
+      await expect(sbx.startProcess("bash", { name: "123" })).rejects.toThrow();
+      sbx.close();
+    });
+
+    it("addresses a process by name or pid (segment is stringified)", async () => {
+      const stub = installNativeStub();
+      const sbx = makeSandbox();
+      await sbx.killProcess("web");
+      await sbx.killProcess(1234);
+      expect(stub.proxy.killProcess).toHaveBeenNthCalledWith(1, "web");
+      expect(stub.proxy.killProcess).toHaveBeenNthCalledWith(2, "1234");
+      sbx.close();
+    });
   });
 
   describe("restartProcess", () => {
     it("restarts the process by PID", async () => {
       const stub = installNativeStub({
         proxy: {
-          restartProcess: vi.fn(async (pid: number) => {
-            expect(pid).toBe(42);
+          restartProcess: vi.fn(async (process: string) => {
+            expect(process).toBe("42");
             return {
               traceId: "t",
               json: JSON.stringify({
@@ -426,7 +443,7 @@ describe("Sandbox", () => {
       const proc = await sbx.restartProcess(42);
       expect(proc.pid).toBe(43);
       expect(proc.managed?.restartCount).toBe(1);
-      expect(stub.proxy.restartProcess).toHaveBeenCalledWith(42);
+      expect(stub.proxy.restartProcess).toHaveBeenCalledWith("42");
       sbx.close();
     });
   });

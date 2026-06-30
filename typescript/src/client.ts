@@ -17,12 +17,15 @@ import {
   type CreateSandboxPoolResponse,
   type CreateSandboxResponse,
   type CreateSnapshotResponse,
+  type GetSandboxLogsOptions,
   type ListArchivedSandboxesOptions,
   type ListArchivedSandboxesResponse,
   type SandboxClientOptions,
   type SandboxInfo,
+  type SandboxLogsResponse,
   type SandboxPortAccess,
   type SandboxPoolInfo,
+  type SandboxProcessLogFiltersResponse,
   SandboxStatus,
   type SnapshotAndWaitOptions,
   type SnapshotInfo,
@@ -281,6 +284,40 @@ export class SandboxClient {
       "sandboxId",
       { sandboxId, notFoundKind: "sandbox" },
     );
+  }
+
+  /** Read persisted logs for a sandbox. */
+  async getLogs(
+    sandboxId: string,
+    options?: GetSandboxLogsOptions,
+  ): Promise<Traced<SandboxLogsResponse>> {
+    const body = {
+      sandbox_id: sandboxId,
+      levels: options?.levels ?? [],
+      process_ids: options?.processIds ?? [],
+      next_token: options?.nextToken,
+      head: options?.head,
+      tail: options?.tail,
+      body: options?.body,
+    };
+    const { traceId, json } = await callNative(
+      () => this.native.getSandboxLogs(JSON.stringify(body)),
+      { sandboxId, notFoundKind: "sandbox" },
+    );
+    return Object.assign(JSON.parse(json) as SandboxLogsResponse, { traceId });
+  }
+
+  /** List sandbox processes available as persisted-log filters. */
+  async listLogProcesses(
+    sandboxId: string,
+  ): Promise<Traced<SandboxProcessLogFiltersResponse>> {
+    const { traceId, json } = await callNative(
+      () => this.native.listSandboxLogProcesses(sandboxId),
+      { sandboxId, notFoundKind: "sandbox" },
+    );
+    return Object.assign(JSON.parse(json) as SandboxProcessLogFiltersResponse, {
+      traceId,
+    });
   }
 
   /** Update sandbox properties such as name, exposed ports, and proxy auth settings. */

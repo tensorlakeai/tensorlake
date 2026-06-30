@@ -479,6 +479,62 @@ class ListSnapshotsResponse(BaseModel):
     snapshots: list[SnapshotInfo]
 
 
+class SandboxLogLevel(str, Enum):
+    """Log severity filter for persisted sandbox logs."""
+
+    TRACE = "trace"
+    DEBUG = "debug"
+    INFO = "info"
+    WARN = "warn"
+    ERROR = "error"
+    FATAL = "fatal"
+
+
+class SandboxLogSignal(BaseModel):
+    """A persisted sandbox log record."""
+
+    timestamp: int
+    uuid: str
+    namespace: str
+    application: str = ""
+    sandbox_id: str | None = Field(default=None, alias="sandboxId")
+    resource_attributes: list[tuple[str, str]] = Field(
+        default_factory=list, alias="resourceAttributes"
+    )
+    body: str
+    log_attributes: str = Field(alias="logAttributes")
+    allocations: list[str] = Field(default_factory=list)
+    function_runs: list[str] = Field(default_factory=list, alias="functionRuns")
+    level: int | None = None
+    retention: int | None = None
+
+
+class SandboxLogsResponse(BaseModel):
+    """Response from reading persisted sandbox logs."""
+
+    logs: list[SandboxLogSignal]
+    next_token: str | None = Field(default=None, alias="nextToken")
+
+
+class SandboxProcessLogFilter(BaseModel):
+    """Process metadata available as a persisted-log filter."""
+
+    process_id: str = Field(alias="processId")
+    process_pid: str = Field(alias="processPid")
+    process_command: str = Field(alias="processCommand")
+    process_managed_id: str = Field(alias="processManagedId")
+    process_managed_name: str = Field(alias="processManagedName")
+    first_seen: int = Field(alias="firstSeen")
+    last_seen: int = Field(alias="lastSeen")
+    log_count: int = Field(alias="logCount")
+
+
+class SandboxProcessLogFiltersResponse(BaseModel):
+    """Response from listing sandbox process log filters."""
+
+    processes: list[SandboxProcessLogFilter]
+
+
 # --- Container daemon models (process management, file ops, I/O) ---
 
 
@@ -582,7 +638,13 @@ class ManagedProcessExit(BaseModel):
 
 
 class ManagedProcessInfo(BaseModel):
-    """Managed-process metadata embedded into ProcessInfo."""
+    """Managed-process metadata embedded into ProcessInfo.
+
+    A managed process is addressable by either its current PID or, if a ``name`` was given
+    at creation, that name (process APIs accept a PID or process name). ``id`` is a stable
+    daemon-local identifier: it equals ``name`` when one was set, otherwise a daemon-assigned
+    opaque id (the process is then addressable only by PID, not by ``id``).
+    """
 
     id: str
     name: str | None = None

@@ -35,6 +35,9 @@ from .models import (
     ProcessUser,
     RestartPolicyConfig,
     SandboxInfo,
+    SandboxLogLevel,
+    SandboxLogsResponse,
+    SandboxProcessLogFiltersResponse,
     SandboxStatus,
     SendSignalResponse,
     SharedFileSystemMount,
@@ -44,10 +47,13 @@ from .models import (
     StdinMode,
 )
 from .sandbox import (
+    _PROCESS_ARG_UNSET,
     _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE,
     RustCloudSandboxProxyClient,
     Sandbox,
     _raise_as_sandbox_error,
+    _resolve_process_arg,
+    _validate_managed_name_client_side,
 )
 
 if TYPE_CHECKING:
@@ -380,6 +386,37 @@ class AsyncSandbox:
         filtered = [s for s in all_snaps if s.sandbox_id == my_id]
         return TracedIterator(all_snaps.trace_id, filtered)
 
+    async def get_logs(
+        self,
+        *,
+        levels: list[SandboxLogLevel | str] | None = None,
+        process_ids: list[str] | None = None,
+        next_token: str | None = None,
+        head: int | None = None,
+        tail: int | None = None,
+        body: str | None = None,
+    ) -> Traced[SandboxLogsResponse]:
+        self._require_lifecycle_client("get_logs")
+        sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
+        traced = await self._lifecycle_client.get_logs(
+            sandbox_id,
+            levels=levels,
+            process_ids=process_ids,
+            next_token=next_token,
+            head=head,
+            tail=tail,
+            body=body,
+        )
+        self._trace_id = traced.trace_id
+        return traced
+
+    async def list_log_processes(self) -> Traced[SandboxProcessLogFiltersResponse]:
+        self._require_lifecycle_client("list_log_processes")
+        sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
+        traced = await self._lifecycle_client.list_log_processes(sandbox_id)
+        self._trace_id = traced.trace_id
+        return traced
+
     async def _fetch_info(self) -> SandboxInfo:
         if self._cached_info is None:
             if self._lifecycle_client is None:
@@ -533,6 +570,8 @@ class AsyncSandbox:
         restart: RestartPolicyConfig | Mapping[str, object] | None = None,
         health_check: ProcessHealthCheck | Mapping[str, object] | None = None,
     ) -> Traced[ProcessInfo]:
+        if name is not None:
+            _validate_managed_name_client_side(name)
         process_user = Sandbox._normalize_process_user(user)
         restart_payload = Sandbox._normalize_restart_config(restart)
         health_check_payload = Sandbox._normalize_health_check(health_check)
@@ -567,35 +606,66 @@ class AsyncSandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def get_process(self, pid: int) -> Traced[ProcessInfo]:
+    async def get_process(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[ProcessInfo]:
+        """Get information about a process by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
         try:
             trace_id, response_json = await self._rust_client.get_process_json_async(
-                pid=pid
+                seg
             )
             return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def kill_process(self, pid: int) -> Traced[None]:
+    async def kill_process(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[None]:
+        """Kill a process by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id = await self._rust_client.kill_process_async(pid=pid)
+            trace_id = await self._rust_client.kill_process_async(seg)
             return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def restart_process(self, pid: int) -> Traced[ProcessInfo]:
+    async def restart_process(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[ProcessInfo]:
+        """Restart a managed process by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
         try:
             trace_id, response_json = (
-                await self._rust_client.restart_process_json_async(pid=pid)
+                await self._rust_client.restart_process_json_async(seg)
             )
             return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def send_signal(self, pid: int, signal: int) -> Traced[SendSignalResponse]:
+    async def send_signal(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        signal: int = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[SendSignalResponse]:
+        """Send a signal to a process by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
+        if signal is _PROCESS_ARG_UNSET:
+            raise TypeError("missing required argument: `signal`")
         try:
             trace_id, response_json = await self._rust_client.send_signal_json_async(
-                pid=pid, signal=signal
+                seg, signal
             )
             return Traced(
                 trace_id, SendSignalResponse.model_validate_json(response_json)
@@ -605,51 +675,90 @@ class AsyncSandbox:
 
     # --- Process I/O ---
 
-    async def write_stdin(self, pid: int, data: bytes) -> Traced[None]:
+    async def write_stdin(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        data: bytes = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[None]:
+        """Write data to a process's stdin by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
+        if data is _PROCESS_ARG_UNSET:
+            raise TypeError("missing required argument: `data`")
         try:
-            trace_id = await self._rust_client.write_stdin_async(pid=pid, data=data)
+            trace_id = await self._rust_client.write_stdin_async(seg, data)
             return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def close_stdin(self, pid: int) -> Traced[None]:
+    async def close_stdin(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[None]:
+        """Close a process's stdin by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id = await self._rust_client.close_stdin_async(pid=pid)
+            trace_id = await self._rust_client.close_stdin_async(seg)
             return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def get_stdout(self, pid: int) -> Traced[OutputResponse]:
+    async def get_stdout(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[OutputResponse]:
+        """Get all stdout output from a process by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, response_json = await self._rust_client.get_stdout_json_async(
-                pid=pid
-            )
+            trace_id, response_json = await self._rust_client.get_stdout_json_async(seg)
             return Traced(trace_id, OutputResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def get_stderr(self, pid: int) -> Traced[OutputResponse]:
+    async def get_stderr(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[OutputResponse]:
+        """Get all stderr output from a process by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, response_json = await self._rust_client.get_stderr_json_async(
-                pid=pid
-            )
+            trace_id, response_json = await self._rust_client.get_stderr_json_async(seg)
             return Traced(trace_id, OutputResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def get_output(self, pid: int) -> Traced[OutputResponse]:
+    async def get_output(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[OutputResponse]:
+        """Get all combined output from a process by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, response_json = await self._rust_client.get_output_json_async(
-                pid=pid
-            )
+            trace_id, response_json = await self._rust_client.get_output_json_async(seg)
             return Traced(trace_id, OutputResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def follow_stdout(self, pid: int) -> TracedIterator[OutputEvent]:
+    async def follow_stdout(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> TracedIterator[OutputEvent]:
+        """Follow stdout output events by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
         try:
             trace_id, events_json = await self._rust_client.follow_stdout_json_async(
-                pid=pid
+                seg
             )
             return TracedIterator(
                 trace_id, [OutputEvent.model_validate_json(ej) for ej in events_json]
@@ -657,10 +766,17 @@ class AsyncSandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def follow_stderr(self, pid: int) -> TracedIterator[OutputEvent]:
+    async def follow_stderr(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> TracedIterator[OutputEvent]:
+        """Follow stderr output events by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
         try:
             trace_id, events_json = await self._rust_client.follow_stderr_json_async(
-                pid=pid
+                seg
             )
             return TracedIterator(
                 trace_id, [OutputEvent.model_validate_json(ej) for ej in events_json]
@@ -668,10 +784,17 @@ class AsyncSandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    async def follow_output(self, pid: int) -> TracedIterator[OutputEvent]:
+    async def follow_output(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> TracedIterator[OutputEvent]:
+        """Follow combined output events by PID or process name given on creation."""
+        seg = _resolve_process_arg(process, pid)
         try:
             trace_id, events_json = await self._rust_client.follow_output_json_async(
-                pid=pid
+                seg
             )
             return TracedIterator(
                 trace_id, [OutputEvent.model_validate_json(ej) for ej in events_json]

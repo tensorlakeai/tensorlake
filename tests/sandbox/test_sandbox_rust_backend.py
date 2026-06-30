@@ -57,8 +57,8 @@ class _FakeRustProxyClient:
             }
         return _TRACE_ID, json.dumps(response)
 
-    def restart_process_json(self, pid):
-        assert pid == 101
+    def restart_process_json(self, process):
+        assert process == "101"
         return _TRACE_ID, json.dumps(
             {
                 "handle": 8,
@@ -100,8 +100,8 @@ class _FakeRustProxyClient:
             }
         )
 
-    def follow_output_json(self, pid):
-        assert pid == 101
+    def follow_output_json(self, process):
+        assert process == "101"
         return _TRACE_ID, [
             json.dumps(
                 {
