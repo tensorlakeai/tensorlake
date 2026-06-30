@@ -14,10 +14,10 @@ export {
   listSandboxImages,
 } from "./sandbox-image.js";
 export {
-  createFileSystem,
-  listFileSystems,
-  deleteFileSystem,
-} from "./file-system.js";
+  createSharedFileSystem,
+  listSharedFileSystems,
+  deleteSharedFileSystem,
+} from "./shared-file-system.js";
 export { Image, dockerfileContent, ImageBuildOperationType } from "./image.js";
 export { sandboxUrlFromIngressEndpoint } from "./url.js";
 
@@ -93,13 +93,13 @@ export type {
   ApplicationBuildImageResult,
   ApplicationBuildResponse,
   SandboxTemplate,
-  FileSystem,
+  SharedFileSystem,
 } from "./cloud-models.js";
 
 export type {
   ContainerResourcesInfo,
   NetworkConfig,
-  FileSystemMount,
+  SharedFileSystemMount,
   CopySandboxOptions,
   CopiedSandboxResponse,
   CopySandboxResponse,

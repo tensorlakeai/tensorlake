@@ -29,7 +29,6 @@ from .models import (
     CreateSandboxResources,
     CreateSandboxResponse,
     CreateSnapshotResponse,
-    FileSystemMount,
     GPUResources,
     ListArchivedSandboxesResponse,
     ListSandboxesResponse,
@@ -41,6 +40,7 @@ from .models import (
     SandboxPoolRequest,
     SandboxPortAccess,
     SandboxStatus,
+    SharedFileSystemMount,
     SnapshotInfo,
     SnapshotStatus,
     SnapshotType,
@@ -394,7 +394,7 @@ class SandboxClient:
         deny_out: list[str] | None = None,
         snapshot_id: str | None = None,
         name: str | None = None,
-        file_systems: list[FileSystemMount] | None = None,
+        shared_file_systems: list[SharedFileSystemMount] | None = None,
     ) -> Traced[CreateSandboxResponse]:
         """Create a new standalone sandbox.
 
@@ -425,8 +425,8 @@ class SandboxClient:
                 overridden.
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
-            file_systems: ZeroFS file systems to mount into the sandbox at boot,
-                each at its own absolute, unique guest mount path.
+            shared_file_systems: Shared file systems to mount into the sandbox
+                at boot, each at its own absolute, unique guest mount path.
 
         Returns:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
@@ -456,12 +456,14 @@ class SandboxClient:
             network=network,
             snapshot_id=snapshot_id,
             name=name,
-            file_systems=file_systems,
+            shared_file_systems=shared_file_systems,
         )
 
         try:
             trace_id, response_json = self._rust_client.create_sandbox(
-                request_json=request_model.model_dump_json(exclude_none=True)
+                request_json=request_model.model_dump_json(
+                    by_alias=True, exclude_none=True
+                )
             )
             return Traced(
                 trace_id, CreateSandboxResponse.model_validate_json(response_json)
@@ -860,26 +862,27 @@ class SandboxClient:
             time.sleep(poll_interval)
         raise SandboxError(f"Sandbox {sandbox_id!r} did not resume within {timeout}s")
 
-    # --- File system operations ---
+    # --- Shared file system operations ---
 
-    def attach_file_system(
+    def attach_shared_file_system(
         self,
         sandbox_id: str,
         file_system_id: str,
         mount_path: str,
     ) -> Traced[SandboxInfo]:
-        """Attach a registered file system to a running sandbox.
+        """Attach a registered shared file system to a running sandbox.
 
         The mount completes asynchronously on the dataplane; the returned
-        ``SandboxInfo`` already reflects the new entry in ``file_systems``.
+        ``SandboxInfo`` already reflects the new entry in
+        ``shared_file_systems``.
 
         Args:
             sandbox_id: ID or name of the running sandbox.
-            file_system_id: The registered file system's id.
+            file_system_id: The registered shared file system's id.
             mount_path: Absolute, unique guest mount path (e.g. ``/mnt/skills``).
 
         Returns:
-            Traced[SandboxInfo] with the sandbox's updated file systems.
+            Traced[SandboxInfo] with the sandbox's updated shared file systems.
 
         Raises:
             SandboxNotFoundError: If the sandbox doesn't exist
@@ -887,7 +890,7 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            trace_id, response_json = self._rust_client.attach_file_system(
+            trace_id, response_json = self._rust_client.attach_shared_file_system(
                 sandbox_id=sandbox_id,
                 file_system_id=file_system_id,
                 mount_path=mount_path,
@@ -898,22 +901,24 @@ class SandboxClient:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
-    def detach_file_system(
+    def detach_shared_file_system(
         self,
         sandbox_id: str,
         mount_path: str,
     ) -> Traced[SandboxInfo]:
-        """Detach the file system mounted at ``mount_path`` from a sandbox.
+        """Detach the shared file system mounted at ``mount_path`` from a sandbox.
 
         The unmount completes asynchronously on the dataplane; the returned
-        ``SandboxInfo`` already reflects the removed ``file_systems`` entry.
+        ``SandboxInfo`` already reflects the removed ``shared_file_systems``
+        entry.
 
         Args:
             sandbox_id: ID or name of the running sandbox.
-            mount_path: Absolute guest mount path of the file system to unmount.
+            mount_path: Absolute guest mount path of the shared file system to
+                unmount.
 
         Returns:
-            Traced[SandboxInfo] with the sandbox's updated file systems.
+            Traced[SandboxInfo] with the sandbox's updated shared file systems.
 
         Raises:
             SandboxNotFoundError: If the sandbox doesn't exist
@@ -921,7 +926,7 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            trace_id, response_json = self._rust_client.detach_file_system(
+            trace_id, response_json = self._rust_client.detach_shared_file_system(
                 sandbox_id=sandbox_id,
                 mount_path=mount_path,
             )
@@ -1331,7 +1336,7 @@ class SandboxClient:
         request_timeout: float | None = None,
         startup_timeout: float | None = None,
         name: str | None = None,
-        file_systems: list[FileSystemMount] | None = None,
+        shared_file_systems: list[SharedFileSystemMount] | None = None,
     ) -> "Sandbox":
         """Create a sandbox, wait for it to start, and return a connected Sandbox.
 
@@ -1368,9 +1373,9 @@ class SandboxClient:
             startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
-            file_systems: ZeroFS file systems to mount into the sandbox at boot,
-                each at its own absolute, unique guest mount path. Ignored when
-                claiming from a pool.
+            shared_file_systems: Shared file systems to mount into the sandbox
+                at boot, each at its own absolute, unique guest mount path.
+                Ignored when claiming from a pool.
 
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)
@@ -1410,7 +1415,7 @@ class SandboxClient:
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
                 name=name,
-                file_systems=file_systems,
+                shared_file_systems=shared_file_systems,
             )
 
         # Fast path: the blocking create/claim response already carries Running status

@@ -505,7 +505,7 @@ impl NativeSandboxClient {
     }
 
     #[napi]
-    pub async fn attach_file_system(
+    pub async fn attach_shared_file_system(
         &self,
         sandbox_id: String,
         file_system_id: String,
@@ -517,7 +517,7 @@ impl NativeSandboxClient {
             let mount_path = mount_path.clone();
             async move {
                 let traced = c
-                    .attach_file_system(&sandbox_id, &file_system_id, &mount_path)
+                    .attach_shared_file_system(&sandbox_id, &file_system_id, &mount_path)
                     .await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced)?;
@@ -528,7 +528,7 @@ impl NativeSandboxClient {
     }
 
     #[napi]
-    pub async fn detach_file_system(
+    pub async fn detach_shared_file_system(
         &self,
         sandbox_id: String,
         mount_path: String,
@@ -537,7 +537,9 @@ impl NativeSandboxClient {
             let sandbox_id = sandbox_id.clone();
             let mount_path = mount_path.clone();
             async move {
-                let traced = c.detach_file_system(&sandbox_id, &mount_path).await?;
+                let traced = c
+                    .detach_shared_file_system(&sandbox_id, &mount_path)
+                    .await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced)?;
                 Ok(TracedJson { trace_id, json })

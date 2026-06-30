@@ -742,7 +742,7 @@ describe("Sandbox", () => {
     });
   });
 
-  describe("file systems", () => {
+  describe("shared file systems", () => {
     function fsSandboxInfoBody(overrides: Record<string, unknown> = {}) {
       return JSON.stringify({
         id: "sbx-abc",
@@ -753,7 +753,7 @@ describe("Sandbox", () => {
       });
     }
 
-    it("create() serializes fileSystems into the request body", async () => {
+    it("create() serializes sharedFileSystems into the request body", async () => {
       let captured: Record<string, unknown> | undefined;
       installNativeStub({
         client: {
@@ -769,7 +769,7 @@ describe("Sandbox", () => {
         /* _internal */ true,
       );
       await client.create({
-        fileSystems: [
+        sharedFileSystems: [
           { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
         ],
       });
@@ -797,10 +797,10 @@ describe("Sandbox", () => {
       expect(captured && "file_systems" in captured).toBe(false);
     });
 
-    it("attachFileSystem() calls the native client and returns updated mounts", async () => {
+    it("attachSharedFileSystem() calls the native client and returns updated mounts", async () => {
       const stub = installNativeStub({
         client: {
-          attachFileSystem: vi.fn(
+          attachSharedFileSystem: vi.fn(
             async (sandboxId: string, fileSystemId: string, mountPath: string) => {
               expect(sandboxId).toBe("sbx-abc");
               expect(fileSystemId).toBe("file_system_abc");
@@ -822,25 +822,30 @@ describe("Sandbox", () => {
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
-      const info = await sbx.attachFileSystem("file_system_abc", "/mnt/skills");
-      expect(info.fileSystems).toEqual([
+      const info = await sbx.attachSharedFileSystem(
+        "file_system_abc",
+        "/mnt/skills",
+      );
+      expect(info.sharedFileSystems).toEqual([
         { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
       ]);
-      expect(stub.client.attachFileSystem).toHaveBeenCalledOnce();
+      expect(stub.client.attachSharedFileSystem).toHaveBeenCalledOnce();
       sbx.close();
     });
 
-    it("detachFileSystem() calls the native client with the mount path", async () => {
+    it("detachSharedFileSystem() calls the native client with the mount path", async () => {
       const stub = installNativeStub({
         client: {
-          detachFileSystem: vi.fn(async (sandboxId: string, mountPath: string) => {
-            expect(sandboxId).toBe("sbx-abc");
-            expect(mountPath).toBe("/mnt/skills");
-            return {
-              traceId: "t",
-              json: fsSandboxInfoBody({ file_systems: [] }),
-            };
-          }),
+          detachSharedFileSystem: vi.fn(
+            async (sandboxId: string, mountPath: string) => {
+              expect(sandboxId).toBe("sbx-abc");
+              expect(mountPath).toBe("/mnt/skills");
+              return {
+                traceId: "t",
+                json: fsSandboxInfoBody({ file_systems: [] }),
+              };
+            },
+          ),
         },
       });
 
@@ -848,13 +853,13 @@ describe("Sandbox", () => {
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
-      const info = await sbx.detachFileSystem("/mnt/skills");
-      expect(info.fileSystems).toEqual([]);
-      expect(stub.client.detachFileSystem).toHaveBeenCalledOnce();
+      const info = await sbx.detachSharedFileSystem("/mnt/skills");
+      expect(info.sharedFileSystems).toEqual([]);
+      expect(stub.client.detachSharedFileSystem).toHaveBeenCalledOnce();
       sbx.close();
     });
 
-    it("listFileSystems() reads the sandbox's current mounts", async () => {
+    it("listSharedFileSystems() reads the sandbox's current mounts", async () => {
       installNativeStub({
         client: {
           getSandbox: vi.fn(async () => ({
@@ -872,7 +877,7 @@ describe("Sandbox", () => {
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
-      const mounts = await sbx.listFileSystems();
+      const mounts = await sbx.listSharedFileSystems();
       expect(mounts.map((m) => m.fileSystemId)).toEqual(["file_system_abc"]);
       expect(mounts[0].mountPath).toBe("/mnt/skills");
       sbx.close();

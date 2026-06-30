@@ -9,8 +9,7 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use tensorlake::{
-    Client, ClientBuilder, sandbox_images::SandboxImageBuildEvent,
-    sandbox_templates::SandboxTemplatesClient,
+    sandbox_images::SandboxImageBuildEvent, sandbox_templates::SandboxTemplatesClient,
 };
 
 const BUILD_CONTEXT_PROGRESS_PREFIX: &str = "Creating build context archive:";
@@ -100,23 +99,8 @@ pub fn org_and_project(ctx: &CliContext) -> Result<(String, String)> {
     Ok((org_id, proj_id))
 }
 
-pub fn scoped_cloud_client(ctx: &CliContext) -> Result<Client> {
-    let token = ctx.bearer_token()?;
-    let mut builder = ClientBuilder::new(&ctx.api_url).bearer_token(&token);
-    let use_scope_headers = ctx.personal_access_token.is_some() && ctx.api_key.is_none();
-
-    if use_scope_headers
-        && let (Some(organization_id), Some(project_id)) =
-            (ctx.effective_organization_id(), ctx.effective_project_id())
-    {
-        builder = builder.scope(&organization_id, &project_id);
-    }
-
-    builder.build().map_err(Into::into)
-}
-
 pub fn sandbox_templates_client(ctx: &CliContext) -> Result<SandboxTemplatesClient> {
-    let client = scoped_cloud_client(ctx)?;
+    let client = ctx.scoped_cloud_client()?;
     let (org_id, proj_id) = org_and_project(ctx)?;
     Ok(SandboxTemplatesClient::new(client, org_id, proj_id))
 }

@@ -1,17 +1,18 @@
 import { CloudClient } from "./cloud-client.js";
-import type { FileSystem } from "./cloud-models.js";
+import type { SharedFileSystem } from "./cloud-models.js";
 import { buildContextFromEnv } from "./sandbox-image.js";
 
 /**
- * Project-scoped ZeroFS file-system registry helpers (create, list, delete).
+ * Project-scoped shared-file-system registry helpers (create, list, delete).
  *
  * Uses the same environment-based Tensorlake auth as `createSandboxImage`, and
  * requires `TENSORLAKE_ORGANIZATION_ID` and `TENSORLAKE_PROJECT_ID` because the
- * file-systems API is organization/project-scoped.
+ * shared-file-system API is organization/project-scoped.
  *
- * To mount a registered file system into a sandbox, pass `fileSystems` to
- * `Sandbox.create()` (mount at boot) or call `sandbox.attachFileSystem()` /
- * `sandbox.detachFileSystem()` on a running sandbox.
+ * To mount a registered shared file system into a sandbox, pass
+ * `sharedFileSystems` to `Sandbox.create()` (mount at boot) or call
+ * `sandbox.attachSharedFileSystem()` / `sandbox.detachSharedFileSystem()` on a
+ * running sandbox.
  */
 
 function requireCloudClient(): CloudClient {
@@ -22,7 +23,7 @@ function requireCloudClient(): CloudClient {
   }
   if (!context.organizationId || !context.projectId) {
     throw new Error(
-      "Managing file systems requires organization and project context " +
+      "Managing shared file systems requires organization and project context " +
         "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID).",
     );
   }
@@ -35,40 +36,42 @@ function requireCloudClient(): CloudClient {
   });
 }
 
-/** Register a new ZeroFS file system for the current project. */
-export async function createFileSystem(
+/** Register a new shared file system for the current project. */
+export async function createSharedFileSystem(
   name: string,
   description?: string,
-): Promise<FileSystem> {
+): Promise<SharedFileSystem> {
   if (typeof name !== "string" || name.length === 0) {
     throw new TypeError("name must be a non-empty string");
   }
   const client = requireCloudClient();
   try {
-    return await client.createFileSystem({ name, description });
+    return await client.createSharedFileSystem({ name, description });
   } finally {
     client.close();
   }
 }
 
-/** List all registered file systems for the current project. */
-export async function listFileSystems(): Promise<FileSystem[]> {
+/** List all registered shared file systems for the current project. */
+export async function listSharedFileSystems(): Promise<SharedFileSystem[]> {
   const client = requireCloudClient();
   try {
-    return await client.listFileSystems();
+    return await client.listSharedFileSystems();
   } finally {
     client.close();
   }
 }
 
-/** Delete a registered file system by its id (e.g. `file_system_...`). */
-export async function deleteFileSystem(fileSystemId: string): Promise<void> {
+/** Delete a registered shared file system by its id (e.g. `file_system_...`). */
+export async function deleteSharedFileSystem(
+  fileSystemId: string,
+): Promise<void> {
   if (typeof fileSystemId !== "string" || fileSystemId.length === 0) {
     throw new TypeError("fileSystemId must be a non-empty string");
   }
   const client = requireCloudClient();
   try {
-    await client.deleteFileSystem(fileSystemId);
+    await client.deleteSharedFileSystem(fileSystemId);
   } finally {
     client.close();
   }

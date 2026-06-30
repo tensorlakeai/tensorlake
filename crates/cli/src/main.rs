@@ -180,9 +180,9 @@ enum Commands {
     #[command(subcommand)]
     Secrets(SecretsCommands),
 
-    /// Manage ZeroFS file systems
-    #[command(subcommand)]
-    Fs(FsCommands),
+    /// Manage shared file systems
+    #[command(subcommand, name = "shared-fs")]
+    SharedFs(SharedFsCommands),
 
     /// Manage SSH public keys for sandbox SSH access
     #[command(subcommand, name = "ssh-keys", alias = "ssh-key", hide = true)]
@@ -203,10 +203,10 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-enum FsCommands {
-    /// Register a new file system
+enum SharedFsCommands {
+    /// Register a new shared file system
     Create {
-        /// File system name
+        /// Shared file system name
         #[arg(short, long)]
         name: String,
 
@@ -214,23 +214,23 @@ enum FsCommands {
         #[arg(short, long)]
         description: Option<String>,
 
-        /// Print the created file system as JSON
+        /// Print the created shared file system as JSON
         #[arg(long)]
         json: bool,
     },
 
-    /// List registered file systems
+    /// List registered shared file systems
     #[command(name = "ls")]
     Ls {
-        /// Print file systems as JSON
+        /// Print shared file systems as JSON
         #[arg(long)]
         json: bool,
     },
 
-    /// Delete a file system by id
+    /// Delete a shared file system by id
     #[command(name = "rm")]
     Rm {
-        /// File system id (e.g. `file_system_...`)
+        /// Shared file system id (e.g. `file_system_...`)
         file_system_id: String,
     },
 }
@@ -631,10 +631,10 @@ enum SbxCommands {
         #[arg(short = 'D', long = "network-deny")]
         network_deny: Vec<String>,
 
-        /// Mount a registered file system at boot as `<file_system_id>:<mount_path>`
-        /// (can be repeated)
-        #[arg(short = 'f', long = "file-system", value_name = "ID:PATH")]
-        file_systems: Vec<String>,
+        /// Mount a registered shared file system at boot as
+        /// `<file_system_id>:<mount_path>` (can be repeated)
+        #[arg(short = 'f', long = "shared-file-system", value_name = "ID:PATH")]
+        shared_file_systems: Vec<String>,
     },
 
     /// Suspend a running sandbox
@@ -900,19 +900,19 @@ enum SbxCommands {
     #[command(subcommand)]
     Image(ImageCommands),
 
-    /// Attach, detach, or list file systems on a sandbox
-    #[command(subcommand)]
-    Fs(SbxFsCommands),
+    /// Attach, detach, or list shared file systems on a sandbox
+    #[command(subcommand, name = "shared-fs")]
+    SharedFs(SbxSharedFsCommands),
 }
 
 #[derive(Subcommand)]
-enum SbxFsCommands {
-    /// Attach a registered file system to a running sandbox
+enum SbxSharedFsCommands {
+    /// Attach a registered shared file system to a running sandbox
     Attach {
         /// Sandbox ID or name
         sandbox_id: String,
 
-        /// File system id to attach (e.g. `file_system_...`)
+        /// Shared file system id to attach (e.g. `file_system_...`)
         #[arg(short, long = "id")]
         file_system_id: String,
 
@@ -925,7 +925,7 @@ enum SbxFsCommands {
         json: bool,
     },
 
-    /// Detach the file system mounted at a path from a running sandbox
+    /// Detach the shared file system mounted at a path from a running sandbox
     Detach {
         /// Sandbox ID or name
         sandbox_id: String,
@@ -939,7 +939,7 @@ enum SbxFsCommands {
         json: bool,
     },
 
-    /// List file systems currently mounted on a sandbox
+    /// List shared file systems currently mounted on a sandbox
     #[command(name = "ls")]
     Ls {
         /// Sandbox ID or name
@@ -1330,17 +1330,17 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 }
             }
         }
-        Commands::Fs(subcmd) => {
+        Commands::SharedFs(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
-                FsCommands::Create {
+                SharedFsCommands::Create {
                     name,
                     description,
                     json,
-                } => commands::fs::create(ctx, &name, description.as_deref(), json).await,
-                FsCommands::Ls { json } => commands::fs::list(ctx, json).await,
-                FsCommands::Rm { file_system_id } => {
-                    commands::fs::remove(ctx, &file_system_id).await
+                } => commands::shared_fs::create(ctx, &name, description.as_deref(), json).await,
+                SharedFsCommands::Ls { json } => commands::shared_fs::list(ctx, json).await,
+                SharedFsCommands::Rm { file_system_id } => {
+                    commands::shared_fs::remove(ctx, &file_system_id).await
                 }
             }
         }
@@ -1401,7 +1401,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         no_internet,
                         network_allow,
                         network_deny,
-                        file_systems,
+                        shared_file_systems,
                     } => {
                         let disk_mb = if let Some(value) = disk_mb {
                             Some(value)
@@ -1433,7 +1433,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 no_internet,
                                 network_allow: &network_allow,
                                 network_deny: &network_deny,
-                                file_systems: &file_systems,
+                                shared_file_systems: &shared_file_systems,
                             },
                         )
                         .await
@@ -1707,14 +1707,14 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             commands::sbx::image::rm::run(ctx, &name_or_id).await
                         }
                     },
-                    SbxCommands::Fs(fs_cmd) => match fs_cmd {
-                        SbxFsCommands::Attach {
+                    SbxCommands::SharedFs(fs_cmd) => match fs_cmd {
+                        SbxSharedFsCommands::Attach {
                             sandbox_id,
                             file_system_id,
                             path,
                             json,
                         } => {
-                            commands::sbx::fs::attach(
+                            commands::sbx::shared_fs::attach(
                                 ctx,
                                 &sandbox_id,
                                 &file_system_id,
@@ -1723,13 +1723,13 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             )
                             .await
                         }
-                        SbxFsCommands::Detach {
+                        SbxSharedFsCommands::Detach {
                             sandbox_id,
                             path,
                             json,
-                        } => commands::sbx::fs::detach(ctx, &sandbox_id, &path, json).await,
-                        SbxFsCommands::Ls { sandbox_id, json } => {
-                            commands::sbx::fs::list(ctx, &sandbox_id, json).await
+                        } => commands::sbx::shared_fs::detach(ctx, &sandbox_id, &path, json).await,
+                        SbxSharedFsCommands::Ls { sandbox_id, json } => {
+                            commands::sbx::shared_fs::list(ctx, &sandbox_id, json).await
                         }
                     },
                     SbxCommands::Tunnel {

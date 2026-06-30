@@ -83,12 +83,13 @@ export interface NetworkConfig {
 }
 
 /**
- * One ZeroFS file system mounted into a sandbox at an absolute guest path.
+ * One shared file system mounted into a sandbox at an absolute guest path.
  *
- * `fileSystemId` is the registered file system's id (e.g. `file_system_...`)
- * and `mountPath` is an absolute, unique guest path (e.g. `/mnt/skills`).
+ * `fileSystemId` is the registered shared file system's id (e.g.
+ * `file_system_...`) and `mountPath` is an absolute, unique guest path
+ * (e.g. `/mnt/skills`).
  */
-export interface FileSystemMount {
+export interface SharedFileSystemMount {
   fileSystemId: string;
   mountPath: string;
 }
@@ -114,8 +115,8 @@ export interface CreateSandboxOptions {
   snapshotId?: string;
   /** Optional name for the sandbox. Named sandboxes support suspend/resume. When absent the sandbox is ephemeral. */
   name?: string;
-  /** ZeroFS file systems to mount into the sandbox at boot, each at its own absolute, unique guest mount path. */
-  fileSystems?: FileSystemMount[];
+  /** Shared file systems to mount into the sandbox at boot, each at its own absolute, unique guest mount path. */
+  sharedFileSystems?: SharedFileSystemMount[];
 }
 
 export interface UpdateSandboxOptions {
@@ -184,8 +185,8 @@ export interface SandboxInfo {
   ingressEndpoint?: string;
   sandboxUrl?: string;
   routingHint?: string;
-  /** ZeroFS file systems currently mounted into the sandbox, each at its own guest mount path. Empty when none are mounted. */
-  fileSystems?: FileSystemMount[];
+  /** Shared file systems currently mounted into the sandbox, each at its own guest mount path. Empty when none are mounted. */
+  sharedFileSystems?: SharedFileSystemMount[];
 }
 
 export interface SandboxPortAccess {
@@ -604,6 +605,12 @@ export function fromSnakeKeys(
       let key: string;
       if (k === "id" && idField) {
         key = idField;
+      } else if (k === "file_systems") {
+        // Wire alias: the server uses `file_systems`, but the SDK exposes
+        // `sharedFileSystems` to disambiguate from a sandbox's local
+        // ephemeral filesystem. Elements still convert recursively
+        // (`file_system_id`/`mount_path` → `fileSystemId`/`mountPath`).
+        key = "sharedFileSystems";
       } else {
         key = snakeToCamel(k);
       }

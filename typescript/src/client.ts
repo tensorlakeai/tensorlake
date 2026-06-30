@@ -17,7 +17,6 @@ import {
   type CreateSandboxPoolResponse,
   type CreateSandboxResponse,
   type CreateSnapshotResponse,
-  type FileSystemMount,
   type ListArchivedSandboxesOptions,
   type ListArchivedSandboxesResponse,
   type SandboxClientOptions,
@@ -196,8 +195,11 @@ export class SandboxClient {
     if (options?.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options?.snapshotId != null) body.snapshot_id = options.snapshotId;
     if (options?.name != null) body.name = options.name;
-    if (options?.fileSystems != null && options.fileSystems.length > 0) {
-      body.file_systems = options.fileSystems.map((fs) => ({
+    if (
+      options?.sharedFileSystems != null &&
+      options.sharedFileSystems.length > 0
+    ) {
+      body.file_systems = options.sharedFileSystems.map((fs) => ({
         file_system_id: fs.fileSystemId,
         mount_path: fs.mountPath,
       }));
@@ -404,35 +406,36 @@ export class SandboxClient {
   }
 
   /**
-   * Attach a registered file system to a running sandbox at `mountPath`.
+   * Attach a registered shared file system to a running sandbox at `mountPath`.
    *
    * The mount completes asynchronously on the dataplane; the returned
-   * `SandboxInfo` already reflects the new entry in `fileSystems`.
+   * `SandboxInfo` already reflects the new entry in `sharedFileSystems`.
    */
-  async attachFileSystem(
+  async attachSharedFileSystem(
     sandboxId: string,
     fileSystemId: string,
     mountPath: string,
   ): Promise<Traced<SandboxInfo>> {
     return this.tracedJson<SandboxInfo>(
-      () => this.native.attachFileSystem(sandboxId, fileSystemId, mountPath),
+      () =>
+        this.native.attachSharedFileSystem(sandboxId, fileSystemId, mountPath),
       "sandboxId",
       { sandboxId, notFoundKind: "sandbox" },
     );
   }
 
   /**
-   * Detach the file system mounted at `mountPath` from a running sandbox.
+   * Detach the shared file system mounted at `mountPath` from a running sandbox.
    *
    * The unmount completes asynchronously on the dataplane; the returned
-   * `SandboxInfo` already reflects the removed `fileSystems` entry.
+   * `SandboxInfo` already reflects the removed `sharedFileSystems` entry.
    */
-  async detachFileSystem(
+  async detachSharedFileSystem(
     sandboxId: string,
     mountPath: string,
   ): Promise<Traced<SandboxInfo>> {
     return this.tracedJson<SandboxInfo>(
-      () => this.native.detachFileSystem(sandboxId, mountPath),
+      () => this.native.detachSharedFileSystem(sandboxId, mountPath),
       "sandboxId",
       { sandboxId, notFoundKind: "sandbox" },
     );

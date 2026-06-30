@@ -13,7 +13,6 @@ import type {
   BuildLogEntry,
   CloudClientOptions,
   CreateApplicationBuildRequest,
-  FileSystem,
   NewSecret,
   RequestInput,
   RequestMetadata,
@@ -21,6 +20,7 @@ import type {
   SandboxTemplate,
   Secret,
   SecretsList,
+  SharedFileSystem,
   StartImageBuildRequest,
   UpsertSecretResponse,
 } from "./cloud-models.js";
@@ -141,15 +141,15 @@ export class CloudClient {
   }
 
   /**
-   * Register a new ZeroFS file system with the project.
+   * Register a new shared file system with the project.
    *
    * Routed through the platform file-systems API, which requires the
    * organization/project scope (from the client or the `options` override).
    */
-  async createFileSystem(
+  async createSharedFileSystem(
     request: { name: string; description?: string },
     options?: { organizationId?: string; projectId?: string },
-  ): Promise<FileSystem> {
+  ): Promise<SharedFileSystem> {
     const scope = this.resolveScope(options?.organizationId, options?.projectId);
     const body: Record<string, unknown> = { name: request.name };
     if (request.description != null) body.description = request.description;
@@ -158,41 +158,39 @@ export class CloudClient {
       `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/file-systems`,
       { body },
     );
-    return fromSnakeKeys(raw) as FileSystem;
+    return fromSnakeKeys(raw) as SharedFileSystem;
   }
 
   /**
-   * List all registered file systems, following pagination to the end. Routed
-   * through the platform file-systems API, which requires the
+   * List all registered shared file systems, following pagination to the end.
+   * Routed through the platform file-systems API, which requires the
    * organization/project scope (from the client or the `options` override).
    */
-  async listFileSystems(
+  async listSharedFileSystems(
     options?: { organizationId?: string; projectId?: string },
-  ): Promise<FileSystem[]> {
+  ): Promise<SharedFileSystem[]> {
     const scope = this.resolveScope(options?.organizationId, options?.projectId);
     const base = `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/file-systems`;
     let path: string | null = `${base}?pageSize=100`;
-    const fileSystems: FileSystem[] = [];
+    const sharedFileSystems: SharedFileSystem[] = [];
     while (path !== null) {
-      const page: FileSystemsPage = await this.http.requestJson<FileSystemsPage>(
-        "GET",
-        path,
-      );
+      const page: SharedFileSystemsPage =
+        await this.http.requestJson<SharedFileSystemsPage>("GET", path);
       for (const item of page.items ?? []) {
-        fileSystems.push(fromSnakeKeys(item) as FileSystem);
+        sharedFileSystems.push(fromSnakeKeys(item) as SharedFileSystem);
       }
       const next = page.pagination?.next;
       path = next ? nextRequestPath(next) : null;
     }
-    return fileSystems;
+    return sharedFileSystems;
   }
 
   /**
-   * Delete a registered file system by its id (e.g. `file_system_...`). Routed
-   * through the platform file-systems API, which requires the
+   * Delete a registered shared file system by its id (e.g. `file_system_...`).
+   * Routed through the platform file-systems API, which requires the
    * organization/project scope (from the client or the `options` override).
    */
-  async deleteFileSystem(
+  async deleteSharedFileSystem(
     fileSystemId: string,
     options?: { organizationId?: string; projectId?: string },
   ): Promise<void> {
@@ -556,8 +554,8 @@ interface SandboxTemplatesPage {
   pagination?: { next?: string };
 }
 
-/** One page of the paginated file-systems list response. */
-interface FileSystemsPage {
+/** One page of the paginated shared-file-systems list response. */
+interface SharedFileSystemsPage {
   items?: Record<string, unknown>[];
   pagination?: { next?: string };
 }

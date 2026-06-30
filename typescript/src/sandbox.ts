@@ -23,7 +23,6 @@ import {
   type CreatePtySessionOptions,
   type DaemonInfo,
   type DirectoryEntry,
-  type FileSystemMount,
   type HealthResponse,
   type ListDirectoryResponse,
   type OutputEvent,
@@ -37,6 +36,7 @@ import {
   type SandboxInfo,
   type SandboxOptions,
   type SendSignalResponse,
+  type SharedFileSystemMount,
   type SnapshotInfo,
   type StartProcessOptions,
   SandboxStatus,
@@ -660,16 +660,17 @@ export class Sandbox {
   }
 
   /**
-   * Attach a registered file system to this running sandbox at `mountPath`.
+   * Attach a registered shared file system to this running sandbox at `mountPath`.
    *
-   * Returns the updated sandbox info; the new mount appears in `fileSystems`.
+   * Returns the updated sandbox info; the new mount appears in
+   * `sharedFileSystems`.
    */
-  async attachFileSystem(
+  async attachSharedFileSystem(
     fileSystemId: string,
     mountPath: string,
   ): Promise<Traced<SandboxInfo>> {
-    const client = this.requireLifecycleClient("attachFileSystem");
-    const info = await client.attachFileSystem(
+    const client = this.requireLifecycleClient("attachSharedFileSystem");
+    const info = await client.attachSharedFileSystem(
       this.lifecycleIdentifier,
       fileSystemId,
       mountPath,
@@ -680,25 +681,30 @@ export class Sandbox {
   }
 
   /**
-   * Detach the file system mounted at `mountPath` from this running sandbox.
+   * Detach the shared file system mounted at `mountPath` from this running
+   * sandbox.
    *
-   * Returns the updated sandbox info with the mount removed from `fileSystems`.
+   * Returns the updated sandbox info with the mount removed from
+   * `sharedFileSystems`.
    */
-  async detachFileSystem(mountPath: string): Promise<Traced<SandboxInfo>> {
-    const client = this.requireLifecycleClient("detachFileSystem");
-    const info = await client.detachFileSystem(this.lifecycleIdentifier, mountPath);
+  async detachSharedFileSystem(mountPath: string): Promise<Traced<SandboxInfo>> {
+    const client = this.requireLifecycleClient("detachSharedFileSystem");
+    const info = await client.detachSharedFileSystem(
+      this.lifecycleIdentifier,
+      mountPath,
+    );
     this._setLifecycleIdentifier(info.sandboxId);
     this._setName(info.name ?? null);
     return info;
   }
 
-  /** List the file systems currently mounted into this sandbox. */
-  async listFileSystems(): Promise<Traced<FileSystemMount[]>> {
-    const client = this.requireLifecycleClient("listFileSystems");
+  /** List the shared file systems currently mounted into this sandbox. */
+  async listSharedFileSystems(): Promise<Traced<SharedFileSystemMount[]>> {
+    const client = this.requireLifecycleClient("listSharedFileSystems");
     const info = await client.get(this.lifecycleIdentifier);
     this._setLifecycleIdentifier(info.sandboxId);
     this._setName(info.name ?? null);
-    return Object.assign(info.fileSystems ?? [], { traceId: info.traceId });
+    return Object.assign(info.sharedFileSystems ?? [], { traceId: info.traceId });
   }
 
   /**
