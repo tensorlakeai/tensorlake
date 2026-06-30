@@ -129,7 +129,7 @@ jobs:
             tests.sandbox.test_client_rust_backend_async \
             tests.sandbox.test_sandbox_rust_backend \
             tests.sandbox.test_sandbox_rust_backend_async \
-            tests.sandbox.test_shared_file_systems \
+            tests.sandbox.test_file_systems \
             tests.image.test_sandbox_builder
 
   test_sandbox:

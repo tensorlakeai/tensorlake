@@ -1,15 +1,15 @@
-//! `tl shared-fs` — manage the project-scoped shared-file-system registry.
+//! `tl fs` — manage the project-scoped file-system registry.
 //!
 //! These commands hit the platform API
 //! (`/platform/v1/organizations/{org}/projects/{project}/file-systems`) through
-//! the cloud SDK's [`SharedFileSystemsClient`], mirroring how `tl sbx image`
-//! talks to the sandbox-templates registry. Attaching/detaching a shared file
-//! system to a specific sandbox lives under `tl sbx shared-fs` instead, because
+//! the cloud SDK's [`FileSystemsClient`], mirroring how `tl sbx image`
+//! talks to the sandbox-templates registry. Attaching/detaching a file
+//! system to a specific sandbox lives under `tl sbx fs` instead, because
 //! that is a sandbox-lifecycle operation rather than registry management.
 
 use comfy_table::Cell;
-use tensorlake::shared_file_systems::SharedFileSystemsClient;
-use tensorlake::shared_file_systems::models::CreateSharedFileSystemRequest;
+use tensorlake::file_systems::FileSystemsClient;
+use tensorlake::file_systems::models::CreateFileSystemRequest;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
@@ -18,17 +18,17 @@ use crate::output::table::new_table;
 fn org_and_project(ctx: &CliContext) -> Result<(String, String)> {
     let org_id = ctx
         .effective_organization_id()
-        .ok_or_else(|| CliError::auth("Organization ID is required to manage shared file systems"))?;
+        .ok_or_else(|| CliError::auth("Organization ID is required to manage file systems"))?;
     let proj_id = ctx
         .effective_project_id()
-        .ok_or_else(|| CliError::auth("Project ID is required to manage shared file systems"))?;
+        .ok_or_else(|| CliError::auth("Project ID is required to manage file systems"))?;
     Ok((org_id, proj_id))
 }
 
-fn shared_file_systems_client(ctx: &CliContext) -> Result<SharedFileSystemsClient> {
+fn file_systems_client(ctx: &CliContext) -> Result<FileSystemsClient> {
     let client = ctx.scoped_cloud_client()?;
     let (org_id, proj_id) = org_and_project(ctx)?;
-    Ok(SharedFileSystemsClient::new(client, org_id, proj_id))
+    Ok(FileSystemsClient::new(client, org_id, proj_id))
 }
 
 pub async fn create(
@@ -37,28 +37,28 @@ pub async fn create(
     description: Option<&str>,
     output_json: bool,
 ) -> Result<()> {
-    let client = shared_file_systems_client(ctx)?;
-    let request = CreateSharedFileSystemRequest {
+    let client = file_systems_client(ctx)?;
+    let request = CreateFileSystemRequest {
         name: name.to_string(),
         description: description.map(str::to_string),
     };
-    let shared_file_system = client.create(&request).await?.into_inner();
+    let file_system = client.create(&request).await?.into_inner();
 
     if output_json {
-        println!("{}", serde_json::to_string_pretty(&shared_file_system)?);
+        println!("{}", serde_json::to_string_pretty(&file_system)?);
         return Ok(());
     }
 
     println!(
-        "Created shared file system '{}' ({}).",
-        shared_file_system.name.as_deref().unwrap_or(name),
-        shared_file_system.id.as_deref().unwrap_or("-"),
+        "Created file system '{}' ({}).",
+        file_system.name.as_deref().unwrap_or(name),
+        file_system.id.as_deref().unwrap_or("-"),
     );
     Ok(())
 }
 
 pub async fn list(ctx: &CliContext, output_json: bool) -> Result<()> {
-    let client = shared_file_systems_client(ctx)?;
+    let client = file_systems_client(ctx)?;
     let items = client.list().await?.into_inner();
 
     if output_json {
@@ -67,7 +67,7 @@ pub async fn list(ctx: &CliContext, output_json: bool) -> Result<()> {
     }
 
     if items.is_empty() {
-        println!("No shared file systems found.");
+        println!("No file systems found.");
         return Ok(());
     }
 
@@ -83,17 +83,13 @@ pub async fn list(ctx: &CliContext, output_json: bool) -> Result<()> {
     println!("{table}");
 
     let count = items.len();
-    println!(
-        "{} shared file system{}",
-        count,
-        if count != 1 { "s" } else { "" }
-    );
+    println!("{} file system{}", count, if count != 1 { "s" } else { "" });
     Ok(())
 }
 
 pub async fn remove(ctx: &CliContext, file_system_id: &str) -> Result<()> {
-    let client = shared_file_systems_client(ctx)?;
+    let client = file_systems_client(ctx)?;
     client.delete(file_system_id).await?;
-    println!("Deleted shared file system '{}'.", file_system_id);
+    println!("Deleted file system '{}'.", file_system_id);
     Ok(())
 }

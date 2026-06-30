@@ -6,11 +6,11 @@ from tensorlake.image import (
     list_sandbox_images,
 )
 from tensorlake.sandbox import (
-    SharedFileSystem,
-    SharedFileSystemMount,
-    create_shared_file_system,
-    delete_shared_file_system,
-    list_shared_file_systems,
+    FileSystem,
+    FileSystemMount,
+    create_file_system,
+    delete_file_system,
+    list_file_systems,
 )
 
 __all__ = [
@@ -19,9 +19,9 @@ __all__ = [
     "find_sandbox_image_by_name",
     "import_sandbox_image",
     "list_sandbox_images",
-    "SharedFileSystem",
-    "SharedFileSystemMount",
-    "create_shared_file_system",
-    "list_shared_file_systems",
-    "delete_shared_file_system",
+    "FileSystem",
+    "FileSystemMount",
+    "create_file_system",
+    "list_file_systems",
+    "delete_file_system",
 ]

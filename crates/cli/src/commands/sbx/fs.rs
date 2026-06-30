@@ -1,14 +1,14 @@
-//! `tl sbx shared-fs` — attach/detach/list shared file systems on a specific
+//! `tl sbx fs` — attach/detach/list file systems on a specific
 //! sandbox.
 //!
 //! These are sandbox-lifecycle operations: they hit the sandbox lifecycle API
 //! (`{sandbox_endpoint}/sandboxes/{id}/file_systems`), not the platform
-//! shared-file-system registry. Registering and deleting shared file systems
-//! themselves lives under the top-level `tl shared-fs` command.
+//! file-system registry. Registering and deleting file systems
+//! themselves lives under the top-level `tl fs` command.
 
 use comfy_table::Cell;
 use reqwest::Response;
-use tensorlake::sandboxes::models::{SandboxInfo, SharedFileSystemMount};
+use tensorlake::sandboxes::models::{FileSystemMount, SandboxInfo};
 
 use crate::auth::context::CliContext;
 use crate::commands::sbx::sandbox_endpoint;
@@ -30,14 +30,14 @@ async fn parse_sandbox_response(resp: Response, action: &str) -> Result<SandboxI
     resp.json().await.map_err(CliError::Http)
 }
 
-/// Render a sandbox's currently-mounted shared file systems as a table.
-fn print_mounts_table(mounts: &[SharedFileSystemMount]) {
+/// Render a sandbox's currently-mounted file systems as a table.
+fn print_mounts_table(mounts: &[FileSystemMount]) {
     if mounts.is_empty() {
-        println!("No shared file systems mounted.");
+        println!("No file systems mounted.");
         return;
     }
 
-    let mut table = new_table(&["Shared File System ID", "Mount Path"]);
+    let mut table = new_table(&["File System ID", "Mount Path"]);
     for mount in mounts {
         table.add_row(vec![
             Cell::new(mount.file_system_id.as_str()),
@@ -67,18 +67,18 @@ pub async fn attach(
         .send()
         .await
         .map_err(CliError::Http)?;
-    let info = parse_sandbox_response(resp, "attach shared file system").await?;
+    let info = parse_sandbox_response(resp, "attach file system").await?;
 
     if output_json {
-        println!("{}", serde_json::to_string_pretty(&info.shared_file_systems)?);
+        println!("{}", serde_json::to_string_pretty(&info.file_systems)?);
         return Ok(());
     }
 
     println!(
-        "Attached shared file system '{}' at '{}' on sandbox {}.",
+        "Attached file system '{}' at '{}' on sandbox {}.",
         file_system_id, mount_path, sandbox_id
     );
-    print_mounts_table(&info.shared_file_systems);
+    print_mounts_table(&info.file_systems);
     Ok(())
 }
 
@@ -98,18 +98,18 @@ pub async fn detach(
         .send()
         .await
         .map_err(CliError::Http)?;
-    let info = parse_sandbox_response(resp, "detach shared file system").await?;
+    let info = parse_sandbox_response(resp, "detach file system").await?;
 
     if output_json {
-        println!("{}", serde_json::to_string_pretty(&info.shared_file_systems)?);
+        println!("{}", serde_json::to_string_pretty(&info.file_systems)?);
         return Ok(());
     }
 
     println!(
-        "Detached shared file system at '{}' from sandbox {}.",
+        "Detached file system at '{}' from sandbox {}.",
         mount_path, sandbox_id
     );
-    print_mounts_table(&info.shared_file_systems);
+    print_mounts_table(&info.file_systems);
     Ok(())
 }
 
@@ -118,13 +118,13 @@ pub async fn list(ctx: &CliContext, sandbox_id: &str, output_json: bool) -> Resu
     let url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}"));
 
     let resp = client.get(&url).send().await.map_err(CliError::Http)?;
-    let info = parse_sandbox_response(resp, "list sandbox shared file systems").await?;
+    let info = parse_sandbox_response(resp, "list sandbox file systems").await?;
 
     if output_json {
-        println!("{}", serde_json::to_string_pretty(&info.shared_file_systems)?);
+        println!("{}", serde_json::to_string_pretty(&info.file_systems)?);
         return Ok(());
     }
 
-    print_mounts_table(&info.shared_file_systems);
+    print_mounts_table(&info.file_systems);
     Ok(())
 }
