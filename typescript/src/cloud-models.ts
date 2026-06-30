@@ -171,8 +171,8 @@ export interface SandboxTemplate {
   public?: boolean;
 }
 
-/** A registered shared file system as returned by the platform API. */
-export interface SharedFileSystem {
+/** A registered file system as returned by the platform API. */
+export interface FileSystem {
   id?: string;
   name?: string;
   description?: string;

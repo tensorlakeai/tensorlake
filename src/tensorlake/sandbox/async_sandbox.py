@@ -24,6 +24,7 @@ from .models import (
     CommandResult,
     CopySandboxResponse,
     DaemonInfo,
+    FileSystemMount,
     HealthResponse,
     ListDirectoryResponse,
     ListProcessesResponse,
@@ -40,7 +41,6 @@ from .models import (
     SandboxProcessLogFiltersResponse,
     SandboxStatus,
     SendSignalResponse,
-    SharedFileSystemMount,
     SnapshotInfo,
     SnapshotType,
     SnapshotWaitCondition,
@@ -166,7 +166,7 @@ class AsyncSandbox:
         request_timeout: float | None = None,
         startup_timeout: float | None = None,
         name: str | None = None,
-        shared_file_systems: list[SharedFileSystemMount] | None = None,
+        file_systems: list[FileSystemMount] | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
         organization_id: str | None = None,
@@ -210,7 +210,7 @@ class AsyncSandbox:
             proxy_url=proxy_url,
             request_timeout=effective_request_timeout,
             name=name,
-            shared_file_systems=shared_file_systems,
+            file_systems=file_systems,
         )
 
     @classmethod
@@ -287,58 +287,58 @@ class AsyncSandbox:
             poll_interval=poll_interval,
         )
 
-    async def attach_shared_file_system(
+    async def attach_file_system(
         self,
         file_system_id: str,
         mount_path: str,
     ) -> Traced[SandboxInfo]:
-        """Attach a registered shared file system to this running sandbox.
+        """Attach a registered file system to this running sandbox.
 
         Args:
-            file_system_id: The registered shared file system's id.
+            file_system_id: The registered file system's id.
             mount_path: Absolute, unique guest mount path (e.g. ``/mnt/skills``).
 
         Returns:
-            Traced[SandboxInfo] with this sandbox's updated shared file systems.
+            Traced[SandboxInfo] with this sandbox's updated file systems.
         """
-        self._require_lifecycle_client("attach_shared_file_system")
-        traced = await self._lifecycle_client.attach_shared_file_system(
+        self._require_lifecycle_client("attach_file_system")
+        traced = await self._lifecycle_client.attach_file_system(
             self._lifecycle_identifier(), file_system_id, mount_path
         )
         self._sandbox_id = traced.sandbox_id
         self._cached_info = traced.value
         return traced
 
-    async def detach_shared_file_system(self, mount_path: str) -> Traced[SandboxInfo]:
-        """Detach the shared file system mounted at ``mount_path`` from this sandbox.
+    async def detach_file_system(self, mount_path: str) -> Traced[SandboxInfo]:
+        """Detach the file system mounted at ``mount_path`` from this sandbox.
 
         Args:
-            mount_path: Absolute guest mount path of the shared file system to
+            mount_path: Absolute guest mount path of the file system to
                 unmount.
 
         Returns:
-            Traced[SandboxInfo] with this sandbox's updated shared file systems.
+            Traced[SandboxInfo] with this sandbox's updated file systems.
         """
-        self._require_lifecycle_client("detach_shared_file_system")
-        traced = await self._lifecycle_client.detach_shared_file_system(
+        self._require_lifecycle_client("detach_file_system")
+        traced = await self._lifecycle_client.detach_file_system(
             self._lifecycle_identifier(), mount_path
         )
         self._sandbox_id = traced.sandbox_id
         self._cached_info = traced.value
         return traced
 
-    async def list_shared_file_systems(self) -> list[SharedFileSystemMount]:
-        """List shared file systems currently mounted into this sandbox.
+    async def list_file_systems(self) -> list[FileSystemMount]:
+        """List file systems currently mounted into this sandbox.
 
         Returns:
-            The shared file systems mounted into this sandbox, each with its
+            The file systems mounted into this sandbox, each with its
             ``file_system_id`` and guest ``mount_path``.
         """
-        self._require_lifecycle_client("list_shared_file_systems")
+        self._require_lifecycle_client("list_file_systems")
         info = (await self._lifecycle_client.get(self._lifecycle_identifier())).value
         self._sandbox_id = info.sandbox_id
         self._cached_info = info
-        return info.shared_file_systems
+        return info.file_systems
 
     async def copy(
         self,

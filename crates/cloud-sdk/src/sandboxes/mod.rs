@@ -20,13 +20,13 @@ pub use desktop::SandboxDesktopClient;
 use models::{
     ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CopySandboxResponse,
     CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
-    CreateSnapshotResponse, DaemonInfo, DetachSharedFileSystemRequest, GetSandboxLogsRequest,
-    HealthResponse, ListArchivedSandboxesParams, ListArchivedSandboxesResponse,
-    ListDirectoryResponse, ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse,
-    ListSnapshotsResponse, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo,
-    SandboxLogsResponse, SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse,
-    SendSignalResponse, SharedFileSystemMount, SignBlobRequest, SnapshotInfo, SnapshotType,
-    UpdateSandboxRequest,
+    CreateSnapshotResponse, DaemonInfo, DetachFileSystemRequest, FileSystemMount,
+    GetSandboxLogsRequest, HealthResponse, ListArchivedSandboxesParams,
+    ListArchivedSandboxesResponse, ListDirectoryResponse, ListProcessesResponse,
+    ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse, OutputEvent,
+    OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxLogsResponse,
+    SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse,
+    SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
 };
 
 /// A reference to a sandbox process: either its OS **pid** or a managed-process **name**
@@ -333,18 +333,18 @@ impl SandboxesClient {
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    /// Attach a registered shared file system to a running sandbox at `mount_path`.
+    /// Attach a registered file system to a running sandbox at `mount_path`.
     ///
     /// The mount completes asynchronously on the dataplane; the returned
-    /// [`SandboxInfo`] already reflects the new entry in `shared_file_systems`.
-    pub async fn attach_shared_file_system(
+    /// [`SandboxInfo`] already reflects the new entry in `file_systems`.
+    pub async fn attach_file_system(
         &self,
         sandbox_id: &str,
         file_system_id: &str,
         mount_path: &str,
     ) -> Result<Traced<SandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
-        let body = SharedFileSystemMount {
+        let body = FileSystemMount {
             file_system_id: file_system_id.to_string(),
             mount_path: mount_path.to_string(),
         };
@@ -354,17 +354,17 @@ impl SandboxesClient {
         self.client.execute_json(req).await
     }
 
-    /// Detach the shared file system mounted at `mount_path` from a running sandbox.
+    /// Detach the file system mounted at `mount_path` from a running sandbox.
     ///
     /// The unmount completes asynchronously on the dataplane; the returned
-    /// [`SandboxInfo`] already reflects the removed `shared_file_systems` entry.
-    pub async fn detach_shared_file_system(
+    /// [`SandboxInfo`] already reflects the removed `file_systems` entry.
+    pub async fn detach_file_system(
         &self,
         sandbox_id: &str,
         mount_path: &str,
     ) -> Result<Traced<SandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
-        let body = DetachSharedFileSystemRequest {
+        let body = DetachFileSystemRequest {
             mount_path: mount_path.to_string(),
         };
         let req = self
