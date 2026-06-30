@@ -3195,7 +3195,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.52"
+version = "0.5.53"
 dependencies = [
  "base64",
  "bollard",
@@ -3238,7 +3238,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.52"
+version = "0.5.53"
 dependencies = [
  "anyhow",
  "base64",
@@ -3282,7 +3282,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.52"
+version = "0.5.53"
 dependencies = [
  "napi",
  "napi-build",
@@ -3296,7 +3296,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.52"
+version = "0.5.53"
 dependencies = [
  "futures",
  "pyo3",
