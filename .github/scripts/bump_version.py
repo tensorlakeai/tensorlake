@@ -8,14 +8,21 @@ DEFAULT_FILES = (
     "pyproject.toml",
     "Cargo.toml",
     "crates/rust-cloud-sdk-py/pyproject.toml",
+    "typescript/package.json",
 )
 
 
 def bump_version(path: Path, version: str) -> None:
     content = path.read_text()
+    if path.suffix == ".json":
+        pattern = r'"version":\s*"[^"]*"'
+        replacement = f'"version": "{version}"'
+    else:
+        pattern = r'^version = "[^"]*"'
+        replacement = f'version = "{version}"'
     updated = re.sub(
-        r'^version = "[^"]*"',
-        f'version = "{version}"',
+        pattern,
+        replacement,
         content,
         count=1,
         flags=re.MULTILINE,
