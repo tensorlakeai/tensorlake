@@ -297,9 +297,7 @@ class TestSharedFileSystemRegistry(unittest.TestCase):
             "tensorlake.sandbox.shared_file_system._cloud_api_client",
             return_value=fake,
         ):
-            fs = create_shared_file_system(
-                "skills", description="shared skills volume"
-            )
+            fs = create_shared_file_system("skills", description="shared skills volume")
 
         self.assertEqual(
             fake.create_args, ("org-1", "proj-1", "skills", "shared skills volume")

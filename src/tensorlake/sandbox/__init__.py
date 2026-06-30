@@ -13,11 +13,6 @@ from .exceptions import (
     SandboxException,
     SandboxNotFoundError,
 )
-from .shared_file_system import (
-    create_shared_file_system,
-    delete_shared_file_system,
-    list_shared_file_systems,
-)
 from .models import (
     ArchivedSandboxInfo,
     CheckpointType,
@@ -72,6 +67,11 @@ from .models import (
 )
 from .pty import AsyncPty, Pty
 from .sandbox import Sandbox
+from .shared_file_system import (
+    create_shared_file_system,
+    delete_shared_file_system,
+    list_shared_file_systems,
+)
 
 __all__ = [
     # Lifecycle management
