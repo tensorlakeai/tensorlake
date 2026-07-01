@@ -3,7 +3,7 @@ use eventsource_stream::Eventsource;
 use futures::{Stream, StreamExt};
 use reqwest::{
     Method, Request, Response, StatusCode,
-    header::{ACCEPT, HeaderMap, HeaderValue, InvalidHeaderValue},
+    header::{ACCEPT, CONTENT_LENGTH, HeaderMap, HeaderValue, InvalidHeaderValue},
 };
 use reqwest_middleware::{ClientBuilder as ReqwestClientBuilder, ClientWithMiddleware, Middleware};
 use serde::de::DeserializeOwned;
@@ -422,6 +422,18 @@ impl Client {
             .map_err(Into::into)
     }
 
+    pub fn build_empty_post_request(&self, path: &str) -> Result<reqwest::Request, SdkError> {
+        build_empty_post_request_from_builder(self.request(Method::POST, path))
+    }
+
+    pub fn build_bytes_post_request(
+        &self,
+        path: &str,
+        body: Vec<u8>,
+    ) -> Result<reqwest::Request, SdkError> {
+        build_bytes_post_request_from_builder(self.request(Method::POST, path), body)
+    }
+
     /// Helper function to build POST, PUT or PATCH requests with JSON body
     pub fn build_post_json_request(
         &self,
@@ -472,6 +484,27 @@ impl Client {
             _ => Ok(response),
         }
     }
+}
+
+pub(crate) fn build_empty_post_request_from_builder(
+    builder: reqwest_middleware::RequestBuilder,
+) -> Result<reqwest::Request, SdkError> {
+    builder
+        .header(CONTENT_LENGTH, "0")
+        .build()
+        .map_err(Into::into)
+}
+
+pub(crate) fn build_bytes_post_request_from_builder(
+    builder: reqwest_middleware::RequestBuilder,
+    body: Vec<u8>,
+) -> Result<reqwest::Request, SdkError> {
+    let len = body.len().to_string();
+    builder
+        .header(CONTENT_LENGTH, len)
+        .body(body)
+        .build()
+        .map_err(Into::into)
 }
 
 fn generate_traceparent() -> (String, String) {

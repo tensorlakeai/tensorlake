@@ -736,9 +736,7 @@ struct IntrospectScope {
 }
 
 async fn introspect_scope(client: &Client) -> Result<IntrospectScope> {
-    let request = client
-        .request(Method::POST, "/platform/v1/keys/introspect")
-        .build()?;
+    let request = client.build_empty_post_request("/platform/v1/keys/introspect")?;
     let response = client.execute_raw(request).await?;
     if !response.status().is_success() {
         let status = response.status();
