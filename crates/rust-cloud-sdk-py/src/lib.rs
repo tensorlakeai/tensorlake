@@ -32,8 +32,8 @@ use tensorlake::sandboxes::models::{
 use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
 };
-use tensorlake::shared_file_systems::SharedFileSystemsClient;
-use tensorlake::shared_file_systems::models::CreateSharedFileSystemRequest;
+use tensorlake::filesystems::FilesystemsClient;
+use tensorlake::filesystems::models::CreateFilesystemRequest;
 use tensorlake::{Client, ClientBuilder, error::SdkError};
 use tokio::runtime::Runtime;
 
@@ -200,12 +200,12 @@ impl CloudApiClient {
         })
     }
 
-    /// Register a new shared file system for the given project scope.
+    /// Register a new filesystem for the given project scope.
     ///
-    /// Returns the created `SharedFileSystem` JSON. Routed through the platform
+    /// Returns the created `Filesystem` JSON. Routed through the platform
     /// file-systems API, which requires the organization/project scope.
     #[pyo3(signature = (organization_id, project_id, name, description=None))]
-    fn create_shared_file_system(
+    fn create_filesystem(
         &self,
         organization_id: String,
         project_id: String,
@@ -215,24 +215,24 @@ impl CloudApiClient {
         self.run_with_retry(5, move |client| {
             let organization_id = organization_id.clone();
             let project_id = project_id.clone();
-            let request = CreateSharedFileSystemRequest {
+            let request = CreateFilesystemRequest {
                 name: name.clone(),
                 description: description.clone(),
             };
             async move {
-                let shared_file_systems =
-                    SharedFileSystemsClient::new(client, organization_id, project_id);
-                let traced = shared_file_systems.create(&request).await?;
+                let filesystems =
+                    FilesystemsClient::new(client, organization_id, project_id);
+                let traced = filesystems.create(&request).await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
             }
         })
     }
 
-    /// List all registered shared file systems for the given project scope.
+    /// List all registered filesystems for the given project scope.
     ///
-    /// Returns a JSON array of shared file systems. Routed through the platform
+    /// Returns a JSON array of filesystems. Routed through the platform
     /// file-systems API, which requires the organization/project scope.
-    fn list_shared_file_systems(
+    fn list_filesystems(
         &self,
         organization_id: String,
         project_id: String,
@@ -241,16 +241,16 @@ impl CloudApiClient {
             let organization_id = organization_id.clone();
             let project_id = project_id.clone();
             async move {
-                let shared_file_systems =
-                    SharedFileSystemsClient::new(client, organization_id, project_id);
-                let traced = shared_file_systems.list().await?;
+                let filesystems =
+                    FilesystemsClient::new(client, organization_id, project_id);
+                let traced = filesystems.list().await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
             }
         })
     }
 
-    /// Delete a registered shared file system by id for the given project scope.
-    fn delete_shared_file_system(
+    /// Delete a registered filesystem by id for the given project scope.
+    fn delete_filesystem(
         &self,
         organization_id: String,
         project_id: String,
@@ -261,9 +261,9 @@ impl CloudApiClient {
             let project_id = project_id.clone();
             let file_system_id = file_system_id.clone();
             async move {
-                let shared_file_systems =
-                    SharedFileSystemsClient::new(client, organization_id, project_id);
-                shared_file_systems.delete(&file_system_id).await?;
+                let filesystems =
+                    FilesystemsClient::new(client, organization_id, project_id);
+                filesystems.delete(&file_system_id).await?;
                 Ok(())
             }
         })
@@ -875,7 +875,7 @@ impl CloudSandboxClient {
         })
     }
 
-    fn attach_shared_file_system(
+    fn attach_filesystem(
         &self,
         sandbox_id: String,
         file_system_id: String,
@@ -887,7 +887,7 @@ impl CloudSandboxClient {
             let mount_path = mount_path.clone();
             async move {
                 let traced = client
-                    .attach_shared_file_system(&sandbox_id, &file_system_id, &mount_path)
+                    .attach_filesystem(&sandbox_id, &file_system_id, &mount_path)
                     .await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
@@ -896,7 +896,7 @@ impl CloudSandboxClient {
         })
     }
 
-    fn detach_shared_file_system(
+    fn detach_filesystem(
         &self,
         sandbox_id: String,
         mount_path: String,
@@ -906,7 +906,7 @@ impl CloudSandboxClient {
             let mount_path = mount_path.clone();
             async move {
                 let traced = client
-                    .detach_shared_file_system(&sandbox_id, &mount_path)
+                    .detach_filesystem(&sandbox_id, &mount_path)
                     .await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
@@ -1273,7 +1273,7 @@ impl CloudSandboxClient {
         })
     }
 
-    fn attach_shared_file_system_async<'py>(
+    fn attach_filesystem_async<'py>(
         &self,
         py: Python<'py>,
         sandbox_id: String,
@@ -1287,7 +1287,7 @@ impl CloudSandboxClient {
                 let file_system_id = file_system_id.clone();
                 let mount_path = mount_path.clone();
                 async move {
-                    c.attach_shared_file_system(&sandbox_id, &file_system_id, &mount_path)
+                    c.attach_filesystem(&sandbox_id, &file_system_id, &mount_path)
                         .await
                 }
             })
@@ -1299,7 +1299,7 @@ impl CloudSandboxClient {
         })
     }
 
-    fn detach_shared_file_system_async<'py>(
+    fn detach_filesystem_async<'py>(
         &self,
         py: Python<'py>,
         sandbox_id: String,
@@ -1310,7 +1310,7 @@ impl CloudSandboxClient {
             let traced = retry_async_op(client, 5, move |c| {
                 let sandbox_id = sandbox_id.clone();
                 let mount_path = mount_path.clone();
-                async move { c.detach_shared_file_system(&sandbox_id, &mount_path).await }
+                async move { c.detach_filesystem(&sandbox_id, &mount_path).await }
             })
             .await
             .map_err(into_sandbox_py_error)?;

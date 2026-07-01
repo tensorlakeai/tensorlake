@@ -8,13 +8,13 @@ use crate::{
 
 pub mod models;
 
-use models::{CreateSharedFileSystemRequest, SharedFileSystem};
+use models::{CreateFilesystemRequest, Filesystem};
 
-/// One page of the paginated shared-file-systems list response.
+/// One page of the paginated filesystems list response.
 #[derive(Debug, Default, Deserialize)]
-struct SharedFileSystemsPage {
+struct FilesystemsPage {
     #[serde(default)]
-    items: Vec<SharedFileSystem>,
+    items: Vec<Filesystem>,
     #[serde(default)]
     pagination: Option<Pagination>,
 }
@@ -44,22 +44,22 @@ fn next_request_path(next: &str) -> String {
     }
 }
 
-/// Client for the project-scoped shared-file-system registry.
+/// Client for the project-scoped filesystem registry.
 ///
-/// Shared file systems are created and listed against the Platform API under
+/// Filesystems are created and listed against the Platform API under
 /// `/platform/v1/organizations/{org}/projects/{project}/file-systems`. Once
-/// registered, a shared file system can be mounted into a sandbox at boot (via
-/// [`CreateSandboxRequest::shared_file_systems`](crate::sandboxes::models::CreateSandboxRequest))
+/// registered, a filesystem can be mounted into a sandbox at boot (via
+/// [`CreateSandboxRequest::filesystems`](crate::sandboxes::models::CreateSandboxRequest))
 /// or attached to a running sandbox (via
-/// [`SandboxesClient::attach_shared_file_system`](crate::sandboxes::SandboxesClient::attach_shared_file_system)).
+/// [`SandboxesClient::attach_filesystem`](crate::sandboxes::SandboxesClient::attach_filesystem)).
 #[derive(Clone)]
-pub struct SharedFileSystemsClient {
+pub struct FilesystemsClient {
     client: Client,
     organization_id: String,
     project_id: String,
 }
 
-impl SharedFileSystemsClient {
+impl FilesystemsClient {
     pub fn new(
         client: Client,
         organization_id: impl Into<String>,
@@ -79,27 +79,27 @@ impl SharedFileSystemsClient {
         )
     }
 
-    /// Register a new shared file system with the project.
+    /// Register a new filesystem with the project.
     pub async fn create(
         &self,
-        request: &CreateSharedFileSystemRequest,
-    ) -> Result<Traced<SharedFileSystem>, SdkError> {
+        request: &CreateFilesystemRequest,
+    ) -> Result<Traced<Filesystem>, SdkError> {
         let req = self
             .client
             .build_post_json_request(Method::POST, &self.endpoint(), request)?;
         self.client.execute_json(req).await
     }
 
-    /// List all registered shared file systems, following pagination to the end.
+    /// List all registered filesystems, following pagination to the end.
     ///
     /// Pages through `?pageSize=100` results, accumulating every entry. The
     /// returned `Traced` carries the trace id of the final page request.
-    pub async fn list(&self) -> Result<Traced<Vec<SharedFileSystem>>, SdkError> {
+    pub async fn list(&self) -> Result<Traced<Vec<Filesystem>>, SdkError> {
         let mut path = format!("{}?pageSize=100", self.endpoint());
-        let mut items: Vec<SharedFileSystem> = Vec::new();
+        let mut items: Vec<Filesystem> = Vec::new();
         loop {
             let req = self.client.build_get_json_request(&path, None)?;
-            let traced = self.client.execute_json::<SharedFileSystemsPage>(req).await?;
+            let traced = self.client.execute_json::<FilesystemsPage>(req).await?;
             let trace_id = traced.trace_id.clone();
             let page = traced.into_inner();
             items.extend(page.items);
@@ -110,7 +110,7 @@ impl SharedFileSystemsClient {
         }
     }
 
-    /// Delete a registered shared file system by its id (e.g. `file_system_...`).
+    /// Delete a registered filesystem by its id (e.g. `file_system_...`).
     pub async fn delete(&self, file_system_id: &str) -> Result<Traced<()>, SdkError> {
         let encoded = urlencoding::encode(file_system_id);
         let path = format!("{}/{}", self.endpoint(), encoded);

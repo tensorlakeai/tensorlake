@@ -1,14 +1,14 @@
-"""Project-scoped shared file system registry operations.
+"""Project-scoped filesystem registry operations.
 
-Shared file systems are managed through the platform API (the same
+Filesystems are managed through the platform API (the same
 environment-based Tensorlake auth and organization/project scope as sandbox
-images). Register one with :func:`create_shared_file_system`, list them with
-:func:`list_shared_file_systems`, and remove one with
-:func:`delete_shared_file_system`.
+images). Register one with :func:`create_filesystem`, list them with
+:func:`list_filesystems`, and remove one with
+:func:`delete_filesystem`.
 
-Once registered, mount a shared file system into a sandbox at boot via
-``Sandbox.create(shared_file_systems=[...])`` or attach it to a running sandbox
-with :meth:`tensorlake.sandbox.Sandbox.attach_shared_file_system`.
+Once registered, mount a filesystem into a sandbox at boot via
+``Sandbox.create(filesystems=[...])`` or attach it to a running sandbox
+with :meth:`tensorlake.sandbox.Sandbox.attach_filesystem`.
 """
 
 from __future__ import annotations
@@ -20,7 +20,7 @@ from tensorlake._tracing import USER_AGENT
 from tensorlake.cli._common import Context, build_context_from_env
 
 from .exceptions import SandboxError
-from .models import SharedFileSystem
+from .models import Filesystem
 
 
 def _require_project_context() -> Context:
@@ -31,7 +31,7 @@ def _require_project_context() -> Context:
         raise SandboxError("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.")
     if not ctx.organization_id or not ctx.project_id:
         raise SandboxError(
-            "Shared file system operations require organization and project context "
+            "Filesystem operations require organization and project context "
             "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID)."
         )
     return ctx
@@ -53,21 +53,21 @@ def _cloud_api_client(ctx: Context) -> Any:
     )
 
 
-def create_shared_file_system(
+def create_filesystem(
     name: str, description: str | None = None
-) -> SharedFileSystem:
-    """Register a new shared file system for the current project.
+) -> Filesystem:
+    """Register a new filesystem for the current project.
 
     Uses the same environment-based Tensorlake auth as sandbox images, and
     requires organization/project context (``TENSORLAKE_ORGANIZATION_ID`` and
     ``TENSORLAKE_PROJECT_ID``).
 
     Args:
-        name: Human-readable shared file system name.
+        name: Human-readable filesystem name.
         description: Optional description.
 
     Returns:
-        The registered :class:`SharedFileSystem`.
+        The registered :class:`Filesystem`.
 
     Raises:
         TypeError: ``name`` is not a non-empty string.
@@ -80,7 +80,7 @@ def create_shared_file_system(
     ctx = _require_project_context()
     client = _cloud_api_client(ctx)
     try:
-        result_json = client.create_shared_file_system(
+        result_json = client.create_filesystem(
             ctx.organization_id, ctx.project_id, name, description
         )
     except Exception as e:
@@ -88,19 +88,19 @@ def create_shared_file_system(
     finally:
         client.close()
 
-    return SharedFileSystem.model_validate_json(result_json)
+    return Filesystem.model_validate_json(result_json)
 
 
-def list_shared_file_systems() -> list[SharedFileSystem]:
-    """List all registered shared file systems for the current project.
+def list_filesystems() -> list[Filesystem]:
+    """List all registered filesystems for the current project.
 
     Uses the same environment-based Tensorlake auth as sandbox images, and
     requires organization/project context (``TENSORLAKE_ORGANIZATION_ID`` and
     ``TENSORLAKE_PROJECT_ID``).
 
     Returns:
-        The registered shared file systems as a list of
-        :class:`SharedFileSystem`.
+        The registered filesystems as a list of
+        :class:`Filesystem`.
 
     Raises:
         SandboxError: Credentials or project context are missing, or the
@@ -109,7 +109,7 @@ def list_shared_file_systems() -> list[SharedFileSystem]:
     ctx = _require_project_context()
     client = _cloud_api_client(ctx)
     try:
-        result_json = client.list_shared_file_systems(
+        result_json = client.list_filesystems(
             ctx.organization_id, ctx.project_id
         )
     except Exception as e:
@@ -119,18 +119,18 @@ def list_shared_file_systems() -> list[SharedFileSystem]:
 
     if not result_json:
         return []
-    return [SharedFileSystem.model_validate(item) for item in json.loads(result_json)]
+    return [Filesystem.model_validate(item) for item in json.loads(result_json)]
 
 
-def delete_shared_file_system(file_system_id: str) -> None:
-    """Delete a registered shared file system by its id (e.g. ``file_system_...``).
+def delete_filesystem(file_system_id: str) -> None:
+    """Delete a registered filesystem by its id (e.g. ``file_system_...``).
 
     Uses the same environment-based Tensorlake auth as sandbox images, and
     requires organization/project context (``TENSORLAKE_ORGANIZATION_ID`` and
     ``TENSORLAKE_PROJECT_ID``).
 
     Args:
-        file_system_id: The registered shared file system's id.
+        file_system_id: The registered filesystem's id.
 
     Raises:
         TypeError: ``file_system_id`` is not a non-empty string.
@@ -143,7 +143,7 @@ def delete_shared_file_system(file_system_id: str) -> None:
     ctx = _require_project_context()
     client = _cloud_api_client(ctx)
     try:
-        client.delete_shared_file_system(
+        client.delete_filesystem(
             ctx.organization_id, ctx.project_id, file_system_id
         )
     except Exception as e:

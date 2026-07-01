@@ -214,7 +214,7 @@ describe("CloudClient", () => {
     client.close();
   });
 
-  it("creates a shared file system through the platform file-systems route", async () => {
+  it("creates a filesystem through the platform file-systems route", async () => {
     mockFetch((url, init) => {
       expect(url).toBe(
         "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems",
@@ -241,7 +241,7 @@ describe("CloudClient", () => {
       organizationId: "org-1",
       projectId: "proj-1",
     });
-    const fs = await client.createSharedFileSystem({
+    const fs = await client.createFilesystem({
       name: "skills",
       description: "shared",
     });
@@ -253,7 +253,7 @@ describe("CloudClient", () => {
     client.close();
   });
 
-  it("lists shared file systems following pagination through the platform route", async () => {
+  it("lists filesystems following pagination through the platform route", async () => {
     const base =
       "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems";
     const requested: string[] = [];
@@ -285,8 +285,8 @@ describe("CloudClient", () => {
       organizationId: "org-1",
       projectId: "proj-1",
     });
-    const sharedFileSystems = await client.listSharedFileSystems();
-    expect(sharedFileSystems.map((fs) => fs.id)).toEqual([
+    const filesystems = await client.listFilesystems();
+    expect(filesystems.map((fs) => fs.id)).toEqual([
       "file_system_a",
       "file_system_b",
       "file_system_c",
@@ -298,7 +298,7 @@ describe("CloudClient", () => {
     client.close();
   });
 
-  it("deletes a shared file system through the platform file-systems route", async () => {
+  it("deletes a filesystem through the platform file-systems route", async () => {
     mockFetch((url, init) => {
       expect(url).toBe(
         "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems/file_system_abc",
@@ -312,7 +312,7 @@ describe("CloudClient", () => {
       organizationId: "org-1",
       projectId: "proj-1",
     });
-    await client.deleteSharedFileSystem("file_system_abc");
+    await client.deleteFilesystem("file_system_abc");
     client.close();
   });
 

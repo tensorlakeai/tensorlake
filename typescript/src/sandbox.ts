@@ -39,7 +39,7 @@ import {
   type SandboxOptions,
   type SandboxProcessLogFiltersResponse,
   type SendSignalResponse,
-  type SharedFileSystemMount,
+  type FilesystemMount,
   type SnapshotInfo,
   type StartProcessOptions,
   SandboxStatus,
@@ -663,17 +663,17 @@ export class Sandbox {
   }
 
   /**
-   * Attach a registered shared file system to this running sandbox at `mountPath`.
+   * Attach a registered filesystem to this running sandbox at `mountPath`.
    *
    * Returns the updated sandbox info; the new mount appears in
-   * `sharedFileSystems`.
+   * `filesystems`.
    */
-  async attachSharedFileSystem(
+  async attachFilesystem(
     fileSystemId: string,
     mountPath: string,
   ): Promise<Traced<SandboxInfo>> {
-    const client = this.requireLifecycleClient("attachSharedFileSystem");
-    const info = await client.attachSharedFileSystem(
+    const client = this.requireLifecycleClient("attachFilesystem");
+    const info = await client.attachFilesystem(
       this.lifecycleIdentifier,
       fileSystemId,
       mountPath,
@@ -684,15 +684,15 @@ export class Sandbox {
   }
 
   /**
-   * Detach the shared file system mounted at `mountPath` from this running
+   * Detach the filesystem mounted at `mountPath` from this running
    * sandbox.
    *
    * Returns the updated sandbox info with the mount removed from
-   * `sharedFileSystems`.
+   * `filesystems`.
    */
-  async detachSharedFileSystem(mountPath: string): Promise<Traced<SandboxInfo>> {
-    const client = this.requireLifecycleClient("detachSharedFileSystem");
-    const info = await client.detachSharedFileSystem(
+  async detachFilesystem(mountPath: string): Promise<Traced<SandboxInfo>> {
+    const client = this.requireLifecycleClient("detachFilesystem");
+    const info = await client.detachFilesystem(
       this.lifecycleIdentifier,
       mountPath,
     );
@@ -701,13 +701,13 @@ export class Sandbox {
     return info;
   }
 
-  /** List the shared file systems currently mounted into this sandbox. */
-  async listSharedFileSystems(): Promise<Traced<SharedFileSystemMount[]>> {
-    const client = this.requireLifecycleClient("listSharedFileSystems");
+  /** List the filesystems currently mounted into this sandbox. */
+  async listFilesystems(): Promise<Traced<FilesystemMount[]>> {
+    const client = this.requireLifecycleClient("listFilesystems");
     const info = await client.get(this.lifecycleIdentifier);
     this._setLifecycleIdentifier(info.sandboxId);
     this._setName(info.name ?? null);
-    return Object.assign(info.sharedFileSystems ?? [], { traceId: info.traceId });
+    return Object.assign(info.filesystems ?? [], { traceId: info.traceId });
   }
 
   /**

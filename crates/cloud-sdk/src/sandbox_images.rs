@@ -523,7 +523,7 @@ where
             network: None,
             snapshot_id: None,
             name: None,
-            shared_file_systems: Vec::new(),
+            filesystems: Vec::new(),
         })
         .await?;
     let sandbox_id = created.sandbox_id.clone();

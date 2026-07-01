@@ -76,7 +76,7 @@ pub mod sandbox_images;
 pub mod sandbox_templates;
 pub mod sandboxes;
 pub mod secrets;
-pub mod shared_file_systems;
+pub mod filesystems;
 use applications::*;
 use artifact_storage::*;
 use cron::*;
@@ -85,7 +85,7 @@ use images::*;
 use sandbox_templates::*;
 use sandboxes::*;
 use secrets::*;
-use shared_file_systems::*;
+use filesystems::*;
 
 mod client;
 pub use client::{Client, ClientBuilder, Traced};
@@ -293,13 +293,13 @@ impl Sdk {
         )
     }
 
-    /// Get a client for managing the project-scoped shared-file-system registry.
-    pub fn shared_file_systems(
+    /// Get a client for managing the project-scoped filesystem registry.
+    pub fn filesystems(
         &self,
         organization_id: &str,
         project_id: &str,
-    ) -> SharedFileSystemsClient {
-        SharedFileSystemsClient::new(
+    ) -> FilesystemsClient {
+        FilesystemsClient::new(
             self.client.clone(),
             organization_id.to_string(),
             project_id.to_string(),

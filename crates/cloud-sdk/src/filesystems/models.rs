@@ -1,18 +1,18 @@
 use serde::{Deserialize, Serialize};
 
-/// Request body for registering a new shared file system with a project.
+/// Request body for registering a new filesystem with a project.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct CreateSharedFileSystemRequest {
+pub struct CreateFilesystemRequest {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
 }
 
-/// A registered shared file system as returned by the Platform API.
+/// A registered filesystem as returned by the Platform API.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "camelCase")]
-pub struct SharedFileSystem {
+pub struct Filesystem {
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
@@ -31,11 +31,11 @@ pub struct SharedFileSystem {
 
 #[cfg(test)]
 mod tests {
-    use super::{CreateSharedFileSystemRequest, SharedFileSystem};
+    use super::{CreateFilesystemRequest, Filesystem};
 
     #[test]
-    fn create_shared_file_system_request_serializes_as_camel_case() {
-        let request = CreateSharedFileSystemRequest {
+    fn create_filesystem_request_serializes_as_camel_case() {
+        let request = CreateFilesystemRequest {
             name: "skills".to_string(),
             description: Some("shared skills volume".to_string()),
         };
@@ -47,8 +47,8 @@ mod tests {
     }
 
     #[test]
-    fn create_shared_file_system_request_omits_absent_description() {
-        let request = CreateSharedFileSystemRequest {
+    fn create_filesystem_request_omits_absent_description() {
+        let request = CreateFilesystemRequest {
             name: "skills".to_string(),
             description: None,
         };
@@ -57,7 +57,7 @@ mod tests {
     }
 
     #[test]
-    fn shared_file_system_deserializes_camel_case_response() {
+    fn filesystem_deserializes_camel_case_response() {
         let body = r#"{
             "id": "file_system_bKtRcMWrzcRTRGfmMhgDc",
             "name": "skills",
@@ -66,7 +66,7 @@ mod tests {
             "createdAt": "2026-06-25T00:00:00Z",
             "updatedAt": "2026-06-25T00:00:00Z"
         }"#;
-        let fs: SharedFileSystem = serde_json::from_str(body).unwrap();
+        let fs: Filesystem = serde_json::from_str(body).unwrap();
         assert_eq!(fs.id.as_deref(), Some("file_system_bKtRcMWrzcRTRGfmMhgDc"));
         assert_eq!(fs.name.as_deref(), Some("skills"));
         assert_eq!(fs.region.as_deref(), Some("us-east-1"));

@@ -95,12 +95,12 @@ export interface NativeSandboxClient {
   deleteSandbox(sandboxId: string): Promise<string>;
   suspendSandbox(sandboxId: string): Promise<string>;
   resumeSandbox(sandboxId: string): Promise<string>;
-  attachSharedFileSystem(
+  attachFilesystem(
     sandboxId: string,
     fileSystemId: string,
     mountPath: string,
   ): Promise<TracedJson>;
-  detachSharedFileSystem(
+  detachFilesystem(
     sandboxId: string,
     mountPath: string,
   ): Promise<TracedJson>;

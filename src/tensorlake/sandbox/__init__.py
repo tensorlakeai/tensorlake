@@ -56,8 +56,8 @@ from .models import (
     SandboxProcessLogFiltersResponse,
     SandboxStatus,
     SendSignalResponse,
-    SharedFileSystem,
-    SharedFileSystemMount,
+    Filesystem,
+    FilesystemMount,
     SnapshotInfo,
     SnapshotStatus,
     SnapshotType,
@@ -67,10 +67,10 @@ from .models import (
 )
 from .pty import AsyncPty, Pty
 from .sandbox import Sandbox
-from .shared_file_system import (
-    create_shared_file_system,
-    delete_shared_file_system,
-    list_shared_file_systems,
+from .filesystem import (
+    create_filesystem,
+    delete_filesystem,
+    list_filesystems,
 )
 
 __all__ = [
@@ -99,12 +99,12 @@ __all__ = [
     "ArchivedSandboxInfo",
     "ListArchivedSandboxesResponse",
     "sandbox_url_from_ingress_endpoint",
-    # Shared file system management
-    "SharedFileSystem",
-    "SharedFileSystemMount",
-    "create_shared_file_system",
-    "list_shared_file_systems",
-    "delete_shared_file_system",
+    # Filesystem management
+    "Filesystem",
+    "FilesystemMount",
+    "create_filesystem",
+    "list_filesystems",
+    "delete_filesystem",
     # Snapshot models
     "SnapshotStatus",
     "SnapshotType",

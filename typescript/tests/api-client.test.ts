@@ -89,7 +89,7 @@ describe("APIClient", () => {
     client.close();
   });
 
-  it("creates a shared file system through the scoped platform route", async () => {
+  it("creates a filesystem through the scoped platform route", async () => {
     mockFetch((url, init) => {
       expect(url).toBe(
         "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems",
@@ -107,12 +107,12 @@ describe("APIClient", () => {
       organizationId: "org-1",
       projectId: "proj-1",
     });
-    const fs = await client.createSharedFileSystem("skills");
+    const fs = await client.createFilesystem("skills");
     expect(fs.id).toBe("file_system_abc");
     client.close();
   });
 
-  it("deletes a shared file system through the scoped platform route", async () => {
+  it("deletes a filesystem through the scoped platform route", async () => {
     mockFetch((url, init) => {
       expect(url).toBe(
         "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems/file_system_abc",
@@ -126,7 +126,7 @@ describe("APIClient", () => {
       organizationId: "org-1",
       projectId: "proj-1",
     });
-    await client.deleteSharedFileSystem("file_system_abc");
+    await client.deleteFilesystem("file_system_abc");
     client.close();
   });
 });
