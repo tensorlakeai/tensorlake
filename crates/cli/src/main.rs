@@ -8,7 +8,7 @@ mod output;
 mod project;
 mod python_ast;
 
-use clap::{Parser, Subcommand, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::num::NonZeroUsize;
 
 use auth::context::CliContext;
@@ -180,6 +180,10 @@ enum Commands {
     #[command(subcommand)]
     Secrets(SecretsCommands),
 
+    /// Manage Tensorlake Filesystems
+    #[command(subcommand, name = "fs")]
+    Fs(FsCommands),
+
     /// Manage SSH public keys for sandbox SSH access
     #[command(subcommand, name = "ssh-keys", alias = "ssh-key", hide = true)]
     SshKeys(SshKeysCommands),
@@ -196,6 +200,39 @@ enum Commands {
     /// Manage sandboxes
     #[command(subcommand)]
     Sbx(SbxCommands),
+}
+
+#[derive(Subcommand)]
+enum FsCommands {
+    /// Register a new file system
+    Create {
+        /// File system name
+        #[arg(short, long)]
+        name: String,
+
+        /// Optional human-readable description
+        #[arg(short, long)]
+        description: Option<String>,
+
+        /// Print the created file system as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List registered file systems
+    #[command(name = "ls")]
+    Ls {
+        /// Print file systems as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Delete a file system by id
+    #[command(name = "rm")]
+    Rm {
+        /// File system id (e.g. `file_system_...`)
+        file_system_id: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -683,6 +720,11 @@ enum SbxCommands {
         /// Deny outbound traffic to this IP or CIDR (can be repeated)
         #[arg(short = 'D', long = "network-deny")]
         network_deny: Vec<String>,
+
+        /// Mount a registered file system at boot as
+        /// `<file_system_id>:<mount_path>` (can be repeated)
+        #[arg(short = 'f', long = "filesystem", value_name = "ID:PATH")]
+        file_systems: Vec<String>,
     },
 
     /// Suspend a running sandbox
@@ -788,30 +830,33 @@ enum SbxCommands {
         /// Sandbox ID or name
         sandbox_id: String,
 
-        /// Optional process PID to inspect
-        pid: Option<i64>,
+        /// Optional process to inspect: PID or process name given on creation
+        process: Option<String>,
 
         /// Print JSON
         #[arg(long)]
         json: bool,
     },
 
-    /// Restart a managed sandbox process by PID
+    /// Read persisted sandbox logs
+    Logs(LogsCliArgs),
+
+    /// Restart a managed sandbox process
     Restart {
         /// Sandbox ID or name
         sandbox_id: String,
 
-        /// Process PID
-        pid: i64,
+        /// PID or process name given on creation
+        process: String,
     },
 
-    /// Kill a sandbox process by PID
+    /// Kill a sandbox process (or stop a managed process)
     Kill {
         /// Sandbox ID or name
         sandbox_id: String,
 
-        /// Process PID
-        pid: i64,
+        /// PID or process name given on creation
+        process: String,
     },
 
     /// Copy files between local and sandbox
@@ -947,6 +992,56 @@ enum SbxCommands {
     /// Manage sandbox images
     #[command(subcommand)]
     Image(ImageCommands),
+
+    /// Attach, detach, or list file systems on a sandbox
+    #[command(subcommand, name = "fs")]
+    Fs(SbxFsCommands),
+}
+
+#[derive(Subcommand)]
+enum SbxFsCommands {
+    /// Attach a registered file system to a running sandbox
+    Attach {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// File system id to attach (e.g. `file_system_...`)
+        #[arg(short, long = "id")]
+        file_system_id: String,
+
+        /// Absolute guest mount path (e.g. `/mnt/skills`)
+        #[arg(short, long)]
+        path: String,
+
+        /// Print the updated sandbox as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Detach the file system mounted at a path from a running sandbox
+    Detach {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Absolute guest mount path to detach
+        #[arg(short, long)]
+        path: String,
+
+        /// Print the updated sandbox as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// List file systems currently mounted on a sandbox
+    #[command(name = "ls")]
+    Ls {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Print mounts as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1101,6 +1196,79 @@ enum RestartPolicyArg {
     Never,
     OnFailure,
     Always,
+}
+
+#[derive(Args, Clone, Debug)]
+struct LogsCliArgs {
+    #[command(subcommand)]
+    command: Option<LogsCommands>,
+
+    /// Sandbox ID or name
+    sandbox_id: Option<String>,
+
+    /// Filter by log level
+    #[arg(long, value_enum)]
+    level: Vec<SandboxLogLevelArg>,
+
+    /// Filter by stable process ID from `sbx logs streams`
+    #[arg(long = "process-id")]
+    process_id: Vec<String>,
+
+    /// Pagination token returned by a previous response
+    #[arg(long)]
+    next_token: Option<String>,
+
+    /// Read the oldest N logs
+    #[arg(long, conflicts_with = "tail")]
+    head: Option<usize>,
+
+    /// Read the newest N logs
+    #[arg(long)]
+    tail: Option<usize>,
+
+    /// Case-insensitive body text search
+    #[arg(long)]
+    body: Option<String>,
+
+    /// Print JSON
+    #[arg(long)]
+    json: bool,
+}
+
+#[derive(Subcommand, Clone, Debug, PartialEq, Eq)]
+enum LogsCommands {
+    /// List streams available for persisted sandbox log filtering
+    Streams {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Print JSON
+        #[arg(long)]
+        json: bool,
+    },
+}
+
+#[derive(ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum SandboxLogLevelArg {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+}
+
+impl SandboxLogLevelArg {
+    fn as_query_value(self) -> i8 {
+        match self {
+            SandboxLogLevelArg::Trace => 1,
+            SandboxLogLevelArg::Debug => 2,
+            SandboxLogLevelArg::Info => 3,
+            SandboxLogLevelArg::Warn => 4,
+            SandboxLogLevelArg::Error => 5,
+            SandboxLogLevelArg::Fatal => 6,
+        }
+    }
 }
 
 impl RestartPolicyArg {
@@ -1328,6 +1496,20 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 }
             }
         }
+        Commands::Fs(subcmd) => {
+            ensure_auth_and_project(ctx).await?;
+            match subcmd {
+                FsCommands::Create {
+                    name,
+                    description,
+                    json,
+                } => commands::fs::create(ctx, &name, description.as_deref(), json).await,
+                FsCommands::Ls { json } => commands::fs::list(ctx, json).await,
+                FsCommands::Rm { file_system_id } => {
+                    commands::fs::remove(ctx, &file_system_id).await
+                }
+            }
+        }
         Commands::SshKeys(subcmd) => {
             // SSH keys live on the user, not on a project — only auth (PAT or
             // logged-in session) is required, no org/project context.
@@ -1385,6 +1567,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         no_internet,
                         network_allow,
                         network_deny,
+                        file_systems,
                     } => {
                         let disk_mb = if let Some(value) = disk_mb {
                             Some(value)
@@ -1416,6 +1599,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 no_internet,
                                 network_allow: &network_allow,
                                 network_deny: &network_deny,
+                                file_systems: &file_systems,
                             },
                         )
                         .await
@@ -1481,15 +1665,49 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     }
                     SbxCommands::Ps {
                         sandbox_id,
-                        pid,
+                        process,
                         json,
-                    } => commands::sbx::process::ps(ctx, &sandbox_id, pid, json).await,
-                    SbxCommands::Restart { sandbox_id, pid } => {
-                        commands::sbx::process::restart(ctx, &sandbox_id, pid).await
+                    } => {
+                        commands::sbx::process::ps(ctx, &sandbox_id, process.as_deref(), json).await
                     }
-                    SbxCommands::Kill { sandbox_id, pid } => {
-                        commands::sbx::process::kill(ctx, &sandbox_id, pid).await
-                    }
+                    SbxCommands::Logs(args) => match args.command.clone() {
+                        Some(LogsCommands::Streams { sandbox_id, json }) => {
+                            commands::sbx::process::log_processes(ctx, &sandbox_id, json).await
+                        }
+                        None => {
+                            let sandbox_id = args.sandbox_id.ok_or_else(|| {
+                                CliError::Other(anyhow::anyhow!(
+                                    "logs requires a sandbox ID or the 'streams' subcommand"
+                                ))
+                            })?;
+                            commands::sbx::process::logs(
+                                ctx,
+                                &sandbox_id,
+                                commands::sbx::process::LogsArgs {
+                                    levels: args
+                                        .level
+                                        .iter()
+                                        .map(|level| level.as_query_value())
+                                        .collect(),
+                                    process_ids: args.process_id,
+                                    next_token: args.next_token.as_deref(),
+                                    head: args.head,
+                                    tail: args.tail,
+                                    body: args.body.as_deref(),
+                                    json: args.json,
+                                },
+                            )
+                            .await
+                        }
+                    },
+                    SbxCommands::Restart {
+                        sandbox_id,
+                        process,
+                    } => commands::sbx::process::restart(ctx, &sandbox_id, &process).await,
+                    SbxCommands::Kill {
+                        sandbox_id,
+                        process,
+                    } => commands::sbx::process::kill(ctx, &sandbox_id, &process).await,
                     SbxCommands::Cp { src, dest } => commands::sbx::cp::run(ctx, &src, &dest).await,
                     SbxCommands::Copy {
                         sandbox_id,
@@ -1687,6 +1905,31 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         }
                         ImageCommands::Rm { name_or_id } => {
                             commands::sbx::image::rm::run(ctx, &name_or_id).await
+                        }
+                    },
+                    SbxCommands::Fs(fs_cmd) => match fs_cmd {
+                        SbxFsCommands::Attach {
+                            sandbox_id,
+                            file_system_id,
+                            path,
+                            json,
+                        } => {
+                            commands::sbx::fs::attach(
+                                ctx,
+                                &sandbox_id,
+                                &file_system_id,
+                                &path,
+                                json,
+                            )
+                            .await
+                        }
+                        SbxFsCommands::Detach {
+                            sandbox_id,
+                            path,
+                            json,
+                        } => commands::sbx::fs::detach(ctx, &sandbox_id, &path, json).await,
+                        SbxFsCommands::Ls { sandbox_id, json } => {
+                            commands::sbx::fs::list(ctx, &sandbox_id, json).await
                         }
                     },
                     SbxCommands::Tunnel {
@@ -2268,31 +2511,78 @@ mod tests {
 
     #[test]
     fn sbx_process_lifecycle_commands_parse() {
-        match parse_command(["tl", "sbx", "ps", "sbx-123", "42", "--json"]) {
+        match parse_command(["tl", "sbx", "ps", "sbx-123", "web", "--json"]) {
             Commands::Sbx(SbxCommands::Ps {
                 sandbox_id,
-                pid,
+                process,
                 json,
             }) => {
                 assert_eq!(sandbox_id, "sbx-123");
-                assert_eq!(pid, Some(42));
+                assert_eq!(process.as_deref(), Some("web"));
                 assert!(json);
             }
             _ => panic!("expected sbx ps command"),
         }
         match parse_command(["tl", "sbx", "restart", "sbx-123", "42"]) {
-            Commands::Sbx(SbxCommands::Restart { sandbox_id, pid }) => {
+            Commands::Sbx(SbxCommands::Restart {
+                sandbox_id,
+                process,
+            }) => {
                 assert_eq!(sandbox_id, "sbx-123");
-                assert_eq!(pid, 42);
+                assert_eq!(process, "42");
             }
             _ => panic!("expected sbx restart command"),
         }
-        match parse_command(["tl", "sbx", "kill", "sbx-123", "42"]) {
-            Commands::Sbx(SbxCommands::Kill { sandbox_id, pid }) => {
+        match parse_command(["tl", "sbx", "kill", "sbx-123", "web"]) {
+            Commands::Sbx(SbxCommands::Kill {
+                sandbox_id,
+                process,
+            }) => {
                 assert_eq!(sandbox_id, "sbx-123");
-                assert_eq!(pid, 42);
+                assert_eq!(process, "web");
             }
             _ => panic!("expected sbx kill command"),
+        }
+    }
+
+    #[test]
+    fn sbx_logs_commands_parse() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "logs",
+            "sbx-123",
+            "--level",
+            "info",
+            "--process-id",
+            "proc-1",
+            "--tail",
+            "25",
+            "--json",
+        ]) {
+            Commands::Sbx(SbxCommands::Logs(args)) => {
+                assert_eq!(args.sandbox_id.as_deref(), Some("sbx-123"));
+                assert_eq!(args.command, None);
+                assert_eq!(args.level, vec![SandboxLogLevelArg::Info]);
+                assert_eq!(args.process_id, vec!["proc-1"]);
+                assert_eq!(args.tail, Some(25));
+                assert!(args.json);
+            }
+            _ => panic!("expected sbx logs command"),
+        }
+
+        match parse_command(["tl", "sbx", "logs", "streams", "sbx-123", "--json"]) {
+            Commands::Sbx(SbxCommands::Logs(args)) => {
+                assert_eq!(args.sandbox_id, None);
+                match args.command {
+                    Some(LogsCommands::Streams { sandbox_id, json }) => {
+                        assert_eq!(sandbox_id, "sbx-123");
+                        assert!(json);
+                    }
+                    _ => panic!("expected sbx logs streams command"),
+                }
+            }
+            _ => panic!("expected sbx logs command"),
         }
     }
 

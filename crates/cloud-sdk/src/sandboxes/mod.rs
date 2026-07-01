@@ -20,17 +20,109 @@ pub use desktop::SandboxDesktopClient;
 use models::{
     ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CopySandboxResponse,
     CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
-    CreateSnapshotResponse, DaemonInfo, HealthResponse, ListArchivedSandboxesParams,
+    CreateSnapshotResponse, DaemonInfo, DetachFileSystemRequest, FileSystemMount,
+    GetSandboxLogsRequest, HealthResponse, ListArchivedSandboxesParams,
     ListArchivedSandboxesResponse, ListDirectoryResponse, ListProcessesResponse,
     ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse, OutputEvent,
-    OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxPoolInfo, SandboxPoolRequest,
-    SendSignalResponse, SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
+    OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxLogsResponse,
+    SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse,
+    SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
 };
+
+/// A reference to a sandbox process: either its OS **pid** or a managed-process **name**
+/// given at creation. This is the single place the pid/name path segment is built, reused by
+/// the Rust SDK, the Python/Node bindings, and the CLI.
+#[derive(Debug, Clone)]
+pub enum ProcessRef {
+    Pid(u64),
+    Name(String),
+}
+
+impl ProcessRef {
+    /// The `{pid_or_name}` path segment. A pid is a bare decimal; a name is **percent-encoded**
+    /// so arbitrary characters (spaces, punctuation) survive as a single path segment. `/`
+    /// can't appear in a valid name (see [`validate_managed_name`]), so encoded slashes never
+    /// arise. The daemon's `Path<String>` extractor percent-decodes before matching the name.
+    pub fn to_path_segment(&self) -> String {
+        match self {
+            ProcessRef::Pid(pid) => pid.to_string(),
+            ProcessRef::Name(name) => urlencoding::encode(name).into_owned(),
+        }
+    }
+}
+
+impl From<u64> for ProcessRef {
+    fn from(pid: u64) -> Self {
+        ProcessRef::Pid(pid)
+    }
+}
+impl From<u32> for ProcessRef {
+    fn from(pid: u32) -> Self {
+        ProcessRef::Pid(pid as u64)
+    }
+}
+impl From<i64> for ProcessRef {
+    fn from(pid: i64) -> Self {
+        ProcessRef::Pid(pid as u64)
+    }
+}
+impl From<&str> for ProcessRef {
+    fn from(s: &str) -> Self {
+        // An all-ASCII-digit string is a pid; anything else is a managed name. This mirrors
+        // the daemon's route disambiguation, so a stringified pid still hits the pid branch.
+        if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
+            if let Ok(pid) = s.parse::<u64>() {
+                return ProcessRef::Pid(pid);
+            }
+        }
+        ProcessRef::Name(s.to_string())
+    }
+}
+impl From<String> for ProcessRef {
+    fn from(s: String) -> Self {
+        ProcessRef::from(s.as_str())
+    }
+}
+impl From<&String> for ProcessRef {
+    fn from(s: &String) -> Self {
+        ProcessRef::from(s.as_str())
+    }
+}
+
+/// Validate a user-supplied managed-process name. **Single source of truth** for the rule
+/// across the Rust SDK, the Python/Node bindings, and the CLI (the daemon keeps a
+/// byte-identical copy in its own repo). Permissive on purpose -- a name may contain any
+/// characters (spaces, punctuation, unicode; clients percent-encode the path segment) with
+/// only three rejections:
+///   1. empty (no path segment),
+///   2. contains `/` (an encoded slash is unreliable across the proxy/router chain), and
+///   3. all ASCII digits (reserved for PID addressing on the shared `/processes/{pid_or_name}`
+///      route -- this is the one residual backward-incompatibility; see release notes).
+pub fn validate_managed_name(name: &str) -> Result<(), SdkError> {
+    if name.is_empty() {
+        return Err(SdkError::ClientError(
+            "managed process name must not be empty".to_string(),
+        ));
+    }
+    if name.contains('/') {
+        return Err(SdkError::ClientError(
+            "managed process name must not contain '/'".to_string(),
+        ));
+    }
+    if name.bytes().all(|b| b.is_ascii_digit()) {
+        return Err(SdkError::ClientError(
+            "managed process name must not be all digits; numeric strings are reserved for PID addressing"
+                .to_string(),
+        ));
+    }
+    Ok(())
+}
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
 #[derive(Clone)]
 pub struct SandboxesClient {
     client: Client,
+    log_client: Client,
     namespace: String,
     use_namespaced_endpoints: bool,
 }
@@ -46,10 +138,17 @@ impl SandboxesClient {
         use_namespaced_endpoints: bool,
     ) -> Self {
         Self {
+            log_client: client.clone(),
             client,
             namespace: namespace.into(),
             use_namespaced_endpoints,
         }
+    }
+
+    /// Use a separate client/base URL for log-reader endpoints.
+    pub fn with_log_client(mut self, log_client: Client) -> Self {
+        self.log_client = log_client;
+        self
     }
 
     pub fn http_client(&self) -> &Client {
@@ -62,6 +161,10 @@ impl SandboxesClient {
         } else {
             format!("/{endpoint}")
         }
+    }
+
+    fn log_endpoint(&self, endpoint: &str) -> String {
+        format!("/v1/namespaces/{}/{}", self.namespace, endpoint)
     }
 
     pub async fn create(
@@ -161,6 +264,45 @@ impl SandboxesClient {
         self.client.execute_json(req).await
     }
 
+    pub async fn get_logs(
+        &self,
+        request: &GetSandboxLogsRequest,
+    ) -> Result<Traced<SandboxLogsResponse>, SdkError> {
+        let uri = self.log_endpoint(&format!("sandboxes/{}/logs", request.sandbox_id));
+        let mut req_builder = self.log_client.request(Method::GET, &uri);
+
+        for level in &request.levels {
+            req_builder = req_builder.query(&[("level", level.as_i8())]);
+        }
+        for process_id in &request.process_ids {
+            req_builder = req_builder.query(&[("processId", process_id)]);
+        }
+        if let Some(ref param_value) = request.next_token {
+            req_builder = req_builder.query(&[("nextToken", param_value)]);
+        }
+        if let Some(param_value) = request.head {
+            req_builder = req_builder.query(&[("head", param_value)]);
+        }
+        if let Some(param_value) = request.tail {
+            req_builder = req_builder.query(&[("tail", param_value)]);
+        }
+        if let Some(ref param_value) = request.body {
+            req_builder = req_builder.query(&[("body", param_value)]);
+        }
+
+        let req = req_builder.build()?;
+        self.log_client.execute_json(req).await
+    }
+
+    pub async fn list_log_processes(
+        &self,
+        sandbox_id: &str,
+    ) -> Result<Traced<SandboxProcessLogFiltersResponse>, SdkError> {
+        let uri = self.log_endpoint(&format!("sandboxes/{sandbox_id}/processes"));
+        let req = self.log_client.request(Method::GET, &uri).build()?;
+        self.log_client.execute_json(req).await
+    }
+
     pub async fn update(
         &self,
         sandbox_id: &str,
@@ -189,6 +331,46 @@ impl SandboxesClient {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/resume"));
         let req = self.client.request(Method::POST, &uri).build()?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
+    }
+
+    /// Attach a registered file system to a running sandbox at `mount_path`.
+    ///
+    /// The mount completes asynchronously on the dataplane; the returned
+    /// [`SandboxInfo`] already reflects the new entry in `file_systems`.
+    pub async fn attach_file_system(
+        &self,
+        sandbox_id: &str,
+        file_system_id: &str,
+        mount_path: &str,
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
+        let body = FileSystemMount {
+            file_system_id: file_system_id.to_string(),
+            mount_path: mount_path.to_string(),
+        };
+        let req = self
+            .client
+            .build_post_json_request(Method::POST, &uri, &body)?;
+        self.client.execute_json(req).await
+    }
+
+    /// Detach the file system mounted at `mount_path` from a running sandbox.
+    ///
+    /// The unmount completes asynchronously on the dataplane; the returned
+    /// [`SandboxInfo`] already reflects the removed `file_systems` entry.
+    pub async fn detach_file_system(
+        &self,
+        sandbox_id: &str,
+        mount_path: &str,
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
+        let body = DetachFileSystemRequest {
+            mount_path: mount_path.to_string(),
+        };
+        let req = self
+            .client
+            .build_post_json_request(Method::DELETE, &uri, &body)?;
+        self.client.execute_json(req).await
     }
 
     pub async fn snapshot(
@@ -332,6 +514,11 @@ impl SandboxProxyClient {
     }
 
     pub async fn start_process(&self, payload: &Value) -> Result<Traced<ProcessInfo>, SdkError> {
+        // Validate a managed name up front (clear client-side error before the round-trip).
+        // The daemon re-validates as the final authority for any path that bypasses this.
+        if let Some(name) = payload.get("name").and_then(Value::as_str) {
+            validate_managed_name(name)?;
+        }
         let req = self
             .request(Method::POST, "/api/v1/processes")
             .json(payload)
@@ -348,98 +535,141 @@ impl SandboxProxyClient {
             .map(|r| r.processes))
     }
 
-    pub async fn get_process(&self, pid: i64) -> Result<Traced<ProcessInfo>, SdkError> {
+    pub async fn get_process(
+        &self,
+        process: impl Into<ProcessRef>,
+    ) -> Result<Traced<ProcessInfo>, SdkError> {
+        let seg = process.into().to_path_segment();
         let req = self
-            .request(Method::GET, &format!("/api/v1/processes/{pid}"))
+            .request(Method::GET, &format!("/api/v1/processes/{seg}"))
             .build()?;
         self.client.execute_json(req).await
     }
 
-    pub async fn kill_process(&self, pid: i64) -> Result<Traced<()>, SdkError> {
+    pub async fn kill_process(
+        &self,
+        process: impl Into<ProcessRef>,
+    ) -> Result<Traced<()>, SdkError> {
+        let seg = process.into().to_path_segment();
         let req = self
-            .request(Method::DELETE, &format!("/api/v1/processes/{pid}"))
+            .request(Method::DELETE, &format!("/api/v1/processes/{seg}"))
             .build()?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    pub async fn restart_process(&self, pid: i64) -> Result<Traced<ProcessInfo>, SdkError> {
+    pub async fn restart_process(
+        &self,
+        process: impl Into<ProcessRef>,
+    ) -> Result<Traced<ProcessInfo>, SdkError> {
+        let seg = process.into().to_path_segment();
         let req = self
-            .request(Method::POST, &format!("/api/v1/processes/{pid}/restart"))
+            .request(Method::POST, &format!("/api/v1/processes/{seg}/restart"))
             .build()?;
         self.client.execute_json(req).await
     }
 
     pub async fn send_signal(
         &self,
-        pid: i64,
+        process: impl Into<ProcessRef>,
         signal: i64,
     ) -> Result<Traced<SendSignalResponse>, SdkError> {
+        let seg = process.into().to_path_segment();
         let req = self
-            .request(Method::POST, &format!("/api/v1/processes/{pid}/signal"))
+            .request(Method::POST, &format!("/api/v1/processes/{seg}/signal"))
             .json(&serde_json::json!({ "signal": signal }))
             .build()?;
         self.client.execute_json(req).await
     }
 
-    pub async fn write_stdin(&self, pid: i64, data: Vec<u8>) -> Result<Traced<()>, SdkError> {
+    pub async fn write_stdin(
+        &self,
+        process: impl Into<ProcessRef>,
+        data: Vec<u8>,
+    ) -> Result<Traced<()>, SdkError> {
+        let seg = process.into().to_path_segment();
         let req = self
-            .request(Method::POST, &format!("/api/v1/processes/{pid}/stdin"))
+            .request(Method::POST, &format!("/api/v1/processes/{seg}/stdin"))
             .body(data)
             .build()?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    pub async fn close_stdin(&self, pid: i64) -> Result<Traced<()>, SdkError> {
+    pub async fn close_stdin(
+        &self,
+        process: impl Into<ProcessRef>,
+    ) -> Result<Traced<()>, SdkError> {
+        let seg = process.into().to_path_segment();
         let req = self
             .request(
                 Method::POST,
-                &format!("/api/v1/processes/{pid}/stdin/close"),
+                &format!("/api/v1/processes/{seg}/stdin/close"),
             )
             .build()?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
-    pub async fn get_stdout(&self, pid: i64) -> Result<Traced<OutputResponse>, SdkError> {
+    pub async fn get_stdout(
+        &self,
+        process: impl Into<ProcessRef>,
+    ) -> Result<Traced<OutputResponse>, SdkError> {
+        let seg = process.into().to_path_segment();
         let req = self
-            .request(Method::GET, &format!("/api/v1/processes/{pid}/stdout"))
+            .request(Method::GET, &format!("/api/v1/processes/{seg}/stdout"))
             .build()?;
         self.client.execute_json(req).await
     }
 
-    pub async fn get_stderr(&self, pid: i64) -> Result<Traced<OutputResponse>, SdkError> {
+    pub async fn get_stderr(
+        &self,
+        process: impl Into<ProcessRef>,
+    ) -> Result<Traced<OutputResponse>, SdkError> {
+        let seg = process.into().to_path_segment();
         let req = self
-            .request(Method::GET, &format!("/api/v1/processes/{pid}/stderr"))
+            .request(Method::GET, &format!("/api/v1/processes/{seg}/stderr"))
             .build()?;
         self.client.execute_json(req).await
     }
 
-    pub async fn get_output(&self, pid: i64) -> Result<Traced<OutputResponse>, SdkError> {
+    pub async fn get_output(
+        &self,
+        process: impl Into<ProcessRef>,
+    ) -> Result<Traced<OutputResponse>, SdkError> {
+        let seg = process.into().to_path_segment();
         let req = self
-            .request(Method::GET, &format!("/api/v1/processes/{pid}/output"))
+            .request(Method::GET, &format!("/api/v1/processes/{seg}/output"))
             .build()?;
         self.client.execute_json(req).await
     }
 
-    pub async fn follow_stdout(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
+    pub async fn follow_stdout(
+        &self,
+        process: impl Into<ProcessRef>,
+    ) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
         let mut events = Vec::new();
         let trace_id = self
-            .follow_stdout_streaming(pid, |event| events.push(event))
+            .follow_stdout_streaming(process, |event| events.push(event))
             .await?;
         Ok(Traced::new(trace_id, events))
     }
 
-    pub async fn follow_stderr(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
+    pub async fn follow_stderr(
+        &self,
+        process: impl Into<ProcessRef>,
+    ) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
         let mut events = Vec::new();
         let trace_id = self
-            .follow_stderr_streaming(pid, |event| events.push(event))
+            .follow_stderr_streaming(process, |event| events.push(event))
             .await?;
         Ok(Traced::new(trace_id, events))
     }
 
-    pub async fn follow_output(&self, pid: i64) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
+    pub async fn follow_output(
+        &self,
+        process: impl Into<ProcessRef>,
+    ) -> Result<Traced<Vec<OutputEvent>>, SdkError> {
         let mut events = Vec::new();
         let trace_id = self
-            .follow_output_streaming(pid, |event| events.push(event))
+            .follow_output_streaming(process, |event| events.push(event))
             .await?;
         Ok(Traced::new(trace_id, events))
     }
@@ -450,28 +680,31 @@ impl SandboxProxyClient {
     /// language bindings that surface a live event stream to the caller.
     pub async fn follow_stdout_streaming(
         &self,
-        pid: i64,
+        process: impl Into<ProcessRef>,
         on_event: impl FnMut(OutputEvent),
     ) -> Result<String, SdkError> {
-        self.follow_stream_cb(&format!("/api/v1/processes/{pid}/stdout/follow"), on_event)
+        let seg = process.into().to_path_segment();
+        self.follow_stream_cb(&format!("/api/v1/processes/{seg}/stdout/follow"), on_event)
             .await
     }
 
     pub async fn follow_stderr_streaming(
         &self,
-        pid: i64,
+        process: impl Into<ProcessRef>,
         on_event: impl FnMut(OutputEvent),
     ) -> Result<String, SdkError> {
-        self.follow_stream_cb(&format!("/api/v1/processes/{pid}/stderr/follow"), on_event)
+        let seg = process.into().to_path_segment();
+        self.follow_stream_cb(&format!("/api/v1/processes/{seg}/stderr/follow"), on_event)
             .await
     }
 
     pub async fn follow_output_streaming(
         &self,
-        pid: i64,
+        process: impl Into<ProcessRef>,
         on_event: impl FnMut(OutputEvent),
     ) -> Result<String, SdkError> {
-        self.follow_stream_cb(&format!("/api/v1/processes/{pid}/output/follow"), on_event)
+        let seg = process.into().to_path_segment();
+        self.follow_stream_cb(&format!("/api/v1/processes/{seg}/output/follow"), on_event)
             .await
     }
 
@@ -704,5 +937,55 @@ impl SandboxProxyClient {
             .json(request)
             .build()?;
         self.client.execute_json(req).await
+    }
+}
+
+#[cfg(test)]
+mod process_ref_tests {
+    use super::{ProcessRef, validate_managed_name};
+
+    #[test]
+    fn validate_managed_name_rules() {
+        // Only three rejections: empty, contains '/', and all-digits (reserved for PID).
+        let long_digits = "9".repeat(100);
+        for bad in ["", "123", "0", "a/b", "worker/api", &long_digits] {
+            assert!(
+                validate_managed_name(bad).is_err(),
+                "expected {bad:?} rejected"
+            );
+        }
+        // Permissive: spaces, punctuation, leading/trailing whitespace, and unicode are all
+        // allowed now (clients percent-encode the path segment).
+        for ok in [
+            "web",
+            "web1",
+            "1web",
+            "my-app_v.2",
+            "web 1",
+            " web ",
+            "a?b",
+            "a%b",
+            "a#b",
+            "café",
+        ] {
+            assert!(
+                validate_managed_name(ok).is_ok(),
+                "expected {ok:?} accepted"
+            );
+        }
+    }
+
+    #[test]
+    fn process_ref_path_segments() {
+        assert_eq!(ProcessRef::from(1234u64).to_path_segment(), "1234");
+        assert_eq!(ProcessRef::from(42i64).to_path_segment(), "42");
+        // A numeric string is treated as a pid; a name is percent-encoded.
+        assert_eq!(ProcessRef::from("1234").to_path_segment(), "1234");
+        assert!(matches!(ProcessRef::from("1234"), ProcessRef::Pid(1234)));
+        assert_eq!(ProcessRef::from("web").to_path_segment(), "web");
+        assert!(matches!(ProcessRef::from("web"), ProcessRef::Name(_)));
+        // Spaces and reserved characters in a name are percent-encoded into one segment.
+        assert_eq!(ProcessRef::from("web 1").to_path_segment(), "web%201");
+        assert_eq!(ProcessRef::from("a?b").to_path_segment(), "a%3Fb");
     }
 }

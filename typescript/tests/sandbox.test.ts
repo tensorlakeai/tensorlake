@@ -385,14 +385,31 @@ describe("Sandbox", () => {
       expect(proc.managed?.healthCheck?.intervalMs).toBe(5000);
       sbx.close();
     });
+
+    it("rejects a numeric managed-process name client-side", async () => {
+      installNativeStub();
+      const sbx = makeSandbox();
+      await expect(sbx.startProcess("bash", { name: "123" })).rejects.toThrow();
+      sbx.close();
+    });
+
+    it("addresses a process by name or pid (segment is stringified)", async () => {
+      const stub = installNativeStub();
+      const sbx = makeSandbox();
+      await sbx.killProcess("web");
+      await sbx.killProcess(1234);
+      expect(stub.proxy.killProcess).toHaveBeenNthCalledWith(1, "web");
+      expect(stub.proxy.killProcess).toHaveBeenNthCalledWith(2, "1234");
+      sbx.close();
+    });
   });
 
   describe("restartProcess", () => {
     it("restarts the process by PID", async () => {
       const stub = installNativeStub({
         proxy: {
-          restartProcess: vi.fn(async (pid: number) => {
-            expect(pid).toBe(42);
+          restartProcess: vi.fn(async (process: string) => {
+            expect(process).toBe("42");
             return {
               traceId: "t",
               json: JSON.stringify({
@@ -426,7 +443,7 @@ describe("Sandbox", () => {
       const proc = await sbx.restartProcess(42);
       expect(proc.pid).toBe(43);
       expect(proc.managed?.restartCount).toBe(1);
-      expect(stub.proxy.restartProcess).toHaveBeenCalledWith(42);
+      expect(stub.proxy.restartProcess).toHaveBeenCalledWith("42");
       sbx.close();
     });
   });
@@ -739,6 +756,148 @@ describe("Sandbox", () => {
       expect(snaps[0].snapshotId).toBe("snap-1");
       sbx.close();
       client.close();
+    });
+  });
+
+  describe("file systems", () => {
+    function fsSandboxInfoBody(overrides: Record<string, unknown> = {}) {
+      return JSON.stringify({
+        id: "sbx-abc",
+        namespace: "default",
+        status: "running",
+        resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+        ...overrides,
+      });
+    }
+
+    it("create() serializes fileSystems into the request body", async () => {
+      let captured: Record<string, unknown> | undefined;
+      installNativeStub({
+        client: {
+          createSandbox: vi.fn(async (json: string) => {
+            captured = JSON.parse(json);
+            return { traceId: "t", json: fsSandboxInfoBody() };
+          }),
+        },
+      });
+
+      const client = new SandboxClient(
+        { apiUrl: "http://localhost:8900" },
+        /* _internal */ true,
+      );
+      await client.create({
+        fileSystems: [
+          { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
+        ],
+      });
+      expect(captured?.file_systems).toEqual([
+        { file_system_id: "file_system_abc", mount_path: "/mnt/skills" },
+      ]);
+    });
+
+    it("create() omits file_systems when none are provided", async () => {
+      let captured: Record<string, unknown> | undefined;
+      installNativeStub({
+        client: {
+          createSandbox: vi.fn(async (json: string) => {
+            captured = JSON.parse(json);
+            return { traceId: "t", json: fsSandboxInfoBody() };
+          }),
+        },
+      });
+
+      const client = new SandboxClient(
+        { apiUrl: "http://localhost:8900" },
+        /* _internal */ true,
+      );
+      await client.create({});
+      expect(captured && "file_systems" in captured).toBe(false);
+    });
+
+    it("attachFileSystem() calls the native client and returns updated mounts", async () => {
+      const stub = installNativeStub({
+        client: {
+          attachFileSystem: vi.fn(
+            async (sandboxId: string, fileSystemId: string, mountPath: string) => {
+              expect(sandboxId).toBe("sbx-abc");
+              expect(fileSystemId).toBe("file_system_abc");
+              expect(mountPath).toBe("/mnt/skills");
+              return {
+                traceId: "t",
+                json: fsSandboxInfoBody({
+                  file_systems: [
+                    { file_system_id: "file_system_abc", mount_path: "/mnt/skills" },
+                  ],
+                }),
+              };
+            },
+          ),
+        },
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-abc",
+        apiUrl: "http://localhost:8900",
+      });
+      const info = await sbx.attachFileSystem(
+        "file_system_abc",
+        "/mnt/skills",
+      );
+      expect(info.fileSystems).toEqual([
+        { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
+      ]);
+      expect(stub.client.attachFileSystem).toHaveBeenCalledOnce();
+      sbx.close();
+    });
+
+    it("detachFileSystem() calls the native client with the mount path", async () => {
+      const stub = installNativeStub({
+        client: {
+          detachFileSystem: vi.fn(
+            async (sandboxId: string, mountPath: string) => {
+              expect(sandboxId).toBe("sbx-abc");
+              expect(mountPath).toBe("/mnt/skills");
+              return {
+                traceId: "t",
+                json: fsSandboxInfoBody({ file_systems: [] }),
+              };
+            },
+          ),
+        },
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-abc",
+        apiUrl: "http://localhost:8900",
+      });
+      const info = await sbx.detachFileSystem("/mnt/skills");
+      expect(info.fileSystems).toEqual([]);
+      expect(stub.client.detachFileSystem).toHaveBeenCalledOnce();
+      sbx.close();
+    });
+
+    it("listFileSystems() reads the sandbox's current mounts", async () => {
+      installNativeStub({
+        client: {
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: fsSandboxInfoBody({
+              file_systems: [
+                { file_system_id: "file_system_abc", mount_path: "/mnt/skills" },
+              ],
+            }),
+          })),
+        },
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-abc",
+        apiUrl: "http://localhost:8900",
+      });
+      const mounts = await sbx.listFileSystems();
+      expect(mounts.map((m) => m.fileSystemId)).toEqual(["file_system_abc"]);
+      expect(mounts[0].mountPath).toBe("/mnt/skills");
+      sbx.close();
     });
   });
 

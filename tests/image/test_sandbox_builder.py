@@ -1,3 +1,4 @@
+import os
 import tempfile
 import unittest
 import warnings
@@ -428,7 +429,18 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
                 captured["args"] = args
                 captured["dockerfile_path"] = args[2]
                 captured["dockerfile_text"] = args[15]
-                captured["context_dir"] = args[16]
+                context_dir = args[16]
+                captured["context_dir"] = context_dir
+                # Snapshot the context contents now — a temp dir built for an
+                # Image without context_dir is removed once the build returns.
+                captured["context_files"] = (
+                    sorted(
+                        str(p.relative_to(context_dir))
+                        for p in Path(context_dir).iterdir()
+                    )
+                    if context_dir is not None and Path(context_dir).is_dir()
+                    else None
+                )
                 return '{"id":"tpl-1","snapshot_id":"snap-1"}'
 
             rust_builder_mock.side_effect = fake_rust_builder
@@ -445,7 +457,8 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             .copy("./src", "/app/src")
         )
 
-        _, _, rust_builder, captured = self._run_build(image)
+        # COPY ops require an explicit context_dir.
+        _, _, rust_builder, captured = self._run_build(image, context_dir=".")
 
         # The registered Dockerfile must match exactly what the TS SDK would
         # generate — no WORKDIR /app or pip install tensorlake injection.
@@ -481,6 +494,113 @@ class TestBuildSandboxImageFromImage(unittest.TestCase):
             self.assertEqual(captured["context_dir"], str(Path(tmpdir).resolve()))
 
         self.assertEqual(generated, [])
+
+    def test_default_context_is_empty_not_cwd(self):
+        # Without an explicit context_dir, an Image build must NOT upload the
+        # current working directory (which has no Dockerfile in it). It uses a
+        # throwaway empty temp dir instead, so only the generated Dockerfile
+        # text is built — nothing from cwd is archived.
+        image = Image(name="no-context-image", base_image="python:3.12-slim").run(
+            "pip install numpy"
+        )
+        _, _, _, captured = self._run_build(image)
+
+        context_dir = captured["context_dir"]
+        self.assertIsInstance(context_dir, str)
+        self.assertNotEqual(
+            Path(str(context_dir)).resolve(),
+            Path(os.getcwd()).resolve(),
+            "Image build must not default its build context to cwd",
+        )
+        # The temp dir is cleaned up once the build returns.
+        self.assertFalse(Path(str(context_dir)).exists())
+
+    def test_default_empty_context_has_no_files(self):
+        # An image with no COPY/ADD host-file ops gets an empty context — just
+        # the (separately passed) Dockerfile text, nothing archived from disk.
+        image = Image(name="no-copy-image", base_image="python:3.12-slim").run(
+            "pip install numpy"
+        )
+        _, _, _, captured = self._run_build(image)
+        self.assertEqual(captured["context_files"], [])
+
+    def test_copy_without_context_dir_raises(self):
+        # COPY/ADD that reads host files needs a context. Without context_dir
+        # the build must fail fast with a clear, actionable message rather than
+        # guessing or uploading the whole cwd.
+        image = Image(name="copy-image", base_image="python:3.12-slim").copy(
+            "requirements.txt", "/tmp/requirements.txt"
+        )
+        with self.assertRaises(sbm.SandboxImageBuildError) as ctx:
+            self._run_build(image)
+        self.assertIn("context_dir", str(ctx.exception))
+
+    def test_add_without_context_dir_raises(self):
+        image = Image(name="add-image", base_image="python:3.12-slim").add(
+            "./data", "/app/data"
+        )
+        with self.assertRaises(sbm.SandboxImageBuildError) as ctx:
+            self._run_build(image)
+        self.assertIn("context_dir", str(ctx.exception))
+
+    def test_remote_add_does_not_require_context(self):
+        # A remote ADD <url> reads nothing from the host, so it needs no
+        # context and builds with an empty one.
+        image = Image(name="url-image", base_image="python:3.12-slim").add(
+            "https://example.com/data.tar.gz", "/app/data.tar.gz"
+        )
+        _, _, _, captured = self._run_build(image)
+        self.assertEqual(captured["context_files"], [])
+
+    def test_copy_from_stage_does_not_require_context(self):
+        # COPY --from=<stage> reads from another build stage, not the host.
+        image = Image(name="stage-image", base_image="python:3.12-slim").copy(
+            "/build/app", "/app", options={"from": "builder"}
+        )
+        _, _, _, captured = self._run_build(image)
+        self.assertEqual(captured["context_files"], [])
+
+    def test_run_bind_mount_without_context_dir_raises(self):
+        # A RUN bind mount reads the build context, so it needs a context.
+        # `type=bind` is the default, so omitting it must also be detected.
+        for mount in (
+            "type=bind,source=.,target=/src",
+            "target=/src",
+        ):
+            image = Image(name="mount-image", base_image="python:3.12-slim").run(
+                "make -C /src", options={"mount": mount}
+            )
+            with self.assertRaises(sbm.SandboxImageBuildError) as ctx:
+                self._run_build(image)
+            self.assertIn("context_dir", str(ctx.exception))
+
+    def test_run_mount_from_stage_does_not_require_context(self):
+        # A `from=` bind mount reads another stage/image, not the host.
+        image = Image(name="mount-stage", base_image="python:3.12-slim").run(
+            "make", options={"mount": "type=bind,from=builder,target=/src"}
+        )
+        _, _, _, captured = self._run_build(image)
+        self.assertEqual(captured["context_files"], [])
+
+    def test_run_cache_mount_does_not_require_context(self):
+        # Non-bind mounts (cache/tmpfs/secret/ssh) don't read the build context.
+        image = Image(name="mount-cache", base_image="python:3.12-slim").run(
+            "pip install -r req.txt",
+            options={"mount": "type=cache,target=/root/.cache"},
+        )
+        _, _, _, captured = self._run_build(image)
+        self.assertEqual(captured["context_files"], [])
+
+    def test_copy_with_context_dir_uploads_dir_as_is(self):
+        # With an explicit context_dir, COPY ops are allowed and the directory
+        # is uploaded as-is (resolved), like `docker build <dir>`.
+        image = Image(name="copy-image", base_image="python:3.12-slim").copy(
+            "requirements.txt", "/tmp/requirements.txt"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            Path(tmp, "requirements.txt").write_text("flask\n", encoding="utf-8")
+            _, _, _, captured = self._run_build(image, context_dir=tmp)
+            self.assertEqual(captured["context_dir"], str(Path(tmp).resolve()))
 
     def test_warns_on_default_name(self):
         image = Image(base_image="python:3.12-slim")

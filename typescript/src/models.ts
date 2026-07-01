@@ -82,6 +82,18 @@ export interface NetworkConfig {
   denyOut: string[];
 }
 
+/**
+ * One file system mounted into a sandbox at an absolute guest path.
+ *
+ * `fileSystemId` is the registered file system's id (e.g.
+ * `file_system_...`) and `mountPath` is an absolute, unique guest path
+ * (e.g. `/mnt/skills`).
+ */
+export interface FileSystemMount {
+  fileSystemId: string;
+  mountPath: string;
+}
+
 // --- Sandbox lifecycle ---
 
 export interface CreateSandboxOptions {
@@ -103,6 +115,8 @@ export interface CreateSandboxOptions {
   snapshotId?: string;
   /** Optional name for the sandbox. Named sandboxes support suspend/resume. When absent the sandbox is ephemeral. */
   name?: string;
+  /** File systems to mount into the sandbox at boot, each at its own absolute, unique guest mount path. */
+  fileSystems?: FileSystemMount[];
 }
 
 export interface UpdateSandboxOptions {
@@ -171,6 +185,8 @@ export interface SandboxInfo {
   ingressEndpoint?: string;
   sandboxUrl?: string;
   routingHint?: string;
+  /** File systems currently mounted into the sandbox, each at its own guest mount path. Empty when none are mounted. */
+  fileSystems?: FileSystemMount[];
 }
 
 export interface SandboxPortAccess {
@@ -236,6 +252,60 @@ export interface SnapshotAndWaitOptions extends SnapshotOptions {
   pollInterval?: number;
   /** Defaults to `"local_ready"`, which is enough to resume from a snapshot. */
   waitUntil?: SnapshotWaitCondition;
+}
+
+// --- Persisted sandbox logs ---
+
+export type SandboxLogLevel =
+  | "trace"
+  | "debug"
+  | "info"
+  | "warn"
+  | "error"
+  | "fatal";
+
+export interface GetSandboxLogsOptions {
+  levels?: SandboxLogLevel[];
+  processIds?: string[];
+  nextToken?: string;
+  head?: number;
+  tail?: number;
+  body?: string;
+}
+
+export interface SandboxLogSignal {
+  timestamp: number;
+  uuid: string;
+  namespace: string;
+  application: string;
+  sandboxId?: string;
+  resourceAttributes: Array<[string, string]>;
+  body: string;
+  logAttributes: string;
+  allocations?: string[];
+  functionRuns?: string[];
+  level?: number;
+  retention?: number;
+}
+
+export interface SandboxLogsResponse {
+  logs: SandboxLogSignal[];
+  nextToken?: string;
+}
+
+export interface SandboxProcessLogFilter {
+  processId: string;
+  processPid: string;
+  processCommand: string;
+  processManagedId: string;
+  processManagedName: string;
+  firstSeen: number;
+  lastSeen: number;
+  logCount: number;
+}
+
+export interface SandboxProcessLogFiltersResponse {
+  processes: SandboxProcessLogFilter[];
 }
 
 // --- Pools ---
@@ -341,6 +411,14 @@ export interface ManagedProcessExit {
   endedAt: Date;
 }
 
+/**
+ * Managed-process metadata embedded into {@link ProcessInfo}.
+ *
+ * A managed process is addressable by either its current PID or, if a `name` was given at
+ * creation, that name (process APIs accept a PID or process name). `id` is a stable
+ * daemon-local identifier: it equals `name` when one was set, otherwise a daemon-assigned
+ * opaque id (the process is then addressable only by PID, not by `id`).
+ */
 export interface ManagedProcessInfo {
   id: string;
   name?: string;
@@ -363,7 +441,14 @@ export interface StartProcessOptions {
   stdoutMode?: OutputMode;
   stderrMode?: OutputMode;
   user?: ProcessUser;
-  /** Optional managed-process name. Supplying this opts into managed process behavior. */
+  /**
+   * Optional managed-process name. Supplying this opts into managed process behavior, and
+   * lets the process be addressed by this name (in addition to its PID) in
+   * `getProcess`/`killProcess`/`sendSignal`/etc. — useful because a managed process's PID
+   * changes when it restarts. May contain any characters except `/` and must not be all
+   * digits (numeric strings are reserved for PID addressing). If omitted, the daemon assigns
+   * an opaque id (`ManagedProcessInfo.id`) and the process is addressable only by its current PID.
+   */
   name?: string;
   /** Optional restart behavior. Supplying this opts into managed process behavior. */
   restart?: RestartPolicyConfig;

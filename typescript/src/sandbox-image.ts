@@ -1,10 +1,12 @@
 import { createRequire } from "node:module";
 import path from "node:path";
-import { existsSync } from "node:fs";
+import os from "node:os";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { parseArgs } from "node:util";
 import { CloudClient } from "./cloud-client.js";
 import type { SandboxTemplate } from "./cloud-models.js";
-import { Image, dockerfileContent } from "./image.js";
+import { Image, ImageBuildOperationType, dockerfileContent } from "./image.js";
+import type { ImageBuildOperation } from "./image.js";
 
 /**
  * Sandbox-image build engine.
@@ -24,6 +26,15 @@ export interface CreateSandboxImageOptions {
   diskMb?: number;
   builderDiskMb?: number;
   isPublic?: boolean;
+  /**
+   * Build context directory for an `Image` source, used exactly like
+   * `docker build <contextDir>`: it is uploaded as-is and COPY/ADD sources
+   * resolve relative to it. Required when the image has COPY/ADD ops that read
+   * host files — building without it then throws. When the image has no such
+   * ops it may be omitted, and an empty context (just the generated Dockerfile)
+   * is uploaded so cwd is not archived. Ignored when the source is a Dockerfile
+   * path (the Dockerfile's parent directory is used instead).
+   */
   contextDir?: string;
   /**
    * Use Docker/BuildKit max compatibility mode (build is slower and uses more
@@ -182,7 +193,7 @@ function nonEmpty(value: string | undefined): string | undefined {
   return value && value.length > 0 ? value : undefined;
 }
 
-function buildContextFromEnv(): BuildContext {
+export function buildContextFromEnv(): BuildContext {
   const debugRaw = (process.env.TENSORLAKE_DEBUG ?? "").toLowerCase();
   const debug = ["1", "true", "yes", "on"].includes(debugRaw);
   return {
@@ -254,6 +265,72 @@ function eventToEmitDict(event: NativeBindingEvent): Record<string, unknown> {
   return out;
 }
 
+/**
+ * True when a `RUN` op bind-mounts the build context (reads host files).
+ * A BuildKit `RUN --mount=type=bind` reads from the build context unless it
+ * mounts `from=<stage/image>`. `bind` is the default mount type, so a mount
+ * with no explicit `type` counts too. Other mount types
+ * (`cache`/`tmpfs`/`secret`/`ssh`) don't read the build context.
+ */
+function runOpMountsContext(op: ImageBuildOperation): boolean {
+  if (op.type !== ImageBuildOperationType.RUN) {
+    return false;
+  }
+  const mount = op.options.mount;
+  if (mount == null || mount === "") {
+    return false;
+  }
+  const fields: Record<string, string> = {};
+  for (const token of mount.split(",")) {
+    const eq = token.indexOf("=");
+    const key = (eq === -1 ? token : token.slice(0, eq)).trim();
+    const value = eq === -1 ? "" : token.slice(eq + 1).trim();
+    fields[key] = value;
+  }
+  if ((fields.type ?? "bind") !== "bind") {
+    return false;
+  }
+  return !("from" in fields);
+}
+
+/**
+ * True when a build op reads files from the host build context.
+ * `COPY`/`ADD` with host sources need a context; a `RUN` with a
+ * `--mount=type=bind` (the default type) reads it too. `COPY --from=<stage>`,
+ * remote `ADD <url>`, `from=` bind mounts, and non-bind mounts don't.
+ */
+function opReferencesHostFiles(op: ImageBuildOperation): boolean {
+  if (op.type === ImageBuildOperationType.RUN) {
+    return runOpMountsContext(op);
+  }
+  if (
+    op.type !== ImageBuildOperationType.COPY &&
+    op.type !== ImageBuildOperationType.ADD
+  ) {
+    return false;
+  }
+  if (op.options.from != null) {
+    return false;
+  }
+  if (
+    op.type === ImageBuildOperationType.ADD &&
+    (op.args[0].startsWith("http://") || op.args[0].startsWith("https://"))
+  ) {
+    return false;
+  }
+  return true;
+}
+
+/**
+ * True if the image has ops that read files from the host (COPY/ADD host
+ * sources, or a RUN bind mount). Such builds need a build context to resolve
+ * those sources, so the caller must pass `contextDir` (mirroring
+ * `docker build <context>`).
+ */
+function imageRequiresContext(image: Image): boolean {
+  return image.buildOperations.some(opReferencesHostFiles);
+}
+
 // --- Public API ------------------------------------------------------------
 
 export async function createSandboxImage(
@@ -268,12 +345,33 @@ export async function createSandboxImage(
   let dockerfileText: string | undefined;
   let nativeContextDir: string | undefined;
   let effectiveName: string;
+  // Throwaway empty build context created when an Image build has no explicit
+  // contextDir. Removed in the finally below.
+  let tempContextDir: string | undefined;
 
   if (source instanceof Image) {
     if (!source.baseImage) {
       throw new Error("Image must have a baseImage to build");
     }
-    const resolvedContext = path.resolve(options.contextDir ?? process.cwd());
+    // With an explicit contextDir we upload that directory as-is, like
+    // `docker build <dir>`. Without one, an image that reads host files via
+    // COPY/ADD can't be built (there is no context to resolve them against);
+    // images without such ops get an empty context (just the Dockerfile) so
+    // the whole cwd is not archived.
+    let resolvedContext: string;
+    if (options.contextDir != null) {
+      resolvedContext = path.resolve(options.contextDir);
+    } else if (imageRequiresContext(source)) {
+      throw new Error(
+        "This image reads files from the host (via COPY/ADD or a RUN bind " +
+          "mount), so it needs a build context. Pass `contextDir` pointing at " +
+          "the directory that contains those sources; they resolve relative " +
+          "to it, like `docker build <contextDir>`.",
+      );
+    } else {
+      tempContextDir = mkdtempSync(path.join(os.tmpdir(), "tl-build-context-"));
+      resolvedContext = tempContextDir;
+    }
     dockerfilePath = path.join(resolvedContext, "Dockerfile");
     let text = dockerfileContent(source);
     if (!text.endsWith("\n")) text += "\n";
@@ -296,72 +394,80 @@ export async function createSandboxImage(
     );
   }
 
-  if (effectiveName === DEFAULT_IMAGE_NAME) {
-    // eslint-disable-next-line no-console
-    console.warn(
-      `Building sandbox image with the default name "${DEFAULT_IMAGE_NAME}". ` +
-        "Pass `registeredName` or `Image({ name })` to avoid collisions " +
-        "with other default-named images in this project.",
+  try {
+    if (effectiveName === DEFAULT_IMAGE_NAME) {
+      // eslint-disable-next-line no-console
+      console.warn(
+        `Building sandbox image with the default name "${DEFAULT_IMAGE_NAME}". ` +
+          "Pass `registeredName` or `Image({ name })` to avoid collisions " +
+          "with other default-named images in this project.",
+      );
+    }
+
+    const bearerToken = context.apiKey ?? context.personalAccessToken;
+    if (!bearerToken) {
+      throw new Error(
+        "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.",
+      );
+    }
+
+    emit({ type: "status", message: `Building image '${effectiveName}'...` });
+
+    const binding = loadNativeBinding();
+    let emitError: unknown;
+    const resultJson = await binding.buildSandboxImage(
+      {
+        apiUrl: context.apiUrl,
+        bearerToken,
+        dockerfilePath,
+        registeredName: effectiveName,
+        diskMb: options.diskMb,
+        builderDiskMb: options.builderDiskMb,
+        cpus: options.cpus,
+        memoryMb: options.memoryMb,
+        isPublic: options.isPublic ?? false,
+        organizationId: context.organizationId,
+        projectId: context.projectId,
+        namespace: context.namespace,
+        useScopeHeaders:
+          context.personalAccessToken != null && context.apiKey == null,
+        userAgent: undefined,
+        dockerCompat: options.dockerCompat ?? false,
+        dockerfileText,
+        contextDir: nativeContextDir,
+      },
+      (event) => {
+        try {
+          emit(eventToEmitDict(event));
+        } catch (error) {
+          emitError ??= error;
+        }
+      },
     );
+
+    if (emitError != null) {
+      throw emitError;
+    }
+
+    let result: Record<string, unknown> = {};
+    if (resultJson.trim().length > 0) {
+      result = JSON.parse(resultJson) as Record<string, unknown>;
+    }
+    emit({
+      type: "image_registered",
+      name: effectiveName,
+      image_id:
+        (typeof result.id === "string" && result.id) ||
+        (typeof result.templateId === "string" && result.templateId) ||
+        "",
+    });
+    emit({ type: "done" });
+    return result;
+  } finally {
+    if (tempContextDir != null) {
+      rmSync(tempContextDir, { recursive: true, force: true });
+    }
   }
-
-  const bearerToken = context.apiKey ?? context.personalAccessToken;
-  if (!bearerToken) {
-    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
-  }
-
-  emit({ type: "status", message: `Building image '${effectiveName}'...` });
-
-  const binding = loadNativeBinding();
-  let emitError: unknown;
-  const resultJson = await binding.buildSandboxImage(
-    {
-      apiUrl: context.apiUrl,
-      bearerToken,
-      dockerfilePath,
-      registeredName: effectiveName,
-      diskMb: options.diskMb,
-      builderDiskMb: options.builderDiskMb,
-      cpus: options.cpus,
-      memoryMb: options.memoryMb,
-      isPublic: options.isPublic ?? false,
-      organizationId: context.organizationId,
-      projectId: context.projectId,
-      namespace: context.namespace,
-      useScopeHeaders:
-        context.personalAccessToken != null && context.apiKey == null,
-      userAgent: undefined,
-      dockerCompat: options.dockerCompat ?? false,
-      dockerfileText,
-      contextDir: nativeContextDir,
-    },
-    (event) => {
-      try {
-        emit(eventToEmitDict(event));
-      } catch (error) {
-        emitError ??= error;
-      }
-    },
-  );
-
-  if (emitError != null) {
-    throw emitError;
-  }
-
-  let result: Record<string, unknown> = {};
-  if (resultJson.trim().length > 0) {
-    result = JSON.parse(resultJson) as Record<string, unknown>;
-  }
-  emit({
-    type: "image_registered",
-    name: effectiveName,
-    image_id:
-      (typeof result.id === "string" && result.id) ||
-      (typeof result.templateId === "string" && result.templateId) ||
-      "",
-  });
-  emit({ type: "done" });
-  return result;
 }
 
 /**

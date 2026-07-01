@@ -71,6 +71,7 @@ pub mod artifact_storage;
 pub mod cron;
 pub mod document_ai;
 pub mod error;
+pub mod file_systems;
 pub mod images;
 pub mod sandbox_images;
 pub mod sandbox_templates;
@@ -80,6 +81,7 @@ use applications::*;
 use artifact_storage::*;
 use cron::*;
 use document_ai::*;
+use file_systems::*;
 use images::*;
 use sandbox_templates::*;
 use sandboxes::*;
@@ -291,6 +293,15 @@ impl Sdk {
         )
     }
 
+    /// Get a client for managing the project-scoped file-system registry.
+    pub fn file_systems(&self, organization_id: &str, project_id: &str) -> FileSystemsClient {
+        FileSystemsClient::new(
+            self.client.clone(),
+            organization_id.to_string(),
+            project_id.to_string(),
+        )
+    }
+
     /// Get a client for managing sandbox lifecycle, pools, and snapshots.
     ///
     /// # Arguments
@@ -307,6 +318,7 @@ impl Sdk {
             namespace.to_string(),
             use_namespaced_endpoints,
         )
+        .with_log_client(self.client.clone())
     }
 
     /// Get a client for Document AI APIs.

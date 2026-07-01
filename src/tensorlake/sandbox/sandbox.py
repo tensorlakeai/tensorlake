@@ -25,6 +25,7 @@ from .models import (
     CommandResult,
     CopySandboxResponse,
     DaemonInfo,
+    FileSystemMount,
     HealthResponse,
     ListDirectoryResponse,
     ListProcessesResponse,
@@ -37,6 +38,9 @@ from .models import (
     ProcessUserSpec,
     RestartPolicyConfig,
     SandboxInfo,
+    SandboxLogLevel,
+    SandboxLogsResponse,
+    SandboxProcessLogFiltersResponse,
     SandboxStatus,
     SendSignalResponse,
     SnapshotInfo,
@@ -111,6 +115,49 @@ def _raise_as_sandbox_error(e: Exception) -> None:
         raise SandboxError(message) from None
 
     raise SandboxError(str(e)) from e
+
+
+# Sentinel distinguishing "argument omitted" from an explicit value, so the deprecated `pid`
+# keyword can coexist with the new `process` parameter (and with the required second arg of
+# send_signal/write_stdin).
+_PROCESS_ARG_UNSET = object()
+
+
+def _validate_managed_name_client_side(name: str) -> None:
+    """Validate a managed-process name via the Rust core (raises ValueError on failure).
+
+    Degrades gracefully if the installed native module predates this validator (version
+    skew between the Python package and the compiled extension) -- the cloud SDK's
+    ``start_process`` and the daemon both re-validate authoritatively.
+    """
+    try:
+        from _cloud_sdk import validate_managed_name as _vmn
+    except ImportError:
+        return
+    _vmn(name)
+
+
+def _resolve_process_arg(process: object, pid: object) -> str:
+    """Resolve the process selector from the new ``process`` arg and the deprecated ``pid``.
+
+    Accepts a pid (int) or a managed-process name (str) and returns the path segment string.
+    Emits a ``DeprecationWarning`` when the old ``pid`` keyword is used; errors if both or
+    neither are given.
+    """
+    if pid is not _PROCESS_ARG_UNSET:
+        if process is not _PROCESS_ARG_UNSET:
+            raise TypeError("pass either `process` or `pid`, not both")
+        import warnings
+
+        warnings.warn(
+            "`pid` is deprecated; use `process` (accepts a PID or a managed-process name)",
+            DeprecationWarning,
+            stacklevel=3,
+        )
+        process = pid
+    if process is _PROCESS_ARG_UNSET:
+        raise TypeError("missing required argument: `process`")
+    return str(process)
 
 
 class Sandbox:
@@ -223,6 +270,7 @@ class Sandbox:
         request_timeout: float | None = None,
         startup_timeout: float | None = None,
         name: str | None = None,
+        file_systems: list[FileSystemMount] | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
         organization_id: str | None = None,
@@ -255,6 +303,8 @@ class Sandbox:
             request_timeout: Max seconds to wait for HTTP operations.
             startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name; named sandboxes support suspend/resume.
+            file_systems: File systems to mount into the sandbox
+                at boot, each at its own absolute, unique guest mount path.
             api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
             api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
             organization_id: Organization ID for multi-tenant access.
@@ -304,6 +354,7 @@ class Sandbox:
             proxy_url=proxy_url,
             request_timeout=effective_request_timeout,
             name=name,
+            file_systems=file_systems,
         )
 
     @classmethod
@@ -536,6 +587,59 @@ class Sandbox:
             self.sandbox_id, wait=wait, timeout=timeout, poll_interval=poll_interval
         )
 
+    def attach_file_system(
+        self,
+        file_system_id: str,
+        mount_path: str,
+    ) -> Traced[SandboxInfo]:
+        """Attach a registered file system to this running sandbox.
+
+        Args:
+            file_system_id: The registered file system's id.
+            mount_path: Absolute, unique guest mount path (e.g. ``/mnt/skills``).
+
+        Returns:
+            Traced[SandboxInfo] with this sandbox's updated file systems.
+        """
+        self._require_lifecycle_client("attach_file_system")
+        traced = self._lifecycle_client.attach_file_system(
+            self._lifecycle_identifier(), file_system_id, mount_path
+        )
+        self._sandbox_id = traced.sandbox_id
+        self._cached_info = traced.value
+        return traced
+
+    def detach_file_system(self, mount_path: str) -> Traced[SandboxInfo]:
+        """Detach the file system mounted at ``mount_path`` from this sandbox.
+
+        Args:
+            mount_path: Absolute guest mount path of the file system to
+                unmount.
+
+        Returns:
+            Traced[SandboxInfo] with this sandbox's updated file systems.
+        """
+        self._require_lifecycle_client("detach_file_system")
+        traced = self._lifecycle_client.detach_file_system(
+            self._lifecycle_identifier(), mount_path
+        )
+        self._sandbox_id = traced.sandbox_id
+        self._cached_info = traced.value
+        return traced
+
+    def list_file_systems(self) -> list[FileSystemMount]:
+        """List file systems currently mounted into this sandbox.
+
+        Returns:
+            The file systems mounted into this sandbox, each with its
+            ``file_system_id`` and guest ``mount_path``.
+        """
+        self._require_lifecycle_client("list_file_systems")
+        info = self._lifecycle_client.get(self._lifecycle_identifier()).value
+        self._sandbox_id = info.sandbox_id
+        self._cached_info = info
+        return info.file_systems
+
     def copy(
         self,
         *,
@@ -614,6 +718,37 @@ class Sandbox:
         my_id = self.sandbox_id
         filtered = [s for s in all_snaps if s.sandbox_id == my_id]
         return TracedIterator(all_snaps.trace_id, filtered)
+
+    def get_logs(
+        self,
+        *,
+        levels: list[SandboxLogLevel | str] | None = None,
+        process_ids: list[str] | None = None,
+        next_token: str | None = None,
+        head: int | None = None,
+        tail: int | None = None,
+        body: str | None = None,
+    ) -> Traced[SandboxLogsResponse]:
+        """Read persisted logs for this sandbox."""
+        self._require_lifecycle_client("get_logs")
+        traced = self._lifecycle_client.get_logs(
+            self.sandbox_id,
+            levels=levels,
+            process_ids=process_ids,
+            next_token=next_token,
+            head=head,
+            tail=tail,
+            body=body,
+        )
+        self._trace_id = traced.trace_id
+        return traced
+
+    def list_log_processes(self) -> Traced[SandboxProcessLogFiltersResponse]:
+        """List processes available as persisted-log filters for this sandbox."""
+        self._require_lifecycle_client("list_log_processes")
+        traced = self._lifecycle_client.list_log_processes(self.sandbox_id)
+        self._trace_id = traced.trace_id
+        return traced
 
     def _fetch_info(self) -> SandboxInfo:
         """Fetch and cache sandbox info from the server (lazy, once per instance)."""
@@ -956,7 +1091,13 @@ class Sandbox:
                 root). Pass a username such as ``"root"``, a Docker-style id
                 string like ``"1000:1000"``, or ``ProcessUserSpec(uid=1000, gid=1000)``.
             name: Optional managed-process name. Supplying this opts the process
-                into daemon management.
+                into daemon management. Once named, the process can be addressed by this
+                name (in addition to its PID) in ``get_process``/``kill_process``/
+                ``send_signal``/etc. -- useful because a managed process's PID changes when
+                it restarts. The name may contain any characters except ``/`` and must not
+                be all digits (numeric strings are reserved for PID addressing). If omitted,
+                the daemon assigns an opaque id (exposed as ``ProcessInfo.managed.id``) and
+                the process is addressable only by its current PID.
             restart: Optional restart policy. Supplying this opts the process
                 into daemon management.
             health_check: Optional HTTP or TCP health check. Supplying this opts
@@ -966,6 +1107,8 @@ class Sandbox:
             Traced[ProcessInfo] — access ``.trace_id`` for the W3C trace ID
             and ``.pid`` / ``.status`` directly (or via ``.value``).
         """
+        if name is not None:
+            _validate_managed_name_client_side(name)
         process_user = self._normalize_process_user(user)
         restart_payload = self._normalize_restart_config(restart)
         health_check_payload = self._normalize_health_check(health_check)
@@ -1000,41 +1143,79 @@ class Sandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def get_process(self, pid: int) -> Traced[ProcessInfo]:
-        """Get information about a specific process."""
+    def get_process(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[ProcessInfo]:
+        """Get information about a specific process.
+
+        Args:
+            process: PID or process name given on creation.
+        """
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, response_json = self._rust_client.get_process_json(pid=pid)
+            trace_id, response_json = self._rust_client.get_process_json(seg)
             return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def kill_process(self, pid: int) -> Traced[None]:
-        """Kill a process."""
+    def kill_process(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[None]:
+        """Kill a process.
+
+        Args:
+            process: PID or process name given on creation. For a managed process this stops
+                the whole supervisor (it will not be restarted).
+        """
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id = self._rust_client.kill_process(pid=pid)
+            trace_id = self._rust_client.kill_process(seg)
             return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def restart_process(self, pid: int) -> Traced[ProcessInfo]:
-        """Restart a managed process by PID."""
+    def restart_process(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[ProcessInfo]:
+        """Restart a managed process.
+
+        Args:
+            process: PID or process name given on creation.
+        """
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, response_json = self._rust_client.restart_process_json(pid=pid)
+            trace_id, response_json = self._rust_client.restart_process_json(seg)
             return Traced(trace_id, ProcessInfo.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def send_signal(self, pid: int, signal: int) -> Traced[SendSignalResponse]:
+    def send_signal(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        signal: int = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[SendSignalResponse]:
         """Send a signal to a process.
 
         Args:
-            pid: Process ID
+            process: PID or process name given on creation.
             signal: Signal number (e.g. 15 for SIGTERM, 9 for SIGKILL)
         """
+        seg = _resolve_process_arg(process, pid)
+        if signal is _PROCESS_ARG_UNSET:
+            raise TypeError("missing required argument: `signal`")
         try:
-            trace_id, response_json = self._rust_client.send_signal_json(
-                pid=pid, signal=signal
-            )
+            trace_id, response_json = self._rust_client.send_signal_json(seg, signal)
             return Traced(
                 trace_id, SendSignalResponse.model_validate_json(response_json)
             )
@@ -1043,52 +1224,115 @@ class Sandbox:
 
     # --- Process I/O ---
 
-    def write_stdin(self, pid: int, data: bytes) -> Traced[None]:
-        """Write data to a process's stdin."""
+    def write_stdin(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        data: bytes = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[None]:
+        """Write data to a process's stdin.
+
+        Args:
+            process: PID or process name given on creation.
+            data: Bytes to write to stdin.
+        """
+        seg = _resolve_process_arg(process, pid)
+        if data is _PROCESS_ARG_UNSET:
+            raise TypeError("missing required argument: `data`")
         try:
-            trace_id = self._rust_client.write_stdin(pid=pid, data=data)
+            trace_id = self._rust_client.write_stdin(seg, data)
             return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def close_stdin(self, pid: int) -> Traced[None]:
-        """Close a process's stdin."""
+    def close_stdin(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[None]:
+        """Close a process's stdin.
+
+        Args:
+            process: PID or process name given on creation.
+        """
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id = self._rust_client.close_stdin(pid=pid)
+            trace_id = self._rust_client.close_stdin(seg)
             return Traced(trace_id, None)
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def get_stdout(self, pid: int) -> Traced[OutputResponse]:
-        """Get all stdout output from a process."""
+    def get_stdout(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[OutputResponse]:
+        """Get all stdout output from a process.
+
+        Args:
+            process: PID or process name given on creation.
+        """
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, response_json = self._rust_client.get_stdout_json(pid=pid)
+            trace_id, response_json = self._rust_client.get_stdout_json(seg)
             return Traced(trace_id, OutputResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def get_stderr(self, pid: int) -> Traced[OutputResponse]:
-        """Get all stderr output from a process."""
+    def get_stderr(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[OutputResponse]:
+        """Get all stderr output from a process.
+
+        Args:
+            process: PID or process name given on creation.
+        """
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, response_json = self._rust_client.get_stderr_json(pid=pid)
+            trace_id, response_json = self._rust_client.get_stderr_json(seg)
             return Traced(trace_id, OutputResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def get_output(self, pid: int) -> Traced[OutputResponse]:
-        """Get all combined output from a process."""
+    def get_output(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> Traced[OutputResponse]:
+        """Get all combined output from a process.
+
+        Args:
+            process: PID or process name given on creation.
+        """
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, response_json = self._rust_client.get_output_json(pid=pid)
+            trace_id, response_json = self._rust_client.get_output_json(seg)
             return Traced(trace_id, OutputResponse.model_validate_json(response_json))
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def follow_stdout(self, pid: int) -> TracedIterator[OutputEvent]:
+    def follow_stdout(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> TracedIterator[OutputEvent]:
         """Collect all stdout output events from a process and return them as an iterable.
 
+        Args:
+            process: PID or process name given on creation.
+
         Blocks until the process exits and all output has been received."""
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, events_json = self._rust_client.follow_stdout_json(pid=pid)
+            trace_id, events_json = self._rust_client.follow_stdout_json(seg)
             return TracedIterator(
                 trace_id,
                 [OutputEvent.model_validate_json(ej) for ej in events_json],
@@ -1096,12 +1340,21 @@ class Sandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def follow_stderr(self, pid: int) -> TracedIterator[OutputEvent]:
+    def follow_stderr(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> TracedIterator[OutputEvent]:
         """Collect all stderr output events from a process and return them as an iterable.
 
+        Args:
+            process: PID or process name given on creation.
+
         Blocks until the process exits and all output has been received."""
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, events_json = self._rust_client.follow_stderr_json(pid=pid)
+            trace_id, events_json = self._rust_client.follow_stderr_json(seg)
             return TracedIterator(
                 trace_id,
                 [OutputEvent.model_validate_json(ej) for ej in events_json],
@@ -1109,12 +1362,21 @@ class Sandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def follow_output(self, pid: int) -> TracedIterator[OutputEvent]:
+    def follow_output(
+        self,
+        process: int | str = _PROCESS_ARG_UNSET,
+        *,
+        pid: int | str = _PROCESS_ARG_UNSET,
+    ) -> TracedIterator[OutputEvent]:
         """Collect all combined output events from a process and return them as an iterable.
 
+        Args:
+            process: PID or process name given on creation.
+
         Blocks until the process exits and all output has been received."""
+        seg = _resolve_process_arg(process, pid)
         try:
-            trace_id, events_json = self._rust_client.follow_output_json(pid=pid)
+            trace_id, events_json = self._rust_client.follow_output_json(seg)
             return TracedIterator(
                 trace_id,
                 [OutputEvent.model_validate_json(ej) for ej in events_json],

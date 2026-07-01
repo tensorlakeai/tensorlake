@@ -1,4 +1,110 @@
+use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+
+#[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SandboxLogLevel {
+    Trace,
+    Debug,
+    Info,
+    Warn,
+    Error,
+    Fatal,
+}
+
+impl SandboxLogLevel {
+    pub fn as_i8(self) -> i8 {
+        match self {
+            SandboxLogLevel::Trace => 1,
+            SandboxLogLevel::Debug => 2,
+            SandboxLogLevel::Info => 3,
+            SandboxLogLevel::Warn => 4,
+            SandboxLogLevel::Error => 5,
+            SandboxLogLevel::Fatal => 6,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SandboxLogSignal {
+    pub timestamp: u64,
+    pub uuid: uuid::Uuid,
+    pub namespace: String,
+    pub application: String,
+    #[serde(default, rename = "sandboxId")]
+    pub sandbox_id: Option<String>,
+    #[serde(default, rename = "resourceAttributes")]
+    pub resource_attributes: Vec<(String, String)>,
+    pub body: String,
+    #[serde(rename = "logAttributes")]
+    pub log_attributes: String,
+    #[serde(default)]
+    pub allocations: Vec<String>,
+    #[serde(default, rename = "functionRuns")]
+    pub function_runs: Vec<String>,
+    #[serde(default)]
+    pub level: Option<i8>,
+    #[serde(default)]
+    pub retention: Option<i8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxLogsResponse {
+    pub logs: Vec<SandboxLogSignal>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub next_token: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxProcessLogFilter {
+    #[serde(rename = "processId")]
+    pub process_id: String,
+    #[serde(rename = "processPid")]
+    pub process_pid: String,
+    #[serde(rename = "processCommand")]
+    pub process_command: String,
+    #[serde(rename = "processManagedId")]
+    pub process_managed_id: String,
+    #[serde(rename = "processManagedName")]
+    pub process_managed_name: String,
+    #[serde(rename = "firstSeen")]
+    pub first_seen: i64,
+    #[serde(rename = "lastSeen")]
+    pub last_seen: i64,
+    #[serde(rename = "logCount")]
+    pub log_count: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SandboxProcessLogFiltersResponse {
+    pub processes: Vec<SandboxProcessLogFilter>,
+}
+
+#[derive(Builder, Clone, Debug, Default, Deserialize)]
+pub struct GetSandboxLogsRequest {
+    #[builder(setter(into))]
+    pub sandbox_id: String,
+    #[builder(default, setter(into))]
+    pub levels: Vec<SandboxLogLevel>,
+    #[builder(default, setter(into))]
+    pub process_ids: Vec<String>,
+    #[builder(default, setter(into, strip_option))]
+    pub next_token: Option<String>,
+    #[builder(default, setter(strip_option))]
+    pub head: Option<usize>,
+    #[builder(default, setter(strip_option))]
+    pub tail: Option<usize>,
+    #[builder(default, setter(into, strip_option))]
+    pub body: Option<String>,
+}
+
+impl GetSandboxLogsRequest {
+    pub fn builder() -> GetSandboxLogsRequestBuilder {
+        GetSandboxLogsRequestBuilder::default()
+    }
+}
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContainerResourcesInfo {
@@ -38,6 +144,17 @@ fn default_allow_internet_access() -> bool {
     true
 }
 
+/// One file system mounted into a sandbox at an absolute guest path.
+///
+/// `file_system_id` is the registered file system's id (e.g.
+/// `file_system_...`) and `mount_path` is an absolute, unique guest path
+/// (e.g. `/mnt/skills`).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct FileSystemMount {
+    pub file_system_id: String,
+    pub mount_path: String,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -55,6 +172,18 @@ pub struct CreateSandboxRequest {
     /// When absent the sandbox is ephemeral.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// File systems to mount into the sandbox at boot, each at its own
+    /// absolute, unique guest mount path.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_systems: Vec<FileSystemMount>,
+}
+
+/// Request body for detaching a file system from a running sandbox. The
+/// mount path is sent in the body (rather than the URL) so its slashes don't
+/// need URL-encoding.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct DetachFileSystemRequest {
+    pub mount_path: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -144,6 +273,10 @@ pub struct SandboxInfo {
     pub ingress_endpoint: Option<String>,
     #[serde(default)]
     pub sandbox_url: Option<String>,
+    /// File systems currently mounted into the sandbox, each at its own
+    /// guest mount path. Empty when no file systems are mounted.
+    #[serde(default)]
+    pub file_systems: Vec<FileSystemMount>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

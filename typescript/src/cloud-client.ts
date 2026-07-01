@@ -20,6 +20,7 @@ import type {
   SandboxTemplate,
   Secret,
   SecretsList,
+  FileSystem,
   StartImageBuildRequest,
   UpsertSecretResponse,
 } from "./cloud-models.js";
@@ -137,6 +138,67 @@ export class CloudClient {
       path = next ? nextRequestPath(next) : null;
     }
     return templates;
+  }
+
+  /**
+   * Register a new file system with the project.
+   *
+   * Routed through the platform file-systems API, which requires the
+   * organization/project scope (from the client or the `options` override).
+   */
+  async createFileSystem(
+    request: { name: string; description?: string },
+    options?: { organizationId?: string; projectId?: string },
+  ): Promise<FileSystem> {
+    const scope = this.resolveScope(options?.organizationId, options?.projectId);
+    const body: Record<string, unknown> = { name: request.name };
+    if (request.description != null) body.description = request.description;
+    const raw = await this.http.requestJson<Record<string, unknown>>(
+      "POST",
+      `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/file-systems`,
+      { body },
+    );
+    return fromSnakeKeys(raw) as FileSystem;
+  }
+
+  /**
+   * List all registered file systems, following pagination to the end.
+   * Routed through the platform file-systems API, which requires the
+   * organization/project scope (from the client or the `options` override).
+   */
+  async listFileSystems(
+    options?: { organizationId?: string; projectId?: string },
+  ): Promise<FileSystem[]> {
+    const scope = this.resolveScope(options?.organizationId, options?.projectId);
+    const base = `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/file-systems`;
+    let path: string | null = `${base}?pageSize=100`;
+    const fileSystems: FileSystem[] = [];
+    while (path !== null) {
+      const page: FileSystemsPage =
+        await this.http.requestJson<FileSystemsPage>("GET", path);
+      for (const item of page.items ?? []) {
+        fileSystems.push(fromSnakeKeys(item) as FileSystem);
+      }
+      const next = page.pagination?.next;
+      path = next ? nextRequestPath(next) : null;
+    }
+    return fileSystems;
+  }
+
+  /**
+   * Delete a registered file system by its id (e.g. `file_system_...`).
+   * Routed through the platform file-systems API, which requires the
+   * organization/project scope (from the client or the `options` override).
+   */
+  async deleteFileSystem(
+    fileSystemId: string,
+    options?: { organizationId?: string; projectId?: string },
+  ): Promise<void> {
+    const scope = this.resolveScope(options?.organizationId, options?.projectId);
+    await this.http.requestResponse(
+      "DELETE",
+      `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/file-systems/${encodeURIComponent(fileSystemId)}`,
+    );
   }
 
   async applications(): Promise<ApplicationSummary[]> {
@@ -488,6 +550,12 @@ function trimTrailingSlashes(value: string): string {
 
 /** One page of the paginated sandbox-templates list response. */
 interface SandboxTemplatesPage {
+  items?: Record<string, unknown>[];
+  pagination?: { next?: string };
+}
+
+/** One page of the paginated file-systems list response. */
+interface FileSystemsPage {
   items?: Record<string, unknown>[];
   pagination?: { next?: string };
 }

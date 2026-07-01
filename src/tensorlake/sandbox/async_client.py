@@ -24,6 +24,7 @@ from .client import (
     _RUST_SANDBOX_CLIENT_AVAILABLE,
     RustCloudSandboxClient,
     _build_gpu_resources,
+    _normalize_log_levels,
     _normalize_user_ports,
     _parse_rust_client_error_fields,
     _raise_as_sandbox_error,
@@ -48,15 +49,19 @@ from .models import (
     CreateSandboxResources,
     CreateSandboxResponse,
     CreateSnapshotResponse,
+    FileSystemMount,
     ListArchivedSandboxesResponse,
     ListSandboxesResponse,
     ListSandboxPoolsResponse,
     ListSnapshotsResponse,
     NetworkConfig,
     SandboxInfo,
+    SandboxLogLevel,
+    SandboxLogsResponse,
     SandboxPoolInfo,
     SandboxPoolRequest,
     SandboxPortAccess,
+    SandboxProcessLogFiltersResponse,
     SandboxStatus,
     SnapshotInfo,
     SnapshotStatus,
@@ -216,6 +221,7 @@ class AsyncSandboxClient:
         deny_out: list[str] | None = None,
         snapshot_id: str | None = None,
         name: str | None = None,
+        file_systems: list[FileSystemMount] | None = None,
     ) -> Traced[CreateSandboxResponse]:
         network = None
         if not allow_internet_access or allow_out is not None or deny_out is not None:
@@ -237,10 +243,13 @@ class AsyncSandboxClient:
             network=network,
             snapshot_id=snapshot_id,
             name=name,
+            file_systems=file_systems,
         )
         try:
             trace_id, response_json = await self._rust_client.create_sandbox_async(
-                request_json=request_model.model_dump_json(exclude_none=True)
+                request_json=request_model.model_dump_json(
+                    by_alias=True, exclude_none=True
+                )
             )
             return Traced(
                 trace_id, CreateSandboxResponse.model_validate_json(response_json)
@@ -383,6 +392,51 @@ class AsyncSandboxClient:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
 
+    async def attach_file_system(
+        self,
+        sandbox_id: str,
+        file_system_id: str,
+        mount_path: str,
+    ) -> Traced[SandboxInfo]:
+        """Attach a registered file system to a running sandbox.
+
+        The returned ``SandboxInfo`` already reflects the new
+        ``file_systems`` entry; the mount completes asynchronously on the
+        dataplane.
+        """
+        try:
+            trace_id, response_json = await self._rust_client.attach_file_system_async(
+                sandbox_id=sandbox_id,
+                file_system_id=file_system_id,
+                mount_path=mount_path,
+            )
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    async def detach_file_system(
+        self,
+        sandbox_id: str,
+        mount_path: str,
+    ) -> Traced[SandboxInfo]:
+        """Detach the file system mounted at ``mount_path`` from a sandbox.
+
+        The returned ``SandboxInfo`` already reflects the removed
+        ``file_systems`` entry; the unmount completes asynchronously.
+        """
+        try:
+            trace_id, response_json = await self._rust_client.detach_file_system_async(
+                sandbox_id=sandbox_id,
+                mount_path=mount_path,
+            )
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
     async def get_port_access(self, sandbox_id: str) -> Traced[SandboxPortAccess]:
         traced = await self.get(sandbox_id)
         port_access = SandboxPortAccess(
@@ -436,6 +490,57 @@ class AsyncSandboxClient:
                 sandbox_id=sandbox_id
             )
             return Traced(trace_id, None)
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    async def get_logs(
+        self,
+        sandbox_id: str,
+        *,
+        levels: list[SandboxLogLevel | str] | None = None,
+        process_ids: list[str] | None = None,
+        next_token: str | None = None,
+        head: int | None = None,
+        tail: int | None = None,
+        body: str | None = None,
+    ) -> Traced[SandboxLogsResponse]:
+        payload = {
+            "sandbox_id": sandbox_id,
+            "levels": _normalize_log_levels(levels),
+            "process_ids": process_ids or [],
+            "next_token": next_token,
+            "head": head,
+            "tail": tail,
+            "body": body,
+        }
+        try:
+            trace_id, response_json = (
+                await self._rust_client.get_sandbox_logs_json_async(json.dumps(payload))
+            )
+            return Traced(
+                trace_id, SandboxLogsResponse.model_validate_json(response_json)
+            )
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    async def list_log_processes(
+        self, sandbox_id: str
+    ) -> Traced[SandboxProcessLogFiltersResponse]:
+        try:
+            (
+                trace_id,
+                response_json,
+            ) = await self._rust_client.list_sandbox_log_processes_json_async(
+                sandbox_id
+            )
+            return Traced(
+                trace_id,
+                SandboxProcessLogFiltersResponse.model_validate_json(response_json),
+            )
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
@@ -742,6 +847,7 @@ class AsyncSandboxClient:
         request_timeout: float | None = None,
         startup_timeout: float | None = None,
         name: str | None = None,
+        file_systems: list[FileSystemMount] | None = None,
     ) -> "AsyncSandbox":
         wait_timeout = (
             request_timeout
@@ -772,6 +878,7 @@ class AsyncSandboxClient:
                 deny_out=deny_out,
                 snapshot_id=snapshot_id,
                 name=name,
+                file_systems=file_systems,
             )
 
         if result.status == SandboxStatus.RUNNING:
