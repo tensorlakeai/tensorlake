@@ -12,7 +12,10 @@ use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 
 use crate::{
-    client::{Client, Traced},
+    client::{
+        Client, Traced, build_bytes_post_request_from_builder,
+        build_empty_post_request_from_builder,
+    },
     error::SdkError,
 };
 pub use desktop::SandboxDesktopClient;
@@ -182,7 +185,7 @@ impl SandboxesClient {
 
     pub async fn claim(&self, pool_id: &str) -> Result<Traced<CreateSandboxResponse>, SdkError> {
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}/sandboxes"));
-        let req = self.client.request(Method::POST, &uri).build()?;
+        let req = self.client.build_empty_post_request(&uri)?;
         self.client
             .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
             .await
@@ -194,11 +197,11 @@ impl SandboxesClient {
         times: usize,
     ) -> Result<Traced<CopySandboxResponse>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/copy"));
-        let req = self
-            .client
-            .request(Method::POST, &uri)
-            .query(&[("times", times)])
-            .build()?;
+        let req = build_empty_post_request_from_builder(
+            self.client
+                .request(Method::POST, &uri)
+                .query(&[("times", times)]),
+        )?;
         self.client
             .execute_json_allow_status(
                 req,
@@ -323,13 +326,13 @@ impl SandboxesClient {
 
     pub async fn suspend(&self, sandbox_id: &str) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/suspend"));
-        let req = self.client.request(Method::POST, &uri).build()?;
+        let req = self.client.build_empty_post_request(&uri)?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
     pub async fn resume(&self, sandbox_id: &str) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/resume"));
-        let req = self.client.request(Method::POST, &uri).build()?;
+        let req = self.client.build_empty_post_request(&uri)?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
@@ -385,7 +388,7 @@ impl SandboxesClient {
                 .build_post_json_request(Method::POST, &uri, &body)?
         } else {
             // Preserve today's wire shape (no body) for callers that don't set a snapshot type.
-            self.client.request(Method::POST, &uri).build()?
+            self.client.build_empty_post_request(&uri)?
         };
         self.client.execute_json(req).await
     }
@@ -562,9 +565,9 @@ impl SandboxProxyClient {
         process: impl Into<ProcessRef>,
     ) -> Result<Traced<ProcessInfo>, SdkError> {
         let seg = process.into().to_path_segment();
-        let req = self
-            .request(Method::POST, &format!("/api/v1/processes/{seg}/restart"))
-            .build()?;
+        let req = build_empty_post_request_from_builder(
+            self.request(Method::POST, &format!("/api/v1/processes/{seg}/restart")),
+        )?;
         self.client.execute_json(req).await
     }
 
@@ -587,10 +590,10 @@ impl SandboxProxyClient {
         data: Vec<u8>,
     ) -> Result<Traced<()>, SdkError> {
         let seg = process.into().to_path_segment();
-        let req = self
-            .request(Method::POST, &format!("/api/v1/processes/{seg}/stdin"))
-            .body(data)
-            .build()?;
+        let req = build_bytes_post_request_from_builder(
+            self.request(Method::POST, &format!("/api/v1/processes/{seg}/stdin")),
+            data,
+        )?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
@@ -599,12 +602,10 @@ impl SandboxProxyClient {
         process: impl Into<ProcessRef>,
     ) -> Result<Traced<()>, SdkError> {
         let seg = process.into().to_path_segment();
-        let req = self
-            .request(
-                Method::POST,
-                &format!("/api/v1/processes/{seg}/stdin/close"),
-            )
-            .build()?;
+        let req = build_empty_post_request_from_builder(self.request(
+            Method::POST,
+            &format!("/api/v1/processes/{seg}/stdin/close"),
+        ))?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 

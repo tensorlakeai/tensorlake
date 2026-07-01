@@ -104,7 +104,7 @@ impl ImagesClient {
             build_service_path.trim_end_matches('/'),
             application_build_id
         );
-        let req = self.client.request(Method::POST, &path).build()?;
+        let req = self.client.build_empty_post_request(&path)?;
         self.client.execute_json(req).await
     }
 
@@ -220,7 +220,7 @@ impl ImagesClient {
         request: &models::CancelBuildRequest,
     ) -> Result<Traced<()>, SdkError> {
         let uri_str = format!("/images/v2/builds/{}/cancel", request.build_id);
-        let req = self.client.request(Method::POST, &uri_str).build()?;
+        let req = self.client.build_empty_post_request(&uri_str)?;
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
