@@ -207,7 +207,7 @@ impl ArtifactStorageClient {
         git_username: &str,
         git_token: &str,
     ) -> Result<Traced<()>, SdkError> {
-        let suffix = format!("_status?status={}", urlencoding::encode(status));
+        let suffix = format!("status?status={}", urlencoding::encode(status));
         let (request, trace_id) = self.git_request(
             Method::PUT,
             project_id,
@@ -235,14 +235,12 @@ impl ArtifactStorageClient {
         git_username: &str,
         git_token: &str,
     ) -> Result<Traced<ListReposResponse>, SdkError> {
-        let (request, trace_id) = self.git_request(
-            Method::GET,
-            project_id,
-            "_repos",
-            None,
-            git_username,
-            git_token,
-        )?;
+        let url = format!(
+            "{}/project/{}/repos",
+            self.git_base_url,
+            encode_path_segment(project_id)
+        );
+        let (request, trace_id) = self.git_request_url(Method::GET, url, git_username, git_token);
         let response = request.send().await?;
         decode_json(response, trace_id).await
     }
@@ -273,7 +271,7 @@ impl ArtifactStorageClient {
             Method::GET,
             project_id,
             repo,
-            Some("_refs"),
+            Some("refs"),
             git_username,
             git_token,
         )?;
@@ -307,12 +305,50 @@ impl ArtifactStorageClient {
             Method::GET,
             project_id,
             repo,
-            Some("_branches"),
+            Some("branches"),
             git_username,
             git_token,
         )?;
         let response = request.send().await?;
         decode_json(response, trace_id).await
+    }
+
+    pub async fn delete_branch(
+        &self,
+        project_id: &str,
+        repo: &str,
+        branch: &str,
+    ) -> Result<Traced<()>, SdkError> {
+        let credential = self.mint_token_for_repo(project_id, Some(repo)).await?;
+        self.delete_branch_with_credential(
+            project_id,
+            repo,
+            branch,
+            &credential.git_username,
+            &credential.token,
+        )
+        .await
+    }
+
+    pub async fn delete_branch_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        branch: &str,
+        git_username: &str,
+        git_token: &str,
+    ) -> Result<Traced<()>, SdkError> {
+        let suffix = format!("branches/{}", encode_path_segment(branch));
+        let (request, trace_id) = self.git_request(
+            Method::DELETE,
+            project_id,
+            repo,
+            Some(&suffix),
+            git_username,
+            git_token,
+        )?;
+        let response = request.send().await?;
+        decode_empty(response, trace_id).await
     }
 
     pub async fn list_operations_with_credential(
@@ -326,7 +362,7 @@ impl ArtifactStorageClient {
             Method::GET,
             project_id,
             repo,
-            Some("_admin/operations"),
+            Some("admin/operations"),
             git_username,
             git_token,
         )?;
@@ -343,29 +379,34 @@ impl ArtifactStorageClient {
         git_username: &str,
         git_token: &str,
     ) -> Result<(reqwest::RequestBuilder, String), SdkError> {
+        let base = format!(
+            "{}/project/{}/repos/{}",
+            self.git_base_url,
+            encode_path_segment(project_id),
+            encode_path_segment(repo)
+        );
         let path = match suffix {
-            Some(suffix) => format!(
-                "{}/{}/{}/{}",
-                self.git_base_url,
-                encode_path_segment(project_id),
-                encode_path_segment(repo),
-                suffix
-            ),
-            None => format!(
-                "{}/{}/{}",
-                self.git_base_url,
-                encode_path_segment(project_id),
-                encode_path_segment(repo)
-            ),
+            Some(suffix) => format!("{base}/{suffix}"),
+            None => base,
         };
+        Ok(self.git_request_url(method, path, git_username, git_token))
+    }
+
+    fn git_request_url(
+        &self,
+        method: Method,
+        url: String,
+        git_username: &str,
+        git_token: &str,
+    ) -> (reqwest::RequestBuilder, String) {
         let (traceparent, trace_id) = traceparent();
-        Ok((
+        (
             self.git_client
-                .request(method, path)
+                .request(method, url)
                 .basic_auth(git_username, Some(git_token))
                 .header("traceparent", traceparent),
             trace_id,
-        ))
+        )
     }
 }
 
@@ -434,7 +475,8 @@ async fn body_message(response: reqwest::Response) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_path_segment, resolve_artifact_storage_url};
+    use super::{ArtifactStorageClient, encode_path_segment, resolve_artifact_storage_url};
+    use crate::ClientBuilder;
 
     #[test]
     fn resolves_git_url_from_api_url() {
@@ -456,5 +498,19 @@ mod tests {
     fn encodes_path_segments() {
         assert_eq!(encode_path_segment("project_123"), "project_123");
         assert_eq!(encode_path_segment("repo/name"), "repo%2Fname");
+    }
+
+    #[test]
+    fn git_repo_url_uses_git_root_project_repo_shape() {
+        let api_client = ClientBuilder::new("https://api.tensorlake.ai")
+            .bearer_token("token")
+            .build()
+            .unwrap();
+        let client = ArtifactStorageClient::new(api_client, "https://git.tensorlake.ai/").unwrap();
+
+        assert_eq!(
+            client.git_repo_url("project_123", "myrepo"),
+            "https://git.tensorlake.ai/project_123/myrepo"
+        );
     }
 }

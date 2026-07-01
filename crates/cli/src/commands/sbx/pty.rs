@@ -339,9 +339,7 @@ fn pty_token_cache_key(ctx: &CliContext, sandbox_id: &str, session_id: &str) -> 
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PtySessionSummary, display_token, parse_session_listing, sessions_to_json_value,
-    };
+    use super::{PtySessionSummary, display_token, parse_session_listing, sessions_to_json_value};
 
     #[test]
     fn parse_session_listing_supports_wrapped_sessions_array() {
