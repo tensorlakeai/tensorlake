@@ -6,6 +6,13 @@ use crate::error::{CliError, Result};
 /// Type alias for TOML table (matches what toml crate uses internally).
 pub type TomlTable = toml::map::Map<String, toml::Value>;
 
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct StoredCredentials {
+    pub token: String,
+    pub organization_id: Option<String>,
+    pub project_id: Option<String>,
+}
+
 /// Global config directory: ~/.config/tensorlake/
 pub fn config_dir() -> PathBuf {
     dirs::home_dir()
@@ -132,17 +139,27 @@ pub fn save_local_config(config: &TomlTable, project_root: &Path) -> Result<()> 
 
 /// Load PAT from credentials file for the given API URL.
 pub fn load_credentials(api_url: &str) -> Option<String> {
+    load_stored_credentials(api_url).map(|credentials| credentials.token)
+}
+
+/// Load PAT and selected scope from credentials file for the given API URL.
+pub fn load_stored_credentials(api_url: &str) -> Option<StoredCredentials> {
     let path = credentials_path();
     if !path.exists() {
         return None;
     }
     let content = fs::read_to_string(&path).ok()?;
     let table = parse_toml_table(&content)?;
-    extract_scoped_token(&table, api_url)
+    extract_scoped_credentials(&table, api_url)
 }
 
 /// Save PAT to credentials file scoped by API URL.
-pub fn save_credentials(api_url: &str, token: &str) -> Result<()> {
+pub fn save_credentials(
+    api_url: &str,
+    token: &str,
+    organization_id: Option<&str>,
+    project_id: Option<&str>,
+) -> Result<()> {
     let dir = config_dir();
     fs::create_dir_all(&dir)?;
 
@@ -168,6 +185,18 @@ pub fn save_credentials(api_url: &str, token: &str) -> Result<()> {
 
     let mut section = TomlTable::new();
     section.insert("token".to_string(), toml::Value::String(token.to_string()));
+    if let Some(organization_id) = organization_id {
+        section.insert(
+            "organization".to_string(),
+            toml::Value::String(organization_id.to_string()),
+        );
+    }
+    if let Some(project_id) = project_id {
+        section.insert(
+            "project".to_string(),
+            toml::Value::String(project_id.to_string()),
+        );
+    }
     table.insert(normalized_url, toml::Value::Table(section));
 
     let content = toml::to_string_pretty(&toml::Value::Table(table))?;
@@ -182,33 +211,54 @@ pub fn save_credentials(api_url: &str, token: &str) -> Result<()> {
     Ok(())
 }
 
+#[cfg(test)]
 fn extract_scoped_token(credentials: &TomlTable, api_url: &str) -> Option<String> {
+    extract_scoped_credentials(credentials, api_url).map(|credentials| credentials.token)
+}
+
+fn credentials_from_value(value: &toml::Value) -> Option<StoredCredentials> {
+    let token = value.get("token").and_then(|v| v.as_str())?.to_string();
+    let organization_id = value
+        .get("organization")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let project_id = value
+        .get("project")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+
+    Some(StoredCredentials {
+        token,
+        organization_id,
+        project_id,
+    })
+}
+
+fn extract_scoped_credentials(credentials: &TomlTable, api_url: &str) -> Option<StoredCredentials> {
     let normalized_api_url = normalize_api_url(api_url);
 
     // 1) exact key match
-    if let Some(token) = credentials
+    if let Some(credentials) = credentials
         .get(api_url.trim())
-        .and_then(|scoped| scoped.get("token"))
-        .and_then(|v| v.as_str())
+        .and_then(credentials_from_value)
     {
-        return Some(token.to_string());
+        return Some(credentials);
     }
 
     // 2) canonical key match
-    if let Some(token) = credentials
+    if let Some(credentials) = credentials
         .get(&normalized_api_url)
-        .and_then(|scoped| scoped.get("token"))
-        .and_then(|v| v.as_str())
+        .and_then(credentials_from_value)
     {
-        return Some(token.to_string());
+        return Some(credentials);
     }
 
     // 3) compatible lookup across previously stored URL variants
     for (key, value) in credentials {
         if normalize_api_url(key) == normalized_api_url
-            && let Some(token) = value.get("token").and_then(|v| v.as_str())
+            && let Some(credentials) = credentials_from_value(value)
         {
-            return Some(token.to_string());
+            return Some(credentials);
         }
     }
 
@@ -216,7 +266,11 @@ fn extract_scoped_token(credentials: &TomlTable, api_url: &str) -> Option<String
     credentials
         .get("token")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(|s| StoredCredentials {
+            token: s.to_string(),
+            organization_id: None,
+            project_id: None,
+        })
 }
 
 /// Get a nested value from a TOML table using dot notation (e.g. "tensorlake.api_url").
@@ -268,7 +322,7 @@ fn add_to_gitignore(path: &Path, entry: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_scoped_token, normalize_api_url};
+    use super::{extract_scoped_credentials, extract_scoped_token, normalize_api_url};
 
     #[test]
     fn normalize_api_url_collapses_common_equivalents() {
@@ -301,6 +355,24 @@ token = "abc123"
                 .expect("token for default-port key"),
             "abc123"
         );
+    }
+
+    #[test]
+    fn extract_scoped_credentials_includes_selected_scope() {
+        let content = r#"
+["https://api.tensorlake.ai"]
+token = "abc123"
+organization = "org_123"
+project = "project_456"
+"#;
+        let table: super::TomlTable = toml::from_str(content).expect("valid toml");
+
+        let credentials = extract_scoped_credentials(&table, "https://api.tensorlake.ai/")
+            .expect("stored credentials");
+
+        assert_eq!(credentials.token, "abc123");
+        assert_eq!(credentials.organization_id.as_deref(), Some("org_123"));
+        assert_eq!(credentials.project_id.as_deref(), Some("project_456"));
     }
 
     #[test]

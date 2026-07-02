@@ -120,8 +120,10 @@ impl CliContext {
         let use_scope_headers = self.personal_access_token.is_some() && self.api_key.is_none();
 
         if use_scope_headers
-            && let (Some(organization_id), Some(project_id)) =
-                (self.effective_organization_id(), self.effective_project_id())
+            && let (Some(organization_id), Some(project_id)) = (
+                self.effective_organization_id(),
+                self.effective_project_id(),
+            )
         {
             builder = builder.scope(&organization_id, &project_id);
         }

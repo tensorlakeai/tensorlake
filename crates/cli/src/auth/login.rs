@@ -5,6 +5,7 @@ use crate::config::resolver;
 use crate::error::{CliError, Result};
 use crate::http;
 use crate::project::detection::find_project_root;
+use std::io::{IsTerminal, Write};
 
 /// Result of a successful login flow.
 pub struct LoginResult {
@@ -39,6 +40,55 @@ fn device_fingerprint() -> serde_json::Value {
         serde_json::Value::String(client_version),
     );
     serde_json::Value::Object(body)
+}
+
+async fn countdown_before_open(seconds: u64) {
+    let interactive = std::io::stderr().is_terminal();
+
+    for remaining in (1..=seconds).rev() {
+        let unit = if remaining == 1 { "second" } else { "seconds" };
+        if interactive {
+            eprint!("\r\x1b[2KOpening the browser in {remaining} {unit}...");
+            let _ = std::io::stderr().flush();
+        } else {
+            eprintln!("Opening the browser in {remaining} {unit}...");
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    if interactive {
+        eprintln!("\r\x1b[2KOpening browser...");
+    }
+}
+
+fn update_status_line(interactive: bool, message: &str) {
+    if interactive {
+        eprint!("\r\x1b[2K{message}");
+        let _ = std::io::stderr().flush();
+    } else {
+        eprintln!("{message}");
+    }
+}
+
+fn finish_status_line(interactive: bool, message: &str) {
+    if interactive {
+        eprintln!("\r\x1b[2K{message}");
+    } else {
+        eprintln!("{message}");
+    }
+}
+
+async fn wait_before_next_login_poll(attempt: u64, seconds: u64, interactive: bool) {
+    for remaining in (1..=seconds).rev() {
+        let unit = if remaining == 1 { "second" } else { "seconds" };
+        update_status_line(
+            interactive,
+            &format!(
+                "Waiting for browser approval. Check #{attempt}; checking again in {remaining} {unit}..."
+            ),
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
 }
 
 /// Run the interactive device code login flow.
@@ -91,10 +141,9 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         urlencoding::encode(&user_code),
     );
     eprintln!("URL: {}", verification_uri);
-    eprintln!("opening web browser...");
 
     // Give user time to read
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    countdown_before_open(5).await;
 
     if open::that(&verification_uri).is_err() {
         eprintln!(
@@ -102,13 +151,17 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         );
     }
 
-    eprintln!("waiting for the code to be processed...");
-
     let poll_url = format!(
         "{}/platform/cli/login/poll?device_code={}",
         ctx.api_url, device_code
     );
 
+    let mut poll_attempt = 1;
+    let interactive_stderr = std::io::stderr().is_terminal();
+    update_status_line(
+        interactive_stderr,
+        "Waiting for browser approval. Complete the flow in your browser.",
+    );
     loop {
         let poll_resp = http
             .get(&poll_url)
@@ -137,25 +190,41 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
 
         match status {
             "pending" => {
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                poll_attempt += 1;
+                wait_before_next_login_poll(poll_attempt, 5, interactive_stderr).await;
             }
             "expired" => {
+                finish_status_line(interactive_stderr, "Login request expired.");
                 return Err(CliError::auth(
                     "login request has expired. run 'tl login' to start a new one.",
                 ));
             }
             "failed" => {
+                finish_status_line(interactive_stderr, "Login request denied.");
                 return Err(CliError::auth(
                     "login request was denied. run 'tl login' to try again.",
                 ));
             }
-            "approved" => break,
+            "approved" => {
+                finish_status_line(
+                    interactive_stderr,
+                    "Browser approval received. Requesting your PAT...",
+                );
+                break;
+            }
             other => {
                 return Err(CliError::auth(format!(
                     "got unexpected login status '{}'. run 'tl login' again.",
                     other
                 )));
             }
+        }
+
+        if poll_attempt % 6 == 0 {
+            update_status_line(
+                interactive_stderr,
+                "Still waiting. If the browser did not open, use the URL above.",
+            );
         }
     }
 
@@ -187,12 +256,25 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         .and_then(|v| v.as_str())
         .ok_or_else(|| CliError::auth("unexpected response during token exchange"))?
         .to_string();
+    let exchange_org_id = exchange_body
+        .get("organization_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let exchange_project_id = exchange_body
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
-    save_credentials(&ctx.api_url, &access_token)?;
+    save_credentials(
+        &ctx.api_url,
+        &access_token,
+        exchange_org_id.as_deref(),
+        exchange_project_id.as_deref(),
+    )?;
     eprintln!("login successful!");
 
-    let mut org_id = None;
-    let mut proj_id = None;
+    let mut org_id = exchange_org_id;
+    let mut proj_id = exchange_project_id;
 
     if auto_init {
         // Recreate context with new PAT
@@ -202,8 +284,8 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
             None,
             Some(&access_token),
             Some(&ctx.namespace),
-            ctx.organization_id.as_deref(),
-            ctx.project_id.as_deref(),
+            org_id.as_deref().or(ctx.organization_id.as_deref()),
+            proj_id.as_deref().or(ctx.project_id.as_deref()),
             ctx.debug,
         );
         let updated_ctx = CliContext::from_resolved(resolved);
