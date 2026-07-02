@@ -41,6 +41,14 @@ fn device_fingerprint() -> serde_json::Value {
     serde_json::Value::Object(body)
 }
 
+async fn countdown_before_open(seconds: u64) {
+    for remaining in (1..=seconds).rev() {
+        let unit = if remaining == 1 { "second" } else { "seconds" };
+        eprintln!("Opening the browser in {remaining} {unit}...");
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 /// Run the interactive device code login flow.
 pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginResult> {
     let login_start_url = format!("{}/platform/cli/login/start", ctx.api_url);
@@ -91,10 +99,9 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         urlencoding::encode(&user_code),
     );
     eprintln!("URL: {}", verification_uri);
-    eprintln!("opening web browser...");
 
     // Give user time to read
-    tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    countdown_before_open(5).await;
 
     if open::that(&verification_uri).is_err() {
         eprintln!(
@@ -102,13 +109,14 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         );
     }
 
-    eprintln!("waiting for the code to be processed...");
+    eprintln!("Waiting for browser approval. Complete the flow in your browser.");
 
     let poll_url = format!(
         "{}/platform/cli/login/poll?device_code={}",
         ctx.api_url, device_code
     );
 
+    let mut poll_attempt = 1;
     loop {
         let poll_resp = http
             .get(&poll_url)
@@ -137,7 +145,9 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
 
         match status {
             "pending" => {
+                eprintln!("Still waiting for approval... checking again in 5 seconds.");
                 tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+                poll_attempt += 1;
             }
             "expired" => {
                 return Err(CliError::auth(
@@ -149,13 +159,20 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
                     "login request was denied. run 'tl login' to try again.",
                 ));
             }
-            "approved" => break,
+            "approved" => {
+                eprintln!("Browser approval received. Requesting your PAT...");
+                break;
+            }
             other => {
                 return Err(CliError::auth(format!(
                     "got unexpected login status '{}'. run 'tl login' again.",
                     other
                 )));
             }
+        }
+
+        if poll_attempt % 6 == 0 {
+            eprintln!("Still waiting. If the browser did not open, use the URL above.");
         }
     }
 
