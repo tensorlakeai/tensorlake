@@ -187,12 +187,25 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         .and_then(|v| v.as_str())
         .ok_or_else(|| CliError::auth("unexpected response during token exchange"))?
         .to_string();
+    let exchange_org_id = exchange_body
+        .get("organization_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
+    let exchange_project_id = exchange_body
+        .get("project_id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string());
 
-    save_credentials(&ctx.api_url, &access_token)?;
+    save_credentials(
+        &ctx.api_url,
+        &access_token,
+        exchange_org_id.as_deref(),
+        exchange_project_id.as_deref(),
+    )?;
     eprintln!("login successful!");
 
-    let mut org_id = None;
-    let mut proj_id = None;
+    let mut org_id = exchange_org_id;
+    let mut proj_id = exchange_project_id;
 
     if auto_init {
         // Recreate context with new PAT
@@ -202,13 +215,15 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
             None,
             Some(&access_token),
             Some(&ctx.namespace),
-            ctx.organization_id.as_deref(),
-            ctx.project_id.as_deref(),
+            org_id.as_deref().or(ctx.organization_id.as_deref()),
+            proj_id.as_deref().or(ctx.project_id.as_deref()),
             ctx.debug,
         );
         let updated_ctx = CliContext::from_resolved(resolved);
 
-        if updated_ctx.has_org_and_project() {
+        if org_id.is_some() && proj_id.is_some() {
+            eprintln!("configured selected organization and project.");
+        } else if updated_ctx.has_org_and_project() {
             org_id = updated_ctx.effective_organization_id();
             proj_id = updated_ctx.effective_project_id();
         } else {

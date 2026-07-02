@@ -1,5 +1,5 @@
 use crate::config::files::{
-    TomlTable, get_nested_value, load_credentials, load_global_config, load_local_config,
+    TomlTable, get_nested_value, load_global_config, load_local_config, load_stored_credentials,
     normalize_api_url,
 };
 
@@ -16,7 +16,7 @@ pub struct ResolvedConfig {
     pub debug: bool,
 }
 
-/// Resolve all configuration from CLI args > env vars > local config > global config > defaults.
+/// Resolve all configuration from CLI args/env vars > stored login scope > local config > global config > defaults.
 /// CLI args and env vars are already merged by clap (via `env` attribute).
 #[allow(clippy::too_many_arguments)]
 pub fn resolve(
@@ -35,10 +35,37 @@ pub fn resolve(
     let final_api_url = resolve_api_url(api_url, &local_config, &global_config);
     let final_cloud_url =
         resolve_cloud_url(cloud_url, &final_api_url, &local_config, &global_config);
-    let (final_api_key, final_pat) =
-        resolve_auth(api_key, pat, &local_config, &global_config, &final_api_url);
+    let stored_credentials = load_stored_credentials(&final_api_url);
+    let use_stored_scope = pat.is_none();
+    let (final_api_key, final_pat) = resolve_auth(
+        api_key,
+        pat,
+        &local_config,
+        &global_config,
+        stored_credentials
+            .as_ref()
+            .map(|credentials| credentials.token.as_str()),
+    );
     let final_namespace = resolve_namespace(namespace, &local_config, &global_config);
-    let (org_id, proj_id) = resolve_project_config(organization_id, project_id, &local_config);
+    let (org_id, proj_id) = resolve_project_config(
+        organization_id,
+        project_id,
+        &local_config,
+        if use_stored_scope {
+            stored_credentials
+                .as_ref()
+                .and_then(|credentials| credentials.organization_id.as_deref())
+        } else {
+            None
+        },
+        if use_stored_scope {
+            stored_credentials
+                .as_ref()
+                .and_then(|credentials| credentials.project_id.as_deref())
+        } else {
+            None
+        },
+    );
 
     ResolvedConfig {
         api_url: final_api_url,
@@ -86,15 +113,16 @@ fn resolve_auth(
     pat: Option<&str>,
     local: &TomlTable,
     global: &TomlTable,
-    api_url: &str,
+    stored_pat: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     let final_api_key = api_key
         .map(|s| s.to_string())
         .or_else(|| get_nested_value(local, "tensorlake.apikey"))
         .or_else(|| get_nested_value(global, "tensorlake.apikey"));
 
-    let file_pat = load_credentials(api_url);
-    let final_pat = pat.map(|s| s.to_string()).or(file_pat);
+    let final_pat = pat
+        .map(|s| s.to_string())
+        .or_else(|| stored_pat.map(str::to_string));
 
     (final_api_key, final_pat)
 }
@@ -110,13 +138,17 @@ fn resolve_project_config(
     org_id: Option<&str>,
     proj_id: Option<&str>,
     local: &TomlTable,
+    stored_org_id: Option<&str>,
+    stored_proj_id: Option<&str>,
 ) -> (Option<String>, Option<String>) {
     let final_org_id = org_id
         .map(|s| s.to_string())
+        .or_else(|| stored_org_id.map(str::to_string))
         .or_else(|| get_nested_value(local, "organization"));
 
     let final_proj_id = proj_id
         .map(|s| s.to_string())
+        .or_else(|| stored_proj_id.map(str::to_string))
         .or_else(|| get_nested_value(local, "project"));
 
     (final_org_id, final_proj_id)
