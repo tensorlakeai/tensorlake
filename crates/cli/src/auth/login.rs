@@ -290,9 +290,7 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         );
         let updated_ctx = CliContext::from_resolved(resolved);
 
-        if org_id.is_some() && proj_id.is_some() {
-            eprintln!("configured selected organization and project.");
-        } else if updated_ctx.has_org_and_project() {
+        if updated_ctx.has_org_and_project() {
             org_id = updated_ctx.effective_organization_id();
             proj_id = updated_ctx.effective_project_id();
         } else {
