@@ -61,6 +61,36 @@ async fn countdown_before_open(seconds: u64) {
     }
 }
 
+fn update_status_line(interactive: bool, message: &str) {
+    if interactive {
+        eprint!("\r\x1b[2K{message}");
+        let _ = std::io::stderr().flush();
+    } else {
+        eprintln!("{message}");
+    }
+}
+
+fn finish_status_line(interactive: bool, message: &str) {
+    if interactive {
+        eprintln!("\r\x1b[2K{message}");
+    } else {
+        eprintln!("{message}");
+    }
+}
+
+async fn wait_before_next_login_poll(attempt: u64, seconds: u64, interactive: bool) {
+    for remaining in (1..=seconds).rev() {
+        let unit = if remaining == 1 { "second" } else { "seconds" };
+        update_status_line(
+            interactive,
+            &format!(
+                "Waiting for browser approval. Check #{attempt}; checking again in {remaining} {unit}..."
+            ),
+        );
+        tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+}
+
 /// Run the interactive device code login flow.
 pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginResult> {
     let login_start_url = format!("{}/platform/cli/login/start", ctx.api_url);
@@ -121,14 +151,17 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         );
     }
 
-    eprintln!("Waiting for browser approval. Complete the flow in your browser.");
-
     let poll_url = format!(
         "{}/platform/cli/login/poll?device_code={}",
         ctx.api_url, device_code
     );
 
     let mut poll_attempt = 1;
+    let interactive_stderr = std::io::stderr().is_terminal();
+    update_status_line(
+        interactive_stderr,
+        "Waiting for browser approval. Complete the flow in your browser.",
+    );
     loop {
         let poll_resp = http
             .get(&poll_url)
@@ -157,22 +190,26 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
 
         match status {
             "pending" => {
-                eprintln!("Still waiting for approval... checking again in 5 seconds.");
-                tokio::time::sleep(std::time::Duration::from_secs(5)).await;
                 poll_attempt += 1;
+                wait_before_next_login_poll(poll_attempt, 5, interactive_stderr).await;
             }
             "expired" => {
+                finish_status_line(interactive_stderr, "Login request expired.");
                 return Err(CliError::auth(
                     "login request has expired. run 'tl login' to start a new one.",
                 ));
             }
             "failed" => {
+                finish_status_line(interactive_stderr, "Login request denied.");
                 return Err(CliError::auth(
                     "login request was denied. run 'tl login' to try again.",
                 ));
             }
             "approved" => {
-                eprintln!("Browser approval received. Requesting your PAT...");
+                finish_status_line(
+                    interactive_stderr,
+                    "Browser approval received. Requesting your PAT...",
+                );
                 break;
             }
             other => {
@@ -184,7 +221,10 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         }
 
         if poll_attempt % 6 == 0 {
-            eprintln!("Still waiting. If the browser did not open, use the URL above.");
+            update_status_line(
+                interactive_stderr,
+                "Still waiting. If the browser did not open, use the URL above.",
+            );
         }
     }
 
