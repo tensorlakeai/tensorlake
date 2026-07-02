@@ -5,6 +5,7 @@ use crate::config::resolver;
 use crate::error::{CliError, Result};
 use crate::http;
 use crate::project::detection::find_project_root;
+use std::io::{IsTerminal, Write};
 
 /// Result of a successful login flow.
 pub struct LoginResult {
@@ -42,10 +43,21 @@ fn device_fingerprint() -> serde_json::Value {
 }
 
 async fn countdown_before_open(seconds: u64) {
+    let interactive = std::io::stderr().is_terminal();
+
     for remaining in (1..=seconds).rev() {
         let unit = if remaining == 1 { "second" } else { "seconds" };
-        eprintln!("Opening the browser in {remaining} {unit}...");
+        if interactive {
+            eprint!("\r\x1b[2KOpening the browser in {remaining} {unit}...");
+            let _ = std::io::stderr().flush();
+        } else {
+            eprintln!("Opening the browser in {remaining} {unit}...");
+        }
         tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+    }
+
+    if interactive {
+        eprintln!("\r\x1b[2KOpening browser...");
     }
 }
 
