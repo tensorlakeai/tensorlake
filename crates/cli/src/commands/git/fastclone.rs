@@ -349,11 +349,17 @@ pub fn default_dest_from_url(raw: &str) -> PathBuf {
 async fn get_json<T: serde::de::DeserializeOwned>(ctx: &HttpCtx, url: Url) -> Result<T> {
     let resp = authed_get(ctx, url.clone()).send().await?;
     let status = resp.status();
+    let body = resp
+        .text()
+        .await
+        .with_context(|| format!("GET {url} ({status}): failed reading response body"))?;
     if !status.is_success() {
-        let body = resp.text().await.unwrap_or_default();
         bail!("GET {url} failed with {status}: {body}");
     }
-    Ok(resp.json::<T>().await?)
+    serde_json::from_str(&body).with_context(|| {
+        let preview: String = body.chars().take(500).collect();
+        format!("GET {url} ({status}): failed to decode JSON response body: {preview:?}")
+    })
 }
 
 async fn ensure_cached_artifact<F>(

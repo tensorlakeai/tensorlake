@@ -149,6 +149,25 @@ pub async fn restore_repo(ctx: &CliContext, repo: &str) -> Result<()> {
     Ok(())
 }
 
+/// Accept either a bare repo name or a full clone URL (as printed by `tl git url`), matching how
+/// `git clone` itself treats its argument. A URL's last non-empty path segment (with any `.git`
+/// suffix stripped) is used as the repo name.
+fn normalize_repo_arg(repo: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(repo) else {
+        return repo.to_string();
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return repo.to_string();
+    }
+    url.path_segments()
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .next_back()
+        .map(|s| s.strip_suffix(".git").unwrap_or(s).to_string())
+        .unwrap_or_else(|| repo.to_string())
+}
+
 pub async fn clone_repo(
     ctx: &CliContext,
     repo: &str,
@@ -157,6 +176,7 @@ pub async fn clone_repo(
     cache_max_bytes: Option<u64>,
     no_checkout: bool,
 ) -> Result<()> {
+    let repo = &normalize_repo_arg(repo);
     let project_id = project_id(ctx)?;
     let client = artifact_storage_client(ctx)?;
     let repo_url = client.git_repo_url(&project_id, repo);
@@ -403,4 +423,38 @@ fn parse_remote_message(raw: &str) -> String {
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| raw.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_repo_arg_passes_through_bare_names() {
+        assert_eq!(normalize_repo_arg("linux1"), "linux1");
+    }
+
+    #[test]
+    fn normalize_repo_arg_extracts_repo_from_full_url() {
+        assert_eq!(
+            normalize_repo_arg("https://git.tensorlake.ai/project_abc/linux1"),
+            "linux1"
+        );
+        assert_eq!(
+            normalize_repo_arg("https://git.tensorlake.ai/project_abc/linux1.git"),
+            "linux1"
+        );
+        assert_eq!(
+            normalize_repo_arg("http://localhost:8080/demo/myrepo/"),
+            "myrepo"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_arg_ignores_non_http_schemes() {
+        assert_eq!(
+            normalize_repo_arg("git@github.com:org/repo.git"),
+            "git@github.com:org/repo.git"
+        );
+    }
 }
