@@ -278,6 +278,22 @@ enum SshKeysCommands {
 
 #[derive(Subcommand)]
 enum GitCommands {
+    /// Fast-clone a repo: install trusted pack artifacts directly, then leave a normal Git checkout
+    Clone {
+        /// Repo name
+        repo: String,
+        /// Destination directory (default: derived from the repo name)
+        dest: Option<std::path::PathBuf>,
+        /// Pack/idx/blob artifact cache directory (default: platform cache dir)
+        #[arg(long)]
+        cache_dir: Option<std::path::PathBuf>,
+        /// Prune old cached artifacts after clone; accepts K/M/G/T suffixes
+        #[arg(long, value_parser = commands::git::parse_cache_max_bytes)]
+        cache_max_bytes: Option<u64>,
+        /// Install objects/refs without checking out the worktree
+        #[arg(long)]
+        no_checkout: bool,
+    },
     /// Create an empty repo
     Create {
         /// Repo name
@@ -2012,6 +2028,16 @@ async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> erro
 
 async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result<()> {
     match subcmd {
+        GitCommands::Clone {
+            repo,
+            dest,
+            cache_dir,
+            cache_max_bytes,
+            no_checkout,
+        } => {
+            commands::git::clone_repo(ctx, &repo, dest, cache_dir, cache_max_bytes, no_checkout)
+                .await
+        }
         GitCommands::Create {
             repo,
             default_branch,
@@ -2152,6 +2178,32 @@ mod tests {
 
     #[test]
     fn git_commands_parse() {
+        match parse_command([
+            "tl",
+            "git",
+            "clone",
+            "demo",
+            "dest-dir",
+            "--cache-max-bytes",
+            "2GiB",
+            "--no-checkout",
+        ]) {
+            Commands::Git(GitCommands::Clone {
+                repo,
+                dest,
+                cache_dir,
+                cache_max_bytes,
+                no_checkout,
+            }) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(dest, Some(std::path::PathBuf::from("dest-dir")));
+                assert_eq!(cache_dir, None);
+                assert_eq!(cache_max_bytes, Some(2 * 1024 * 1024 * 1024));
+                assert!(no_checkout);
+            }
+            _ => panic!("expected git clone command"),
+        }
+
         match parse_command(["tl", "git", "create", "demo", "--default-branch", "trunk"]) {
             Commands::Git(GitCommands::Create {
                 repo,

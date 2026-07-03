@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use comfy_table::Cell;
 use console::style;
 use tensorlake::artifact_storage::ArtifactStorageClient;
@@ -9,6 +11,10 @@ use tensorlake::{ClientBuilder, Sdk};
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
+
+mod fastclone;
+
+pub use fastclone::parse_cache_max_bytes;
 
 pub fn repo_url(ctx: &CliContext, repo: &str) -> Result<String> {
     let client = artifact_storage_client(ctx)?;
@@ -140,6 +146,69 @@ pub async fn restore_repo(ctx: &CliContext, repo: &str) -> Result<()> {
         .await
         .map_err(map_sdk_error)?;
     println!("restored {repo}");
+    Ok(())
+}
+
+/// Accept either a bare repo name or a full clone URL (as printed by `tl git url`), matching how
+/// `git clone` itself treats its argument. A URL's last non-empty path segment (with any `.git`
+/// suffix stripped) is used as the repo name.
+fn normalize_repo_arg(repo: &str) -> String {
+    let Ok(url) = reqwest::Url::parse(repo) else {
+        return repo.to_string();
+    };
+    if !matches!(url.scheme(), "http" | "https") {
+        return repo.to_string();
+    }
+    url.path_segments()
+        .into_iter()
+        .flatten()
+        .filter(|s| !s.is_empty())
+        .next_back()
+        .map(|s| s.strip_suffix(".git").unwrap_or(s).to_string())
+        .unwrap_or_else(|| repo.to_string())
+}
+
+pub async fn clone_repo(
+    ctx: &CliContext,
+    repo: &str,
+    dest: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
+    cache_max_bytes: Option<u64>,
+    no_checkout: bool,
+) -> Result<()> {
+    let repo = &normalize_repo_arg(repo);
+    let project_id = project_id(ctx)?;
+    let client = artifact_storage_client(ctx)?;
+    let repo_url = client.git_repo_url(&project_id, repo);
+
+    let spinner = fastclone::new_spinner(&format!("minting git credential for {repo}"));
+    let credential = client
+        .mint_token_for_repo(&project_id, Some(repo))
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner();
+    if let Some(pb) = &spinner {
+        pb.set_message("fetching clone manifest");
+    }
+
+    let dest = dest.unwrap_or_else(|| fastclone::default_dest_from_url(&repo_url));
+    let opts = fastclone::FastCloneOptions {
+        repo_url: repo_url.clone(),
+        dest,
+        cache_dir,
+        cache_max_bytes,
+        credential: Some(fastclone::BasicAuth {
+            username: credential.git_username,
+            password: Some(credential.token),
+        }),
+        checkout: !no_checkout,
+        progress: spinner,
+    };
+    let stats = fastclone::fast_clone(opts).await?;
+    println!(
+        "{}",
+        fastclone::format_fast_clone_stats(&format!("cloned {repo}"), &stats)
+    );
     Ok(())
 }
 
@@ -361,4 +430,38 @@ fn parse_remote_message(raw: &str) -> String {
                 .map(|s| s.to_string())
         })
         .unwrap_or_else(|| raw.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn normalize_repo_arg_passes_through_bare_names() {
+        assert_eq!(normalize_repo_arg("linux1"), "linux1");
+    }
+
+    #[test]
+    fn normalize_repo_arg_extracts_repo_from_full_url() {
+        assert_eq!(
+            normalize_repo_arg("https://git.tensorlake.ai/project_abc/linux1"),
+            "linux1"
+        );
+        assert_eq!(
+            normalize_repo_arg("https://git.tensorlake.ai/project_abc/linux1.git"),
+            "linux1"
+        );
+        assert_eq!(
+            normalize_repo_arg("http://localhost:8080/demo/myrepo/"),
+            "myrepo"
+        );
+    }
+
+    #[test]
+    fn normalize_repo_arg_ignores_non_http_schemes() {
+        assert_eq!(
+            normalize_repo_arg("git@github.com:org/repo.git"),
+            "git@github.com:org/repo.git"
+        );
+    }
 }
