@@ -21,6 +21,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use anyhow::{Context, Result, bail};
 use flate2::Compression;
 use gsvc_codec::{BlobOidHasher, IdxV2, Oid};
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -122,6 +123,23 @@ struct HttpCtx {
     client: reqwest::Client,
     origin: Url,
     auth: Option<BasicAuth>,
+    progress: Option<ProgressBar>,
+}
+
+fn new_progress_bar(total_bytes: u64) -> Option<ProgressBar> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return None;
+    }
+    let pb = ProgressBar::new(total_bytes);
+    pb.set_style(
+        ProgressStyle::with_template(
+            "{spinner} {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta}) {msg}",
+        )
+        .unwrap()
+        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
+    );
+    pb.enable_steady_tick(std::time::Duration::from_millis(80));
+    Some(pb)
 }
 
 /// Run a fast clone into `opts.dest`.
@@ -136,10 +154,11 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         let path = format!("{}/", clean_base.path());
         clean_base.set_path(&path);
     }
-    let ctx = HttpCtx {
+    let mut ctx = HttpCtx {
         client: reqwest::Client::builder().build()?,
         origin: clean_base.clone(),
         auth: opts.credential.clone(),
+        progress: None,
     };
     let manifest_url = clean_base.join("fast/clone-manifest")?;
     let manifest: FastCloneManifest = get_json(&ctx, manifest_url).await?;
@@ -153,6 +172,17 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
     let cache_dir = opts.cache_dir.clone().unwrap_or_else(default_cache_dir);
     std::fs::create_dir_all(&cache_dir)
         .with_context(|| format!("create cache dir {}", cache_dir.display()))?;
+
+    let total_bytes: u64 = manifest
+        .packs
+        .iter()
+        .map(|p| p.pack_bytes + p.idx_bytes)
+        .sum::<u64>()
+        + manifest.large_blobs.iter().map(|b| b.bytes).sum::<u64>();
+    ctx.progress = new_progress_bar(total_bytes);
+    if let Some(pb) = &ctx.progress {
+        pb.set_message("fetching pack artifacts");
+    }
 
     let mut stats = FastCloneStats {
         packs: manifest.packs.len(),
@@ -202,6 +232,11 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
             stats.reused_bytes += blob.bytes;
         }
     }
+
+    if let Some(pb) = ctx.progress.take() {
+        pb.finish_and_clear();
+    }
+    eprintln!("installing objects into {}", opts.dest.display());
 
     run_git_outside(&mut stats, &["init", "-q", opts.dest.to_str().unwrap()])?;
     let git_dir = opts.dest.join(".git");
@@ -334,7 +369,12 @@ where
     if path.exists() {
         match file_size(path)? {
             Some(size) if size == expected_bytes => match validate(path) {
-                Ok(()) => return Ok(false),
+                Ok(()) => {
+                    if let Some(pb) = &ctx.progress {
+                        pb.inc(expected_bytes);
+                    }
+                    return Ok(false);
+                }
                 Err(_) => {
                     let _ = fs::remove_file(path);
                 }
@@ -369,6 +409,9 @@ where
     let mut written = 0u64;
     while let Some(chunk) = resp.chunk().await? {
         written += chunk.len() as u64;
+        if let Some(pb) = &ctx.progress {
+            pb.inc(chunk.len() as u64);
+        }
         out.write_all(&chunk).await?;
     }
     out.flush().await?;
@@ -400,7 +443,12 @@ async fn ensure_loose_blob_cached(
 ) -> Result<bool> {
     if path.exists() {
         match validate_loose_blob_cache(path, oid, expected_bytes) {
-            Ok(()) => return Ok(false),
+            Ok(()) => {
+                if let Some(pb) = &ctx.progress {
+                    pb.inc(expected_bytes);
+                }
+                return Ok(false);
+            }
             Err(_) => {
                 let _ = fs::remove_file(path);
             }
@@ -432,6 +480,9 @@ async fn ensure_loose_blob_cached(
     let mut written = 0u64;
     while let Some(chunk) = resp.chunk().await? {
         written += chunk.len() as u64;
+        if let Some(pb) = &ctx.progress {
+            pb.inc(chunk.len() as u64);
+        }
         hasher.update(&chunk);
         enc.write_all(&chunk)?;
     }
