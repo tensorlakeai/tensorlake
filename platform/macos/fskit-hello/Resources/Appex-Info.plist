@@ -9,7 +9,7 @@
 	<key>CFBundleExecutable</key>
 	<string>TLFSHelloFS</string>
 	<key>CFBundleIdentifier</key>
-	<string>com.tensorlake.TLFSHello.TLFSHelloFS</string>
+	<string>ai.tensorlake.tlfs.fsmodule</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
@@ -28,8 +28,12 @@
 	<string>26.0</string>
 	<key>EXAppExtensionAttributes</key>
 	<dict>
+		<key>EXExtensionPrincipalClass</key>
+		<string>TLFSHelloFileSystem</string>
 		<key>EXExtensionPointIdentifier</key>
 		<string>com.apple.fskit.fsmodule</string>
+		<key>EXExtensionPrincipalClass</key>
+		<string>TLFSHelloFileSystem</string>
 		<key>FSActivateOptionSyntax</key>
 		<dict>
 			<key>shortOptions</key>

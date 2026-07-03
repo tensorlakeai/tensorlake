@@ -6,15 +6,17 @@ import Foundation
 import ExtensionFoundation
 import FSKit
 
-// MARK: - Extension entry point
-
-@main
-final class TLFSHelloExtension: UnaryFileSystemExtension {
-    let fileSystem = TLFSHelloFileSystem()
-}
+// MARK: - Entry point
+//
+// Mirrors Apple's shipping FSKit modules (msdos/exfat/ftp): the appex binary's
+// entry point is Foundation's NSExtensionMain (linked via `-e _NSExtensionMain`),
+// and the system instantiates EXExtensionPrincipalClass from the Info.plist.
+// (The Swift @main + UnaryFileSystemExtension path launches but the process
+// exits before fskit_agent can fetch its listener endpoint; see notes.)
 
 // MARK: - Unary file system
 
+@objc(TLFSHelloFileSystem)
 final class TLFSHelloFileSystem: FSUnaryFileSystem, FSUnaryFileSystemOperations {
 
     private func isOurs(_ resource: FSResource) -> Bool {

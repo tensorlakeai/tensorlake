@@ -7,9 +7,32 @@ enabled. macFUSE is abandoned (its mount returns EPERM on macOS 26 even with
 the kext loaded); FSKit is the sanctioned kextless path (macOS 26+; same
 approach as Archil).
 
-## Status
+## Status: FULLY WORKING
 
-Everything works up to process launch. The one blocker is that
+Validated end to end on macOS 26.5 (2026-07-03): builds headlessly, signs with
+the team's development identity + provisioning profile, registers, enables,
+launches, **mounts, and serves reads through the kernel** — no sudo, no kext:
+
+    $ mount -F -t tlfshello 'tlfshello://x' /tmp/hellomnt
+    $ cat /tmp/hellomnt/hello.txt
+    hello from tlfs
+
+Two requirements beyond the original notes:
+
+1.  is a restricted entitlement — the appex
+   embeds a macOS development provisioning profile for the explicit App ID
+    (FSKit Module capability enabled in the
+   portal) as , and the signing
+   entitlements include application-identifier + team-identifier matching it.
+    reads the profile path from 
+   (default: ~/Downloads/tlfsfsmoduledev.provisionprofile).
+2.  is NOT optional in practice: without it the
+   extension launches and even creates its FSMachPort, but fskit_agent cannot
+   fetch the listener endpoint (NSCocoaErrorDomain 4099) and fskitd terminates
+   the instance. Point it at the FSUnaryFileSystem subclass and pin the ObjC
+   name with  on the Swift class.
+
+(Original pre-profile notes follow.) The earlier blocker was that
 `com.apple.developer.fskit.fsmodule` is a **restricted entitlement**: the
 appex needs a macOS provisioning profile with the "FSKit Module" capability
 for team 9DQWQ9K87W, embedded as `Contents/embedded.provisionprofile`, then
