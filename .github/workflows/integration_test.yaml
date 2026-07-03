@@ -80,19 +80,9 @@ jobs:
               set -e
 
               echo "--- Installing tensorlake from TestPyPI ---"
-              for attempt in $(seq 1 8); do
-                if pip install --index-url https://test.pypi.org/simple/ \
-                                --extra-index-url https://pypi.org/simple/ \
-                                tensorlake==${PYPI_VERSION}; then
-                  break
-                fi
-                if [ "$attempt" -eq 8 ]; then
-                  echo "tensorlake==${PYPI_VERSION} still not resolvable on TestPyPI after 8 attempts"
-                  exit 1
-                fi
-                echo "TestPyPI index propagation not caught up yet (attempt ${attempt}/8), retrying in 30s..."
-                sleep 30
-              done
+              pip install --index-url https://test.pypi.org/simple/ \
+                          --extra-index-url https://pypi.org/simple/ \
+                          tensorlake==${PYPI_VERSION}
 
               echo "--- 1. Build images ---"
               tl build-images /tmp/test_app.py \

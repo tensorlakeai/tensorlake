@@ -568,6 +568,7 @@ fn collect_push_files(
         source: PushSource::Path(path.to_path_buf()),
     });
     Ok(())
+}
 
 #[cfg(test)]
 mod tests {
