@@ -186,10 +186,6 @@ impl OverlayFs {
         }))
     }
 
-    pub fn core(&self) -> &Arc<MountCore> {
-        &self.core
-    }
-
     fn upper_path(&self, path: &str) -> PathBuf {
         if path.is_empty() {
             self.upper.clone()
@@ -318,10 +314,10 @@ impl OverlayFs {
             .lock()
             .expect("inode lock")
             .forget(ino, nlookups);
-        if let Some(node) = dropped {
-            if let Some(core_ino) = node.core_ino() {
-                self.core.forget(core_ino, 1);
-            }
+        if let Some(node) = dropped
+            && let Some(core_ino) = node.core_ino()
+        {
+            self.core.forget(core_ino, 1);
         }
     }
 
@@ -371,33 +367,33 @@ impl OverlayFs {
             }
         }
 
-        if let Some(core_ino) = node.core_ino() {
-            if !self.whited_out(&node.path) || node.path.is_empty() {
-                let fh = self.core.opendir(core_ino)?;
-                let mut offset = 0u64;
-                loop {
-                    let page = self.core.readdir(fh, offset, 4096).await;
-                    let page = match page {
-                        Ok(page) => page,
-                        Err(e) => {
-                            self.core.releasedir(fh);
-                            return Err(e);
-                        }
-                    };
-                    if page.is_empty() {
-                        break;
+        if let Some(core_ino) = node.core_ino()
+            && (!self.whited_out(&node.path) || node.path.is_empty())
+        {
+            let fh = self.core.opendir(core_ino)?;
+            let mut offset = 0u64;
+            loop {
+                let page = self.core.readdir(fh, offset, 4096).await;
+                let page = match page {
+                    Ok(page) => page,
+                    Err(e) => {
+                        self.core.releasedir(fh);
+                        return Err(e);
                     }
-                    offset = page.last().expect("nonempty page").next_offset;
-                    for entry in page {
-                        let child = Self::child_path(&node.path, &entry.name);
-                        if seen.contains(&entry.name) || self.whited_out(&child) {
-                            continue;
-                        }
-                        merged.push((entry.name, entry.kind));
-                    }
+                };
+                if page.is_empty() {
+                    break;
                 }
-                self.core.releasedir(fh);
+                offset = page.last().expect("nonempty page").next_offset;
+                for entry in page {
+                    let child = Self::child_path(&node.path, &entry.name);
+                    if seen.contains(&entry.name) || self.whited_out(&child) {
+                        continue;
+                    }
+                    merged.push((entry.name, entry.kind));
+                }
             }
+            self.core.releasedir(fh);
         }
 
         merged.sort_by(|a, b| a.0.cmp(&b.0));

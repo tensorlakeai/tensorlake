@@ -1,10 +1,10 @@
 //! The `tl fs` mount daemon.
 //!
-//! One daemon per mount: it holds the FUSE session over the overlay, follows the workspace ref
-//! (so a snapshot's ref advance swaps the lower layer to the new commit), heartbeats the
-//! workspace lease, rotates the minted git credential before it expires (the shared token slot
-//! in the vendored [`gsvc_mount::FsClient`] makes this an in-place swap), and answers a tiny
-//! line-JSON control protocol on a unix socket in the state directory:
+//! One daemon per mount: it owns the mount core (lazy server reads, immutable caches, workspace
+//! ref following) and the writable overlay, heartbeats the workspace lease, rotates the minted
+//! git credential before it expires (the shared token slot in the vendored
+//! [`gsvc_mount::FsClient`] makes this an in-place swap), and answers a tiny line-JSON control
+//! protocol on a unix socket in the state directory:
 //!
 //! ```text
 //! {"op":"ping"}        -> {"ok":true,"commit":"<hex>"}
@@ -12,9 +12,16 @@
 //! {"op":"clear_upper"} -> drop all overlay state (post-snapshot / restore)
 //! {"op":"shutdown"}    -> unmount and exit
 //! ```
+//!
+//! How the kernel reaches the overlay differs by platform:
+//! - **Linux**: an in-process FUSE session over `/dev/fuse` ([`super::fusefs`]).
+//! - **macOS**: the TensorLake FSKit extension (`ai.tensorlake.tlfs.fsmodule`, a sandboxed Swift
+//!   proxy) speaks the [`super::vfsserver`] protocol to this daemon over localhost TCP; the
+//!   daemon invokes `mount -F -t tlfs 'tlfs://127.0.0.1:<port>/<secret>' <dir>` once the server
+//!   is listening. No kernel extension, no sudo.
 
 use std::path::{Path, PathBuf};
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -23,9 +30,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use super::overlay::OverlayFs;
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 use std::sync::Arc;
 
 /// Persisted per-mount state (`<state dir>/state.json`). No credentials: the daemon mints its
@@ -92,12 +99,12 @@ pub async fn control(state_dir: &Path, op: &str) -> Result<serde_json::Value> {
 }
 
 /// How long before recorded credential expiry the daemon re-mints. Minted tokens live ~1h.
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const CREDENTIAL_ROTATE_MARGIN: Duration = Duration::from_secs(10 * 60);
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20 * 60);
 
-#[cfg(target_os = "linux")]
+#[cfg(unix)]
 fn expires_in(expires_at: &str) -> Duration {
     chrono::DateTime::parse_from_rfc3339(expires_at)
         .map(|t| {
@@ -107,33 +114,27 @@ fn expires_in(expires_at: &str) -> Duration {
 }
 
 /// Run the daemon in the foreground of the current process. `tl fs mount` spawns this as a
-/// detached child (`tl fs daemon --state-dir ... --mountpoint ...`).
+/// detached child (`tl fs daemon --state-dir ...`).
 pub async fn run(ctx: &CliContext, state_dir: &Path) -> Result<()> {
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(not(unix))]
     {
         let _ = (ctx, state_dir);
         Err(CliError::usage(
-            "This platform mounts via the TensorLake FSKit extension, which this build does not \
-             ship yet; Linux builds mount via FUSE.",
+            "tl fs mount is supported on Linux (FUSE) and macOS (FSKit) only.",
         ))
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(unix)]
     {
-        run_fuse(ctx, state_dir).await
+        run_mount(ctx, state_dir).await
     }
 }
 
-#[cfg(target_os = "linux")]
-async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
+#[cfg(unix)]
+async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     use crate::commands::git::{artifact_storage_client, project_id};
     use gsvc_mount::{FsClient, MountCore, MountOptions};
 
-    eprintln!("daemon: loading state from {}", state_dir.display());
     let state = load_mount_state(state_dir)?;
-    eprintln!(
-        "daemon: state ok (mountpoint {})",
-        state.mountpoint.display()
-    );
     let sdk = artifact_storage_client(ctx)?;
     let project = project_id(ctx)?;
 
@@ -159,7 +160,6 @@ async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     // Keep a handle onto the shared credential slot for rotation.
     let rotating_client = client.clone();
 
-    eprintln!("daemon: client ok; building core");
     let core = MountCore::new(
         client,
         MountOptions {
@@ -223,26 +223,11 @@ async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         });
     }
 
-    // The FUSE session must attach before the control socket exists: the socket answering is
-    // what `tl fs mount` treats as success.
-    eprintln!(
-        "daemon: overlay ok; attaching fuse at {}",
-        state.mountpoint.display()
-    );
-    let (mounted_tx, mounted_rx) = tokio::sync::oneshot::channel();
-    let fuse =
-        super::fusefs::WorkspaceFuse::new(overlay.clone(), tokio::runtime::Handle::current());
     let mountpoint = state.mountpoint.clone();
-    let mp = mountpoint.clone();
-    let served = tokio::task::spawn_blocking(move || fuse.run(&mp, mounted_tx));
-    if mounted_rx.await.is_err() {
-        // Session establishment failed; surface the real error.
-        return match served.await {
-            Ok(Ok(())) => Err(CliError::usage("fuse session ended before mounting")),
-            Ok(Err(e)) => Err(CliError::usage(format!("fuse mount failed: {e}"))),
-            Err(e) => Err(CliError::usage(format!("fuse thread: {e}"))),
-        };
-    }
+
+    // Attach the kernel: platform-specific. Only after this succeeds does the control socket
+    // exist — the socket answering is what `tl fs mount` treats as success.
+    let served = attach(overlay.clone(), &mountpoint).await?;
 
     // Control socket (mount is live).
     let sock_path = control_socket(state_dir);
@@ -302,18 +287,105 @@ async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         });
     }
 
-    // Serve until the kernel unmounts us.
-    let served = served.await;
+    // Serve until the kernel lets go of the mountpoint.
+    let result = served.wait().await;
     let _ = std::fs::remove_file(&sock_path);
-    match served {
-        Ok(Ok(())) => Ok(()),
-        Ok(Err(e)) => Err(CliError::usage(format!("fuse session: {e}"))),
-        Err(e) => Err(CliError::usage(format!("fuse thread: {e}"))),
+    result
+}
+
+/// A live kernel attachment; `wait` returns when the mount ends.
+#[cfg(unix)]
+enum Attached {
+    #[cfg(target_os = "linux")]
+    Fuse(tokio::task::JoinHandle<std::io::Result<()>>),
+    #[cfg(target_os = "macos")]
+    FsKit { mountpoint: PathBuf },
+}
+
+#[cfg(unix)]
+impl Attached {
+    async fn wait(self) -> Result<()> {
+        match self {
+            #[cfg(target_os = "linux")]
+            Attached::Fuse(handle) => match handle.await {
+                Ok(Ok(())) => Ok(()),
+                Ok(Err(e)) => Err(CliError::usage(format!("fuse session: {e}"))),
+                Err(e) => Err(CliError::usage(format!("fuse thread: {e}"))),
+            },
+            #[cfg(target_os = "macos")]
+            Attached::FsKit { mountpoint } => {
+                // FSKit serves through our TCP server; the daemon's job is simply to outlive
+                // the mount. Poll the mount table and exit once the kernel lets go.
+                loop {
+                    tokio::time::sleep(Duration::from_secs(3)).await;
+                    if !is_mounted(&mountpoint) {
+                        return Ok(());
+                    }
+                }
+            }
+        }
     }
 }
 
-/// Ask the kernel to unmount; the blocked FUSE session then returns and the daemon exits.
 #[cfg(target_os = "linux")]
+async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<Attached> {
+    let (mounted_tx, mounted_rx) = tokio::sync::oneshot::channel();
+    let fuse = super::fusefs::WorkspaceFuse::new(overlay, tokio::runtime::Handle::current());
+    let mp = mountpoint.to_path_buf();
+    let served = tokio::task::spawn_blocking(move || fuse.run(&mp, mounted_tx));
+    if mounted_rx.await.is_err() {
+        return match served.await {
+            Ok(Ok(())) => Err(CliError::usage("fuse session ended before mounting")),
+            Ok(Err(e)) => Err(CliError::usage(format!("fuse mount failed: {e}"))),
+            Err(e) => Err(CliError::usage(format!("fuse thread: {e}"))),
+        };
+    }
+    Ok(Attached::Fuse(served))
+}
+
+/// macOS: serve the overlay over localhost TCP and ask the kernel to mount through the
+/// TensorLake FSKit extension.
+#[cfg(target_os = "macos")]
+async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<Attached> {
+    let server = super::vfsserver::serve(overlay)
+        .await
+        .map_err(|e| CliError::usage(format!("vfs server: {e}")))?;
+    let url = format!("tlfs://127.0.0.1:{}/{}", server.port, server.secret);
+    let status = tokio::process::Command::new("/sbin/mount")
+        .arg("-F")
+        .arg("-t")
+        .arg("tlfs")
+        .arg(&url)
+        .arg(mountpoint)
+        .status()
+        .await?;
+    if !status.success() {
+        return Err(CliError::usage(
+            "mount(8) failed: is the TensorLake file-system extension installed and enabled? \
+             (System Settings -> General -> Login Items & Extensions -> File System Extensions)",
+        ));
+    }
+    Ok(Attached::FsKit {
+        mountpoint: mountpoint.to_path_buf(),
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn is_mounted(mountpoint: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c_path) = std::ffi::CString::new(mountpoint.as_os_str().as_bytes()) else {
+        return false;
+    };
+    let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
+    if unsafe { libc::statfs(c_path.as_ptr(), &mut sfs) } != 0 {
+        return false;
+    }
+    let fstype = unsafe { std::ffi::CStr::from_ptr(sfs.f_fstypename.as_ptr()) };
+    fstype.to_string_lossy() == "tlfs"
+}
+
+/// Ask the kernel to unmount; the daemon then observes the detach and exits.
+#[cfg(unix)]
 fn unmount(mountpoint: &Path) {
     #[cfg(target_os = "linux")]
     let status = std::process::Command::new("fusermount")

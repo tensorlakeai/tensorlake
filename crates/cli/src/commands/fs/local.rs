@@ -17,6 +17,13 @@ const IGNORED_DIR_NAMES: &[&str] = &[
     "__pycache__",
 ];
 
+/// Whether a name is inherently workspace-local: macOS metadata turds the kernel writes onto
+/// filesystems without native xattr support. They serve reads from the overlay but never
+/// version.
+pub fn is_metadata_turd(name: &str) -> bool {
+    name.starts_with("._") || name == ".DS_Store"
+}
+
 /// Names ignored at any depth: the built-in set plus `.tlignore` lines read from the mount root
 /// (comments with `#`, blank lines skipped; a trailing `/` is stripped — v1 matches
 /// directory/file *names*). Ignored paths are workspace-local: never uploaded, never restored.

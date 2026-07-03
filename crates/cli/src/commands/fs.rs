@@ -31,11 +31,12 @@ pub mod daemon;
 #[cfg(target_os = "linux")]
 pub mod fusefs;
 pub mod local;
-// The overlay's write surface is driven by the FUSE glue; without it (macOS build sans macFUSE)
-// the methods are intentionally uncalled.
 #[cfg(unix)]
-#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod overlay;
+// How the kernel reaches the overlay on macOS: the FSKit extension proxies this wire protocol
+// over localhost TCP (Linux talks to the overlay in-process through the FUSE glue).
+#[cfg(unix)]
+pub mod vfsserver;
 
 use daemon::MountState;
 
@@ -217,10 +218,11 @@ fn canonical_mountpoint(path: &Path) -> Result<String> {
 }
 
 fn registry_load() -> toml::map::Map<String, toml::Value> {
+    // Deserialize as a Table: `toml::Value::from_str` stopped accepting top-level documents in
+    // toml 0.9, which silently yielded an empty registry (and add-then-save clobbered entries).
     std::fs::read_to_string(mounts_registry_path())
         .ok()
-        .and_then(|raw| raw.parse::<toml::Value>().ok())
-        .and_then(|v| v.as_table().cloned())
+        .and_then(|raw| toml::from_str::<toml::map::Map<String, toml::Value>>(&raw).ok())
         .unwrap_or_default()
 }
 
@@ -410,10 +412,10 @@ pub async fn unmount(ctx: &CliContext, path: &Path, keep_workspace: bool) -> Res
 
 /// Walk the overlay state dir: `(upserts, deletes)` as repo paths. Ignored names (built-ins +
 /// the mount's `.tlignore`) are workspace-local and never enumerate.
-fn enumerate_overlay(
-    state_dir: &Path,
-    mount_root: &Path,
-) -> Result<(Vec<(String, PathBuf, u32)>, Vec<String>)> {
+/// Overlay upserts as `(repo path, upper file, git mode)`.
+type OverlayUpserts = Vec<(String, PathBuf, u32)>;
+
+fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpserts, Vec<String>)> {
     let ignored = local::ignored_names(mount_root);
     let mut upserts = Vec::new();
     let mut deletes = Vec::new();
@@ -431,7 +433,7 @@ fn enumerate_overlay(
         };
         for entry in read.flatten() {
             let name = entry.file_name().to_string_lossy().into_owned();
-            if ignored.contains(&name) {
+            if ignored.contains(&name) || local::is_metadata_turd(&name) {
                 continue;
             }
             let abs = entry.path();
@@ -745,18 +747,57 @@ pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()>
     }
     let mut removed = 0usize;
     for file_path in current.keys().filter(|p| !target.contains_key(*p)) {
-        let marker = wh.join(file_path);
-        if let Some(parent) = marker.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        std::fs::write(&marker, b"")?;
+        write_whiteout(&wh, file_path)?;
         removed += 1;
+    }
+    // Directories only present in `current` vanish too; a dir-level marker supersedes any
+    // child markers (same convention as OverlayFs::set_whiteout). Shallowest first, so one
+    // marker covers a vanished subtree.
+    let implied_dirs = |tree: &std::collections::BTreeMap<String, TreeEntry>| {
+        let mut dirs = std::collections::BTreeSet::new();
+        for file_path in tree.keys() {
+            let mut dir = file_path.as_str();
+            while let Some((parent, _)) = dir.rsplit_once('/') {
+                dirs.insert(parent.to_string());
+                dir = parent;
+            }
+        }
+        dirs
+    };
+    let target_dirs = implied_dirs(&target);
+    let mut whited_dirs: Vec<String> = Vec::new();
+    for dir in implied_dirs(&current)
+        .into_iter()
+        .filter(|d| !target_dirs.contains(d))
+    {
+        if whited_dirs
+            .iter()
+            .any(|w| dir.starts_with(w.as_str()) && dir.as_bytes().get(w.len()) == Some(&b'/'))
+        {
+            continue;
+        }
+        write_whiteout(&wh, &dir)?;
+        whited_dirs.push(dir);
     }
     println!(
         "Restored {} to {} ({restored} file(s) refreshed, {removed} removed).",
         path.display(),
         &version[..version.len().min(12)]
     );
+    Ok(())
+}
+
+/// Write a whiteout marker file, superseding any container of child markers at the same path
+/// (mirrors OverlayFs::set_whiteout).
+fn write_whiteout(wh: &Path, rel: &str) -> Result<()> {
+    let marker = wh.join(rel);
+    if let Some(parent) = marker.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if marker.is_dir() {
+        std::fs::remove_dir_all(&marker)?;
+    }
+    std::fs::write(&marker, b"")?;
     Ok(())
 }
 
@@ -955,5 +996,20 @@ fn lease_display(ws: &WorkspaceInfo) -> String {
                 format!("lease expires in {}h{:02}m", mins / 60, mins % 60)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn registry_document_parses_as_table() {
+        // toml 0.9 rejects top-level documents through Value::from_str; the registry must
+        // deserialize as a Table or every lookup sees an empty registry.
+        let raw = "\"/Users/u/work\" = \"/Users/u/.local/share/tensorlake/mounts/abc\"\n";
+        let table: toml::map::Map<String, toml::Value> = toml::from_str(raw).unwrap();
+        assert_eq!(
+            table.get("/Users/u/work").and_then(|v| v.as_str()),
+            Some("/Users/u/.local/share/tensorlake/mounts/abc")
+        );
     }
 }
