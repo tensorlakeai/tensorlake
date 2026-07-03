@@ -38,7 +38,7 @@ pub use graph::{
     commit_links, encode_commit, encode_tree, links_of, tag_target, tree_entries, Links, TreeEntry,
 };
 pub use idx::{write_idx_v2, IdxV2};
-pub use object::{hash, BlobOidHasher, Kind, Object};
+pub use object::{hash, BlobOidHasher, Kind, Object, ResumableBlobOidHasher};
 pub use oid::{ChunkHash, Oid};
 pub use pack::{
     build_pack, build_pack_at_level, build_pack_delta, build_pack_delta_for_serving,

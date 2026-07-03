@@ -897,6 +897,14 @@ impl ScannedPack {
         bases.dedup();
         bases
     }
+
+    /// Whether the pack carries any `REF_DELTA` entry — i.e. it is thin and its received bytes
+    /// can never be manifested as-is (the resolver must produce a self-contained replacement).
+    pub fn is_thin(&self) -> bool {
+        self.entries
+            .iter()
+            .any(|entry| matches!(entry.kind, ReceiveEntryKind::RefDelta { .. }))
+    }
 }
 
 /// A large blob resolved from a pack into a local temporary file.
@@ -1172,6 +1180,7 @@ pub struct ReceivePackSpooler {
     entries: Vec<ReceiveEntryMeta>,
     count: Option<usize>,
     allow_ref_delta: bool,
+    seen_ref_delta: bool,
     started: std::time::Instant,
 }
 
@@ -1234,6 +1243,7 @@ impl ReceivePackSpooler {
             entries: Vec::new(),
             count: None,
             allow_ref_delta,
+            seen_ref_delta: false,
             started: std::time::Instant::now(),
         }
     }
@@ -1241,6 +1251,13 @@ impl ReceivePackSpooler {
     pub fn push(&mut self, chunk: &[u8]) -> Result<(), CodecError> {
         self.buf.extend_from_slice(chunk);
         self.process()
+    }
+
+    /// Whether any `REF_DELTA` entry header has been consumed so far. Available while bytes are
+    /// still streaming in, so a caller uploading the raw bytes in parallel can stop as soon as
+    /// the pack turns out to be thin (its bytes must never be manifested verbatim).
+    pub fn seen_ref_delta(&self) -> bool {
+        self.seen_ref_delta
     }
 
     pub fn finish(mut self) -> Result<Option<ScannedPack>, CodecError> {
@@ -1337,6 +1354,7 @@ impl ReceivePackSpooler {
                             };
                         }
                         T_REF_DELTA => {
+                            self.seen_ref_delta = true;
                             self.state = SpoolState::RefDelta {
                                 entry_offset,
                                 ty,
