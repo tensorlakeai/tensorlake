@@ -232,17 +232,29 @@ enum FsCommands {
         name: String,
     },
 
-    /// Mount a file system into a local directory as a private workspace
+    /// Mount a file system at a local directory (FUSE): reads stream lazily, writes stay local
+    /// until snapshotted
     Mount {
         /// `<file-system>[:<ref-or-commit>]` (defaults to the default branch head)
         target: String,
 
-        /// Directory to materialize into (created; must be empty)
+        /// Mountpoint directory (created; must be empty)
         path: PathBuf,
 
         /// Activity-lease override in seconds (server default: 48h)
         #[arg(long)]
         lease_seconds: Option<u64>,
+
+        /// Run the mount daemon in the foreground (debugging)
+        #[arg(long)]
+        foreground: bool,
+    },
+
+    /// (internal) Run a mount daemon for an existing state directory
+    #[command(hide = true)]
+    Daemon {
+        #[arg(long)]
+        state_dir: PathBuf,
     },
 
     /// Seal local changes into a snapshot on the workspace ref
@@ -1651,7 +1663,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     target,
                     path,
                     lease_seconds,
-                } => commands::fs::mount(ctx, &target, &path, lease_seconds).await,
+                    foreground,
+                } => commands::fs::mount(ctx, &target, &path, lease_seconds, foreground).await,
+                FsCommands::Daemon { state_dir } => {
+                    commands::fs::daemon::run(ctx, &state_dir).await
+                }
                 FsCommands::Snapshot { path, message } => {
                     commands::fs::snapshot(ctx, &path, message.as_deref()).await
                 }

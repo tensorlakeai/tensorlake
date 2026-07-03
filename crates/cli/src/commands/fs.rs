@@ -1,14 +1,15 @@
-//! `tl fs` — versioned filesystem workspaces on artifact storage.
+//! `tl fs` — versioned filesystem workspaces on artifact storage, mounted over FUSE.
 //!
 //! Product model (artifact_storage issue #24): a *file system* is an artifact-storage repo; a
-//! *mount* is a workspace — a private leased ref created from a base commit, materialized into a
-//! local directory. Work happens on plain local files; `snapshot` seals local changes into a
-//! commit on the workspace ref (transferring only chunks the server lacks); `promote`
-//! CAS-advances a real branch to the snapshot (squash by default). The activity lease is re-armed
-//! by every snapshot and by the heartbeat each `tl fs` command sends, and an unpinned workspace
-//! whose lease lapses is reaped server-side.
+//! *mount* is a workspace (private leased ref) served by a FUSE daemon — reads stream lazily
+//! from the server through the vendored `gsvc-mount` core's immutable caches, writes land in a
+//! local overlay. **The overlay is the dirty set**: `snapshot` enumerates it (nothing is
+//! scanned), seals it into a commit on the workspace ref, and the mount's lower layer follows
+//! the ref to the new snapshot; `promote` CAS-advances a real branch (squash by default);
+//! `restore` refills the overlay from any snapshot. FUSE is the only mount path — Linux builds
+//! carry it unconditionally, macOS requires macFUSE and the `macfuse` build feature.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use comfy_table::Cell;
@@ -26,20 +27,28 @@ use crate::commands::git::{artifact_storage_client, project_id};
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
+pub mod daemon;
+#[cfg(any(target_os = "linux", feature = "macfuse"))]
+pub mod fusefs;
 pub mod local;
+// The overlay's write surface is driven by the FUSE glue; without it (macOS build sans macFUSE)
+// the methods are intentionally uncalled.
+#[cfg(unix)]
+#[cfg_attr(not(any(target_os = "linux", feature = "macfuse")), allow(dead_code))]
+pub mod overlay;
 
-use local::{Change, Manifest, WorkspaceState};
+use daemon::MountState;
 
 const MATERIALIZE_CONCURRENCY: usize = 16;
 
-struct FsSession {
-    client: ArtifactStorageClient,
-    project_id: String,
+pub(crate) struct FsSession {
+    pub(crate) client: ArtifactStorageClient,
+    pub(crate) project_id: String,
     credential: GitCredential,
 }
 
 impl FsSession {
-    async fn open(ctx: &CliContext, repo: Option<&str>) -> Result<FsSession> {
+    pub(crate) async fn open(ctx: &CliContext, repo: Option<&str>) -> Result<FsSession> {
         let client = artifact_storage_client(ctx)?;
         let project_id = project_id(ctx)?;
         // Self-hosted / dev affordance: a pre-provisioned git credential skips platform token
@@ -101,7 +110,7 @@ impl FsSession {
         })
     }
 
-    fn creds(&self) -> (&str, &str) {
+    pub(crate) fn creds(&self) -> (&str, &str) {
         (&self.credential.git_username, &self.credential.token)
     }
 }
@@ -182,35 +191,104 @@ pub async fn remove(ctx: &CliContext, name: &str) -> Result<()> {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Mount: create a workspace and materialize it.
+// Mount registry: mountpoint -> state dir, in the CLI config dir.
 // ---------------------------------------------------------------------------------------------
 
-/// `tl fs mount <file-system>[:<ref-or-commit>] <path>`
+fn mounts_registry_path() -> PathBuf {
+    crate::config::files::config_dir().join("mounts.toml")
+}
+
+fn canonical_mountpoint(path: &Path) -> Result<String> {
+    let abs = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    // The mountpoint itself may be a live FUSE fs; canonicalize the parent instead.
+    let parent = abs.parent().unwrap_or(&abs);
+    let name = abs.file_name().map(|n| n.to_string_lossy().into_owned());
+    let parent = parent
+        .canonicalize()
+        .unwrap_or_else(|_| parent.to_path_buf());
+    Ok(match name {
+        Some(name) => parent.join(name).to_string_lossy().into_owned(),
+        None => parent.to_string_lossy().into_owned(),
+    })
+}
+
+fn registry_load() -> toml::map::Map<String, toml::Value> {
+    std::fs::read_to_string(mounts_registry_path())
+        .ok()
+        .and_then(|raw| raw.parse::<toml::Value>().ok())
+        .and_then(|v| v.as_table().cloned())
+        .unwrap_or_default()
+}
+
+fn registry_save(table: &toml::map::Map<String, toml::Value>) -> Result<()> {
+    std::fs::create_dir_all(crate::config::files::config_dir())?;
+    std::fs::write(
+        mounts_registry_path(),
+        toml::to_string_pretty(&toml::Value::Table(table.clone()))?,
+    )?;
+    Ok(())
+}
+
+fn registry_add(mountpoint: &str, state_dir: &Path) -> Result<()> {
+    let mut table = registry_load();
+    table.insert(
+        mountpoint.to_string(),
+        toml::Value::String(state_dir.to_string_lossy().into_owned()),
+    );
+    registry_save(&table)
+}
+
+fn registry_remove(mountpoint: &str) -> Result<()> {
+    let mut table = registry_load();
+    table.remove(mountpoint);
+    registry_save(&table)
+}
+
+fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
+    let mountpoint = canonical_mountpoint(path)?;
+    let table = registry_load();
+    let Some(state_dir) = table.get(&mountpoint).and_then(|v| v.as_str()) else {
+        return Err(CliError::usage(format!(
+            "{mountpoint} is not a tl fs mount; run `tl fs mount` first"
+        )));
+    };
+    Ok((mountpoint, PathBuf::from(state_dir)))
+}
+
+// ---------------------------------------------------------------------------------------------
+// Mount / unmount
+// ---------------------------------------------------------------------------------------------
+
+/// `tl fs mount <file-system>[:<ref-or-commit>] <path>` — create the workspace and start its
+/// FUSE daemon. Reads stream lazily; nothing is copied to disk up front.
 pub async fn mount(
     ctx: &CliContext,
     target: &str,
     path: &Path,
     lease_seconds: Option<u64>,
+    foreground: bool,
 ) -> Result<()> {
     let (repo, base) = match target.split_once(':') {
         Some((repo, base)) => (repo, Some(base.to_string())),
         None => (target, None),
     };
-    if path.exists()
-        && path
-            .read_dir()
-            .map(|mut d| d.next().is_some())
-            .unwrap_or(true)
+    std::fs::create_dir_all(path)?;
+    if path
+        .read_dir()
+        .map(|mut d| d.next().is_some())
+        .unwrap_or(true)
     {
         return Err(CliError::usage(format!(
-            "{} already exists and is not empty",
+            "{} is not an empty directory",
             path.display()
         )));
     }
     let session = FsSession::open(ctx, Some(repo)).await?;
     let (user, token) = session.creds();
-
-    // The workspace pins the base against GC and validates it server-side before any transfer.
     let ws = session
         .client
         .create_workspace(
@@ -226,105 +304,424 @@ pub async fn mount(
         .await?
         .into_inner();
 
-    std::fs::create_dir_all(path)?;
-    let manifest = if base.is_none() {
-        // Default-branch mount: fast-clone (pack download, local decode) then drop `.git`.
-        materialize_fastclone(&session, repo, path, &ws).await?
-    } else {
-        // Pinned to an explicit ref/commit: differential tree-walk materialize.
-        materialize_tree_walk(&session, repo, &ws.base, path, &Manifest::new()).await?
-    };
+    let mountpoint = canonical_mountpoint(path)?;
+    let state_dir = daemon::state_dir_root().join(&ws.id);
+    daemon::save_mount_state(
+        &state_dir,
+        &MountState {
+            project_id: session.project_id.clone(),
+            repo: repo.to_string(),
+            workspace_id: ws.id.clone(),
+            ref_name: ws.ref_name.clone(),
+            mountpoint: PathBuf::from(&mountpoint),
+        },
+    )?;
+    registry_add(&mountpoint, &state_dir)?;
 
-    let state = WorkspaceState {
-        project_id: session.project_id.clone(),
-        repo: repo.to_string(),
-        workspace_id: ws.id.clone(),
-        ref_name: ws.ref_name.clone(),
-        base_commit: ws.base.clone(),
-    };
-    local::save_state(path, &state)?;
-    local::save_manifest(path, &manifest)?;
+    if foreground {
+        return daemon::run(ctx, &state_dir).await;
+    }
+
+    // Detach the daemon and wait for its control socket to answer.
+    let exe = std::env::current_exe()?;
+    std::process::Command::new(exe)
+        .args(["fs", "daemon", "--state-dir"])
+        .arg(&state_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    loop {
+        match daemon::control(&state_dir, "ping").await {
+            Ok(resp) => {
+                println!(
+                    "Mounted {}:{} at {} (workspace {}, {})",
+                    repo,
+                    ws.base_ref.as_deref().unwrap_or(&ws.base[..12]),
+                    mountpoint,
+                    short_id(&ws.id),
+                    lease_display(&ws),
+                );
+                println!(
+                    "Lower commit {}. Work in the mount, then: tl fs snapshot {}",
+                    resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
+                    path.display()
+                );
+                return Ok(());
+            }
+            Err(_) if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            }
+            Err(e) => {
+                // The workspace is unusable without its daemon; don't leave it leaking until
+                // lease expiry.
+                registry_remove(&mountpoint)?;
+                let _ = session
+                    .client
+                    .delete_workspace(&session.project_id, repo, user, token, &ws.id)
+                    .await;
+                let _ = std::fs::remove_dir_all(&state_dir);
+                return Err(CliError::usage(format!(
+                    "mount daemon did not come up: {e}. Linux builds need /dev/fuse; on macOS, \
+                     install macFUSE and use a tl build with `--features macfuse`."
+                )));
+            }
+        }
+    }
+}
+
+/// Unmount: stop the daemon (unmounts the kernel fs), delete the workspace (unless
+/// `--keep-workspace`), and forget the mount. Overlay state dies with the workspace.
+pub async fn unmount(ctx: &CliContext, path: &Path, keep_workspace: bool) -> Result<()> {
+    let (mountpoint, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    let _ = daemon::control(&state_dir, "shutdown").await;
+    if !keep_workspace {
+        let session = FsSession::open(ctx, Some(&state.repo)).await?;
+        let (user, token) = session.creds();
+        session
+            .client
+            .delete_workspace(
+                &session.project_id,
+                &state.repo,
+                user,
+                token,
+                &state.workspace_id,
+            )
+            .await?;
+        std::fs::remove_dir_all(&state_dir)?;
+    }
+    registry_remove(&mountpoint)?;
     println!(
-        "Mounted {}:{} at {} (workspace {}, {} files, {})",
-        repo,
-        ws.base_ref.as_deref().unwrap_or(&ws.base[..12]),
-        path.display(),
-        short_id(&ws.id),
-        manifest.len(),
-        lease_display(&ws),
+        "Unmounted {mountpoint} ({}).",
+        if keep_workspace {
+            "workspace kept; its lease keeps ticking".to_string()
+        } else {
+            format!("workspace {} deleted", short_id(&state.workspace_id))
+        }
     );
-    println!("Work locally, then: tl fs snapshot {}", path.display());
     Ok(())
 }
 
-async fn materialize_fastclone(
-    session: &FsSession,
-    repo: &str,
-    path: &Path,
-    ws: &WorkspaceInfo,
-) -> Result<Manifest> {
-    use crate::commands::git::fastclone::{self, BasicAuth, FastCloneOptions};
-    let url = session.client.git_repo_url(&session.project_id, repo);
-    let progress = fastclone::new_spinner("fetching");
-    fastclone::fast_clone(FastCloneOptions {
-        repo_url: url,
-        dest: path.to_path_buf(),
-        cache_dir: None,
-        cache_max_bytes: None,
-        credential: Some(BasicAuth {
-            username: session.credential.git_username.clone(),
-            password: Some(session.credential.token.clone()),
-        }),
-        checkout: false,
-        progress,
-    })
-    .await?;
-    // Check out the exact commit the workspace was created at: the clone fetched the branch
-    // head, which can already have moved past the workspace base under concurrent pushes.
-    let co = std::process::Command::new("git")
-        .arg("-C")
-        .arg(path)
-        .args(["checkout", "-q", &ws.base])
-        .status()?;
-    if !co.success() {
-        return Err(CliError::usage("materialize checkout failed"));
+// ---------------------------------------------------------------------------------------------
+// Snapshot: the overlay is the dirty set.
+// ---------------------------------------------------------------------------------------------
+
+/// Walk the overlay state dir: `(upserts, deletes)` as repo paths. Ignored names (built-ins +
+/// the mount's `.tlignore`) are workspace-local and never enumerate.
+fn enumerate_overlay(
+    state_dir: &Path,
+    mount_root: &Path,
+) -> Result<(Vec<(String, PathBuf, u32)>, Vec<String>)> {
+    let ignored = local::ignored_names(mount_root);
+    let mut upserts = Vec::new();
+    let mut deletes = Vec::new();
+    let upper = state_dir.join("upper");
+    let wh = state_dir.join("wh");
+
+    fn walk(
+        root: &Path,
+        dir: &Path,
+        ignored: &[String],
+        out: &mut dyn FnMut(String, PathBuf, &std::fs::Metadata),
+    ) -> Result<()> {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return Ok(());
+        };
+        for entry in read.flatten() {
+            let name = entry.file_name().to_string_lossy().into_owned();
+            if ignored.contains(&name) {
+                continue;
+            }
+            let abs = entry.path();
+            let meta = std::fs::symlink_metadata(&abs)?;
+            let rel = abs
+                .strip_prefix(root)
+                .expect("under root")
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            if meta.file_type().is_symlink() || meta.is_file() {
+                out(rel, abs, &meta);
+            } else if meta.is_dir() {
+                walk(root, &abs, ignored, out)?;
+            }
+        }
+        Ok(())
     }
-    let manifest = local::manifest_from_git_checkout(path)?;
-    std::fs::remove_dir_all(path.join(".git"))?;
-    Ok(manifest)
+
+    walk(&upper, &upper, &ignored, &mut |rel, abs, meta| {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if meta.file_type().is_symlink() {
+            0o120000
+        } else if meta.permissions().mode() & 0o111 != 0 {
+            0o100755
+        } else {
+            0o100644
+        };
+        upserts.push((rel, abs, mode));
+    })?;
+    walk(&wh, &wh, &ignored, &mut |rel, _abs, _meta| {
+        deletes.push(rel);
+    })?;
+    // A whiteout under a path that upper re-created is already shadowed; don't double-send.
+    let upserted: std::collections::HashSet<&str> =
+        upserts.iter().map(|(p, _, _)| p.as_str()).collect();
+    deletes.retain(|p| !upserted.contains(p.as_str()));
+    upserts.sort_by(|a, b| a.0.cmp(&b.0));
+    deletes.sort();
+    Ok((upserts, deletes))
 }
 
-/// Materialize `version` into `path` differentially against `have`: walk the remote tree
-/// (paged, concurrent), fetch entries whose oid differs, delete tracked paths that vanished.
-/// Returns the new manifest.
-async fn materialize_tree_walk(
-    session: &FsSession,
-    repo: &str,
-    version: &str,
-    path: &Path,
-    have: &Manifest,
-) -> Result<Manifest> {
-    let entries = walk_remote_tree(session, repo, version).await?;
-    let (user, token) = session.creds();
+pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> Result<()> {
+    let (mountpoint, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    let session = FsSession::open(ctx, Some(&state.repo)).await?;
+    heartbeat(&session, &state).await?;
 
-    let mut manifest = Manifest::new();
-    let mut to_fetch: Vec<(String, u32, String)> = Vec::new();
-    for (file_path, entry) in &entries {
-        match have.get(file_path) {
-            Some(existing) if existing.oid == entry.oid && existing.mode == entry.mode => {
-                manifest.insert(file_path.clone(), existing.clone());
-            }
-            _ => to_fetch.push((file_path.clone(), entry.mode, entry.oid.clone())),
-        }
+    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
+    if upserts.is_empty() && deletes.is_empty() {
+        println!("Nothing to snapshot: workspace is clean.");
+        return Ok(());
+    }
+    let mut files = Vec::with_capacity(upserts.len() + deletes.len());
+    for (rel, abs, mode) in &upserts {
+        // A symlink's blob content is its target path; reading through `abs` would upload the
+        // target file's bytes instead.
+        let source = if *mode == 0o120000 {
+            PushSource::Bytes(
+                std::fs::read_link(abs)?
+                    .to_string_lossy()
+                    .into_owned()
+                    .into_bytes(),
+            )
+        } else {
+            PushSource::Path(abs.clone())
+        };
+        files.push(PushFile {
+            repo_path: rel.clone(),
+            source,
+            mode: Some(*mode),
+            delete: false,
+        });
+    }
+    for rel in &deletes {
+        files.push(PushFile {
+            repo_path: rel.clone(),
+            source: PushSource::Bytes(Vec::new()),
+            mode: None,
+            delete: true,
+        });
     }
 
-    type Fetched = (String, u32, String, Vec<u8>);
-    let fetched: Vec<Result<Fetched>> =
-        futures::stream::iter(to_fetch.into_iter().map(|(file_path, mode, oid)| {
+    let (user, token) = session.creds();
+    let progress: Arc<dyn Fn(PushEvent) + Send + Sync> = Arc::new(|ev| {
+        if let PushEvent::Negotiated { missing, total } = ev {
+            eprintln!("uploading {missing} of {total} chunks (rest already stored)");
+        }
+    });
+    let report = session
+        .client
+        .push_files(
+            &session.project_id,
+            &state.repo,
+            user,
+            token,
+            files,
+            PushOptions {
+                message: message.unwrap_or("tl fs snapshot").to_string(),
+                workspace_snapshot: Some(state.workspace_id.clone()),
+                progress: Some(progress),
+                ..Default::default()
+            },
+        )
+        .await?
+        .into_inner();
+
+    // Swap the mount's lower layer to the new snapshot, then drop the overlay: the content the
+    // upper layer held is now served (identically) by the lower commit.
+    daemon::control(&state_dir, "refresh").await?;
+    daemon::control(&state_dir, "clear_upper").await?;
+    println!(
+        "Snapshot {} ({} file(s), {} of {} chunks uploaded)",
+        report.commit, report.files, report.chunks_uploaded, report.chunks_total,
+    );
+    Ok(())
+}
+
+pub async fn promote(
+    ctx: &CliContext,
+    path: &Path,
+    branch: &str,
+    full_history: bool,
+    message: Option<&str>,
+) -> Result<()> {
+    let (mountpoint, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    let session = FsSession::open(ctx, Some(&state.repo)).await?;
+    heartbeat(&session, &state).await?;
+    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
+    if !upserts.is_empty() || !deletes.is_empty() {
+        eprintln!(
+            "{} {} local change(s) not in any snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to include them.",
+            style("note:").yellow(),
+            upserts.len() + deletes.len()
+        );
+    }
+    let (user, token) = session.creds();
+    let request = PromoteWorkspaceRequest {
+        branch: branch.to_string(),
+        expect_oid: None,
+        full_history,
+        message: message.map(str::to_string),
+    };
+    // A squash promote reads the snapshot's commit-index row, which materializes asynchronously
+    // after the snapshot publishes; a promote issued right behind a snapshot can land in that
+    // window. The server signals it with 425 Too Early — poll it out.
+    let resp = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match session
+                .client
+                .workspace_promote(
+                    &session.project_id,
+                    &state.repo,
+                    user,
+                    token,
+                    &state.workspace_id,
+                    &request,
+                )
+                .await
+            {
+                Ok(resp) => break resp.into_inner(),
+                Err(tensorlake::error::SdkError::ServerError { status, message })
+                    if status.as_u16() == 425 && std::time::Instant::now() < deadline =>
+                {
+                    let _ = message;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    };
+    println!(
+        "Promoted workspace {} -> {} at {}{}",
+        short_id(&state.workspace_id),
+        resp.ref_name,
+        resp.commit,
+        if resp.squashed {
+            " (squashed)"
+        } else {
+            " (full history)"
+        },
+    );
+    Ok(())
+}
+
+pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<()> {
+    let (mountpoint, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    let session = FsSession::open(ctx, Some(&state.repo)).await?;
+    let (user, token) = session.creds();
+    let ws = session
+        .client
+        .get_workspace(
+            &session.project_id,
+            &state.repo,
+            user,
+            token,
+            &state.workspace_id,
+        )
+        .await?
+        .into_inner();
+    let _ = heartbeat(&session, &state).await;
+    let daemon_commit = daemon::control(&state_dir, "ping")
+        .await
+        .ok()
+        .and_then(|r| r.get("commit").and_then(|c| c.as_str().map(str::to_string)));
+    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
+
+    if output_json {
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&serde_json::json!({
+                "workspace": ws,
+                "mounted": daemon_commit.is_some(),
+                "lower_commit": daemon_commit,
+                "dirty": upserts.iter().map(|(p, _, _)| p.clone())
+                    .chain(deletes.iter().cloned()).collect::<Vec<_>>(),
+            }))?
+        );
+        return Ok(());
+    }
+    println!("{} {}", style("file system:").dim(), state.repo);
+    println!(
+        "{} {} ({})",
+        style("workspace:").dim(),
+        short_id(&ws.id),
+        lease_display(&ws)
+    );
+    match &daemon_commit {
+        Some(commit) => println!("{} mounted at {commit}", style("daemon:").dim()),
+        None => println!(
+            "{} not running (remount with tl fs mount)",
+            style("daemon:").dim()
+        ),
+    }
+    let dirty = upserts.len() + deletes.len();
+    if dirty == 0 {
+        println!("{} clean", style("local:").dim());
+    } else {
+        println!("{} {} change(s):", style("local:").dim(), dirty);
+        for (p, _, _) in upserts.iter().take(20) {
+            println!("  {} {p}", style("M").yellow());
+        }
+        for p in deletes.iter().take(20) {
+            println!("  {} {p}", style("D").red());
+        }
+        if dirty > 40 {
+            println!("  … and more");
+        }
+    }
+    Ok(())
+}
+
+/// Restore: refill the overlay so the merged view equals `version`. The mount's lower layer is
+/// untouched (history preserved); the next snapshot seals the restored state.
+pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()> {
+    let (_, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    let session = FsSession::open(ctx, Some(&state.repo)).await?;
+    heartbeat(&session, &state).await?;
+
+    let lower = daemon::control(&state_dir, "ping")
+        .await?
+        .get("commit")
+        .and_then(|c| c.as_str().map(str::to_string))
+        .ok_or_else(|| CliError::usage("daemon did not report a commit"))?;
+    daemon::control(&state_dir, "clear_upper").await?;
+
+    let target = walk_remote_tree(&session, &state.repo, version).await?;
+    let current = walk_remote_tree(&session, &state.repo, &lower).await?;
+    let upper = state_dir.join("upper");
+    let wh = state_dir.join("wh");
+
+    let (user, token) = session.creds();
+    let mut to_fetch: Vec<(String, u32)> = Vec::new();
+    for (file_path, entry) in &target {
+        match current.get(file_path) {
+            Some(cur) if cur.oid == entry.oid && cur.mode == entry.mode => {}
+            _ => to_fetch.push((file_path.clone(), entry.mode)),
+        }
+    }
+    let fetched: Vec<Result<(String, u32, Vec<u8>)>> =
+        futures::stream::iter(to_fetch.into_iter().map(|(file_path, mode)| {
             let client = session.client.clone();
             let (project, repo, user, token, version) = (
                 session.project_id.clone(),
-                repo.to_string(),
+                state.repo.clone(),
                 user.to_string(),
                 token.to_string(),
                 version.to_string(),
@@ -334,23 +731,124 @@ async fn materialize_tree_walk(
                     .get_file_bytes(&project, &repo, &user, &token, &version, &file_path)
                     .await?
                     .into_inner();
-                Ok((file_path, mode, oid, bytes))
+                Ok((file_path, mode, bytes))
             }
         }))
         .buffer_unordered(MATERIALIZE_CONCURRENCY)
         .collect()
         .await;
+    let mut restored = 0usize;
     for item in fetched {
-        let (file_path, mode, oid, bytes) = item?;
-        let entry = local::write_entry(path, &file_path, mode, &oid, &bytes)?;
-        manifest.insert(file_path, entry);
+        let (file_path, mode, bytes) = item?;
+        local::write_entry(&upper, &file_path, mode, &bytes)?;
+        restored += 1;
     }
+    let mut removed = 0usize;
+    for file_path in current.keys().filter(|p| !target.contains_key(*p)) {
+        let marker = wh.join(file_path);
+        if let Some(parent) = marker.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::write(&marker, b"")?;
+        removed += 1;
+    }
+    println!(
+        "Restored {} to {} ({restored} file(s) refreshed, {removed} removed).",
+        path.display(),
+        &version[..version.len().min(12)]
+    );
+    Ok(())
+}
 
-    // Tracked paths that no longer exist at `version` go away locally too.
-    for stale in have.keys().filter(|p| !entries.contains_key(*p)) {
-        let _ = std::fs::remove_file(path.join(stale));
+/// `tl fs diff <path>` — overlay changes vs the last snapshot; `tl fs diff <path> <a> <b>` —
+/// server-side tree diff between two commits/refs.
+pub async fn diff(ctx: &CliContext, path: &Path, a: Option<&str>, b: Option<&str>) -> Result<()> {
+    let (mountpoint, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    match (a, b) {
+        (None, None) => {
+            let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
+            for (p, _, _) in &upserts {
+                println!("M {p}");
+            }
+            for p in &deletes {
+                println!("D {p}");
+            }
+            Ok(())
+        }
+        (Some(a), Some(b)) => {
+            let session = FsSession::open(ctx, Some(&state.repo)).await?;
+            let left = walk_remote_tree(&session, &state.repo, a).await?;
+            let right = walk_remote_tree(&session, &state.repo, b).await?;
+            for (p, entry) in &right {
+                match left.get(p) {
+                    None => println!("A {p}"),
+                    Some(prev) if prev.oid != entry.oid || prev.mode != entry.mode => {
+                        println!("M {p}")
+                    }
+                    Some(_) => {}
+                }
+            }
+            for p in left.keys().filter(|p| !right.contains_key(*p)) {
+                println!("D {p}");
+            }
+            Ok(())
+        }
+        _ => Err(CliError::usage(
+            "diff takes no versions (local vs snapshot) or two (snapshot vs snapshot)",
+        )),
     }
-    Ok(manifest)
+}
+
+pub async fn pin(ctx: &CliContext, path: &Path) -> Result<()> {
+    let (_, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    let session = FsSession::open(ctx, Some(&state.repo)).await?;
+    let (user, token) = session.creds();
+    session
+        .client
+        .workspace_pin(
+            &session.project_id,
+            &state.repo,
+            user,
+            token,
+            &state.workspace_id,
+        )
+        .await?;
+    println!(
+        "Pinned workspace {}: it will not expire until deleted.",
+        short_id(&state.workspace_id)
+    );
+    Ok(())
+}
+
+pub async fn workspaces(ctx: &CliContext, file_system: &str, output_json: bool) -> Result<()> {
+    let session = FsSession::open(ctx, Some(file_system)).await?;
+    let (user, token) = session.creds();
+    let list = session
+        .client
+        .list_workspaces(&session.project_id, file_system, user, token)
+        .await?
+        .into_inner();
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&list)?);
+        return Ok(());
+    }
+    if list.is_empty() {
+        println!("No workspaces.");
+        return Ok(());
+    }
+    let mut table = new_table(&["Workspace", "Base", "Head", "Lease"]);
+    for ws in &list {
+        table.add_row(vec![
+            Cell::new(short_id(&ws.id)),
+            Cell::new(&ws.base[..12]),
+            Cell::new(&ws.head[..12]),
+            Cell::new(lease_display(ws)),
+        ]);
+    }
+    println!("{table}");
+    Ok(())
 }
 
 /// Full recursive listing of `version`: repo path -> entry. Directories are traversed
@@ -423,400 +921,7 @@ async fn walk_remote_tree(
     Ok(out)
 }
 
-// ---------------------------------------------------------------------------------------------
-// Snapshot / promote / status / restore / diff / unmount / pin / workspaces
-// ---------------------------------------------------------------------------------------------
-
-pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> Result<()> {
-    let state = local::load_state(path)?;
-    let mut manifest = local::load_manifest(path)?;
-    let session = FsSession::open(ctx, Some(&state.repo)).await?;
-    heartbeat(&session, &state).await?;
-
-    let changes = local::scan_dirty(path, &manifest)?;
-    if changes.is_empty() {
-        println!("Nothing to snapshot: workspace is clean.");
-        return Ok(());
-    }
-
-    let mut files = Vec::with_capacity(changes.len());
-    for change in &changes {
-        match change {
-            Change::Upsert {
-                path: p, abs, mode, ..
-            } => {
-                // A symlink's blob content is its target path; reading through `abs` would
-                // upload the target file's bytes instead.
-                let source = if *mode == 0o120000 {
-                    PushSource::Bytes(
-                        std::fs::read_link(abs)?
-                            .to_string_lossy()
-                            .into_owned()
-                            .into_bytes(),
-                    )
-                } else {
-                    PushSource::Path(abs.clone())
-                };
-                files.push(PushFile {
-                    repo_path: p.clone(),
-                    source,
-                    mode: Some(*mode),
-                    delete: false,
-                });
-            }
-            Change::Delete { path: p } => files.push(PushFile {
-                repo_path: p.clone(),
-                source: PushSource::Bytes(Vec::new()),
-                mode: None,
-                delete: true,
-            }),
-        }
-    }
-    let (user, token) = session.creds();
-    let progress: Arc<dyn Fn(PushEvent) + Send + Sync> = Arc::new(|ev| {
-        if let PushEvent::Negotiated { missing, total } = ev {
-            eprintln!("uploading {missing} of {total} chunks (rest already stored)");
-        }
-    });
-    let report = session
-        .client
-        .push_files(
-            &session.project_id,
-            &state.repo,
-            user,
-            token,
-            files,
-            PushOptions {
-                message: message.unwrap_or("tl fs snapshot").to_string(),
-                workspace_snapshot: Some(state.workspace_id.clone()),
-                progress: Some(progress),
-                ..Default::default()
-            },
-        )
-        .await?
-        .into_inner();
-
-    // Fold the observed changes into the manifest with the freshness we hashed at. New files
-    // skipped the pre-hash read; their oids come from the push's single chunk pass.
-    let pushed_oids: std::collections::HashMap<&str, &str> = report
-        .file_blob_oids
-        .iter()
-        .map(|(p, o)| (p.as_str(), o.as_str()))
-        .collect();
-    for change in changes {
-        match change {
-            Change::Upsert {
-                path: p,
-                mode,
-                oid,
-                size,
-                mtime_ms,
-                ..
-            } => {
-                let oid = match oid {
-                    Some(oid) => oid,
-                    None => pushed_oids
-                        .get(p.as_str())
-                        .map(|o| o.to_string())
-                        .unwrap_or_default(),
-                };
-                manifest.insert(
-                    p,
-                    local::ManifestEntry {
-                        oid,
-                        mode,
-                        size,
-                        mtime_ms,
-                    },
-                );
-            }
-            Change::Delete { path: p } => {
-                manifest.remove(&p);
-            }
-        }
-    }
-    local::save_manifest(path, &manifest)?;
-    let mut state = state;
-    state.base_commit = report.commit.clone();
-    local::save_state(path, &state)?;
-    println!(
-        "Snapshot {} ({} file(s), {} of {} chunks uploaded)",
-        report.commit, report.files, report.chunks_uploaded, report.chunks_total,
-    );
-    Ok(())
-}
-
-pub async fn promote(
-    ctx: &CliContext,
-    path: &Path,
-    branch: &str,
-    full_history: bool,
-    message: Option<&str>,
-) -> Result<()> {
-    let state = local::load_state(path)?;
-    let session = FsSession::open(ctx, Some(&state.repo)).await?;
-    heartbeat(&session, &state).await?;
-    let dirty = local::scan_dirty(path, &local::load_manifest(path)?)?;
-    if !dirty.is_empty() {
-        eprintln!(
-            "{} {} local change(s) not in any snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to include them.",
-            style("note:").yellow(),
-            dirty.len()
-        );
-    }
-    let (user, token) = session.creds();
-    let request = PromoteWorkspaceRequest {
-        branch: branch.to_string(),
-        expect_oid: None,
-        full_history,
-        message: message.map(str::to_string),
-    };
-    // A squash promote reads the snapshot's commit-index row, which materializes asynchronously
-    // after the snapshot publishes; a promote issued right behind a snapshot can land in that
-    // window. The server signals it with 425 Too Early — poll it out.
-    let resp = {
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
-        loop {
-            match session
-                .client
-                .workspace_promote(
-                    &session.project_id,
-                    &state.repo,
-                    user,
-                    token,
-                    &state.workspace_id,
-                    &request,
-                )
-                .await
-            {
-                Ok(resp) => break resp.into_inner(),
-                Err(tensorlake::error::SdkError::ServerError { status, message })
-                    if status.as_u16() == 425 && std::time::Instant::now() < deadline =>
-                {
-                    let _ = message;
-                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
-                }
-                Err(e) => return Err(e.into()),
-            }
-        }
-    };
-    println!(
-        "Promoted workspace {} -> {} at {}{}",
-        short_id(&state.workspace_id),
-        resp.ref_name,
-        resp.commit,
-        if resp.squashed {
-            " (squashed)"
-        } else {
-            " (full history)"
-        },
-    );
-    Ok(())
-}
-
-pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<()> {
-    let state = local::load_state(path)?;
-    let manifest = local::load_manifest(path)?;
-    let session = FsSession::open(ctx, Some(&state.repo)).await?;
-    let (user, token) = session.creds();
-    let ws = session
-        .client
-        .get_workspace(
-            &session.project_id,
-            &state.repo,
-            user,
-            token,
-            &state.workspace_id,
-        )
-        .await?
-        .into_inner();
-    // Reading status is activity too: keep the lease alive for whoever is looking.
-    let _ = heartbeat(&session, &state).await;
-    let changes = local::scan_dirty(path, &manifest)?;
-
-    if output_json {
-        let dirty: Vec<_> = changes.iter().map(|c| c.path().to_string()).collect();
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "workspace": ws,
-                "base_commit": state.base_commit,
-                "tracked_files": manifest.len(),
-                "dirty": dirty,
-            }))?
-        );
-        return Ok(());
-    }
-    println!("{} {}", style("file system:").dim(), state.repo);
-    println!(
-        "{} {} ({})",
-        style("workspace:").dim(),
-        short_id(&ws.id),
-        lease_display(&ws)
-    );
-    println!("{} {}", style("snapshot:").dim(), state.base_commit);
-    println!("{} {} file(s)", style("tracked:").dim(), manifest.len());
-    if changes.is_empty() {
-        println!("{} clean", style("local:").dim());
-    } else {
-        println!("{} {} change(s):", style("local:").dim(), changes.len());
-        for change in changes.iter().take(20) {
-            let tag = match change {
-                Change::Upsert { .. } => style("M").yellow(),
-                Change::Delete { .. } => style("D").red(),
-            };
-            println!("  {tag} {}", change.path());
-        }
-        if changes.len() > 20 {
-            println!("  … and {} more", changes.len() - 20);
-        }
-    }
-    Ok(())
-}
-
-pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()> {
-    let state = local::load_state(path)?;
-    let manifest = local::load_manifest(path)?;
-    let session = FsSession::open(ctx, Some(&state.repo)).await?;
-    heartbeat(&session, &state).await?;
-    let new_manifest =
-        materialize_tree_walk(&session, &state.repo, version, path, &manifest).await?;
-    let restored = new_manifest.len();
-    local::save_manifest(path, &new_manifest)?;
-    let mut state = state;
-    state.base_commit = version.to_string();
-    local::save_state(path, &state)?;
-    println!(
-        "Restored {} to {} ({restored} file(s) tracked).",
-        path.display(),
-        &version[..version.len().min(12)]
-    );
-    Ok(())
-}
-
-/// `tl fs diff <path>` — local changes vs the last snapshot; `tl fs diff <path> <a> <b>` —
-/// server-side tree diff between two commits/refs.
-pub async fn diff(ctx: &CliContext, path: &Path, a: Option<&str>, b: Option<&str>) -> Result<()> {
-    let state = local::load_state(path)?;
-    match (a, b) {
-        (None, None) => {
-            let manifest = local::load_manifest(path)?;
-            for change in local::scan_dirty(path, &manifest)? {
-                let tag = match &change {
-                    Change::Upsert { path: p, .. } if manifest.contains_key(p) => "M",
-                    Change::Upsert { .. } => "A",
-                    Change::Delete { .. } => "D",
-                };
-                println!("{tag} {}", change.path());
-            }
-            Ok(())
-        }
-        (Some(a), Some(b)) => {
-            let session = FsSession::open(ctx, Some(&state.repo)).await?;
-            let left = walk_remote_tree(&session, &state.repo, a).await?;
-            let right = walk_remote_tree(&session, &state.repo, b).await?;
-            for (p, entry) in &right {
-                match left.get(p) {
-                    None => println!("A {p}"),
-                    Some(prev) if prev.oid != entry.oid || prev.mode != entry.mode => {
-                        println!("M {p}")
-                    }
-                    Some(_) => {}
-                }
-            }
-            for p in left.keys().filter(|p| !right.contains_key(*p)) {
-                println!("D {p}");
-            }
-            Ok(())
-        }
-        _ => Err(CliError::usage(
-            "diff takes no versions (local vs snapshot) or two (snapshot vs snapshot)",
-        )),
-    }
-}
-
-pub async fn pin(ctx: &CliContext, path: &Path) -> Result<()> {
-    let state = local::load_state(path)?;
-    let session = FsSession::open(ctx, Some(&state.repo)).await?;
-    let (user, token) = session.creds();
-    session
-        .client
-        .workspace_pin(
-            &session.project_id,
-            &state.repo,
-            user,
-            token,
-            &state.workspace_id,
-        )
-        .await?;
-    println!(
-        "Pinned workspace {}: it will not expire until deleted.",
-        short_id(&state.workspace_id)
-    );
-    Ok(())
-}
-
-/// Unmount: end the workspace (unless `--keep-workspace`) and drop local `.tlfs` state. The
-/// working files stay on disk.
-pub async fn unmount(ctx: &CliContext, path: &Path, keep_workspace: bool) -> Result<()> {
-    let state = local::load_state(path)?;
-    if !keep_workspace {
-        let session = FsSession::open(ctx, Some(&state.repo)).await?;
-        let (user, token) = session.creds();
-        session
-            .client
-            .delete_workspace(
-                &session.project_id,
-                &state.repo,
-                user,
-                token,
-                &state.workspace_id,
-            )
-            .await?;
-    }
-    std::fs::remove_dir_all(local::state_dir(path))?;
-    println!(
-        "Unmounted {} ({}).",
-        path.display(),
-        if keep_workspace {
-            "workspace kept; its lease keeps ticking".to_string()
-        } else {
-            format!("workspace {} deleted", short_id(&state.workspace_id))
-        }
-    );
-    Ok(())
-}
-
-pub async fn workspaces(ctx: &CliContext, file_system: &str, output_json: bool) -> Result<()> {
-    let session = FsSession::open(ctx, Some(file_system)).await?;
-    let (user, token) = session.creds();
-    let list = session
-        .client
-        .list_workspaces(&session.project_id, file_system, user, token)
-        .await?
-        .into_inner();
-    if output_json {
-        println!("{}", serde_json::to_string_pretty(&list)?);
-        return Ok(());
-    }
-    if list.is_empty() {
-        println!("No workspaces.");
-        return Ok(());
-    }
-    let mut table = new_table(&["Workspace", "Base", "Head", "Lease"]);
-    for ws in &list {
-        table.add_row(vec![
-            Cell::new(short_id(&ws.id)),
-            Cell::new(&ws.base[..12]),
-            Cell::new(&ws.head[..12]),
-            Cell::new(lease_display(ws)),
-        ]);
-    }
-    println!("{table}");
-    Ok(())
-}
-
-async fn heartbeat(session: &FsSession, state: &WorkspaceState) -> Result<()> {
+async fn heartbeat(session: &FsSession, state: &MountState) -> Result<()> {
     let (user, token) = session.creds();
     session
         .client

@@ -3,6 +3,7 @@ members = [
     "crates/cloud-sdk",
     "crates/cli",
     "crates/gsvc-codec",
+    "crates/gsvc-mount",
     "crates/rust-cloud-sdk-node",
     "crates/rust-cloud-sdk-py",
 ]
@@ -23,6 +24,8 @@ tensorlake = { path = "crates/cloud-sdk" }
 # Vendored from artifact_storage (crates/gsvc-codec) to back `tl git clone`.
 # See AGENTS.md in that repo: open a companion PR there if this crate's wire format changes upstream.
 gsvc-codec = { path = "crates/gsvc-codec" }
+# Vendored from artifact_storage (crates/gsvc-mount): VFS-agnostic mount core backing `tl fs mount`.
+gsvc-mount = { path = "crates/gsvc-mount" }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time", "process", "io-std", "io-util", "signal"] }

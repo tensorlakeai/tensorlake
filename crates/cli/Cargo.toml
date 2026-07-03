@@ -52,8 +52,20 @@ rand = { workspace = true }
 shlex = { workspace = true }
 rustpython-parser = "0.3"
 gsvc-codec = { workspace = true }
+gsvc-mount = { workspace = true }
 flate2 = { workspace = true }
 sha1 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+
+# FUSE: pure-Rust /dev/fuse on Linux (always on — sandboxes are the primary mount target);
+# macOS requires macFUSE at build time, so the binding is feature-gated there.
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.15", default-features = false }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+fuser = { version = "0.15", optional = true }
+
+[features]
+macfuse = ["dep:fuser"]
