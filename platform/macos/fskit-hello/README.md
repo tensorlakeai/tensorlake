@@ -19,18 +19,18 @@ launches, **mounts, and serves reads through the kernel** — no sudo, no kext:
 
 Two requirements beyond the original notes:
 
-1.  is a restricted entitlement — the appex
+1. `com.apple.developer.fskit.fsmodule` is a restricted entitlement — the appex
    embeds a macOS development provisioning profile for the explicit App ID
-    (FSKit Module capability enabled in the
-   portal) as , and the signing
+   `ai.tensorlake.tlfs.fsmodule` (FSKit Module capability enabled in the
+   portal) as `Contents/embedded.provisionprofile`, and the signing
    entitlements include application-identifier + team-identifier matching it.
-    reads the profile path from 
+   `build.sh` reads the profile path from `TLFS_PROVISION_PROFILE`
    (default: ~/Downloads/tlfsfsmoduledev.provisionprofile).
-2.  is NOT optional in practice: without it the
+2. `EXExtensionPrincipalClass` is NOT optional in practice: without it the
    extension launches and even creates its FSMachPort, but fskit_agent cannot
    fetch the listener endpoint (NSCocoaErrorDomain 4099) and fskitd terminates
    the instance. Point it at the FSUnaryFileSystem subclass and pin the ObjC
-   name with  on the Swift class.
+   name with `@objc(...)` on the Swift class.
 
 (Original pre-profile notes follow.) The earlier blocker was that
 `com.apple.developer.fskit.fsmodule` is a **restricted entitlement**: the
