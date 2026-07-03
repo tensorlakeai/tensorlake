@@ -49,10 +49,13 @@ jobs:
             target: x86_64
             manylinux: auto
             cloud_sdk_interpreter: /opt/python/cp310-cp310/bin/python
-          - os: namespace-profile-rust-builder-amd64
+          # Native arm64 runner + native PyPA image: the manylinux2014-cross image's
+          # GCC 4.8 miscompiles ring's aarch64 crypto (TLS BadSignature at runtime).
+          - os: ubuntu-24.04-arm
             target: aarch64
-            manylinux: auto
-            cloud_sdk_interpreter: python3
+            manylinux: '2014'
+            manylinux_container: quay.io/pypa/manylinux2014_aarch64:latest
+            cloud_sdk_interpreter: /opt/python/cp310-cp310/bin/python
           - os: macos-14
             target: aarch64
             rust_target: aarch64-apple-darwin
@@ -85,13 +88,12 @@ jobs:
       - name: Build Cloud SDK wheel
         uses: PyO3/maturin-action@v1
         env:
-          # ring's AArch64 assembly requires __ARM_ARCH; manylinux2014 cross GCC 4.8 doesn't define it.
-          CFLAGS_aarch64_unknown_linux_gnu: ${{ runner.os == 'Linux' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
           CARGO_TARGET_DIR: target
         with:
           target: ${{ matrix.platform.target }}
           args: --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk -i ${{ matrix.platform.cloud_sdk_interpreter }}
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
+          container: ${{ matrix.platform.manylinux_container || '' }}
           sccache: 'true'
 
       - name: Bundle Cloud SDK extension into tensorlake wheel
@@ -101,19 +103,17 @@ jobs:
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
-          # ring's AArch64 assembly requires __ARM_ARCH; manylinux2014 cross GCC 4.8 doesn't define it.
-          CFLAGS_aarch64_unknown_linux_gnu: ${{ runner.os == 'Linux' && matrix.platform.target == 'aarch64' && '-D__ARM_ARCH=8' || '' }}
           CARGO_TARGET_DIR: target
         with:
           target: ${{ matrix.platform.target }}
           args: --release --out dist
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
+          container: ${{ matrix.platform.manylinux_container || '' }}
           sccache: 'true'
 
       - name: Verify wheel imports Rust Cloud SDK extension
-        if: ${{ !(runner.os == 'Linux' && matrix.platform.target == 'aarch64') }}
         run: |
-          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --tls-check https://api.tensorlake.ai --cli-check https://api.tensorlake.ai
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4
