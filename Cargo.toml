@@ -16,6 +16,7 @@ license = "Apache-2.0"
 
 [workspace.dependencies]
 async-trait = "0.1"
+fastcdc = "3"
 
 # Internal crates
 tensorlake = { path = "crates/cloud-sdk" }

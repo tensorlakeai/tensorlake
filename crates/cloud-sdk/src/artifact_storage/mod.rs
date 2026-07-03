@@ -6,6 +6,7 @@ use crate::{
     error::SdkError,
 };
 
+pub mod ingest;
 pub mod models;
 
 use models::{

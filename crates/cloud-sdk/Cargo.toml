@@ -10,6 +10,7 @@ homepage = "https://tensorlake.ai"
 documentation = "https://docs.rs/tensorlake"
 
 [dependencies]
+fastcdc = { workspace = true }
 bytes = { workspace = true }
 base64 = { workspace = true }
 bollard = { workspace = true }
