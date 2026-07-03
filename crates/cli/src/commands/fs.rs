@@ -28,13 +28,13 @@ use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
 pub mod daemon;
-#[cfg(any(target_os = "linux", feature = "macfuse"))]
+#[cfg(target_os = "linux")]
 pub mod fusefs;
 pub mod local;
 // The overlay's write surface is driven by the FUSE glue; without it (macOS build sans macFUSE)
 // the methods are intentionally uncalled.
 #[cfg(unix)]
-#[cfg_attr(not(any(target_os = "linux", feature = "macfuse")), allow(dead_code))]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub mod overlay;
 
 use daemon::MountState;
@@ -363,8 +363,8 @@ pub async fn mount(
                     .await;
                 let _ = std::fs::remove_dir_all(&state_dir);
                 return Err(CliError::usage(format!(
-                    "mount daemon did not come up: {e}. Linux builds need /dev/fuse; on macOS, \
-                     install macFUSE and use a tl build with `--features macfuse`."
+                    "mount daemon did not come up: {e}. Linux builds need /dev/fuse; macOS needs the \
+                     TensorLake FSKit extension enabled."
                 )));
             }
         }

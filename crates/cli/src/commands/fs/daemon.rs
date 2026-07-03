@@ -14,7 +14,7 @@
 //! ```
 
 use std::path::{Path, PathBuf};
-#[cfg(any(target_os = "linux", feature = "macfuse"))]
+#[cfg(target_os = "linux")]
 use std::time::Duration;
 
 use serde::{Deserialize, Serialize};
@@ -23,9 +23,9 @@ use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
-#[cfg(any(target_os = "linux", feature = "macfuse"))]
+#[cfg(target_os = "linux")]
 use super::overlay::OverlayFs;
-#[cfg(any(target_os = "linux", feature = "macfuse"))]
+#[cfg(target_os = "linux")]
 use std::sync::Arc;
 
 /// Persisted per-mount state (`<state dir>/state.json`). No credentials: the daemon mints its
@@ -92,12 +92,12 @@ pub async fn control(state_dir: &Path, op: &str) -> Result<serde_json::Value> {
 }
 
 /// How long before recorded credential expiry the daemon re-mints. Minted tokens live ~1h.
-#[cfg(any(target_os = "linux", feature = "macfuse"))]
+#[cfg(target_os = "linux")]
 const CREDENTIAL_ROTATE_MARGIN: Duration = Duration::from_secs(10 * 60);
-#[cfg(any(target_os = "linux", feature = "macfuse"))]
+#[cfg(target_os = "linux")]
 const HEARTBEAT_INTERVAL: Duration = Duration::from_secs(20 * 60);
 
-#[cfg(any(target_os = "linux", feature = "macfuse"))]
+#[cfg(target_os = "linux")]
 fn expires_in(expires_at: &str) -> Duration {
     chrono::DateTime::parse_from_rfc3339(expires_at)
         .map(|t| {
@@ -109,26 +109,31 @@ fn expires_in(expires_at: &str) -> Duration {
 /// Run the daemon in the foreground of the current process. `tl fs mount` spawns this as a
 /// detached child (`tl fs daemon --state-dir ... --mountpoint ...`).
 pub async fn run(ctx: &CliContext, state_dir: &Path) -> Result<()> {
-    #[cfg(not(any(target_os = "linux", feature = "macfuse")))]
+    #[cfg(not(target_os = "linux"))]
     {
         let _ = (ctx, state_dir);
         Err(CliError::usage(
-            "FUSE support is not compiled into this tl build. Linux builds include it; on macOS \
-             install macFUSE and build with `--features macfuse`.",
+            "This platform mounts via the TensorLake FSKit extension, which this build does not \
+             ship yet; Linux builds mount via FUSE.",
         ))
     }
-    #[cfg(any(target_os = "linux", feature = "macfuse"))]
+    #[cfg(target_os = "linux")]
     {
         run_fuse(ctx, state_dir).await
     }
 }
 
-#[cfg(any(target_os = "linux", feature = "macfuse"))]
+#[cfg(target_os = "linux")]
 async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     use crate::commands::git::{artifact_storage_client, project_id};
     use gsvc_mount::{FsClient, MountCore, MountOptions};
 
+    eprintln!("daemon: loading state from {}", state_dir.display());
     let state = load_mount_state(state_dir)?;
+    eprintln!(
+        "daemon: state ok (mountpoint {})",
+        state.mountpoint.display()
+    );
     let sdk = artifact_storage_client(ctx)?;
     let project = project_id(ctx)?;
 
@@ -154,6 +159,7 @@ async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     // Keep a handle onto the shared credential slot for rotation.
     let rotating_client = client.clone();
 
+    eprintln!("daemon: client ok; building core");
     let core = MountCore::new(
         client,
         MountOptions {
@@ -219,6 +225,10 @@ async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
 
     // The FUSE session must attach before the control socket exists: the socket answering is
     // what `tl fs mount` treats as success.
+    eprintln!(
+        "daemon: overlay ok; attaching fuse at {}",
+        state.mountpoint.display()
+    );
     let (mounted_tx, mounted_rx) = tokio::sync::oneshot::channel();
     let fuse =
         super::fusefs::WorkspaceFuse::new(overlay.clone(), tokio::runtime::Handle::current());
@@ -229,10 +239,7 @@ async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         // Session establishment failed; surface the real error.
         return match served.await {
             Ok(Ok(())) => Err(CliError::usage("fuse session ended before mounting")),
-            Ok(Err(e)) => Err(CliError::usage(format!(
-                "fuse mount failed: {e}. On macOS, approve the macFUSE kernel extension in \
-                 System Settings -> Privacy & Security (a reboot may be required)."
-            ))),
+            Ok(Err(e)) => Err(CliError::usage(format!("fuse mount failed: {e}"))),
             Err(e) => Err(CliError::usage(format!("fuse thread: {e}"))),
         };
     }
@@ -306,7 +313,7 @@ async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
 }
 
 /// Ask the kernel to unmount; the blocked FUSE session then returns and the daemon exits.
-#[cfg(any(target_os = "linux", feature = "macfuse"))]
+#[cfg(target_os = "linux")]
 fn unmount(mountpoint: &Path) {
     #[cfg(target_os = "linux")]
     let status = std::process::Command::new("fusermount")
