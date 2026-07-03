@@ -47,7 +47,7 @@ enum VfsOp: UInt8 {
     case statfs = 20
 }
 
-let vfsProtocolVersion: UInt32 = 1
+let vfsProtocolVersion: UInt32 = 2
 
 struct WireWriter {
     var data = Data()
@@ -107,6 +107,10 @@ struct WireAttr {
     let size: UInt64
     let perm: UInt16
     let upper: Bool
+    /// Content timestamp (Unix). Changes exactly when the daemon-side content can have
+    /// changed; the kernel compares it across getattrs to decide cache revalidation.
+    let mtimeSec: UInt64
+    let mtimeNsec: UInt32
 
     init(_ r: inout WireReader) throws {
         ino = try r.u64()
@@ -114,6 +118,8 @@ struct WireAttr {
         size = try r.u64()
         perm = try r.u16()
         upper = try r.u8() != 0
+        mtimeSec = try r.u64()
+        mtimeNsec = try r.u32()
     }
 
     var itemType: FSItem.ItemType {
@@ -433,25 +439,44 @@ final class TLFSVolume: FSVolume {
         itemsLock.unlock()
     }
 
-    fileprivate func attributes(_ attr: WireAttr) -> FSItem.Attributes {
+    /// Populate attributes from the wire. When `wanted` is present (a getAttributes request),
+    /// answer exactly the requested set — FSVolumeConnector treats a mismatched validity mask
+    /// as "reported attributes are incomplete" (a fault) and discards the reply, which is how
+    /// stale sizes survive; Apple's passthrough sample guards every field the same way.
+    fileprivate func attributes(
+        _ attr: WireAttr,
+        wanted: FSItem.GetAttributesRequest? = nil
+    ) -> FSItem.Attributes {
+        // A fresh Attributes() starts with every property inactive; do NOT call
+        // invalidateAllProperties() here — it also clears an internal validity bit (bit 62)
+        // that FSVolumeConnector requires, and without it every reply is discarded as
+        // "reported attributes are incomplete". (Apple's passthrough sample never calls it.)
         let out = FSItem.Attributes()
-        out.invalidateAllProperties()
-        out.uid = getuid()
-        out.gid = getgid()
-        out.type = attr.itemType
-        out.fileID = FSItem.Identifier(rawValue: attr.ino) ?? .invalid
-        out.parentID = attr.ino == 1 ? .parentOfRoot : .rootDirectory
-        out.linkCount = attr.itemType == .directory ? 2 : 1
-        out.mode = UInt32(attr.perm)
-        out.allocSize = (attr.size + 4095) & ~4095
-        out.size = attr.size
-        out.flags = 0
+        func want(_ a: FSItem.Attribute) -> Bool {
+            wanted?.isAttributeWanted(a) ?? true
+        }
+        if want(.uid) { out.uid = getuid() }
+        if want(.gid) { out.gid = getgid() }
+        if want(.type) { out.type = attr.itemType }
+        if want(.fileID) { out.fileID = FSItem.Identifier(rawValue: attr.ino) ?? .invalid }
+        if want(.parentID) { out.parentID = attr.ino == 1 ? .parentOfRoot : .rootDirectory }
+        if want(.linkCount) { out.linkCount = attr.itemType == .directory ? 2 : 1 }
+        if want(.mode) { out.mode = UInt32(attr.perm) }
+        if want(.allocSize) { out.allocSize = (attr.size + 4095) & ~4095 }
+        if want(.size) { out.size = attr.size }
+        if want(.flags) { out.flags = 0 }
+        // The wire mtime is the daemon's content timestamp; report it for every time facet so
+        // the kernel's revalidation sees a change exactly when content can have changed.
         var ts = timespec()
-        ts.tv_sec = time(nil)
-        out.accessTime = ts
-        out.modifyTime = ts
-        out.changeTime = ts
-        out.birthTime = ts
+        ts.tv_sec = Int(attr.mtimeSec)
+        ts.tv_nsec = Int(attr.mtimeNsec)
+        if want(.accessTime) { out.accessTime = ts }
+        if want(.modifyTime) { out.modifyTime = ts }
+        if want(.changeTime) { out.changeTime = ts }
+        if want(.birthTime) { out.birthTime = ts }
+        if want(.addedTime) { out.addedTime = ts }
+        if want(.backupTime) { out.backupTime = timespec() }
+        if want(.supportsLimitedXAttrs) { out.supportsLimitedXAttrs = false }
         return out
     }
 
@@ -603,7 +628,7 @@ extension TLFSVolume: FSVolume.Operations {
         }
         do {
             let attr = try getattr(item.ino)
-            reply(attributes(attr), nil)
+            reply(attributes(attr, wanted: desiredAttributes), nil)
         } catch {
             reply(nil, error)
         }
@@ -864,6 +889,14 @@ extension TLFSVolume: FSVolume.Operations {
             return
         }
         do {
+            // The verifier is how the kernel detects that a directory changed and its cached
+            // listing pages / resume cookies are stale. Derive it from the directory's wire
+            // mtime — the daemon moves that exactly when content can have changed (restore,
+            // snapshot, lower advance). A constant verifier makes `ls` serve stale or empty
+            // cached listings forever.
+            let dirAttr = try getattr(dir.ino)
+            let dirVerifier = FSDirectoryVerifier(
+                rawValue: dirAttr.mtimeSec &* 1_000_000_007 &+ UInt64(dirAttr.mtimeNsec))
             // Stateless per call: open, page from the cookie offset, release. The daemon's dir
             // handles snapshot the merged listing, so offsets within one call are stable.
             let fh = try pool.withConnection { conn -> UInt64 in
@@ -921,26 +954,28 @@ extension TLFSVolume: FSVolume.Operations {
                 for (next, kind, name) in entries {
                     let itemType: FSItem.ItemType =
                         kind == 0 ? .directory : (kind == 2 ? .symlink : .file)
-                    // When per-entry attributes are requested, resolve them via lookup and
-                    // immediately repay the reference.
+                    // Every entry needs a real item ID: plain enumeration (getdirentries64,
+                    // attributes == nil) surfaces it as `d_ino`, and the kernel silently drops
+                    // entries packed with `.invalid` — `ls` worked while `readdir(3)` returned
+                    // nothing. Resolve via lookup and immediately repay the reference.
                     var packedAttrs: FSItem.Attributes? = nil
                     var entryID = FSItem.Identifier.invalid
-                    if attributes != nil {
-                        var lw = WireWriter()
-                        lw.u64(dir.ino)
-                        lw.str(name)
-                        if let attr = try? pool.withConnection({ conn -> WireAttr in
-                            var r = try conn.request(.lookup, lw.data)
-                            return try WireAttr(&r)
-                        }) {
+                    var lw = WireWriter()
+                    lw.u64(dir.ino)
+                    lw.str(name)
+                    if let attr = try? pool.withConnection({ conn -> WireAttr in
+                        var r = try conn.request(.lookup, lw.data)
+                        return try WireAttr(&r)
+                    }) {
+                        if attributes != nil {
                             packedAttrs = self.attributes(attr)
-                            entryID = FSItem.Identifier(rawValue: attr.ino) ?? .invalid
-                            _ = try? pool.withConnection { conn in
-                                var fw = WireWriter()
-                                fw.u64(attr.ino)
-                                fw.u64(1)
-                                _ = try conn.request(.forget, fw.data)
-                            }
+                        }
+                        entryID = FSItem.Identifier(rawValue: attr.ino) ?? .invalid
+                        _ = try? pool.withConnection { conn in
+                            var fw = WireWriter()
+                            fw.u64(attr.ino)
+                            fw.u64(1)
+                            _ = try conn.request(.forget, fw.data)
                         }
                     }
                     full = !packer.packEntry(
@@ -953,7 +988,7 @@ extension TLFSVolume: FSVolume.Operations {
                     cookieValue = next + 2
                 }
             }
-            reply(FSDirectoryVerifier(rawValue: 0x746c6673), nil)
+            reply(dirVerifier, nil)
         } catch {
             reply(FSDirectoryVerifier(rawValue: 0), error)
         }

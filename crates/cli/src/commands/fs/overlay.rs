@@ -144,6 +144,11 @@ pub struct OverlayAttr {
     pub perm: u16,
     /// True when the upper layer backs this node (i.e. it is locally dirty).
     pub upper: bool,
+    /// Content timestamp. Upper-backed nodes report the real file mtime; lower-backed nodes
+    /// report when this mount first saw their pinned commit (lower content can only change
+    /// with the commit). The kernel's cache revalidation compares this across getattrs, so it
+    /// must change exactly when content can have changed — and not otherwise.
+    pub mtime: std::time::SystemTime,
 }
 
 #[derive(Clone, Debug)]
@@ -160,6 +165,8 @@ pub struct OverlayFs {
     inodes: Mutex<InodeTable>,
     handles: Mutex<HashMap<u64, OHandle>>,
     next_fh: AtomicU64,
+    /// When each lower commit was first served by this mount — the stable mtime for its nodes.
+    lower_times: Mutex<HashMap<String, std::time::SystemTime>>,
 }
 
 fn not_found() -> MountError {
@@ -183,6 +190,7 @@ impl OverlayFs {
             inodes: Mutex::new(InodeTable::new()),
             handles: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
+            lower_times: Mutex::new(HashMap::new()),
         }))
     }
 
@@ -200,13 +208,28 @@ impl OverlayFs {
 
     fn whited_out(&self, path: &str) -> bool {
         // Markers are files; a directory at a wh path is only the container for child markers
-        // (wh/dir/b.txt marks dir/b.txt, not dir).
-        !path.is_empty()
-            && self
-                .wh_path(path)
+        // (wh/dir/b.txt marks dir/b.txt, not dir). A marker on an ancestor whiteouts the whole
+        // subtree — descendants must test as whited out too, or a node cached by inode keeps
+        // serving content from under a deleted directory.
+        if path.is_empty() {
+            return false;
+        }
+        let mut probe = String::with_capacity(path.len());
+        for component in path.split('/') {
+            if !probe.is_empty() {
+                probe.push('/');
+            }
+            probe.push_str(component);
+            let marker_is_file = self
+                .wh_path(&probe)
                 .symlink_metadata()
                 .map(|m| m.is_file())
-                .unwrap_or(false)
+                .unwrap_or(false);
+            if marker_is_file {
+                return true;
+            }
+        }
+        false
     }
 
     fn upper_meta(&self, path: &str) -> Option<std::fs::Metadata> {
@@ -228,6 +251,7 @@ impl OverlayFs {
             size: meta.len(),
             perm: (meta.permissions().mode() & 0o777) as u16,
             upper: true,
+            mtime: meta.modified().unwrap_or(std::time::UNIX_EPOCH),
         }
     }
 
@@ -238,7 +262,18 @@ impl OverlayFs {
             size: attr.size,
             perm: attr.perm,
             upper: false,
+            mtime: self.lower_mtime(&attr.commit),
         }
+    }
+
+    /// Stable mtime for lower-backed nodes: the wall time this mount first served their
+    /// pinned commit. Advancing the lower (snapshot, ref follow) therefore moves every lower
+    /// node's mtime forward exactly once, which is what kernel cache revalidation needs.
+    fn lower_mtime(&self, commit: &str) -> std::time::SystemTime {
+        let mut times = self.lower_times.lock().expect("lower times lock");
+        *times
+            .entry(commit.to_string())
+            .or_insert_with(std::time::SystemTime::now)
     }
 
     fn node(&self, ino: u64) -> Result<Arc<ONode>, MountError> {
@@ -295,7 +330,47 @@ impl OverlayFs {
         Ok(self.attr_from_core(ino, &attr))
     }
 
-    pub fn getattr(&self, ino: u64) -> Result<OverlayAttr, MountError> {
+    /// The node's lower backing, resolving it lazily when absent. A node born in the upper
+    /// (create/mkdir) has no core binding; once a snapshot seals it the advanced lower serves
+    /// the same path, and the kernel keeps using the cached inode — ino-based ops must follow
+    /// the path into the lower rather than report the node gone.
+    async fn lower_binding(&self, node: &Arc<ONode>) -> Result<u64, MountError> {
+        if let Some(ino) = node.core_ino() {
+            return Ok(ino);
+        }
+        let mut cur = ROOT_INO;
+        let mut chain: Vec<u64> = Vec::new();
+        for component in node.path.split('/') {
+            match self.core.lookup(cur, component).await {
+                Ok(attr) => {
+                    chain.push(attr.ino);
+                    cur = attr.ino;
+                }
+                Err(e) => {
+                    for ino in chain {
+                        self.core.forget(ino, 1);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        // Keep one core reference on the leaf (owned by this node, repaid on forget); the
+        // intermediate lookups are repaid immediately.
+        let leaf = *chain.last().expect("path is never empty here");
+        for ino in &chain[..chain.len() - 1] {
+            self.core.forget(*ino, 1);
+        }
+        let mut stored = node.core_ino.lock().expect("core ino lock");
+        if let Some(existing) = *stored {
+            drop(stored);
+            self.core.forget(leaf, 1);
+            return Ok(existing);
+        }
+        *stored = Some(leaf);
+        Ok(leaf)
+    }
+
+    pub async fn getattr(&self, ino: u64) -> Result<OverlayAttr, MountError> {
         let node = self.node(ino)?;
         if let Some(meta) = self.upper_meta(&node.path) {
             return Ok(self.attr_from_meta(ino, &meta));
@@ -303,7 +378,7 @@ impl OverlayFs {
         if self.whited_out(&node.path) {
             return Err(not_found());
         }
-        let core_ino = node.core_ino().ok_or_else(not_found)?;
+        let core_ino = self.lower_binding(&node).await?;
         let attr = self.core.getattr(core_ino)?;
         Ok(self.attr_from_core(ino, &attr))
     }
@@ -329,7 +404,10 @@ impl OverlayFs {
                 target.to_string_lossy().into_owned().into_bytes(),
             ));
         }
-        let core_ino = node.core_ino().ok_or_else(not_found)?;
+        if self.whited_out(&node.path) {
+            return Err(not_found());
+        }
+        let core_ino = self.lower_binding(&node).await?;
         self.core.readlink(core_ino).await
     }
 
@@ -367,9 +445,12 @@ impl OverlayFs {
             }
         }
 
-        if let Some(core_ino) = node.core_ino()
-            && (!self.whited_out(&node.path) || node.path.is_empty())
-        {
+        let lower = if !self.whited_out(&node.path) || node.path.is_empty() {
+            self.lower_binding(&node).await.ok()
+        } else {
+            None
+        };
+        if let Some(core_ino) = lower {
             let fh = self.core.opendir(core_ino)?;
             let mut offset = 0u64;
             loop {
@@ -440,6 +521,11 @@ impl OverlayFs {
     /// all IO on the path is local.
     pub async fn open(&self, ino: u64, write: bool) -> Result<u64, MountError> {
         let node = self.node(ino)?;
+        // The kernel can open by cached inode without a fresh lookup; a node under a whiteout
+        // (restore deleted it out-of-band) must not hand out its stale lower backing.
+        if self.upper_meta(&node.path).is_none() && self.whited_out(&node.path) {
+            return Err(not_found());
+        }
         if write {
             self.copy_up(&node).await?;
         }
@@ -451,7 +537,7 @@ impl OverlayFs {
                 .map_err(io_err)?;
             OHandle::Upper { file }
         } else {
-            let core_ino = node.core_ino().ok_or_else(not_found)?;
+            let core_ino = self.lower_binding(&node).await?;
             OHandle::Lower {
                 core_fh: self.core.open(core_ino)?,
             }
@@ -608,6 +694,29 @@ impl OverlayFs {
         Ok(())
     }
 
+    /// Whether the merged view already has an entry at `path` (upper presence, or lower
+    /// presence not hidden by a whiteout). Create-style ops must enforce this themselves: the
+    /// kernel skips its LOOKUP when it trusts a (possibly stale) negative name-cache entry, so
+    /// a create arriving here may target a name that already exists.
+    async fn merged_exists(&self, parent_core: Option<u64>, path: &str, name: &str) -> bool {
+        if self.upper_path(path).symlink_metadata().is_ok() {
+            return true;
+        }
+        if self.whited_out(path) {
+            return false;
+        }
+        let Some(core_parent) = parent_core else {
+            return false;
+        };
+        match self.core.lookup(core_parent, name).await {
+            Ok(attr) => {
+                self.core.forget(attr.ino, 1);
+                true
+            }
+            Err(_) => false,
+        }
+    }
+
     pub async fn create(
         &self,
         parent: u64,
@@ -616,6 +725,12 @@ impl OverlayFs {
     ) -> Result<(OverlayAttr, u64), MountError> {
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
+        if self
+            .merged_exists(parent_node.core_ino(), &path, name)
+            .await
+        {
+            return Err(MountError::Exists);
+        }
         let dest = self.upper_path(&path);
         if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir).map_err(io_err)?;
@@ -644,9 +759,15 @@ impl OverlayFs {
         Ok((attr, fh))
     }
 
-    pub fn mkdir(&self, parent: u64, name: &str) -> Result<OverlayAttr, MountError> {
+    pub async fn mkdir(&self, parent: u64, name: &str) -> Result<OverlayAttr, MountError> {
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
+        if self
+            .merged_exists(parent_node.core_ino(), &path, name)
+            .await
+        {
+            return Err(MountError::Exists);
+        }
         let dest = self.upper_path(&path);
         std::fs::create_dir_all(&dest).map_err(io_err)?;
         self.clear_whiteout(&path);
@@ -655,7 +776,7 @@ impl OverlayFs {
         Ok(self.attr_from_meta(ino, &meta))
     }
 
-    pub fn symlink(
+    pub async fn symlink(
         &self,
         parent: u64,
         name: &str,
@@ -663,6 +784,12 @@ impl OverlayFs {
     ) -> Result<OverlayAttr, MountError> {
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
+        if self
+            .merged_exists(parent_node.core_ino(), &path, name)
+            .await
+        {
+            return Err(MountError::Exists);
+        }
         let dest = self.upper_path(&path);
         if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir).map_err(io_err)?;
@@ -793,7 +920,7 @@ impl OverlayFs {
                     .map_err(io_err)?;
             }
         }
-        self.getattr(ino)
+        self.getattr(ino).await
     }
 
     // -------------------------------------------------------------------------------------
@@ -995,8 +1122,8 @@ mod tests {
         fs.write(cfh, 0, b"fresh\n").unwrap();
         fs.release(cfh);
         fs.forget(created.ino, 1);
-        fs.mkdir(ROOT_INO, "made").unwrap();
-        fs.symlink(ROOT_INO, "lnk", "README.md").unwrap();
+        fs.mkdir(ROOT_INO, "made").await.unwrap();
+        fs.symlink(ROOT_INO, "lnk", "README.md").await.unwrap();
         let names = dir_names(&fs, ROOT_INO).await;
         assert_eq!(
             names,

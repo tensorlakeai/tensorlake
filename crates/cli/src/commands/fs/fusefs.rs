@@ -22,6 +22,7 @@ fn errno(e: &MountError) -> i32 {
         MountError::NotFound(_) => libc::ENOENT,
         MountError::NotADirectory => libc::ENOTDIR,
         MountError::IsADirectory => libc::EISDIR,
+        MountError::Exists => libc::EEXIST,
         MountError::IndexNotReady(_) => libc::EAGAIN,
         MountError::BadHandle => libc::EBADF,
         _ => libc::EIO,
@@ -37,15 +38,17 @@ fn file_type(kind: NodeKind) -> fuser::FileType {
 }
 
 fn file_attr(attr: &OverlayAttr) -> fuser::FileAttr {
-    let now = SystemTime::now();
+    // The overlay's content timestamp (see OverlayAttr::mtime): stable while content is
+    // unchanged, moves when it can have changed — what kernel cache revalidation needs.
+    let mtime = attr.mtime;
     fuser::FileAttr {
         ino: attr.ino,
         size: attr.size,
         blocks: attr.size.div_ceil(512),
-        atime: now,
-        mtime: now,
-        ctime: now,
-        crtime: now,
+        atime: mtime,
+        mtime,
+        ctime: mtime,
+        crtime: mtime,
         kind: file_type(attr.kind),
         perm: attr.perm,
         nlink: 1,
@@ -113,7 +116,7 @@ impl fuser::Filesystem for WorkspaceFuse {
         _fh: Option<u64>,
         reply: fuser::ReplyAttr,
     ) {
-        match self.fs.getattr(ino) {
+        match self.rt.block_on(self.fs.getattr(ino)) {
             Ok(attr) => reply.attr(&TTL, &file_attr(&attr)),
             Err(e) => reply.error(errno(&e)),
         }
@@ -319,7 +322,7 @@ impl fuser::Filesystem for WorkspaceFuse {
         reply: fuser::ReplyEntry,
     ) {
         let name = name.to_string_lossy();
-        match self.fs.mkdir(parent, &name) {
+        match self.rt.block_on(self.fs.mkdir(parent, &name)) {
             Ok(attr) => reply.entry(&TTL, &file_attr(&attr), 0),
             Err(e) => reply.error(errno(&e)),
         }
@@ -335,7 +338,7 @@ impl fuser::Filesystem for WorkspaceFuse {
     ) {
         let name = link_name.to_string_lossy();
         let target = target.to_string_lossy();
-        match self.fs.symlink(parent, &name, &target) {
+        match self.rt.block_on(self.fs.symlink(parent, &name, &target)) {
             Ok(attr) => reply.entry(&TTL, &file_attr(&attr), 0),
             Err(e) => reply.error(errno(&e)),
         }

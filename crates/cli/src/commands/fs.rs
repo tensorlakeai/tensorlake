@@ -321,6 +321,8 @@ pub async fn mount(
     registry_add(&mountpoint, &state_dir)?;
 
     if foreground {
+        #[cfg(unix)]
+        vfsserver::TRACE_OPS.store(true, std::sync::atomic::Ordering::Relaxed);
         return daemon::run(ctx, &state_dir).await;
     }
 
@@ -546,6 +548,14 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
     // upper layer held is now served (identically) by the lower commit.
     daemon::control(&state_dir, "refresh").await?;
     daemon::control(&state_dir, "clear_upper").await?;
+    // Content is byte-identical across the swap, but the previously-dirty paths' attributes
+    // changed backing (upper mtimes -> lower commit time); refresh the kernel's view.
+    let sealed: Vec<String> = upserts
+        .iter()
+        .map(|(p, _, _)| p.clone())
+        .chain(deletes.iter().cloned())
+        .collect();
+    revalidate_paths(Path::new(&mountpoint), &sealed);
     println!(
         "Snapshot {} ({} file(s), {} of {} chunks uploaded)",
         report.commit, report.files, report.chunks_uploaded, report.chunks_total,
@@ -693,7 +703,7 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
 /// Restore: refill the overlay so the merged view equals `version`. The mount's lower layer is
 /// untouched (history preserved); the next snapshot seals the restored state.
 pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()> {
-    let (_, state_dir) = state_dir_for(path)?;
+    let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
@@ -703,6 +713,9 @@ pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()>
         .get("commit")
         .and_then(|c| c.as_str().map(str::to_string))
         .ok_or_else(|| CliError::usage("daemon did not report a commit"))?;
+    // The overlay's dirty set is about to be dropped — those paths' kernel views flip to the
+    // target too (even when the target equals the lower and the tree diff below is empty).
+    let (pre_upserts, pre_deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
     daemon::control(&state_dir, "clear_upper").await?;
 
     let target = walk_remote_tree(&session, &state.repo, version).await?;
@@ -739,15 +752,27 @@ pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()>
         .buffer_unordered(MATERIALIZE_CONCURRENCY)
         .collect()
         .await;
+    let mut changed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    let mut expect: std::collections::BTreeMap<String, PathExpect> =
+        std::collections::BTreeMap::new();
     let mut restored = 0usize;
     for item in fetched {
         let (file_path, mode, bytes) = item?;
         local::write_entry(&upper, &file_path, mode, &bytes)?;
+        let e = if mode == 0o120000 {
+            PathExpect::Present
+        } else {
+            PathExpect::FileSize(bytes.len() as u64)
+        };
+        expect.insert(file_path.clone(), e);
+        changed.insert(file_path);
         restored += 1;
     }
     let mut removed = 0usize;
     for file_path in current.keys().filter(|p| !target.contains_key(*p)) {
         write_whiteout(&wh, file_path)?;
+        expect.insert(file_path.clone(), PathExpect::Absent);
+        changed.insert(file_path.clone());
         removed += 1;
     }
     // Directories only present in `current` vanish too; a dir-level marker supersedes any
@@ -777,14 +802,195 @@ pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()>
             continue;
         }
         write_whiteout(&wh, &dir)?;
+        expect.insert(dir.clone(), PathExpect::Absent);
+        changed.insert(dir.clone());
         whited_dirs.push(dir);
     }
+    // Paths the dropped overlay used to answer now flip to the target view as well.
+    for p in pre_upserts
+        .iter()
+        .map(|(p, _, _)| p.clone())
+        .chain(pre_deletes.iter().cloned())
+    {
+        if changed.contains(&p) {
+            continue;
+        }
+        let e = match target.get(&p) {
+            Some(entry) if entry.mode == 0o120000 => PathExpect::Present,
+            Some(entry) => entry
+                .size
+                .map(PathExpect::FileSize)
+                .unwrap_or(PathExpect::Present),
+            None if target_dirs.contains(&p) => PathExpect::Present,
+            None => PathExpect::Absent,
+        };
+        expect.insert(p.clone(), e);
+        changed.insert(p);
+    }
+    converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
     println!(
         "Restored {} to {} ({restored} file(s) refreshed, {removed} removed).",
         path.display(),
         &version[..version.len().min(12)]
     );
     Ok(())
+}
+
+/// What the kernel's view of a path must look like once a restore has settled.
+enum PathExpect {
+    /// A regular file with exactly this size.
+    FileSize(u64),
+    /// Present (symlinks and directories, or files whose size isn't cheaply known).
+    Present,
+    /// No longer visible.
+    Absent,
+}
+
+/// Nudge the kernel to revalidate paths whose content changed behind its back (restore and
+/// snapshot mutate the overlay out-of-band). A stat through the mountpoint makes the kernel
+/// re-fetch attributes; the changed mtime/size then revalidates that file.
+/// Best-effort: a failed stat (e.g. the path was just deleted) is itself the fresh answer.
+fn revalidate_paths(mountpoint: &Path, changed: &[String]) {
+    // Parent directories first (dedup'd): their listings changed too.
+    let mut dirs = std::collections::BTreeSet::new();
+    dirs.insert(String::new());
+    for p in changed {
+        let mut dir = p.as_str();
+        while let Some((parent, _)) = dir.rsplit_once('/') {
+            dirs.insert(parent.to_string());
+            dir = parent;
+        }
+    }
+    for dir in &dirs {
+        let _ = std::fs::symlink_metadata(mountpoint.join(dir));
+    }
+    for p in changed {
+        let _ = std::fs::symlink_metadata(mountpoint.join(p));
+    }
+}
+
+/// Open a path without following a final symlink and return its fstat size, or `None` when it
+/// does not exist. `open(2)` is the coherence workhorse here: the kernel revalidates a path's
+/// item on open (close-to-open, like NFS), cutting through stale positive AND negative name
+/// cache entries that plain `stat(2)` keeps serving until their TTL (~30s measured) —
+/// `purge` additionally drops cached data pages via `msync(MS_INVALIDATE)` on a shared read
+/// mapping, the only userspace lever that does so: attribute changes alone make the kernel
+/// adopt a new size but NOT refetch cached pages (a file that grew behind the kernel keeps a
+/// zero-filled tail forever otherwise — measured on macOS 26.5 FSKit/lifs).
+fn open_truth(path: &Path, purge: bool) -> Option<u64> {
+    use std::os::unix::ffi::OsStrExt;
+    let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
+    #[cfg(target_os = "macos")]
+    let flags = libc::O_RDONLY | libc::O_SYMLINK;
+    #[cfg(not(target_os = "macos"))]
+    let flags = libc::O_RDONLY | libc::O_PATH | libc::O_NOFOLLOW;
+    unsafe {
+        let fd = libc::open(c.as_ptr(), flags);
+        if fd < 0 {
+            return None;
+        }
+        let mut st: libc::stat = std::mem::zeroed();
+        if libc::fstat(fd, &mut st) != 0 {
+            libc::close(fd);
+            return None;
+        }
+        let len = st.st_size as usize;
+        if purge && st.st_mode & libc::S_IFMT == libc::S_IFREG && len > 0 {
+            let addr = libc::mmap(
+                std::ptr::null_mut(),
+                len,
+                libc::PROT_READ,
+                libc::MAP_SHARED,
+                fd,
+                0,
+            );
+            if addr != libc::MAP_FAILED {
+                libc::msync(addr, len, libc::MS_INVALIDATE);
+                libc::munmap(addr, len);
+            }
+        }
+        libc::close(fd);
+        Some(st.st_size as u64)
+    }
+}
+
+/// Break a stale negative name-cache entry for a path that exists daemon-side. The kernel can
+/// pin ENOENT for a name (directories especially) past any lookup we drive; a create attempt
+/// is the one operation it cannot answer from that cache — the overlay's exclusivity check
+/// answers EEXIST, teaching the kernel the name is real. Safe by construction: this is only
+/// called for paths the overlay is already known to serve, so nothing is ever created.
+fn probe_negative_dentry(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
+        return;
+    };
+    unsafe {
+        let fd = libc::open(
+            c.as_ptr(),
+            libc::O_RDONLY | libc::O_CREAT | libc::O_EXCL,
+            0o644,
+        );
+        if fd >= 0 {
+            // The expectation machinery only probes paths the daemon serves; reaching here
+            // means the view raced badly — undo and let the caller's re-check decide.
+            libc::close(fd);
+            libc::unlink(c.as_ptr());
+            return;
+        }
+        if libc::mkdir(c.as_ptr(), 0o755) == 0 {
+            libc::rmdir(c.as_ptr());
+        }
+    }
+}
+
+/// Nudge and wait (bounded) until the kernel's view through the mountpoint matches `expect`.
+/// The kernel applies out-of-band changes asynchronously and never refetches cached pages on
+/// its own; each round opens every changed path (open revalidates), purges cached pages of
+/// expected files, and re-checks. Returns once settled or after ~5s. After this, open/read
+/// and directory listings are coherent; a bare `stat(2)` of a path that was never re-opened
+/// can still serve cached attributes until the kernel's TTL.
+fn converge_kernel_view(
+    mountpoint: &Path,
+    changed: &std::collections::BTreeSet<String>,
+    expect: &std::collections::BTreeMap<String, PathExpect>,
+) {
+    let changed: Vec<String> = changed.iter().cloned().collect();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        revalidate_paths(mountpoint, &changed);
+        let mut settled = true;
+        for (p, e) in expect {
+            let full = mountpoint.join(p);
+            match e {
+                PathExpect::Absent => {
+                    if open_truth(&full, false).is_some() {
+                        settled = false;
+                    }
+                }
+                PathExpect::Present => {
+                    if open_truth(&full, false).is_none() {
+                        probe_negative_dentry(&full);
+                        if open_truth(&full, false).is_none() {
+                            settled = false;
+                        }
+                    }
+                }
+                PathExpect::FileSize(size) => {
+                    if open_truth(&full, true).is_none() {
+                        probe_negative_dentry(&full);
+                    }
+                    match open_truth(&full, true) {
+                        Some(len) if len == *size => {}
+                        _ => settled = false,
+                    }
+                }
+            }
+        }
+        if settled || std::time::Instant::now() > deadline {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+    }
 }
 
 /// Write a whiteout marker file, superseding any container of child markers at the same path

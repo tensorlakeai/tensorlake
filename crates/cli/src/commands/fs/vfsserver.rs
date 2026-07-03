@@ -18,7 +18,8 @@
 //! The first message on every connection must be `Hello` with the secret and protocol version.
 //!
 //! Attribute encoding (`attr`): `u64 ino | u8 kind (0 dir, 1 file, 2 symlink) | u64 size |
-//! u16 perm | u8 upper`.
+//! u16 perm | u8 upper | u64 mtime_sec | u32 mtime_nsec` (mtime as a Unix timestamp; it is
+//! the content timestamp the kernel uses for cache revalidation, see `OverlayAttr::mtime`).
 
 use std::sync::Arc;
 
@@ -27,7 +28,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 use super::overlay::{OverlayAttr, OverlayFs};
 
-pub const PROTOCOL_VERSION: u32 = 1;
+pub const PROTOCOL_VERSION: u32 = 2;
 
 pub mod op {
     pub const HELLO: u8 = 0;
@@ -55,11 +56,15 @@ pub mod op {
 
 const MAX_FRAME: u32 = 4 * 1024 * 1024 + 512;
 
+/// Op tracing to stderr, for foreground-daemon debugging (`tl fs mount --foreground`).
+pub static TRACE_OPS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
 fn errno(e: &MountError) -> i32 {
     match e {
         MountError::NotFound(_) => libc::ENOENT,
         MountError::NotADirectory => libc::ENOTDIR,
         MountError::IsADirectory => libc::EISDIR,
+        MountError::Exists => libc::EEXIST,
         MountError::IndexNotReady(_) => libc::EAGAIN,
         MountError::BadHandle => libc::EBADF,
         _ => libc::EIO,
@@ -153,11 +158,17 @@ impl Writer {
         self
     }
     fn attr(&mut self, a: &OverlayAttr) -> &mut Self {
+        let mtime = a
+            .mtime
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default();
         self.u64v(a.ino)
             .u8v(kind_byte(a.kind))
             .u64v(a.size)
             .u16v(a.perm)
             .u8v(a.upper as u8)
+            .u64v(mtime.as_secs())
+            .u32v(mtime.subsec_nanos())
     }
 }
 
@@ -244,6 +255,37 @@ async fn connection(
         }
 
         let resp = handle(&fs, opcode, payload).await;
+        if TRACE_OPS.load(std::sync::atomic::Ordering::Relaxed) {
+            let errno = i32::from_le_bytes(resp.buf[..4].try_into().unwrap_or_default());
+            let mut r = Reader::new(payload);
+            let arg = r.u64().unwrap_or(0);
+            let name = match opcode {
+                op::LOOKUP
+                | op::CREATE
+                | op::MKDIR
+                | op::SYMLINK
+                | op::UNLINK
+                | op::RMDIR
+                | op::RENAME => r.str().unwrap_or("?").to_string(),
+                op::READDIR => format!(
+                    "off={} -> {} entries",
+                    r.u64().unwrap_or(0),
+                    resp.buf
+                        .get(4..8)
+                        .map(|b| u32::from_le_bytes(b.try_into().unwrap()))
+                        .unwrap_or(0)
+                ),
+                _ => String::new(),
+            };
+            eprintln!(
+                "[vfs {:>9.3}] op={opcode:<2} arg={arg} {name} errno={errno}",
+                std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap_or_default()
+                    .as_secs_f64()
+                    % 1000.0,
+            );
+        }
         write_frame(&mut stream, resp).await?;
     }
 }
@@ -272,7 +314,7 @@ async fn handle(fs: &Arc<OverlayFs>, opcode: u8, payload: &[u8]) -> Writer {
     match opcode {
         op::GETATTR => {
             let ino = try_req!(r.u64());
-            let attr = try_req!(map(fs.getattr(ino)));
+            let attr = try_req!(map(fs.getattr(ino).await));
             let mut w = Writer::ok();
             w.attr(&attr);
             w
@@ -365,7 +407,7 @@ async fn handle(fs: &Arc<OverlayFs>, opcode: u8, payload: &[u8]) -> Writer {
         op::MKDIR => {
             let parent = try_req!(r.u64());
             let name = try_req!(r.str());
-            let attr = try_req!(map(fs.mkdir(parent, name)));
+            let attr = try_req!(map(fs.mkdir(parent, name).await));
             let mut w = Writer::ok();
             w.attr(&attr);
             w
@@ -374,7 +416,7 @@ async fn handle(fs: &Arc<OverlayFs>, opcode: u8, payload: &[u8]) -> Writer {
             let parent = try_req!(r.u64());
             let name = try_req!(r.str());
             let target = try_req!(r.str());
-            let attr = try_req!(map(fs.symlink(parent, name, target)));
+            let attr = try_req!(map(fs.symlink(parent, name, target).await));
             let mut w = Writer::ok();
             w.attr(&attr);
             w

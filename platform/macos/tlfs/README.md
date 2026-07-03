@@ -76,11 +76,52 @@ The daemon mounts with `/sbin/mount -F -t tlfs tlfs://127.0.0.1:<port>/<secret> 
   `closeItem` fsyncs writable handles before RELEASE.
 - Writes are chunked at 2 MiB per WRITE frame.
 
-## Known issue: post-restore/snapshot cache staleness
+## Cache coherence after restore/snapshot
 
-`tl fs restore` and `tl fs snapshot` mutate overlay state behind the kernel's back.
-The kernel's UBC may serve cached file content for a short window (observed seconds,
-occasionally longer) until it revalidates attributes and notices the size/mtime
-change; directory listings recover faster than `open`+`read` of a cached file. A
-`stat(2)` of the file forces revalidation. Fix candidates: FSKit invalidation pushes
-(if/when the API allows) or attribute-validity hints tuned down for upper-backed items.
+`tl fs restore` and `tl fs snapshot` mutate overlay state behind the kernel's back, and
+FSKit has no invalidation-push API — so coherence is engineered from what the kernel
+does honor (all measured on macOS 26.5 lifs):
+
+- **Real content timestamps.** The wire attr carries an mtime: upper-backed items report
+  the real file mtime; lower-backed items report when the mount first served their
+  pinned commit. It moves exactly when content can have changed, which is what the
+  kernel's revalidation compares. (Never report `time(nil)`: constant-now mtimes defeat
+  caching and still leave minutes-long stale windows.)
+- **Directory verifier from the dir's mtime.** A constant `FSDirectoryVerifier` makes
+  the kernel treat cached listing pages and resume cookies as forever-valid (`ls` shows
+  deleted files, or a stale empty tail). Deriving it from the directory's wire mtime
+  makes it re-enumerate exactly when needed.
+- **Every packed entry needs a real `itemID`.** Plain enumeration (`getdirentries64`,
+  no attributes requested) surfaces it as `d_ino`; the kernel silently drops entries
+  packed with `.invalid` — `ls` (getattrlistbulk) worked while `readdir(3)` returned
+  nothing.
+- **The CLI converges the kernel view before returning** (`converge_kernel_view` in
+  `fs.rs`): after restore it opens every changed path (open revalidates close-to-open
+  and cuts through stale positive *and* negative name-cache entries; plain `stat(2)`
+  serves the cache until a ~30s TTL), purges cached pages of changed files via
+  `msync(MS_INVALIDATE)` on a shared mapping (attribute changes alone make the kernel
+  adopt a new size but never refetch pages — a file that grew behind the kernel keeps a
+  zero-filled tail forever otherwise), and breaks pinned negative entries with an
+  `O_CREAT|O_EXCL` / `mkdir` probe that the overlay answers with `EEXIST`.
+
+Measured result: restore returns in ~0.1s with `open`/`read` and directory listings
+fully coherent, both directions, repeatedly. Residual caveat: a bare `stat(2)`/`lstat`
+of a changed path that is never re-opened can serve cached attributes for up to the
+kernel's TTL (~30s); `open(2)` always sees truth.
+
+The daemon-side halves of this: the overlay enforces `EEXIST` on create/mkdir/symlink
+itself (the kernel skips LOOKUP when it trusts a stale negative entry), whiteouts hide
+whole subtrees for inode-based ops (`whited_out` walks ancestors), and nodes born in
+the upper lazily re-bind to the advanced lower after a snapshot seals them
+(`lower_binding`), so cached kernel inodes keep working across the swap.
+
+## Iteration gotchas (beyond fskit-hello's README)
+
+- Rebuilding/re-registering the appex while a volume is mounted can make `fskit_agent`
+  prune the module from `~/Library/Group Containers/group.com.apple.fskit.settings/`
+  `enabledModules.plist` on the next LaunchServices database change — the running
+  module process is killed ("Module Death") and later mounts fail with `mount: Unable
+  to invoke task`. Re-add the id with PlistBuddy, re-run the pluginkit gate, and kill
+  `fskit_agent` (`kill -9`; plain `pkill` may not take).
+- A mountpoint directory whose volume died uncleanly can wedge (`rmdir` hangs); make a
+  fresh mountpoint and let a reboot reap the zombie.

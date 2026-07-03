@@ -55,7 +55,7 @@ impl Default for MountOptions {
 
 /// Errors surfaced by the mount core. Bindings map these onto errnos
 /// (`NotFound` → `ENOENT`, `NotADirectory` → `ENOTDIR`, `IsADirectory` → `EISDIR`,
-/// `IndexNotReady` → `EAGAIN`, the rest → `EIO`).
+/// `Exists` → `EEXIST`, `IndexNotReady` → `EAGAIN`, the rest → `EIO`).
 #[derive(Debug, thiserror::Error)]
 pub enum MountError {
     #[error("http error: {0}")]
@@ -68,6 +68,8 @@ pub enum MountError {
     NotADirectory,
     #[error("is a directory")]
     IsADirectory,
+    #[error("already exists")]
+    Exists,
     #[error("stale or invalid handle")]
     BadHandle,
     #[error("index not ready: {0}")]
