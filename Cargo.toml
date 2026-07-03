@@ -81,7 +81,9 @@ tempfile = "3"
 tracing = "0.1"
 
 # Compression & archives
-flate2 = "1.1.9"
+# zlib-rs matches artifact_storage's flate2 feature choice, which gsvc-codec (vendored from there)
+# is tested against; the default miniz_oxide backend has produced a divergent test result.
+flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 tar = "0.4"
 
 # OpenAPI
