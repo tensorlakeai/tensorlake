@@ -12,7 +12,7 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
-mod fastclone;
+pub(crate) mod fastclone;
 
 pub use fastclone::parse_cache_max_bytes;
 
@@ -313,7 +313,7 @@ pub async fn list_operations(
     Ok(())
 }
 
-fn artifact_storage_client(ctx: &CliContext) -> Result<ArtifactStorageClient> {
+pub(crate) fn artifact_storage_client(ctx: &CliContext) -> Result<ArtifactStorageClient> {
     let token = ctx.bearer_token()?;
     let mut builder = ClientBuilder::new(&ctx.api_url).bearer_token(&token);
     let use_scope_headers = ctx.personal_access_token.is_some() && ctx.api_key.is_none();
@@ -327,7 +327,7 @@ fn artifact_storage_client(ctx: &CliContext) -> Result<ArtifactStorageClient> {
     sdk.artifact_storage().map_err(Into::into)
 }
 
-fn project_id(ctx: &CliContext) -> Result<String> {
+pub(crate) fn project_id(ctx: &CliContext) -> Result<String> {
     ctx.effective_project_id()
         .ok_or_else(|| CliError::auth("missing project ID; run `tl init`"))
 }
@@ -564,6 +564,8 @@ fn collect_push_files(
         .to_string_lossy()
         .replace('\\', "/");
     out.push(PushFile {
+        mode: None,
+        delete: false,
         repo_path,
         source: PushSource::Path(path.to_path_buf()),
     });

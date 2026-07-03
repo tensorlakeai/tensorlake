@@ -31,6 +31,10 @@ pub struct PushFile {
     /// Path inside the repository (forward-slash separated).
     pub repo_path: String,
     pub source: PushSource,
+    /// Octal git mode (`0o100644`, `0o100755`, `0o120000`); server defaults to `100644`.
+    pub mode: Option<u32>,
+    /// Delete this path instead of writing it (`source` is ignored).
+    pub delete: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -71,6 +75,9 @@ pub struct PushOptions {
     /// Upper bound on one upload request's payload.
     pub upload_batch_bytes: usize,
     pub progress: Option<PushProgress>,
+    /// When set, the commit publishes as a snapshot on this workspace's ref
+    /// (`workspaces/{id}/snapshots`) instead of advancing `branch`; `branch`/`base` are ignored.
+    pub workspace_snapshot: Option<String>,
 }
 
 impl Default for PushOptions {
@@ -82,6 +89,7 @@ impl Default for PushOptions {
             expect_oid: None,
             upload_batch_bytes: 48 * 1024 * 1024,
             progress: None,
+            workspace_snapshot: None,
         }
     }
 }
@@ -128,6 +136,10 @@ struct CommitFileWire {
     chunks: Vec<CommitChunkWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     file_token: Option<String>,
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    delete: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mode: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -138,7 +150,8 @@ struct CommitChunkWire {
 
 #[derive(Serialize)]
 struct CommitWire {
-    branch: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    branch: Option<String>,
     message: String,
     session_id: String,
     files: Vec<CommitFileWire>,
@@ -162,6 +175,8 @@ struct ChunkedFile {
     source: PushSource,
     /// `(sha256, size)` in file order.
     chunks: Vec<([u8; 32], u32)>,
+    mode: Option<u32>,
+    delete: bool,
 }
 
 fn chunk_source(
@@ -221,18 +236,24 @@ impl ArtifactStorageClient {
         let mut chunked = Vec::with_capacity(files.len());
         let (mut total_chunks, mut total_bytes) = (0usize, 0u64);
         for f in files {
-            let chunks = chunk_source(
-                &f.source,
-                session.cdc_min_bytes,
-                session.cdc_avg_bytes,
-                session.cdc_max_bytes,
-            )?;
+            let chunks = if f.delete {
+                Vec::new()
+            } else {
+                chunk_source(
+                    &f.source,
+                    session.cdc_min_bytes,
+                    session.cdc_avg_bytes,
+                    session.cdc_max_bytes,
+                )?
+            };
             total_chunks += chunks.len();
             total_bytes += chunks.iter().map(|(_, s)| *s as u64).sum::<u64>();
             chunked.push(ChunkedFile {
                 repo_path: f.repo_path,
                 source: f.source,
                 chunks,
+                mode: f.mode,
+                delete: f.delete,
             });
         }
         emit(PushEvent::Hashed {
@@ -272,6 +293,9 @@ impl ArtifactStorageClient {
         let (mut uploaded_chunks, mut uploaded_bytes) = (0usize, 0u64);
         let mut file_tokens: Vec<Option<String>> = vec![None; chunked.len()];
         for (i, file) in chunked.iter().enumerate() {
+            if file.delete {
+                continue;
+            }
             let total: u64 = file.chunks.iter().map(|(_, s)| *s as u64).sum();
             let missing_bytes: u64 = file
                 .chunks
@@ -411,10 +435,16 @@ impl ArtifactStorageClient {
                     })
                     .collect(),
                 file_token: file_tokens[i].clone(),
+                delete: f.delete,
+                mode: f.mode.map(|m| format!("{m:o}")),
             })
             .collect();
+        let (commit_suffix, branch) = match &opts.workspace_snapshot {
+            Some(ws_id) => (format!("workspaces/{ws_id}/snapshots"), None),
+            None => ("commits".to_string(), Some(opts.branch.clone())),
+        };
         let body = CommitWire {
-            branch: opts.branch.clone(),
+            branch,
             message: opts.message.clone(),
             session_id: session.session_id.clone(),
             files: commit_files,
@@ -425,7 +455,7 @@ impl ArtifactStorageClient {
             Method::POST,
             project_id,
             repo,
-            Some("commits"),
+            Some(&commit_suffix),
             git_username,
             git_token,
         )?;
@@ -528,7 +558,7 @@ fn hex_lower(h: &[u8; 32]) -> String {
     hex::encode(h)
 }
 
-async fn expect_json<T: serde::de::DeserializeOwned>(
+pub(super) async fn expect_json<T: serde::de::DeserializeOwned>(
     resp: reqwest::Response,
 ) -> Result<T, SdkError> {
     let status = resp.status();

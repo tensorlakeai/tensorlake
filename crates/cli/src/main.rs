@@ -202,24 +202,22 @@ enum Commands {
     Sbx(SbxCommands),
 }
 
+use std::path::PathBuf;
+
 #[derive(Subcommand)]
 enum FsCommands {
-    /// Register a new file system
+    /// Create a new file system (a versioned artifact-storage repository)
     Create {
         /// File system name
         #[arg(short, long)]
         name: String,
-
-        /// Optional human-readable description
-        #[arg(short, long)]
-        description: Option<String>,
 
         /// Print the created file system as JSON
         #[arg(long)]
         json: bool,
     },
 
-    /// List registered file systems
+    /// List file systems
     #[command(name = "ls")]
     Ls {
         /// Print file systems as JSON
@@ -227,11 +225,108 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Delete a file system by id
+    /// Delete a file system by name
     #[command(name = "rm")]
     Rm {
-        /// File system id (e.g. `file_system_...`)
-        file_system_id: String,
+        /// File system name
+        name: String,
+    },
+
+    /// Mount a file system into a local directory as a private workspace
+    Mount {
+        /// `<file-system>[:<ref-or-commit>]` (defaults to the default branch head)
+        target: String,
+
+        /// Directory to materialize into (created; must be empty)
+        path: PathBuf,
+
+        /// Activity-lease override in seconds (server default: 48h)
+        #[arg(long)]
+        lease_seconds: Option<u64>,
+    },
+
+    /// Seal local changes into a snapshot on the workspace ref
+    Snapshot {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Snapshot message
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+
+    /// Publish the workspace's snapshot onto a real branch (squash by default)
+    Promote {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Target branch
+        branch: String,
+
+        /// Land the full checkpoint chain instead of a single squashed commit
+        #[arg(long)]
+        full_history: bool,
+
+        /// Commit message for the squashed promote
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+
+    /// Show workspace, lease, and local-change status for a mount
+    Status {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Print status as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Restore a mount's tracked files to a snapshot or commit
+    Restore {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Snapshot/commit hex, branch, or ref to restore to
+        version: String,
+    },
+
+    /// List changed paths: local vs last snapshot, or between two snapshots
+    Diff {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Older snapshot/commit (omit both for local vs last snapshot)
+        a: Option<String>,
+
+        /// Newer snapshot/commit
+        b: Option<String>,
+    },
+
+    /// Pin the workspace: its lease stops expiring until it is deleted
+    Pin {
+        /// A mounted directory
+        path: PathBuf,
+    },
+
+    /// Unmount: delete the workspace (unless --keep-workspace) and forget local state
+    Unmount {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Keep the server-side workspace (its lease keeps ticking)
+        #[arg(long)]
+        keep_workspace: bool,
+    },
+
+    /// List a file system's live workspaces
+    Workspaces {
+        /// File system name
+        file_system: String,
+
+        /// Print workspaces as JSON
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1549,14 +1644,40 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
         Commands::Fs(subcmd) => {
             ensure_auth_and_project(ctx).await?;
             match subcmd {
-                FsCommands::Create {
-                    name,
-                    description,
-                    json,
-                } => commands::fs::create(ctx, &name, description.as_deref(), json).await,
+                FsCommands::Create { name, json } => commands::fs::create(ctx, &name, json).await,
                 FsCommands::Ls { json } => commands::fs::list(ctx, json).await,
-                FsCommands::Rm { file_system_id } => {
-                    commands::fs::remove(ctx, &file_system_id).await
+                FsCommands::Rm { name } => commands::fs::remove(ctx, &name).await,
+                FsCommands::Mount {
+                    target,
+                    path,
+                    lease_seconds,
+                } => commands::fs::mount(ctx, &target, &path, lease_seconds).await,
+                FsCommands::Snapshot { path, message } => {
+                    commands::fs::snapshot(ctx, &path, message.as_deref()).await
+                }
+                FsCommands::Promote {
+                    path,
+                    branch,
+                    full_history,
+                    message,
+                } => {
+                    commands::fs::promote(ctx, &path, &branch, full_history, message.as_deref())
+                        .await
+                }
+                FsCommands::Status { path, json } => commands::fs::status(ctx, &path, json).await,
+                FsCommands::Restore { path, version } => {
+                    commands::fs::restore(ctx, &path, &version).await
+                }
+                FsCommands::Diff { path, a, b } => {
+                    commands::fs::diff(ctx, &path, a.as_deref(), b.as_deref()).await
+                }
+                FsCommands::Pin { path } => commands::fs::pin(ctx, &path).await,
+                FsCommands::Unmount {
+                    path,
+                    keep_workspace,
+                } => commands::fs::unmount(ctx, &path, keep_workspace).await,
+                FsCommands::Workspaces { file_system, json } => {
+                    commands::fs::workspaces(ctx, &file_system, json).await
                 }
             }
         }

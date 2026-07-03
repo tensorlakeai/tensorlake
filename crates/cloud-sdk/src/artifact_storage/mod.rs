@@ -8,6 +8,7 @@ use crate::{
 
 pub mod ingest;
 pub mod models;
+pub mod workspaces;
 
 use models::{
     CreateRepoRequest, GitCredential, ListBranchesResponse, ListOperationsResponse,
