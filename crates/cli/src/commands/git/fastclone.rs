@@ -96,6 +96,27 @@ pub struct FastCloneOptions {
     /// Basic-auth credential for the gsvc origin, e.g. from a minted git token.
     pub credential: Option<BasicAuth>,
     pub checkout: bool,
+    /// Spinner already shown by the caller (e.g. while minting a credential); reused and
+    /// switched to a byte progress bar once the manifest's artifact sizes are known.
+    pub progress: Option<ProgressBar>,
+}
+
+/// A spinner for indeterminate-length work (auth, manifest fetch), or `None` when stderr isn't a
+/// TTY. `fast_clone` converts it into a byte progress bar once download sizes are known.
+pub fn new_spinner(message: &str) -> Option<ProgressBar> {
+    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        return None;
+    }
+    let pb = ProgressBar::new_spinner();
+    pb.set_style(
+        ProgressStyle::default_spinner()
+            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+            .template("{spinner} {msg}")
+            .unwrap(),
+    );
+    pb.set_message(message.to_string());
+    pb.enable_steady_tick(std::time::Duration::from_millis(80));
+    Some(pb)
 }
 
 #[derive(Clone, Debug, Default)]
@@ -126,23 +147,16 @@ struct HttpCtx {
     progress: Option<ProgressBar>,
 }
 
-fn new_progress_bar(total_bytes: u64) -> Option<ProgressBar> {
-    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-        return None;
-    }
-    let pb = ProgressBar::new(total_bytes);
-    pb.set_style(
-        ProgressStyle::with_template(
-            "{spinner} {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta}) {msg}",
-        )
-        .unwrap()
-        .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]),
-    );
-    pb.enable_steady_tick(std::time::Duration::from_millis(80));
-    Some(pb)
+fn byte_progress_style() -> ProgressStyle {
+    ProgressStyle::with_template(
+        "{spinner} {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta}) {msg}",
+    )
+    .unwrap()
+    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
 }
 
-/// Run a fast clone into `opts.dest`.
+/// Run a fast clone into `opts.dest`. `opts.progress`, if set, is shown while resolving the
+/// manifest and then converted into a byte progress bar once download sizes are known.
 pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
     ensure_clone_target_available(&opts.dest)?;
     let mut clean_base = Url::parse(&opts.repo_url)
@@ -158,7 +172,7 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         client: reqwest::Client::builder().build()?,
         origin: clean_base.clone(),
         auth: opts.credential.clone(),
-        progress: None,
+        progress: opts.progress,
     };
     let manifest_url = clean_base.join("fast/clone-manifest")?;
     let manifest: FastCloneManifest = get_json(&ctx, manifest_url).await?;
@@ -179,9 +193,17 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         .map(|p| p.pack_bytes + p.idx_bytes)
         .sum::<u64>()
         + manifest.large_blobs.iter().map(|b| b.bytes).sum::<u64>();
-    ctx.progress = new_progress_bar(total_bytes);
     if let Some(pb) = &ctx.progress {
+        pb.set_style(byte_progress_style());
+        pb.set_length(total_bytes);
+        pb.set_position(0);
         pb.set_message("fetching pack artifacts");
+    } else if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
+        let pb = ProgressBar::new(total_bytes);
+        pb.set_style(byte_progress_style());
+        pb.set_message("fetching pack artifacts");
+        pb.enable_steady_tick(std::time::Duration::from_millis(80));
+        ctx.progress = Some(pb);
     }
 
     let mut stats = FastCloneStats {

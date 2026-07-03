@@ -180,11 +180,17 @@ pub async fn clone_repo(
     let project_id = project_id(ctx)?;
     let client = artifact_storage_client(ctx)?;
     let repo_url = client.git_repo_url(&project_id, repo);
+
+    let spinner = fastclone::new_spinner(&format!("minting git credential for {repo}"));
     let credential = client
         .mint_token_for_repo(&project_id, Some(repo))
         .await
         .map_err(map_sdk_error)?
         .into_inner();
+    if let Some(pb) = &spinner {
+        pb.set_message("fetching clone manifest");
+    }
+
     let dest = dest.unwrap_or_else(|| fastclone::default_dest_from_url(&repo_url));
     let opts = fastclone::FastCloneOptions {
         repo_url: repo_url.clone(),
@@ -196,6 +202,7 @@ pub async fn clone_repo(
             password: Some(credential.token),
         }),
         checkout: !no_checkout,
+        progress: spinner,
     };
     let stats = fastclone::fast_clone(opts).await?;
     println!(
