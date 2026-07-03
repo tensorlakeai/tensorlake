@@ -126,6 +126,8 @@ struct MissingRespWire {
 struct CommitFileWire {
     path: String,
     chunks: Vec<CommitChunkWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    file_token: Option<String>,
 }
 
 #[derive(Serialize)]
@@ -261,10 +263,81 @@ impl ArtifactStorageClient {
             total: distinct.len(),
         });
 
-        // 4. Upload missing chunks: re-read sources (CDC is deterministic), frame, and PUT in
-        //    bounded batches. Duplicate hashes across files upload once.
+        // 4. Upload. Per file, pick the cheaper identity path (Phase 2, artifact_storage#26):
+        //    a file the server mostly lacks streams IN FULL under a file token — the server
+        //    hashes it during upload and the commit needs zero read-back; a file the server
+        //    mostly has uploads only its missing chunks and accepts server-side read-back
+        //    proportional to the reused bytes.
         let mut to_upload = missing.clone();
         let (mut uploaded_chunks, mut uploaded_bytes) = (0usize, 0u64);
+        let mut file_tokens: Vec<Option<String>> = vec![None; chunked.len()];
+        for (i, file) in chunked.iter().enumerate() {
+            let total: u64 = file.chunks.iter().map(|(_, s)| *s as u64).sum();
+            let missing_bytes: u64 = file
+                .chunks
+                .iter()
+                .filter(|(h, _)| missing.contains(h))
+                .map(|(_, s)| *s as u64)
+                .sum();
+            // Tokened only pays off for recipe-tier files that are mostly fresh.
+            if total < 8 * 1024 * 1024 || missing_bytes * 2 < total {
+                continue;
+            }
+            let token = format!("f{i}-{}", hex::encode(&file.chunks[0].0[..8]));
+            let mut reader: Box<dyn Read> = match &file.source {
+                PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
+                PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+            };
+            let mut offset = 0u64;
+            let mut frame = Vec::with_capacity(opts.upload_batch_bytes + 64);
+            for (hash, size) in &file.chunks {
+                let mut data = vec![0u8; *size as usize];
+                reader.read_exact(&mut data).map_err(io_err)?;
+                to_upload.remove(hash);
+                frame.extend_from_slice(hash);
+                frame.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                frame.extend_from_slice(&data);
+                uploaded_chunks += 1;
+                uploaded_bytes += data.len() as u64;
+                if frame.len() >= opts.upload_batch_bytes {
+                    let sent: u64 = frame_payload_bytes(&frame);
+                    self.put_chunk_frame(
+                        project_id,
+                        repo,
+                        git_username,
+                        git_token,
+                        &session.session_id,
+                        Some((&token, total, offset)),
+                        std::mem::take(&mut frame),
+                    )
+                    .await?;
+                    offset += sent;
+                    emit(PushEvent::UploadedBatch {
+                        chunks: uploaded_chunks,
+                        bytes: uploaded_bytes,
+                    });
+                }
+            }
+            if !frame.is_empty() {
+                self.put_chunk_frame(
+                    project_id,
+                    repo,
+                    git_username,
+                    git_token,
+                    &session.session_id,
+                    Some((&token, total, offset)),
+                    frame,
+                )
+                .await?;
+                emit(PushEvent::UploadedBatch {
+                    chunks: uploaded_chunks,
+                    bytes: uploaded_bytes,
+                });
+            }
+            file_tokens[i] = Some(token);
+        }
+
+        // Dedup path for everything else: only chunks the server lacks, shared frames.
         let mut frame = Vec::with_capacity(opts.upload_batch_bytes + 64);
         let mut frame_chunks = 0usize;
         for file in &chunked {
@@ -294,6 +367,7 @@ impl ArtifactStorageClient {
                         git_username,
                         git_token,
                         &session.session_id,
+                        None,
                         std::mem::take(&mut frame),
                     )
                     .await?;
@@ -312,6 +386,7 @@ impl ArtifactStorageClient {
                 git_username,
                 git_token,
                 &session.session_id,
+                None,
                 frame,
             )
             .await?;
@@ -324,7 +399,8 @@ impl ArtifactStorageClient {
         // 5. Commit by reference. The server re-verifies identity by reading chunks back.
         let commit_files: Vec<CommitFileWire> = chunked
             .iter()
-            .map(|f| CommitFileWire {
+            .enumerate()
+            .map(|(i, f)| CommitFileWire {
                 path: f.repo_path.clone(),
                 chunks: f
                     .chunks
@@ -334,6 +410,7 @@ impl ArtifactStorageClient {
                         size: *s,
                     })
                     .collect(),
+                file_token: file_tokens[i].clone(),
             })
             .collect();
         let body = CommitWire {
@@ -405,6 +482,7 @@ impl ArtifactStorageClient {
         Ok(missing)
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn put_chunk_frame(
         &self,
         project_id: &str,
@@ -412,19 +490,38 @@ impl ArtifactStorageClient {
         git_username: &str,
         git_token: &str,
         session_id: &str,
+        file: Option<(&str, u64, u64)>,
         frame: Vec<u8>,
     ) -> Result<(), SdkError> {
+        let suffix = match file {
+            None => format!("ingest/sessions/{session_id}/chunks"),
+            Some((token, total, offset)) => format!(
+                "ingest/sessions/{session_id}/chunks?file={token}&file_total={total}&file_offset={offset}"
+            ),
+        };
         let (req, _t) = self.git_request(
             Method::PUT,
             project_id,
             repo,
-            Some(&format!("ingest/sessions/{session_id}/chunks")),
+            Some(&suffix),
             git_username,
             git_token,
         )?;
         let resp = req.body(frame).send().await?;
         expect_ok(resp).await
     }
+}
+
+/// Payload bytes (sum of chunk data lengths) inside a well-formed frame buffer.
+fn frame_payload_bytes(frame: &[u8]) -> u64 {
+    let mut cursor = frame;
+    let mut total = 0u64;
+    while cursor.len() >= 36 {
+        let len = u32::from_be_bytes(cursor[32..36].try_into().expect("sized")) as u64;
+        total += len;
+        cursor = &cursor[36 + len as usize..];
+    }
+    total
 }
 
 fn hex_lower(h: &[u8; 32]) -> String {
