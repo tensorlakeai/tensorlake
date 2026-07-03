@@ -1,0 +1,26 @@
+[package]
+name = "gsvc-codec"
+version.workspace = true
+# Vendored verbatim from artifact_storage, which targets edition 2021 (not tensorlake's edition 2024).
+# Pinned explicitly to keep this a byte-for-byte-diffable copy of the upstream crate.
+edition = "2021"
+license.workspace = true
+description = "git object & packfile codec (hashing, pack v2 read/write with delta resolution, idx v2)"
+
+[dependencies]
+parking_lot.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+bytes.workspace = true
+sha1.workspace = true
+sha2.workspace = true
+flate2.workspace = true
+crc32fast.workspace = true
+rayon.workspace = true
+hex.workspace = true
+tempfile.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+futures.workspace = true

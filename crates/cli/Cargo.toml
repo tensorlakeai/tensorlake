@@ -51,6 +51,9 @@ hex = { workspace = true }
 rand = { workspace = true }
 shlex = { workspace = true }
 rustpython-parser = "0.3"
+gsvc-codec = { workspace = true }
+flate2 = { workspace = true }
+sha1 = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use comfy_table::Cell;
 use console::style;
 use tensorlake::artifact_storage::ArtifactStorageClient;
@@ -9,6 +11,10 @@ use tensorlake::{ClientBuilder, Sdk};
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
+
+mod fastclone;
+
+pub use fastclone::parse_cache_max_bytes;
 
 pub fn repo_url(ctx: &CliContext, repo: &str) -> Result<String> {
     let client = artifact_storage_client(ctx)?;
@@ -140,6 +146,42 @@ pub async fn restore_repo(ctx: &CliContext, repo: &str) -> Result<()> {
         .await
         .map_err(map_sdk_error)?;
     println!("restored {repo}");
+    Ok(())
+}
+
+pub async fn clone_repo(
+    ctx: &CliContext,
+    repo: &str,
+    dest: Option<PathBuf>,
+    cache_dir: Option<PathBuf>,
+    cache_max_bytes: Option<u64>,
+    no_checkout: bool,
+) -> Result<()> {
+    let project_id = project_id(ctx)?;
+    let client = artifact_storage_client(ctx)?;
+    let repo_url = client.git_repo_url(&project_id, repo);
+    let credential = client
+        .mint_token_for_repo(&project_id, Some(repo))
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner();
+    let dest = dest.unwrap_or_else(|| fastclone::default_dest_from_url(&repo_url));
+    let opts = fastclone::FastCloneOptions {
+        repo_url: repo_url.clone(),
+        dest,
+        cache_dir,
+        cache_max_bytes,
+        credential: Some(fastclone::BasicAuth {
+            username: credential.git_username,
+            password: Some(credential.token),
+        }),
+        checkout: !no_checkout,
+    };
+    let stats = fastclone::fast_clone(opts).await?;
+    println!(
+        "{}",
+        fastclone::format_fast_clone_stats(&format!("cloned {repo}"), &stats)
+    );
     Ok(())
 }
 
