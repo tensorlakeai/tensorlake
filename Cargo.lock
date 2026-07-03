@@ -1193,7 +1193,7 @@ dependencies = [
 
 [[package]]
 name = "gsvc-codec"
-version = "0.5.55"
+version = "0.5.56"
 dependencies = [
  "bytes",
  "crc32fast",
@@ -3305,7 +3305,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.55"
+version = "0.5.56"
 dependencies = [
  "base64",
  "bollard",
@@ -3349,7 +3349,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.55"
+version = "0.5.56"
 dependencies = [
  "anyhow",
  "base64",
@@ -3396,7 +3396,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.55"
+version = "0.5.56"
 dependencies = [
  "napi",
  "napi-build",
@@ -3410,7 +3410,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.55"
+version = "0.5.56"
 dependencies = [
  "futures",
  "pyo3",
