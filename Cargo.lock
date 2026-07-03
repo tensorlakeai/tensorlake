@@ -3552,6 +3552,7 @@ dependencies = [
  "hex",
  "http-body-util",
  "indicatif",
+ "libc",
  "minijinja",
  "open",
  "rand 0.9.4",
@@ -3570,6 +3571,7 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml",
+ "tracing",
  "url",
  "urlencoding",
 ]

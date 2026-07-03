@@ -67,14 +67,23 @@ impl WorkspaceFuse {
         WorkspaceFuse { fs, rt }
     }
 
-    /// Mount and serve until unmounted. Blocks the calling thread.
-    pub fn run(self, mountpoint: &Path) -> std::io::Result<()> {
+    /// Establish the kernel mount (fails fast when FUSE is unavailable), then serve until
+    /// unmounted. `mounted` fires exactly once, after the session exists — the daemon publishes
+    /// its control socket only then, so `tl fs mount` can't observe a live socket for a mount
+    /// that never attached.
+    pub fn run(
+        self,
+        mountpoint: &Path,
+        mounted: tokio::sync::oneshot::Sender<()>,
+    ) -> std::io::Result<()> {
         let options = vec![
             fuser::MountOption::FSName("tlfs".to_string()),
             fuser::MountOption::DefaultPermissions,
             fuser::MountOption::NoAtime,
         ];
-        fuser::mount2(self, mountpoint, &options)
+        let mut session = fuser::Session::new(self, mountpoint, &options)?;
+        let _ = mounted.send(());
+        session.run()
     }
 }
 

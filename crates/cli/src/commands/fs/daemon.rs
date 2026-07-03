@@ -165,7 +165,7 @@ async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     )
     .await
     .map_err(|e| CliError::usage(format!("mount init: {e}")))?;
-    gsvc_mount::spawn_ref_watcher(core.clone());
+    gsvc_mount::spawn_ref_watcher(&core, || {});
     let overlay = OverlayFs::new(core.clone(), state_dir)
         .map_err(|e| CliError::usage(format!("overlay init: {e}")))?;
 
@@ -217,11 +217,30 @@ async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         });
     }
 
-    // Control socket.
+    // The FUSE session must attach before the control socket exists: the socket answering is
+    // what `tl fs mount` treats as success.
+    let (mounted_tx, mounted_rx) = tokio::sync::oneshot::channel();
+    let fuse =
+        super::fusefs::WorkspaceFuse::new(overlay.clone(), tokio::runtime::Handle::current());
+    let mountpoint = state.mountpoint.clone();
+    let mp = mountpoint.clone();
+    let served = tokio::task::spawn_blocking(move || fuse.run(&mp, mounted_tx));
+    if mounted_rx.await.is_err() {
+        // Session establishment failed; surface the real error.
+        return match served.await {
+            Ok(Ok(())) => Err(CliError::usage("fuse session ended before mounting")),
+            Ok(Err(e)) => Err(CliError::usage(format!(
+                "fuse mount failed: {e}. On macOS, approve the macFUSE kernel extension in \
+                 System Settings -> Privacy & Security (a reboot may be required)."
+            ))),
+            Err(e) => Err(CliError::usage(format!("fuse thread: {e}"))),
+        };
+    }
+
+    // Control socket (mount is live).
     let sock_path = control_socket(state_dir);
     let _ = std::fs::remove_file(&sock_path);
     let listener = tokio::net::UnixListener::bind(&sock_path)?;
-    let mountpoint = state.mountpoint.clone();
     {
         let overlay = overlay.clone();
         let core = core.clone();
@@ -276,10 +295,8 @@ async fn run_fuse(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         });
     }
 
-    // The FUSE session blocks a dedicated thread until the mountpoint is unmounted.
-    let fuse = super::fusefs::WorkspaceFuse::new(overlay, tokio::runtime::Handle::current());
-    let mp = mountpoint.clone();
-    let served = tokio::task::spawn_blocking(move || fuse.run(&mp)).await;
+    // Serve until the kernel unmounts us.
+    let served = served.await;
     let _ = std::fs::remove_file(&sock_path);
     match served {
         Ok(Ok(())) => Ok(()),

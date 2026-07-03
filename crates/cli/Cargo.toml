@@ -53,6 +53,8 @@ shlex = { workspace = true }
 rustpython-parser = "0.3"
 gsvc-codec = { workspace = true }
 gsvc-mount = { workspace = true }
+libc = "0.2"
+tracing = { workspace = true }
 flate2 = { workspace = true }
 sha1 = { workspace = true }
 
