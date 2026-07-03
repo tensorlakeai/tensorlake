@@ -1643,7 +1643,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
         }
         Commands::Fs(subcmd) => {
             ensure_auth_and_project(ctx).await?;
-            match subcmd {
+            let result = match subcmd {
                 FsCommands::Create { name, json } => commands::fs::create(ctx, &name, json).await,
                 FsCommands::Ls { json } => commands::fs::list(ctx, json).await,
                 FsCommands::Rm { name } => commands::fs::remove(ctx, &name).await,
@@ -1679,7 +1679,21 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 FsCommands::Workspaces { file_system, json } => {
                     commands::fs::workspaces(ctx, &file_system, json).await
                 }
+            };
+            // A cached minted git credential can be revoked before its recorded expiry; purge
+            // the cache on an auth failure so the next invocation re-mints instead of retrying
+            // a dead token.
+            if let Err(
+                CliError::Auth(_)
+                | CliError::Sdk(
+                    tensorlake::error::SdkError::Authentication(_)
+                    | tensorlake::error::SdkError::Authorization(_),
+                ),
+            ) = &result
+            {
+                crate::config::files::purge_git_credentials();
             }
+            result
         }
         Commands::SshKeys(subcmd) => {
             // SSH keys live on the user, not on a project — only auth (PAT or

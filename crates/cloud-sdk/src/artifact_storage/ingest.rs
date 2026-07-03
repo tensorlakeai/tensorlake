@@ -107,6 +107,9 @@ pub struct PushReport {
     /// Chunks the server lacked at first negotiation (uploaded by this push).
     pub chunks_uploaded: usize,
     pub bytes_uploaded: u64,
+    /// Client-computed git blob oid per file (`(repo_path, hex oid)`), from the chunk pass.
+    /// Deletes carry an empty oid.
+    pub file_blob_oids: Vec<(String, String)>,
 }
 
 #[derive(Deserialize)]
@@ -177,25 +180,35 @@ struct ChunkedFile {
     chunks: Vec<([u8; 32], u32)>,
     mode: Option<u32>,
     delete: bool,
+    blob_oid: String,
 }
 
+/// One streaming pass over the source produces both the CDC chunk list and the git blob oid
+/// (`sha1("blob <len>\0" + bytes)`), so callers never read a file once for identity and again
+/// for chunking.
 fn chunk_source(
     source: &PushSource,
     min: usize,
     avg: usize,
     max: usize,
-) -> Result<Vec<([u8; 32], u32)>, SdkError> {
+) -> Result<(Vec<([u8; 32], u32)>, String), SdkError> {
+    let len: u64 = match source {
+        PushSource::Path(p) => std::fs::metadata(p).map_err(io_err)?.len(),
+        PushSource::Bytes(b) => b.len() as u64,
+    };
     let reader: Box<dyn Read> = match source {
         PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
         PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
     };
+    let mut blob_hasher = gsvc_codec::BlobOidHasher::new(len);
     let mut out = Vec::new();
     for chunk in fastcdc::v2020::StreamCDC::new(reader, min as u32, avg as u32, max as u32) {
         let chunk = chunk.map_err(|e| SdkError::ClientError(format!("chunking failed: {e}")))?;
         let hash: [u8; 32] = Sha256::digest(&chunk.data).into();
+        blob_hasher.update(&chunk.data);
         out.push((hash, chunk.data.len() as u32));
     }
-    Ok(out)
+    Ok((out, blob_hasher.finalize().to_hex()))
 }
 
 fn io_err(e: std::io::Error) -> SdkError {
@@ -232,30 +245,55 @@ impl ArtifactStorageClient {
         )?;
         let session: IngestSessionWire = expect_json(req.send().await?).await?;
 
-        // 2. Chunk + hash every file locally (streaming; data dropped after hashing).
-        let mut chunked = Vec::with_capacity(files.len());
-        let (mut total_chunks, mut total_bytes) = (0usize, 0u64);
-        for f in files {
-            let chunks = if f.delete {
-                Vec::new()
-            } else {
-                chunk_source(
-                    &f.source,
-                    session.cdc_min_bytes,
-                    session.cdc_avg_bytes,
-                    session.cdc_max_bytes,
-                )?
-            };
-            total_chunks += chunks.len();
-            total_bytes += chunks.iter().map(|(_, s)| *s as u64).sum::<u64>();
-            chunked.push(ChunkedFile {
-                repo_path: f.repo_path,
-                source: f.source,
-                chunks,
-                mode: f.mode,
-                delete: f.delete,
-            });
-        }
+        // 2. Chunk + hash every file locally: one streaming pass per file yields the CDC chunk
+        //    list and the git blob oid together, files fanned across blocking threads.
+        let (min, avg, max) = (
+            session.cdc_min_bytes,
+            session.cdc_avg_bytes,
+            session.cdc_max_bytes,
+        );
+        let hash_parallelism = std::thread::available_parallelism()
+            .map(|n| n.get().min(8))
+            .unwrap_or(4);
+        let chunked: Vec<ChunkedFile> = {
+            use futures::StreamExt as _;
+            type ChunkResult = Result<ChunkedFile, SdkError>;
+            let results: Vec<ChunkResult> =
+                futures::stream::iter(files.into_iter().map(|f| async move {
+                    if f.delete {
+                        return Ok(ChunkedFile {
+                            repo_path: f.repo_path,
+                            source: f.source,
+                            chunks: Vec::new(),
+                            mode: f.mode,
+                            delete: true,
+                            blob_oid: String::new(),
+                        });
+                    }
+                    tokio::task::spawn_blocking(move || {
+                        let (chunks, blob_oid) = chunk_source(&f.source, min, avg, max)?;
+                        Ok(ChunkedFile {
+                            repo_path: f.repo_path,
+                            source: f.source,
+                            chunks,
+                            mode: f.mode,
+                            delete: false,
+                            blob_oid,
+                        })
+                    })
+                    .await
+                    .map_err(|e| SdkError::ClientError(format!("chunking task failed: {e}")))?
+                }))
+                .buffered(hash_parallelism)
+                .collect()
+                .await;
+            results.into_iter().collect::<Result<_, _>>()?
+        };
+        let total_chunks: usize = chunked.iter().map(|f| f.chunks.len()).sum();
+        let total_bytes: u64 = chunked
+            .iter()
+            .flat_map(|f| f.chunks.iter().map(|(_, s)| *s as u64))
+            .sum();
         emit(PushEvent::Hashed {
             files: chunked.len(),
             chunks: total_chunks,
@@ -361,63 +399,74 @@ impl ArtifactStorageClient {
             file_tokens[i] = Some(token);
         }
 
-        // Dedup path for everything else: only chunks the server lacks, shared frames.
-        let mut frame = Vec::with_capacity(opts.upload_batch_bytes + 64);
-        let mut frame_chunks = 0usize;
-        for file in &chunked {
-            if to_upload.is_empty() {
-                break;
-            }
-            let mut reader: Box<dyn Read> = match &file.source {
-                PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
-                PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
-            };
-            for (hash, size) in &file.chunks {
-                let mut data = vec![0u8; *size as usize];
-                reader.read_exact(&mut data).map_err(io_err)?;
-                if !to_upload.remove(hash) {
-                    continue;
+        // Dedup path for everything else: only chunks the server lacks, shared frames. Frames
+        // are order-independent (unlike tokened file streams), so keep a few uploads in flight
+        // while the next frame is still being read and assembled.
+        const DEDUP_UPLOADS_IN_FLIGHT: usize = 3;
+        {
+            use futures::StreamExt as _;
+            let mut inflight = futures::stream::FuturesUnordered::new();
+            let mut frame = Vec::with_capacity(opts.upload_batch_bytes + 64);
+            let mut frame_chunks = 0usize;
+            for file in &chunked {
+                if to_upload.is_empty() {
+                    break;
                 }
-                frame.extend_from_slice(hash);
-                frame.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                frame.extend_from_slice(&data);
-                frame_chunks += 1;
-                uploaded_chunks += 1;
-                uploaded_bytes += data.len() as u64;
-                if frame.len() >= opts.upload_batch_bytes {
-                    self.put_chunk_frame(
-                        project_id,
-                        repo,
-                        git_username,
-                        git_token,
-                        &session.session_id,
-                        None,
-                        std::mem::take(&mut frame),
-                    )
-                    .await?;
-                    emit(PushEvent::UploadedBatch {
-                        chunks: frame_chunks,
-                        bytes: uploaded_bytes,
-                    });
-                    frame_chunks = 0;
+                let mut reader: Box<dyn Read> = match &file.source {
+                    PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
+                    PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+                };
+                for (hash, size) in &file.chunks {
+                    let mut data = vec![0u8; *size as usize];
+                    reader.read_exact(&mut data).map_err(io_err)?;
+                    if !to_upload.remove(hash) {
+                        continue;
+                    }
+                    frame.extend_from_slice(hash);
+                    frame.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                    frame.extend_from_slice(&data);
+                    frame_chunks += 1;
+                    uploaded_chunks += 1;
+                    uploaded_bytes += data.len() as u64;
+                    if frame.len() >= opts.upload_batch_bytes {
+                        inflight.push(self.put_chunk_frame(
+                            project_id,
+                            repo,
+                            git_username,
+                            git_token,
+                            &session.session_id,
+                            None,
+                            std::mem::take(&mut frame),
+                        ));
+                        emit(PushEvent::UploadedBatch {
+                            chunks: frame_chunks,
+                            bytes: uploaded_bytes,
+                        });
+                        frame_chunks = 0;
+                        if inflight.len() >= DEDUP_UPLOADS_IN_FLIGHT {
+                            inflight.next().await.expect("inflight upload present")?;
+                        }
+                    }
                 }
             }
-        }
-        if !frame.is_empty() {
-            self.put_chunk_frame(
-                project_id,
-                repo,
-                git_username,
-                git_token,
-                &session.session_id,
-                None,
-                frame,
-            )
-            .await?;
-            emit(PushEvent::UploadedBatch {
-                chunks: frame_chunks,
-                bytes: uploaded_bytes,
-            });
+            if !frame.is_empty() {
+                inflight.push(self.put_chunk_frame(
+                    project_id,
+                    repo,
+                    git_username,
+                    git_token,
+                    &session.session_id,
+                    None,
+                    frame,
+                ));
+                emit(PushEvent::UploadedBatch {
+                    chunks: frame_chunks,
+                    bytes: uploaded_bytes,
+                });
+            }
+            while let Some(done) = inflight.next().await {
+                done?;
+            }
         }
 
         // 5. Commit by reference. The server re-verifies identity by reading chunks back.
@@ -476,6 +525,10 @@ impl ArtifactStorageClient {
                 chunks_total: distinct.len(),
                 chunks_uploaded: uploaded_chunks,
                 bytes_uploaded: uploaded_bytes,
+                file_blob_oids: chunked
+                    .into_iter()
+                    .map(|f| (f.repo_path, f.blob_oid))
+                    .collect(),
             },
         ))
     }
@@ -590,9 +643,14 @@ mod tests {
     fn chunking_is_deterministic_and_frames_are_well_formed() {
         let data: Vec<u8> = (0..3_000_000usize).map(|i| (i % 251) as u8).collect();
         let src = PushSource::Bytes(data.clone());
-        let a = chunk_source(&src, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024).unwrap();
-        let b = chunk_source(&src, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024).unwrap();
+        let (a, oid_a) = chunk_source(&src, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024).unwrap();
+        let (b, oid_b) = chunk_source(&src, 256 * 1024, 1024 * 1024, 4 * 1024 * 1024).unwrap();
         assert_eq!(a, b, "CDC must be deterministic across passes");
+        assert_eq!(oid_a, oid_b, "blob oid must be deterministic");
+        // The single-pass blob oid must equal a straight git blob hash of the same bytes.
+        let mut reference = gsvc_codec::BlobOidHasher::new(data.len() as u64);
+        reference.update(&data);
+        assert_eq!(oid_a, reference.finalize().to_hex());
         assert_eq!(
             a.iter().map(|(_, s)| *s as usize).sum::<usize>(),
             data.len(),

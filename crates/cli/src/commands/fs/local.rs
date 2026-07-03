@@ -52,12 +52,15 @@ pub type Manifest = BTreeMap<String, ManifestEntry>;
 /// One local change discovered by a dirty scan.
 #[derive(Clone, Debug)]
 pub enum Change {
-    /// Added or modified: `(repo path, absolute path, mode, blob oid, size, mtime_ms)`.
+    /// Added or modified: `(repo path, absolute path, mode, blob oid, size, mtime_ms)`. The
+    /// oid is computed only when a manifest entry exists to compare against (to filter
+    /// touched-but-unchanged files); new files skip the extra read and take their oid from the
+    /// push report.
     Upsert {
         path: String,
         abs: PathBuf,
         mode: u32,
-        oid: String,
+        oid: Option<String>,
         size: u64,
         mtime_ms: u64,
     },
@@ -183,19 +186,18 @@ pub fn scan_dirty(root: &Path, manifest: &Manifest) -> Result<Vec<Change>> {
                         path: path.clone(),
                         abs: abs.clone(),
                         mode: *mode,
-                        oid,
+                        oid: Some(oid),
                         size: *size,
                         mtime_ms: *mtime,
                     });
                 }
             }
             None => {
-                let oid = blob_oid(abs, *mode)?;
                 changes.push(Change::Upsert {
                     path: path.clone(),
                     abs: abs.clone(),
                     mode: *mode,
-                    oid,
+                    oid: None,
                     size: *size,
                     mtime_ms: *mtime,
                 });

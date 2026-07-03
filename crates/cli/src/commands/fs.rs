@@ -60,10 +60,40 @@ impl FsSession {
                 },
             });
         }
+        // Minted tokens are short-lived but not per-command: cache them under the CLI's global
+        // config dir (same convention as the PAT) so each `tl fs` invocation doesn't pay a
+        // platform mint round trip.
+        let scope = repo.unwrap_or("*");
+        if let Some((username, token, expires_at)) =
+            crate::config::files::load_git_credential(&ctx.api_url, &project_id, scope)
+        {
+            return Ok(FsSession {
+                client,
+                project_id,
+                credential: GitCredential {
+                    token,
+                    token_type: "bearer".to_string(),
+                    expires_at,
+                    git_username: username,
+                    repo_pattern: scope.to_string(),
+                    scopes: Vec::new(),
+                },
+            });
+        }
         let credential = client
             .mint_token_for_repo(&project_id, repo)
             .await?
             .into_inner();
+        if let Err(e) = crate::config::files::save_git_credential(
+            &ctx.api_url,
+            &project_id,
+            scope,
+            &credential.git_username,
+            &credential.token,
+            &credential.expires_at,
+        ) {
+            eprintln!("warning: could not cache git credential: {e}");
+        }
         Ok(FsSession {
             client,
             project_id,
@@ -414,12 +444,26 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
         match change {
             Change::Upsert {
                 path: p, abs, mode, ..
-            } => files.push(PushFile {
-                repo_path: p.clone(),
-                source: PushSource::Path(abs.clone()),
-                mode: Some(*mode),
-                delete: false,
-            }),
+            } => {
+                // A symlink's blob content is its target path; reading through `abs` would
+                // upload the target file's bytes instead.
+                let source = if *mode == 0o120000 {
+                    PushSource::Bytes(
+                        std::fs::read_link(abs)?
+                            .to_string_lossy()
+                            .into_owned()
+                            .into_bytes(),
+                    )
+                } else {
+                    PushSource::Path(abs.clone())
+                };
+                files.push(PushFile {
+                    repo_path: p.clone(),
+                    source,
+                    mode: Some(*mode),
+                    delete: false,
+                });
+            }
             Change::Delete { path: p } => files.push(PushFile {
                 repo_path: p.clone(),
                 source: PushSource::Bytes(Vec::new()),
@@ -452,7 +496,13 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
         .await?
         .into_inner();
 
-    // Fold the observed changes into the manifest with the freshness we hashed at.
+    // Fold the observed changes into the manifest with the freshness we hashed at. New files
+    // skipped the pre-hash read; their oids come from the push's single chunk pass.
+    let pushed_oids: std::collections::HashMap<&str, &str> = report
+        .file_blob_oids
+        .iter()
+        .map(|(p, o)| (p.as_str(), o.as_str()))
+        .collect();
     for change in changes {
         match change {
             Change::Upsert {
@@ -463,6 +513,13 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
                 mtime_ms,
                 ..
             } => {
+                let oid = match oid {
+                    Some(oid) => oid,
+                    None => pushed_oids
+                        .get(p.as_str())
+                        .map(|o| o.to_string())
+                        .unwrap_or_default(),
+                };
                 manifest.insert(
                     p,
                     local::ManifestEntry {
@@ -508,23 +565,41 @@ pub async fn promote(
         );
     }
     let (user, token) = session.creds();
-    let resp = session
-        .client
-        .workspace_promote(
-            &session.project_id,
-            &state.repo,
-            user,
-            token,
-            &state.workspace_id,
-            &PromoteWorkspaceRequest {
-                branch: branch.to_string(),
-                expect_oid: None,
-                full_history,
-                message: message.map(str::to_string),
-            },
-        )
-        .await?
-        .into_inner();
+    let request = PromoteWorkspaceRequest {
+        branch: branch.to_string(),
+        expect_oid: None,
+        full_history,
+        message: message.map(str::to_string),
+    };
+    // A squash promote reads the snapshot's commit-index row, which materializes asynchronously
+    // after the snapshot publishes; a promote issued right behind a snapshot can land in that
+    // window. The server signals it with 425 Too Early — poll it out.
+    let resp = {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            match session
+                .client
+                .workspace_promote(
+                    &session.project_id,
+                    &state.repo,
+                    user,
+                    token,
+                    &state.workspace_id,
+                    &request,
+                )
+                .await
+            {
+                Ok(resp) => break resp.into_inner(),
+                Err(tensorlake::error::SdkError::ServerError { status, message })
+                    if status.as_u16() == 425 && std::time::Instant::now() < deadline =>
+                {
+                    let _ = message;
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    };
     println!(
         "Promoted workspace {} -> {} at {}{}",
         short_id(&state.workspace_id),

@@ -11,6 +11,7 @@ documentation = "https://docs.rs/tensorlake"
 
 [dependencies]
 fastcdc = { workspace = true }
+gsvc-codec = { workspace = true }
 bytes = { workspace = true }
 base64 = { workspace = true }
 bollard = { workspace = true }

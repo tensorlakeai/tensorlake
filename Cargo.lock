@@ -3319,6 +3319,7 @@ dependencies = [
  "fastcdc",
  "flate2",
  "futures",
+ "gsvc-codec",
  "hex",
  "ignore",
  "pin-project-lite",
