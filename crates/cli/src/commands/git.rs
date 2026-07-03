@@ -432,6 +432,144 @@ fn parse_remote_message(raw: &str) -> String {
         .unwrap_or_else(|| raw.to_string())
 }
 
+/// `tl git push` — resumable chunked push of local files as one commit, no local git required.
+/// Retrying after any failure is safe and cheap: the client re-negotiates and uploads only what
+/// the server still lacks.
+pub async fn push(
+    ctx: &CliContext,
+    repo: &str,
+    branch: &str,
+    message: &str,
+    expect_oid: Option<String>,
+    paths: Vec<std::path::PathBuf>,
+    output_json: bool,
+) -> Result<()> {
+    use tensorlake::artifact_storage::ingest::{PushEvent, PushOptions};
+
+    let project_id = project_id(ctx)?;
+    let client = artifact_storage_client(ctx)?;
+    let credential = client
+        .mint_token_for_repo(&project_id, Some(repo))
+        .await?
+        .into_inner();
+
+    // Collect files: directories recurse; repo paths are relative to the CWD (or to the
+    // directory itself for its children), normalized to forward slashes.
+    let mut files = Vec::new();
+    for path in &paths {
+        collect_push_files(path, path, &mut files)?;
+    }
+    if files.is_empty() {
+        return Err(crate::error::CliError::Usage(
+            "no files found under the given paths".to_string(),
+        ));
+    }
+
+    let bar = indicatif::ProgressBar::new_spinner();
+    bar.set_message("chunking...");
+    let bar_for_events = bar.clone();
+    let opts = PushOptions {
+        branch: branch.to_string(),
+        message: message.to_string(),
+        base: None,
+        expect_oid,
+        progress: Some(std::sync::Arc::new(move |ev: PushEvent| match ev {
+            PushEvent::Hashed {
+                files,
+                chunks,
+                bytes,
+            } => bar_for_events.set_message(format!(
+                "hashed {files} files ({chunks} chunks, {bytes} bytes); negotiating..."
+            )),
+            PushEvent::Negotiated { missing, total } => bar_for_events.set_message(format!(
+                "server lacks {missing}/{total} chunks; uploading..."
+            )),
+            PushEvent::UploadedBatch { chunks, bytes } => {
+                bar_for_events.set_message(format!("uploaded {chunks} chunks ({bytes} bytes)..."))
+            }
+            PushEvent::Committed { ref_name, .. } => {
+                bar_for_events.set_message(format!("committed to {ref_name}"))
+            }
+        })),
+        ..Default::default()
+    };
+    let report = client
+        .push_files(
+            &project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+            files,
+            opts,
+        )
+        .await?
+        .into_inner();
+    bar.finish_and_clear();
+
+    if output_json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "commit": report.commit,
+                "tree": report.tree,
+                "ref": report.ref_name,
+                "created": report.created,
+                "files": report.files,
+                "bytes_total": report.bytes_total,
+                "chunks_total": report.chunks_total,
+                "chunks_uploaded": report.chunks_uploaded,
+                "bytes_uploaded": report.bytes_uploaded,
+            })
+        );
+    } else {
+        let deduped = report.chunks_total - report.chunks_uploaded;
+        println!(
+            "{} {} -> {} ({} files, {} of {} chunks uploaded, {} deduplicated, {} bytes on the wire)",
+            console::style("pushed").green().bold(),
+            report.commit,
+            report.ref_name,
+            report.files,
+            report.chunks_uploaded,
+            report.chunks_total,
+            deduped,
+            report.bytes_uploaded,
+        );
+    }
+    Ok(())
+}
+
+fn collect_push_files(
+    root: &std::path::Path,
+    path: &std::path::Path,
+    out: &mut Vec<tensorlake::artifact_storage::ingest::PushFile>,
+) -> Result<()> {
+    use tensorlake::artifact_storage::ingest::{PushFile, PushSource};
+    let meta = std::fs::metadata(path)?;
+    if meta.is_dir() {
+        let mut entries: Vec<_> = std::fs::read_dir(path)?.collect::<std::io::Result<_>>()?;
+        entries.sort_by_key(|e| e.file_name());
+        for entry in entries {
+            let name = entry.file_name();
+            // Never traverse into VCS metadata.
+            if name == ".git" {
+                continue;
+            }
+            collect_push_files(root, &entry.path(), out)?;
+        }
+        return Ok(());
+    }
+    let repo_path = path
+        .strip_prefix(root.parent().unwrap_or(root))
+        .unwrap_or(path)
+        .to_string_lossy()
+        .replace('\\', "/");
+    out.push(PushFile {
+        repo_path,
+        source: PushSource::Path(path.to_path_buf()),
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

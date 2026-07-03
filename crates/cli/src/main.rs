@@ -305,6 +305,27 @@ enum GitCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Push local files to a repo as one commit (resumable chunk upload; no local git needed)
+    Push {
+        /// Repo name
+        #[arg(long)]
+        repo: String,
+        /// Target branch
+        #[arg(long, default_value = "main")]
+        branch: String,
+        /// Commit message
+        #[arg(short, long, default_value = "tl push")]
+        message: String,
+        /// Force-with-lease: require the branch to currently equal this commit oid
+        #[arg(long)]
+        expect_oid: Option<String>,
+        /// Files or directories to push (directories recurse; repo paths are relative to CWD)
+        #[arg(required = true)]
+        paths: Vec<std::path::PathBuf>,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// List repos in the current project
     #[command(alias = "list")]
     Ls {
@@ -2053,6 +2074,14 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
         GitCommands::Token { repo, json } => {
             commands::git::mint_token(ctx, repo.as_deref(), json).await
         }
+        GitCommands::Push {
+            repo,
+            branch,
+            message,
+            expect_oid,
+            paths,
+            json,
+        } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, paths, json).await,
         GitCommands::Url { repo } => {
             println!("{}", commands::git::repo_url(ctx, &repo)?);
             Ok(())
