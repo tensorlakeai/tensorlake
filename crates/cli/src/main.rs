@@ -1462,6 +1462,19 @@ async fn main() {
             CliError::Cancelled => std::process::exit(1),
             _ => {
                 eprintln!("Error: {}", e);
+                // Walk the source chain: wrapped errors like reqwest's hide the
+                // root cause (DNS failure, connection refused, TLS, timeout)
+                // behind Display and only expose it via source().
+                let mut prev = e.to_string();
+                let mut source = std::error::Error::source(&e);
+                while let Some(cause) = source {
+                    let msg = cause.to_string();
+                    if !prev.contains(&msg) {
+                        eprintln!("  Caused by: {}", msg);
+                        prev = msg;
+                    }
+                    source = cause.source();
+                }
                 if ctx.debug {
                     eprintln!("\nDebug info:");
                     eprintln!("  {:?}", e);
