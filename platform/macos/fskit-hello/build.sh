@@ -35,7 +35,7 @@ echo "== assembling bundles =="
 cp "$ROOT/Resources/App-Info.plist"   "$APP/Contents/Info.plist"
 cp "$ROOT/Resources/Appex-Info.plist" "$APPEX/Contents/Info.plist"
 
-PROFILE="${TLFS_PROVISIONING_PROFILE:-$HOME/Downloads/tlfsfsmoduledev.provisionprofile}"
+PROFILE="${TLFS_PROVISION_PROFILE:-$HOME/Downloads/tlfsfsmoduledev.provisionprofile}"
 if [[ -f "$PROFILE" ]]; then
     echo "== embedding provisioning profile ($PROFILE) =="
     cp "$PROFILE" "$APPEX/Contents/embedded.provisionprofile"

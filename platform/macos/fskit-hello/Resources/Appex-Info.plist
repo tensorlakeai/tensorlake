@@ -28,8 +28,6 @@
 	<string>26.0</string>
 	<key>EXAppExtensionAttributes</key>
 	<dict>
-		<key>EXExtensionPrincipalClass</key>
-		<string>TLFSHelloFileSystem</string>
 		<key>EXExtensionPointIdentifier</key>
 		<string>com.apple.fskit.fsmodule</string>
 		<key>EXExtensionPrincipalClass</key>

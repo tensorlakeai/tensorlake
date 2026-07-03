@@ -44,9 +44,13 @@ functionally mandatory.
 
 ## Hard-won mechanics (do not rediscover)
 
-- Entry point: `@main final class X: UnaryFileSystemExtension { let fileSystem = … }`
-  — no `EXExtensionMain`, `EXExtensionPrincipalClass` optional. Build the appex
-  binary with `-parse-as-library`.
+- Entry point (validated config, mirrors Apple's msdos/exfat/ftp modules): NO
+  Swift `@main`. Link the appex binary with `-parse-as-library -Xlinker -e
+  -Xlinker _NSExtensionMain` and set `EXExtensionPrincipalClass` to the
+  `FSUnaryFileSystem` subclass, pinned with `@objc(ClassName)`. The
+  `@main … UnaryFileSystemExtension` path launches and creates its FSMachPort
+  but the process exits before fskit_agent can fetch the listener endpoint
+  (NSCocoaErrorDomain 4099 → "Couldn't communicate with a helper application").
 - Appex embeds under `App.app/Contents/Extensions/*.appex` (ExtensionKit, not PlugIns).
 - Registration: `lsregister -f App.app` FIRST, then `pluginkit -a <appex>`,
   `pluginkit -e use -i <bundle id>`. Re-run after every rebuild.
