@@ -6,10 +6,17 @@
 //! after their bases are installed, writes refs, and checks out the requested HEAD. After that, the
 //! checkout uses ordinary `git fetch` / `git push` against the original remote.
 //!
+//! Pack/idx downloads (`ensure_cached_artifact`) resume via HTTP Range from a deterministic
+//! `.partial` cache file, so a dropped connection partway through a multi-GB pack doesn't lose all
+//! prior progress — see [`partial_path`]. Large-blob downloads (`ensure_loose_blob_cached`) are
+//! *not* resumable: they re-encode the downloaded bytes into a loose-object zlib stream on the fly,
+//! and appending new compressed data after a partial write would produce a corrupt stream.
+//!
 //! Vendored from `artifact_storage` (`crates/gsvc-server/src/fastclone.rs` and the
-//! `FastCloneManifest` wire types in `crates/gsvc-server/src/service.rs`). If the manifest format or
-//! client behavior changes upstream, open a companion PR here to keep this copy in sync — see the
-//! note in that repo's `AGENTS.md`.
+//! `FastCloneManifest` wire types in `crates/gsvc-server/src/service.rs`), which does not have the
+//! Range-resume behavior described above — that's an addition made here, not upstream. If the
+//! manifest format or client behavior changes upstream, open a companion PR here to keep this copy
+//! in sync — see the note in that repo's `AGENTS.md`.
 
 use std::collections::HashSet;
 use std::fs;
@@ -384,6 +391,18 @@ async fn get_json<T: serde::de::DeserializeOwned>(ctx: &HttpCtx, url: Url) -> Re
     })
 }
 
+/// The resumable download's staging path: deterministic (not per-process/random) so a later
+/// invocation can find and resume a partial download via HTTP Range instead of restarting a
+/// multi-GB transfer from byte 0.
+fn partial_path(path: &Path) -> PathBuf {
+    let mut name = path
+        .file_name()
+        .map(|n| n.to_os_string())
+        .unwrap_or_default();
+    name.push(".partial");
+    path.with_file_name(name)
+}
+
 async fn ensure_cached_artifact<F>(
     ctx: &HttpCtx,
     url: Url,
@@ -417,24 +436,68 @@ where
         fs::create_dir_all(parent)
             .with_context(|| format!("create cache parent {}", parent.display()))?;
     }
-    let tmp = path.with_extension(format!(
-        "tmp-{}-{}",
-        std::process::id(),
-        SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-    ));
-    let mut resp = authed_get(ctx, url.clone()).send().await?;
+    let tmp = partial_path(path);
+
+    // A prior interrupted attempt may have left a `.partial` file behind. If it already holds the
+    // full artifact (the process died between the last write and the validate+rename), validate
+    // and commit it directly rather than redownloading. If it's short, resume from its length via
+    // Range; if it's somehow longer than expected, it's stale (e.g. a previous manifest generation)
+    // and gets discarded.
+    if let Some(size) = file_size(&tmp)? {
+        match size.cmp(&expected_bytes) {
+            std::cmp::Ordering::Equal => match validate(&tmp) {
+                Ok(()) => {
+                    let _ = fs::remove_file(path);
+                    fs::rename(&tmp, path)
+                        .with_context(|| format!("commit cache artifact {}", path.display()))?;
+                    if let Some(pb) = &ctx.progress {
+                        pb.inc(expected_bytes);
+                    }
+                    return Ok(true);
+                }
+                Err(_) => {
+                    let _ = fs::remove_file(&tmp);
+                }
+            },
+            std::cmp::Ordering::Greater => {
+                let _ = fs::remove_file(&tmp);
+            }
+            std::cmp::Ordering::Less => {}
+        }
+    }
+    let mut resume_from = file_size(&tmp)?.unwrap_or(0);
+
+    let mut req = authed_get(ctx, url.clone());
+    if resume_from > 0 {
+        req = req.header(reqwest::header::RANGE, format!("bytes={resume_from}-"));
+    }
+    let mut resp = req.send().await?;
     let status = resp.status();
-    if !status.is_success() {
+    if resume_from > 0 && status == reqwest::StatusCode::OK {
+        // The server ignored the Range request and sent the full body from byte 0 instead of 206
+        // Partial Content (some backends, e.g. presigned URLs re-issued against a different
+        // artifact generation, don't support resuming this exact request) — restart from scratch.
+        resume_from = 0;
+    } else if resume_from > 0 && status != reqwest::StatusCode::PARTIAL_CONTENT {
+        let body = resp.text().await.unwrap_or_default();
+        bail!("GET {url} (resume from {resume_from}) failed with {status}: {body}");
+    } else if resume_from == 0 && !status.is_success() {
         let body = resp.text().await.unwrap_or_default();
         bail!("GET {url} failed with {status}: {body}");
     }
-    let mut out = tokio::fs::File::create(&tmp)
+
+    let mut out = tokio::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(resume_from == 0)
+        .open(&tmp)
         .await
-        .with_context(|| format!("create temp artifact {}", tmp.display()))?;
-    let mut written = 0u64;
+        .with_context(|| format!("open temp artifact {}", tmp.display()))?;
+    if resume_from > 0 {
+        use tokio::io::AsyncSeekExt as _;
+        out.seek(std::io::SeekFrom::Start(resume_from)).await?;
+    }
+    let mut written = resume_from;
     while let Some(chunk) = resp.chunk().await? {
         written += chunk.len() as u64;
         if let Some(pb) = &ctx.progress {
@@ -444,13 +507,17 @@ where
     }
     out.flush().await?;
     drop(out);
+    // On a byte-count mismatch or a validation failure below, deliberately leave a short `.partial`
+    // in place (rather than deleting it, as earlier code did with its per-process temp names) so
+    // the next invocation resumes instead of restarting — the only case that discards it is
+    // validated corruption, where resuming untrustworthy bytes could never succeed.
     if written != expected_bytes {
-        let _ = fs::remove_file(&tmp);
         bail!(
-            "downloaded {} bytes from {}, expected {}",
+            "downloaded {} of {} bytes from {} (resumed from {}); re-run to resume the remainder",
             written,
+            expected_bytes,
             url,
-            expected_bytes
+            resume_from
         );
     }
     if let Err(err) = validate(&tmp) {
@@ -1074,5 +1141,161 @@ mod tests {
             2 * 1024 * 1024 * 1024
         );
         assert_eq!(parse_cache_max_bytes("10 mb").unwrap(), 10 * 1024 * 1024);
+    }
+
+    #[test]
+    fn partial_path_appends_suffix_without_disturbing_extension() {
+        assert_eq!(
+            partial_path(Path::new("/tmp/cache/pack-abc.pack")),
+            PathBuf::from("/tmp/cache/pack-abc.pack.partial")
+        );
+    }
+
+    /// A single-connection HTTP/1.1 server for one request, serving a fixed byte payload with
+    /// Range support, for exercising `ensure_cached_artifact`'s resume path without a mocking
+    /// dependency. Records whether the request it served carried a `Range` header.
+    async fn serve_one_range_request(
+        payload: &'static [u8],
+    ) -> (Url, tokio::task::JoinHandle<bool>) {
+        use tokio::io::{AsyncBufReadExt, BufReader};
+        use tokio::net::TcpListener;
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let url = Url::parse(&format!("http://{addr}/artifact")).unwrap();
+
+        let handle = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (read_half, mut write_half) = stream.into_split();
+            let mut reader = BufReader::new(read_half);
+            let mut range_start: Option<u64> = None;
+            loop {
+                let mut line = String::new();
+                let n = reader.read_line(&mut line).await.unwrap();
+                if n == 0 || line == "\r\n" {
+                    break;
+                }
+                if let Some(value) = line
+                    .to_ascii_lowercase()
+                    .strip_prefix("range: bytes=")
+                    .map(str::to_string)
+                {
+                    let start = value.trim().trim_end_matches('-').parse::<u64>().unwrap();
+                    range_start = Some(start);
+                }
+            }
+
+            match range_start {
+                Some(start) => {
+                    let body = &payload[start as usize..];
+                    let header = format!(
+                        "HTTP/1.1 206 Partial Content\r\nContent-Length: {}\r\nContent-Range: bytes {}-{}/{}\r\nConnection: close\r\n\r\n",
+                        body.len(),
+                        start,
+                        payload.len() - 1,
+                        payload.len()
+                    );
+                    write_half.write_all(header.as_bytes()).await.unwrap();
+                    write_half.write_all(body).await.unwrap();
+                }
+                None => {
+                    let header = format!(
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        payload.len()
+                    );
+                    write_half.write_all(header.as_bytes()).await.unwrap();
+                    write_half.write_all(payload).await.unwrap();
+                }
+            }
+            write_half.flush().await.unwrap();
+            write_half.shutdown().await.unwrap();
+            range_start.is_some()
+        });
+        (url, handle)
+    }
+
+    fn test_ctx() -> HttpCtx {
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        HttpCtx {
+            client: reqwest::Client::new(),
+            origin: Url::parse("http://127.0.0.1/").unwrap(),
+            auth: None,
+            progress: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn ensure_cached_artifact_resumes_from_existing_partial_file() {
+        let payload: &'static [u8] = b"0123456789ABCDEFGHIJ";
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("artifact.bin");
+        let partial = partial_path(&dest);
+        std::fs::write(&partial, &payload[..10]).unwrap();
+
+        let (url, handle) = serve_one_range_request(payload).await;
+        let ctx = test_ctx();
+        let downloaded = ensure_cached_artifact(&ctx, url, &dest, payload.len() as u64, |p| {
+            let bytes = std::fs::read(p)?;
+            anyhow::ensure!(bytes == payload, "content mismatch");
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(downloaded);
+        assert!(
+            handle.await.unwrap(),
+            "server should have seen a Range header"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+        assert!(!partial.exists());
+    }
+
+    #[tokio::test]
+    async fn ensure_cached_artifact_downloads_fresh_without_partial_file() {
+        let payload: &'static [u8] = b"fresh download, no resume";
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("artifact.bin");
+
+        let (url, handle) = serve_one_range_request(payload).await;
+        let ctx = test_ctx();
+        let downloaded = ensure_cached_artifact(&ctx, url, &dest, payload.len() as u64, |p| {
+            let bytes = std::fs::read(p)?;
+            anyhow::ensure!(bytes == payload, "content mismatch");
+            Ok(())
+        })
+        .await
+        .unwrap();
+
+        assert!(downloaded);
+        assert!(
+            !handle.await.unwrap(),
+            "fresh download should not send Range"
+        );
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    }
+
+    #[tokio::test]
+    async fn ensure_cached_artifact_skips_network_when_partial_already_complete() {
+        let payload: &'static [u8] = b"already fully staged";
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("artifact.bin");
+        std::fs::write(partial_path(&dest), payload).unwrap();
+
+        // A URL nothing is listening on: if this test makes a network call, it fails, proving the
+        // already-complete `.partial` file was validated and committed without redownloading.
+        let unreachable = Url::parse("http://127.0.0.1:1/artifact").unwrap();
+        let ctx = test_ctx();
+        let downloaded =
+            ensure_cached_artifact(&ctx, unreachable, &dest, payload.len() as u64, |p| {
+                let bytes = std::fs::read(p)?;
+                anyhow::ensure!(bytes == payload, "content mismatch");
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        assert!(downloaded);
+        assert_eq!(std::fs::read(&dest).unwrap(), payload);
     }
 }
