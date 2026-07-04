@@ -634,12 +634,7 @@ async fn push_credential(
 
 /// `tl git commit-status --repo <repo> <job-id>` — the out-of-band view of a detached commit
 /// job's state machine, from any terminal or process.
-pub async fn commit_status(
-    ctx: &CliContext,
-    repo: &str,
-    job_id: &str,
-    output_json: bool,
-) -> Result<()> {
+pub async fn commit_status(ctx: &CliContext, repo: &str, job_id: &str) -> Result<()> {
     let project_id = project_id(ctx)?;
     let client = artifact_storage_client(ctx)?;
     let credential = push_credential(&client, &project_id, repo).await?;
@@ -653,10 +648,6 @@ pub async fn commit_status(
         )
         .await?
         .into_inner();
-    if output_json {
-        println!("{}", serde_json::to_string_pretty(&job)?);
-        return Ok(());
-    }
     let state = job["state"].as_str().unwrap_or("?");
     match state {
         "committed" => println!(
