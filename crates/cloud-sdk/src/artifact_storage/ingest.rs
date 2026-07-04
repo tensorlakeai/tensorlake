@@ -195,14 +195,11 @@ struct CommitJobErrorWire {
 }
 
 /// A commit job's state machine as rendered by the server (submission response and polls).
-/// `job_id`/`state` are optional so the same decode accepts the legacy synchronous response
-/// shape (servers or endpoints without the async job machinery answer `201` with the bare
-/// commit fields — that is a terminal committed result).
+/// This is the only commit protocol: both the branch-commit and workspace-snapshot endpoints
+/// answer it, and success embeds the commit fields at the top level.
 #[derive(Deserialize)]
 struct CommitJobWire {
-    #[serde(default)]
-    job_id: Option<String>,
-    #[serde(default = "default_committed_state")]
+    job_id: String,
     state: String,
     #[serde(default)]
     phase: Option<String>,
@@ -220,10 +217,6 @@ struct CommitJobWire {
     created: Option<bool>,
     #[serde(default)]
     error: Option<CommitJobErrorWire>,
-}
-
-fn default_committed_state() -> String {
-    "committed".to_string()
 }
 
 /// zstd level for staged chunk frames — the server stores frames verbatim, so this matches its
@@ -743,11 +736,11 @@ impl ArtifactStorageClient {
         emit(PushEvent::Committing {
             files: body.files.len(),
         });
-        // Async commit: the server records the commit as a durable job and answers within a
-        // grace window — 201 with the result when the job finished, 202 with a job id when it
-        // detached. Either way no connection stays silent long enough for an LB idle timeout
-        // to reap it (which used to CANCEL the in-flight commit), and losing a response is
-        // recoverable: the idempotency key reattaches to the same job.
+        // Every commit is a durable job server-side: 201 with the result when it finishes
+        // within the grace window, 202 with a job id when it detaches. Either way no
+        // connection stays silent long enough for an LB idle timeout to reap it (which used
+        // to CANCEL the in-flight commit), and losing a response is recoverable: the
+        // idempotency key reattaches to the same job.
         let idem_key = {
             let bytes: [u8; 16] = rand::random();
             bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
@@ -761,6 +754,8 @@ impl ArtifactStorageClient {
             git_token,
         )?;
         let submit = req
+            // Deployed servers from the header-opt-in era only answer the job shape when asked;
+            // the job-only server ignores this. Removable once every environment is job-only.
             .header("x-commit-async", "1")
             .header("idempotency-key", &idem_key)
             .timeout(std::time::Duration::from_secs(60))
@@ -770,9 +765,7 @@ impl ArtifactStorageClient {
         let accepted = submit.status().as_u16() == 202;
         let mut job: CommitJobWire = expect_json(submit).await?;
         if accepted {
-            let job_id = job.job_id.clone().ok_or_else(|| {
-                SdkError::ClientError("202 submission without a job id".to_string())
-            })?;
+            let job_id = job.job_id.clone();
             emit(PushEvent::CommitDetached {
                 job_id: job_id.clone(),
             });
