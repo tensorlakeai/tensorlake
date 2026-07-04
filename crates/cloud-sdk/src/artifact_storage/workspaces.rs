@@ -34,6 +34,10 @@ pub struct WorkspaceInfo {
     /// Epoch-ms lease expiry. `None` means pinned: never expires.
     pub lease_due_ms: Option<u64>,
     pub pinned: bool,
+    /// Shared-rw mode: every snapshot is automatically reconciled into this branch (short
+    /// name), in server-assigned order.
+    #[serde(default)]
+    pub shared_target: Option<String>,
 }
 
 #[derive(Clone, Debug, Default, Serialize)]
@@ -41,6 +45,9 @@ pub struct CreateWorkspaceRequest {
     /// Base commit-ish (branch, full ref, tag, or commit hex). Defaults to the repo's HEAD.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
+    /// Shared-rw mode: reconcile every snapshot into this branch (short name) in server order.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub shared_target: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]

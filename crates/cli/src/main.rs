@@ -246,6 +246,16 @@ enum FsCommands {
         #[arg(long)]
         workspace: Option<String>,
 
+        /// Read-only view that follows the branch: reads see new commits as the branch
+        /// advances, writes fail with EROFS
+        #[arg(long, conflicts_with_all = ["workspace", "shared_rw"])]
+        shared_ro: bool,
+
+        /// Every snapshot automatically publishes to the mounted branch (server-ordered,
+        /// one attributed commit per snapshot). Requires `<file-system>:<branch>`
+        #[arg(long, conflicts_with = "workspace")]
+        shared_rw: bool,
+
         /// Run the mount daemon in the foreground (debugging)
         #[arg(long)]
         foreground: bool,
@@ -1681,9 +1691,17 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     target,
                     path,
                     workspace,
+                    shared_ro,
+                    shared_rw,
                     foreground,
                 } => {
-                    commands::fs::mount(ctx, &target, &path, workspace.as_deref(), foreground).await
+                    let mode = match (shared_ro, shared_rw) {
+                        (true, _) => commands::fs::MountMode::SharedRo,
+                        (_, true) => commands::fs::MountMode::SharedRw,
+                        _ => commands::fs::MountMode::Workspace,
+                    };
+                    commands::fs::mount(ctx, &target, &path, workspace.as_deref(), mode, foreground)
+                        .await
                 }
                 FsCommands::Daemon { state_dir } => {
                     commands::fs::daemon::run(ctx, &state_dir).await

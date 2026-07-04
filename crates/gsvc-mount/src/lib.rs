@@ -74,6 +74,8 @@ pub enum MountError {
     BadHandle,
     #[error("index not ready: {0}")]
     IndexNotReady(String),
+    #[error("read-only mount")]
+    ReadOnly,
     #[error("protocol error: {0}")]
     Protocol(String),
 }

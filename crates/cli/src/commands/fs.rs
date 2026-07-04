@@ -265,6 +265,18 @@ fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
 // Mount / unmount
 // ---------------------------------------------------------------------------------------------
 
+/// How a mount treats the branch it was created from. Every mode is still a private,
+/// single-writer workspace — modes vary only what the view follows and what happens to writes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MountMode {
+    /// Private workspace; publish with explicit `promote`.
+    Workspace,
+    /// Read session following the branch: reads see new commits, writes answer EROFS.
+    SharedRo,
+    /// Private workspace whose every snapshot auto-publishes to the branch (server-ordered).
+    SharedRw,
+}
+
 /// `tl fs mount <file-system>[:<ref-or-commit>] <path>` — create a workspace (or attach to an
 /// existing one with `--workspace <id>`, resuming at its last snapshot) and start its FUSE
 /// daemon. Reads stream lazily; nothing is copied to disk up front.
@@ -273,6 +285,7 @@ pub async fn mount(
     target: &str,
     path: &Path,
     workspace: Option<&str>,
+    mode: MountMode,
     foreground: bool,
 ) -> Result<()> {
     // Bail before creating a workspace or spawning the daemon-wait loop.
@@ -288,6 +301,21 @@ pub async fn mount(
     if workspace.is_some() && base.is_some() {
         return Err(CliError::usage(
             "--workspace attaches at the workspace's own head; drop the :<ref-or-commit> suffix",
+        ));
+    }
+    if mode == MountMode::SharedRw && base.is_none() {
+        return Err(CliError::usage(
+            "--shared-rw needs the branch to publish to: tl fs mount <file-system>:<branch> ...",
+        ));
+    }
+    if mode == MountMode::SharedRo
+        && base
+            .as_deref()
+            .is_some_and(|b| b.len() == 40 && b.bytes().all(|c| c.is_ascii_hexdigit()))
+    {
+        return Err(CliError::usage(
+            "--shared-ro follows a branch; a fixed commit never advances (mount it without \
+             --shared-ro instead)",
         ));
     }
     std::fs::create_dir_all(path)?;
@@ -322,12 +350,37 @@ pub async fn mount(
                     repo,
                     user,
                     token,
-                    &CreateWorkspaceRequest { base: base.clone() },
+                    &CreateWorkspaceRequest {
+                        base: base.clone(),
+                        shared_target: (mode == MountMode::SharedRw)
+                            .then(|| base.clone().expect("guarded above")),
+                    },
                 )
                 .await?
                 .into_inner(),
             false,
         ),
+    };
+
+    // Shared-ro: the view follows the branch itself. An explicit `:branch` names it; otherwise
+    // the workspace's resolved base ref (the repo HEAD) is the branch.
+    let follow_ref = if mode == MountMode::SharedRo {
+        let branch_ref = match &base {
+            Some(b) => format!("refs/heads/{b}"),
+            None => {
+                let base_ref = ws.base_ref.clone().unwrap_or_default();
+                if !base_ref.starts_with("refs/heads/") {
+                    return Err(CliError::usage(
+                        "--shared-ro follows a branch, and the repo HEAD did not resolve to \
+                         one; name it explicitly: tl fs mount <file-system>:<branch> --shared-ro",
+                    ));
+                }
+                base_ref
+            }
+        };
+        Some(branch_ref)
+    } else {
+        None
     };
 
     let mountpoint = canonical_mountpoint(path)?;
@@ -340,6 +393,7 @@ pub async fn mount(
             workspace_id: ws.id.clone(),
             ref_name: ws.ref_name.clone(),
             mountpoint: PathBuf::from(&mountpoint),
+            follow_ref,
         },
     )?;
     registry_add(&mountpoint, &state_dir)?;
@@ -371,18 +425,29 @@ pub async fn mount(
                     );
                 } else {
                     println!(
-                        "Mounted {}:{} at {} (workspace {})",
+                        "Mounted {}:{} at {} (workspace {}{})",
                         repo,
                         ws.base_ref.as_deref().unwrap_or(&ws.base[..12]),
                         mountpoint,
                         short_id(&ws.id),
+                        match mode {
+                            MountMode::Workspace => "",
+                            MountMode::SharedRo => ", read-only, follows the branch",
+                            MountMode::SharedRw => ", snapshots auto-publish to the branch",
+                        },
                     );
                 }
-                println!(
-                    "Lower commit {}. Work in the mount, then: tl fs snapshot {}",
-                    resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
-                    path.display()
-                );
+                match mode {
+                    MountMode::SharedRo => println!(
+                        "Reading commit {}; new commits on the branch appear as it advances.",
+                        resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
+                    ),
+                    _ => println!(
+                        "Lower commit {}. Work in the mount, then: tl fs snapshot {}",
+                        resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
+                        path.display()
+                    ),
+                }
                 return Ok(());
             }
             Err(_) if std::time::Instant::now() < deadline => {
@@ -529,6 +594,13 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
 pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> Result<()> {
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
+    if state.read_only() {
+        return Err(CliError::usage(format!(
+            "this is a read-only mount following {}; there is nothing to {}",
+            state.follow_ref.as_deref().unwrap_or("the branch"),
+            "snapshot",
+        )));
+    }
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
 
@@ -619,6 +691,12 @@ pub async fn promote(
 ) -> Result<()> {
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
+    if state.read_only() {
+        return Err(CliError::usage(format!(
+            "this is a read-only mount following {}; there is nothing to promote",
+            state.follow_ref.as_deref().unwrap_or("the branch"),
+        )));
+    }
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
     let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
@@ -722,6 +800,14 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         short_id(&ws.id),
         age_display(ws.created_at_secs)
     );
+    if let Some(followed) = &state.follow_ref {
+        println!("{} read-only, follows {followed}", style("mode:").dim());
+    } else if let Some(target) = &ws.shared_target {
+        println!(
+            "{} shared-rw, snapshots auto-publish to {target}",
+            style("mode:").dim()
+        );
+    }
     match &daemon_commit {
         Some(commit) => println!("{} mounted at {commit}", style("daemon:").dim()),
         None => println!(
@@ -752,6 +838,12 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
 pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()> {
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
+    if state.read_only() {
+        return Err(CliError::usage(format!(
+            "this is a read-only mount following {}; there is nothing to restore",
+            state.follow_ref.as_deref().unwrap_or("the branch"),
+        )));
+    }
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
 
@@ -1141,13 +1233,17 @@ pub async fn workspace_ls(ctx: &CliContext, file_system: &str, output_json: bool
         println!("No workspaces.");
         return Ok(());
     }
-    let mut table = new_table(&["Workspace", "Base", "Head", "Snapshots", "Age"]);
+    let mut table = new_table(&["Workspace", "Base", "Head", "Snapshots", "Mode", "Age"]);
     for ws in &list {
         table.add_row(vec![
             Cell::new(&ws.id),
             Cell::new(ws.base_ref.as_deref().unwrap_or(&ws.base[..12])),
             Cell::new(&ws.head[..12]),
             Cell::new(if ws.head == ws.base { "-" } else { "yes" }),
+            Cell::new(match &ws.shared_target {
+                Some(target) => format!("shared-rw -> {target}"),
+                None => "workspace".to_string(),
+            }),
             Cell::new(age_display(ws.created_at_secs)),
         ]);
     }

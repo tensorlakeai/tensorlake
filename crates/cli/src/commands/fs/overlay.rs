@@ -28,15 +28,23 @@ use gsvc_mount::{MountCore, MountError, NodeAttr, NodeKind, ROOT_INO};
 struct ONode {
     path: String,
     /// The core's ino for the lower node at this path, when one exists. Holds exactly one
-    /// counted core lookup reference (released on forget). Mutable because the workspace ref
-    /// moves: a fresh lookup after a snapshot re-resolves against the new commit and swaps the
-    /// backing, while inos the kernel already holds keep serving the commit they came from.
+    /// counted core lookup reference (released on forget). Mutable because the followed ref
+    /// moves: path-level operations re-resolve a stale binding against the current commit
+    /// (see [`OverlayFs::lower_binding`]), while open file handles keep the commit they
+    /// opened through their own pinned core handle.
     core_ino: Mutex<Option<u64>>,
+    /// The core ref-generation this binding was made at; a mismatch with the core's current
+    /// generation means the followed ref advanced and the binding must be re-walked.
+    bound_gen: std::sync::atomic::AtomicU64,
 }
 
 impl ONode {
     fn core_ino(&self) -> Option<u64> {
         *self.core_ino.lock().expect("core ino lock")
+    }
+
+    fn bound_gen(&self) -> u64 {
+        self.bound_gen.load(Ordering::SeqCst)
     }
 }
 
@@ -56,6 +64,7 @@ impl InodeTable {
                 Arc::new(ONode {
                     path: String::new(),
                     core_ino: Mutex::new(Some(ROOT_INO)),
+                    bound_gen: std::sync::atomic::AtomicU64::new(0),
                 }),
                 1,
             ),
@@ -97,6 +106,7 @@ impl InodeTable {
         let node = Arc::new(ONode {
             path: path.clone(),
             core_ino: Mutex::new(fresh_core),
+            bound_gen: std::sync::atomic::AtomicU64::new(0),
         });
         self.nodes.insert(ino, (node.clone(), 1));
         self.index.insert(path, ino);
@@ -162,6 +172,8 @@ pub struct OverlayFs {
     core: Arc<MountCore>,
     upper: PathBuf,
     wh: PathBuf,
+    /// Shared-ro mode: reject every mutation with [`MountError::ReadOnly`].
+    read_only: bool,
     inodes: Mutex<InodeTable>,
     handles: Mutex<HashMap<u64, OHandle>>,
     next_fh: AtomicU64,
@@ -198,7 +210,11 @@ fn io_err(e: std::io::Error) -> MountError {
 }
 
 impl OverlayFs {
-    pub fn new(core: Arc<MountCore>, state_dir: &Path) -> Result<Arc<OverlayFs>, MountError> {
+    pub fn new(
+        core: Arc<MountCore>,
+        state_dir: &Path,
+        read_only: bool,
+    ) -> Result<Arc<OverlayFs>, MountError> {
         let upper = state_dir.join("upper");
         let wh = state_dir.join("wh");
         std::fs::create_dir_all(&upper).map_err(io_err)?;
@@ -207,11 +223,21 @@ impl OverlayFs {
             core,
             upper,
             wh,
+            read_only,
             inodes: Mutex::new(InodeTable::new()),
             handles: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             lower_times: Mutex::new(HashMap::new()),
         }))
+    }
+
+    /// Every mutating entry point funnels through this guard: a shared-ro mount is a window
+    /// onto a branch, and the kernel answer for any write attempt is `EROFS`.
+    fn write_guard(&self) -> Result<(), MountError> {
+        if self.read_only {
+            return Err(MountError::ReadOnly);
+        }
+        Ok(())
     }
 
     fn upper_path(&self, path: &str) -> PathBuf {
@@ -333,7 +359,7 @@ impl OverlayFs {
         if self.whited_out(&path) {
             return Err(not_found());
         }
-        let Some(parent_core) = parent_node.core_ino() else {
+        let Ok(parent_core) = self.lower_binding(&parent_node).await else {
             return Err(not_found());
         };
         // Always a fresh core lookup: after a snapshot the workspace ref moved, and the node's
@@ -354,8 +380,17 @@ impl OverlayFs {
     /// (create/mkdir) has no core binding; once a snapshot seals it the advanced lower serves
     /// the same path, and the kernel keeps using the cached inode — ino-based ops must follow
     /// the path into the lower rather than report the node gone.
-    async fn lower_binding(&self, node: &Arc<ONode>) -> Result<u64, MountError> {
-        if let Some(ino) = node.core_ino() {
+    async fn lower_binding(&self, node: &ONode) -> Result<u64, MountError> {
+        // The core's root always tracks the followed ref internally.
+        if node.path.is_empty() {
+            return Ok(ROOT_INO);
+        }
+        // Capture the generation BEFORE resolving: an advance racing the walk just means one
+        // redundant re-walk later, never a stale binding recorded as fresh.
+        let generation = self.core.current_generation();
+        if let Some(ino) = node.core_ino()
+            && node.bound_gen() == generation
+        {
             return Ok(ino);
         }
         let mut cur = ROOT_INO;
@@ -381,12 +416,17 @@ impl OverlayFs {
             self.core.forget(*ino, 1);
         }
         let mut stored = node.core_ino.lock().expect("core ino lock");
-        if let Some(existing) = *stored {
-            drop(stored);
-            self.core.forget(leaf, 1);
-            return Ok(existing);
+        let old = stored.replace(leaf);
+        node.bound_gen.store(generation, Ordering::SeqCst);
+        drop(stored);
+        if let Some(old) = old {
+            if old != leaf {
+                self.core.forget(old, 1);
+            } else {
+                // Same core node re-resolved: repay the duplicate reference.
+                self.core.forget(leaf, 1);
+            }
         }
-        *stored = Some(leaf);
         Ok(leaf)
     }
 
@@ -540,6 +580,9 @@ impl OverlayFs {
     /// Open for read or write. Writing to a lower-backed file copies it up first; after that,
     /// all IO on the path is local.
     pub async fn open(&self, ino: u64, write: bool) -> Result<u64, MountError> {
+        if write {
+            self.write_guard()?;
+        }
         let node = self.node(ino)?;
         // The kernel can open by cached inode without a fresh lookup; a node under a whiteout
         // (restore deleted it out-of-band) must not hand out its stale lower backing.
@@ -586,6 +629,7 @@ impl OverlayFs {
     }
 
     pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, MountError> {
+        self.write_guard()?;
         use std::os::unix::fs::FileExt;
         let handles = self.handles.lock().expect("handle lock");
         match handles.get(&fh) {
@@ -622,7 +666,7 @@ impl OverlayFs {
         if self.upper_meta(&node.path).is_some() {
             return Ok(());
         }
-        let core_ino = node.core_ino().ok_or_else(not_found)?;
+        let core_ino = self.lower_binding(node).await?;
         let attr = self.core.getattr(core_ino)?;
         match attr.kind {
             NodeKind::Dir => {
@@ -743,6 +787,7 @@ impl OverlayFs {
         name: &str,
         exec: bool,
     ) -> Result<(OverlayAttr, u64), MountError> {
+        self.write_guard()?;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         if self
@@ -780,6 +825,7 @@ impl OverlayFs {
     }
 
     pub async fn mkdir(&self, parent: u64, name: &str) -> Result<OverlayAttr, MountError> {
+        self.write_guard()?;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         if self
@@ -802,6 +848,7 @@ impl OverlayFs {
         name: &str,
         target: &str,
     ) -> Result<OverlayAttr, MountError> {
+        self.write_guard()?;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         if self
@@ -823,6 +870,7 @@ impl OverlayFs {
     }
 
     pub async fn unlink(&self, parent: u64, name: &str) -> Result<(), MountError> {
+        self.write_guard()?;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         let dest = self.upper_path(&path);
@@ -839,6 +887,7 @@ impl OverlayFs {
     }
 
     pub async fn rmdir(&self, parent: u64, name: &str) -> Result<(), MountError> {
+        self.write_guard()?;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         // Merged-empty check: opendir the directory and require zero entries.
@@ -872,6 +921,7 @@ impl OverlayFs {
         new_parent: u64,
         new_name: &str,
     ) -> Result<(), MountError> {
+        self.write_guard()?;
         let parent_node = self.node(parent)?;
         let new_parent_node = self.node(new_parent)?;
         let src = Self::child_path(&parent_node.path, name);
@@ -922,6 +972,7 @@ impl OverlayFs {
         size: Option<u64>,
         mode: Option<u32>,
     ) -> Result<OverlayAttr, MountError> {
+        self.write_guard()?;
         let node = self.node(ino)?;
         if size.is_some() || mode.is_some() {
             self.copy_up(&node).await?;
@@ -1109,7 +1160,23 @@ mod tests {
         .await
         .unwrap();
         let state = tempfile::tempdir().unwrap();
-        let fs: Arc<OverlayFs> = OverlayFs::new(core.clone(), state.path()).unwrap();
+        let fs: Arc<OverlayFs> = OverlayFs::new(core.clone(), state.path(), false).unwrap();
+
+        // A read-only overlay over the same core answers EROFS for every mutation.
+        let ro_state = tempfile::tempdir().unwrap();
+        let ro: Arc<OverlayFs> = OverlayFs::new(core.clone(), ro_state.path(), true).unwrap();
+        assert!(matches!(
+            ro.mkdir(gsvc_mount::ROOT_INO, "nope").await,
+            Err(MountError::ReadOnly)
+        ));
+        assert!(matches!(
+            ro.create(gsvc_mount::ROOT_INO, "nope.txt", false).await,
+            Err(MountError::ReadOnly)
+        ));
+        assert!(matches!(
+            ro.open(gsvc_mount::ROOT_INO, true).await,
+            Err(MountError::ReadOnly)
+        ));
 
         // 1. Lower reads through the merged view.
         assert_eq!(read_all(&fs, ROOT_INO, "README.md").await, b"# seed\n");

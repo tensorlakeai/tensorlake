@@ -44,6 +44,16 @@ pub struct MountState {
     pub workspace_id: String,
     pub ref_name: String,
     pub mountpoint: PathBuf,
+    /// Shared-ro: the mount is a read session — the view follows this ref (a real branch)
+    /// instead of the workspace ref, and every mutation answers `EROFS`.
+    #[serde(default)]
+    pub follow_ref: Option<String>,
+}
+
+impl MountState {
+    pub fn read_only(&self) -> bool {
+        self.follow_ref.is_some()
+    }
 }
 
 pub fn state_dir_root() -> PathBuf {
@@ -170,10 +180,15 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     // Keep a handle onto the shared credential slot for rotation.
     let rotating_client = client.clone();
 
+    // Shared-ro sessions follow the branch itself; writable mounts follow their workspace ref.
+    let followed = state
+        .follow_ref
+        .clone()
+        .unwrap_or_else(|| state.ref_name.clone());
     let core = MountCore::new(
         client,
         MountOptions {
-            reference: state.ref_name.clone(),
+            reference: followed,
             follow: true,
             poll_interval: Duration::from_secs(5),
             ..Default::default()
@@ -182,7 +197,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     .await
     .map_err(|e| CliError::usage(format!("mount init: {e}")))?;
     gsvc_mount::spawn_ref_watcher(&core, || {});
-    let overlay = OverlayFs::new(core.clone(), state_dir)
+    let overlay = OverlayFs::new(core.clone(), state_dir, state.read_only())
         .map_err(|e| CliError::usage(format!("overlay init: {e}")))?;
 
     // Credential rotation: re-mint comfortably before expiry, swap in place.

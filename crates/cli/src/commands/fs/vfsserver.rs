@@ -67,6 +67,7 @@ fn errno(e: &MountError) -> i32 {
         MountError::Exists => libc::EEXIST,
         MountError::IndexNotReady(_) => libc::EAGAIN,
         MountError::BadHandle => libc::EBADF,
+        MountError::ReadOnly => libc::EROFS,
         _ => libc::EIO,
     }
 }
