@@ -448,10 +448,24 @@ pub async fn push(
 
     let project_id = project_id(ctx)?;
     let client = artifact_storage_client(ctx)?;
-    let credential = client
-        .mint_token_for_repo(&project_id, Some(repo))
-        .await?
-        .into_inner();
+    // Same dev affordance as `tl fs` (FsSession::open): a pre-provisioned git credential
+    // skips platform minting, e.g. against a local artifact-storage server in open-auth mode.
+    let credential = if let Ok(token) = std::env::var("TENSORLAKE_GIT_TOKEN") {
+        tensorlake::artifact_storage::models::GitCredential {
+            token,
+            token_type: "bearer".to_string(),
+            expires_at: String::new(),
+            git_username: std::env::var("TENSORLAKE_GIT_USERNAME")
+                .unwrap_or_else(|_| "t".to_string()),
+            repo_pattern: "*".to_string(),
+            scopes: Vec::new(),
+        }
+    } else {
+        client
+            .mint_token_for_repo(&project_id, Some(repo))
+            .await?
+            .into_inner()
+    };
 
     // Collect files: directories recurse; repo paths are relative to the CWD (or to the
     // directory itself for its children), normalized to forward slashes.
@@ -466,29 +480,46 @@ pub async fn push(
     }
 
     let bar = indicatif::ProgressBar::new_spinner();
-    bar.set_message("chunking...");
+    bar.enable_steady_tick(std::time::Duration::from_millis(120));
+    bar.set_message(format!("hashing {} files...", files.len()));
     let bar_for_events = bar.clone();
     let opts = PushOptions {
         branch: branch.to_string(),
         message: message.to_string(),
         base: None,
         expect_oid,
-        progress: Some(std::sync::Arc::new(move |ev: PushEvent| match ev {
-            PushEvent::Hashed {
-                files,
-                chunks,
-                bytes,
-            } => bar_for_events.set_message(format!(
-                "hashed {files} files ({chunks} chunks, {bytes} bytes); negotiating..."
-            )),
-            PushEvent::Negotiated { missing, total } => bar_for_events.set_message(format!(
-                "server lacks {missing}/{total} chunks; uploading..."
-            )),
-            PushEvent::UploadedBatch { chunks, bytes } => {
-                bar_for_events.set_message(format!("uploaded {chunks} chunks ({bytes} bytes)..."))
-            }
-            PushEvent::Committed { ref_name, .. } => {
-                bar_for_events.set_message(format!("committed to {ref_name}"))
+        progress: Some(std::sync::Arc::new(move |ev: PushEvent| {
+            use indicatif::HumanBytes;
+            match ev {
+                PushEvent::Chunking {
+                    files_done,
+                    files_total,
+                    bytes_hashed,
+                } => bar_for_events.set_message(format!(
+                    "hashing {files_done}/{files_total} files ({})...",
+                    HumanBytes(bytes_hashed)
+                )),
+                PushEvent::Hashed {
+                    files,
+                    chunks,
+                    bytes,
+                } => bar_for_events.set_message(format!(
+                    "hashed {files} files ({chunks} chunks, {}); asking the server what it already has...",
+                    HumanBytes(bytes)
+                )),
+                PushEvent::Negotiated { missing, total } => bar_for_events.set_message(format!(
+                    "server lacks {missing} of {total} chunks; uploading..."
+                )),
+                PushEvent::UploadedBatch { chunks, bytes } => bar_for_events.set_message(format!(
+                    "uploaded {chunks} chunks ({})...",
+                    HumanBytes(bytes)
+                )),
+                PushEvent::Committing { files } => bar_for_events.set_message(format!(
+                    "all bytes on the server; committing {files} files (server builds the tree)..."
+                )),
+                PushEvent::Committed { ref_name, .. } => {
+                    bar_for_events.set_message(format!("committed to {ref_name}"))
+                }
             }
         })),
         ..Default::default()
@@ -558,11 +589,10 @@ fn collect_push_files(
         }
         return Ok(());
     }
-    let repo_path = path
-        .strip_prefix(root.parent().unwrap_or(root))
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let repo_path = repo_path_for(root, path);
+    if repo_path.is_empty() {
+        return Ok(());
+    }
     out.push(PushFile {
         mode: None,
         delete: false,
@@ -572,9 +602,47 @@ fn collect_push_files(
     Ok(())
 }
 
+/// Repo path for a file under a pushed root: relative to the root's parent (so pushing
+/// `somedir` prefixes its name), built from normal components only. Pushing `.` used to
+/// yield `./arch/boot.c` — the server rejects `.`/`..`/empty components at commit time,
+/// after every chunk was already uploaded, so this must be clean by construction.
+fn repo_path_for(root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root.parent().unwrap_or(root))
+        .unwrap_or(path)
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_paths_from_dot_have_no_dot_components() {
+        let root = std::path::Path::new(".");
+        assert_eq!(
+            repo_path_for(root, std::path::Path::new("./.clang-format")),
+            ".clang-format"
+        );
+        assert_eq!(
+            repo_path_for(root, std::path::Path::new("./arch/boot.c")),
+            "arch/boot.c"
+        );
+    }
+
+    #[test]
+    fn repo_paths_from_named_dir_keep_the_dir_prefix() {
+        let root = std::path::Path::new("/tmp/somedir");
+        assert_eq!(
+            repo_path_for(root, std::path::Path::new("/tmp/somedir/a/b.txt")),
+            "somedir/a/b.txt"
+        );
+    }
 
     #[test]
     fn normalize_repo_arg_passes_through_bare_names() {

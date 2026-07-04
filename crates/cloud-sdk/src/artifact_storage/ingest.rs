@@ -48,6 +48,12 @@ pub enum PushSource {
 /// Progress events, emitted in order. Rendering (progress bars, logs) is the caller's concern.
 #[derive(Clone, Debug)]
 pub enum PushEvent {
+    /// Local chunk+hash progress (throttled; `files_done` of `files_total` finished so far).
+    Chunking {
+        files_done: usize,
+        files_total: usize,
+        bytes_hashed: u64,
+    },
     /// All files chunked and hashed locally.
     Hashed {
         files: usize,
@@ -56,8 +62,11 @@ pub enum PushEvent {
     },
     /// Negotiation complete: this many chunks (of the total) need uploading.
     Negotiated { missing: usize, total: usize },
-    /// One upload batch accepted.
+    /// One upload batch accepted (`chunks`/`bytes` are cumulative for the push).
     UploadedBatch { chunks: usize, bytes: u64 },
+    /// All bytes are on the server; the commit request is being published (tree build +
+    /// read-back happen server-side, so large pushes dwell here).
+    Committing { files: usize },
     /// The commit published.
     Committed { commit: String, ref_name: String },
 }
@@ -257,37 +266,52 @@ impl ArtifactStorageClient {
             .unwrap_or(4);
         let chunked: Vec<ChunkedFile> = {
             use futures::StreamExt as _;
-            type ChunkResult = Result<ChunkedFile, SdkError>;
-            let results: Vec<ChunkResult> =
-                futures::stream::iter(files.into_iter().map(|f| async move {
-                    if f.delete {
-                        return Ok(ChunkedFile {
-                            repo_path: f.repo_path,
-                            source: f.source,
-                            chunks: Vec::new(),
-                            mode: f.mode,
-                            delete: true,
-                            blob_oid: String::new(),
-                        });
-                    }
-                    tokio::task::spawn_blocking(move || {
-                        let (chunks, blob_oid) = chunk_source(&f.source, min, avg, max)?;
-                        Ok(ChunkedFile {
-                            repo_path: f.repo_path,
-                            source: f.source,
-                            chunks,
-                            mode: f.mode,
-                            delete: false,
-                            blob_oid,
-                        })
+            let files_total = files.len();
+            let mut stream = futures::stream::iter(files.into_iter().map(|f| async move {
+                if f.delete {
+                    return Ok::<ChunkedFile, SdkError>(ChunkedFile {
+                        repo_path: f.repo_path,
+                        source: f.source,
+                        chunks: Vec::new(),
+                        mode: f.mode,
+                        delete: true,
+                        blob_oid: String::new(),
+                    });
+                }
+                tokio::task::spawn_blocking(move || {
+                    let (chunks, blob_oid) = chunk_source(&f.source, min, avg, max)?;
+                    Ok(ChunkedFile {
+                        repo_path: f.repo_path,
+                        source: f.source,
+                        chunks,
+                        mode: f.mode,
+                        delete: false,
+                        blob_oid,
                     })
-                    .await
-                    .map_err(|e| SdkError::ClientError(format!("chunking task failed: {e}")))?
-                }))
-                .buffered(hash_parallelism)
-                .collect()
-                .await;
-            results.into_iter().collect::<Result<_, _>>()?
+                })
+                .await
+                .map_err(|e| SdkError::ClientError(format!("chunking task failed: {e}")))?
+            }))
+            .buffered(hash_parallelism);
+            // Stream results so progress can flow while hashing runs; a kernel-scale tree
+            // spends tens of seconds here and a silent spinner reads as a hang.
+            let mut out: Vec<ChunkedFile> = Vec::with_capacity(files_total);
+            let mut bytes_hashed = 0u64;
+            let mut last_emit = std::time::Instant::now();
+            while let Some(result) = stream.next().await {
+                let file: ChunkedFile = result?;
+                bytes_hashed += file.chunks.iter().map(|(_, s)| *s as u64).sum::<u64>();
+                out.push(file);
+                if last_emit.elapsed() >= std::time::Duration::from_millis(100) {
+                    last_emit = std::time::Instant::now();
+                    emit(PushEvent::Chunking {
+                        files_done: out.len(),
+                        files_total,
+                        bytes_hashed,
+                    });
+                }
+            }
+            out
         };
         let total_chunks: usize = chunked.iter().map(|f| f.chunks.len()).sum();
         let total_bytes: u64 = chunked
@@ -407,7 +431,6 @@ impl ArtifactStorageClient {
             use futures::StreamExt as _;
             let mut inflight = futures::stream::FuturesUnordered::new();
             let mut frame = Vec::with_capacity(opts.upload_batch_bytes + 64);
-            let mut frame_chunks = 0usize;
             for file in &chunked {
                 if to_upload.is_empty() {
                     break;
@@ -425,7 +448,6 @@ impl ArtifactStorageClient {
                     frame.extend_from_slice(hash);
                     frame.extend_from_slice(&(data.len() as u32).to_be_bytes());
                     frame.extend_from_slice(&data);
-                    frame_chunks += 1;
                     uploaded_chunks += 1;
                     uploaded_bytes += data.len() as u64;
                     if frame.len() >= opts.upload_batch_bytes {
@@ -439,10 +461,9 @@ impl ArtifactStorageClient {
                             std::mem::take(&mut frame),
                         ));
                         emit(PushEvent::UploadedBatch {
-                            chunks: frame_chunks,
+                            chunks: uploaded_chunks,
                             bytes: uploaded_bytes,
                         });
-                        frame_chunks = 0;
                         if inflight.len() >= DEDUP_UPLOADS_IN_FLIGHT {
                             inflight.next().await.expect("inflight upload present")?;
                         }
@@ -460,7 +481,7 @@ impl ArtifactStorageClient {
                     frame,
                 ));
                 emit(PushEvent::UploadedBatch {
-                    chunks: frame_chunks,
+                    chunks: uploaded_chunks,
                     bytes: uploaded_bytes,
                 });
             }
@@ -500,6 +521,9 @@ impl ArtifactStorageClient {
             base: opts.base.clone(),
             expect_oid: opts.expect_oid.clone(),
         };
+        emit(PushEvent::Committing {
+            files: body.files.len(),
+        });
         let (req, trace_id) = self.git_request(
             Method::POST,
             project_id,
