@@ -142,6 +142,35 @@ struct MissingRespWire {
     missing: Vec<String>,
 }
 
+#[derive(Deserialize)]
+struct IngestStagingWire {
+    pack_id: String,
+    /// Presigned PUT URL; absent when the backend cannot sign (fall back to chunk frames).
+    url: Option<String>,
+}
+
+#[derive(Serialize)]
+struct StagedEntryWire {
+    /// 64-hex chunk hash (uncompressed content address).
+    hash: String,
+    /// Byte offset of the zstd frame within the staged pack.
+    offset: u64,
+    /// Compressed frame length.
+    length: u32,
+    /// Uncompressed chunk size.
+    size: u32,
+}
+
+#[derive(Serialize)]
+struct StagedRegisterWire {
+    pack_id: String,
+    entries: Vec<StagedEntryWire>,
+}
+
+/// zstd level for staged chunk frames — the server stores frames verbatim, so this matches its
+/// own chunk compression default (speed/ratio balance; any valid zstd frame decodes).
+const STAGED_ZSTD_LEVEL: i32 = 3;
+
 #[derive(Serialize)]
 struct CommitFileWire {
     path: String,
@@ -429,11 +458,135 @@ impl ArtifactStorageClient {
             file_tokens[i] = Some(token);
         }
 
-        // Dedup path for everything else: only chunks the server lacks, shared frames. Frames
-        // are order-independent (unlike tokened file streams), so keep a few uploads in flight
-        // while the next frame is still being read and assembled.
+        // Dedup path for everything else: only chunks the server lacks. When the backend
+        // presigns, bytes are zstd-framed into client-assembled chunk packs and PUT straight
+        // to the object store — the service only records session-scoped layout claims, and
+        // identity is minted by commit-time read-back, so service bandwidth drops out of the
+        // push entirely. Backends that cannot presign fall back to service-mediated frames.
+        // Either way a few uploads stay in flight while the next batch is read and assembled.
         const DEDUP_UPLOADS_IN_FLIGHT: usize = 3;
-        {
+        let staging_target = if to_upload.is_empty() {
+            None
+        } else {
+            match self
+                .ingest_staging_target(
+                    project_id,
+                    repo,
+                    git_username,
+                    git_token,
+                    &session.session_id,
+                )
+                .await
+            {
+                Ok(probe) => probe.url.is_some().then_some(probe),
+                // A server without the staging endpoint (or with it disabled) is not an
+                // error — the frame path below works against every server version.
+                Err(SdkError::ServerError { status, .. })
+                    if status.as_u16() == 404 || status.as_u16() == 405 =>
+                {
+                    None
+                }
+                Err(e) => return Err(e),
+            }
+        };
+        if let Some(first_target) = staging_target {
+            use futures::StreamExt as _;
+            let mut inflight = futures::stream::FuturesUnordered::new();
+            let mut next_target = Some(first_target);
+            let mut pack: Vec<u8> = Vec::with_capacity(opts.upload_batch_bytes + 256 * 1024);
+            let mut entries: Vec<StagedEntryWire> = Vec::new();
+            for file in &chunked {
+                if to_upload.is_empty() {
+                    break;
+                }
+                let mut reader: Box<dyn Read> = match &file.source {
+                    PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
+                    PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+                };
+                for (hash, size) in &file.chunks {
+                    let mut data = vec![0u8; *size as usize];
+                    reader.read_exact(&mut data).map_err(io_err)?;
+                    if !to_upload.remove(hash) {
+                        continue;
+                    }
+                    let zframe = zstd::encode_all(&data[..], STAGED_ZSTD_LEVEL)
+                        .map_err(|e| SdkError::ClientError(format!("zstd encode: {e}")))?;
+                    entries.push(StagedEntryWire {
+                        hash: hex_lower(hash),
+                        offset: pack.len() as u64,
+                        length: zframe.len() as u32,
+                        size: *size,
+                    });
+                    pack.extend_from_slice(&zframe);
+                    uploaded_chunks += 1;
+                    uploaded_bytes += data.len() as u64;
+                    if pack.len() >= opts.upload_batch_bytes {
+                        let target = match next_target.take() {
+                            Some(t) => t,
+                            None => {
+                                self.ingest_staging_target(
+                                    project_id,
+                                    repo,
+                                    git_username,
+                                    git_token,
+                                    &session.session_id,
+                                )
+                                .await?
+                            }
+                        };
+                        inflight.push(self.upload_staged_pack(
+                            project_id,
+                            repo,
+                            git_username,
+                            git_token,
+                            &session.session_id,
+                            target,
+                            std::mem::take(&mut pack),
+                            std::mem::take(&mut entries),
+                        ));
+                        emit(PushEvent::UploadedBatch {
+                            chunks: uploaded_chunks,
+                            bytes: uploaded_bytes,
+                        });
+                        if inflight.len() >= DEDUP_UPLOADS_IN_FLIGHT {
+                            inflight.next().await.expect("inflight upload present")?;
+                        }
+                    }
+                }
+            }
+            if !pack.is_empty() {
+                let target = match next_target.take() {
+                    Some(t) => t,
+                    None => {
+                        self.ingest_staging_target(
+                            project_id,
+                            repo,
+                            git_username,
+                            git_token,
+                            &session.session_id,
+                        )
+                        .await?
+                    }
+                };
+                inflight.push(self.upload_staged_pack(
+                    project_id,
+                    repo,
+                    git_username,
+                    git_token,
+                    &session.session_id,
+                    target,
+                    pack,
+                    entries,
+                ));
+                emit(PushEvent::UploadedBatch {
+                    chunks: uploaded_chunks,
+                    bytes: uploaded_bytes,
+                });
+            }
+            while let Some(done) = inflight.next().await {
+                done?;
+            }
+        } else {
             use futures::StreamExt as _;
             let mut inflight = futures::stream::FuturesUnordered::new();
             let mut frame = Vec::with_capacity(opts.upload_batch_bytes + 64);
@@ -594,6 +747,77 @@ impl ArtifactStorageClient {
             }
         }
         Ok(missing)
+    }
+
+    /// Mint a presigned chunk-pack staging target. `url` is `None` when the backend cannot
+    /// presign (e.g. filesystem stores) — callers fall back to service-mediated frames.
+    async fn ingest_staging_target(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        session_id: &str,
+    ) -> Result<IngestStagingWire, SdkError> {
+        let (req, _t) = self.git_request(
+            Method::POST,
+            project_id,
+            repo,
+            Some(&format!("ingest/sessions/{session_id}/staging")),
+            git_username,
+            git_token,
+        )?;
+        expect_json(req.send().await?).await
+    }
+
+    /// PUT a client-assembled chunk pack directly to its presigned target, then register its
+    /// layout with the session. Entry hashes are claims — the server mints identity only at
+    /// commit read-back, so a corrupt upload fails the commit, never the store.
+    #[allow(clippy::too_many_arguments)]
+    async fn upload_staged_pack(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        session_id: &str,
+        target: IngestStagingWire,
+        pack: Vec<u8>,
+        entries: Vec<StagedEntryWire>,
+    ) -> Result<(), SdkError> {
+        let url = target.url.as_deref().ok_or_else(|| {
+            SdkError::ClientError("staged upload requires a presigned url".to_string())
+        })?;
+        // The signature lives in the query string — no auth headers (an Authorization header
+        // would conflict with the presigned signature).
+        let resp = self.git_client.put(url).body(pack).send().await?;
+        if !resp.status().is_success() {
+            return Err(SdkError::ServerError {
+                status: resp.status(),
+                message: format!("staged pack PUT: {}", resp.text().await.unwrap_or_default()),
+            });
+        }
+        // Bounded batches: the server caps entries per registration call.
+        const REGISTER_BATCH: usize = 4096;
+        let mut remaining = entries;
+        while !remaining.is_empty() {
+            let take = remaining.len().min(REGISTER_BATCH);
+            let batch: Vec<StagedEntryWire> = remaining.drain(..take).collect();
+            let (req, _t) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&format!("ingest/sessions/{session_id}/staged")),
+                git_username,
+                git_token,
+            )?;
+            let body = StagedRegisterWire {
+                pack_id: target.pack_id.clone(),
+                entries: batch,
+            };
+            expect_ok(req.json(&body).send().await?).await?;
+        }
+        Ok(())
     }
 
     #[allow(clippy::too_many_arguments)]
