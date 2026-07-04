@@ -67,6 +67,10 @@ pub enum PushEvent {
     /// All bytes are on the server; the commit request is being published (tree build +
     /// read-back happen server-side, so large pushes dwell here).
     Committing { files: usize },
+    /// The commit outlived the server's inline grace window and detached as a durable job.
+    /// From here the push survives any disconnect: the job can be observed (or picked back
+    /// up) out-of-band via `GET .../commits/jobs/{job_id}`.
+    CommitDetached { job_id: String },
     /// Server-side progress of a detached commit job (async path), straight from the job's
     /// state machine. `done`/`total` are read-back chunk counts when the phase reports them.
     CommitProgress {
@@ -757,6 +761,9 @@ impl ArtifactStorageClient {
         let accepted = submit.status().as_u16() == 202;
         let mut job: CommitJobWire = expect_json(submit).await?;
         if accepted {
+            emit(PushEvent::CommitDetached {
+                job_id: job.job_id.clone(),
+            });
             // Poll the job's state machine to terminal. Each poll is a fresh, short request.
             let poll_suffix = format!("{commit_suffix}/jobs/{}", job.job_id);
             let mut delay = std::time::Duration::from_millis(500);
@@ -877,6 +884,33 @@ impl ArtifactStorageClient {
             }
         }
         Ok(missing)
+    }
+
+    /// Poll a commit job's state machine (`GET .../commits/jobs/{id}`) — the out-of-band view
+    /// of an async commit, usable from any process that knows the job id.
+    pub async fn commit_job_status(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        job_id: &str,
+    ) -> Result<Traced<serde_json::Value>, SdkError> {
+        let (req, trace_id) = self.git_request(
+            Method::GET,
+            project_id,
+            repo,
+            Some(&format!("commits/jobs/{job_id}")),
+            git_username,
+            git_token,
+        )?;
+        let value = expect_json(
+            req.timeout(std::time::Duration::from_secs(30))
+                .send()
+                .await?,
+        )
+        .await?;
+        Ok(Traced::new(trace_id, value))
     }
 
     /// Mint a presigned chunk-pack staging target. `url` is `None` when the backend cannot

@@ -448,24 +448,7 @@ pub async fn push(
 
     let project_id = project_id(ctx)?;
     let client = artifact_storage_client(ctx)?;
-    // Same dev affordance as `tl fs` (FsSession::open): a pre-provisioned git credential
-    // skips platform minting, e.g. against a local artifact-storage server in open-auth mode.
-    let credential = if let Ok(token) = std::env::var("TENSORLAKE_GIT_TOKEN") {
-        tensorlake::artifact_storage::models::GitCredential {
-            token,
-            token_type: "bearer".to_string(),
-            expires_at: String::new(),
-            git_username: std::env::var("TENSORLAKE_GIT_USERNAME")
-                .unwrap_or_else(|_| "t".to_string()),
-            repo_pattern: "*".to_string(),
-            scopes: Vec::new(),
-        }
-    } else {
-        client
-            .mint_token_for_repo(&project_id, Some(repo))
-            .await?
-            .into_inner()
-    };
+    let credential = push_credential(&client, &project_id, repo).await?;
 
     // Collect files: directories recurse; repo paths are relative to the CWD (or to the
     // directory itself for its children), normalized to forward slashes.
@@ -517,6 +500,19 @@ pub async fn push(
                 PushEvent::Committing { files } => bar_for_events.set_message(format!(
                     "all bytes on the server; committing {files} files (server builds the tree)..."
                 )),
+                PushEvent::CommitDetached { job_id } => {
+                    let line = format!(
+                        "commit running as job {job_id} (survives disconnects; check from \
+                         anywhere with: tl git commit-status --repo <repo> {job_id})"
+                    );
+                    // indicatif drops println on hidden draw targets (piped stderr) — and a
+                    // scripted push is exactly where the out-of-band job id matters.
+                    if bar_for_events.is_hidden() {
+                        println!("{line}");
+                    } else {
+                        bar_for_events.println(line);
+                    }
+                }
                 PushEvent::CommitProgress { phase, done, total } => {
                     if total > 0 {
                         bar_for_events.set_message(format!(
@@ -608,6 +604,94 @@ fn collect_push_files(
         repo_path,
         source: PushSource::Path(path.to_path_buf()),
     });
+    Ok(())
+}
+
+/// Git credential for pushes and job polls. Same dev affordance as `tl fs`
+/// (FsSession::open): a pre-provisioned `TENSORLAKE_GIT_TOKEN` skips platform minting, e.g.
+/// against a local artifact-storage server in open-auth mode.
+async fn push_credential(
+    client: &tensorlake::artifact_storage::ArtifactStorageClient,
+    project_id: &str,
+    repo: &str,
+) -> Result<tensorlake::artifact_storage::models::GitCredential> {
+    if let Ok(token) = std::env::var("TENSORLAKE_GIT_TOKEN") {
+        return Ok(tensorlake::artifact_storage::models::GitCredential {
+            token,
+            token_type: "bearer".to_string(),
+            expires_at: String::new(),
+            git_username: std::env::var("TENSORLAKE_GIT_USERNAME")
+                .unwrap_or_else(|_| "t".to_string()),
+            repo_pattern: "*".to_string(),
+            scopes: Vec::new(),
+        });
+    }
+    Ok(client
+        .mint_token_for_repo(project_id, Some(repo))
+        .await?
+        .into_inner())
+}
+
+/// `tl git commit-status --repo <repo> <job-id>` — the out-of-band view of a detached commit
+/// job's state machine, from any terminal or process.
+pub async fn commit_status(
+    ctx: &CliContext,
+    repo: &str,
+    job_id: &str,
+    output_json: bool,
+) -> Result<()> {
+    let project_id = project_id(ctx)?;
+    let client = artifact_storage_client(ctx)?;
+    let credential = push_credential(&client, &project_id, repo).await?;
+    let job = client
+        .commit_job_status(
+            &project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+            job_id,
+        )
+        .await?
+        .into_inner();
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&job)?);
+        return Ok(());
+    }
+    let state = job["state"].as_str().unwrap_or("?");
+    match state {
+        "committed" => println!(
+            "{} {} -> {}",
+            console::style("committed").green().bold(),
+            job["commit"].as_str().unwrap_or("?"),
+            job["ref_name"].as_str().unwrap_or("?"),
+        ),
+        "failed" => println!(
+            "{} {} ({}){}",
+            console::style("failed").red().bold(),
+            job["error"]["message"].as_str().unwrap_or("?"),
+            job["error"]["kind"].as_str().unwrap_or("?"),
+            if job["error"]["retryable"].as_bool().unwrap_or(false) {
+                " — safe to re-push: uploaded chunks are deduplicated"
+            } else {
+                ""
+            },
+        ),
+        _ => {
+            let phase = job["phase"].as_str().unwrap_or(state);
+            if let (Some(done), Some(total)) = (
+                job["read_back"]["done"].as_u64(),
+                job["read_back"]["total"].as_u64(),
+            ) {
+                let pct = if total > 0 { done * 100 / total } else { 0 };
+                println!(
+                    "{} {phase}: {done}/{total} chunks ({pct}%)",
+                    console::style(state).yellow().bold(),
+                );
+            } else {
+                println!("{} {phase}", console::style(state).yellow().bold());
+            }
+        }
+    }
     Ok(())
 }
 

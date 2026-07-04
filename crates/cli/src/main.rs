@@ -433,6 +433,17 @@ enum GitCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Check a detached commit job's progress (job id is printed when a push detaches)
+    CommitStatus {
+        /// Repo name
+        #[arg(long)]
+        repo: String,
+        /// Commit job id
+        job_id: String,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
     /// List repos in the current project
     #[command(alias = "list")]
     Ls {
@@ -2246,6 +2257,9 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
             paths,
             json,
         } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, paths, json).await,
+        GitCommands::CommitStatus { repo, job_id, json } => {
+            commands::git::commit_status(ctx, &repo, &job_id, json).await
+        }
         GitCommands::Url { repo } => {
             println!("{}", commands::git::repo_url(ctx, &repo)?);
             Ok(())
