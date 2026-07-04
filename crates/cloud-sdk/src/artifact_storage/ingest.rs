@@ -145,7 +145,13 @@ struct MissingRespWire {
 #[derive(Serialize)]
 struct CommitFileWire {
     path: String,
+    /// Omitted when empty: a zero-byte file has no chunks and must publish as inline
+    /// `content` instead (the server rejects an explicit empty chunk list), and deletes
+    /// carry neither.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     chunks: Vec<CommitChunkWire>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     file_token: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
@@ -504,6 +510,7 @@ impl ArtifactStorageClient {
                         size: *s,
                     })
                     .collect(),
+                content: (!f.delete && f.chunks.is_empty()).then(String::new),
                 file_token: file_tokens[i].clone(),
                 delete: f.delete,
                 mode: f.mode.map(|m| format!("{m:o}")),
