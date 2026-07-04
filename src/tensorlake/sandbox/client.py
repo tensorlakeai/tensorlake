@@ -1550,15 +1550,17 @@ class SandboxClient:
         while time.time() < deadline:
             info = request_client.get(result.sandbox_id)
             if info.status == SandboxStatus.RUNNING:
-                selected_proxy_url = request_client._rust_client.select_sandbox_proxy_url(
-                    sandbox_id=info.sandbox_id,
-                    sandbox_url=info.sandbox_url,
-                    ingress_endpoint=info.ingress_endpoint,
-                    explicit_proxy_url=(
-                        proxy_url
-                        if proxy_url is not None
-                        else _explicit_proxy_url_override()
-                    ),
+                selected_proxy_url = (
+                    request_client._rust_client.select_sandbox_proxy_url(
+                        sandbox_id=info.sandbox_id,
+                        sandbox_url=info.sandbox_url,
+                        ingress_endpoint=info.ingress_endpoint,
+                        explicit_proxy_url=(
+                            proxy_url
+                            if proxy_url is not None
+                            else _explicit_proxy_url_override()
+                        ),
+                    )
                 )
                 sandbox = request_client.connect(
                     info.sandbox_id,
