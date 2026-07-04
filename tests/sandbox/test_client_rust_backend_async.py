@@ -203,7 +203,24 @@ class _RecordingCreateRustClient:
         self.create_calls += 1
         return (
             "trace-create-sandbox",
-            '{"sandbox_id":"sbx-1","status":"running"}',
+            '{"sandbox_id":"sbx-1","status":"running",'
+            '"sandbox_url":"https://sbx-1.sandbox.tensorlake.ai"}',
+        )
+
+    def select_sandbox_proxy_url(
+        self,
+        *,
+        sandbox_id,
+        sandbox_url=None,
+        ingress_endpoint=None,
+        explicit_proxy_url=None,
+    ):
+        if sandbox_url:
+            return sandbox_url
+        if explicit_proxy_url:
+            return explicit_proxy_url
+        raise RuntimeError(
+            "server response did not include sandbox_url; refusing to derive a proxy URL"
         )
 
     def connect_proxy(self, *, proxy_url, sandbox_id, routing_hint=None):
