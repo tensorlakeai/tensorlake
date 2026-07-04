@@ -517,6 +517,15 @@ pub async fn push(
                 PushEvent::Committing { files } => bar_for_events.set_message(format!(
                     "all bytes on the server; committing {files} files (server builds the tree)..."
                 )),
+                PushEvent::CommitProgress { phase, done, total } => {
+                    if total > 0 {
+                        bar_for_events.set_message(format!(
+                            "committing: {phase} {done}/{total} chunks..."
+                        ))
+                    } else {
+                        bar_for_events.set_message(format!("committing: {phase}..."))
+                    }
+                }
                 PushEvent::Committed { ref_name, .. } => {
                     bar_for_events.set_message(format!("committed to {ref_name}"))
                 }

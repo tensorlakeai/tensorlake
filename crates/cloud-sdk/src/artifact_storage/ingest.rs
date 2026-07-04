@@ -67,6 +67,13 @@ pub enum PushEvent {
     /// All bytes are on the server; the commit request is being published (tree build +
     /// read-back happen server-side, so large pushes dwell here).
     Committing { files: usize },
+    /// Server-side progress of a detached commit job (async path), straight from the job's
+    /// state machine. `done`/`total` are read-back chunk counts when the phase reports them.
+    CommitProgress {
+        phase: String,
+        done: u64,
+        total: u64,
+    },
     /// The commit published.
     Committed { commit: String, ref_name: String },
 }
@@ -165,6 +172,45 @@ struct StagedEntryWire {
 struct StagedRegisterWire {
     pack_id: String,
     entries: Vec<StagedEntryWire>,
+}
+
+#[derive(Deserialize)]
+struct CommitJobReadBackWire {
+    done: u64,
+    total: u64,
+}
+
+#[derive(Default, Deserialize)]
+struct CommitJobErrorWire {
+    #[serde(default)]
+    kind: String,
+    #[serde(default)]
+    message: String,
+    #[serde(default)]
+    retryable: bool,
+}
+
+/// A commit job's state machine as rendered by the server (submission response and polls).
+#[derive(Deserialize)]
+struct CommitJobWire {
+    job_id: String,
+    state: String,
+    #[serde(default)]
+    phase: Option<String>,
+    #[serde(default)]
+    read_back: Option<CommitJobReadBackWire>,
+    #[serde(default)]
+    commit: Option<String>,
+    #[serde(default)]
+    tree: Option<String>,
+    #[serde(default)]
+    ref_name: Option<String>,
+    #[serde(default)]
+    parent: Option<String>,
+    #[serde(default)]
+    created: Option<bool>,
+    #[serde(default)]
+    error: Option<CommitJobErrorWire>,
 }
 
 /// zstd level for staged chunk frames — the server stores frames verbatim, so this matches its
@@ -684,6 +730,15 @@ impl ArtifactStorageClient {
         emit(PushEvent::Committing {
             files: body.files.len(),
         });
+        // Async commit: the server records the commit as a durable job and answers within a
+        // grace window — 201 with the result when the job finished, 202 with a job id when it
+        // detached. Either way no connection stays silent long enough for an LB idle timeout
+        // to reap it (which used to CANCEL the in-flight commit), and losing a response is
+        // recoverable: the idempotency key reattaches to the same job.
+        let idem_key = {
+            let bytes: [u8; 16] = rand::random();
+            bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
+        };
         let (req, trace_id) = self.git_request(
             Method::POST,
             project_id,
@@ -692,7 +747,82 @@ impl ArtifactStorageClient {
             git_username,
             git_token,
         )?;
-        let resp: CommitByReferenceResponse = expect_json(req.json(&body).send().await?).await?;
+        let submit = req
+            .header("x-commit-async", "1")
+            .header("idempotency-key", &idem_key)
+            .timeout(std::time::Duration::from_secs(60))
+            .json(&body)
+            .send()
+            .await?;
+        let accepted = submit.status().as_u16() == 202;
+        let mut job: CommitJobWire = expect_json(submit).await?;
+        if accepted {
+            // Poll the job's state machine to terminal. Each poll is a fresh, short request.
+            let poll_suffix = format!("{commit_suffix}/jobs/{}", job.job_id);
+            let mut delay = std::time::Duration::from_millis(500);
+            loop {
+                tokio::time::sleep(delay).await;
+                delay = (delay * 2).min(std::time::Duration::from_secs(2));
+                let (req, _t) = self.git_request(
+                    Method::GET,
+                    project_id,
+                    repo,
+                    Some(&poll_suffix),
+                    git_username,
+                    git_token,
+                )?;
+                job = expect_json(
+                    req.timeout(std::time::Duration::from_secs(30))
+                        .send()
+                        .await?,
+                )
+                .await?;
+                match job.state.as_str() {
+                    "committed" | "failed" => break,
+                    _ => {
+                        if let Some(rb) = &job.read_back {
+                            emit(PushEvent::CommitProgress {
+                                phase: job.phase.clone().unwrap_or_else(|| job.state.clone()),
+                                done: rb.done,
+                                total: rb.total,
+                            });
+                        } else {
+                            emit(PushEvent::CommitProgress {
+                                phase: job.phase.clone().unwrap_or_else(|| job.state.clone()),
+                                done: 0,
+                                total: 0,
+                            });
+                        }
+                    }
+                }
+            }
+        }
+        if job.state == "failed" {
+            let err = job.error.unwrap_or_default();
+            return Err(SdkError::ClientError(format!(
+                "commit job failed ({}): {}{}",
+                err.kind,
+                err.message,
+                if err.retryable {
+                    " (safe to retry: uploaded chunks are deduplicated)"
+                } else {
+                    ""
+                }
+            )));
+        }
+        let resp = CommitByReferenceResponse {
+            commit: job.commit.ok_or_else(|| {
+                SdkError::ClientError("committed job missing commit oid".to_string())
+            })?,
+            tree: job
+                .tree
+                .ok_or_else(|| SdkError::ClientError("committed job missing tree".to_string()))?,
+            ref_name: job.ref_name.ok_or_else(|| {
+                SdkError::ClientError("committed job missing ref name".to_string())
+            })?,
+            parent: job.parent,
+            created: job.created.unwrap_or(false),
+        };
         emit(PushEvent::Committed {
             commit: resp.commit.clone(),
             ref_name: resp.ref_name.clone(),
