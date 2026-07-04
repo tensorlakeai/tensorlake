@@ -28,7 +28,9 @@ use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, CreateSandboxRequest, GetSandboxLogsRequest,
     ListArchivedSandboxesParams, SandboxPoolRequest, SnapshotType, UpdateSandboxRequest,
 };
-use tensorlake::sandboxes::{SandboxProxyClient, SandboxesClient};
+use tensorlake::sandboxes::{
+    SandboxProxyClient, SandboxesClient, resolve_sandbox_proxy_target, select_sandbox_proxy_url,
+};
 use tensorlake::{ClientBuilder, error::SdkError};
 
 // ---- Return value objects -------------------------------------------------
@@ -185,36 +187,6 @@ fn is_localhost_api_url(api_url: &str) -> bool {
         .is_some_and(|host| host == "localhost" || host == "127.0.0.1")
 }
 
-/// Resolve the proxy base URL and routing headers for a sandbox connection.
-///
-/// Returns `(base_url, host_override, sandbox_id_header)`:
-/// - localhost: `base_url` is the proxy URL as-is; `host_override` is
-///   `{sandbox_id}.local`; no sandbox-id header.
-/// - cloud: `base_url` is the apex ingress; the sandbox id is sent via the
-///   `X-Tensorlake-Sandbox-Id` header.
-fn resolve_proxy_target(
-    proxy_url: &str,
-    sandbox_id: &str,
-) -> napi::Result<(String, Option<String>, Option<String>)> {
-    let parsed = reqwest::Url::parse(proxy_url)
-        .map_err(|error| usage_error(format!("invalid proxy url `{proxy_url}`: {error}")))?;
-    let host = parsed
-        .host_str()
-        .ok_or_else(|| usage_error(format!("proxy url `{proxy_url}` is missing a host")))?;
-
-    if host == "localhost" || host == "127.0.0.1" {
-        return Ok((
-            proxy_url.trim_end_matches('/').to_string(),
-            Some(format!("{sandbox_id}.local")),
-            None,
-        ));
-    }
-
-    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
-    let base_url = format!("{}://{host}{port}", parsed.scheme());
-    Ok((base_url, None, Some(sandbox_id.to_string())))
-}
-
 fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
     if is_localhost_api_url(api_url) {
         return api_url.to_string();
@@ -276,6 +248,7 @@ fn parse_snapshot_type(snapshot_type: Option<String>) -> napi::Result<Option<Sna
 #[napi]
 pub struct NativeSandboxClient {
     client: SandboxesClient,
+    api_url: String,
 }
 
 #[napi]
@@ -326,7 +299,26 @@ impl NativeSandboxClient {
 
         Ok(Self {
             client: sandboxes_client,
+            api_url,
         })
+    }
+
+    #[napi]
+    pub fn select_sandbox_proxy_url(
+        &self,
+        sandbox_id: String,
+        sandbox_url: Option<String>,
+        ingress_endpoint: Option<String>,
+        explicit_proxy_url: Option<String>,
+    ) -> napi::Result<String> {
+        select_sandbox_proxy_url(
+            &self.api_url,
+            &sandbox_id,
+            sandbox_url.as_deref(),
+            ingress_endpoint.as_deref(),
+            explicit_proxy_url.as_deref(),
+        )
+        .map_err(into_napi_error)
     }
 
     /// Create a proxy client for `sandbox_id` that shares this client's
@@ -340,28 +332,28 @@ impl NativeSandboxClient {
         routing_hint: Option<String>,
         request_timeout_sec: Option<f64>,
     ) -> napi::Result<NativeSandboxProxyClient> {
-        let (base_url, host_override, sandbox_id_header) =
-            resolve_proxy_target(&proxy_url, &sandbox_id)?;
+        let target =
+            resolve_sandbox_proxy_target(&proxy_url, &sandbox_id).map_err(into_napi_error)?;
         let shared_client = if let Some(seconds) = request_timeout_sec {
             self.client
                 .http_client()
                 .with_base_url_and_timeout(
-                    &base_url,
+                    &target.base_url,
                     Some(duration_from_seconds("request_timeout_sec", seconds)?),
                 )
                 .map_err(into_napi_error)?
         } else {
             self.client
                 .http_client()
-                .with_base_url_without_timeout(&base_url)
+                .with_base_url_without_timeout(&target.base_url)
                 .map_err(into_napi_error)?
         };
-        let proxy = SandboxProxyClient::new(shared_client, host_override)
-            .with_sandbox_id(sandbox_id_header)
+        let proxy = SandboxProxyClient::new(shared_client, target.host_override)
+            .with_sandbox_id(target.sandbox_id_header)
             .with_routing_hint(routing_hint);
         Ok(NativeSandboxProxyClient {
             client: proxy,
-            base_url,
+            base_url: target.base_url,
         })
     }
 
@@ -731,10 +723,10 @@ impl NativeSandboxProxyClient {
         user_agent: Option<String>,
         request_timeout_sec: Option<f64>,
     ) -> napi::Result<Self> {
-        let (base_url, host_override, sandbox_id_header) =
-            resolve_proxy_target(&proxy_url, &sandbox_id)?;
+        let target =
+            resolve_sandbox_proxy_target(&proxy_url, &sandbox_id).map_err(into_napi_error)?;
 
-        let mut builder = ClientBuilder::new(&base_url);
+        let mut builder = ClientBuilder::new(&target.base_url);
         if let Some(token) = api_key.as_deref() {
             builder = builder.bearer_token(token);
         }
@@ -751,13 +743,13 @@ impl NativeSandboxProxyClient {
         }
 
         let client = builder.build().map_err(into_napi_error)?;
-        let proxy = SandboxProxyClient::new(client, host_override)
-            .with_sandbox_id(sandbox_id_header)
+        let proxy = SandboxProxyClient::new(client, target.host_override)
+            .with_sandbox_id(target.sandbox_id_header)
             .with_routing_hint(routing_hint);
 
         Ok(Self {
             client: proxy,
-            base_url,
+            base_url: target.base_url,
         })
     }
 

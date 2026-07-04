@@ -39,7 +39,7 @@ import {
 } from "./models.js";
 import { Sandbox } from "./sandbox.js";
 import { nowMs, logSdkTimingEvent, logSdkTiming } from "./sdk-timings.js";
-import { resolveProxyUrl } from "./url.js";
+import { explicitProxyUrlOverride } from "./url.js";
 
 function gpuRequest(
   gpus: number | undefined,
@@ -673,10 +673,9 @@ export class SandboxClient {
     routingHint?: string,
     requestTimeout?: number,
   ): Sandbox {
-    const resolvedProxy = proxyUrl ?? resolveProxyUrl(this.apiUrl);
     return new Sandbox({
       sandboxId: identifier,
-      proxyUrl: resolvedProxy,
+      proxyUrl,
       apiKey: this.apiKey,
       organizationId: this.organizationId,
       projectId: this.projectId,
@@ -724,26 +723,35 @@ export class SandboxClient {
     const requestedName = options?.poolId != null ? null : options?.name ?? null;
 
     const finishConnect = (
+      sandboxId: string,
       routingHint: string | undefined,
       name: string | null | undefined,
       ingressEndpoint: string | undefined,
+      sandboxUrl: string | undefined,
     ) => {
+      const selectedProxyUrl = this.native.selectSandboxProxyUrl(
+        sandboxId,
+        sandboxUrl ?? null,
+        ingressEndpoint ?? null,
+        options?.proxyUrl ?? explicitProxyUrlOverride() ?? null,
+      );
       const sandbox = requestClient.connect(
-        result.sandboxId,
-        options?.proxyUrl ?? ingressEndpoint,
+        sandboxId,
+        selectedProxyUrl,
         routingHint,
         requestTimeout,
       );
       sandbox._setOwner(requestClient);
       sandbox.traceId = result.traceId;
-      sandbox._setLifecycleIdentifier(result.sandboxId);
+      sandbox._setLifecycleIdentifier(sandboxId);
       sandbox._setName(name ?? requestedName);
       logSdkTiming("sandbox.create", "complete", opStart, {
-        sandbox_id: result.sandboxId,
+        sandbox_id: sandboxId,
         status: SandboxStatus.RUNNING,
         server_trace_id: result.traceId,
         routing_hint: routingHint,
         ingress_endpoint: ingressEndpoint,
+        sandbox_url: sandboxUrl,
       });
       return sandbox;
     };
@@ -752,7 +760,13 @@ export class SandboxClient {
     // and a short-lived routing hint. Use it immediately to skip an extra poll RTT
     // and let the proxy route the first request without a placement lookup.
     if (result.status === SandboxStatus.RUNNING) {
-      return finishConnect(result.routingHint, result.name, result.ingressEndpoint);
+      return finishConnect(
+        result.sandboxId,
+        result.routingHint,
+        result.name,
+        result.ingressEndpoint,
+        result.sandboxUrl,
+      );
     }
     if (
       result.status === SandboxStatus.SUSPENDED ||
@@ -787,7 +801,13 @@ export class SandboxClient {
         server_trace_id: info.traceId,
       });
       if (info.status === SandboxStatus.RUNNING) {
-        return finishConnect(info.routingHint, info.name, info.ingressEndpoint);
+        return finishConnect(
+          info.sandboxId,
+          info.routingHint,
+          info.name,
+          info.ingressEndpoint,
+          info.sandboxUrl,
+        );
       }
       if (
         info.status === SandboxStatus.SUSPENDED ||

@@ -98,6 +98,21 @@ function makeClient(proxy: FakeFns): FakeFns {
     updatePool: vi.fn(tracedJson()),
     deletePool: vi.fn(tracedId()),
     connectProxy: vi.fn(() => proxy as unknown as NativeSandboxProxyClient),
+    selectSandboxProxyUrl: vi.fn(
+      (
+        sandboxId: string,
+        sandboxUrl?: string | null,
+        ingressEndpoint?: string | null,
+        explicitProxyUrl?: string | null,
+      ) =>
+        sandboxUrl ??
+        explicitProxyUrl ??
+        (() => {
+          throw new Error(
+            "server response did not include sandbox_url; refusing to derive a proxy URL",
+          );
+        })(),
+    ),
   };
 }
 

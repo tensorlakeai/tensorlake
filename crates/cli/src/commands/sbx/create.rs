@@ -1,10 +1,11 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
     DEFAULT_SANDBOX_WAIT_TIMEOUT, apply_proxy_access_settings, sandbox_endpoint,
-    sandbox_proxy_base, wait_for_sandbox_status,
+    wait_for_sandbox_status,
 };
 use crate::error::{CliError, Result};
 use serde::Deserialize;
+use tensorlake::sandboxes::resolve_sandbox_proxy_target;
 
 const DEFAULT_SANDBOX_CPUS: f64 = 1.0;
 const DEFAULT_SANDBOX_MEMORY_MB: i64 = 1024;
@@ -190,7 +191,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         println!("{}", sandbox_id);
     }
     if is_tty {
-        print_post_create_tip(ctx, &create_result, display_id, name.is_none());
+        print_post_create_tip(&create_result, display_id, name.is_none());
     }
     Ok(())
 }
@@ -203,17 +204,10 @@ fn format_ready_message(name: Option<&str>, sandbox_id: &str) -> String {
 }
 
 fn print_post_create_tip(
-    ctx: &CliContext,
     create_result: &CreateSandboxResult,
     display_id: &str,
     is_ephemeral: bool,
 ) {
-    let (proxy_url, host_header) = post_create_proxy_base(ctx, create_result, display_id);
-    let host_flag = host_header
-        .as_deref()
-        .map(|h| format!(" \\\n     -H \"Host: {}\"", h))
-        .unwrap_or_default();
-
     eprintln!();
     eprintln!("Get started:");
     eprintln!("  tl sbx ssh {display_id}");
@@ -221,6 +215,14 @@ fn print_post_create_tip(
     if is_ephemeral {
         eprintln!("  tl sbx name {display_id} <name>  # make persistent (enables suspend/resume)");
     }
+
+    let Some(proxy_target) = post_create_proxy_base(create_result, display_id) else {
+        eprintln!();
+        eprintln!("Docs: https://docs.tensorlake.ai/sandboxes");
+        return;
+    };
+    let header_flags = proxy_target.header_flags();
+    let proxy_url = proxy_target.proxy_url;
 
     let tips: Vec<(&str, String)> = vec![
         (
@@ -230,30 +232,30 @@ fn print_post_create_tip(
         (
             "run a process via the HTTP API?",
             format!(
-                "  curl -X POST {proxy_url}/api/v1/processes{host_flag} \\\n     -H \"Content-Type: application/json\" \\\n     -d '{{\"command\": \"echo\", \"args\": [\"Hello, World!\"]}}'"
+                "  curl -X POST {proxy_url}/api/v1/processes{header_flags} \\\n     -H \"Content-Type: application/json\" \\\n     -d '{{\"command\": \"echo\", \"args\": [\"Hello, World!\"]}}'"
             ),
         ),
         (
             "run a bash script via the HTTP API?",
             format!(
-                "  curl -X POST {proxy_url}/api/v1/processes{host_flag} \\\n     -H \"Content-Type: application/json\" \\\n     -d '{{\"command\": \"bash\", \"args\": [\"-c\", \"for i in 1 2 3; do echo Line $i; sleep 1; done\"]}}'"
+                "  curl -X POST {proxy_url}/api/v1/processes{header_flags} \\\n     -H \"Content-Type: application/json\" \\\n     -d '{{\"command\": \"bash\", \"args\": [\"-c\", \"for i in 1 2 3; do echo Line $i; sleep 1; done\"]}}'"
             ),
         ),
         (
             "follow process output in real-time?",
             format!(
-                "  # Start a process:\n  curl -X POST {proxy_url}/api/v1/processes{host_flag} \\\n     -H \"Content-Type: application/json\" \\\n     -d '{{\"command\": \"bash\", \"args\": [\"-c\", \"for i in 1 2 3; do echo Line $i; sleep 1; done\"]}}'\n\n  # Then stream its output (replace <pid> with the returned pid):\n  curl {proxy_url}/api/v1/processes/<pid>/output/follow{host_flag}"
+                "  # Start a process:\n  curl -X POST {proxy_url}/api/v1/processes{header_flags} \\\n     -H \"Content-Type: application/json\" \\\n     -d '{{\"command\": \"bash\", \"args\": [\"-c\", \"for i in 1 2 3; do echo Line $i; sleep 1; done\"]}}'\n\n  # Then stream its output (replace <pid> with the returned pid):\n  curl {proxy_url}/api/v1/processes/<pid>/output/follow{header_flags}"
             ),
         ),
         (
             "write files into your sandbox via the HTTP API?",
             format!(
-                "  curl -X PUT \"{proxy_url}/api/v1/files?path=/tmp/hello.txt\"{host_flag} \\\n     -H \"Content-Type: application/octet-stream\" \\\n     -d \"Hello from sandbox!\""
+                "  curl -X PUT \"{proxy_url}/api/v1/files?path=/tmp/hello.txt\"{header_flags} \\\n     -H \"Content-Type: application/octet-stream\" \\\n     -d \"Hello from sandbox!\""
             ),
         ),
         (
             "read files from your sandbox via the HTTP API?",
-            format!("  curl \"{proxy_url}/api/v1/files?path=/tmp/hello.txt\"{host_flag}"),
+            format!("  curl \"{proxy_url}/api/v1/files?path=/tmp/hello.txt\"{header_flags}"),
         ),
     ];
 
@@ -272,50 +274,57 @@ fn print_post_create_tip(
     eprintln!("Docs: https://docs.tensorlake.ai/sandboxes");
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct PostCreateProxyTarget {
+    proxy_url: String,
+    host_header: Option<String>,
+    sandbox_id_header: Option<String>,
+}
+
+impl PostCreateProxyTarget {
+    fn header_flags(&self) -> String {
+        let mut flags = String::new();
+        if let Some(host) = self.host_header.as_deref() {
+            flags.push_str(&format!(" \\\n     -H \"Host: {host}\""));
+        }
+        if let Some(sandbox_id) = self.sandbox_id_header.as_deref() {
+            flags.push_str(&format!(
+                " \\\n     -H \"X-Tensorlake-Sandbox-Id: {sandbox_id}\""
+            ));
+        }
+        flags
+    }
+}
+
 fn post_create_proxy_base(
-    ctx: &CliContext,
     create_result: &CreateSandboxResult,
     display_id: &str,
-) -> (String, Option<String>) {
-    if let Some(sandbox_url) = create_result.sandbox_url.clone() {
-        return (sandbox_url, None);
-    }
+) -> Option<PostCreateProxyTarget> {
+    let explicit_proxy_url = super::explicit_proxy_url_override();
+    post_create_proxy_base_with_explicit(create_result, display_id, explicit_proxy_url.as_deref())
+}
 
-    if let Some(sandbox_url) = create_result
-        .ingress_endpoint
+fn post_create_proxy_base_with_explicit(
+    create_result: &CreateSandboxResult,
+    display_id: &str,
+    explicit_proxy_url: Option<&str>,
+) -> Option<PostCreateProxyTarget> {
+    let proxy_url = create_result
+        .sandbox_url
         .as_deref()
-        .and_then(|endpoint| sandbox_url_from_ingress_endpoint(endpoint, &create_result.sandbox_id))
-    {
-        return (sandbox_url, None);
-    }
-
-    let proxy_key = if create_result.sandbox_id == display_id {
+        .or(explicit_proxy_url)?;
+    let has_server_sandbox_url = create_result.sandbox_url.is_some();
+    let proxy_key = if has_server_sandbox_url || create_result.sandbox_id == display_id {
         create_result.sandbox_id.as_str()
     } else {
         display_id
     };
-    sandbox_proxy_base(ctx, proxy_key)
-}
-
-fn sandbox_url_from_ingress_endpoint(ingress_endpoint: &str, sandbox_id: &str) -> Option<String> {
-    let parsed = url::Url::parse(ingress_endpoint).ok()?;
-    let host = parsed.host_str()?;
-    let host = if host.contains(':') && !host.starts_with('[') {
-        format!("[{host}]")
-    } else {
-        host.to_string()
-    };
-    let port = parsed
-        .port()
-        .map(|port| format!(":{port}"))
-        .unwrap_or_default();
-    Some(format!(
-        "{}://{}.{}{}",
-        parsed.scheme(),
-        sandbox_id,
-        host,
-        port
-    ))
+    let target = resolve_sandbox_proxy_target(proxy_url, proxy_key).ok()?;
+    Some(PostCreateProxyTarget {
+        proxy_url: target.base_url,
+        host_header: target.host_override,
+        sandbox_id_header: target.sandbox_id_header,
+    })
 }
 
 fn build_create_request_body(
@@ -380,24 +389,9 @@ fn build_create_request_body(
 #[cfg(test)]
 mod tests {
     use super::{
-        CreateSandboxResult, GpuRequest, build_create_request_body, format_ready_message,
-        parse_file_system_mounts, post_create_proxy_base, sandbox_url_from_ingress_endpoint,
+        CreateSandboxResult, GpuRequest, PostCreateProxyTarget, build_create_request_body,
+        format_ready_message, parse_file_system_mounts, post_create_proxy_base_with_explicit,
     };
-    use crate::auth::context::CliContext;
-    use crate::config::resolver::ResolvedConfig;
-
-    fn test_ctx() -> CliContext {
-        CliContext::from_resolved(ResolvedConfig {
-            api_url: "https://api.tensorlake.ai".to_string(),
-            cloud_url: "https://cloud.tensorlake.ai".to_string(),
-            namespace: "default".to_string(),
-            api_key: None,
-            personal_access_token: None,
-            organization_id: None,
-            project_id: None,
-            debug: false,
-        })
-    }
 
     #[test]
     fn parse_file_system_mounts_builds_wire_objects() {
@@ -579,19 +573,7 @@ mod tests {
     }
 
     #[test]
-    fn sandbox_url_is_derived_from_returned_ingress_endpoint() {
-        assert_eq!(
-            sandbox_url_from_ingress_endpoint(
-                "https://sandbox.us-east-1.aws.tensorlake.ai",
-                "sbx-123"
-            ),
-            Some("https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai".to_string())
-        );
-    }
-
-    #[test]
     fn post_create_tip_prefers_sandbox_url_from_create_response() {
-        let ctx = test_ctx();
         let create_result = CreateSandboxResult {
             sandbox_id: "sbx-123".to_string(),
             status: Some("running".to_string()),
@@ -600,14 +582,36 @@ mod tests {
         };
 
         assert_eq!(
-            post_create_proxy_base(&ctx, &create_result, "sbx-123"),
-            ("https://returned.example.com".to_string(), None)
+            post_create_proxy_base_with_explicit(&create_result, "sbx-123", None),
+            Some(PostCreateProxyTarget {
+                proxy_url: "https://returned.example.com".to_string(),
+                host_header: None,
+                sandbox_id_header: Some("sbx-123".to_string()),
+            })
         );
     }
 
     #[test]
-    fn post_create_tip_uses_ingress_endpoint_from_create_response() {
-        let ctx = test_ctx();
+    fn post_create_tip_uses_canonical_id_with_server_sandbox_url_for_named_sandbox() {
+        let create_result = CreateSandboxResult {
+            sandbox_id: "sbx-123".to_string(),
+            status: Some("running".to_string()),
+            sandbox_url: Some("https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai".to_string()),
+            ingress_endpoint: Some("https://sandbox.us-east-1.aws.tensorlake.ai".to_string()),
+        };
+
+        assert_eq!(
+            post_create_proxy_base_with_explicit(&create_result, "stable-name", None),
+            Some(PostCreateProxyTarget {
+                proxy_url: "https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai".to_string(),
+                host_header: None,
+                sandbox_id_header: Some("sbx-123".to_string()),
+            })
+        );
+    }
+
+    #[test]
+    fn post_create_tip_does_not_derive_from_ingress_endpoint() {
         let create_result = CreateSandboxResult {
             sandbox_id: "sbx-123".to_string(),
             status: Some("running".to_string()),
@@ -616,11 +620,31 @@ mod tests {
         };
 
         assert_eq!(
-            post_create_proxy_base(&ctx, &create_result, "sbx-123"),
-            (
-                "https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai".to_string(),
-                None
-            )
+            post_create_proxy_base_with_explicit(&create_result, "sbx-123", None),
+            None
+        );
+    }
+
+    #[test]
+    fn post_create_tip_uses_explicit_override_when_server_url_missing() {
+        let create_result = CreateSandboxResult {
+            sandbox_id: "sbx-123".to_string(),
+            status: Some("running".to_string()),
+            sandbox_url: None,
+            ingress_endpoint: Some("https://sandbox.us-east-1.aws.tensorlake.ai".to_string()),
+        };
+
+        assert_eq!(
+            post_create_proxy_base_with_explicit(
+                &create_result,
+                "sbx-123",
+                Some("http://localhost:9443")
+            ),
+            Some(PostCreateProxyTarget {
+                proxy_url: "http://localhost:9443".to_string(),
+                host_header: Some("sbx-123.local".to_string()),
+                sandbox_id_header: None,
+            })
         );
     }
 }

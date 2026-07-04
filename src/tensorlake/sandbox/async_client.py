@@ -24,6 +24,7 @@ from .client import (
     _RUST_SANDBOX_CLIENT_AVAILABLE,
     RustCloudSandboxClient,
     _build_gpu_resources,
+    _explicit_proxy_url_override,
     _normalize_log_levels,
     _normalize_user_ports,
     _parse_rust_client_error_fields,
@@ -176,6 +177,11 @@ class AsyncSandboxClient:
         return parsed.hostname in ("localhost", "127.0.0.1")
 
     def _resolve_proxy_url(self) -> str:
+        """Resolve the legacy default proxy URL for direct sandbox handles.
+
+        Normal connect/create flows use the server-returned ``sandbox_url``.
+        ``TENSORLAKE_SANDBOX_PROXY_URL`` remains an explicit override.
+        """
         import os
 
         explicit = os.getenv("TENSORLAKE_SANDBOX_PROXY_URL")
@@ -792,6 +798,12 @@ class AsyncSandboxClient:
         routing_hint: str | None = None,
         request_timeout: float | None = None,
     ) -> "AsyncSandbox":
+        """Connect to a running sandbox for process and file operations.
+
+        When ``proxy_url`` is omitted, the client resolves the sandbox and
+        uses the server-returned ``sandbox_url``. ``proxy_url`` and
+        ``TENSORLAKE_SANDBOX_PROXY_URL`` are explicit overrides.
+        """
         from .async_sandbox import AsyncSandbox
 
         sandbox_identifier = _resolve_sandbox_identifier(
@@ -801,9 +813,14 @@ class AsyncSandboxClient:
         proxy_sandbox_id = sandbox_identifier
         if proxy_url is None:
             info = await self.get(sandbox_identifier)
-            proxy_url = info.ingress_endpoint or self._resolve_proxy_url()
             proxy_sandbox_id = info.sandbox_id
             routing_hint = routing_hint or info.routing_hint
+            proxy_url = self._rust_client.select_sandbox_proxy_url(
+                sandbox_id=proxy_sandbox_id,
+                sandbox_url=info.sandbox_url,
+                ingress_endpoint=info.ingress_endpoint,
+                explicit_proxy_url=_explicit_proxy_url_override(),
+            )
         connect_proxy_kwargs = {
             "proxy_url": proxy_url,
             "sandbox_id": proxy_sandbox_id,
@@ -849,6 +866,11 @@ class AsyncSandboxClient:
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
     ) -> "AsyncSandbox":
+        """Create a sandbox, wait for it to start, and return a connection.
+
+        When ``proxy_url`` is omitted, the connected sandbox uses the
+        server-returned ``sandbox_url``.
+        """
         wait_timeout = (
             request_timeout
             if request_timeout is not None
@@ -882,11 +904,19 @@ class AsyncSandboxClient:
             )
 
         if result.status == SandboxStatus.RUNNING:
+            selected_proxy_url = request_client._rust_client.select_sandbox_proxy_url(
+                sandbox_id=result.sandbox_id,
+                sandbox_url=result.sandbox_url,
+                ingress_endpoint=result.ingress_endpoint,
+                explicit_proxy_url=(
+                    proxy_url
+                    if proxy_url is not None
+                    else _explicit_proxy_url_override()
+                ),
+            )
             sandbox = await request_client.connect(
                 result.sandbox_id,
-                proxy_url=proxy_url
-                or result.ingress_endpoint
-                or self._resolve_proxy_url(),
+                proxy_url=selected_proxy_url,
                 routing_hint=result.routing_hint,
             )
             sandbox._sandbox_id = result.sandbox_id
@@ -897,6 +927,7 @@ class AsyncSandboxClient:
                 sandbox_id=result.sandbox_id,
                 status=result.status,
                 ingress_endpoint=result.ingress_endpoint,
+                sandbox_url=result.sandbox_url,
                 name=result.name or requested_name,
             )
             return sandbox
@@ -922,11 +953,21 @@ class AsyncSandboxClient:
         while asyncio.get_running_loop().time() < deadline:
             info = await request_client.get(result.sandbox_id)
             if info.status == SandboxStatus.RUNNING:
+                selected_proxy_url = (
+                    request_client._rust_client.select_sandbox_proxy_url(
+                        sandbox_id=info.sandbox_id,
+                        sandbox_url=info.sandbox_url,
+                        ingress_endpoint=info.ingress_endpoint,
+                        explicit_proxy_url=(
+                            proxy_url
+                            if proxy_url is not None
+                            else _explicit_proxy_url_override()
+                        ),
+                    )
+                )
                 sandbox = await request_client.connect(
-                    result.sandbox_id,
-                    proxy_url=proxy_url
-                    or info.ingress_endpoint
-                    or self._resolve_proxy_url(),
+                    info.sandbox_id,
+                    proxy_url=selected_proxy_url,
                     routing_hint=info.routing_hint,
                 )
                 sandbox._sandbox_id = info.sandbox_id

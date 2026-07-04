@@ -189,6 +189,10 @@ def _sandbox_info(status=SandboxStatus.RUNNING, **overrides) -> SandboxInfo:
 
 
 class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
+    def test_direct_async_sandbox_requires_proxy_url(self):
+        with self.assertRaisesRegex(SandboxError, "`proxy_url` is required"):
+            AsyncSandbox(sandbox_id="sbx-1", api_key="k")
+
     def test_async_sandbox_accepts_sandbox_name(self):
         sandbox = AsyncSandbox(
             identifier="stable-name",

@@ -24,6 +24,10 @@ pub mod tunnel;
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use chrono::{DateTime, Local, TimeZone, Utc};
+use tensorlake::sandboxes::{
+    resolve_default_sandbox_proxy_url, resolve_sandbox_proxy_target as resolve_core_proxy_target,
+    select_sandbox_proxy_url,
+};
 use tokio::time::{Duration, Instant};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,6 +37,7 @@ pub struct ResolvedSandboxProxyTarget {
     pub host_override: Option<String>,
     pub routing_hint: Option<String>,
     pub ingress_endpoint: Option<String>,
+    pub sandbox_url: Option<String>,
 }
 
 /// Build the lifecycle API base URL for sandbox CRUD operations.
@@ -153,47 +158,20 @@ pub async fn wait_for_sandbox_status(
     }
 }
 
-/// Build the proxy base URL for a specific sandbox (process/file/PTY operations).
-///
-/// Cloud: returns the apex proxy domain; callers must inject `X-Tensorlake-Sandbox-Id`
-/// via [`with_sandbox_headers`].
-/// Localhost: returns the proxy URL as-is with a `Host` header override.
-pub fn sandbox_proxy_base(ctx: &CliContext, sandbox_id: &str) -> (String, Option<String>) {
-    let proxy_url = resolve_proxy_url(&ctx.api_url);
-    proxy_base_from_url(&proxy_url, sandbox_id)
-}
-
-fn proxy_base_from_url(proxy_url: &str, sandbox_id: &str) -> (String, Option<String>) {
-    if let Ok(parsed) = url::Url::parse(proxy_url) {
-        let host = parsed.host_str().unwrap_or("");
-        if host == "localhost" || host == "127.0.0.1" {
-            // Localhost: keep URL as-is, set Host header to {sandbox_id}.local
-            let host_header = format!("{sandbox_id}.local");
-            return (proxy_url.to_string(), Some(host_header));
-        }
-        // Cloud: use apex domain; sandbox routing is via X-Tensorlake-Sandbox-Id header
-        let port_part = parsed.port().map(|p| format!(":{}", p)).unwrap_or_default();
-        let base_url = format!("{}://{host}{port_part}", parsed.scheme());
-        return (base_url, None);
-    }
-
-    // Fallback
-    (proxy_url.to_string(), None)
-}
-
 pub async fn resolve_sandbox_proxy_target(
     ctx: &CliContext,
     identifier: &str,
 ) -> Result<ResolvedSandboxProxyTarget> {
     if is_localhost(&ctx.api_url) {
-        let proxy_url = resolve_proxy_url(&ctx.api_url);
-        let (proxy_base, host_override) = proxy_base_from_url(&proxy_url, identifier);
+        let proxy_url = resolve_default_sandbox_proxy_url(&ctx.api_url);
+        let target = resolve_core_proxy_target(&proxy_url, identifier)?;
         return Ok(ResolvedSandboxProxyTarget {
             sandbox_id: identifier.to_string(),
-            proxy_base,
-            host_override,
+            proxy_base: target.base_url,
+            host_override: target.host_override,
             routing_hint: None,
             ingress_endpoint: None,
+            sandbox_url: None,
         });
     }
 
@@ -230,21 +208,33 @@ pub async fn resolve_sandbox_proxy_target(
         .map(str::to_string);
     let ingress_endpoint = info
         .get("ingress_endpoint")
+        .or_else(|| info.get("ingressEndpoint"))
+        .and_then(|value| value.as_str())
+        .filter(|value| !value.is_empty())
+        .map(str::to_string);
+    let sandbox_url = info
+        .get("sandbox_url")
+        .or_else(|| info.get("sandboxUrl"))
         .and_then(|value| value.as_str())
         .filter(|value| !value.is_empty())
         .map(str::to_string);
 
-    let proxy_url = explicit_proxy_url_override()
-        .or_else(|| ingress_endpoint.clone())
-        .unwrap_or_else(|| resolve_proxy_url(&ctx.api_url));
-    let (proxy_base, host_override) = proxy_base_from_url(&proxy_url, &sandbox_id);
+    let proxy_url = select_sandbox_proxy_url(
+        &ctx.api_url,
+        &sandbox_id,
+        sandbox_url.as_deref(),
+        ingress_endpoint.as_deref(),
+        explicit_proxy_url_override().as_deref(),
+    )?;
+    let target = resolve_core_proxy_target(&proxy_url, &sandbox_id)?;
 
     Ok(ResolvedSandboxProxyTarget {
         sandbox_id,
-        proxy_base,
-        host_override,
+        proxy_base: target.base_url,
+        host_override: target.host_override,
         routing_hint,
         ingress_endpoint,
+        sandbox_url,
     })
 }
 
@@ -278,24 +268,6 @@ pub fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
         let host = parsed.host_str().unwrap_or("");
         if let Some(rest) = host.strip_prefix("api.") {
             return format!("{}://sandbox.{}", parsed.scheme(), rest);
-        }
-    }
-    "https://sandbox.tensorlake.ai".to_string()
-}
-
-/// Resolve the sandbox proxy URL from env or api_url.
-fn resolve_proxy_url(api_url: &str) -> String {
-    if let Some(url) = explicit_proxy_url_override() {
-        return url;
-    }
-    if is_localhost(api_url) {
-        return "http://localhost:9443".to_string();
-    }
-    if let Ok(parsed) = url::Url::parse(api_url) {
-        let host = parsed.host_str().unwrap_or("");
-        if let Some(rest) = host.strip_prefix("api.") {
-            let proxy_host = format!("sandbox.{}", rest);
-            return format!("{}://{}", parsed.scheme(), proxy_host);
         }
     }
     "https://sandbox.tensorlake.ai".to_string()

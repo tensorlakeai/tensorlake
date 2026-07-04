@@ -128,6 +128,14 @@ def _resolve_sandbox_identifier(
     return resolved
 
 
+def _explicit_proxy_url_override() -> str | None:
+    explicit = os.getenv("TENSORLAKE_SANDBOX_PROXY_URL")
+    if explicit is None:
+        return None
+    explicit = explicit.strip()
+    return explicit or None
+
+
 def _raise_as_sandbox_error(e: Exception) -> NoReturn:
     if isinstance(e, SandboxError):
         raise
@@ -359,11 +367,10 @@ class SandboxClient:
         return parsed.hostname in ("localhost", "127.0.0.1")
 
     def _resolve_proxy_url(self) -> str:
-        """Derive the sandbox proxy URL from the API URL.
+        """Resolve the legacy default proxy URL for direct sandbox handles.
 
-        Checks the ``TENSORLAKE_SANDBOX_PROXY_URL`` env var first, then
-        infers the proxy domain from the API URL so that
-        ``api.tensorlake.dev`` → ``sandbox.tensorlake.dev``, etc.
+        Normal connect/create flows use the server-returned ``sandbox_url``.
+        ``TENSORLAKE_SANDBOX_PROXY_URL`` remains an explicit override.
         """
         import os
 
@@ -1333,9 +1340,10 @@ class SandboxClient:
 
         Args:
             identifier: Sandbox ID or name to connect to.
-            proxy_url: Override the sandbox proxy URL. Auto-detected based on
-                api_url when not provided. Can also be set via the
-                TENSORLAKE_SANDBOX_PROXY_URL environment variable.
+            proxy_url: Explicit sandbox proxy URL override. When omitted,
+                the client resolves the sandbox and uses the server-returned
+                ``sandbox_url``. Can also be set via the
+                ``TENSORLAKE_SANDBOX_PROXY_URL`` environment variable.
             sandbox_id: Deprecated alias for ``identifier``.
 
         Returns:
@@ -1353,9 +1361,14 @@ class SandboxClient:
         proxy_sandbox_id = sandbox_identifier
         if proxy_url is None:
             info = self.get(sandbox_identifier)
-            proxy_url = info.ingress_endpoint or self._resolve_proxy_url()
             proxy_sandbox_id = info.sandbox_id
             routing_hint = routing_hint or info.routing_hint
+            proxy_url = self._rust_client.select_sandbox_proxy_url(
+                sandbox_id=proxy_sandbox_id,
+                sandbox_url=info.sandbox_url,
+                ingress_endpoint=info.ingress_endpoint,
+                explicit_proxy_url=_explicit_proxy_url_override(),
+            )
 
         connect_proxy_kwargs = {
             "proxy_url": proxy_url,
@@ -1432,7 +1445,8 @@ class SandboxClient:
                 (e.g. ``["192.168.1.0/24"]``).
             pool_id: Pool ID to use for warm containers (optional)
             snapshot_id: ID of a completed snapshot to restore from
-            proxy_url: Override the sandbox proxy URL
+            proxy_url: Explicit sandbox proxy URL override. When omitted,
+                the connected sandbox uses the server-returned ``sandbox_url``.
             request_timeout: Max seconds to wait for Running status.
                 Defaults to the client request timeout.
             startup_timeout: Deprecated alias for ``request_timeout``.
@@ -1487,11 +1501,19 @@ class SandboxClient:
         # and a short-lived routing hint. Use it immediately to skip an extra poll RTT
         # and let the proxy route the first request without a placement lookup.
         if result.status == SandboxStatus.RUNNING:
+            selected_proxy_url = request_client._rust_client.select_sandbox_proxy_url(
+                sandbox_id=result.sandbox_id,
+                sandbox_url=result.sandbox_url,
+                ingress_endpoint=result.ingress_endpoint,
+                explicit_proxy_url=(
+                    proxy_url
+                    if proxy_url is not None
+                    else _explicit_proxy_url_override()
+                ),
+            )
             sandbox = request_client.connect(
                 result.sandbox_id,
-                proxy_url=proxy_url
-                or result.ingress_endpoint
-                or self._resolve_proxy_url(),
+                proxy_url=selected_proxy_url,
                 routing_hint=result.routing_hint,
             )
             sandbox._sandbox_id = result.sandbox_id
@@ -1502,6 +1524,7 @@ class SandboxClient:
                 sandbox_id=result.sandbox_id,
                 status=result.status,
                 ingress_endpoint=result.ingress_endpoint,
+                sandbox_url=result.sandbox_url,
                 name=result.name or requested_name,
             )
             return sandbox
@@ -1527,11 +1550,21 @@ class SandboxClient:
         while time.time() < deadline:
             info = request_client.get(result.sandbox_id)
             if info.status == SandboxStatus.RUNNING:
+                selected_proxy_url = (
+                    request_client._rust_client.select_sandbox_proxy_url(
+                        sandbox_id=info.sandbox_id,
+                        sandbox_url=info.sandbox_url,
+                        ingress_endpoint=info.ingress_endpoint,
+                        explicit_proxy_url=(
+                            proxy_url
+                            if proxy_url is not None
+                            else _explicit_proxy_url_override()
+                        ),
+                    )
+                )
                 sandbox = request_client.connect(
-                    result.sandbox_id,
-                    proxy_url=proxy_url
-                    or info.ingress_endpoint
-                    or self._resolve_proxy_url(),
+                    info.sandbox_id,
+                    proxy_url=selected_proxy_url,
                     routing_hint=info.routing_hint,
                 )
                 sandbox._sandbox_id = info.sandbox_id

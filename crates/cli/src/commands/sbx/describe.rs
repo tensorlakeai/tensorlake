@@ -243,7 +243,11 @@ fn print_ssh_config_details(item: &serde_json::Value) -> Result<()> {
         .filter(|value| !value.is_empty())
         .unwrap_or("-");
     let name = item.get("name").and_then(|v| v.as_str());
-    let sandbox = native_ssh::ResolvedSandbox::new(id, name);
+    let sandbox_url = item
+        .get("sandbox_url")
+        .or_else(|| item.get("sandboxUrl"))
+        .and_then(|v| v.as_str());
+    let sandbox = native_ssh::ResolvedSandbox::with_sandbox_url(id, name, sandbox_url)?;
     let config = native_ssh::format_ssh_config(&sandbox, None, None)?;
 
     println!("SSH Config:");

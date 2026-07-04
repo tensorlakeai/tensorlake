@@ -33,6 +33,7 @@ use tensorlake::sandboxes::models::{
 };
 use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
+    resolve_sandbox_proxy_target, select_sandbox_proxy_url,
 };
 use tensorlake::{Client, ClientBuilder, error::SdkError};
 use tokio::runtime::Runtime;
@@ -655,6 +656,7 @@ impl CloudApiClient {
 #[pyclass]
 pub struct CloudSandboxClient {
     client: SandboxesClient,
+    api_url: String,
 }
 
 #[pymethods]
@@ -707,11 +709,30 @@ impl CloudSandboxClient {
 
         Ok(Self {
             client: sandboxes_client,
+            api_url,
         })
     }
 
     fn close(&self) {
         // reqwest clients are closed when dropped; this is a no-op for API parity.
+    }
+
+    #[pyo3(signature = (sandbox_id, sandbox_url=None, ingress_endpoint=None, explicit_proxy_url=None))]
+    fn select_sandbox_proxy_url(
+        &self,
+        sandbox_id: String,
+        sandbox_url: Option<String>,
+        ingress_endpoint: Option<String>,
+        explicit_proxy_url: Option<String>,
+    ) -> PyResult<String> {
+        select_sandbox_proxy_url(
+            &self.api_url,
+            &sandbox_id,
+            sandbox_url.as_deref(),
+            ingress_endpoint.as_deref(),
+            explicit_proxy_url.as_deref(),
+        )
+        .map_err(into_sandbox_py_error)
     }
 
     fn create_sandbox(&self, request_json: String) -> PyResult<(String, String)> {
@@ -1495,28 +1516,28 @@ impl CloudSandboxClient {
         routing_hint: Option<String>,
         request_timeout_sec: Option<f64>,
     ) -> PyResult<CloudSandboxProxyClient> {
-        let (base_url, host_override, sandbox_id_header) =
-            resolve_proxy_target(&proxy_url, &sandbox_id)?;
+        let target =
+            resolve_sandbox_proxy_target(&proxy_url, &sandbox_id).map_err(into_sandbox_py_error)?;
         let shared_client = if let Some(seconds) = request_timeout_sec {
             self.client
                 .http_client()
                 .with_base_url_and_timeout(
-                    &base_url,
+                    &target.base_url,
                     Some(duration_from_seconds("request_timeout_sec", seconds)?),
                 )
                 .map_err(into_sandbox_py_error)?
         } else {
             self.client
                 .http_client()
-                .with_base_url_without_timeout(&base_url)
+                .with_base_url_without_timeout(&target.base_url)
                 .map_err(into_sandbox_py_error)?
         };
-        let proxy = SandboxProxyClient::new(shared_client, host_override)
-            .with_sandbox_id(sandbox_id_header)
+        let proxy = SandboxProxyClient::new(shared_client, target.host_override)
+            .with_sandbox_id(target.sandbox_id_header)
             .with_routing_hint(routing_hint);
         Ok(CloudSandboxProxyClient {
             client: proxy,
-            base_url,
+            base_url: target.base_url,
         })
     }
 }
@@ -1557,10 +1578,10 @@ impl CloudSandboxProxyClient {
         user_agent: Option<String>,
         request_timeout_sec: Option<f64>,
     ) -> PyResult<Self> {
-        let (base_url, host_override, sandbox_id_header) =
-            resolve_proxy_target(&proxy_url, &sandbox_id)?;
+        let target =
+            resolve_sandbox_proxy_target(&proxy_url, &sandbox_id).map_err(into_sandbox_py_error)?;
 
-        let mut builder = ClientBuilder::new(&base_url);
+        let mut builder = ClientBuilder::new(&target.base_url);
         if let Some(token) = api_key.as_deref() {
             builder = builder.bearer_token(token);
         }
@@ -1579,13 +1600,13 @@ impl CloudSandboxProxyClient {
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
-        let sandbox_proxy_client = SandboxProxyClient::new(client, host_override)
-            .with_sandbox_id(sandbox_id_header)
+        let sandbox_proxy_client = SandboxProxyClient::new(client, target.host_override)
+            .with_sandbox_id(target.sandbox_id_header)
             .with_routing_hint(routing_hint);
 
         Ok(Self {
             client: sandbox_proxy_client,
-            base_url,
+            base_url: target.base_url,
         })
     }
 
@@ -2337,10 +2358,10 @@ impl CloudSandboxDesktopClient {
         project_id: Option<String>,
         user_agent: Option<String>,
     ) -> PyResult<Self> {
-        let (base_url, host_override, sandbox_id_header) =
-            resolve_proxy_target(&proxy_url, &sandbox_id)?;
+        let target =
+            resolve_sandbox_proxy_target(&proxy_url, &sandbox_id).map_err(into_sandbox_py_error)?;
 
-        let mut builder = ClientBuilder::new(&base_url);
+        let mut builder = ClientBuilder::new(&target.base_url);
         if let Some(token) = api_key.as_deref() {
             builder = builder.bearer_token(token);
         }
@@ -2356,8 +2377,8 @@ impl CloudSandboxDesktopClient {
         }
 
         let client = builder.build().map_err(into_sandbox_py_error)?;
-        let proxy_client =
-            SandboxProxyClient::new(client, host_override).with_sandbox_id(sandbox_id_header);
+        let proxy_client = SandboxProxyClient::new(client, target.host_override)
+            .with_sandbox_id(target.sandbox_id_header);
         let connect_timeout = duration_from_seconds("connect_timeout_sec", connect_timeout_sec)?;
         let desktop_client = shared_runtime()
             .block_on(RustSandboxDesktopClient::connect(
@@ -3017,44 +3038,6 @@ fn parse_archived_sandboxes_params(
         cursor,
         direction,
     })
-}
-
-/// Resolve the proxy base URL and routing headers for a sandbox connection.
-///
-/// Returns `(base_url, host_override, sandbox_id_header)`:
-/// - localhost: `base_url` = proxy URL as-is; `host_override` = `{sandbox_id}.local`; no sandbox_id header
-/// - cloud: `base_url` = the server-selected ingress endpoint; `sandbox_id_header` = sandbox_id for `X-Tensorlake-Sandbox-Id` header
-fn resolve_proxy_target(
-    proxy_url: &str,
-    sandbox_id: &str,
-) -> PyResult<(String, Option<String>, Option<String>)> {
-    let parsed = reqwest::Url::parse(proxy_url).map_err(|error| {
-        CloudSandboxClientError::new_err((
-            "sdk_usage",
-            Option::<u16>::None,
-            format!("invalid proxy url `{proxy_url}`: {error}"),
-        ))
-    })?;
-    let host = parsed.host_str().ok_or_else(|| {
-        CloudSandboxClientError::new_err((
-            "sdk_usage",
-            Option::<u16>::None,
-            format!("proxy url `{proxy_url}` is missing a host"),
-        ))
-    })?;
-
-    if host == "localhost" || host == "127.0.0.1" {
-        return Ok((
-            proxy_url.trim_end_matches('/').to_string(),
-            Some(format!("{sandbox_id}.local")),
-            None,
-        ));
-    }
-
-    // Cloud: use apex domain with X-Tensorlake-Sandbox-Id header for routing.
-    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
-    let base_url = format!("{}://{host}{port}", parsed.scheme());
-    Ok((base_url, None, Some(sandbox_id.to_string())))
 }
 
 fn is_localhost_api_url(api_url: &str) -> bool {
