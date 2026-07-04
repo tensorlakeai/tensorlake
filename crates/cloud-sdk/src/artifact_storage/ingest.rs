@@ -195,9 +195,14 @@ struct CommitJobErrorWire {
 }
 
 /// A commit job's state machine as rendered by the server (submission response and polls).
+/// `job_id`/`state` are optional so the same decode accepts the legacy synchronous response
+/// shape (servers or endpoints without the async job machinery answer `201` with the bare
+/// commit fields — that is a terminal committed result).
 #[derive(Deserialize)]
 struct CommitJobWire {
-    job_id: String,
+    #[serde(default)]
+    job_id: Option<String>,
+    #[serde(default = "default_committed_state")]
     state: String,
     #[serde(default)]
     phase: Option<String>,
@@ -215,6 +220,10 @@ struct CommitJobWire {
     created: Option<bool>,
     #[serde(default)]
     error: Option<CommitJobErrorWire>,
+}
+
+fn default_committed_state() -> String {
+    "committed".to_string()
 }
 
 /// zstd level for staged chunk frames — the server stores frames verbatim, so this matches its
@@ -761,11 +770,14 @@ impl ArtifactStorageClient {
         let accepted = submit.status().as_u16() == 202;
         let mut job: CommitJobWire = expect_json(submit).await?;
         if accepted {
+            let job_id = job.job_id.clone().ok_or_else(|| {
+                SdkError::ClientError("202 submission without a job id".to_string())
+            })?;
             emit(PushEvent::CommitDetached {
-                job_id: job.job_id.clone(),
+                job_id: job_id.clone(),
             });
             // Poll the job's state machine to terminal. Each poll is a fresh, short request.
-            let poll_suffix = format!("{commit_suffix}/jobs/{}", job.job_id);
+            let poll_suffix = format!("{commit_suffix}/jobs/{job_id}");
             let mut delay = std::time::Duration::from_millis(500);
             loop {
                 tokio::time::sleep(delay).await;

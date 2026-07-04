@@ -241,9 +241,10 @@ enum FsCommands {
         /// Mountpoint directory (created; must be empty)
         path: PathBuf,
 
-        /// Activity-lease override in seconds (server default: 48h)
+        /// Attach to an existing workspace by id (see `tl fs workspace ls`) instead of
+        /// creating a new one; resumes at its last snapshot
         #[arg(long)]
-        lease_seconds: Option<u64>,
+        workspace: Option<String>,
 
         /// Run the mount daemon in the foreground (debugging)
         #[arg(long)]
@@ -315,30 +316,39 @@ enum FsCommands {
         b: Option<String>,
     },
 
-    /// Pin the workspace: its lease stops expiring until it is deleted
-    Pin {
-        /// A mounted directory
-        path: PathBuf,
-    },
-
-    /// Unmount: delete the workspace (unless --keep-workspace) and forget local state
+    /// Unmount: detach and forget local state; the workspace stays until deleted
     Unmount {
         /// A mounted directory
         path: PathBuf,
 
-        /// Keep the server-side workspace (its lease keeps ticking)
+        /// Also delete the server-side workspace
         #[arg(long)]
-        keep_workspace: bool,
+        delete: bool,
     },
 
-    /// List a file system's live workspaces
-    Workspaces {
+    /// Manage a file system's workspaces
+    #[command(subcommand)]
+    Workspace(WorkspaceCommands),
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCommands {
+    /// List a file system's workspaces
+    Ls {
         /// File system name
         file_system: String,
 
         /// Print workspaces as JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Delete a workspace (the only way a workspace dies)
+    Rm {
+        /// File system name
+        file_system: String,
+
+        /// Workspace id (see `tl fs workspace ls`)
+        workspace_id: String,
     },
 }
 
@@ -1670,9 +1680,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 FsCommands::Mount {
                     target,
                     path,
-                    lease_seconds,
+                    workspace,
                     foreground,
-                } => commands::fs::mount(ctx, &target, &path, lease_seconds, foreground).await,
+                } => {
+                    commands::fs::mount(ctx, &target, &path, workspace.as_deref(), foreground).await
+                }
                 FsCommands::Daemon { state_dir } => {
                     commands::fs::daemon::run(ctx, &state_dir).await
                 }
@@ -1695,14 +1707,18 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 FsCommands::Diff { path, a, b } => {
                     commands::fs::diff(ctx, &path, a.as_deref(), b.as_deref()).await
                 }
-                FsCommands::Pin { path } => commands::fs::pin(ctx, &path).await,
-                FsCommands::Unmount {
-                    path,
-                    keep_workspace,
-                } => commands::fs::unmount(ctx, &path, keep_workspace).await,
-                FsCommands::Workspaces { file_system, json } => {
-                    commands::fs::workspaces(ctx, &file_system, json).await
+                FsCommands::Unmount { path, delete } => {
+                    commands::fs::unmount(ctx, &path, delete).await
                 }
+                FsCommands::Workspace(cmd) => match cmd {
+                    WorkspaceCommands::Ls { file_system, json } => {
+                        commands::fs::workspace_ls(ctx, &file_system, json).await
+                    }
+                    WorkspaceCommands::Rm {
+                        file_system,
+                        workspace_id,
+                    } => commands::fs::workspace_rm(ctx, &file_system, &workspace_id).await,
+                },
             };
             // A cached minted git credential can be revoked before its recorded expiry; purge
             // the cache on an auth failure so the next invocation re-mints instead of retrying

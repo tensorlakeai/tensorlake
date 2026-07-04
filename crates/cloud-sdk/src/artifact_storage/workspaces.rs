@@ -1,10 +1,11 @@
-//! Workspace client: private leased refs (`refs/workspaces/<id>`) on artifact storage.
+//! Workspace client: private durable refs (`refs/workspaces/<id>`) on artifact storage.
 //!
 //! A workspace is the unit of ongoing work (artifact_storage issue #24): created from a base
 //! commit, advanced by snapshots (ordinary commits on the workspace ref, uploaded as CDC chunks
-//! through the resumable-ingest pipeline), kept alive by an activity lease that every snapshot
-//! and heartbeat re-arms, and published by promoting a snapshot onto a real branch (squash by
-//! default). All calls authenticate with a minted git credential, like the repo/commit APIs.
+//! through the resumable-ingest pipeline), and published by promoting a snapshot onto a real
+//! branch (squash by default). Workspaces are durable scratch pads — they survive crashes,
+//! timeouts, and unmounts, and die only by explicit deletion. All calls authenticate with a
+//! minted git credential, like the repo/commit APIs.
 
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
@@ -40,9 +41,6 @@ pub struct CreateWorkspaceRequest {
     /// Base commit-ish (branch, full ref, tag, or commit hex). Defaults to the repo's HEAD.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub base: Option<String>,
-    /// Activity lease override in seconds; defaults to the server's configured lease.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub lease_seconds: Option<u64>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -203,26 +201,6 @@ impl ArtifactStorageClient {
         )?;
         let resp = expect_json(req.json(request).send().await?).await?;
         Ok(Traced::new(trace_id, resp))
-    }
-
-    /// Clear the activity lease: the workspace never expires until explicitly deleted.
-    pub async fn workspace_pin(
-        &self,
-        project_id: &str,
-        repo: &str,
-        git_username: &str,
-        git_token: &str,
-        workspace_id: &str,
-    ) -> Result<Traced<()>, SdkError> {
-        let (req, trace_id) = self.git_request(
-            Method::PUT,
-            project_id,
-            repo,
-            Some(&format!("workspaces/{workspace_id}/pin")),
-            git_username,
-            git_token,
-        )?;
-        decode_empty(req.send().await?, trace_id).await
     }
 
     pub async fn delete_workspace(

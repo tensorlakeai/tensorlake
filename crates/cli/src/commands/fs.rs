@@ -19,7 +19,7 @@ use tensorlake::artifact_storage::ArtifactStorageClient;
 use tensorlake::artifact_storage::ingest::{PushEvent, PushFile, PushOptions, PushSource};
 use tensorlake::artifact_storage::models::GitCredential;
 use tensorlake::artifact_storage::workspaces::{
-    CreateWorkspaceRequest, PromoteWorkspaceRequest, TreeEntry, WorkspaceInfo,
+    CreateWorkspaceRequest, PromoteWorkspaceRequest, TreeEntry,
 };
 
 use crate::auth::context::CliContext;
@@ -265,13 +265,14 @@ fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
 // Mount / unmount
 // ---------------------------------------------------------------------------------------------
 
-/// `tl fs mount <file-system>[:<ref-or-commit>] <path>` — create the workspace and start its
-/// FUSE daemon. Reads stream lazily; nothing is copied to disk up front.
+/// `tl fs mount <file-system>[:<ref-or-commit>] <path>` — create a workspace (or attach to an
+/// existing one with `--workspace <id>`, resuming at its last snapshot) and start its FUSE
+/// daemon. Reads stream lazily; nothing is copied to disk up front.
 pub async fn mount(
     ctx: &CliContext,
     target: &str,
     path: &Path,
-    lease_seconds: Option<u64>,
+    workspace: Option<&str>,
     foreground: bool,
 ) -> Result<()> {
     // Bail before creating a workspace or spawning the daemon-wait loop.
@@ -284,6 +285,11 @@ pub async fn mount(
         Some((repo, base)) => (repo, Some(base.to_string())),
         None => (target, None),
     };
+    if workspace.is_some() && base.is_some() {
+        return Err(CliError::usage(
+            "--workspace attaches at the workspace's own head; drop the :<ref-or-commit> suffix",
+        ));
+    }
     std::fs::create_dir_all(path)?;
     if path
         .read_dir()
@@ -297,20 +303,32 @@ pub async fn mount(
     }
     let session = FsSession::open(ctx, Some(repo)).await?;
     let (user, token) = session.creds();
-    let ws = session
-        .client
-        .create_workspace(
-            &session.project_id,
-            repo,
-            user,
-            token,
-            &CreateWorkspaceRequest {
-                base: base.clone(),
-                lease_seconds,
-            },
-        )
-        .await?
-        .into_inner();
+    // Attach = reconnect: the workspace ref (and everything snapshotted onto it) survived
+    // whatever happened to the previous mount — sandbox crash, timeout, unmount.
+    let (ws, attached) = match workspace {
+        Some(id) => (
+            session
+                .client
+                .get_workspace(&session.project_id, repo, user, token, id)
+                .await?
+                .into_inner(),
+            true,
+        ),
+        None => (
+            session
+                .client
+                .create_workspace(
+                    &session.project_id,
+                    repo,
+                    user,
+                    token,
+                    &CreateWorkspaceRequest { base: base.clone() },
+                )
+                .await?
+                .into_inner(),
+            false,
+        ),
+    };
 
     let mountpoint = canonical_mountpoint(path)?;
     let state_dir = daemon::state_dir_root().join(&ws.id);
@@ -345,14 +363,21 @@ pub async fn mount(
     loop {
         match daemon::control(&state_dir, "ping").await {
             Ok(resp) => {
-                println!(
-                    "Mounted {}:{} at {} (workspace {}, {})",
-                    repo,
-                    ws.base_ref.as_deref().unwrap_or(&ws.base[..12]),
-                    mountpoint,
-                    short_id(&ws.id),
-                    lease_display(&ws),
-                );
+                if attached {
+                    println!(
+                        "Attached workspace {} at {} (resumed at its last snapshot)",
+                        short_id(&ws.id),
+                        mountpoint,
+                    );
+                } else {
+                    println!(
+                        "Mounted {}:{} at {} (workspace {})",
+                        repo,
+                        ws.base_ref.as_deref().unwrap_or(&ws.base[..12]),
+                        mountpoint,
+                        short_id(&ws.id),
+                    );
+                }
                 println!(
                     "Lower commit {}. Work in the mount, then: tl fs snapshot {}",
                     resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
@@ -364,13 +389,15 @@ pub async fn mount(
                 tokio::time::sleep(std::time::Duration::from_millis(250)).await;
             }
             Err(e) => {
-                // The workspace is unusable without its daemon; don't leave it leaking until
-                // lease expiry.
                 registry_remove(&mountpoint)?;
-                let _ = session
-                    .client
-                    .delete_workspace(&session.project_id, repo, user, token, &ws.id)
-                    .await;
+                // A workspace we just created is useless without its daemon; an attached one
+                // predates this mount and is not ours to destroy.
+                if !attached {
+                    let _ = session
+                        .client
+                        .delete_workspace(&session.project_id, repo, user, token, &ws.id)
+                        .await;
+                }
                 let _ = std::fs::remove_dir_all(&state_dir);
                 return Err(CliError::usage(format!(
                     "mount daemon did not come up: {e}. Linux builds need /dev/fuse; macOS needs the \
@@ -381,13 +408,14 @@ pub async fn mount(
     }
 }
 
-/// Unmount: stop the daemon (unmounts the kernel fs), delete the workspace (unless
-/// `--keep-workspace`), and forget the mount. Overlay state dies with the workspace.
-pub async fn unmount(ctx: &CliContext, path: &Path, keep_workspace: bool) -> Result<()> {
+/// Unmount: stop the daemon (unmounts the kernel fs) and forget the mount. The workspace — and
+/// every snapshot on it — stays on the server until `tl fs workspace rm` (or `--delete` here);
+/// unsnapshotted overlay changes are local and die with the mount's state directory.
+pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> {
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     let _ = daemon::control(&state_dir, "shutdown").await;
-    if !keep_workspace {
+    if delete {
         let session = FsSession::open(ctx, Some(&state.repo)).await?;
         let (user, token) = session.creds();
         session
@@ -400,17 +428,23 @@ pub async fn unmount(ctx: &CliContext, path: &Path, keep_workspace: bool) -> Res
                 &state.workspace_id,
             )
             .await?;
-        std::fs::remove_dir_all(&state_dir)?;
     }
+    std::fs::remove_dir_all(&state_dir)?;
     registry_remove(&mountpoint)?;
-    println!(
-        "Unmounted {mountpoint} ({}).",
-        if keep_workspace {
-            "workspace kept; its lease keeps ticking".to_string()
-        } else {
-            format!("workspace {} deleted", short_id(&state.workspace_id))
-        }
-    );
+    if delete {
+        println!(
+            "Unmounted {mountpoint} (workspace {} deleted).",
+            short_id(&state.workspace_id)
+        );
+    } else {
+        println!(
+            "Unmounted {mountpoint}. Workspace {} kept — reattach with: tl fs mount {} \
+             --workspace {} <path>",
+            short_id(&state.workspace_id),
+            state.repo,
+            state.workspace_id,
+        );
+    }
     Ok(())
 }
 
@@ -683,10 +717,10 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     }
     println!("{} {}", style("file system:").dim(), state.repo);
     println!(
-        "{} {} ({})",
+        "{} {} (created {} ago)",
         style("workspace:").dim(),
         short_id(&ws.id),
-        lease_display(&ws)
+        age_display(ws.created_at_secs)
     );
     match &daemon_commit {
         Some(commit) => println!("{} mounted at {commit}", style("daemon:").dim()),
@@ -1089,29 +1123,9 @@ pub async fn diff(ctx: &CliContext, path: &Path, a: Option<&str>, b: Option<&str
     }
 }
 
-pub async fn pin(ctx: &CliContext, path: &Path) -> Result<()> {
-    let (_, state_dir) = state_dir_for(path)?;
-    let state = daemon::load_mount_state(&state_dir)?;
-    let session = FsSession::open(ctx, Some(&state.repo)).await?;
-    let (user, token) = session.creds();
-    session
-        .client
-        .workspace_pin(
-            &session.project_id,
-            &state.repo,
-            user,
-            token,
-            &state.workspace_id,
-        )
-        .await?;
-    println!(
-        "Pinned workspace {}: it will not expire until deleted.",
-        short_id(&state.workspace_id)
-    );
-    Ok(())
-}
-
-pub async fn workspaces(ctx: &CliContext, file_system: &str, output_json: bool) -> Result<()> {
+/// `tl fs workspace ls <file-system>` — every live workspace, with enough context to pick one
+/// to reattach to (`tl fs mount <fs> --workspace <id> <path>`).
+pub async fn workspace_ls(ctx: &CliContext, file_system: &str, output_json: bool) -> Result<()> {
     let session = FsSession::open(ctx, Some(file_system)).await?;
     let (user, token) = session.creds();
     let list = session
@@ -1127,16 +1141,34 @@ pub async fn workspaces(ctx: &CliContext, file_system: &str, output_json: bool) 
         println!("No workspaces.");
         return Ok(());
     }
-    let mut table = new_table(&["Workspace", "Base", "Head", "Lease"]);
+    let mut table = new_table(&["Workspace", "Base", "Head", "Snapshots", "Age"]);
     for ws in &list {
         table.add_row(vec![
-            Cell::new(short_id(&ws.id)),
-            Cell::new(&ws.base[..12]),
+            Cell::new(&ws.id),
+            Cell::new(ws.base_ref.as_deref().unwrap_or(&ws.base[..12])),
             Cell::new(&ws.head[..12]),
-            Cell::new(lease_display(ws)),
+            Cell::new(if ws.head == ws.base { "-" } else { "yes" }),
+            Cell::new(age_display(ws.created_at_secs)),
         ]);
     }
     println!("{table}");
+    println!(
+        "Reattach: tl fs mount {file_system} --workspace <id> <path> — delete: tl fs workspace \
+         rm {file_system} <id>"
+    );
+    Ok(())
+}
+
+/// `tl fs workspace rm <file-system> <workspace-id>` — the one way a workspace dies. Its
+/// snapshots become unreachable (promoted work is unaffected).
+pub async fn workspace_rm(ctx: &CliContext, file_system: &str, workspace_id: &str) -> Result<()> {
+    let session = FsSession::open(ctx, Some(file_system)).await?;
+    let (user, token) = session.creds();
+    session
+        .client
+        .delete_workspace(&session.project_id, file_system, user, token, workspace_id)
+        .await?;
+    println!("Deleted workspace {}.", short_id(workspace_id));
     Ok(())
 }
 
@@ -1254,21 +1286,16 @@ fn short_id(id: &str) -> &str {
     &id[..id.len().min(12)]
 }
 
-fn lease_display(ws: &WorkspaceInfo) -> String {
-    match ws.lease_due_ms {
-        None => "pinned".to_string(),
-        Some(due) => {
-            let now = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_millis() as u64)
-                .unwrap_or(0);
-            if due <= now {
-                "lease expired".to_string()
-            } else {
-                let mins = (due - now) / 60_000;
-                format!("lease expires in {}h{:02}m", mins / 60, mins % 60)
-            }
-        }
+fn age_display(created_at_secs: u64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0);
+    let mins = now.saturating_sub(created_at_secs) / 60;
+    match mins {
+        0..=59 => format!("{mins}m"),
+        60..=1439 => format!("{}h{:02}m", mins / 60, mins % 60),
+        _ => format!("{}d", mins / 1440),
     }
 }
 
