@@ -274,6 +274,12 @@ pub async fn mount(
     lease_seconds: Option<u64>,
     foreground: bool,
 ) -> Result<()> {
+    // Bail before creating a workspace or spawning the daemon-wait loop.
+    if cfg!(not(unix)) {
+        return Err(CliError::usage(
+            "tl fs mount is supported on Linux (FUSE) and macOS (FSKit) only.",
+        ));
+    }
     let (repo, base) = match target.split_once(':') {
         Some((repo, base)) => (repo, Some(base.to_string())),
         None => (target, None),
@@ -457,10 +463,17 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
     }
 
     walk(&upper, &upper, &ignored, &mut |rel, abs, meta| {
-        use std::os::unix::fs::PermissionsExt;
+        #[cfg(unix)]
+        let exec = {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o111 != 0
+        };
+        // Windows has no exec bit (and no mounts — this only runs for local state inspection).
+        #[cfg(not(unix))]
+        let exec = false;
         let mode = if meta.file_type().is_symlink() {
             0o120000
-        } else if meta.permissions().mode() & 0o111 != 0 {
+        } else if exec {
             0o100755
         } else {
             0o100644
@@ -893,6 +906,7 @@ fn revalidate_paths(mountpoint: &Path, changed: &[String]) {
 /// mapping, the only userspace lever that does so: attribute changes alone make the kernel
 /// adopt a new size but NOT refetch cached pages (a file that grew behind the kernel keeps a
 /// zero-filled tail forever otherwise — measured on macOS 26.5 FSKit/lifs).
+#[cfg(unix)]
 fn open_truth(path: &Path, purge: bool) -> Option<u64> {
     use std::os::unix::ffi::OsStrExt;
     let c = std::ffi::CString::new(path.as_os_str().as_bytes()).ok()?;
@@ -935,6 +949,7 @@ fn open_truth(path: &Path, purge: bool) -> Option<u64> {
 /// is the one operation it cannot answer from that cache — the overlay's exclusivity check
 /// answers EEXIST, teaching the kernel the name is real. Safe by construction: this is only
 /// called for paths the overlay is already known to serve, so nothing is ever created.
+#[cfg(unix)]
 fn probe_negative_dentry(path: &Path) {
     use std::os::unix::ffi::OsStrExt;
     let Ok(c) = std::ffi::CString::new(path.as_os_str().as_bytes()) else {
@@ -958,6 +973,17 @@ fn probe_negative_dentry(path: &Path) {
         }
     }
 }
+
+/// Mounts don't exist off unix, so there is no kernel view to converge — these are compile
+/// stubs so the shared restore/snapshot plumbing stays portable (the mount-family commands
+/// themselves fail with "unsupported" long before reaching here).
+#[cfg(not(unix))]
+fn open_truth(path: &Path, _purge: bool) -> Option<u64> {
+    std::fs::symlink_metadata(path).ok().map(|m| m.len())
+}
+
+#[cfg(not(unix))]
+fn probe_negative_dentry(_path: &Path) {}
 
 /// Nudge and wait (bounded) until the kernel's view through the mountpoint matches `expect`.
 /// The kernel applies out-of-band changes asynchronously and never refetches cached pages on

@@ -73,7 +73,17 @@ pub fn control_socket(state_dir: &Path) -> PathBuf {
     state_dir.join("control.sock")
 }
 
+/// One control round-trip from a CLI command to the daemon. Mounts (and so daemons) exist
+/// only on unix; elsewhere every control call reports the daemon as not running.
+#[cfg(not(unix))]
+pub async fn control(_state_dir: &Path, _op: &str) -> Result<serde_json::Value> {
+    Err(CliError::usage(
+        "tl fs mounts are supported on Linux (FUSE) and macOS (FSKit) only.",
+    ))
+}
+
 /// One control round-trip from a CLI command to the daemon.
+#[cfg(unix)]
 pub async fn control(state_dir: &Path, op: &str) -> Result<serde_json::Value> {
     let sock = control_socket(state_dir);
     let mut stream = tokio::net::UnixStream::connect(&sock).await.map_err(|e| {
