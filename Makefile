@@ -107,4 +107,10 @@ bump_version:
 	done
 	@echo "Version bumped to $(VERSION)"
 
-.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox install-dev install-dev-release install-global build_release bump_version
+.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
+
+# POSIX conformance for `tl fs mount` (Linux + FUSE + working credentials). Runs the ported
+# issue-#24 battery against a real mounted workspace, in fresh and snapshot-reattached phases.
+# Build tl first (cargo build -p tl) or point TL_BIN at a binary.
+fs-posix-conformance:
+	bash tests/fs-posix-conformance/run_conformance.sh
