@@ -52,6 +52,22 @@ class _FakeRustClient:
         )
         return _FakeRustProxyClient(proxy_url)
 
+    def select_sandbox_proxy_url(
+        self,
+        *,
+        sandbox_id,
+        sandbox_url=None,
+        ingress_endpoint=None,
+        explicit_proxy_url=None,
+    ):
+        if sandbox_url:
+            return sandbox_url
+        if explicit_proxy_url:
+            return explicit_proxy_url
+        raise RuntimeError(
+            "server response did not include sandbox_url; refusing to derive a proxy URL"
+        )
+
     def create_snapshot(self, sandbox_id, snapshot_type=None):
         self.create_snapshot_calls.append((sandbox_id, snapshot_type))
         return (
@@ -471,7 +487,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         with self.assertRaisesRegex(SandboxError, "Provide only one of"):
             client.connect("stable-name", sandbox_id="sbx-123")
 
-    def test_connect_resolves_ingress_endpoint_when_proxy_url_omitted(self):
+    def test_connect_prefers_server_sandbox_url_when_proxy_url_omitted(self):
         client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")
         fake = _FakeRustClient()
         client._rust_client = fake
@@ -483,13 +499,56 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             fake.connect_proxy_calls,
             [
                 {
-                    "proxy_url": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                    "proxy_url": "https://sbx-1.sandbox.tensorlake.ai",
                     "sandbox_id": "sbx-1",
                     "routing_hint": None,
                 }
             ],
         )
         self.assertEqual(sandbox.sandbox_id, "sbx-1")
+
+    def test_connect_uses_env_proxy_override_when_server_url_missing(self):
+        class _NoSandboxUrlRustClient(_FakeRustClient):
+            def get_sandbox_json(self, sandbox_id):
+                self.last_get_sandbox_id = sandbox_id
+                return (
+                    "trace-get-sandbox",
+                    json.dumps(
+                        {
+                            "id": "sbx-1",
+                            "namespace": "default",
+                            "status": "running",
+                            "resources": {
+                                "cpus": 1.0,
+                                "memory_mb": 512,
+                                "ephemeral_disk_mb": 1024,
+                            },
+                        }
+                    ),
+                )
+
+        client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")
+        fake = _NoSandboxUrlRustClient()
+        client._rust_client = fake
+
+        with patch.dict(
+            "os.environ",
+            {"TENSORLAKE_SANDBOX_PROXY_URL": "https://override.example.com"},
+        ):
+            sandbox = client.connect("stable-name")
+
+        self.assertEqual(fake.last_get_sandbox_id, "stable-name")
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://override.example.com",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": None,
+                }
+            ],
+        )
 
     def test_create_uses_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
@@ -596,7 +655,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         ):
             client.create_and_connect(image="tensorlake/missing-image")
 
-    def test_create_and_connect_uses_ingress_endpoint_from_running_response(self):
+    def test_create_and_connect_uses_sandbox_url_from_running_response(self):
         class _RunningRustClient(_FakeRustClient):
             def create_sandbox(self, request_json):
                 self.create_request_json = request_json
@@ -608,6 +667,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                             "status": "running",
                             "routing_hint": "hint-1",
                             "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                            "sandbox_url": "https://sbx-1.sandbox.gcp-use4.tensorlake.ai",
                         }
                     ),
                 )
@@ -623,9 +683,93 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             fake.connect_proxy_calls,
             [
                 {
-                    "proxy_url": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                    "proxy_url": "https://sbx-1.sandbox.gcp-use4.tensorlake.ai",
                     "sandbox_id": "sbx-1",
                     "routing_hint": "hint-1",
+                }
+            ],
+        )
+
+    def test_create_and_connect_uses_env_proxy_override_when_server_url_missing(self):
+        class _RunningRustClient(_FakeRustClient):
+            def create_sandbox(self, request_json):
+                self.create_request_json = request_json
+                return (
+                    "trace-create-sandbox",
+                    json.dumps(
+                        {
+                            "sandbox_id": "sbx-1",
+                            "status": "running",
+                        }
+                    ),
+                )
+
+        client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")
+        fake = _RunningRustClient()
+        client._rust_client = fake
+
+        with patch.dict(
+            "os.environ",
+            {"TENSORLAKE_SANDBOX_PROXY_URL": "https://override.example.com"},
+        ):
+            sandbox = client.create_and_connect(image="python:3.11")
+
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://override.example.com",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": None,
+                }
+            ],
+        )
+
+    def test_create_and_connect_uses_canonical_id_from_polled_running_response(self):
+        class _PollCanonicalRustClient(_FakeRustClient):
+            def create_sandbox(self, request_json):
+                self.create_request_json = request_json
+                return (
+                    "trace-create-sandbox",
+                    json.dumps({"sandbox_id": "sbx-original", "status": "pending"}),
+                )
+
+            def get_sandbox_json(self, sandbox_id):
+                self.last_get_sandbox_id = sandbox_id
+                return (
+                    "trace-get-sandbox",
+                    json.dumps(
+                        {
+                            "id": "sbx-canonical",
+                            "namespace": "default",
+                            "status": "running",
+                            "resources": {
+                                "cpus": 1.0,
+                                "memory_mb": 512,
+                                "ephemeral_disk_mb": 1024,
+                            },
+                            "routing_hint": "hint-2",
+                            "sandbox_url": "https://sbx-canonical.sandbox.tensorlake.ai",
+                        }
+                    ),
+                )
+
+        client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")
+        fake = _PollCanonicalRustClient()
+        client._rust_client = fake
+
+        sandbox = client.create_and_connect(image="python:3.11", request_timeout=1)
+
+        self.assertEqual(fake.last_get_sandbox_id, "sbx-original")
+        self.assertEqual(sandbox.sandbox_id, "sbx-canonical")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://sbx-canonical.sandbox.tensorlake.ai",
+                    "sandbox_id": "sbx-canonical",
+                    "routing_hint": "hint-2",
                 }
             ],
         )

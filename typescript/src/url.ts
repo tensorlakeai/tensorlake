@@ -15,17 +15,27 @@ export function isLocalhost(apiUrl: string): boolean {
   }
 }
 
+/** Return the explicit sandbox proxy env override, if the user set one. */
+export function explicitProxyUrlOverride(): string | undefined {
+  const explicit = process.env.TENSORLAKE_SANDBOX_PROXY_URL?.trim();
+  return explicit && explicit.length > 0 ? explicit : undefined;
+}
+
 /**
- * Derive the sandbox proxy URL from the API URL.
+ * Resolve the legacy default proxy URL for direct sandbox handles.
  *
- * Priority:
+ * Normal client connect/create flows use the server-returned `sandboxUrl`.
+ * This helper keeps the old direct-handle behavior and treats the env var as
+ * an explicit override.
+ *
+ * Legacy priority:
  * 1. TENSORLAKE_SANDBOX_PROXY_URL env var
  * 2. `http://localhost:9443` for localhost API URLs
  * 3. Transform `api.X` → `sandbox.X`
  * 4. Default fallback
  */
 export function resolveProxyUrl(apiUrl: string): string {
-  const explicit = process.env.TENSORLAKE_SANDBOX_PROXY_URL;
+  const explicit = explicitProxyUrlOverride();
   if (explicit) return explicit;
 
   if (isLocalhost(apiUrl)) return "http://localhost:9443";
@@ -48,7 +58,7 @@ export function resolveProxyUrl(apiUrl: string): string {
  * Resolve the proxy target for a specific sandbox.
  *
  * - Localhost: base URL stays the same, Host header set to `{sandboxId}.local`
- * - Cloud: apex proxy domain with `X-Tensorlake-Sandbox-Id` header
+ * - Cloud: selected proxy domain with `X-Tensorlake-Sandbox-Id` header
  *
  * Returns `{ baseUrl, hostHeader, sandboxIdHeader }`.
  */

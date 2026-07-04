@@ -25,6 +25,13 @@ describe("Sandbox", () => {
   }
 
   describe("constructor", () => {
+    it("requires an explicit proxyUrl for direct construction", () => {
+      expect(() => new Sandbox({ sandboxId: "sbx-direct" })).toThrow(SandboxError);
+      expect(() => new Sandbox({ sandboxId: "sbx-direct" })).toThrow(
+        /proxyUrl is required/,
+      );
+    });
+
     it("sets sandboxId", () => {
       installNativeStub();
       const sbx = makeSandbox("sbx-abc");

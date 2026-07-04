@@ -66,12 +66,16 @@ class AsyncSandbox:
     Use :class:`AsyncSandboxClient` to create or connect, then call methods
     on the returned :class:`AsyncSandbox` to drive the sandbox without
     blocking the event loop.
+
+    Direct construction requires ``proxy_url``. Prefer
+    :meth:`AsyncSandbox.connect` or :class:`AsyncSandboxClient` so the
+    server-returned sandbox URL is used.
     """
 
     def __init__(
         self,
         identifier: str | None = None,
-        proxy_url: str = _defaults.SANDBOX_PROXY_URL,
+        proxy_url: str | None = None,
         api_key: str | None = _defaults.API_KEY,
         organization_id: str | None = None,
         project_id: str | None = None,
@@ -90,6 +94,14 @@ class AsyncSandbox:
             raise SandboxError(
                 "`identifier` is required. `sandbox_id` is accepted as a deprecated alias."
             )
+        if proxy_url is None:
+            if _proxy_rust_client is None:
+                raise SandboxError(
+                    "`proxy_url` is required for direct AsyncSandbox construction; "
+                    "use AsyncSandbox.connect(...) or AsyncSandboxClient.connect(...) to "
+                    "use the server-returned sandbox_url."
+                )
+            proxy_url = _proxy_rust_client.base_url()
 
         self._identifier = sandbox_identifier
         self._sandbox_id: str | None = None

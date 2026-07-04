@@ -159,6 +159,10 @@ def _sandbox_info(status=SandboxStatus.RUNNING, **overrides) -> SandboxInfo:
 
 
 class TestSandboxRustBackend(unittest.TestCase):
+    def test_direct_sandbox_requires_proxy_url(self):
+        with self.assertRaisesRegex(SandboxError, "`proxy_url` is required"):
+            Sandbox(sandbox_id="sbx-1", api_key="k")
+
     def test_sandbox_accepts_sandbox_name(self):
         sandbox, _ = _make_sandbox()
         # Rename so the identifier is set from `identifier=` kwarg.

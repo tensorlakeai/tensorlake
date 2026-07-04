@@ -123,6 +123,12 @@ export interface NativeSandboxClient {
     routingHint?: string | null,
     requestTimeoutSec?: number | null,
   ): NativeSandboxProxyClient;
+  selectSandboxProxyUrl(
+    sandboxId: string,
+    sandboxUrl?: string | null,
+    ingressEndpoint?: string | null,
+    explicitProxyUrl?: string | null,
+  ): string;
 }
 
 interface NativeSandboxClientCtor {

@@ -32,6 +32,9 @@ use models::{
     SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
 };
 
+pub const DEFAULT_SANDBOX_PROXY_URL: &str = "https://sandbox.tensorlake.ai";
+pub const SANDBOX_MANAGEMENT_PORT: u16 = 9501;
+
 /// A reference to a sandbox process: either its OS **pid** or a managed-process **name**
 /// given at creation. This is the single place the pid/name path segment is built, reused by
 /// the Rust SDK, the Python/Node bindings, and the CLI.
@@ -119,6 +122,140 @@ pub fn validate_managed_name(name: &str) -> Result<(), SdkError> {
         ));
     }
     Ok(())
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SandboxProxyTarget {
+    pub base_url: String,
+    pub host_override: Option<String>,
+    pub sandbox_id_header: Option<String>,
+}
+
+pub fn sandbox_url_from_ingress_endpoint(
+    ingress_endpoint: &str,
+    sandbox_id: &str,
+    port: Option<u16>,
+) -> Result<String, SdkError> {
+    let parsed = reqwest::Url::parse(ingress_endpoint).map_err(|error| {
+        SdkError::ClientError(format!(
+            "invalid ingress endpoint `{ingress_endpoint}`: {error}"
+        ))
+    })?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(SdkError::ClientError(
+            "ingress_endpoint must be an absolute http(s) URL".to_string(),
+        ));
+    }
+    let host = parsed.host_str().ok_or_else(|| {
+        SdkError::ClientError(format!(
+            "ingress endpoint `{ingress_endpoint}` is missing a host"
+        ))
+    })?;
+    let label = match port {
+        Some(port) if port != SANDBOX_MANAGEMENT_PORT => format!("{port}-{sandbox_id}"),
+        _ => sandbox_id.to_string(),
+    };
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let port_part = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+    Ok(format!("{}://{label}.{host}{port_part}", parsed.scheme()))
+}
+
+pub fn resolve_default_sandbox_proxy_url(api_url: &str) -> String {
+    if let Ok(url) = std::env::var("TENSORLAKE_SANDBOX_PROXY_URL") {
+        let trimmed = url.trim();
+        if !trimmed.is_empty() {
+            return trimmed.to_string();
+        }
+    }
+    if is_localhost_api_url(api_url) {
+        return "http://localhost:9443".to_string();
+    }
+    if let Ok(parsed) = reqwest::Url::parse(api_url)
+        && let Some(host) = parsed.host_str()
+        && let Some(rest) = host.strip_prefix("api.")
+    {
+        return format!("{}://sandbox.{rest}", parsed.scheme());
+    }
+    DEFAULT_SANDBOX_PROXY_URL.to_string()
+}
+
+pub fn select_sandbox_proxy_url(
+    _api_url: &str,
+    _sandbox_id: &str,
+    server_sandbox_url: Option<&str>,
+    _server_ingress_endpoint: Option<&str>,
+    explicit_proxy_url: Option<&str>,
+) -> Result<String, SdkError> {
+    if let Some(url) = non_empty(server_sandbox_url) {
+        return Ok(url.to_string());
+    }
+    if let Some(url) = non_empty(explicit_proxy_url) {
+        return Ok(url.to_string());
+    }
+    Err(SdkError::ClientError(
+        "server response did not include sandbox_url; refusing to derive a proxy URL".to_string(),
+    ))
+}
+
+pub fn resolve_sandbox_proxy_target(
+    proxy_url: &str,
+    sandbox_id: &str,
+) -> Result<SandboxProxyTarget, SdkError> {
+    let parsed = reqwest::Url::parse(proxy_url).map_err(|error| {
+        SdkError::ClientError(format!("invalid proxy url `{proxy_url}`: {error}"))
+    })?;
+    let host = parsed.host_str().ok_or_else(|| {
+        SdkError::ClientError(format!("proxy url `{proxy_url}` is missing a host"))
+    })?;
+
+    if host == "localhost" || host == "127.0.0.1" {
+        return Ok(SandboxProxyTarget {
+            base_url: proxy_url.trim_end_matches('/').to_string(),
+            host_override: Some(format!("{sandbox_id}.local")),
+            sandbox_id_header: None,
+        });
+    }
+
+    let host = if host.contains(':') && !host.starts_with('[') {
+        format!("[{host}]")
+    } else {
+        host.to_string()
+    };
+    let port = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
+    Ok(SandboxProxyTarget {
+        base_url: format!("{}://{host}{port}", parsed.scheme()),
+        host_override: None,
+        sandbox_id_header: Some(sandbox_id.to_string()),
+    })
+}
+
+pub fn sandbox_proxy_hostname(proxy_url: &str) -> Result<String, SdkError> {
+    let parsed = reqwest::Url::parse(proxy_url).map_err(|error| {
+        SdkError::ClientError(format!("invalid sandbox url `{proxy_url}`: {error}"))
+    })?;
+    if parsed.scheme() != "http" && parsed.scheme() != "https" {
+        return Err(SdkError::ClientError(
+            "sandbox_url must be an absolute http(s) URL".to_string(),
+        ));
+    }
+    parsed.host_str().map(str::to_string).ok_or_else(|| {
+        SdkError::ClientError(format!("sandbox url `{proxy_url}` is missing a host"))
+    })
+}
+
+fn non_empty(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
+fn is_localhost_api_url(api_url: &str) -> bool {
+    reqwest::Url::parse(api_url)
+        .ok()
+        .and_then(|url| url.host_str().map(ToString::to_string))
+        .is_some_and(|host| host == "localhost" || host == "127.0.0.1")
 }
 
 /// A client for managing sandbox lifecycle, pool, and snapshot APIs.
@@ -943,7 +1080,10 @@ impl SandboxProxyClient {
 
 #[cfg(test)]
 mod process_ref_tests {
-    use super::{ProcessRef, validate_managed_name};
+    use super::{
+        ProcessRef, resolve_sandbox_proxy_target, sandbox_proxy_hostname,
+        sandbox_url_from_ingress_endpoint, select_sandbox_proxy_url, validate_managed_name,
+    };
 
     #[test]
     fn validate_managed_name_rules() {
@@ -988,5 +1128,89 @@ mod process_ref_tests {
         // Spaces and reserved characters in a name are percent-encoded into one segment.
         assert_eq!(ProcessRef::from("web 1").to_path_segment(), "web%201");
         assert_eq!(ProcessRef::from("a?b").to_path_segment(), "a%3Fb");
+    }
+
+    #[test]
+    fn select_proxy_url_prefers_server_sandbox_url() {
+        let selected = select_sandbox_proxy_url(
+            "https://api.tensorlake.ai",
+            "sbx-1",
+            Some("https://sbx-1.sandbox.gcp-use4.tensorlake.ai"),
+            Some("https://sandbox.us-east-1.aws.tensorlake.ai"),
+            Some("https://override.example.com"),
+        )
+        .unwrap();
+
+        assert_eq!(selected, "https://sbx-1.sandbox.gcp-use4.tensorlake.ai");
+    }
+
+    #[test]
+    fn select_proxy_url_uses_explicit_override_when_server_url_missing() {
+        let selected = select_sandbox_proxy_url(
+            "https://api.tensorlake.ai",
+            "sbx-1",
+            None,
+            Some("https://sandbox.gcp-use4.tensorlake.ai"),
+            Some("https://override.example.com"),
+        )
+        .unwrap();
+
+        assert_eq!(selected, "https://override.example.com");
+    }
+
+    #[test]
+    fn select_proxy_url_errors_without_server_url_or_explicit_override() {
+        let error = select_sandbox_proxy_url(
+            "https://api.tensorlake.ai",
+            "sbx-1",
+            None,
+            Some("https://sandbox.gcp-use4.tensorlake.ai"),
+            None,
+        )
+        .unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("server response did not include sandbox_url"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn ingress_endpoint_url_builder_preserves_custom_port() {
+        let selected = sandbox_url_from_ingress_endpoint(
+            "https://sandbox.gcp-use4.tensorlake.ai:9443",
+            "sbx-1",
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(
+            selected,
+            "https://sbx-1.sandbox.gcp-use4.tensorlake.ai:9443"
+        );
+    }
+
+    #[test]
+    fn proxy_target_preserves_server_sandbox_host() {
+        let target =
+            resolve_sandbox_proxy_target("https://sbx-1.sandbox.gcp-use4.tensorlake.ai", "sbx-1")
+                .unwrap();
+
+        assert_eq!(
+            target.base_url,
+            "https://sbx-1.sandbox.gcp-use4.tensorlake.ai"
+        );
+        assert_eq!(target.host_override, None);
+        assert_eq!(target.sandbox_id_header.as_deref(), Some("sbx-1"));
+    }
+
+    #[test]
+    fn sandbox_proxy_hostname_uses_server_sandbox_url_host() {
+        let hostname =
+            sandbox_proxy_hostname("https://sbx-1.sandbox.gcp-use4.tensorlake.ai").unwrap();
+
+        assert_eq!(hostname, "sbx-1.sandbox.gcp-use4.tensorlake.ai");
     }
 }

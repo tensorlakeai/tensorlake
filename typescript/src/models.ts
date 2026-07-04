@@ -134,6 +134,7 @@ export interface CreateSandboxResponse {
   reason?: string;
   routingHint?: string;
   ingressEndpoint?: string;
+  sandboxUrl?: string;
   name?: string | null;
   terminationReason?: string;
   errorDetails?: unknown;
@@ -153,6 +154,7 @@ export interface CopiedSandboxResponse {
   reason?: string;
   routingHint?: string;
   ingressEndpoint?: string;
+  sandboxUrl?: string;
   name?: string | null;
   terminationReason?: string;
   errorDetails?: unknown;
@@ -563,6 +565,11 @@ export interface SandboxClientOptions {
 
 export interface SandboxOptions {
   sandboxId: string;
+  /**
+   * Explicit sandbox proxy base URL. Direct `new Sandbox(...)` construction
+   * requires this; `Sandbox.connect()` and `SandboxClient.connect()` normally
+   * resolve the server-returned `sandboxUrl`.
+   */
   proxyUrl?: string;
   apiKey?: string;
   organizationId?: string;

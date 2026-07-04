@@ -285,6 +285,7 @@ class CreateSandboxResponse(BaseModel):
     reason: str | None = None
     routing_hint: str | None = None
     ingress_endpoint: str | None = None
+    sandbox_url: str | None = None
     name: str | None = None
     termination_reason: str | None = None
     error_details: Any | None = None
@@ -302,6 +303,7 @@ class CopiedSandboxResponse(BaseModel):
     reason: str | None = None
     routing_hint: str | None = None
     ingress_endpoint: str | None = None
+    sandbox_url: str | None = None
     name: str | None = None
     termination_reason: str | None = None
     error_details: Any | None = None
@@ -344,14 +346,14 @@ class SandboxInfo(BaseModel):
     def url_for_port(self, port: int = _SANDBOX_MANAGEMENT_PORT) -> str | None:
         """Return the public URL for the management API or an exposed user port."""
 
+        if port == _SANDBOX_MANAGEMENT_PORT:
+            return self.sandbox_url
         if self.ingress_endpoint is not None:
             return sandbox_url_from_ingress_endpoint(
                 self.ingress_endpoint,
                 self.sandbox_id,
                 port,
             )
-        if port == _SANDBOX_MANAGEMENT_PORT:
-            return self.sandbox_url
         return None
 
 

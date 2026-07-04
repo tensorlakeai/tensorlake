@@ -222,6 +222,8 @@ pub struct CreateSandboxResponse {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ingress_endpoint: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub termination_reason: Option<String>,
@@ -265,6 +267,8 @@ pub struct SandboxInfo {
     /// User-provided name. Present only on named (non-ephemeral) sandboxes.
     #[serde(default)]
     pub name: Option<String>,
+    #[serde(default)]
+    pub routing_hint: Option<String>,
     #[serde(default)]
     pub allow_unauthenticated_access: bool,
     #[serde(default)]
@@ -843,6 +847,25 @@ mod tests {
         assert_eq!(response.source_sandbox_id, "source-1");
         assert_eq!(response.sandboxes[0].sandbox_id, "copy-1");
         assert_eq!(response.sandboxes[0].status, "running");
+    }
+
+    #[test]
+    fn sandbox_info_deserializes_routing_hint_and_sandbox_url() {
+        let json = r#"{
+            "id":"sbx-1",
+            "namespace":"default",
+            "status":"running",
+            "resources":{"cpus":1.0,"memory_mb":512,"ephemeral_disk_mb":1024},
+            "routing_hint":"hint-1",
+            "sandbox_url":"https://sbx-1.sandbox.tensorlake.ai"
+        }"#;
+        let info: SandboxInfo = serde_json::from_str(json).unwrap();
+        assert_eq!(info.sandbox_id, "sbx-1");
+        assert_eq!(info.routing_hint.as_deref(), Some("hint-1"));
+        assert_eq!(
+            info.sandbox_url.as_deref(),
+            Some("https://sbx-1.sandbox.tensorlake.ai")
+        );
     }
 
     #[test]

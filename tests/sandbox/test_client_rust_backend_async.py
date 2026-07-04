@@ -46,6 +46,22 @@ class _FakeAsyncRustClient:
         )
         return _FakeAsyncRustProxyClient(proxy_url)
 
+    def select_sandbox_proxy_url(
+        self,
+        *,
+        sandbox_id,
+        sandbox_url=None,
+        ingress_endpoint=None,
+        explicit_proxy_url=None,
+    ):
+        if sandbox_url:
+            return sandbox_url
+        if explicit_proxy_url:
+            return explicit_proxy_url
+        raise RuntimeError(
+            "server response did not include sandbox_url; refusing to derive a proxy URL"
+        )
+
     async def suspend_sandbox_async(self, *, sandbox_id):
         self.suspend_calls.append(sandbox_id)
         return "trace-suspend"
@@ -210,20 +226,22 @@ class _StatusSequenceRustClient(_FakeAsyncRustClient):
     """Returns each status from `statuses` on successive get calls; the last
     status repeats once exhausted."""
 
-    def __init__(self, statuses: list[str]):
+    def __init__(self, statuses: list[str], returned_sandbox_id: str | None = None):
         super().__init__()
         self._statuses = statuses
+        self._returned_sandbox_id = returned_sandbox_id
         self.get_calls = 0
 
     async def get_sandbox_json_async(self, *, sandbox_id) -> tuple[str, str]:
         self.last_get_sandbox_id = sandbox_id
         idx = min(self.get_calls, len(self._statuses) - 1)
         self.get_calls += 1
+        returned_sandbox_id = self._returned_sandbox_id or sandbox_id
         return (
             "trace-get-sandbox",
             json.dumps(
                 {
-                    "id": sandbox_id,
+                    "id": returned_sandbox_id,
                     "namespace": "default",
                     "status": self._statuses[idx],
                     "resources": {
@@ -231,6 +249,8 @@ class _StatusSequenceRustClient(_FakeAsyncRustClient):
                         "memory_mb": 512,
                         "ephemeral_disk_mb": 1024,
                     },
+                    "routing_hint": "hint-2",
+                    "sandbox_url": f"https://{returned_sandbox_id}.sandbox.tensorlake.ai",
                 }
             ),
         )
@@ -523,7 +543,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(SandboxError, "Provide only one of"):
             await client.connect("stable-name", sandbox_id="sbx-123")
 
-    async def test_connect_resolves_ingress_endpoint_when_proxy_url_omitted(self):
+    async def test_connect_prefers_server_sandbox_url_when_proxy_url_omitted(self):
         fake = _FakeAsyncRustClient()
         client = _make_client(fake)
 
@@ -534,13 +554,55 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             fake.connect_proxy_calls,
             [
                 {
-                    "proxy_url": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                    "proxy_url": "https://sbx-1.sandbox.tensorlake.ai",
                     "sandbox_id": "sbx-1",
                     "routing_hint": None,
                 }
             ],
         )
         self.assertEqual(sandbox.sandbox_id, "sbx-1")
+
+    async def test_connect_uses_env_proxy_override_when_server_url_missing(self):
+        class _NoSandboxUrlRustClient(_FakeAsyncRustClient):
+            async def get_sandbox_json_async(self, *, sandbox_id):
+                self.last_get_sandbox_id = sandbox_id
+                return (
+                    "trace-get-sandbox",
+                    json.dumps(
+                        {
+                            "id": "sbx-1",
+                            "namespace": "default",
+                            "status": "running",
+                            "resources": {
+                                "cpus": 1.0,
+                                "memory_mb": 512,
+                                "ephemeral_disk_mb": 1024,
+                            },
+                        }
+                    ),
+                )
+
+        fake = _NoSandboxUrlRustClient()
+        client = _make_client(fake)
+
+        with patch.dict(
+            "os.environ",
+            {"TENSORLAKE_SANDBOX_PROXY_URL": "https://override.example.com"},
+        ):
+            sandbox = await client.connect("stable-name")
+
+        self.assertEqual(fake.last_get_sandbox_id, "stable-name")
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://override.example.com",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": None,
+                }
+            ],
+        )
 
     async def test_create_uses_rust_backend(self):
         fake = _FakeAsyncRustClient()
@@ -598,7 +660,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         ):
             await client.create_and_connect(image="tensorlake/missing-image")
 
-    async def test_create_and_connect_uses_ingress_endpoint_from_running_response(self):
+    async def test_create_and_connect_uses_sandbox_url_from_running_response(self):
         class _RunningRustClient(_FakeAsyncRustClient):
             async def create_sandbox_async(self, *, request_json):
                 self.create_request_json = request_json
@@ -610,6 +672,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                             "status": "running",
                             "routing_hint": "hint-1",
                             "ingress_endpoint": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                            "sandbox_url": "https://sbx-1.sandbox.gcp-use4.tensorlake.ai",
                         }
                     ),
                 )
@@ -624,9 +687,46 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             fake.connect_proxy_calls,
             [
                 {
-                    "proxy_url": "https://sandbox.us-east-1.aws.tensorlake.ai",
+                    "proxy_url": "https://sbx-1.sandbox.gcp-use4.tensorlake.ai",
                     "sandbox_id": "sbx-1",
                     "routing_hint": "hint-1",
+                }
+            ],
+        )
+
+    async def test_create_and_connect_uses_env_proxy_override_when_server_url_missing(
+        self,
+    ):
+        class _RunningRustClient(_FakeAsyncRustClient):
+            async def create_sandbox_async(self, *, request_json):
+                self.create_request_json = request_json
+                return (
+                    "trace-create-sandbox",
+                    json.dumps(
+                        {
+                            "sandbox_id": "sbx-1",
+                            "status": "running",
+                        }
+                    ),
+                )
+
+        fake = _RunningRustClient()
+        client = _make_client(fake)
+
+        with patch.dict(
+            "os.environ",
+            {"TENSORLAKE_SANDBOX_PROXY_URL": "https://override.example.com"},
+        ):
+            sandbox = await client.create_and_connect(image="python:3.11")
+
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://override.example.com",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": None,
                 }
             ],
         )
@@ -645,6 +745,29 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(sandbox.sandbox_id, "sbx-1")
             self.assertGreaterEqual(fake.get_calls, 2)
             self.assertEqual(len(fake.connect_proxy_calls), 1)
+
+    async def test_create_and_connect_uses_canonical_id_from_polled_running_response(
+        self,
+    ):
+        fake = _StatusSequenceRustClient(
+            ["running"], returned_sandbox_id="sbx-canonical"
+        )
+        client = _make_client(fake)
+
+        sandbox = await client.create_and_connect(image="python:3.11")
+
+        self.assertEqual(fake.last_get_sandbox_id, "sbx-1")
+        self.assertEqual(sandbox.sandbox_id, "sbx-canonical")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://sbx-canonical.sandbox.tensorlake.ai",
+                    "sandbox_id": "sbx-canonical",
+                    "routing_hint": "hint-2",
+                }
+            ],
+        )
 
     async def test_list_uses_rust_backend(self):
         client = _make_client()

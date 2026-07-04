@@ -25,6 +25,7 @@ use crate::{
             CreateSandboxRequest, CreateSandboxResources, MultipartHint, ProcessInfo,
             RunProcessEvent, SandboxInfo, SignBlobOp, SignBlobRequest, SignBlobTarget,
         },
+        resolve_sandbox_proxy_target, select_sandbox_proxy_url,
     },
 };
 
@@ -527,7 +528,6 @@ where
         })
         .await?;
     let sandbox_id = created.sandbox_id.clone();
-    let routing_hint = created.routing_hint.clone();
 
     let result = async {
         let running_info = wait_for_sandbox_status(
@@ -537,10 +537,18 @@ where
             DEFAULT_SANDBOX_WAIT_TIMEOUT,
         )
         .await?;
+        let sandbox_url = created
+            .sandbox_url
+            .clone()
+            .or_else(|| running_info.sandbox_url.clone());
         let ingress_endpoint = created
             .ingress_endpoint
             .clone()
             .or_else(|| running_info.ingress_endpoint.clone());
+        let routing_hint = created
+            .routing_hint
+            .clone()
+            .or_else(|| running_info.routing_hint.clone());
         emit(SandboxImageBuildEvent::Status(format!(
             "Rootfs builder sandbox {sandbox_id} is running"
         )));
@@ -549,6 +557,7 @@ where
             &ctx,
             &client,
             &sandbox_id,
+            sandbox_url.as_deref(),
             ingress_endpoint.as_deref(),
             routing_hint,
         )?;
@@ -1030,50 +1039,54 @@ fn sandbox_template_builds_path(ctx: &ResolvedBuildContext) -> String {
 fn sandbox_proxy_base(
     api_url: &str,
     sandbox_id: &str,
+    sandbox_url: Option<&str>,
     ingress_endpoint: Option<&str>,
-) -> (String, Option<String>) {
-    let proxy_url = ingress_endpoint
-        .map(str::to_string)
-        .unwrap_or_else(|| resolve_proxy_url(api_url));
-
-    if let Ok(parsed) = url::Url::parse(&proxy_url) {
-        let host = parsed.host_str().unwrap_or("");
-        if host == "localhost" || host == "127.0.0.1" {
-            return (proxy_url, Some(format!("{sandbox_id}.local")));
-        }
-        let port_part = parsed.port().map(|p| format!(":{p}")).unwrap_or_default();
-        let base_url = format!("{}://{host}{port_part}", parsed.scheme());
-        return (base_url, None);
-    }
-
-    (proxy_url, None)
+) -> Result<(String, Option<String>)> {
+    let explicit_proxy_url = explicit_sandbox_proxy_url_override();
+    sandbox_proxy_base_with_explicit(
+        api_url,
+        sandbox_id,
+        sandbox_url,
+        ingress_endpoint,
+        explicit_proxy_url.as_deref(),
+    )
 }
 
-fn resolve_proxy_url(api_url: &str) -> String {
-    if let Ok(url) = std::env::var("TENSORLAKE_SANDBOX_PROXY_URL") {
-        return url;
-    }
-    if is_localhost(api_url) {
-        return "http://localhost:9443".to_string();
-    }
-    if let Ok(parsed) = url::Url::parse(api_url) {
-        let host = parsed.host_str().unwrap_or("");
-        if let Some(rest) = host.strip_prefix("api.") {
-            return format!("{}://sandbox.{}", parsed.scheme(), rest);
-        }
-    }
-    "https://sandbox.tensorlake.ai".to_string()
+fn sandbox_proxy_base_with_explicit(
+    api_url: &str,
+    sandbox_id: &str,
+    sandbox_url: Option<&str>,
+    ingress_endpoint: Option<&str>,
+    explicit_proxy_url: Option<&str>,
+) -> Result<(String, Option<String>)> {
+    let proxy_url = select_sandbox_proxy_url(
+        api_url,
+        sandbox_id,
+        sandbox_url,
+        ingress_endpoint,
+        explicit_proxy_url,
+    )?;
+    let target = resolve_sandbox_proxy_target(&proxy_url, sandbox_id)?;
+    Ok((target.base_url, target.host_override))
+}
+
+fn explicit_sandbox_proxy_url_override() -> Option<String> {
+    std::env::var("TENSORLAKE_SANDBOX_PROXY_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
 }
 
 fn sandbox_proxy_client(
     ctx: &ResolvedBuildContext,
     client: &Client,
     sandbox_id: &str,
+    sandbox_url: Option<&str>,
     ingress_endpoint: Option<&str>,
     routing_hint: Option<String>,
 ) -> Result<SandboxProxyClient> {
     let (proxy_base, host_override) =
-        sandbox_proxy_base(&ctx.api_url, sandbox_id, ingress_endpoint);
+        sandbox_proxy_base(&ctx.api_url, sandbox_id, sandbox_url, ingress_endpoint)?;
     Ok(
         SandboxProxyClient::new(client.with_base_url(&proxy_base), host_override)
             .with_sandbox_id(Some(sandbox_id.to_string()))
@@ -2794,7 +2807,8 @@ mod tests {
         load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
         parse_df_line_usage_percent, parse_df_max_usage_percent, process_terminal_status,
         rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
-        splice_signed_upload, streaming_process_payload, upload_percent,
+        sandbox_proxy_base_with_explicit, splice_signed_upload, streaming_process_payload,
+        upload_percent,
     };
     use crate::sandboxes::models::ProcessInfo;
     use serde_json::{Value, json};
@@ -2811,6 +2825,21 @@ mod tests {
         assert!(contains_oom_killer_evidence(
             "Killed process 42 (cc1plus), UID 0, total-vm:1234kB"
         ));
+    }
+
+    #[test]
+    fn sandbox_proxy_base_uses_explicit_override_when_server_url_missing() {
+        let (proxy_base, host_override) = sandbox_proxy_base_with_explicit(
+            "https://api.tensorlake.ai",
+            "sbx-123",
+            None,
+            Some("https://sandbox.us-east-1.aws.tensorlake.ai"),
+            Some("http://localhost:9443"),
+        )
+        .unwrap();
+
+        assert_eq!(proxy_base, "http://localhost:9443");
+        assert_eq!(host_override, Some("sbx-123.local".to_string()));
     }
 
     #[test]

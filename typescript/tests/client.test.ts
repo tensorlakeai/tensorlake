@@ -14,6 +14,7 @@ describe("SandboxClient", () => {
   afterEach(() => {
     clearNativeStub();
     vi.restoreAllMocks();
+    delete process.env.TENSORLAKE_SANDBOX_PROXY_URL;
   });
 
   describe("construction", () => {
@@ -721,7 +722,7 @@ describe("SandboxClient", () => {
   });
 
   describe("createAndConnect", () => {
-    it("uses ingress endpoint from running create response", async () => {
+    it("uses server sandbox URL from running create response", async () => {
       const stub = installNativeStub({
         client: {
           createSandbox: vi.fn(async () => ({
@@ -731,6 +732,7 @@ describe("SandboxClient", () => {
               status: "running",
               routing_hint: "hint-1",
               ingress_endpoint: "https://sandbox.us-east-1.aws.tensorlake.ai",
+              sandbox_url: "https://sbx-1.sandbox.gcp-use4.tensorlake.ai",
             }),
           })),
         },
@@ -740,11 +742,75 @@ describe("SandboxClient", () => {
       const sandbox = await client.createAndConnect();
       expect(sandbox.sandboxId).toBe("sbx-1");
       // The proxy is minted from the shared native client via connectProxy with
-      // the ingress endpoint resolved from the create response.
+      // the server-returned sandbox URL from the create response.
       expect(stub.client.connectProxy).toHaveBeenCalledWith(
-        "https://sandbox.us-east-1.aws.tensorlake.ai",
+        "https://sbx-1.sandbox.gcp-use4.tensorlake.ai",
         "sbx-1",
         "hint-1",
+        expect.anything(),
+      );
+      sandbox.close();
+      client.close();
+    });
+
+    it("uses canonical sandbox ID from polled running response", async () => {
+      const stub = installNativeStub({
+        client: {
+          createSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              sandbox_id: "sbx-original",
+              status: "pending",
+            }),
+          })),
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              id: "sbx-canonical",
+              status: "running",
+              routing_hint: "hint-2",
+              sandbox_url: "https://sbx-canonical.sandbox.tensorlake.ai",
+            }),
+          })),
+        },
+      });
+
+      const client = SandboxClient.forCloud({ apiKey: "key" });
+      const sandbox = await client.createAndConnect({ requestTimeout: 1 });
+
+      expect(stub.client.getSandbox).toHaveBeenCalledWith("sbx-original");
+      expect(sandbox.sandboxId).toBe("sbx-canonical");
+      expect(stub.client.connectProxy).toHaveBeenCalledWith(
+        "https://sbx-canonical.sandbox.tensorlake.ai",
+        "sbx-canonical",
+        "hint-2",
+        expect.anything(),
+      );
+      sandbox.close();
+      client.close();
+    });
+
+    it("uses env proxy override when server sandbox URL is missing", async () => {
+      process.env.TENSORLAKE_SANDBOX_PROXY_URL = "https://override.example.com";
+      const stub = installNativeStub({
+        client: {
+          createSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              sandbox_id: "sbx-1",
+              status: "running",
+            }),
+          })),
+        },
+      });
+
+      const client = SandboxClient.forCloud({ apiKey: "key" });
+      const sandbox = await client.createAndConnect();
+
+      expect(stub.client.connectProxy).toHaveBeenCalledWith(
+        "https://override.example.com",
+        "sbx-1",
+        null,
         expect.anything(),
       );
       sandbox.close();
@@ -756,7 +822,11 @@ describe("SandboxClient", () => {
         client: {
           createSandbox: vi.fn(async () => ({
             traceId: "t",
-            json: JSON.stringify({ sandbox_id: "sbx-1", status: "running" }),
+            json: JSON.stringify({
+              sandbox_id: "sbx-1",
+              status: "running",
+              sandbox_url: "https://sbx-1.sandbox.tensorlake.ai",
+            }),
           })),
         },
       });
@@ -776,7 +846,11 @@ describe("SandboxClient", () => {
         client: {
           createSandbox: vi.fn(async () => ({
             traceId: "t",
-            json: JSON.stringify({ sandbox_id: "sbx-1", status: "running" }),
+            json: JSON.stringify({
+              sandbox_id: "sbx-1",
+              status: "running",
+              sandbox_url: "https://sbx-1.sandbox.tensorlake.ai",
+            }),
           })),
         },
       });
@@ -793,7 +867,11 @@ describe("SandboxClient", () => {
         client: {
           createSandbox: vi.fn(async () => ({
             traceId: "t",
-            json: JSON.stringify({ sandbox_id: "sbx-1", status: "running" }),
+            json: JSON.stringify({
+              sandbox_id: "sbx-1",
+              status: "running",
+              sandbox_url: "https://sbx-1.sandbox.tensorlake.ai",
+            }),
           })),
         },
       });
@@ -1137,7 +1215,7 @@ describe("SandboxClient", () => {
       client.close();
     });
 
-    it("resolves ingress endpoint before first proxy request", async () => {
+    it("resolves server sandbox URL before first proxy request", async () => {
       const stub = installNativeStub({
         client: {
           getSandbox: vi.fn(async (id: string) => {
@@ -1148,6 +1226,7 @@ describe("SandboxClient", () => {
                 sandbox_id: "sbx-1",
                 status: "running",
                 ingress_endpoint: "https://sandbox.us-east-1.aws.tensorlake.ai",
+                sandbox_url: "https://sbx-1.sandbox.gcp-use4.tensorlake.ai",
                 routing_hint: "hint-1",
               }),
             };
@@ -1163,20 +1242,56 @@ describe("SandboxClient", () => {
 
       const client = SandboxClient.forCloud({ apiKey: "key" });
       const sandbox = client.connect("stable-name");
+      expect(stub.client.connectProxy).not.toHaveBeenCalled();
       const health = await sandbox.health();
 
       expect(health.healthy).toBe(true);
       // The lazy resolver resolves via getSandbox(name) before the first proxy op.
       expect(stub.client.getSandbox).toHaveBeenCalledWith("stable-name");
-      // After resolution the proxy is reconnected with the resolved ingress
-      // endpoint and canonical id.
+      // After resolution the proxy is reconnected with the server-returned
+      // sandbox URL and canonical id.
       expect(stub.client.connectProxy).toHaveBeenLastCalledWith(
-        "https://sandbox.us-east-1.aws.tensorlake.ai",
+        "https://sbx-1.sandbox.gcp-use4.tensorlake.ai",
         "sbx-1",
         "hint-1",
         null,
       );
       expect(stub.proxy.health).toHaveBeenCalledOnce();
+      sandbox.close();
+      client.close();
+    });
+
+    it("uses env proxy override when resolved sandbox URL is missing", async () => {
+      process.env.TENSORLAKE_SANDBOX_PROXY_URL = "https://override.example.com";
+      const stub = installNativeStub({
+        client: {
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              sandbox_id: "sbx-1",
+              status: "running",
+            }),
+          })),
+        },
+        proxy: {
+          health: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({ healthy: true }),
+          })),
+        },
+      });
+
+      const client = SandboxClient.forCloud({ apiKey: "key" });
+      const sandbox = client.connect("stable-name");
+      expect(stub.client.connectProxy).not.toHaveBeenCalled();
+      await sandbox.health();
+
+      expect(stub.client.connectProxy).toHaveBeenLastCalledWith(
+        "https://override.example.com",
+        "sbx-1",
+        null,
+        null,
+      );
       sandbox.close();
       client.close();
     });

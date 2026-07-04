@@ -3,7 +3,6 @@ import {
   type ConnectDesktopOptions,
   Desktop,
 } from "./desktop.js";
-import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
 import { type Traced } from "./http.js";
 import {
@@ -54,14 +53,14 @@ import {
   TcpTunnel,
 } from "./tunnel.js";
 import { nowMs, logSdkTimingEvent, sdkTimingPayloadsEnabled, logSdkTiming } from "./sdk-timings.js";
-import { resolveProxyTarget } from "./url.js";
+import { explicitProxyUrlOverride, resolveProxyTarget } from "./url.js";
 import WebSocket, { type RawData } from "ws";
 
 class SandboxProxyConnection {
   baseUrl = "";
   wsHeaders: Record<string, string> = {};
 
-  private nativeProxy: NativeSandboxProxyClient;
+  private nativeProxy: NativeSandboxProxyClient | null = null;
   private resolveProxyInfo?: (
     identifier: string,
   ) => Promise<Traced<SandboxInfo>>;
@@ -73,12 +72,18 @@ class SandboxProxyConnection {
     private readonly options: SandboxOptions,
   ) {
     this.routingHint = options.routingHint;
-    this.nativeProxy = this.configureProxy(
-      options.proxyUrl ?? defaults.SANDBOX_PROXY_URL,
-      options.sandboxId,
-      options.routingHint,
-    );
     this.resolveProxyInfo = options.resolveProxyInfo;
+    if (options.proxyUrl != null) {
+      this.nativeProxy = this.configureProxy(
+        options.proxyUrl,
+        options.sandboxId,
+        options.routingHint,
+      );
+    } else if (this.resolveProxyInfo == null) {
+      throw new SandboxError(
+        "proxyUrl is required for direct Sandbox construction; use Sandbox.connect(...) or SandboxClient.connect(...) to use the server-returned sandbox_url.",
+      );
+    }
   }
 
   async ensureResolved(): Promise<void> {
@@ -102,8 +107,19 @@ class SandboxProxyConnection {
         this.sandbox._setLifecycleIdentifier(info.sandboxId);
         this.sandbox._setName(info.name ?? null);
         this.routingHint = this.routingHint ?? info.routingHint;
-        const proxyUrl =
-          info.ingressEndpoint ?? this.options.proxyUrl ?? defaults.SANDBOX_PROXY_URL;
+        const proxyUrl = this.options.nativeClient?.selectSandboxProxyUrl(
+          info.sandboxId,
+          info.sandboxUrl ?? null,
+          info.ingressEndpoint ?? null,
+          this.options.proxyUrl ?? explicitProxyUrlOverride() ?? null,
+        ) ?? info.sandboxUrl
+          ?? this.options.proxyUrl
+          ?? explicitProxyUrlOverride();
+        if (proxyUrl == null) {
+          throw new SandboxError(
+            "server response did not include sandbox_url; refusing to derive a proxy URL",
+          );
+        }
         this.nativeProxy = this.configureProxy(
           proxyUrl,
           info.sandboxId,
@@ -114,6 +130,7 @@ class SandboxProxyConnection {
           server_trace_id: info.traceId,
           routing_hint: this.routingHint,
           ingress_endpoint: info.ingressEndpoint,
+          sandbox_url: info.sandboxUrl,
         });
       })
       .finally(() => {
@@ -126,6 +143,11 @@ class SandboxProxyConnection {
   /** Await proxy resolution and return the Rust-backed proxy client. */
   async client(): Promise<NativeSandboxProxyClient> {
     await this.ensureResolved();
+    if (this.nativeProxy == null) {
+      throw new SandboxError(
+        "server response did not include sandbox_url; refusing to derive a proxy URL",
+      );
+    }
     return this.nativeProxy;
   }
 
