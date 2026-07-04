@@ -713,13 +713,12 @@ pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()>
         .get("commit")
         .and_then(|c| c.as_str().map(str::to_string))
         .ok_or_else(|| CliError::usage("daemon did not report a commit"))?;
-    // The overlay's dirty set is about to be dropped — those paths' kernel views flip to the
-    // target too (even when the target equals the lower and the tree diff below is empty).
-    let (pre_upserts, pre_deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-    daemon::control(&state_dir, "clear_upper").await?;
-
-    let target = walk_remote_tree(&session, &state.repo, version).await?;
-    let current = walk_remote_tree(&session, &state.repo, &lower).await?;
+    // Read everything from the server BEFORE touching local state, so a failed restore leaves
+    // the workspace exactly as it was. A commit's index materializes asynchronously after its
+    // snapshot publishes; a restore issued right behind one can land in that window — the
+    // server signals 425 Too Early, poll it out (same contract as promote).
+    let target = walk_remote_tree_ready(&session, &state.repo, version).await?;
+    let current = walk_remote_tree_ready(&session, &state.repo, &lower).await?;
     let upper = state_dir.join("upper");
     let wh = state_dir.join("wh");
 
@@ -742,22 +741,39 @@ pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()>
                 version.to_string(),
             );
             async move {
-                let bytes = client
-                    .get_file_bytes(&project, &repo, &user, &token, &version, &file_path)
-                    .await?
-                    .into_inner();
+                let deadline = std::time::Instant::now() + TOO_EARLY_DEADLINE;
+                let bytes = loop {
+                    match client
+                        .get_file_bytes(&project, &repo, &user, &token, &version, &file_path)
+                        .await
+                    {
+                        Ok(resp) => break resp.into_inner(),
+                        Err(tensorlake::error::SdkError::ServerError { status, .. })
+                            if status.as_u16() == 425 && std::time::Instant::now() < deadline =>
+                        {
+                            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                        }
+                        Err(e) => return Err(e.into()),
+                    }
+                };
                 Ok((file_path, mode, bytes))
             }
         }))
         .buffer_unordered(MATERIALIZE_CONCURRENCY)
         .collect()
         .await;
+    let fetched: Vec<(String, u32, Vec<u8>)> = fetched.into_iter().collect::<Result<Vec<_>>>()?;
+
+    // Point of no return: everything needed is local, now swap the overlay.
+    // The overlay's dirty set is about to be dropped — those paths' kernel views flip to the
+    // target too (even when the target equals the lower and the tree diff below is empty).
+    let (pre_upserts, pre_deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
+    daemon::control(&state_dir, "clear_upper").await?;
     let mut changed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut expect: std::collections::BTreeMap<String, PathExpect> =
         std::collections::BTreeMap::new();
     let mut restored = 0usize;
-    for item in fetched {
-        let (file_path, mode, bytes) = item?;
+    for (file_path, mode, bytes) in fetched {
         local::write_entry(&upper, &file_path, mode, &bytes)?;
         let e = if mode == 0o120000 {
             PathExpect::Present
@@ -1100,6 +1116,31 @@ pub async fn workspaces(ctx: &CliContext, file_system: &str, output_json: bool) 
 
 /// Full recursive listing of `version`: repo path -> entry. Directories are traversed
 /// concurrently; each directory is paged through `next_after`.
+/// How long read paths poll out 425 Too Early while a just-published commit's index
+/// materializes (same contract as promote's poll loop).
+const TOO_EARLY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// `walk_remote_tree`, polling out 425 Too Early: a commit's index materializes
+/// asynchronously after its snapshot publishes, and reads issued right behind one land in
+/// that window.
+async fn walk_remote_tree_ready(
+    session: &FsSession,
+    repo: &str,
+    version: &str,
+) -> Result<std::collections::BTreeMap<String, TreeEntry>> {
+    let deadline = std::time::Instant::now() + TOO_EARLY_DEADLINE;
+    loop {
+        match walk_remote_tree(session, repo, version).await {
+            Err(CliError::Sdk(tensorlake::error::SdkError::ServerError { status, .. }))
+                if status.as_u16() == 425 && std::time::Instant::now() < deadline =>
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            other => return other,
+        }
+    }
+}
+
 async fn walk_remote_tree(
     session: &FsSession,
     repo: &str,

@@ -173,6 +173,26 @@ fn not_found() -> MountError {
     MountError::NotFound("no such file or directory".to_string())
 }
 
+/// How long lower reads poll out `IndexNotReady` before surfacing it. Right after a snapshot
+/// the workspace ref moves to a commit whose derived index is still materializing server-side;
+/// surfacing EAGAIN breaks tools that don't retry (`ls` aborts mid-listing with `fts_read`).
+/// Bounded, so a genuinely broken index still errors.
+const INDEX_SETTLE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+macro_rules! settle_lower {
+    ($expr:expr) => {{
+        let deadline = std::time::Instant::now() + INDEX_SETTLE_DEADLINE;
+        loop {
+            match $expr {
+                Err(MountError::IndexNotReady(_)) if std::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                }
+                other => break other,
+            }
+        }
+    }};
+}
+
 fn io_err(e: std::io::Error) -> MountError {
     MountError::Protocol(format!("overlay io: {e}"))
 }
@@ -318,7 +338,7 @@ impl OverlayFs {
         };
         // Always a fresh core lookup: after a snapshot the workspace ref moved, and the node's
         // lower backing must follow it (intern swaps and hands back the stale reference).
-        let attr = self.core.lookup(parent_core, name).await?;
+        let attr = settle_lower!(self.core.lookup(parent_core, name).await)?;
         let (ino, release) = {
             let mut inodes = self.inodes.lock().expect("inode lock");
             let (ino, _, release) = inodes.intern(path, Some(attr.ino));
@@ -341,7 +361,7 @@ impl OverlayFs {
         let mut cur = ROOT_INO;
         let mut chain: Vec<u64> = Vec::new();
         for component in node.path.split('/') {
-            match self.core.lookup(cur, component).await {
+            match settle_lower!(self.core.lookup(cur, component).await) {
                 Ok(attr) => {
                     chain.push(attr.ino);
                     cur = attr.ino;
@@ -408,7 +428,7 @@ impl OverlayFs {
             return Err(not_found());
         }
         let core_ino = self.lower_binding(&node).await?;
-        self.core.readlink(core_ino).await
+        settle_lower!(self.core.readlink(core_ino).await)
     }
 
     /// Open a directory handle over the merged listing: lower entries (paged to exhaustion via
@@ -454,7 +474,7 @@ impl OverlayFs {
             let fh = self.core.opendir(core_ino)?;
             let mut offset = 0u64;
             loop {
-                let page = self.core.readdir(fh, offset, 4096).await;
+                let page = settle_lower!(self.core.readdir(fh, offset, 4096).await);
                 let page = match page {
                     Ok(page) => page,
                     Err(e) => {
@@ -562,7 +582,7 @@ impl OverlayFs {
                 _ => return Err(not_found()),
             }
         };
-        self.core.read(core_fh, offset, size).await
+        settle_lower!(self.core.read(core_fh, offset, size).await)
     }
 
     pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, MountError> {
@@ -632,7 +652,7 @@ impl OverlayFs {
             let fh = self.core.open(core_ino)?;
             let mut offset = 0u64;
             loop {
-                let chunk = match self.core.read(fh, offset, 4 * 1024 * 1024).await {
+                let chunk = match settle_lower!(self.core.read(fh, offset, 4 * 1024 * 1024).await) {
                     Ok(chunk) => chunk,
                     Err(e) => {
                         self.core.release(fh);
