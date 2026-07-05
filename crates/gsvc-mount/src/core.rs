@@ -1,12 +1,26 @@
 //! The VFS-agnostic mount core: inode table, lookup/readdir/read over the native API, and the
 //! branch-refresh state machine.
 //!
-//! Everything is scoped by a commit. The root inode (1) always resolves against the mount's
-//! *current* commit; every other node captures the commit it was looked up under and keeps it for
-//! life. A branch-following refresh therefore only swaps the root's commit pointer: new lookups
-//! descend into the new tree, while open handles and already-known inodes keep reading the commit
-//! they were opened under — the open-handle pinning semantics the workspace design requires, with
-//! no per-node invalidation at all.
+//! ## Coherence model: stable per-path inodes, close-to-open
+//!
+//! Inodes are allocated **per path** and survive a branch refresh (issue #24's shared-ro
+//! decision): to `watchman`/`make`/`rsync`, a refresh looks like files being edited in place,
+//! not a full tree replacement. Content under one commit is immutable, so each node records the
+//! commit and object it currently serves; a refresh walks the live inode table against the new
+//! commit and, per path:
+//!
+//! - **unchanged** (same oid and mode): the node is left exactly as it was — same ino, same
+//!   attrs, and still keyed to the old commit so every metadata/block cache entry stays warm.
+//!   An unchanged *directory* oid proves the whole subtree unchanged, so its descendants are
+//!   skipped wholesale.
+//! - **changed**: the node is rebound in place — same ino, new size/mode/oid under the new
+//!   commit. New opens serve the new content.
+//! - **gone**: the node is marked stale; lookups and new opens return `NotFound` while the ino
+//!   lingers until the kernel forgets it (NFS-ish `ESTALE` shape). A later lookup of the same
+//!   path revives the ino.
+//!
+//! Open *handles* are unaffected throughout: they snapshot their node at open time and keep
+//! reading the commit they opened under — close-to-open coherence, stated as such in the design.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -46,8 +60,10 @@ pub struct NodeAttr {
     pub commit: String,
 }
 
-/// One resolved filesystem node. Immutable once created: the (commit, path) pair it names can
-/// never change content.
+/// One resolved view of a path. Immutable once created — the (commit, path) pair it names can
+/// never change content — but the inode table may swap a fresh `Node` in behind the same ino
+/// when a branch refresh rebinds the path. Handles clone the `Arc` at open time, which is what
+/// pins their commit.
 #[derive(Debug)]
 struct Node {
     commit: Arc<str>,
@@ -83,12 +99,22 @@ impl Node {
     }
 }
 
+/// One inode's slot: the node it currently serves, the kernel lookup count, and whether the
+/// path vanished in a refresh (`stale` — served as `NotFound` until the kernel forgets the ino
+/// or a lookup of the same path revives it).
+struct NodeSlot {
+    node: Arc<Node>,
+    count: u64,
+    stale: bool,
+}
+
 /// Inode table with kernel-style lookup counting: `lookup`-family calls increment a node's count,
 /// `forget` decrements, and a node is dropped at zero so the table stays bounded by what the
-/// kernel actually references. Ino 1 is the root and never expires.
+/// kernel actually references. Inos are keyed **per path** and stable across branch refreshes;
+/// a refresh rebinds or stales slots in place. Ino 1 is the root and never expires.
 struct InodeTable {
-    nodes: HashMap<u64, (Arc<Node>, u64)>, // node, lookup count
-    index: HashMap<(Arc<str>, String), u64>,
+    nodes: HashMap<u64, NodeSlot>,
+    index: HashMap<String, u64>, // path -> ino
     next: u64,
 }
 
@@ -104,36 +130,88 @@ impl InodeTable {
     }
 
     fn intern(&mut self, node: Node) -> (u64, Arc<Node>) {
-        let key = (node.commit.clone(), node.path.clone());
-        if let Some(&ino) = self.index.get(&key) {
-            let (existing, count) = self.nodes.get_mut(&ino).expect("indexed node");
-            *count += 1;
-            return (ino, existing.clone());
+        if let Some(&ino) = self.index.get(&node.path) {
+            let slot = self.nodes.get_mut(&ino).expect("indexed node");
+            slot.count += 1;
+            // A fresh resolution revives stale slots and swaps the node when the *content*
+            // (oid/mode/size) differs. A resolution that differs only by commit is the same
+            // bytes proven by oid equality — keeping the existing node keeps every
+            // (commit, path)-keyed cache entry warm, matching the refresh walk's
+            // unchanged-path behavior.
+            slot.stale = false;
+            if slot.node.oid != node.oid
+                || slot.node.mode != node.mode
+                || slot.node.size != node.size
+            {
+                slot.node = Arc::new(node);
+            }
+            return (ino, slot.node.clone());
         }
         let ino = self.next;
         self.next += 1;
+        let path = node.path.clone();
         let node = Arc::new(node);
-        self.nodes.insert(ino, (node.clone(), 1));
-        self.index.insert(key, ino);
+        self.nodes.insert(
+            ino,
+            NodeSlot {
+                node: node.clone(),
+                count: 1,
+                stale: false,
+            },
+        );
+        self.index.insert(path, ino);
         (ino, node)
     }
 
+    /// The node an ino currently serves; `None` for unknown or stale inos.
     fn get(&self, ino: u64) -> Option<Arc<Node>> {
-        self.nodes.get(&ino).map(|(n, _)| n.clone())
+        self.nodes
+            .get(&ino)
+            .filter(|slot| !slot.stale)
+            .map(|slot| slot.node.clone())
+    }
+
+    /// All live (non-stale) inos with their nodes, for the refresh walk.
+    fn live(&self) -> Vec<(u64, Arc<Node>)> {
+        self.nodes
+            .iter()
+            .filter(|(_, slot)| !slot.stale)
+            .map(|(ino, slot)| (*ino, slot.node.clone()))
+            .collect()
+    }
+
+    /// Swap the node behind `ino` (same path, new commit/attrs). No-op if the ino was forgotten
+    /// meanwhile.
+    fn rebind(&mut self, ino: u64, node: Node) {
+        if let Some(slot) = self.nodes.get_mut(&ino) {
+            slot.node = Arc::new(node);
+            slot.stale = false;
+        }
+    }
+
+    /// Mark `ino` as vanished-in-refresh. No-op if forgotten meanwhile.
+    fn mark_stale(&mut self, ino: u64) {
+        if let Some(slot) = self.nodes.get_mut(&ino) {
+            slot.stale = true;
+        }
     }
 
     fn forget(&mut self, ino: u64, nlookups: u64) {
         if ino == ROOT_INO {
             return;
         }
-        let Some((node, count)) = self.nodes.get_mut(&ino) else {
+        let Some(slot) = self.nodes.get_mut(&ino) else {
             return;
         };
-        *count = count.saturating_sub(nlookups);
-        if *count == 0 {
-            let key = (node.commit.clone(), node.path.clone());
+        slot.count = slot.count.saturating_sub(nlookups);
+        if slot.count == 0 {
+            let path = slot.node.path.clone();
             self.nodes.remove(&ino);
-            self.index.remove(&key);
+            // Only unmap the path if it still points at this ino (a revive cannot remap, but
+            // stay defensive against future re-keying).
+            if self.index.get(&path) == Some(&ino) {
+                self.index.remove(&path);
+            }
         }
     }
 }
@@ -253,40 +331,123 @@ impl MountCore {
         self.root.read().unwrap().commit.clone()
     }
 
-    /// One poll of the followed ref. Returns `true` when the root moved to a new commit. A
-    /// deleted ref keeps serving the last commit (the mount is pinned-by-force and logs it).
+    /// One poll of the followed ref. Returns `true` when the root moved to a new commit (after
+    /// rebinding the live inode table against it). A deleted ref keeps serving the last commit
+    /// (the mount is pinned-by-force and logs it).
     pub async fn poll_ref(&self) -> Result<bool, MountError> {
         if !self.opts.follow {
             return Ok(false);
         }
         let status = self.client.ref_status(&self.opts.reference).await?;
+        let new_commit: Arc<str> = {
+            let mut root = self.root.write().unwrap();
+            if status.generation == root.generation {
+                return Ok(false);
+            }
+            match status.oid {
+                Some(oid) => {
+                    tracing::info!(
+                        reference = %self.opts.reference,
+                        from = %root.commit,
+                        to = %oid,
+                        generation = status.generation,
+                        "mount: ref advanced; refreshing root"
+                    );
+                    // The commit swaps now (new lookups must see the new tree immediately), but
+                    // the generation is recorded only after the inode refresh completes cleanly:
+                    // a partially-failed refresh leaves the generation stale so the next poll
+                    // re-enters and retries the failed paths (already-rebound nodes are skipped
+                    // as up to date, so the retry costs only the failures).
+                    root.commit = Arc::from(oid.as_str());
+                    root.commit.clone()
+                }
+                None => {
+                    tracing::warn!(
+                        reference = %self.opts.reference,
+                        pinned = %root.commit,
+                        "mount: followed ref deleted; serving last known commit"
+                    );
+                    root.generation = status.generation;
+                    return Ok(false);
+                }
+            }
+        };
+        let failed = self.refresh_inodes(&new_commit).await;
         let mut root = self.root.write().unwrap();
-        if status.generation == root.generation {
-            return Ok(false);
-        }
-        match status.oid {
-            Some(oid) => {
-                tracing::info!(
-                    reference = %self.opts.reference,
-                    from = %root.commit,
-                    to = %oid,
-                    generation = status.generation,
-                    "mount: ref advanced; refreshing root"
-                );
-                root.commit = Arc::from(oid.as_str());
+        if failed == 0 {
+            // Only mark the generation handled if the root hasn't moved again mid-refresh; a
+            // newer target must keep the poll loop live.
+            if root.commit.as_ref() == new_commit.as_ref() {
                 root.generation = status.generation;
-                Ok(true)
             }
-            None => {
-                tracing::warn!(
-                    reference = %self.opts.reference,
-                    pinned = %root.commit,
-                    "mount: followed ref deleted; serving last known commit"
-                );
-                root.generation = status.generation;
-                Ok(false)
+        } else {
+            tracing::warn!(
+                reference = %self.opts.reference,
+                failed,
+                "mount: refresh left stale nodes; will retry on the next poll"
+            );
+        }
+        Ok(true)
+    }
+
+    /// Rebind the live inode table against `new_commit`: unchanged paths keep their node (same
+    /// ino, same attrs, caches stay warm on the old commit's immutable keys), changed paths get
+    /// a fresh node behind the same ino, vanished paths go stale. An unchanged directory oid
+    /// proves its whole subtree unchanged, so descendants are skipped without a stat.
+    ///
+    /// Per-path stat failures leave that node on its prior commit — it serves slightly stale
+    /// (still immutable, still consistent) content — and are returned as a count so the caller
+    /// keeps the poll generation stale and retries them on the next poll.
+    async fn refresh_inodes(&self, new_commit: &Arc<str>) -> usize {
+        let mut live = self.inodes.lock().unwrap().live();
+        // Ancestors sort before their descendants (a path is lexicographically smaller than any
+        // path it prefixes), which is all the pruning walk needs; sibling interleavings like
+        // `a.txt` between `a` and `a/b` are irrelevant to it.
+        live.sort_by(|a, b| a.1.path.cmp(&b.1.path));
+        let mut pruned: Vec<String> = Vec::new();
+        let mut failed = 0usize;
+        for (ino, node) in live {
+            if node.commit.as_ref() == new_commit.as_ref() {
+                // Already resolved under the new commit by a racing lookup.
+                continue;
+            }
+            if pruned.iter().any(|dir| under_dir(&node.path, dir)) {
+                continue;
+            }
+            match self.stat_at(new_commit, &node.path).await {
+                Ok(StatOutcome::Present(stat)) => {
+                    let unchanged =
+                        !stat.oid.is_empty() && stat.oid == node.oid && stat.mode == node.mode;
+                    if unchanged {
+                        if node.kind == NodeKind::Dir {
+                            pruned.push(node.path.clone());
+                        }
+                        continue;
+                    }
+                    let fresh = Node {
+                        commit: new_commit.clone(),
+                        path: node.path.clone(),
+                        kind: kind_of_mode(stat.mode),
+                        mode: stat.mode,
+                        size: stat.size,
+                        oid: stat.oid,
+                    };
+                    self.inodes.lock().unwrap().rebind(ino, fresh);
+                }
+                Ok(StatOutcome::Absent) => {
+                    self.inodes.lock().unwrap().mark_stale(ino);
+                }
+                Err(e) => {
+                    failed += 1;
+                    tracing::warn!(
+                        path = %node.path,
+                        error = %e,
+                        "mount: refresh re-stat failed; node keeps its prior commit until the next poll"
+                    );
+                }
             }
         }
+        failed
     }
 
     fn node_of(&self, ino: u64) -> Result<Arc<Node>, MountError> {
@@ -382,10 +543,12 @@ impl MountCore {
         let outcome = match self.client.stat(commit, path).await {
             Ok(stat) => StatOutcome::Present(stat),
             Err(MountError::NotFound(_)) => {
-                // Not servable as a file: either a directory or truly absent.
+                // Not servable as a file: either a directory or truly absent. The probe page
+                // carries the tree's own oid, which is what lets the refresh walk prove the
+                // directory (and its subtree) unchanged across commits.
                 match self.client.tree_page(commit, path, None, 1).await {
-                    Ok(_) => StatOutcome::Present(FileStat {
-                        oid: String::new(),
+                    Ok(page) => StatOutcome::Present(FileStat {
+                        oid: page.tree_oid.unwrap_or_default(),
                         mode: 0o40000,
                         size: 0,
                     }),
@@ -596,6 +759,12 @@ fn join_path(dir: &str, name: &str) -> String {
     }
 }
 
+/// Whether `path` lies strictly inside directory `dir`.
+fn under_dir(path: &str, dir: &str) -> bool {
+    path.strip_prefix(dir)
+        .is_some_and(|rest| rest.starts_with('/'))
+}
+
 /// Split a repo-relative path into `(parent dir, name)`; `None` for the root itself.
 fn split_path(path: &str) -> Option<(&str, &str)> {
     if path.is_empty() {
@@ -620,22 +789,25 @@ mod tests {
         assert_eq!(split_path("a/b/c"), Some(("a/b", "c")));
     }
 
-    #[test]
-    fn inode_table_interns_and_forgets() {
-        let mut table = InodeTable::new();
-        let commit: Arc<str> = Arc::from("c1");
-        let node = |path: &str| Node {
+    fn node_at(commit: &Arc<str>, path: &str, oid: &str, size: u64) -> Node {
+        Node {
             commit: commit.clone(),
             path: path.to_string(),
             kind: NodeKind::File,
             mode: 0o100644,
-            size: 1,
-            oid: String::new(),
-        };
-        let (ino_a, _) = table.intern(node("a"));
-        let (ino_a2, _) = table.intern(node("a"));
-        assert_eq!(ino_a, ino_a2, "same (commit, path) interns to one ino");
-        let (ino_b, _) = table.intern(node("b"));
+            size,
+            oid: oid.to_string(),
+        }
+    }
+
+    #[test]
+    fn inode_table_interns_and_forgets() {
+        let mut table = InodeTable::new();
+        let commit: Arc<str> = Arc::from("c1");
+        let (ino_a, _) = table.intern(node_at(&commit, "a", "o1", 1));
+        let (ino_a2, _) = table.intern(node_at(&commit, "a", "o1", 1));
+        assert_eq!(ino_a, ino_a2, "same path interns to one ino");
+        let (ino_b, _) = table.intern(node_at(&commit, "b", "o2", 1));
         assert_ne!(ino_a, ino_b);
         // Two lookups recorded for a: one forget keeps it, the second drops it.
         table.forget(ino_a, 1);
@@ -643,7 +815,42 @@ mod tests {
         table.forget(ino_a, 1);
         assert!(table.get(ino_a).is_none());
         // A new intern of the same path gets a fresh ino.
-        let (ino_a3, _) = table.intern(node("a"));
+        let (ino_a3, _) = table.intern(node_at(&commit, "a", "o1", 1));
         assert_ne!(ino_a, ino_a3);
+    }
+
+    #[test]
+    fn inode_survives_refresh_rebind_and_revive() {
+        let mut table = InodeTable::new();
+        let c1: Arc<str> = Arc::from("c1");
+        let c2: Arc<str> = Arc::from("c2");
+        let (ino, _) = table.intern(node_at(&c1, "a", "o1", 1));
+
+        // Same path resolved under a new commit with new content: same ino, node swapped.
+        let (ino2, node2) = table.intern(node_at(&c2, "a", "o2", 7));
+        assert_eq!(ino, ino2, "path keeps its ino across commits");
+        assert_eq!(node2.size, 7);
+        assert_eq!(node2.commit, c2);
+
+        // Rebind (the refresh walk's path) also swaps in place.
+        table.rebind(ino, node_at(&c2, "a", "o3", 9));
+        assert_eq!(table.get(ino).unwrap().size, 9);
+
+        // Stale hides the ino from get() but a fresh intern of the path revives it.
+        table.mark_stale(ino);
+        assert!(table.get(ino).is_none(), "stale ino serves NotFound");
+        let (ino3, node3) = table.intern(node_at(&c2, "a", "o4", 3));
+        assert_eq!(ino, ino3, "revived path keeps its ino");
+        assert_eq!(node3.oid, "o4");
+        assert!(table.get(ino).is_some());
+    }
+
+    #[test]
+    fn under_dir_matches_strict_descendants_only() {
+        assert!(under_dir("a/b", "a"));
+        assert!(under_dir("a/b/c", "a"));
+        assert!(!under_dir("a", "a"));
+        assert!(!under_dir("a.txt", "a"));
+        assert!(!under_dir("ab/c", "a"));
     }
 }

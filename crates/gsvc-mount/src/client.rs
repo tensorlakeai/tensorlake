@@ -19,6 +19,9 @@ pub struct TreePage {
     pub truncated: bool,
     #[serde(default)]
     pub next_after: Option<String>,
+    /// The listed tree's own oid (hex). `None` against servers predating the field.
+    #[serde(default)]
+    pub tree_oid: Option<String>,
 }
 
 /// One directory entry. `size` is present for blobs when cheaply known server-side; trees and

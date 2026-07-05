@@ -1,0 +1,3 @@
+Vendored from artifact_storage commit c75f7bae0a5cc2afc17a51ca50b68372530a61aa
+crates: gsvc-mount, gsvc-codec (src/ verbatim; Cargo.toml adapted for the tensorlake workspace)
+Sync: rsync -a --delete <artifact_storage>/crates/<c>/src/ crates/<c>/src/ then update this file.

@@ -11,9 +11,13 @@
 //! A mount is `repo : reference`, either **pinned** (reference resolved once — a branch, tag, or
 //! raw commit) or **following** (a ref polled through the per-ref generation journal; the root
 //! swaps to the new commit when the ref moves). All content below a commit is immutable, so every
-//! cache is keyed by `(commit, path)` and never invalidates. Nodes capture the commit they were
-//! looked up under: after a refresh, new lookups descend the new tree while existing inodes and
-//! open handles keep serving the commit they came from.
+//! cache is keyed by `(commit, path)` and never invalidates.
+//!
+//! Inodes are **per path and stable across refreshes** (close-to-open coherence, issue #24):
+//! a refresh rebinds changed paths behind their existing inos, leaves unchanged paths (proven by
+//! oid equality, whole subtrees pruned via directory oids) untouched with warm caches, and
+//! stales vanished paths. Open handles snapshot their node at open time and keep serving the
+//! commit they opened under.
 
 mod cache;
 mod client;
@@ -55,7 +59,7 @@ impl Default for MountOptions {
 
 /// Errors surfaced by the mount core. Bindings map these onto errnos
 /// (`NotFound` → `ENOENT`, `NotADirectory` → `ENOTDIR`, `IsADirectory` → `EISDIR`,
-/// `Exists` → `EEXIST`, `IndexNotReady` → `EAGAIN`, the rest → `EIO`).
+/// `Exists` → `EEXIST`, `IndexNotReady` → `EAGAIN`, `ReadOnly` → `EROFS`, the rest → `EIO`).
 #[derive(Debug, thiserror::Error)]
 pub enum MountError {
     #[error("http error: {0}")]
