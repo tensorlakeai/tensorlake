@@ -64,4 +64,6 @@ tempfile = "3"
 # FUSE: pure-Rust /dev/fuse on Linux (always on — sandboxes are the primary mount target).
 # macOS mounts go through an FSKit extension (no kernel extension), not FUSE.
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = { version = "0.15", default-features = false }
+# abi-7-12 gates the kernel notify channel (Notifier::inval_entry/inval_inode) that the
+# mount daemon pushes refresh deltas through; FUSE 7.12 is Linux 2.6.29-era, universally safe.
+fuser = { version = "0.15", default-features = false, features = ["abi-7-12"] }

@@ -31,9 +31,16 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
 #[cfg(unix)]
-use super::overlay::OverlayFs;
+use super::overlay::{OverlayFs, OverlayInval};
 #[cfg(unix)]
 use std::sync::Arc;
+
+/// Pushes kernel-cache invalidations for a batch of overlay inos. On Linux this drives the FUSE
+/// session's `Notifier` (which is what makes the binding's long entry/attr TTLs sound); on
+/// macOS/FSKit there is no notify channel and the sink is a no-op (FSKit revalidates through
+/// its own attribute protocol).
+#[cfg(unix)]
+type InvalSink = Arc<dyn Fn(Vec<OverlayInval>) + Send + Sync>;
 
 /// Persisted per-mount state (`<state dir>/state.json`). No credentials: the daemon mints its
 /// own from the same CLI auth context.
@@ -196,7 +203,6 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     )
     .await
     .map_err(|e| CliError::usage(format!("mount init: {e}")))?;
-    gsvc_mount::spawn_ref_watcher(&core, || {});
     let overlay = OverlayFs::new(core.clone(), state_dir, state.read_only())
         .map_err(|e| CliError::usage(format!("overlay init: {e}")))?;
 
@@ -252,7 +258,17 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
 
     // Attach the kernel: platform-specific. Only after this succeeds does the control socket
     // exist — the socket answering is what `tl fs mount` treats as success.
-    let served = attach(overlay.clone(), &mountpoint).await?;
+    let (served, invalidate) = attach(overlay.clone(), &mountpoint).await?;
+
+    // Follow the workspace ref, pushing each refresh's exact delta to the kernel. Spawned after
+    // attach because the invalidation sink is born with the kernel session.
+    {
+        let overlay = overlay.clone();
+        let invalidate = invalidate.clone();
+        gsvc_mount::spawn_ref_watcher(&core, move |delta| {
+            invalidate(overlay.translate_delta(&delta));
+        });
+    }
 
     // Control socket (mount is live).
     let sock_path = control_socket(state_dir);
@@ -262,6 +278,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         let overlay = overlay.clone();
         let core = core.clone();
         let mountpoint = mountpoint.clone();
+        let invalidate = invalidate.clone();
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -270,6 +287,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 let overlay = overlay.clone();
                 let core = core.clone();
                 let mountpoint = mountpoint.clone();
+                let invalidate = invalidate.clone();
                 tokio::spawn(async move {
                     let mut reader = tokio::io::BufReader::new(stream);
                     let mut line = String::new();
@@ -285,13 +303,21 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             serde_json::json!({ "ok": true, "commit": core.current_commit() })
                         }
                         "refresh" => match core.poll_ref().await {
-                            Ok(_) => {
+                            Ok(delta) => {
+                                if let Some(delta) = delta {
+                                    invalidate(overlay.translate_delta(&delta));
+                                }
                                 serde_json::json!({ "ok": true, "commit": core.current_commit() })
                             }
                             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
                         },
+                        // The upper drop flips interned paths to their lower view with no
+                        // kernel-visible operation; push the implied invalidations.
                         "clear_upper" => match overlay.clear_upper() {
-                            Ok(()) => serde_json::json!({ "ok": true }),
+                            Ok(affected) => {
+                                invalidate(affected);
+                                serde_json::json!({ "ok": true })
+                            }
                             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
                         },
                         "shutdown" => {
@@ -353,25 +379,41 @@ impl Attached {
 }
 
 #[cfg(target_os = "linux")]
-async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<Attached> {
+async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<(Attached, InvalSink)> {
     let (mounted_tx, mounted_rx) = tokio::sync::oneshot::channel();
     let fuse = super::fusefs::WorkspaceFuse::new(overlay, tokio::runtime::Handle::current());
     let mp = mountpoint.to_path_buf();
     let served = tokio::task::spawn_blocking(move || fuse.run(&mp, mounted_tx));
-    if mounted_rx.await.is_err() {
-        return match served.await {
-            Ok(Ok(())) => Err(CliError::usage("fuse session ended before mounting")),
-            Ok(Err(e)) => Err(CliError::usage(format!("fuse mount failed: {e}"))),
-            Err(e) => Err(CliError::usage(format!("fuse thread: {e}"))),
-        };
-    }
-    Ok(Attached::Fuse(served))
+    let notifier = match mounted_rx.await {
+        Ok(notifier) => notifier,
+        Err(_) => {
+            return match served.await {
+                Ok(Ok(())) => Err(CliError::usage("fuse session ended before mounting")),
+                Ok(Err(e)) => Err(CliError::usage(format!("fuse mount failed: {e}"))),
+                Err(e) => Err(CliError::usage(format!("fuse thread: {e}"))),
+            };
+        }
+    };
+    // Notify errors are expected steady-state (ENOENT when the kernel holds no cache for the
+    // ino/dentry) and never actionable — the point is only to drop what *is* cached.
+    let invalidate: InvalSink = Arc::new(move |items: Vec<OverlayInval>| {
+        for item in items {
+            if item.staled {
+                if let Some(parent) = item.parent_ino {
+                    let _ = notifier.inval_entry(parent, std::ffi::OsStr::new(&item.name));
+                }
+            }
+            let _ = notifier.inval_inode(item.ino, 0, 0);
+        }
+    });
+    Ok((Attached::Fuse(served), invalidate))
 }
 
 /// macOS: serve the overlay over localhost TCP and ask the kernel to mount through the
-/// TensorLake FSKit extension.
+/// TensorLake FSKit extension. There is no notify channel in the FSKit protocol, so the
+/// invalidation sink is a no-op — FSKit revalidates through its own attribute traffic.
 #[cfg(target_os = "macos")]
-async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<Attached> {
+async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<(Attached, InvalSink)> {
     let server = super::vfsserver::serve(overlay)
         .await
         .map_err(|e| CliError::usage(format!("vfs server: {e}")))?;
@@ -390,9 +432,12 @@ async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<Attached> 
              (System Settings -> General -> Login Items & Extensions -> File System Extensions)",
         ));
     }
-    Ok(Attached::FsKit {
-        mountpoint: mountpoint.to_path_buf(),
-    })
+    Ok((
+        Attached::FsKit {
+            mountpoint: mountpoint.to_path_buf(),
+        },
+        Arc::new(|_| {}),
+    ))
 }
 
 #[cfg(target_os = "macos")]

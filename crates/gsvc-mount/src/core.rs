@@ -21,15 +21,28 @@
 //!
 //! Open *handles* are unaffected throughout: they snapshot their node at open time and keep
 //! reading the commit they opened under — close-to-open coherence, stated as such in the design.
+//!
+//! A refresh reports what it did as a [`RefreshDelta`] — exactly the rebound and staled inos,
+//! with the `(parent ino, name)` pair kernel dentry invalidation wants. That delta is what lets
+//! a binding answer lookups and getattrs with effectively-infinite kernel TTLs and invalidate
+//! precisely on change instead of expiring everything on a timer (see the crate docs for the
+//! full binding contract).
+//!
+//! Refreshes are computed one of two ways: the **diff path** asks the server for the path-diff
+//! between the proof base (the commit every live inode is known consistent with) and the new
+//! commit — one paged request, no per-path stats — and the **walk path** re-stats every live
+//! path in bounded depth waves. The walk is the fallback whenever the diff isn't servable
+//! (derived indexes still materializing, base commit pruned, older servers) or the proof base
+//! was lost to a partially-failed walk.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
 use bytes::{Bytes, BytesMut};
 
 use crate::cache::{MountCaches, StatOutcome};
-use crate::client::{FileStat, FsClient, TreeEntry};
+use crate::client::{ChangeEntry, ChangeKind, FileStat, FsClient, TreeEntry};
 use crate::{MountError, MountOptions};
 
 /// What a node is, from its git mode.
@@ -58,6 +71,41 @@ pub struct NodeAttr {
     pub perm: u16,
     /// The commit this node is pinned to (hex).
     pub commit: String,
+    /// The node's git object id (hex) — a content hash. Empty when unknown (the mount root, or
+    /// a directory resolved through the tree-probe fallback). Bindings compare this at `open`
+    /// against the oid they last opened the ino with: equal means the kernel page cache is
+    /// still valid (`FOPEN_KEEP_CACHE`), because content under one oid is immutable.
+    pub oid: String,
+}
+
+/// One kernel-invalidation item from a branch refresh: the ino whose path was rebound or went
+/// stale, plus the `(parent ino, name)` pair FUSE `inval_entry` wants.
+#[derive(Clone, Debug)]
+pub struct InvalEntry {
+    pub ino: u64,
+    /// The parent directory's ino: `ROOT_INO` for top-level names, otherwise the parent path's
+    /// interned ino. `None` when the parent was never looked up or has been forgotten — the
+    /// kernel then holds no dentry for this name, and `inval_inode(ino)` alone suffices.
+    pub parent_ino: Option<u64>,
+    /// Final path component.
+    pub name: String,
+    /// Full repo-relative path — what layers with their own path-keyed inode space (e.g. a
+    /// writable overlay above this core) translate through.
+    pub path: String,
+    pub kind: NodeKind,
+}
+
+/// What one branch refresh changed, expressed for kernel-cache invalidation. Unchanged paths —
+/// including whole subtrees proven by directory-oid equality — appear in neither list, which is
+/// what makes long kernel TTLs safe between deltas.
+#[derive(Clone, Debug, Default)]
+pub struct RefreshDelta {
+    /// Rebound in place: same ino, new content/attrs. Invalidate the ino's kernel attrs and
+    /// cached data (for directories: the kernel readdir cache).
+    pub rebound: Vec<InvalEntry>,
+    /// Vanished at the new commit: the ino now serves `NotFound`. Invalidate the
+    /// `(parent_ino, name)` dentry and the ino.
+    pub staled: Vec<InvalEntry>,
 }
 
 /// One resolved view of a path. Immutable once created — the (commit, path) pair it names can
@@ -95,6 +143,7 @@ impl Node {
                 }
             },
             commit: self.commit.to_string(),
+            oid: self.oid.clone(),
         }
     }
 }
@@ -119,6 +168,10 @@ struct InodeTable {
 }
 
 pub const ROOT_INO: u64 = 1;
+
+/// In-flight re-stat bound for one refresh depth wave — matches the FUSE-like 16-way concurrency
+/// the mount benchmark models, and keeps a refresh from monopolizing per-repo admission slots.
+const REFRESH_CONCURRENCY: usize = 16;
 
 impl InodeTable {
     fn new() -> Self {
@@ -171,6 +224,12 @@ impl InodeTable {
             .map(|slot| slot.node.clone())
     }
 
+    /// The ino currently interned for `path`, stale or not — a stale parent's ino is still the
+    /// one the kernel holds dentries under, which is what invalidation needs.
+    fn ino_of(&self, path: &str) -> Option<u64> {
+        self.index.get(path).copied()
+    }
+
     /// All live (non-stale) inos with their nodes, for the refresh walk.
     fn live(&self) -> Vec<(u64, Arc<Node>)> {
         self.nodes
@@ -220,6 +279,11 @@ impl InodeTable {
 struct RootState {
     commit: Arc<str>,
     generation: u64,
+    /// The commit every live inode is proven consistent with — the sound `from` for a
+    /// server-side diff refresh. Advanced only when a refresh completes without failures;
+    /// `None` after a partial refresh, forcing the per-path stat walk until a clean pass
+    /// re-establishes the proof.
+    base: Option<Arc<str>>,
 }
 
 /// An open directory handle: incrementally paged entries, so a huge directory is never fetched
@@ -290,12 +354,15 @@ impl MountCore {
             }
             Err(e) => return Err(e),
         };
+        let commit: Arc<str> = Arc::from(commit.as_str());
         let core = Arc::new(MountCore {
             client,
             caches: MountCaches::new(opts.cache),
             root: RwLock::new(RootState {
-                commit: Arc::from(commit.as_str()),
+                commit: commit.clone(),
                 generation,
+                // An empty inode table is trivially consistent with the mount commit.
+                base: Some(commit),
             }),
             inodes: Mutex::new(InodeTable::new()),
             handles: Mutex::new(HashMap::new()),
@@ -331,18 +398,27 @@ impl MountCore {
         self.root.read().unwrap().commit.clone()
     }
 
-    /// One poll of the followed ref. Returns `true` when the root moved to a new commit (after
-    /// rebinding the live inode table against it). A deleted ref keeps serving the last commit
-    /// (the mount is pinned-by-force and logs it).
-    pub async fn poll_ref(&self) -> Result<bool, MountError> {
+    /// One poll of the followed ref. Returns the refresh delta when the root moved to a new
+    /// commit (after rebinding the live inode table against it), `None` when nothing moved. A
+    /// deleted ref keeps serving the last commit (the mount is pinned-by-force and logs it).
+    ///
+    /// The refresh prefers the server-side path-diff (`changes?from=&to=`, one round trip plus
+    /// paging, no per-path stats): the `from` is the proof base — the commit every live inode
+    /// is known consistent with. When the diff isn't servable (indexes still materializing, the
+    /// base commit pruned, older servers) or the proof base was lost to a partial refresh, it
+    /// falls back to the depth-wave stat walk. A walk with per-path failures still returns the
+    /// delta for the paths that resolved; the failed paths keep their prior commit, the
+    /// generation stays stale, and the next poll retries them — their changes arrive in a later
+    /// delta.
+    pub async fn poll_ref(&self) -> Result<Option<RefreshDelta>, MountError> {
         if !self.opts.follow {
-            return Ok(false);
+            return Ok(None);
         }
         let status = self.client.ref_status(&self.opts.reference).await?;
-        let new_commit: Arc<str> = {
+        let (new_commit, base): (Arc<str>, Option<Arc<str>>) = {
             let mut root = self.root.write().unwrap();
             if status.generation == root.generation {
-                return Ok(false);
+                return Ok(None);
             }
             match status.oid {
                 Some(oid) => {
@@ -359,7 +435,7 @@ impl MountCore {
                     // re-enters and retries the failed paths (already-rebound nodes are skipped
                     // as up to date, so the retry costs only the failures).
                     root.commit = Arc::from(oid.as_str());
-                    root.commit.clone()
+                    (root.commit.clone(), root.base.clone())
                 }
                 None => {
                     tracing::warn!(
@@ -368,26 +444,162 @@ impl MountCore {
                         "mount: followed ref deleted; serving last known commit"
                     );
                     root.generation = status.generation;
-                    return Ok(false);
+                    return Ok(None);
                 }
             }
         };
-        let failed = self.refresh_inodes(&new_commit).await;
+        let diffed = match base {
+            _ if !self.opts.diff_refresh => None,
+            // The ref moved but points back at the proof base (e.g. delete + re-create at the
+            // same commit): every live node is already consistent, nothing to invalidate.
+            Some(base) if base.as_ref() == new_commit.as_ref() => Some(RefreshDelta::default()),
+            Some(base) => match self.refresh_via_changes(&base, &new_commit).await {
+                Ok(delta) => Some(delta),
+                Err(e) => {
+                    tracing::info!(
+                        from = %base,
+                        to = %new_commit,
+                        error = %e,
+                        "mount: diff refresh unavailable; falling back to stat walk"
+                    );
+                    None
+                }
+            },
+            None => None,
+        };
+        let (delta, failed) = match diffed {
+            Some(delta) => (delta, 0),
+            None => self.refresh_inodes(&new_commit).await,
+        };
         let mut root = self.root.write().unwrap();
-        if failed == 0 {
-            // Only mark the generation handled if the root hasn't moved again mid-refresh; a
-            // newer target must keep the poll loop live.
-            if root.commit.as_ref() == new_commit.as_ref() {
+        // Only record progress if the root hasn't moved again mid-refresh; a newer target must
+        // keep the poll loop live (and owns the base bookkeeping for its own pass).
+        if root.commit.as_ref() == new_commit.as_ref() {
+            if failed == 0 {
                 root.generation = status.generation;
+                root.base = Some(new_commit.clone());
+            } else {
+                root.base = None;
+                tracing::warn!(
+                    reference = %self.opts.reference,
+                    failed,
+                    "mount: refresh left stale nodes; will retry on the next poll"
+                );
             }
-        } else {
-            tracing::warn!(
-                reference = %self.opts.reference,
-                failed,
-                "mount: refresh left stale nodes; will retry on the next poll"
-            );
         }
-        Ok(true)
+        Ok(Some(delta))
+    }
+
+    /// Diff-driven refresh: fetch the server's path-diff `base -> new_commit` and rebind/stale
+    /// exactly the listed live paths — no per-path stats except for the rare pre-index row
+    /// without a size. Runs in two passes (plan, then apply) so any error mutates nothing and
+    /// the caller can fall back to the stat walk with the proof base intact.
+    async fn refresh_via_changes(
+        &self,
+        base: &Arc<str>,
+        new_commit: &Arc<str>,
+    ) -> Result<RefreshDelta, MountError> {
+        let mut rows: Vec<ChangeEntry> = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = self
+                .client
+                .changes_page(base, new_commit, after.as_deref(), 1000)
+                .await?;
+            rows.extend(page.entries);
+            if !page.truncated || page.next_after.is_none() {
+                break;
+            }
+            after = page.next_after;
+        }
+        // Prefixes under which every known path is implicitly gone: removed directories, and
+        // paths that stopped being directories.
+        let erased_prefixes: Vec<&str> = rows
+            .iter()
+            .filter(|row| match row.change {
+                ChangeKind::Removed => row.is_dir(),
+                ChangeKind::Modified => !row.is_dir(),
+                ChangeKind::Added => false,
+            })
+            .map(|row| row.path.as_str())
+            .collect();
+        let by_path: HashMap<&str, &ChangeEntry> =
+            rows.iter().map(|row| (row.path.as_str(), row)).collect();
+
+        // Plan pass: resolve every action (including any stats) before touching the table.
+        enum Action {
+            Rebind(Node),
+            Stale,
+        }
+        let live = self.inodes.lock().unwrap().live();
+        let mut plan: Vec<(u64, Arc<Node>, Action)> = Vec::new();
+        for (ino, node) in live {
+            if node.commit.as_ref() == new_commit.as_ref() {
+                continue;
+            }
+            let Some(row) = by_path.get(node.path.as_str()) else {
+                if erased_prefixes.iter().any(|dir| under_dir(&node.path, dir)) {
+                    plan.push((ino, node, Action::Stale));
+                }
+                // No row and no erased ancestor: the path is unchanged between base and
+                // new_commit, and the node was proven consistent with base — leave it (and
+                // every cache entry keyed under its commit) untouched.
+                continue;
+            };
+            match row.change {
+                ChangeKind::Removed => plan.push((ino, node, Action::Stale)),
+                // `Added` on a live path cannot normally happen (a live node implies the path
+                // existed at the proof base); treat it like a modification defensively.
+                ChangeKind::Modified | ChangeKind::Added => {
+                    if row.oid == node.oid && row.mode == node.mode {
+                        // Changed and changed back inside the window: same bytes, keep the node.
+                        continue;
+                    }
+                    let kind = kind_of_mode(row.mode);
+                    let size = match (kind, row.size) {
+                        (NodeKind::Dir, _) => 0,
+                        (_, Some(size)) => size,
+                        // Pre-index row without a size: resolve through the stat path. An error
+                        // aborts the whole diff refresh before any mutation.
+                        (_, None) => match self.stat_at(new_commit, &node.path).await? {
+                            StatOutcome::Present(stat) => stat.size,
+                            StatOutcome::Absent => {
+                                plan.push((ino, node, Action::Stale));
+                                continue;
+                            }
+                        },
+                    };
+                    let fresh = Node {
+                        commit: new_commit.clone(),
+                        path: node.path.clone(),
+                        kind,
+                        mode: row.mode,
+                        size,
+                        oid: row.oid.clone(),
+                    };
+                    plan.push((ino, node, Action::Rebind(fresh)));
+                }
+            }
+        }
+
+        // Apply pass: pure table operations, no failures possible.
+        let mut delta = RefreshDelta::default();
+        for (ino, node, action) in plan {
+            match action {
+                Action::Rebind(fresh) => {
+                    let kind = fresh.kind;
+                    self.inodes.lock().unwrap().rebind(ino, fresh);
+                    delta.rebound.push(self.inval_entry(ino, &node.path, kind));
+                }
+                Action::Stale => {
+                    self.inodes.lock().unwrap().mark_stale(ino);
+                    delta
+                        .staled
+                        .push(self.inval_entry(ino, &node.path, node.kind));
+                }
+            }
+        }
+        Ok(delta)
     }
 
     /// Rebind the live inode table against `new_commit`: unchanged paths keep their node (same
@@ -395,59 +607,104 @@ impl MountCore {
     /// a fresh node behind the same ino, vanished paths go stale. An unchanged directory oid
     /// proves its whole subtree unchanged, so descendants are skipped without a stat.
     ///
-    /// Per-path stat failures leave that node on its prior commit — it serves slightly stale
-    /// (still immutable, still consistent) content — and are returned as a count so the caller
-    /// keeps the poll generation stale and retries them on the next poll.
-    async fn refresh_inodes(&self, new_commit: &Arc<str>) -> usize {
-        let mut live = self.inodes.lock().unwrap().live();
-        // Ancestors sort before their descendants (a path is lexicographically smaller than any
-        // path it prefixes), which is all the pruning walk needs; sibling interleavings like
-        // `a.txt` between `a` and `a/b` are irrelevant to it.
-        live.sort_by(|a, b| a.1.path.cmp(&b.1.path));
-        let mut pruned: Vec<String> = Vec::new();
-        let mut failed = 0usize;
+    /// The walk runs in **depth waves**: every path at depth `d` re-stats concurrently (bounded
+    /// by [`REFRESH_CONCURRENCY`]), and a wave completes before depth `d + 1` starts, so a
+    /// directory proven unchanged still prunes its whole subtree exactly as the sequential walk
+    /// did — the parallelism never costs an extra stat.
+    ///
+    /// Returns the invalidation delta plus a failure count. Per-path stat failures leave that
+    /// node on its prior commit — it serves slightly stale (still immutable, still consistent)
+    /// content — and the count keeps the poll generation stale so the next poll retries them.
+    async fn refresh_inodes(&self, new_commit: &Arc<str>) -> (RefreshDelta, usize) {
+        use futures::StreamExt as _;
+
+        let live = self.inodes.lock().unwrap().live();
+        let mut by_depth: BTreeMap<usize, Vec<(u64, Arc<Node>)>> = BTreeMap::new();
         for (ino, node) in live {
             if node.commit.as_ref() == new_commit.as_ref() {
                 // Already resolved under the new commit by a racing lookup.
                 continue;
             }
-            if pruned.iter().any(|dir| under_dir(&node.path, dir)) {
-                continue;
-            }
-            match self.stat_at(new_commit, &node.path).await {
-                Ok(StatOutcome::Present(stat)) => {
-                    let unchanged =
-                        !stat.oid.is_empty() && stat.oid == node.oid && stat.mode == node.mode;
-                    if unchanged {
-                        if node.kind == NodeKind::Dir {
-                            pruned.push(node.path.clone());
+            by_depth
+                .entry(node.path.matches('/').count())
+                .or_default()
+                .push((ino, node));
+        }
+        let mut pruned: Vec<String> = Vec::new();
+        let mut delta = RefreshDelta::default();
+        let mut failed = 0usize;
+        for (_, nodes) in by_depth {
+            let wave = nodes
+                .into_iter()
+                .filter(|(_, node)| !pruned.iter().any(|dir| under_dir(&node.path, dir)))
+                .map(|(ino, node)| async move {
+                    let outcome = self.stat_at(new_commit, &node.path).await;
+                    (ino, node, outcome)
+                });
+            let results = futures::stream::iter(wave)
+                .buffer_unordered(REFRESH_CONCURRENCY)
+                .collect::<Vec<_>>()
+                .await;
+            for (ino, node, outcome) in results {
+                match outcome {
+                    Ok(StatOutcome::Present(stat)) => {
+                        let unchanged =
+                            !stat.oid.is_empty() && stat.oid == node.oid && stat.mode == node.mode;
+                        if unchanged {
+                            if node.kind == NodeKind::Dir {
+                                pruned.push(node.path.clone());
+                            }
+                            continue;
                         }
-                        continue;
+                        let kind = kind_of_mode(stat.mode);
+                        let fresh = Node {
+                            commit: new_commit.clone(),
+                            path: node.path.clone(),
+                            kind,
+                            mode: stat.mode,
+                            size: stat.size,
+                            oid: stat.oid,
+                        };
+                        self.inodes.lock().unwrap().rebind(ino, fresh);
+                        delta.rebound.push(self.inval_entry(ino, &node.path, kind));
                     }
-                    let fresh = Node {
-                        commit: new_commit.clone(),
-                        path: node.path.clone(),
-                        kind: kind_of_mode(stat.mode),
-                        mode: stat.mode,
-                        size: stat.size,
-                        oid: stat.oid,
-                    };
-                    self.inodes.lock().unwrap().rebind(ino, fresh);
-                }
-                Ok(StatOutcome::Absent) => {
-                    self.inodes.lock().unwrap().mark_stale(ino);
-                }
-                Err(e) => {
-                    failed += 1;
-                    tracing::warn!(
-                        path = %node.path,
-                        error = %e,
-                        "mount: refresh re-stat failed; node keeps its prior commit until the next poll"
-                    );
+                    Ok(StatOutcome::Absent) => {
+                        self.inodes.lock().unwrap().mark_stale(ino);
+                        delta
+                            .staled
+                            .push(self.inval_entry(ino, &node.path, node.kind));
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        tracing::warn!(
+                            path = %node.path,
+                            error = %e,
+                            "mount: refresh re-stat failed; node keeps its prior commit until the next poll"
+                        );
+                    }
                 }
             }
         }
-        failed
+        (delta, failed)
+    }
+
+    /// Build the invalidation item for a rebound or staled path. The parent ino is resolved
+    /// through the path index (top-level names hang off the root); a parent the kernel never
+    /// looked up — or has since forgotten — yields `None`, and the binding falls back to
+    /// `inval_inode` alone.
+    fn inval_entry(&self, ino: u64, path: &str, kind: NodeKind) -> InvalEntry {
+        let (parent_ino, name) = match split_path(path) {
+            Some(("", name)) => (Some(ROOT_INO), name),
+            Some((dir, name)) => (self.inodes.lock().unwrap().ino_of(dir), name),
+            None => (None, path),
+        };
+        InvalEntry {
+            ino,
+            parent_ino,
+            name: name.to_string(),
+            path: path.to_string(),
+            kind,
+        }
     }
 
     fn node_of(&self, ino: u64) -> Result<Arc<Node>, MountError> {

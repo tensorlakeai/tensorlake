@@ -36,6 +36,11 @@ struct ONode {
     /// The core ref-generation this binding was made at; a mismatch with the core's current
     /// generation means the followed ref advanced and the binding must be re-walked.
     bound_gen: std::sync::atomic::AtomicU64,
+    /// Content identity at the last `open` of this node (the lower blob oid; `None` for
+    /// upper-backed opens). An open whose identity matches gets `FOPEN_KEEP_CACHE`: same oid
+    /// means byte-identical content, so the kernel page cache from earlier opens is still
+    /// valid — including across branch refreshes that never touched the path.
+    last_open_oid: Mutex<Option<String>>,
 }
 
 impl ONode {
@@ -65,6 +70,7 @@ impl InodeTable {
                     path: String::new(),
                     core_ino: Mutex::new(Some(ROOT_INO)),
                     bound_gen: std::sync::atomic::AtomicU64::new(0),
+                    last_open_oid: Mutex::new(None),
                 }),
                 1,
             ),
@@ -107,6 +113,7 @@ impl InodeTable {
             path: path.clone(),
             core_ino: Mutex::new(fresh_core),
             bound_gen: std::sync::atomic::AtomicU64::new(0),
+            last_open_oid: Mutex::new(None),
         });
         self.nodes.insert(ino, (node.clone(), 1));
         self.index.insert(path, ino);
@@ -579,7 +586,13 @@ impl OverlayFs {
 
     /// Open for read or write. Writing to a lower-backed file copies it up first; after that,
     /// all IO on the path is local.
-    pub async fn open(&self, ino: u64, write: bool) -> Result<u64, MountError> {
+    ///
+    /// The returned flag is the keep-cache decision for the binding (`FOPEN_KEEP_CACHE`): true
+    /// when this open serves byte-identical content to the node's previous open (same lower
+    /// blob oid), so the kernel page cache survives — including across branch refreshes that
+    /// never touched the path. Upper-backed opens always report false: local writes own the
+    /// path from then on and the identity chain restarts.
+    pub async fn open(&self, ino: u64, write: bool) -> Result<(u64, bool), MountError> {
         if write {
             self.write_guard()?;
         }
@@ -592,22 +605,37 @@ impl OverlayFs {
         if write {
             self.copy_up(&node).await?;
         }
-        let handle = if self.upper_meta(&node.path).is_some() {
+        let (handle, ident) = if self.upper_meta(&node.path).is_some() {
             let file = std::fs::OpenOptions::new()
                 .read(true)
                 .write(write)
                 .open(self.upper_path(&node.path))
                 .map_err(io_err)?;
-            OHandle::Upper { file }
+            (OHandle::Upper { file }, None)
         } else {
             let core_ino = self.lower_binding(&node).await?;
-            OHandle::Lower {
-                core_fh: self.core.open(core_ino)?,
-            }
+            let ident = self
+                .core
+                .getattr(core_ino)
+                .ok()
+                .map(|attr| attr.oid)
+                .filter(|oid| !oid.is_empty());
+            (
+                OHandle::Lower {
+                    core_fh: self.core.open(core_ino)?,
+                },
+                ident,
+            )
+        };
+        let keep_cache = {
+            let mut last = node.last_open_oid.lock().expect("last open oid lock");
+            let keep = ident.is_some() && *last == ident;
+            *last = ident;
+            keep
         };
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
         self.handles.lock().expect("handle lock").insert(fh, handle);
-        Ok(fh)
+        Ok((fh, keep_cache))
     }
 
     pub async fn read(&self, fh: u64, offset: u64, size: u64) -> Result<Bytes, MountError> {
@@ -995,13 +1023,80 @@ impl OverlayFs {
     }
 
     // -------------------------------------------------------------------------------------
+    // Kernel-cache invalidation
+    // -------------------------------------------------------------------------------------
+
+    /// Translate a core refresh delta into this overlay's ino space for kernel invalidation.
+    /// Entries whose kernel-visible content the lower change cannot affect — upper-shadowed or
+    /// whited-out paths — are dropped, as are paths the kernel never looked up here.
+    pub fn translate_delta(&self, delta: &gsvc_mount::RefreshDelta) -> Vec<OverlayInval> {
+        let mut out = Vec::new();
+        let tagged = delta
+            .rebound
+            .iter()
+            .map(|e| (e, false))
+            .chain(delta.staled.iter().map(|e| (e, true)));
+        for (entry, staled) in tagged {
+            if self.upper_meta(&entry.path).is_some() || self.whited_out(&entry.path) {
+                continue;
+            }
+            let inodes = self.inodes.lock().expect("inode lock");
+            let Some(&ino) = inodes.index.get(&entry.path) else {
+                continue;
+            };
+            let parent_ino = match entry.path.rfind('/') {
+                Some(i) => inodes.index.get(&entry.path[..i]).copied(),
+                None => Some(ROOT_INO),
+            };
+            out.push(OverlayInval {
+                ino,
+                parent_ino,
+                name: entry.name.clone(),
+                staled,
+            });
+        }
+        out
+    }
+
+    // -------------------------------------------------------------------------------------
     // Snapshot support
     // -------------------------------------------------------------------------------------
 
     /// Drop all upper state (after a successful snapshot has sealed it into a commit, or a
     /// restore replaced it). Open upper handles keep their descriptors (unix semantics); new
     /// opens see the lower layer.
-    pub fn clear_upper(&self) -> Result<(), MountError> {
+    ///
+    /// Returns the kernel invalidations this implies: every interned node the upper layer or a
+    /// whiteout was presenting flips to its merged-lower view without any kernel-visible
+    /// operation, so a binding holding long TTLs must push these (`staled` here means "force a
+    /// fresh lookup", not that the path is gone).
+    pub fn clear_upper(&self) -> Result<Vec<OverlayInval>, MountError> {
+        let affected: Vec<OverlayInval> = {
+            let inodes = self.inodes.lock().expect("inode lock");
+            inodes
+                .nodes
+                .iter()
+                .filter(|(ino, _)| **ino != ROOT_INO)
+                .filter(|(_, (node, _))| {
+                    self.upper_meta(&node.path).is_some() || self.whited_out(&node.path)
+                })
+                .map(|(&ino, (node, _))| {
+                    let (parent_ino, name) = match node.path.rfind('/') {
+                        Some(i) => (
+                            inodes.index.get(&node.path[..i]).copied(),
+                            node.path[i + 1..].to_string(),
+                        ),
+                        None => (Some(ROOT_INO), node.path.clone()),
+                    };
+                    OverlayInval {
+                        ino,
+                        parent_ino,
+                        name,
+                        staled: true,
+                    }
+                })
+                .collect()
+        };
         for dir in [&self.upper, &self.wh] {
             for entry in std::fs::read_dir(dir).map_err(io_err)?.flatten() {
                 let path = entry.path();
@@ -1012,8 +1107,20 @@ impl OverlayFs {
                 }
             }
         }
-        Ok(())
+        Ok(affected)
     }
+}
+
+/// One kernel invalidation in the overlay's ino space, produced by [`OverlayFs::translate_delta`]
+/// (branch refresh) or [`OverlayFs::clear_upper`] (post-snapshot upper drop). `staled` entries
+/// need the `(parent_ino, name)` dentry invalidated in addition to the inode, so the next access
+/// re-looks the path up; rebound entries only need the inode's attrs/data dropped.
+#[derive(Clone, Debug)]
+pub struct OverlayInval {
+    pub ino: u64,
+    pub parent_ino: Option<u64>,
+    pub name: String,
+    pub staled: bool,
 }
 
 #[cfg(test)]
@@ -1076,7 +1183,7 @@ mod tests {
 
     async fn read_all(fs: &OverlayFs, parent: u64, name: &str) -> Vec<u8> {
         let attr = fs.lookup(parent, name).await.unwrap();
-        let fh = fs.open(attr.ino, false).await.unwrap();
+        let (fh, _) = fs.open(attr.ino, false).await.unwrap();
         let mut out = Vec::new();
         loop {
             let chunk = fs.read(fh, out.len() as u64, 1 << 20).await.unwrap();
@@ -1191,7 +1298,7 @@ mod tests {
 
         // 2. Copy-up on first write; content merges; the upper layer holds exactly the dirty file.
         let readme = fs.lookup(ROOT_INO, "README.md").await.unwrap();
-        let fh = fs.open(readme.ino, true).await.unwrap();
+        let (fh, _) = fs.open(readme.ino, true).await.unwrap();
         fs.write(fh, 0, b"# edited\n").unwrap();
         fs.setattr(readme.ino, Some(9), None).await.unwrap();
         fs.release(fh);
@@ -1280,7 +1387,10 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(core.poll_ref().await.unwrap(), "ref moved to the snapshot");
+        assert!(
+            core.poll_ref().await.unwrap().is_some(),
+            "ref moved to the snapshot"
+        );
         assert_ne!(core.current_commit(), before_commit);
         fs.clear_upper().unwrap();
         assert!(!state.path().join("upper/README.md").exists());

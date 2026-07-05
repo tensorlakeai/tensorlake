@@ -363,7 +363,9 @@ async fn handle(fs: &Arc<OverlayFs>, opcode: u8, payload: &[u8]) -> Writer {
         op::OPEN => {
             let ino = try_req!(r.u64());
             let write = try_req!(r.u8()) != 0;
-            let fh = try_req!(map(fs.open(ino, write).await));
+            // The keep-cache hint has no slot in the FSKit wire protocol (FSKit does its own
+            // attribute-driven revalidation); the overlay still records the open identity.
+            let (fh, _keep_cache) = try_req!(map(fs.open(ino, write).await));
             let mut w = Writer::ok();
             w.u64v(fh);
             w

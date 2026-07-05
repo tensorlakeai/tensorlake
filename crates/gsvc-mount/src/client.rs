@@ -62,6 +62,46 @@ pub struct RefStatus {
     pub generation: u64,
 }
 
+/// How a path differs between the `from` and `to` commits of a changes page.
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum ChangeKind {
+    Added,
+    Modified,
+    Removed,
+}
+
+/// One changed path from `GET .../changes?from=&to=`. `mode`/`size`/`oid` describe the `to`
+/// side for added/modified rows and the `from` side for removed rows. Rows sit at the change
+/// boundary: an added or removed directory implies its whole subtree; a modified row whose new
+/// mode is not a directory implies any children the client knew are gone.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ChangeEntry {
+    pub path: String,
+    pub change: ChangeKind,
+    pub mode: u32,
+    #[serde(default)]
+    pub size: Option<u64>,
+    pub oid: String,
+}
+
+impl ChangeEntry {
+    pub fn is_dir(&self) -> bool {
+        self.mode == 0o40000
+    }
+}
+
+/// One page of the path-diff between two commits.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ChangesPage {
+    pub from: String,
+    pub to: String,
+    pub entries: Vec<ChangeEntry>,
+    pub truncated: bool,
+    #[serde(default)]
+    pub next_after: Option<String>,
+}
+
 /// Client for one repo's native filesystem API.
 ///
 /// `base` is the server origin (e.g. `https://git.tensorlake.ai`); `project`/`repo` scope every
@@ -138,6 +178,33 @@ impl FsClient {
     /// The ref's current head and movement generation — the only mutable read in the API.
     pub async fn ref_status(&self, refspec: &str) -> Result<RefStatus, MountError> {
         let url = format!("{}?ref={}", self.control("ref-status"), urlencode(refspec));
+        let resp = self.get(url).send().await.map_err(MountError::Http)?;
+        if !resp.status().is_success() {
+            return Err(Self::error_for(resp).await);
+        }
+        resp.json().await.map_err(MountError::Http)
+    }
+
+    /// One page of the path-diff between two commits (`GET .../changes?from=&to=`). `404` when
+    /// either commit no longer resolves, `425` (`IndexNotReady`) while derived indexes
+    /// materialize — callers fall back to per-path stats on both.
+    pub async fn changes_page(
+        &self,
+        from: &str,
+        to: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<ChangesPage, MountError> {
+        let mut url = format!(
+            "{}?from={}&to={}&limit={limit}",
+            self.control("changes"),
+            urlencode(from),
+            urlencode(to)
+        );
+        if let Some(after) = after {
+            url.push_str("&after=");
+            url.push_str(&urlencode(after));
+        }
         let resp = self.get(url).send().await.map_err(MountError::Http)?;
         if !resp.status().is_success() {
             return Err(Self::error_for(resp).await);

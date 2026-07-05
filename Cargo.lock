@@ -1284,6 +1284,7 @@ name = "gsvc-mount"
 version = "0.5.57"
 dependencies = [
  "bytes",
+ "futures",
  "reqwest",
  "serde",
  "serde_json",

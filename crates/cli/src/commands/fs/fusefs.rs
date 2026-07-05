@@ -15,7 +15,14 @@ use gsvc_mount::{MountError, NodeKind};
 
 use super::overlay::{OverlayAttr, OverlayFs};
 
-const TTL: Duration = Duration::from_secs(1);
+/// Kernel entry/attr TTL. Effectively infinite (the EdenFS posture): nothing a mount serves can
+/// change between refresh deltas, and the daemon pushes exact invalidations for those
+/// (`Notifier::inval_entry`/`inval_inode`, handed out by [`WorkspaceFuse::run`]) — so repeat
+/// stats are kernel-cache hits instead of daemon round trips. Negative lookups are never
+/// kernel-cached (`reply.error(ENOENT)` carries no TTL), so newly created names are always
+/// discoverable. Bounded rather than literally infinite as a backstop for a missed
+/// invalidation edge.
+const TTL: Duration = Duration::from_secs(3600);
 
 fn errno(e: &MountError) -> i32 {
     match e {
@@ -74,11 +81,13 @@ impl WorkspaceFuse {
     /// Establish the kernel mount (fails fast when FUSE is unavailable), then serve until
     /// unmounted. `mounted` fires exactly once, after the session exists — the daemon publishes
     /// its control socket only then, so `tl fs mount` can't observe a live socket for a mount
-    /// that never attached.
+    /// that never attached. It carries the session's [`fuser::Notifier`], which is what the
+    /// daemon drives refresh-delta invalidation through — the contract that makes the long
+    /// [`TTL`] sound.
     pub fn run(
         self,
         mountpoint: &Path,
-        mounted: tokio::sync::oneshot::Sender<()>,
+        mounted: tokio::sync::oneshot::Sender<fuser::Notifier>,
     ) -> std::io::Result<()> {
         let options = vec![
             fuser::MountOption::FSName("tlfs".to_string()),
@@ -86,7 +95,7 @@ impl WorkspaceFuse {
             fuser::MountOption::NoAtime,
         ];
         let mut session = fuser::Session::new(self, mountpoint, &options)?;
-        let _ = mounted.send(());
+        let _ = mounted.send(session.notifier());
         session.run()
     }
 }
@@ -210,7 +219,16 @@ impl fuser::Filesystem for WorkspaceFuse {
     fn open(&mut self, _req: &fuser::Request<'_>, ino: u64, flags: i32, reply: fuser::ReplyOpen) {
         let write = (flags & libc::O_ACCMODE) != libc::O_RDONLY;
         match self.rt.block_on(self.fs.open(ino, write)) {
-            Ok(fh) => reply.opened(fh, 0),
+            // keep_cache: the overlay proved this open serves byte-identical content to the
+            // previous one (same lower oid), so the kernel page cache survives the reopen.
+            Ok((fh, keep_cache)) => reply.opened(
+                fh,
+                if keep_cache {
+                    fuser::consts::FOPEN_KEEP_CACHE
+                } else {
+                    0
+                },
+            ),
             Err(e) => reply.error(errno(&e)),
         }
     }
