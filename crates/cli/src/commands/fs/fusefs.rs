@@ -204,6 +204,45 @@ impl fuser::Filesystem for WorkspaceFuse {
         }
     }
 
+    fn readdirplus(
+        &mut self,
+        _req: &fuser::Request<'_>,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        mut reply: fuser::ReplyDirectoryPlus,
+    ) {
+        // readdir + attrs in one op: attr-hungry walks (`ls -l`, build scanners) skip the
+        // per-name lookup storm entirely. Each delivered entry carries one counted lookup
+        // reference (the kernel balances it with forget); entries the reply buffer refuses
+        // must be forgotten here or their references leak.
+        match self
+            .rt
+            .block_on(self.fs.readdir_plus(fh, offset.max(0) as u64, 1024))
+        {
+            Ok(entries) => {
+                let mut full = false;
+                for (entry, attr) in entries {
+                    if full
+                        || reply.add(
+                            attr.ino,
+                            entry.next_offset as i64,
+                            &entry.name,
+                            &TTL,
+                            &file_attr(&attr),
+                            0,
+                        )
+                    {
+                        full = true;
+                        self.fs.forget(attr.ino, 1);
+                    }
+                }
+                reply.ok();
+            }
+            Err(e) => reply.error(errno(&e)),
+        }
+    }
+
     fn releasedir(
         &mut self,
         _req: &fuser::Request<'_>,

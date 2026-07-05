@@ -102,11 +102,14 @@ impl Default for CacheConfig {
 
 /// Cache key: `(commit hex, repo-relative path)`.
 type PathKey = (Arc<str>, String);
-/// Cache key for one content block: `(commit hex, path, block index)`.
-type BlockKey = (Arc<str>, String, u64);
+/// Cache key for one content block: `(content identity, block index)`. The identity is the blob
+/// oid — content-addressed, so identical files share blocks across commits, paths, and renames —
+/// with a `commit:path` fallback for the rare node whose oid is unknown.
+type BlockKey = (String, u64);
 
-/// The mount's immutable-content caches. Keys carry the commit hex, so a branch-following refresh
-/// needs no invalidation: new lookups miss under the new commit and old entries age out.
+/// The mount's immutable-content caches. Metadata keys carry the commit hex (a branch-following
+/// refresh needs no invalidation: new lookups miss under the new commit and old entries age
+/// out); content blocks key by blob oid, which is immutable by construction.
 pub struct MountCaches {
     dirs: Mutex<Lru<PathKey, Arc<Vec<TreeEntry>>>>,
     stats: Mutex<Lru<PathKey, StatOutcome>>,
@@ -152,20 +155,16 @@ impl MountCaches {
             .insert((commit.clone(), path.to_string()), outcome, 1);
     }
 
-    pub fn block(&self, commit: &Arc<str>, path: &str, block: u64) -> Option<Bytes> {
+    pub fn block(&self, ident: &str, block: u64) -> Option<Bytes> {
+        self.blocks.lock().unwrap().get(&(ident.to_string(), block))
+    }
+
+    pub fn put_block(&self, ident: &str, block: u64, bytes: Bytes) {
+        let weight = bytes.len() as u64;
         self.blocks
             .lock()
             .unwrap()
-            .get(&(commit.clone(), path.to_string(), block))
-    }
-
-    pub fn put_block(&self, commit: &Arc<str>, path: &str, block: u64, bytes: Bytes) {
-        let weight = bytes.len() as u64;
-        self.blocks.lock().unwrap().insert(
-            (commit.clone(), path.to_string(), block),
-            bytes,
-            weight,
-        );
+            .insert((ident.to_string(), block), bytes, weight);
     }
 }
 

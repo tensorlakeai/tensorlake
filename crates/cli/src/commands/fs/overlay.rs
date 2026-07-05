@@ -149,7 +149,12 @@ enum OHandle {
     /// Backed by the read-only core.
     Lower { core_fh: u64 },
     /// A merged directory listing, fixed at opendir time.
-    Dir { entries: Vec<(String, NodeKind)> },
+    Dir {
+        /// The directory's own overlay ino, so `readdir_plus` can resolve entries through the
+        /// counted lookup path.
+        ino: u64,
+        entries: Vec<(String, NodeKind)>,
+    },
 }
 
 /// Attributes of a merged node, plus which layer answered.
@@ -546,10 +551,13 @@ impl OverlayFs {
 
         merged.sort_by(|a, b| a.0.cmp(&b.0));
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
-        self.handles
-            .lock()
-            .expect("handle lock")
-            .insert(fh, OHandle::Dir { entries: merged });
+        self.handles.lock().expect("handle lock").insert(
+            fh,
+            OHandle::Dir {
+                ino,
+                entries: merged,
+            },
+        );
         Ok(fh)
     }
 
@@ -560,7 +568,7 @@ impl OverlayFs {
         max: usize,
     ) -> Result<Vec<OverlayDirEntry>, MountError> {
         let handles = self.handles.lock().expect("handle lock");
-        let Some(OHandle::Dir { entries }) = handles.get(&fh) else {
+        let Some(OHandle::Dir { entries, .. }) = handles.get(&fh) else {
             return Err(not_found());
         };
         Ok(entries
@@ -574,6 +582,44 @@ impl OverlayFs {
                 kind: *kind,
             })
             .collect())
+    }
+
+    /// `readdir` with attributes — the FUSE readdirplus shape. Every returned entry resolves
+    /// through [`OverlayFs::lookup`], so it carries **one counted reference** on its overlay
+    /// ino, which the kernel balances with later `forget`s; a binding that fails to deliver an
+    /// entry to the kernel (reply buffer full) must call [`OverlayFs::forget`] with 1 for it.
+    pub async fn readdir_plus(
+        &self,
+        fh: u64,
+        offset: u64,
+        max: usize,
+    ) -> Result<Vec<(OverlayDirEntry, OverlayAttr)>, MountError> {
+        let (dir_ino, window) = {
+            let handles = self.handles.lock().expect("handle lock");
+            let Some(OHandle::Dir { ino, entries }) = handles.get(&fh) else {
+                return Err(not_found());
+            };
+            (
+                *ino,
+                entries
+                    .iter()
+                    .enumerate()
+                    .skip(offset as usize)
+                    .take(max)
+                    .map(|(i, (name, kind))| OverlayDirEntry {
+                        next_offset: i as u64 + 1,
+                        name: name.clone(),
+                        kind: *kind,
+                    })
+                    .collect::<Vec<_>>(),
+            )
+        };
+        let mut out = Vec::with_capacity(window.len());
+        for entry in window {
+            let attr = self.lookup(dir_ino, &entry.name).await?;
+            out.push((entry, attr));
+        }
+        Ok(out)
     }
 
     pub fn releasedir(&self, fh: u64) {
@@ -1295,6 +1341,19 @@ mod tests {
         let run_sh = fs.lookup(run.ino, "run.sh").await.unwrap();
         assert_eq!(run_sh.perm & 0o111, 0o111, "exec bit survives the lower");
         assert!(!run_sh.upper);
+
+        // readdirplus: entries carry counted (ino, attr) pairs consistent with lookup.
+        let root_fh = fs.opendir(ROOT_INO).await.unwrap();
+        let plus = fs.readdir_plus(root_fh, 0, 100).await.unwrap();
+        fs.releasedir(root_fh);
+        assert_eq!(plus.len(), 3);
+        let (_, dir_attr) = plus.iter().find(|(e, _)| e.name == "dir").unwrap();
+        assert_eq!(dir_attr.ino, dir.ino, "readdirplus interns the same ino");
+        let (_, readme_attr) = plus.iter().find(|(e, _)| e.name == "README.md").unwrap();
+        assert_eq!(readme_attr.size, "# seed\n".len() as u64);
+        for (_, attr) in &plus {
+            fs.forget(attr.ino, 1); // balance the readdirplus references
+        }
 
         // 2. Copy-up on first write; content merges; the upper layer holds exactly the dirty file.
         let readme = fs.lookup(ROOT_INO, "README.md").await.unwrap();

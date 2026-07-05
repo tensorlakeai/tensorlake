@@ -218,6 +218,9 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
             reference: followed,
             follow: true,
             poll_interval: Duration::from_secs(5),
+            // Manifest-driven cache prefill in the background: first walks serve warm instead
+            // of paying a per-directory crawl. Best-effort — a failed warmup just starts cold.
+            warmup: true,
             ..Default::default()
         },
     )

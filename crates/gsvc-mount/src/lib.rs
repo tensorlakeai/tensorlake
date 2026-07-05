@@ -49,9 +49,10 @@ mod watch;
 
 pub use cache::CacheConfig;
 pub use client::{
-    ChangeEntry, ChangeKind, ChangesPage, FileStat, FsClient, RefStatus, TreeEntry, TreePage,
+    ChangeEntry, ChangeKind, ChangesPage, FileStat, FsClient, ManifestPage, ManifestRow, RefStatus,
+    TreeEntry, TreePage,
 };
-pub use core::{DirEntryOut, InvalEntry, MountCore, NodeAttr, NodeKind, ROOT_INO, RefreshDelta};
+pub use core::{DirEntryOut, InvalEntry, MountCore, NodeAttr, NodeKind, RefreshDelta, ROOT_INO};
 pub use watch::spawn_ref_watcher;
 
 use std::time::Duration;
@@ -72,6 +73,10 @@ pub struct MountOptions {
     /// force the walk (rollout safety valve; the walk is also what covers servers without the
     /// endpoint).
     pub diff_refresh: bool,
+    /// Pre-warm the metadata caches from the recursive manifest in the background at mount
+    /// time, so first walks serve like warm ones. Best-effort: a failed warmup publishes
+    /// nothing and the mount just starts cold.
+    pub warmup: bool,
     pub cache: CacheConfig,
 }
 
@@ -83,6 +88,7 @@ impl Default for MountOptions {
             poll_interval: Duration::from_secs(5),
             page_limit: 1000,
             diff_refresh: true,
+            warmup: false,
             cache: CacheConfig::default(),
         }
     }

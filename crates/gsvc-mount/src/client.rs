@@ -102,6 +102,28 @@ pub struct ChangesPage {
     pub next_after: Option<String>,
 }
 
+/// One row of a commit's recursive manifest (`GET .../manifest`): files and, when requested with
+/// `dirs=1`, directories (mode `0o40000`, `size` null, `oid` = the subtree's tree oid).
+#[derive(Clone, Debug, Deserialize)]
+pub struct ManifestRow {
+    pub path: String,
+    pub mode: u32,
+    #[serde(default)]
+    pub size: Option<u64>,
+    pub oid: String,
+}
+
+/// One page of the recursive manifest. Large-blob read plans are ignored here — the mount reads
+/// content through ranged file reads, not bulk materialize.
+#[derive(Clone, Debug, Deserialize)]
+pub struct ManifestPage {
+    pub commit: String,
+    pub entries: Vec<ManifestRow>,
+    pub truncated: bool,
+    #[serde(default)]
+    pub next_after: Option<String>,
+}
+
 /// Client for one repo's native filesystem API.
 ///
 /// `base` is the server origin (e.g. `https://git.tensorlake.ai`); `project`/`repo` scope every
@@ -201,6 +223,39 @@ impl FsClient {
             urlencode(from),
             urlencode(to)
         );
+        if let Some(after) = after {
+            url.push_str("&after=");
+            url.push_str(&urlencode(after));
+        }
+        let resp = self.get(url).send().await.map_err(MountError::Http)?;
+        if !resp.status().is_success() {
+            return Err(Self::error_for(resp).await);
+        }
+        resp.json().await.map_err(MountError::Http)
+    }
+
+    /// One page of the commit's recursive manifest (`GET .../manifest?dirs=&glob=`), the bulk
+    /// enumeration surface warmup pre-fills the metadata caches from.
+    pub async fn manifest_page(
+        &self,
+        version: &str,
+        after: Option<&str>,
+        limit: usize,
+        dirs: bool,
+        glob: Option<&str>,
+    ) -> Result<ManifestPage, MountError> {
+        let mut url = format!(
+            "{}?version={}&limit={limit}",
+            self.control("manifest"),
+            urlencode(version)
+        );
+        if dirs {
+            url.push_str("&dirs=1");
+        }
+        if let Some(glob) = glob {
+            url.push_str("&glob=");
+            url.push_str(&urlencode(glob));
+        }
         if let Some(after) = after {
             url.push_str("&after=");
             url.push_str(&urlencode(after));

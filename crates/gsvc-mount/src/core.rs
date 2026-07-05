@@ -42,7 +42,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use bytes::{Bytes, BytesMut};
 
 use crate::cache::{MountCaches, StatOutcome};
-use crate::client::{ChangeEntry, ChangeKind, FileStat, FsClient, TreeEntry};
+use crate::client::{ChangeEntry, ChangeKind, FileStat, FsClient, ManifestRow, TreeEntry};
 use crate::{MountError, MountOptions};
 
 /// What a node is, from its git mode.
@@ -173,6 +173,9 @@ pub const ROOT_INO: u64 = 1;
 /// the mount benchmark models, and keeps a refresh from monopolizing per-repo admission slots.
 const REFRESH_CONCURRENCY: usize = 16;
 
+/// In-flight block-fetch bound for one read that spans multiple uncached blocks.
+const READ_CONCURRENCY: usize = 8;
+
 impl InodeTable {
     fn new() -> Self {
         InodeTable {
@@ -228,6 +231,26 @@ impl InodeTable {
     /// one the kernel holds dentries under, which is what invalidation needs.
     fn ino_of(&self, path: &str) -> Option<u64> {
         self.index.get(path).copied()
+    }
+
+    /// Build the invalidation item for a rebound or staled path. The parent ino is resolved
+    /// through the path index (top-level names hang off the root); a parent the kernel never
+    /// looked up — or has since forgotten — yields `None`, and the binding falls back to
+    /// `inval_inode` alone. A table method so refresh apply passes resolve it under the guard
+    /// they already hold.
+    fn inval_entry(&self, ino: u64, path: &str, kind: NodeKind) -> InvalEntry {
+        let (parent_ino, name) = match split_path(path) {
+            Some(("", name)) => (Some(ROOT_INO), name),
+            Some((dir, name)) => (self.ino_of(dir), name),
+            None => (None, path),
+        };
+        InvalEntry {
+            ino,
+            parent_ino,
+            name: name.to_string(),
+            path: path.to_string(),
+            kind,
+        }
     }
 
     /// All live (non-stale) inos with their nodes, for the refresh walk.
@@ -373,7 +396,82 @@ impl MountCore {
         core.client
             .tree_page(&core.current_commit(), "", None, 1)
             .await?;
+        if core.opts.warmup {
+            // Best-effort background warmup; the mount serves (colder) without it, and a failed
+            // warmup publishes nothing.
+            let warm = core.clone();
+            tokio::spawn(async move {
+                if let Err(e) = warm.warmup().await {
+                    tracing::info!(error = %e, "mount: cache warmup unavailable");
+                }
+            });
+        }
         Ok(core)
+    }
+
+    /// Pre-warm the metadata caches from the recursive manifest: a couple of paged requests
+    /// replace the cold walk's per-directory listings and per-entry stats (Envoy scale: two
+    /// pages / ~15ms of server work versus a 3,200-request crawl). Directory rows carry tree
+    /// oids, so warmed listings keep the descend-by-oid fast path. All-or-nothing: a failed
+    /// page publishes nothing, because a partially-assembled listing must never be served as a
+    /// directory's complete cached contents.
+    pub async fn warmup(&self) -> Result<(), MountError> {
+        let commit = self.root_commit();
+        let mut rows: Vec<ManifestRow> = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let page = self
+                .client
+                .manifest_page(&commit, after.as_deref(), 10_000, true, None)
+                .await?;
+            rows.extend(page.entries);
+            if !page.truncated || page.next_after.is_none() {
+                break;
+            }
+            after = page.next_after;
+        }
+
+        let mut dirs: HashMap<String, Vec<TreeEntry>> = HashMap::new();
+        dirs.insert(String::new(), Vec::new());
+        for row in &rows {
+            if row.mode == 0o40000 {
+                // Materialize the directory's own listing bucket even if (theoretically) empty.
+                dirs.entry(row.path.clone()).or_default();
+            }
+            let (dir, name) = split_path(&row.path).unwrap_or(("", row.path.as_str()));
+            dirs.entry(dir.to_string()).or_default().push(TreeEntry {
+                name: name.to_string(),
+                oid: row.oid.clone(),
+                mode: row.mode,
+                size: row.size,
+            });
+        }
+        for (dir, mut entries) in dirs {
+            // Server listings serve raw-name-byte order; match it so paged readdirs and warmed
+            // listings agree.
+            entries.sort_by(|a, b| a.name.as_bytes().cmp(b.name.as_bytes()));
+            self.caches.put_dir(&commit, &dir, Arc::new(entries));
+        }
+        for row in rows {
+            let stat = match (row.mode == 0o40000, row.size) {
+                (true, _) => FileStat {
+                    oid: row.oid,
+                    mode: row.mode,
+                    size: 0,
+                },
+                (false, Some(size)) => FileStat {
+                    oid: row.oid,
+                    mode: row.mode,
+                    size,
+                },
+                // A file row without a size (pre-index window) resolves through the stat path
+                // on demand; caching a fabricated size would serve wrong attrs.
+                (false, None) => continue,
+            };
+            self.caches
+                .put_stat(&commit, &row.path, StatOutcome::Present(stat));
+        }
+        Ok(())
     }
 
     /// The commit the root currently resolves to (hex).
@@ -419,7 +517,7 @@ impl MountCore {
         // derived index may still be materializing, and swapping the view onto an unservable
         // commit turns every operation into EAGAIN until it settles. Keep serving the current
         // (immutable, consistent) commit and re-poll instead — stale beats broken, the same
-        // stance as a deleted ref. (Upstream gsvc-mount carries the same guard.)
+        // stance as a deleted ref.
         if let Some(oid) = status.oid.as_deref() {
             if let Err(MountError::IndexNotReady(msg)) =
                 self.client.tree_page(oid, "", None, 1).await
@@ -520,9 +618,11 @@ impl MountCore {
         let mut rows: Vec<ChangeEntry> = Vec::new();
         let mut after: Option<String> = None;
         loop {
+            // Page at the server's clamp (10k): a branch-jump diff can carry tens of thousands
+            // of rows, and smaller pages just multiply round trips on the refresh path.
             let page = self
                 .client
-                .changes_page(base, new_commit, after.as_deref(), 1000)
+                .changes_page(base, new_commit, after.as_deref(), 10_000)
                 .await?;
             rows.extend(page.entries);
             if !page.truncated || page.next_after.is_none() {
@@ -531,8 +631,9 @@ impl MountCore {
             after = page.next_after;
         }
         // Prefixes under which every known path is implicitly gone: removed directories, and
-        // paths that stopped being directories.
-        let erased_prefixes: Vec<&str> = rows
+        // paths that stopped being directories. A set keyed by exact path — each live node
+        // checks its O(depth) ancestors against it instead of scanning every prefix.
+        let erased_prefixes: std::collections::HashSet<&str> = rows
             .iter()
             .filter(|row| match row.change {
                 ChangeKind::Removed => row.is_dir(),
@@ -556,7 +657,7 @@ impl MountCore {
                 continue;
             }
             let Some(row) = by_path.get(node.path.as_str()) else {
-                if erased_prefixes.iter().any(|dir| under_dir(&node.path, dir)) {
+                if ancestor_in(&node.path, &erased_prefixes) {
                     plan.push((ino, node, Action::Stale));
                 }
                 // No row and no erased ancestor: the path is unchanged between base and
@@ -600,23 +701,27 @@ impl MountCore {
             }
         }
 
-        // Apply pass: pure table operations, no failures possible.
+        // Apply pass: pure table operations under one guard, no failures possible.
         let mut delta = RefreshDelta::default();
+        let mut inodes = self.inodes.lock().unwrap();
         for (ino, node, action) in plan {
             match action {
                 Action::Rebind(fresh) => {
                     let kind = fresh.kind;
-                    self.inodes.lock().unwrap().rebind(ino, fresh);
-                    delta.rebound.push(self.inval_entry(ino, &node.path, kind));
+                    inodes.rebind(ino, fresh);
+                    delta
+                        .rebound
+                        .push(inodes.inval_entry(ino, &node.path, kind));
                 }
                 Action::Stale => {
-                    self.inodes.lock().unwrap().mark_stale(ino);
+                    inodes.mark_stale(ino);
                     delta
                         .staled
-                        .push(self.inval_entry(ino, &node.path, node.kind));
+                        .push(inodes.inval_entry(ino, &node.path, node.kind));
                 }
             }
         }
+        drop(inodes);
         Ok(delta)
     }
 
@@ -663,6 +768,9 @@ impl MountCore {
                 .buffer_unordered(REFRESH_CONCURRENCY)
                 .collect::<Vec<_>>()
                 .await;
+            // Apply the wave's outcomes under one guard: rebinds, stales, and the parent-ino
+            // lookups for their invalidation entries are all table operations.
+            let mut inodes = self.inodes.lock().unwrap();
             for (ino, node, outcome) in results {
                 match outcome {
                     Ok(StatOutcome::Present(stat)) => {
@@ -683,14 +791,16 @@ impl MountCore {
                             size: stat.size,
                             oid: stat.oid,
                         };
-                        self.inodes.lock().unwrap().rebind(ino, fresh);
-                        delta.rebound.push(self.inval_entry(ino, &node.path, kind));
+                        inodes.rebind(ino, fresh);
+                        delta
+                            .rebound
+                            .push(inodes.inval_entry(ino, &node.path, kind));
                     }
                     Ok(StatOutcome::Absent) => {
-                        self.inodes.lock().unwrap().mark_stale(ino);
+                        inodes.mark_stale(ino);
                         delta
                             .staled
-                            .push(self.inval_entry(ino, &node.path, node.kind));
+                            .push(inodes.inval_entry(ino, &node.path, node.kind));
                     }
                     Err(e) => {
                         failed += 1;
@@ -702,27 +812,9 @@ impl MountCore {
                     }
                 }
             }
+            drop(inodes);
         }
         (delta, failed)
-    }
-
-    /// Build the invalidation item for a rebound or staled path. The parent ino is resolved
-    /// through the path index (top-level names hang off the root); a parent the kernel never
-    /// looked up — or has since forgotten — yields `None`, and the binding falls back to
-    /// `inval_inode` alone.
-    fn inval_entry(&self, ino: u64, path: &str, kind: NodeKind) -> InvalEntry {
-        let (parent_ino, name) = match split_path(path) {
-            Some(("", name)) => (Some(ROOT_INO), name),
-            Some((dir, name)) => (self.inodes.lock().unwrap().ino_of(dir), name),
-            None => (None, path),
-        };
-        InvalEntry {
-            ino,
-            parent_ino,
-            name: name.to_string(),
-            path: path.to_string(),
-            kind,
-        }
     }
 
     fn node_of(&self, ino: u64) -> Result<Arc<Node>, MountError> {
@@ -942,6 +1034,65 @@ impl MountCore {
             .collect())
     }
 
+    /// `readdir` with attributes — the FUSE `readdirplus` shape, killing the per-entry lookup
+    /// storm a plain readdir triggers from attr-hungry tools (`ls -l`, tree walkers). Every
+    /// returned entry is interned with **one counted lookup reference** (exactly as if the
+    /// binding had called [`MountCore::lookup`] for the name), which the kernel balances with
+    /// later `forget`s. A binding that fails to deliver an entry to the kernel (reply buffer
+    /// full) must call [`MountCore::forget`] with 1 for that entry's ino to rebalance.
+    ///
+    /// Attributes resolve from the handle's already-paged listing — no extra requests in the
+    /// common case; only entries whose size the listing doesn't carry (pre-index window) go
+    /// through the stat path.
+    pub async fn readdir_plus(
+        &self,
+        fh: u64,
+        offset: u64,
+        max: usize,
+    ) -> Result<Vec<(DirEntryOut, NodeAttr)>, MountError> {
+        let names = self.readdir(fh, offset, max).await?;
+        let (parent, window): (Arc<Node>, Vec<TreeEntry>) = {
+            let handles = self.handles.lock().unwrap();
+            let Some(Handle::Dir(dir)) = handles.get(&fh) else {
+                return Err(MountError::BadHandle);
+            };
+            (
+                dir.node.clone(),
+                dir.entries
+                    .iter()
+                    .skip(offset as usize)
+                    .take(names.len())
+                    .cloned()
+                    .collect(),
+            )
+        };
+        let mut out = Vec::with_capacity(names.len());
+        for (entry, te) in names.into_iter().zip(window) {
+            let child_path = join_path(&parent.path, &te.name);
+            let size = match (te.is_dir(), te.size) {
+                (true, _) => 0,
+                (false, Some(size)) => size,
+                (false, None) => match self.stat_at(&parent.commit, &child_path).await? {
+                    StatOutcome::Present(stat) => stat.size,
+                    StatOutcome::Absent => {
+                        return Err(MountError::NotFound(te.name.clone()));
+                    }
+                },
+            };
+            let node = Node {
+                commit: parent.commit.clone(),
+                path: child_path,
+                kind: kind_of_mode(te.mode),
+                mode: te.mode,
+                size,
+                oid: te.oid.clone(),
+            };
+            let (ino, node) = self.inodes.lock().unwrap().intern(node);
+            out.push((entry, node.attr(ino)));
+        }
+        Ok(out)
+    }
+
     pub fn releasedir(&self, fh: u64) {
         self.handles.lock().unwrap().remove(&fh);
     }
@@ -987,6 +1138,8 @@ impl MountCore {
     }
 
     async fn read_node(&self, node: &Node, offset: u64, size: u64) -> Result<Bytes, MountError> {
+        use futures::StreamExt as _;
+
         if size == 0 || offset >= node.size {
             return Ok(Bytes::new());
         }
@@ -995,27 +1148,54 @@ impl MountCore {
         let first_block = offset / block_bytes;
         let last_block = (end - 1) / block_bytes;
 
+        // Blocks cache by content identity — the blob oid — so identical files share entries
+        // across commits, paths, and renames. The rare oid-less node keys by (commit, path),
+        // which is equally immutable.
+        let ident = if node.oid.is_empty() {
+            format!("{}:{}", node.commit, node.path)
+        } else {
+            node.oid.clone()
+        };
+
+        // Gather cached blocks, then fetch every miss concurrently: a large read that misses
+        // otherwise pays one serial round trip per block.
+        let mut blocks: Vec<Option<Bytes>> = (first_block..=last_block)
+            .map(|block| self.caches.block(&ident, block))
+            .collect();
+        let misses: Vec<u64> = (first_block..=last_block)
+            .filter(|block| blocks[(block - first_block) as usize].is_none())
+            .collect();
+        let fetched: Vec<(u64, Result<Bytes, MountError>)> =
+            futures::stream::iter(misses.into_iter().map(|block| async move {
+                let block_start = block * block_bytes;
+                let block_end = (block_start + block_bytes).min(node.size);
+                let bytes = self
+                    .client
+                    .read_range(
+                        &node.commit,
+                        &node.path,
+                        block_start,
+                        block_end - block_start,
+                    )
+                    .await;
+                (block, bytes)
+            }))
+            .buffer_unordered(READ_CONCURRENCY)
+            .collect()
+            .await;
+        for (block, bytes) in fetched {
+            let bytes = bytes?;
+            self.caches.put_block(&ident, block, bytes.clone());
+            blocks[(block - first_block) as usize] = Some(bytes);
+        }
+
         let mut out = BytesMut::with_capacity((end - offset) as usize);
         for block in first_block..=last_block {
             let block_start = block * block_bytes;
             let block_end = (block_start + block_bytes).min(node.size);
-            let bytes = match self.caches.block(&node.commit, &node.path, block) {
-                Some(bytes) => bytes,
-                None => {
-                    let bytes = self
-                        .client
-                        .read_range(
-                            &node.commit,
-                            &node.path,
-                            block_start,
-                            block_end - block_start,
-                        )
-                        .await?;
-                    self.caches
-                        .put_block(&node.commit, &node.path, block, bytes.clone());
-                    bytes
-                }
-            };
+            let bytes = blocks[(block - first_block) as usize]
+                .as_ref()
+                .expect("all blocks resolved");
             let want_start = offset.max(block_start) - block_start;
             let want_end = (end.min(block_end) - block_start).min(bytes.len() as u64);
             if want_start < want_end {
@@ -1038,6 +1218,22 @@ fn join_path(dir: &str, name: &str) -> String {
 fn under_dir(path: &str, dir: &str) -> bool {
     path.strip_prefix(dir)
         .is_some_and(|rest| rest.starts_with('/'))
+}
+
+/// Whether any strict ancestor directory of `path` is in `dirs` — O(depth) hash lookups, versus
+/// scanning every candidate prefix per path.
+fn ancestor_in(path: &str, dirs: &std::collections::HashSet<&str>) -> bool {
+    if dirs.is_empty() {
+        return false;
+    }
+    let mut end = path.len();
+    while let Some(i) = path[..end].rfind('/') {
+        if dirs.contains(&path[..i]) {
+            return true;
+        }
+        end = i;
+    }
+    false
 }
 
 /// Split a repo-relative path into `(parent dir, name)`; `None` for the root itself.
@@ -1127,5 +1323,17 @@ mod tests {
         assert!(!under_dir("a", "a"));
         assert!(!under_dir("a.txt", "a"));
         assert!(!under_dir("ab/c", "a"));
+    }
+
+    #[test]
+    fn ancestor_in_checks_every_ancestor_and_only_ancestors() {
+        let dirs: std::collections::HashSet<&str> = ["a", "x/y"].into_iter().collect();
+        assert!(ancestor_in("a/b", &dirs));
+        assert!(ancestor_in("a/b/c", &dirs));
+        assert!(ancestor_in("x/y/z", &dirs));
+        assert!(!ancestor_in("a", &dirs), "a path is not its own ancestor");
+        assert!(!ancestor_in("ab/c", &dirs), "no partial-component match");
+        assert!(!ancestor_in("x/yy/z", &dirs));
+        assert!(!ancestor_in("top.txt", &dirs));
     }
 }

@@ -1,4 +1,4 @@
-Vendored from artifact_storage commit fa56a21 (branch claude/loving-williamson-e0cbed:
-main c75f7ba + mount refresh delta + changes endpoint / diff-driven refresh)
+Vendored from artifact_storage commit 01029ba (branch claude/loving-williamson-e0cbed = main
+f968290/#49 + read-path performance round: manifest warmup, readdirplus, oid-keyed block cache)
 crates: gsvc-mount, gsvc-codec (src/ verbatim; Cargo.toml adapted for the tensorlake workspace)
 Sync: rsync -a --delete <artifact_storage>/crates/<c>/src/ crates/<c>/src/ then update this file.
