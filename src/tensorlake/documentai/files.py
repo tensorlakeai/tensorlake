@@ -4,6 +4,7 @@ This module contains the FileUploader class, which is used to upload files to th
 
 import asyncio
 import json
+from io import BytesIO
 from pathlib import Path
 from typing import Optional, Union
 
@@ -11,6 +12,8 @@ from pydantic import BaseModel, Field
 
 from .common import get_doc_ai_base_url
 from .models import Region
+
+UploadSource = Union[str, Path, BytesIO]
 
 try:
     from tensorlake._cloud_sdk import CloudDocumentAIClient as RustCloudDocumentAIClient
@@ -64,12 +67,14 @@ class FileUploader:
             api_key=self.api_key,
         )
 
-    def upload_file(self, file_path: Union[str, Path]) -> str:
+    def upload_file(self, file_path: UploadSource) -> str:
         """
         Upload a file to Tensorlake.
 
         Args:
-            file_path: Path to the file to upload
+            file_path: Path to the file to upload, or an in-memory BytesIO buffer.
+                BytesIO uploads use the buffer's ``name`` attribute as the file
+                name when present, otherwise ``upload.bin``.
 
         Returns:
             File ID of the uploaded file. This ID can be used to reference the file in other API calls.
@@ -78,6 +83,11 @@ class FileUploader:
         Raises:
             FileNotFoundError: If the file doesn't exist
         """
+        if isinstance(file_path, BytesIO):
+            return self._upload_content(
+                file_name=self._bytes_io_file_name(file_path),
+                content=file_path.getvalue(),
+            )
 
         if isinstance(file_path, str):
             if file_path.startswith("http://") or file_path.startswith("https://"):
@@ -89,9 +99,11 @@ class FileUploader:
         if not path.exists():
             raise FileNotFoundError(f"File not found: {path}")
 
+        return self._upload_content(file_name=path.name, content=path.read_bytes())
+
+    def _upload_content(self, file_name: str, content: bytes) -> str:
         response_json = self._rust_client.upload_file_json(
-            file_name=path.name,
-            content=path.read_bytes(),
+            file_name=file_name, content=content
         )
         payload = json.loads(response_json)
         status_code = int(payload.get("status_code", 500))
@@ -106,12 +118,21 @@ class FileUploader:
         except Exception as e:
             raise RuntimeError(f"Invalid upload response payload: {body}") from e
 
-    async def upload_file_async(self, path: Union[str, Path]) -> str:
+    @staticmethod
+    def _bytes_io_file_name(file_obj: BytesIO) -> str:
+        name = getattr(file_obj, "name", None)
+        if isinstance(name, (str, Path)):
+            file_name = Path(name).name
+            if file_name:
+                return file_name
+        return "upload.bin"
+
+    async def upload_file_async(self, path: UploadSource) -> str:
         """
         Upload a file to Tensorlake asynchronously.
 
         Args:
-            file_path: Path to the file to upload
+            file_path: Path to the file to upload, or an in-memory BytesIO buffer.
 
         Returns:
             File ID of the uploaded file. This ID can be used to reference the file in other API calls.

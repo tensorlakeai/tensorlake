@@ -4,6 +4,7 @@ File-management helpers (upload, list, delete).
 
 from __future__ import annotations
 
+from io import BytesIO
 from pathlib import Path
 from typing import Optional, Union
 
@@ -14,6 +15,8 @@ from ._utils import _drop_none
 from .common import PaginatedResult
 from .files import FileInfo, FileUploader
 from .models import PaginationDirection, Region
+
+UploadSource = Union[str, Path, BytesIO]
 
 
 class _FilesMixin(_BaseClient):
@@ -102,21 +105,21 @@ class _FilesMixin(_BaseClient):
         resp = await self._arequest("GET", "files", params=params)
         return PaginatedResult[FileInfo].model_validate(resp.json())
 
-    def upload(self, path: Union[str, Path]) -> str:
+    def upload(self, path: UploadSource) -> str:
         """
         Upload a file to Tensorlake.
 
         Args:
-            file_path: Path to the file to upload
+            file_path: Path to the file to upload, or an in-memory BytesIO buffer.
         """
         return self._uploader.upload_file(path)
 
     @exponential_backoff(max_retries=10, initial_delay_seconds=2)
-    async def upload_async(self, path: Union[str, Path]) -> str:
+    async def upload_async(self, path: UploadSource) -> str:
         """
         Upload a file to Tensorlake asynchronously.
         Args:
-            file_path: Path to the file to upload
+            file_path: Path to the file to upload, or an in-memory BytesIO buffer.
         """
         return await self._uploader.upload_file_async(path)
 

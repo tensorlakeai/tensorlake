@@ -1,3 +1,4 @@
+import io
 import json
 import tempfile
 import unittest
@@ -125,6 +126,30 @@ class TestDocumentAIRustBackend(unittest.TestCase):
         self.assertEqual(file_id, "tensorlake-123")
         self.assertEqual(len(fake.uploads), 1)
         self.assertEqual(fake.uploads[0][0], tmp_path.name)
+
+    def test_upload_accepts_bytes_io(self):
+        doc_ai = DocumentAI(api_key="k", server_url="http://localhost:8900")
+        fake = _FakeRustDocumentAIClient()
+        doc_ai._uploader._rust_client = fake
+        buffer = io.BytesIO(b"hello from memory")
+        buffer.name = "/tmp/report.txt"
+        buffer.seek(5)
+
+        file_id = doc_ai.upload(path=buffer)
+
+        self.assertEqual(file_id, "tensorlake-123")
+        self.assertEqual(fake.uploads, [("report.txt", b"hello from memory")])
+        self.assertEqual(buffer.tell(), 5)
+
+    def test_upload_accepts_unnamed_bytes_io(self):
+        doc_ai = DocumentAI(api_key="k", server_url="http://localhost:8900")
+        fake = _FakeRustDocumentAIClient()
+        doc_ai._uploader._rust_client = fake
+
+        file_id = doc_ai.upload(path=io.BytesIO(b"nameless"))
+
+        self.assertEqual(file_id, "tensorlake-123")
+        self.assertEqual(fake.uploads, [("upload.bin", b"nameless")])
 
     def test_unauthorized_maps_to_document_ai_error(self):
         doc_ai = DocumentAI(api_key="k", server_url="http://localhost:8900")
