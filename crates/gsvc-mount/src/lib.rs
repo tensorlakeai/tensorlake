@@ -51,7 +51,7 @@ pub use cache::CacheConfig;
 pub use client::{
     ChangeEntry, ChangeKind, ChangesPage, FileStat, FsClient, RefStatus, TreeEntry, TreePage,
 };
-pub use core::{DirEntryOut, InvalEntry, MountCore, NodeAttr, NodeKind, RefreshDelta, ROOT_INO};
+pub use core::{DirEntryOut, InvalEntry, MountCore, NodeAttr, NodeKind, ROOT_INO, RefreshDelta};
 pub use watch::spawn_ref_watcher;
 
 use std::time::Duration;

@@ -51,15 +51,21 @@ pub struct MountState {
     pub workspace_id: String,
     pub ref_name: String,
     pub mountpoint: PathBuf,
-    /// Shared-ro: the mount is a read session — the view follows this ref (a real branch)
-    /// instead of the workspace ref, and every mutation answers `EROFS`.
+    /// Branch-following view: the lower side follows this ref (a real branch) instead of the
+    /// workspace ref. Shared-ro *and* shared-rw set it — the mode axiom is that modes vary only
+    /// what the view follows plus write policy.
     #[serde(default)]
     pub follow_ref: Option<String>,
+    /// Write policy, decoupled from following: shared-ro is the only read-only mode. `None` in
+    /// state files written before shared-rw followed the branch; those were read-only exactly
+    /// when they followed, which is what the accessor falls back to.
+    #[serde(default)]
+    pub read_only: Option<bool>,
 }
 
 impl MountState {
     pub fn read_only(&self) -> bool {
-        self.follow_ref.is_some()
+        self.read_only.unwrap_or(self.follow_ref.is_some())
     }
 }
 
@@ -88,6 +94,20 @@ pub fn save_mount_state(state_dir: &Path, state: &MountState) -> Result<()> {
 
 pub fn control_socket(state_dir: &Path) -> PathBuf {
     state_dir.join("control.sock")
+}
+
+/// The daemon's pid, written at startup so `unmount` can wait for the process to actually die
+/// before tearing down the state dir (a shutdown fired into the socket alone races the exit).
+pub fn pid_file(state_dir: &Path) -> PathBuf {
+    state_dir.join("daemon.pid")
+}
+
+pub fn daemon_pid(state_dir: &Path) -> Option<i32> {
+    std::fs::read_to_string(pid_file(state_dir))
+        .ok()?
+        .trim()
+        .parse()
+        .ok()
 }
 
 /// One control round-trip from a CLI command to the daemon. Mounts (and so daemons) exist
@@ -273,6 +293,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     // Control socket (mount is live).
     let sock_path = control_socket(state_dir);
     let _ = std::fs::remove_file(&sock_path);
+    std::fs::write(pid_file(state_dir), std::process::id().to_string())?;
     let listener = tokio::net::UnixListener::bind(&sock_path)?;
     {
         let overlay = overlay.clone();
@@ -325,7 +346,10 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             let mut stream = reader.into_inner();
                             let _ = stream.write_all(format!("{resp}\n").as_bytes()).await;
                             unmount(&mountpoint);
-                            return;
+                            // Exit outright: session-wait is not guaranteed to return after an
+                            // external unmount (observed leaked daemons on Linux), and the
+                            // daemon's one job is over. The reply above already flushed.
+                            std::process::exit(0);
                         }
                         other => {
                             serde_json::json!({ "ok": false, "error": format!("unknown op {other:?}") })

@@ -334,14 +334,46 @@ pub async fn mount(
     // Attach = reconnect: the workspace ref (and everything snapshotted onto it) survived
     // whatever happened to the previous mount — sandbox crash, timeout, unmount.
     let (ws, attached) = match workspace {
-        Some(id) => (
-            session
-                .client
-                .get_workspace(&session.project_id, repo, user, token, id)
-                .await?
-                .into_inner(),
-            true,
-        ),
+        Some(id) => {
+            // Accept the short id every listing displays: resolve a <40-hex prefix against the
+            // live workspace list, requiring uniqueness.
+            let full_id = if id.len() < 40 {
+                let all = session
+                    .client
+                    .list_workspaces(&session.project_id, repo, user, token)
+                    .await?
+                    .into_inner();
+                let matches: Vec<String> = all
+                    .iter()
+                    .map(|w| w.id.clone())
+                    .filter(|wid| wid.starts_with(id))
+                    .collect();
+                match matches.as_slice() {
+                    [one] => one.clone(),
+                    [] => {
+                        return Err(CliError::usage(format!(
+                            "no workspace matches {id:?} (see: tl fs workspace ls {repo})"
+                        )));
+                    }
+                    many => {
+                        return Err(CliError::usage(format!(
+                            "workspace id {id:?} is ambiguous ({} matches); use more characters",
+                            many.len()
+                        )));
+                    }
+                }
+            } else {
+                id.to_string()
+            };
+            (
+                session
+                    .client
+                    .get_workspace(&session.project_id, repo, user, token, &full_id)
+                    .await?
+                    .into_inner(),
+                true,
+            )
+        }
         None => (
             session
                 .client
@@ -362,25 +394,33 @@ pub async fn mount(
         ),
     };
 
-    // Shared-ro: the view follows the branch itself. An explicit `:branch` names it; otherwise
-    // the workspace's resolved base ref (the repo HEAD) is the branch.
-    let follow_ref = if mode == MountMode::SharedRo {
-        let branch_ref = match &base {
-            Some(b) => format!("refs/heads/{b}"),
-            None => {
-                let base_ref = ws.base_ref.clone().unwrap_or_default();
-                if !base_ref.starts_with("refs/heads/") {
-                    return Err(CliError::usage(
-                        "--shared-ro follows a branch, and the repo HEAD did not resolve to \
-                         one; name it explicitly: tl fs mount <file-system>:<branch> --shared-ro",
-                    ));
+    // Shared modes follow the branch itself (default mode follows the workspace ref): shared-ro
+    // as a pure read session, shared-rw so every writer's view converges on the reconciled
+    // branch rather than staying pinned to its own snapshots. An explicit `:branch` names it;
+    // for shared-ro without one, the workspace's resolved base ref (the repo HEAD) is the branch.
+    let follow_ref = match mode {
+        MountMode::SharedRo => {
+            let branch_ref = match &base {
+                Some(b) => format!("refs/heads/{b}"),
+                None => {
+                    let base_ref = ws.base_ref.clone().unwrap_or_default();
+                    if !base_ref.starts_with("refs/heads/") {
+                        return Err(CliError::usage(
+                            "--shared-ro follows a branch, and the repo HEAD did not resolve to \
+                             one; name it explicitly: tl fs mount <file-system>:<branch> --shared-ro",
+                        ));
+                    }
+                    base_ref
                 }
-                base_ref
-            }
-        };
-        Some(branch_ref)
-    } else {
-        None
+            };
+            Some(branch_ref)
+        }
+        MountMode::SharedRw => Some(format!(
+            "refs/heads/{}",
+            base.clone()
+                .expect("shared-rw requires <file-system>:<branch>")
+        )),
+        _ => None,
     };
 
     let mountpoint = canonical_mountpoint(path)?;
@@ -394,6 +434,7 @@ pub async fn mount(
             ref_name: ws.ref_name.clone(),
             mountpoint: PathBuf::from(&mountpoint),
             follow_ref,
+            read_only: Some(mode == MountMode::SharedRo),
         },
     )?;
     registry_add(&mountpoint, &state_dir)?;
@@ -479,7 +520,23 @@ pub async fn mount(
 pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> {
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
+    let pid = daemon::daemon_pid(&state_dir);
     let _ = daemon::control(&state_dir, "shutdown").await;
+    // Wait for the daemon to actually exit before tearing down its state dir: the shutdown op
+    // races the process exit, and deleting upper/control state under a live daemon is how
+    // daemons leak (and how a reattach ends up sharing a state dir with a zombie).
+    if let Some(pid) = pid {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while unsafe { libc::kill(pid, 0) } == 0 {
+            if std::time::Instant::now() >= deadline {
+                // Still alive: escalate once, then proceed — better a killed daemon than a
+                // shared state dir.
+                unsafe { libc::kill(pid, libc::SIGKILL) };
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+    }
     if delete {
         let session = FsSession::open(ctx, Some(&state.repo)).await?;
         let (user, token) = session.creds();

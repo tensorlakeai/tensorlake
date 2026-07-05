@@ -415,6 +415,24 @@ impl MountCore {
             return Ok(None);
         }
         let status = self.client.ref_status(&self.opts.reference).await?;
+        // Probe the candidate commit before adopting it: right after a push/reconcile its
+        // derived index may still be materializing, and swapping the view onto an unservable
+        // commit turns every operation into EAGAIN until it settles. Keep serving the current
+        // (immutable, consistent) commit and re-poll instead — stale beats broken, the same
+        // stance as a deleted ref. (Upstream gsvc-mount carries the same guard.)
+        if let Some(oid) = status.oid.as_deref() {
+            if let Err(MountError::IndexNotReady(msg)) =
+                self.client.tree_page(oid, "", None, 1).await
+            {
+                tracing::info!(
+                    reference = %self.opts.reference,
+                    candidate = %oid,
+                    msg,
+                    "mount: new commit's index not ready; keeping current view this poll"
+                );
+                return Ok(None);
+            }
+        }
         let (new_commit, base): (Arc<str>, Option<Arc<str>>) = {
             let mut root = self.root.write().unwrap();
             if status.generation == root.generation {
