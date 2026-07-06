@@ -1681,78 +1681,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 }
             }
         }
-        Commands::Fs(subcmd) => {
-            ensure_auth_and_project(ctx).await?;
-            let result = match subcmd {
-                FsCommands::Create { name, json } => commands::fs::create(ctx, &name, json).await,
-                FsCommands::Ls { json } => commands::fs::list(ctx, json).await,
-                FsCommands::Rm { name } => commands::fs::remove(ctx, &name).await,
-                FsCommands::Mount {
-                    target,
-                    path,
-                    workspace,
-                    shared_ro,
-                    shared_rw,
-                    foreground,
-                } => {
-                    let mode = match (shared_ro, shared_rw) {
-                        (true, _) => commands::fs::MountMode::SharedRo,
-                        (_, true) => commands::fs::MountMode::SharedRw,
-                        _ => commands::fs::MountMode::Workspace,
-                    };
-                    commands::fs::mount(ctx, &target, &path, workspace.as_deref(), mode, foreground)
-                        .await
-                }
-                FsCommands::Daemon { state_dir } => {
-                    commands::fs::daemon::run(ctx, &state_dir).await
-                }
-                FsCommands::Snapshot { path, message } => {
-                    commands::fs::snapshot(ctx, &path, message.as_deref()).await
-                }
-                FsCommands::Promote {
-                    path,
-                    branch,
-                    full_history,
-                    message,
-                } => {
-                    commands::fs::promote(ctx, &path, &branch, full_history, message.as_deref())
-                        .await
-                }
-                FsCommands::Status { path, json } => commands::fs::status(ctx, &path, json).await,
-                FsCommands::Restore { path, version } => {
-                    commands::fs::restore(ctx, &path, &version).await
-                }
-                FsCommands::Diff { path, a, b } => {
-                    commands::fs::diff(ctx, &path, a.as_deref(), b.as_deref()).await
-                }
-                FsCommands::Unmount { path, delete } => {
-                    commands::fs::unmount(ctx, &path, delete).await
-                }
-                FsCommands::Workspace(cmd) => match cmd {
-                    WorkspaceCommands::Ls { file_system, json } => {
-                        commands::fs::workspace_ls(ctx, &file_system, json).await
-                    }
-                    WorkspaceCommands::Rm {
-                        file_system,
-                        workspace_id,
-                    } => commands::fs::workspace_rm(ctx, &file_system, &workspace_id).await,
-                },
-            };
-            // A cached minted git credential can be revoked before its recorded expiry; purge
-            // the cache on an auth failure so the next invocation re-mints instead of retrying
-            // a dead token.
-            if let Err(
-                CliError::Auth(_)
-                | CliError::Sdk(
-                    tensorlake::error::SdkError::Authentication(_)
-                    | tensorlake::error::SdkError::Authorization(_),
-                ),
-            ) = &result
-            {
-                crate::config::files::purge_git_credentials();
-            }
-            result
-        }
+        Commands::Fs(subcmd) => run_fs_command(ctx, subcmd).await,
         Commands::SshKeys(subcmd) => {
             // SSH keys live on the user, not on a project — only auth (PAT or
             // logged-in session) is required, no org/project context.
@@ -2241,6 +2170,84 @@ async fn run_applications_command(
     match app_args.command {
         Some(ApplicationsCommands::Ls) | None => commands::applications::ls(ctx).await,
     }
+}
+
+// `tl fs` drives the local FUSE/overlay mount stack, which is backed by the private gsvc-mount
+// core and therefore only compiled into `--features mount` release builds. The command surface
+// (FsCommands) is always parsed so `tl fs --help` documents it, but a build without the feature
+// answers with a clear "not available" error instead of the real implementation.
+#[cfg(feature = "mount")]
+async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Result<()> {
+    ensure_auth_and_project(ctx).await?;
+    let result = match subcmd {
+        FsCommands::Create { name, json } => commands::fs::create(ctx, &name, json).await,
+        FsCommands::Ls { json } => commands::fs::list(ctx, json).await,
+        FsCommands::Rm { name } => commands::fs::remove(ctx, &name).await,
+        FsCommands::Mount {
+            target,
+            path,
+            workspace,
+            shared_ro,
+            shared_rw,
+            foreground,
+        } => {
+            let mode = match (shared_ro, shared_rw) {
+                (true, _) => commands::fs::MountMode::SharedRo,
+                (_, true) => commands::fs::MountMode::SharedRw,
+                _ => commands::fs::MountMode::Workspace,
+            };
+            commands::fs::mount(ctx, &target, &path, workspace.as_deref(), mode, foreground).await
+        }
+        FsCommands::Daemon { state_dir } => commands::fs::daemon::run(ctx, &state_dir).await,
+        FsCommands::Snapshot { path, message } => {
+            commands::fs::snapshot(ctx, &path, message.as_deref()).await
+        }
+        FsCommands::Promote {
+            path,
+            branch,
+            full_history,
+            message,
+        } => {
+            commands::fs::promote(ctx, &path, &branch, full_history, message.as_deref()).await
+        }
+        FsCommands::Status { path, json } => commands::fs::status(ctx, &path, json).await,
+        FsCommands::Restore { path, version } => commands::fs::restore(ctx, &path, &version).await,
+        FsCommands::Diff { path, a, b } => {
+            commands::fs::diff(ctx, &path, a.as_deref(), b.as_deref()).await
+        }
+        FsCommands::Unmount { path, delete } => commands::fs::unmount(ctx, &path, delete).await,
+        FsCommands::Workspace(cmd) => match cmd {
+            WorkspaceCommands::Ls { file_system, json } => {
+                commands::fs::workspace_ls(ctx, &file_system, json).await
+            }
+            WorkspaceCommands::Rm {
+                file_system,
+                workspace_id,
+            } => commands::fs::workspace_rm(ctx, &file_system, &workspace_id).await,
+        },
+    };
+    // A cached minted git credential can be revoked before its recorded expiry; purge
+    // the cache on an auth failure so the next invocation re-mints instead of retrying
+    // a dead token.
+    if let Err(
+        CliError::Auth(_)
+        | CliError::Sdk(
+            tensorlake::error::SdkError::Authentication(_)
+            | tensorlake::error::SdkError::Authorization(_),
+        ),
+    ) = &result
+    {
+        crate::config::files::purge_git_credentials();
+    }
+    result
+}
+
+#[cfg(not(feature = "mount"))]
+async fn run_fs_command(_ctx: &mut CliContext, _subcmd: FsCommands) -> error::Result<()> {
+    Err(CliError::usage(
+        "`tl fs` local mounts are not available in this build. Install the official `tl` release, \
+         which is compiled with mount support.",
+    ))
 }
 
 async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> error::Result<()> {

@@ -51,18 +51,23 @@ if (!cargoSubcommand) {
   process.exit(1);
 }
 
+// Cargo features to enable, comma/space separated (e.g. "mount"). CI sets this to "mount" for
+// Unix targets so the shipped CLI includes the `tl fs mount` stack; empty otherwise.
+const cliFeatures = (process.env.TENSORLAKE_CLI_FEATURES ?? "").trim();
+
 const cargoArgs = [
   cargoSubcommand,
   "--release",
   "-p",
   cliPackageName,
+  ...(cliFeatures ? ["--features", cliFeatures] : []),
   ...(targetTriple ? ["--target", targetTriple] : []),
 ];
 
 console.log(
   `Building CLI binaries for ${targetId}${
     targetTriple ? ` (${targetTriple})` : ""
-  } with cargo ${cargoSubcommand}`,
+  } with cargo ${cargoSubcommand}${cliFeatures ? ` (features: ${cliFeatures})` : ""}`,
 );
 
 const cargo = spawnSync("cargo", cargoArgs, {

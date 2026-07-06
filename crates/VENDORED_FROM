@@ -1,4 +1,15 @@
 Vendored from artifact_storage commit 01029ba (branch claude/loving-williamson-e0cbed = main
 f968290/#49 + read-path performance round: manifest warmup, readdirplus, oid-keyed block cache)
-crates: gsvc-mount, gsvc-codec (src/ verbatim; Cargo.toml adapted for the tensorlake workspace)
-Sync: rsync -a --delete <artifact_storage>/crates/<c>/src/ crates/<c>/src/ then update this file.
+crates: gsvc-codec (src/ verbatim; Cargo.toml adapted for the tensorlake workspace)
+Sync: rsync -a --delete <artifact_storage>/crates/gsvc-codec/src/ crates/gsvc-codec/src/ then update this file.
+
+gsvc-mount is NOT vendored: it is the private mount core and its source must never be copied into
+this public tree. crates/gsvc-mount here is a resolution-only placeholder (a `compile_error!` lib
+plus a tensorlake-adapted Cargo.toml) so the public repo builds offline with no access to the
+artifact_storage repo. It is consumed only by tensorlake-cli behind the optional `mount` feature,
+so default builds never compile it.
+
+Official mount-enabled binaries are built with `just build-cli-mount`, which copies the real
+gsvc-mount src/ from a sibling artifact_storage checkout over the placeholder for the duration of
+the build (using the placeholder's adapted Cargo.toml) and restores the placeholder afterward.
+Keep the placeholder Cargo.toml's dependency list in sync with the real crate's.

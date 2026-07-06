@@ -19,18 +19,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `mount: true` ships the `tl fs mount` stack (the private gsvc-mount core, vendored in
+          # at build time). Unix only — the mount stack uses unix-only APIs, so Windows omits it.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             target_id: linux-x86_64
             archive: tar.gz
+            mount: true
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             target_id: linux-aarch64
             archive: tar.gz
+            mount: true
           - os: macos-14
             target: aarch64-apple-darwin
             target_id: darwin-aarch64
             archive: tar.gz
+            mount: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             target_id: windows-x86_64
@@ -50,8 +55,15 @@ jobs:
           key: ${{ matrix.target }}
           cache-bin: false
 
+      - name: Vendor gsvc-mount core
+        if: matrix.mount
+        uses: ./.github/actions/vendor-mount-core
+        with:
+          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
+          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
+
       - name: Build CLI
-        run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }}
+        run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }} ${{ matrix.mount && '--features mount' || '' }}
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'

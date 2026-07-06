@@ -1,19 +1,40 @@
+# Resolution-only placeholder for the private `gsvc-mount` mount core.
+#
+# The real crate lives in the private artifact_storage repo and is never vendored into this public
+# tree. This placeholder exists solely so the public repo *resolves* the optional `gsvc-mount`
+# dependency of `tensorlake-cli` without any access to that repo. Its `src/lib.rs` is a
+# `compile_error!` and is never compiled by a valid build:
+#   * default / `cargo build --workspace` builds — the `mount` feature is off, so the optional
+#     dependency is not activated and this crate is not compiled (and it is `exclude`d from the
+#     workspace, so `--workspace` does not build it either);
+#   * official `--features mount` release builds — a Cargo `paths` override replaces this crate
+#     with the real one, so this source is not compiled.
+# Only enabling `--features mount` *without* the override compiles it, and then the `compile_error!`
+# explains exactly what to do.
+#
+# Name and version MUST match the real crate for the `paths` override to apply.
 [package]
 name = "gsvc-mount"
-version.workspace = true
-edition.workspace = true
-license.workspace = true
-description = "VFS-agnostic mount core for artifact-storage repos: native-API client, immutable caches, branch-refresh state machine. FUSE (or other) bindings live in the client distribution, not here."
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Resolution-only placeholder for the private gsvc-mount mount core (see Cargo.toml)."
+publish = false
 
+[lib]
+path = "src/lib.rs"
+
+# These MUST mirror the real gsvc-mount's dependency list (crates/gsvc-mount/Cargo.toml in
+# artifact_storage). The `paths` override that swaps in the real crate for `--features mount`
+# release builds errors if the override alters the resolved dependency set, so the placeholder
+# declares the same dependencies (never actually compiled — the lib is a `compile_error!`). If the
+# real crate's dependencies change upstream, update this list to match.
 [dependencies]
-bytes.workspace = true
-futures.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-thiserror.workspace = true
-tokio = { workspace = true }
-tracing.workspace = true
+bytes = "1"
+futures = "0.3"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tracing = "0.1"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
-
-[dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }

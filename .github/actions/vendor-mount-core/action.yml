@@ -1,0 +1,56 @@
+name: Vendor gsvc-mount core
+description: >
+  Swaps the private gsvc-mount mount core into crates/gsvc-mount so the CLI can be built with
+  `--features mount`. Mints a short-lived GitHub App token, sparse-checks-out the gsvc-mount
+  source from the private artifact_storage repo, and copies it over the committed placeholder
+  (keeping the placeholder's tensorlake-adapted Cargo.toml). The source is only present on the
+  runner for the duration of the job and is never committed to this public repo.
+
+  The calling workflow must have already run actions/checkout for this repo, and must pass the
+  credentials for a GitHub App that has `contents: read` on tensorlakeai/artifact_storage.
+
+inputs:
+  app-id:
+    description: App ID of a GitHub App with contents:read on tensorlakeai/artifact_storage.
+    required: true
+  private-key:
+    description: Private key (PEM) for that GitHub App.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Mint artifact_storage access token
+      id: app-token
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: tensorlakeai
+        repositories: artifact_storage
+
+    - name: Check out gsvc-mount source
+      uses: actions/checkout@v4
+      with:
+        repository: tensorlakeai/artifact_storage
+        token: ${{ steps.app-token.outputs.token }}
+        path: .mount-core
+        sparse-checkout: crates/gsvc-mount/src
+        sparse-checkout-cone-mode: false
+        persist-credentials: false
+
+    - name: Swap real gsvc-mount source over the placeholder
+      shell: bash
+      run: |
+        set -euo pipefail
+        real=".mount-core/crates/gsvc-mount/src"
+        placeholder="crates/gsvc-mount/src"
+        if [ ! -d "$real" ]; then
+          echo "::error::gsvc-mount source not found at $real (checkout of artifact_storage failed?)"
+          exit 1
+        fi
+        # Keep the placeholder's tensorlake-adapted Cargo.toml; replace only the source tree.
+        rm -f "$placeholder"/*.rs
+        cp "$real"/*.rs "$placeholder"/
+        count=$(ls "$placeholder"/*.rs | wc -l | tr -d ' ')
+        echo "Vendored ${count} gsvc-mount source file(s); the CLI can now build with --features mount."

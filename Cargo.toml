@@ -3,10 +3,14 @@ members = [
     "crates/cloud-sdk",
     "crates/cli",
     "crates/gsvc-codec",
-    "crates/gsvc-mount",
     "crates/rust-cloud-sdk-node",
     "crates/rust-cloud-sdk-py",
 ]
+# gsvc-mount is a resolution-only placeholder for the private mount core (see its Cargo.toml and
+# the workspace.dependencies note below). Excluded so `cargo build --workspace` never compiles the
+# placeholder; it is only ever built when `tensorlake-cli --features mount` activates it, at which
+# point official builds swap in the real crate via a Cargo `paths` override.
+exclude = ["crates/gsvc-mount"]
 resolver = "3"
 
 [workspace.package]
@@ -24,7 +28,14 @@ tensorlake = { path = "crates/cloud-sdk" }
 # Vendored from artifact_storage (crates/gsvc-codec) to back `tl git clone`.
 # See AGENTS.md in that repo: open a companion PR there if this crate's wire format changes upstream.
 gsvc-codec = { path = "crates/gsvc-codec" }
-# Vendored from artifact_storage (crates/gsvc-mount): VFS-agnostic mount core backing `tl fs mount`.
+# Private mount core for `tl fs mount`. The source is NOT vendored into this public tree; the
+# `crates/gsvc-mount` here is a resolution-only placeholder (a `compile_error!` stub) so the public
+# repo builds with no access to the private artifact_storage repo. It is consumed only by
+# `tensorlake-cli` behind the optional `mount` feature, so default builds never compile it.
+# Official release binaries are built with `--features mount` and a Cargo `paths` override that
+# points this crate at the real gsvc-mount in a sibling artifact_storage checkout (see the
+# `build-cli-mount` recipe in the justfile). Keep the placeholder's name/version in sync with the
+# real crate so the override matches.
 gsvc-mount = { path = "crates/gsvc-mount" }
 
 # Async runtime

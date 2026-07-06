@@ -22,6 +22,31 @@ build-cli:
 build-cli-release:
     cargo build -p tensorlake-cli --release
 
+# Build the CLI with the private `tl fs mount` stack (the `mount` feature + the real gsvc-mount
+# core). The mount core is NOT vendored into this public repo — only a resolution placeholder is
+# committed at crates/gsvc-mount. This recipe copies the real source over the placeholder for the
+# duration of the build and restores it afterward (even on failure), so the private source is never
+# committed here. Requires the private artifact_storage repo checked out as a sibling directory.
+build-cli-mount *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    real="../artifact_storage/crates/gsvc-mount/src"
+    placeholder="crates/gsvc-mount/src"
+    if [ ! -d "$real" ]; then
+        echo "error: $real not found." >&2
+        echo "Check out github.com/tensorlakeai/artifact_storage as a sibling of this repo." >&2
+        exit 1
+    fi
+    restore() {
+        git checkout -q -- "$placeholder" 2>/dev/null || true
+        git clean -fdq "$placeholder" 2>/dev/null || true
+    }
+    trap restore EXIT
+    # Swap in the real mount core, keeping the placeholder's tensorlake-adapted Cargo.toml.
+    rm -f "$placeholder"/*.rs
+    cp "$real"/*.rs "$placeholder"/
+    cargo build -p tensorlake-cli --release --features mount {{ARGS}}
+
 # Run all Rust tests
 test-rust:
     cargo test --workspace
