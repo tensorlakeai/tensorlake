@@ -365,6 +365,26 @@ fn io_err(e: std::io::Error) -> SdkError {
     SdkError::Io(e)
 }
 
+/// Whole-file identity pass for small staged files: one read yields the git blob oid and the
+/// file's single upload frame. CDC buys nothing under the staged threshold — those chunks are
+/// never registered for dedup server-side — so small files skip the chunker (and, downstream,
+/// the `missing` negotiation) entirely.
+fn chunk_source_whole(source: &PushSource) -> Result<(Vec<([u8; 32], u32)>, String), SdkError> {
+    let data: Vec<u8> = match source {
+        PushSource::Path(p) => std::fs::read(p).map_err(io_err)?,
+        PushSource::Bytes(b) => b.clone(),
+        PushSource::KnownOid(_) => {
+            return Err(SdkError::ClientError(
+                "known-oid sources carry no bytes to hash".to_string(),
+            ));
+        }
+    };
+    let hash: [u8; 32] = Sha256::digest(&data).into();
+    let mut blob = gsvc_codec::BlobOidHasher::new(data.len() as u64);
+    blob.update(&data);
+    Ok((vec![(hash, data.len() as u32)], blob.finalize().to_hex()))
+}
+
 /// Which files take the tokened (verified-at-upload) path: content-bearing files whose bytes the
 /// server mostly lacks. Mostly-present files stay on the dedup path (upload only missing chunks,
 /// accept commit-time read-back proportional to reused bytes); deletes and known-oid references
@@ -372,6 +392,7 @@ fn io_err(e: std::io::Error) -> SdkError {
 fn elect_tokened(
     chunked: &[ChunkedFile],
     missing: &std::collections::HashSet<[u8; 32]>,
+    small_max: u64,
 ) -> Vec<bool> {
     chunked
         .iter()
@@ -380,6 +401,11 @@ fn elect_tokened(
                 return false;
             }
             let total: u64 = file.chunks.iter().map(|(_, s)| *s as u64).sum();
+            // Small staged files are always tokened: they skip negotiation (their chunks are
+            // never registered server-side), so there is no missing-ratio to consult.
+            if small_max > 0 && total < small_max {
+                return true;
+            }
             let missing_bytes: u64 = file
                 .chunks
                 .iter()
@@ -446,6 +472,10 @@ impl ArtifactStorageClient {
             session.cdc_avg_bytes,
             session.cdc_max_bytes,
         );
+        // Files under the server's staged threshold hash whole (single frame, one read):
+        // their chunks never register server-side, so CDC granularity and negotiation are
+        // pure overhead for them. 0 (older server) keeps everything on the CDC path.
+        let small_max = session.small_file_max_bytes;
         let hash_parallelism = std::thread::available_parallelism()
             .map(|n| n.get().min(8))
             .unwrap_or(4);
@@ -482,8 +512,18 @@ impl ArtifactStorageClient {
                         known_oid: true,
                     });
                 }
+                let source_len: u64 = match &f.source {
+                    PushSource::Path(p) => std::fs::metadata(p).map_err(io_err)?.len(),
+                    PushSource::Bytes(b) => b.len() as u64,
+                    PushSource::KnownOid(_) => unreachable!("handled above"),
+                };
+                let whole = small_max > 0 && source_len < small_max;
                 tokio::task::spawn_blocking(move || {
-                    let (chunks, blob_oid) = chunk_source(&f.source, min, avg, max)?;
+                    let (chunks, blob_oid) = if whole {
+                        chunk_source_whole(&f.source)?
+                    } else {
+                        chunk_source(&f.source, min, avg, max)?
+                    };
                     Ok(ChunkedFile {
                         repo_path: f.repo_path,
                         source: f.source,
@@ -539,9 +579,19 @@ impl ArtifactStorageClient {
             bytes: total_bytes,
         });
 
-        // 3. Negotiate: which distinct hashes does the server lack?
+        // 3. Negotiate: which distinct hashes does the server lack? Small staged files are
+        // excluded — their chunks are never registered, so the answer is always "missing" and
+        // the round trips are wasted; they take the tokened path unconditionally.
+        let is_small = |f: &ChunkedFile| -> bool {
+            small_max > 0
+                && f.chunks.iter().map(|(_, s)| *s as u64).sum::<u64>() < small_max
+                && !f.delete
+                && !f.known_oid
+                && !f.chunks.is_empty()
+        };
         let mut distinct: Vec<[u8; 32]> = chunked
             .iter()
+            .filter(|f| !is_small(f))
             .flat_map(|f| f.chunks.iter().map(|(h, _)| *h))
             .collect();
         distinct.sort_unstable();
@@ -574,7 +624,7 @@ impl ArtifactStorageClient {
         //    presenting the same completed token, so each distinct blob uploads once.
         let (mut uploaded_chunks, mut uploaded_bytes) = (0usize, 0u64);
         let mut file_tokens: Vec<Option<String>> = vec![None; chunked.len()];
-        let tokened = elect_tokened(&chunked, &missing);
+        let tokened = elect_tokened(&chunked, &missing, small_max);
         {
             let mut token_by_oid: std::collections::HashMap<&str, String> =
                 std::collections::HashMap::new();
@@ -992,25 +1042,36 @@ impl ArtifactStorageClient {
             }
         }
 
-        // 5. Commit by reference. The server re-verifies identity by reading chunks back.
+        // 5. Commit by reference. Small staged files commit TOKEN-ONLY ({path, file_token,
+        // oid}, no chunk list): upload already verified their content, so re-declaring chunks
+        // only bloats the request. Large tokened files keep their chunk lists (recipes are
+        // built from them); untokened files keep them for read-back verification.
+        let token_commits = session.features.iter().any(|f| f == "token_commits");
         let commit_files: Vec<CommitFileWire> = chunked
             .iter()
             .enumerate()
-            .map(|(i, f)| CommitFileWire {
-                path: f.repo_path.clone(),
-                chunks: f
-                    .chunks
-                    .iter()
-                    .map(|(h, s)| CommitChunkWire {
-                        hash: hex_lower(h),
-                        size: *s,
-                    })
-                    .collect(),
-                content: (!f.delete && !f.known_oid && f.chunks.is_empty()).then(String::new),
-                file_token: file_tokens[i].clone(),
-                oid: f.known_oid.then(|| f.blob_oid.clone()),
-                delete: f.delete,
-                mode: f.mode.map(|m| format!("{m:o}")),
+            .map(|(i, f)| {
+                let token_only = token_commits && file_tokens[i].is_some() && is_small(f);
+                CommitFileWire {
+                    path: f.repo_path.clone(),
+                    chunks: if token_only {
+                        Vec::new()
+                    } else {
+                        f.chunks
+                            .iter()
+                            .map(|(h, s)| CommitChunkWire {
+                                hash: hex_lower(h),
+                                size: *s,
+                            })
+                            .collect()
+                    },
+                    content: (!f.delete && !f.known_oid && !token_only && f.chunks.is_empty())
+                        .then(String::new),
+                    file_token: file_tokens[i].clone(),
+                    oid: (f.known_oid || token_only).then(|| f.blob_oid.clone()),
+                    delete: f.delete,
+                    mode: f.mode.map(|m| format!("{m:o}")),
+                }
             })
             .collect();
         let (commit_suffix, branch) = match &opts.workspace_snapshot {
@@ -1392,22 +1453,28 @@ mod tests {
         [b; 32]
     }
 
-    /// Mostly-missing files (any size) take the tokened path; mostly-present files, deletes,
-    /// known-oid references, and empty files never do.
+    /// Small files (under the staged threshold) are always tokened; above it the
+    /// missing-ratio heuristic decides; deletes, known-oid references, and empty files never
+    /// token. With no advertised threshold (older server), ratio-only applies everywhere.
     #[test]
-    fn tokened_election_is_by_missing_ratio_only() {
+    fn tokened_election_smalls_always_larges_by_ratio() {
         let missing: std::collections::HashSet<[u8; 32]> = [h(1), h(2)].into();
         let files = vec![
-            cf(vec![(h(1), 100)], false, false), // tiny, fully missing → tokened
-            cf(vec![(h(1), 100), (h(9), 100)], false, false), // half missing → tokened
-            cf(vec![(h(9), 100), (h(8), 300)], false, false), // mostly present → dedup
+            cf(vec![(h(9), 100)], false, false), // small, fully PRESENT → tokened anyway
+            cf(vec![(h(1), 300), (h(9), 300)], false, false), // large, half missing → tokened
+            cf(vec![(h(9), 300), (h(8), 300)], false, false), // large, mostly present → dedup
             cf(vec![(h(2), 100)], true, false),  // delete → never
             cf(Vec::new(), false, true),         // known oid → never
             cf(Vec::new(), false, false),        // empty file → inline content
         ];
         assert_eq!(
-            elect_tokened(&files, &missing),
+            elect_tokened(&files, &missing, 200),
             vec![true, true, false, false, false, false]
+        );
+        // Threshold 0 (older server): the tiny fully-present file falls back to the dedup path.
+        assert_eq!(
+            elect_tokened(&files, &missing, 0),
+            vec![false, true, false, false, false, false]
         );
     }
 
