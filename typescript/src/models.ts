@@ -571,6 +571,8 @@ export interface SandboxOptions {
    * resolve the server-returned `sandboxUrl`.
    */
   proxyUrl?: string;
+  /** @internal Real caller/env proxy override, distinct from an internally selected proxyUrl. */
+  explicitProxyUrl?: string;
   apiKey?: string;
   organizationId?: string;
   projectId?: string;

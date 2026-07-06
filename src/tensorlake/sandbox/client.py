@@ -1335,6 +1335,7 @@ class SandboxClient:
         sandbox_id: str | None = None,
         routing_hint: str | None = None,
         request_timeout: float | None = None,
+        _routing_info: object | None = None,
     ) -> "Sandbox":
         """Connect to a running sandbox for process and file operations.
 
@@ -1358,20 +1359,35 @@ class SandboxClient:
         )
 
         info: Traced[SandboxInfo] | None = None
+        routing_info = _routing_info
+        cached_info: SandboxInfo | None = None
         proxy_sandbox_id = sandbox_identifier
-        if proxy_url is None:
+        explicit_proxy_url = (
+            proxy_url if proxy_url is not None else _explicit_proxy_url_override()
+        )
+        selected_proxy_url = explicit_proxy_url
+        if routing_info is None and proxy_url is None:
             info = self.get(sandbox_identifier)
-            proxy_sandbox_id = info.sandbox_id
-            routing_hint = routing_hint or info.routing_hint
-            proxy_url = self._rust_client.select_sandbox_proxy_url(
+            routing_info = info.value
+            cached_info = info.value
+        if routing_info is not None:
+            proxy_sandbox_id = routing_info.sandbox_id
+            routing_hint = routing_hint or routing_info.routing_hint
+            if isinstance(routing_info, SandboxInfo):
+                cached_info = routing_info
+            selected_proxy_url = self._rust_client.select_sandbox_proxy_url(
                 sandbox_id=proxy_sandbox_id,
-                sandbox_url=info.sandbox_url,
-                ingress_endpoint=info.ingress_endpoint,
-                explicit_proxy_url=_explicit_proxy_url_override(),
+                sandbox_url=routing_info.sandbox_url,
+                ingress_endpoint=routing_info.ingress_endpoint,
+                explicit_proxy_url=explicit_proxy_url,
+            )
+        if selected_proxy_url is None:
+            raise SandboxError(
+                "server response did not include sandbox_url; refusing to derive a proxy URL"
             )
 
         connect_proxy_kwargs = {
-            "proxy_url": proxy_url,
+            "proxy_url": selected_proxy_url,
             "sandbox_id": proxy_sandbox_id,
             "routing_hint": routing_hint,
         }
@@ -1381,18 +1397,22 @@ class SandboxClient:
 
         sandbox = Sandbox(
             identifier=proxy_sandbox_id,
-            proxy_url=proxy_url,
+            proxy_url=selected_proxy_url,
             api_key=self._api_key,
             organization_id=self._organization_id,
             project_id=self._project_id,
             routing_hint=routing_hint,
+            request_timeout=request_timeout,
             _proxy_rust_client=proxy_rust_client,
+            _explicit_proxy_url=explicit_proxy_url,
         )
         sandbox._lifecycle_client = self
         if info is not None:
             sandbox._sandbox_id = info.sandbox_id
-            sandbox._cached_info = info.value
             sandbox._trace_id = info.trace_id
+        if cached_info is not None:
+            sandbox._sandbox_id = cached_info.sandbox_id
+            sandbox._cached_info = cached_info
         return sandbox
 
     def create_and_connect(
@@ -1501,20 +1521,12 @@ class SandboxClient:
         # and a short-lived routing hint. Use it immediately to skip an extra poll RTT
         # and let the proxy route the first request without a placement lookup.
         if result.status == SandboxStatus.RUNNING:
-            selected_proxy_url = request_client._rust_client.select_sandbox_proxy_url(
-                sandbox_id=result.sandbox_id,
-                sandbox_url=result.sandbox_url,
-                ingress_endpoint=result.ingress_endpoint,
-                explicit_proxy_url=(
-                    proxy_url
-                    if proxy_url is not None
-                    else _explicit_proxy_url_override()
-                ),
-            )
             sandbox = request_client.connect(
                 result.sandbox_id,
-                proxy_url=selected_proxy_url,
+                proxy_url=proxy_url,
                 routing_hint=result.routing_hint,
+                request_timeout=wait_timeout,
+                _routing_info=result,
             )
             sandbox._sandbox_id = result.sandbox_id
             sandbox._owns_sandbox = True
@@ -1550,22 +1562,12 @@ class SandboxClient:
         while time.time() < deadline:
             info = request_client.get(result.sandbox_id)
             if info.status == SandboxStatus.RUNNING:
-                selected_proxy_url = (
-                    request_client._rust_client.select_sandbox_proxy_url(
-                        sandbox_id=info.sandbox_id,
-                        sandbox_url=info.sandbox_url,
-                        ingress_endpoint=info.ingress_endpoint,
-                        explicit_proxy_url=(
-                            proxy_url
-                            if proxy_url is not None
-                            else _explicit_proxy_url_override()
-                        ),
-                    )
-                )
                 sandbox = request_client.connect(
                     info.sandbox_id,
-                    proxy_url=selected_proxy_url,
+                    proxy_url=proxy_url,
                     routing_hint=info.routing_hint,
+                    request_timeout=wait_timeout,
+                    _routing_info=info.value,
                 )
                 sandbox._sandbox_id = info.sandbox_id
                 sandbox._cached_info = info.value

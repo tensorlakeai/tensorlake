@@ -15,6 +15,7 @@ describe("Sandbox", () => {
     vi.restoreAllMocks();
     delete process.env.TENSORLAKE_SDK_TIMINGS;
     delete process.env.TENSORLAKE_SDK_TIMING_PAYLOADS;
+    delete process.env.TENSORLAKE_SANDBOX_PROXY_URL;
   });
 
   function makeSandbox(id = "sbx-test"): Sandbox {
@@ -96,6 +97,289 @@ describe("Sandbox", () => {
       expect(response.sourceSandboxId).toBe("sbx-abc");
       expect(response.sandboxes[0].sandboxId).toBe("copy-1");
       expect(stub.client.copySandbox).toHaveBeenCalled();
+      sbx.close();
+    });
+  });
+
+  describe("resume", () => {
+    function sandboxInfo(overrides: Record<string, unknown> = {}) {
+      return JSON.stringify({
+        id: "sbx-1",
+        namespace: "default",
+        status: "running",
+        resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+        sandbox_url: "https://old.sandbox.tensorlake.ai",
+        routing_hint: "old-hint",
+        ...overrides,
+      });
+    }
+
+    it("refreshes proxy routing after blocking resume", async () => {
+      const responses = [
+        sandboxInfo(),
+        sandboxInfo({
+          sandbox_url: "https://new.sandbox.tensorlake.ai",
+          routing_hint: "new-hint",
+        }),
+        sandboxInfo({
+          sandbox_url: "https://new.sandbox.tensorlake.ai",
+          routing_hint: "new-hint",
+        }),
+      ];
+      const stub = installNativeStub({
+        client: {
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: responses.shift()!,
+          })),
+          resumeSandbox: vi.fn(async () => "t"),
+        },
+        proxy: {
+          health: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({ healthy: true }),
+          })),
+        },
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "stable-name",
+        apiKey: "key",
+        apiUrl: "https://api.tensorlake.ai",
+        requestTimeout: 7,
+      });
+      await sbx.health();
+      await sbx.resume({ timeout: 2, pollInterval: 0.01 });
+
+      expect(stub.client.connectProxy).toHaveBeenNthCalledWith(
+        1,
+        "https://old.sandbox.tensorlake.ai",
+        "sbx-1",
+        "old-hint",
+        7,
+      );
+      expect(stub.client.connectProxy).toHaveBeenNthCalledWith(
+        2,
+        "https://new.sandbox.tensorlake.ai",
+        "sbx-1",
+        "new-hint",
+        7,
+      );
+      sbx.close();
+    });
+
+    it("does not refresh proxy routing for wait=false", async () => {
+      const stub = installNativeStub({
+        client: {
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: sandboxInfo(),
+          })),
+          resumeSandbox: vi.fn(async () => "t"),
+        },
+        proxy: {
+          health: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({ healthy: true }),
+          })),
+        },
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "stable-name",
+        apiKey: "key",
+        apiUrl: "https://api.tensorlake.ai",
+      });
+      await sbx.health();
+      await sbx.resume({ wait: false });
+
+      expect(stub.client.connectProxy).toHaveBeenCalledOnce();
+      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1");
+      sbx.close();
+    });
+
+    it("keeps caller proxyUrl as the explicit override across resume rebind", async () => {
+      const stub = installNativeStub({
+        client: {
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: sandboxInfo({
+              sandbox_url: "https://server-after-resume.tensorlake.ai",
+              routing_hint: "new-hint",
+            }),
+          })),
+          resumeSandbox: vi.fn(async () => "t"),
+          selectSandboxProxyUrl: vi.fn(
+            (
+              _sandboxId: string,
+              sandboxUrl?: string | null,
+              _ingressEndpoint?: string | null,
+              explicitProxyUrl?: string | null,
+            ) => explicitProxyUrl ?? sandboxUrl ?? "",
+          ),
+        },
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-1",
+        proxyUrl: "https://caller-proxy.example.com",
+        apiKey: "key",
+        apiUrl: "https://api.tensorlake.ai",
+        requestTimeout: 7,
+      });
+
+      await sbx.resume({ timeout: 2, pollInterval: 0.01 });
+
+      expect(stub.client.selectSandboxProxyUrl).toHaveBeenCalledWith(
+        "sbx-1",
+        "https://server-after-resume.tensorlake.ai",
+        null,
+        "https://caller-proxy.example.com",
+      );
+      expect(stub.client.connectProxy).toHaveBeenNthCalledWith(
+        2,
+        "https://caller-proxy.example.com",
+        "sbx-1",
+        "new-hint",
+        7,
+      );
+      sbx.close();
+    });
+
+    it("keeps the connect-time env proxy override across resume rebind", async () => {
+      process.env.TENSORLAKE_SANDBOX_PROXY_URL = "https://initial-env.example.com";
+      const responses = [
+        sandboxInfo({
+          sandbox_url: undefined,
+          routing_hint: "old-hint",
+        }),
+        sandboxInfo({
+          sandbox_url: undefined,
+          routing_hint: "new-hint",
+        }),
+        sandboxInfo({
+          sandbox_url: undefined,
+          routing_hint: "new-hint",
+        }),
+      ];
+      const stub = installNativeStub({
+        client: {
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: responses.shift()!,
+          })),
+          resumeSandbox: vi.fn(async () => "t"),
+          selectSandboxProxyUrl: vi.fn(
+            (
+              _sandboxId: string,
+              sandboxUrl?: string | null,
+              _ingressEndpoint?: string | null,
+              explicitProxyUrl?: string | null,
+            ) => explicitProxyUrl ?? sandboxUrl ?? "",
+          ),
+        },
+        proxy: {
+          health: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({ healthy: true }),
+          })),
+        },
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "stable-name",
+        apiKey: "key",
+        apiUrl: "https://api.tensorlake.ai",
+        requestTimeout: 7,
+      });
+      await sbx.health();
+      process.env.TENSORLAKE_SANDBOX_PROXY_URL = "https://later-env.example.com";
+
+      await sbx.resume({ timeout: 2, pollInterval: 0.01 });
+
+      expect(stub.client.selectSandboxProxyUrl).toHaveBeenNthCalledWith(
+        1,
+        "sbx-1",
+        null,
+        null,
+        "https://initial-env.example.com",
+      );
+      expect(stub.client.selectSandboxProxyUrl).toHaveBeenNthCalledWith(
+        2,
+        "sbx-1",
+        null,
+        null,
+        "https://initial-env.example.com",
+      );
+      expect(stub.client.connectProxy).toHaveBeenNthCalledWith(
+        2,
+        "https://initial-env.example.com",
+        "sbx-1",
+        "new-hint",
+        7,
+      );
+      sbx.close();
+    });
+
+    it("does not treat create-time server URL as an explicit resume override", async () => {
+      const stub = installNativeStub({
+        client: {
+          createSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              sandbox_id: "sbx-1",
+              status: "running",
+              sandbox_url: "https://old.sandbox.tensorlake.ai",
+              routing_hint: "old-hint",
+            }),
+          })),
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: sandboxInfo({
+              sandbox_url: "https://new.sandbox.tensorlake.ai",
+              routing_hint: "new-hint",
+            }),
+          })),
+          resumeSandbox: vi.fn(async () => "t"),
+          selectSandboxProxyUrl: vi.fn(
+            (
+              _sandboxId: string,
+              sandboxUrl?: string | null,
+              _ingressEndpoint?: string | null,
+              explicitProxyUrl?: string | null,
+            ) => explicitProxyUrl ?? sandboxUrl ?? "",
+          ),
+        },
+      });
+
+      const sbx = await Sandbox.create({
+        apiKey: "key",
+        apiUrl: "https://api.tensorlake.ai",
+        requestTimeout: 7,
+      });
+      await sbx.resume({ timeout: 2, pollInterval: 0.01 });
+
+      expect(stub.client.selectSandboxProxyUrl).toHaveBeenNthCalledWith(
+        1,
+        "sbx-1",
+        "https://old.sandbox.tensorlake.ai",
+        null,
+        null,
+      );
+      expect(stub.client.selectSandboxProxyUrl).toHaveBeenNthCalledWith(
+        2,
+        "sbx-1",
+        "https://new.sandbox.tensorlake.ai",
+        null,
+        null,
+      );
+      expect(stub.client.connectProxy).toHaveBeenNthCalledWith(
+        2,
+        "https://new.sandbox.tensorlake.ai",
+        "sbx-1",
+        "new-hint",
+        7,
+      );
       sbx.close();
     });
   });
