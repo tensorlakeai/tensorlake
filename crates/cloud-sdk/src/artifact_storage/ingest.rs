@@ -7,10 +7,16 @@
 //! of arbitrarily large trees work from small sandboxes.
 //!
 //! Protocol (server: artifact-storage `/project/{p}/repos/{r}/ingest/...`):
-//! 1. open a session (returns the CDC parameters to chunk with),
+//! 1. open a session (returns the CDC parameters to chunk with and capability markers),
 //! 2. negotiate which chunk hashes the server lacks,
-//! 3. upload missing chunks in length-framed batches,
-//! 4. commit by chunk reference (server verifies identity by read-back).
+//! 3. upload: mostly-missing files stream whole under file tokens, several files in flight —
+//!    every request is independent server-side, so parallel requests are the throughput model;
+//!    the server verifies + hashes in transit (and on `staged_small_files` servers deflates
+//!    small files straight into pack entries at upload). Remaining missing chunks upload
+//!    through the dedup path (presigned packs or service-mediated frames),
+//! 4. commit by reference: tokened files publish their verified oid with zero read-back,
+//!    known-oid files move no bytes at all, and bare chunk references are verified by
+//!    server-side read-back.
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -43,6 +49,15 @@ pub enum PushSource {
     Path(PathBuf),
     /// In-memory content.
     Bytes(Vec<u8>),
+    /// Reference a blob **already present in the repository's network** by its git blob oid
+    /// (40-hex) — no bytes are read, hashed, or uploaded. This is the repeat-content path:
+    /// callers that know content is unchanged (e.g. from a mount manifest or a prior
+    /// `PushReport::file_blob_oids`) commit it by reference. The server presence-checks the
+    /// oid at commit and rejects unknown or non-blob oids.
+    ///
+    /// Requires a server advertising the `oid_files` ingest capability; `push_files` fails
+    /// fast otherwise (an older server would ignore the field and publish an empty file).
+    KnownOid(String),
 }
 
 /// Progress events, emitted in order. Rendering (progress bars, logs) is the caller's concern.
@@ -141,6 +156,11 @@ struct IngestSessionWire {
     max_hashes_per_query: usize,
     #[allow(dead_code)]
     max_chunk_bytes: usize,
+    /// Server capability markers (absent on older servers): `staged_small_files` (small
+    /// tokened files are deflated + staged at upload; their chunks are NOT registered for
+    /// dedup), `oid_files` (the commit endpoint accepts `{path, mode, oid}` references).
+    #[serde(default)]
+    features: Vec<String>,
 }
 
 #[derive(Serialize)]
@@ -228,13 +248,17 @@ struct CommitFileWire {
     path: String,
     /// Omitted when empty: a zero-byte file has no chunks and must publish as inline
     /// `content` instead (the server rejects an explicit empty chunk list), and deletes
-    /// carry neither.
+    /// and oid references carry neither.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     chunks: Vec<CommitChunkWire>,
     #[serde(skip_serializing_if = "Option::is_none")]
     content: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     file_token: Option<String>,
+    /// Reference an already-present blob by oid (no bytes move). Only sent to servers
+    /// advertising the `oid_files` capability.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    oid: Option<String>,
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     delete: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -272,10 +296,12 @@ pub struct CommitByReferenceResponse {
 struct ChunkedFile {
     repo_path: String,
     source: PushSource,
-    /// `(sha256, size)` in file order.
+    /// `(sha256, size)` in file order; empty for deletes and known-oid references.
     chunks: Vec<([u8; 32], u32)>,
     mode: Option<u32>,
     delete: bool,
+    /// The file is a `PushSource::KnownOid` reference: commit by oid, move no bytes.
+    known_oid: bool,
     blob_oid: String,
 }
 
@@ -291,10 +317,16 @@ fn chunk_source(
     let len: u64 = match source {
         PushSource::Path(p) => std::fs::metadata(p).map_err(io_err)?.len(),
         PushSource::Bytes(b) => b.len() as u64,
+        PushSource::KnownOid(_) => {
+            return Err(SdkError::ClientError(
+                "known-oid sources carry no bytes to chunk".to_string(),
+            ));
+        }
     };
     let reader: Box<dyn Read> = match source {
         PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
         PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+        PushSource::KnownOid(_) => unreachable!("guarded above"),
     };
     let mut blob_hasher = gsvc_codec::BlobOidHasher::new(len);
     let mut out = Vec::new();
@@ -309,6 +341,50 @@ fn chunk_source(
 
 fn io_err(e: std::io::Error) -> SdkError {
     SdkError::Io(e)
+}
+
+/// Which files take the tokened (verified-at-upload) path: content-bearing files whose bytes the
+/// server mostly lacks. Mostly-present files stay on the dedup path (upload only missing chunks,
+/// accept commit-time read-back proportional to reused bytes); deletes and known-oid references
+/// upload nothing.
+fn elect_tokened(
+    chunked: &[ChunkedFile],
+    missing: &std::collections::HashSet<[u8; 32]>,
+) -> Vec<bool> {
+    chunked
+        .iter()
+        .map(|file| {
+            if file.delete || file.known_oid || file.chunks.is_empty() {
+                return false;
+            }
+            let total: u64 = file.chunks.iter().map(|(_, s)| *s as u64).sum();
+            let missing_bytes: u64 = file
+                .chunks
+                .iter()
+                .filter(|(h, _)| missing.contains(h))
+                .map(|(_, s)| *s as u64)
+                .sum();
+            missing_bytes * 2 >= total
+        })
+        .collect()
+}
+
+/// The chunks that must upload through the dedup path: missing chunks referenced by at least
+/// one NON-tokened content file. Tokened uploads never count as coverage for other files —
+/// on servers with upload-time staging, a small tokened file's chunks are not registered, and
+/// the client does not know the server's small/large threshold.
+fn dedup_needed_chunks(
+    chunked: &[ChunkedFile],
+    tokened: &[bool],
+    missing: &std::collections::HashSet<[u8; 32]>,
+) -> std::collections::HashSet<[u8; 32]> {
+    chunked
+        .iter()
+        .zip(tokened)
+        .filter(|(file, tokened)| !**tokened && !file.delete && !file.known_oid)
+        .flat_map(|(file, _)| file.chunks.iter().map(|(h, _)| *h))
+        .filter(|h| missing.contains(h))
+        .collect()
 }
 
 impl ArtifactStorageClient {
@@ -362,7 +438,26 @@ impl ArtifactStorageClient {
                         chunks: Vec::new(),
                         mode: f.mode,
                         delete: true,
+                        known_oid: false,
                         blob_oid: String::new(),
+                    });
+                }
+                if let PushSource::KnownOid(oid) = &f.source {
+                    let oid = oid.to_ascii_lowercase();
+                    if oid.len() != 40 || !oid.bytes().all(|b| b.is_ascii_hexdigit()) {
+                        return Err(SdkError::ClientError(format!(
+                            "known oid for {:?} is not a 40-hex git oid: {oid:?}",
+                            f.repo_path
+                        )));
+                    }
+                    return Ok(ChunkedFile {
+                        repo_path: f.repo_path,
+                        blob_oid: oid,
+                        source: f.source,
+                        chunks: Vec::new(),
+                        mode: f.mode,
+                        delete: false,
+                        known_oid: true,
                     });
                 }
                 tokio::task::spawn_blocking(move || {
@@ -373,6 +468,7 @@ impl ArtifactStorageClient {
                         chunks,
                         mode: f.mode,
                         delete: false,
+                        known_oid: false,
                         blob_oid,
                     })
                 })
@@ -400,6 +496,16 @@ impl ArtifactStorageClient {
             }
             out
         };
+        // Known-oid files require explicit server support: an older server ignores the
+        // unknown `oid` field and would silently publish an EMPTY file at the path.
+        if chunked.iter().any(|f| f.known_oid) && !session.features.iter().any(|f| f == "oid_files")
+        {
+            return Err(SdkError::ClientError(
+                "this artifact-storage server does not support known-oid file references \
+                 (`oid_files` capability missing); re-push the content instead"
+                    .to_string(),
+            ));
+        }
         let total_chunks: usize = chunked.iter().map(|f| f.chunks.len()).sum();
         let total_bytes: u64 = chunked
             .iter()
@@ -433,82 +539,110 @@ impl ArtifactStorageClient {
             total: distinct.len(),
         });
 
-        // 4. Upload. Per file, pick the cheaper identity path (Phase 2, artifact_storage#26):
-        //    a file the server mostly lacks streams IN FULL under a file token — the server
-        //    hashes it during upload and the commit needs zero read-back; a file the server
-        //    mostly has uploads only its missing chunks and accepts server-side read-back
-        //    proportional to the reused bytes.
-        let mut to_upload = missing.clone();
+        // 4. Upload. Per file, pick the cheapest identity path (artifact_storage#26 + #57):
+        //    known-oid files move no bytes at all; a file the server mostly lacks streams IN
+        //    FULL under a file token — the server hashes it during upload (and, on servers with
+        //    upload-time staging, deflates small files straight into pack entries), so the
+        //    commit needs zero read-back; a file the server mostly has uploads only its missing
+        //    chunks and accepts server-side read-back proportional to the reused bytes.
+        //
+        //    Every tokened request is independent server-side (any pod, no ordering), so
+        //    tokened files upload several at a time — parallel requests are the throughput
+        //    model. Identical content shares one token: the server accepts several files
+        //    presenting the same completed token, so each distinct blob uploads once.
         let (mut uploaded_chunks, mut uploaded_bytes) = (0usize, 0u64);
         let mut file_tokens: Vec<Option<String>> = vec![None; chunked.len()];
-        for (i, file) in chunked.iter().enumerate() {
-            if file.delete {
-                continue;
-            }
-            let total: u64 = file.chunks.iter().map(|(_, s)| *s as u64).sum();
-            let missing_bytes: u64 = file
-                .chunks
-                .iter()
-                .filter(|(h, _)| missing.contains(h))
-                .map(|(_, s)| *s as u64)
-                .sum();
-            // Tokened only pays off for recipe-tier files that are mostly fresh.
-            if total < 8 * 1024 * 1024 || missing_bytes * 2 < total {
-                continue;
-            }
-            let token = format!("f{i}-{}", hex::encode(&file.chunks[0].0[..8]));
-            let mut reader: Box<dyn Read> = match &file.source {
-                PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
-                PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
-            };
-            let mut offset = 0u64;
-            let mut frame = Vec::with_capacity(opts.upload_batch_bytes + 64);
-            for (hash, size) in &file.chunks {
-                let mut data = vec![0u8; *size as usize];
-                reader.read_exact(&mut data).map_err(io_err)?;
-                to_upload.remove(hash);
-                frame.extend_from_slice(hash);
-                frame.extend_from_slice(&(data.len() as u32).to_be_bytes());
-                frame.extend_from_slice(&data);
-                uploaded_chunks += 1;
-                uploaded_bytes += data.len() as u64;
-                if frame.len() >= opts.upload_batch_bytes {
-                    let sent: u64 = frame_payload_bytes(&frame);
-                    self.put_chunk_frame(
-                        project_id,
-                        repo,
-                        git_username,
-                        git_token,
-                        &session.session_id,
-                        Some((&token, total, offset)),
-                        std::mem::take(&mut frame),
-                    )
-                    .await?;
-                    offset += sent;
-                    emit(PushEvent::UploadedBatch {
-                        chunks: uploaded_chunks,
-                        bytes: uploaded_bytes,
-                    });
+        let tokened = elect_tokened(&chunked, &missing);
+        {
+            let mut token_by_oid: std::collections::HashMap<&str, String> =
+                std::collections::HashMap::new();
+            let mut owners: Vec<usize> = Vec::new();
+            for (i, file) in chunked.iter().enumerate() {
+                if !tokened[i] {
+                    continue;
                 }
+                let token = token_by_oid
+                    .entry(file.blob_oid.as_str())
+                    .or_insert_with(|| {
+                        owners.push(i);
+                        format!("f{i}-{}", hex::encode(&file.chunks[0].0[..8]))
+                    });
+                file_tokens[i] = Some(token.clone());
             }
-            if !frame.is_empty() {
-                self.put_chunk_frame(
-                    project_id,
-                    repo,
-                    git_username,
-                    git_token,
-                    &session.session_id,
-                    Some((&token, total, offset)),
-                    frame,
-                )
-                .await?;
+            use futures::StreamExt as _;
+            const TOKENED_UPLOADS_IN_FLIGHT: usize = 4;
+            let mut results = futures::stream::iter(owners.into_iter().map(|i| {
+                let file = &chunked[i];
+                let token = file_tokens[i].clone().expect("owner has a token");
+                let session_id = session.session_id.as_str();
+                let batch_bytes = opts.upload_batch_bytes;
+                async move {
+                    let total: u64 = file.chunks.iter().map(|(_, s)| *s as u64).sum();
+                    let mut reader: Box<dyn Read> = match &file.source {
+                        PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
+                        PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+                        PushSource::KnownOid(_) => unreachable!("known-oid files are not tokened"),
+                    };
+                    // The whole file goes in ONE request when it fits a batch (required for
+                    // small files on staging servers — they cannot resume — and one round trip
+                    // for everything else); larger files continue at explicit offsets.
+                    let (mut sent_chunks, mut sent_bytes) = (0usize, 0u64);
+                    let mut offset = 0u64;
+                    let mut frame = Vec::with_capacity(batch_bytes + 64);
+                    for (hash, size) in &file.chunks {
+                        let mut data = vec![0u8; *size as usize];
+                        reader.read_exact(&mut data).map_err(io_err)?;
+                        frame.extend_from_slice(hash);
+                        frame.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                        frame.extend_from_slice(&data);
+                        sent_chunks += 1;
+                        sent_bytes += data.len() as u64;
+                        if frame.len() >= batch_bytes {
+                            let sent: u64 = frame_payload_bytes(&frame);
+                            self.put_chunk_frame(
+                                project_id,
+                                repo,
+                                git_username,
+                                git_token,
+                                session_id,
+                                Some((&token, total, offset)),
+                                std::mem::take(&mut frame),
+                            )
+                            .await?;
+                            offset += sent;
+                        }
+                    }
+                    if !frame.is_empty() {
+                        self.put_chunk_frame(
+                            project_id,
+                            repo,
+                            git_username,
+                            git_token,
+                            session_id,
+                            Some((&token, total, offset)),
+                            frame,
+                        )
+                        .await?;
+                    }
+                    Ok::<(usize, u64), SdkError>((sent_chunks, sent_bytes))
+                }
+            }))
+            .buffer_unordered(TOKENED_UPLOADS_IN_FLIGHT);
+            while let Some(done) = results.next().await {
+                let (chunks, bytes) = done?;
+                uploaded_chunks += chunks;
+                uploaded_bytes += bytes;
                 emit(PushEvent::UploadedBatch {
                     chunks: uploaded_chunks,
                     bytes: uploaded_bytes,
                 });
             }
-            file_tokens[i] = Some(token);
         }
+        // Chunks still needed by dedup-path files upload below even when a tokened file also
+        // carried them: on staging servers a small tokened file's chunks are never registered,
+        // and the client deliberately doesn't know the server's small/large threshold — so a
+        // tokened upload is never relied on to cover another file's chunk references.
+        let mut to_upload = dedup_needed_chunks(&chunked, &tokened, &missing);
 
         // Dedup path for everything else: only chunks the server lacks. When the backend
         // presigns, bytes are zstd-framed into client-assembled chunk packs and PUT straight
@@ -551,9 +685,13 @@ impl ArtifactStorageClient {
                 if to_upload.is_empty() {
                     break;
                 }
+                if file.chunks.is_empty() {
+                    continue; // deletes and known-oid references carry no bytes
+                }
                 let mut reader: Box<dyn Read> = match &file.source {
                     PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
                     PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+                    PushSource::KnownOid(_) => unreachable!("no chunks to upload"),
                 };
                 for (hash, size) in &file.chunks {
                     let mut data = vec![0u8; *size as usize];
@@ -646,9 +784,13 @@ impl ArtifactStorageClient {
                 if to_upload.is_empty() {
                     break;
                 }
+                if file.chunks.is_empty() {
+                    continue; // deletes and known-oid references carry no bytes
+                }
                 let mut reader: Box<dyn Read> = match &file.source {
                     PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
                     PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+                    PushSource::KnownOid(_) => unreachable!("no chunks to upload"),
                 };
                 for (hash, size) in &file.chunks {
                     let mut data = vec![0u8; *size as usize];
@@ -715,8 +857,9 @@ impl ArtifactStorageClient {
                         size: *s,
                     })
                     .collect(),
-                content: (!f.delete && f.chunks.is_empty()).then(String::new),
+                content: (!f.delete && !f.known_oid && f.chunks.is_empty()).then(String::new),
                 file_token: file_tokens[i].clone(),
+                oid: f.known_oid.then(|| f.blob_oid.clone()),
                 delete: f.delete,
                 mode: f.mode.map(|m| format!("{m:o}")),
             })
@@ -1060,6 +1203,224 @@ async fn expect_ok(resp: reqwest::Response) -> Result<(), SdkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn cf(chunks: Vec<([u8; 32], u32)>, delete: bool, known_oid: bool) -> ChunkedFile {
+        ChunkedFile {
+            repo_path: "p".to_string(),
+            source: PushSource::Bytes(Vec::new()),
+            chunks,
+            mode: None,
+            delete,
+            known_oid,
+            blob_oid: String::new(),
+        }
+    }
+
+    fn h(b: u8) -> [u8; 32] {
+        [b; 32]
+    }
+
+    /// Mostly-missing files (any size) take the tokened path; mostly-present files, deletes,
+    /// known-oid references, and empty files never do.
+    #[test]
+    fn tokened_election_is_by_missing_ratio_only() {
+        let missing: std::collections::HashSet<[u8; 32]> = [h(1), h(2)].into();
+        let files = vec![
+            cf(vec![(h(1), 100)], false, false), // tiny, fully missing → tokened
+            cf(vec![(h(1), 100), (h(9), 100)], false, false), // half missing → tokened
+            cf(vec![(h(9), 100), (h(8), 300)], false, false), // mostly present → dedup
+            cf(vec![(h(2), 100)], true, false),  // delete → never
+            cf(Vec::new(), false, true),         // known oid → never
+            cf(Vec::new(), false, false),        // empty file → inline content
+        ];
+        assert_eq!(
+            elect_tokened(&files, &missing),
+            vec![true, true, false, false, false, false]
+        );
+    }
+
+    /// A chunk carried by a tokened file must STILL upload through the dedup path when a
+    /// non-tokened file references it: staging servers do not register small tokened files'
+    /// chunks, so tokened uploads never count as coverage for other files.
+    #[test]
+    fn dedup_coverage_ignores_tokened_uploads() {
+        let missing: std::collections::HashSet<[u8; 32]> = [h(1), h(2), h(3)].into();
+        let files = vec![
+            // Tokened: carries h(1) (shared) and h(2) (private to this file).
+            cf(vec![(h(1), 100), (h(2), 100)], false, false),
+            // Dedup path (mostly present): references shared h(1) and missing h(3).
+            cf(vec![(h(1), 100), (h(3), 100), (h(9), 800)], false, false),
+        ];
+        let tokened = vec![true, false];
+        let need = dedup_needed_chunks(&files, &tokened, &missing);
+        assert!(need.contains(&h(1)), "shared chunk must upload via dedup");
+        assert!(need.contains(&h(3)));
+        assert!(
+            !need.contains(&h(2)),
+            "chunks only a tokened file carries ride the tokened stream"
+        );
+    }
+
+    /// The commit wire shape for a known-oid file: `oid` set, no chunks, no content.
+    #[test]
+    fn known_oid_commit_wire_shape() {
+        let wire = CommitFileWire {
+            path: "copies/b.txt".to_string(),
+            chunks: Vec::new(),
+            content: None,
+            file_token: None,
+            oid: Some("00112233445566778899aabbccddeeff00112233".to_string()),
+            delete: false,
+            mode: None,
+        };
+        let json = serde_json::to_value(&wire).unwrap();
+        assert_eq!(json["oid"], "00112233445566778899aabbccddeeff00112233");
+        assert!(json.get("chunks").is_none());
+        assert!(json.get("content").is_none());
+    }
+
+    /// Live integration: the reworked upload paths against a running artifact-storage server
+    /// (issue #57): small files take the tokened staged path, identical content shares one
+    /// token, and a second commit references the first's blob by oid with no bytes.
+    ///
+    /// `cargo run -p gsvc-server` in an artifact_storage checkout, then
+    /// `cargo test -p tensorlake -- push_paths --ignored --nocapture`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires a local artifact-storage server on 127.0.0.1:8080"]
+    async fn push_paths_roundtrip_against_local_server() {
+        const BASE: &str = "http://127.0.0.1:8080";
+        if std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:8080".parse().unwrap(),
+            std::time::Duration::from_millis(500),
+        )
+        .is_err()
+        {
+            eprintln!("skipping: no local artifact-storage server");
+            return;
+        }
+        let client = crate::ClientBuilder::new(BASE)
+            .bearer_token("dummy")
+            .build()
+            .unwrap();
+        let sdk = ArtifactStorageClient::new(client, BASE).unwrap();
+        let repo = format!(
+            "ingest-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sdk.create_repo_with_credential("ingesttest", &repo, None, "t", "devtoken")
+            .await
+            .unwrap();
+
+        // Push 1: small fresh files (tokened + staged server-side); identical content at two
+        // paths shares one token and one upload.
+        let salt = repo.as_bytes().to_vec();
+        let content_a: Vec<u8> = [b"alpha ".as_slice(), &salt].concat();
+        let big: Vec<u8> = (0..3usize * 1024 * 1024)
+            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(salt[i % salt.len()]))
+            .collect();
+        let report = sdk
+            .push_files(
+                "ingesttest",
+                &repo,
+                "t",
+                "devtoken",
+                vec![
+                    PushFile {
+                        repo_path: "a.txt".to_string(),
+                        source: PushSource::Bytes(content_a.clone()),
+                        mode: None,
+                        delete: false,
+                    },
+                    PushFile {
+                        repo_path: "dup/a-again.txt".to_string(),
+                        source: PushSource::Bytes(content_a.clone()),
+                        mode: None,
+                        delete: false,
+                    },
+                    PushFile {
+                        repo_path: "big.bin".to_string(),
+                        source: PushSource::Bytes(big),
+                        mode: None,
+                        delete: false,
+                    },
+                ],
+                PushOptions {
+                    message: "seed".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(report.files, 3);
+        let a_oid = report
+            .file_blob_oids
+            .iter()
+            .find(|(p, _)| p == "a.txt")
+            .unwrap()
+            .1
+            .clone();
+        let dup_oid = &report
+            .file_blob_oids
+            .iter()
+            .find(|(p, _)| p == "dup/a-again.txt")
+            .unwrap()
+            .1;
+        assert_eq!(&a_oid, dup_oid, "identical content has one blob oid");
+
+        // Push 2: reference the seeded blob by oid — no bytes anywhere in the request.
+        let report2 = sdk
+            .push_files(
+                "ingesttest",
+                &repo,
+                "t",
+                "devtoken",
+                vec![PushFile {
+                    repo_path: "copies/by-ref.txt".to_string(),
+                    source: PushSource::KnownOid(a_oid.clone()),
+                    mode: None,
+                    delete: false,
+                }],
+                PushOptions {
+                    message: "by reference".into(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(report2.bytes_uploaded, 0, "oid references upload nothing");
+        assert_eq!(
+            report2.file_blob_oids,
+            vec![("copies/by-ref.txt".to_string(), a_oid)]
+        );
+
+        // An unknown oid is rejected by the server's presence check.
+        let bogus = sdk
+            .push_files(
+                "ingesttest",
+                &repo,
+                "t",
+                "devtoken",
+                vec![PushFile {
+                    repo_path: "copies/bogus.txt".to_string(),
+                    source: PushSource::KnownOid(
+                        "00112233445566778899aabbccddeeff00112233".to_string(),
+                    ),
+                    mode: None,
+                    delete: false,
+                }],
+                PushOptions {
+                    message: "bogus".into(),
+                    ..Default::default()
+                },
+            )
+            .await;
+        assert!(bogus.is_err(), "unknown oid must fail the commit");
+    }
 
     /// CDC over the same bytes must be deterministic (the upload pass re-reads and re-chunks),
     /// and the frame layout must match the server: `32-byte hash | u32-be len | bytes`.
