@@ -158,9 +158,16 @@ struct IngestSessionWire {
     max_chunk_bytes: usize,
     /// Server capability markers (absent on older servers): `staged_small_files` (small
     /// tokened files are deflated + staged at upload; their chunks are NOT registered for
-    /// dedup), `oid_files` (the commit endpoint accepts `{path, mode, oid}` references).
+    /// dedup), `oid_files` (the commit endpoint accepts `{path, mode, oid}` references),
+    /// `batch_files` (the multi-file batch upload endpoint exists).
     #[serde(default)]
     features: Vec<String>,
+    /// Files strictly under this take the batch endpoint; 0 on servers without it.
+    #[serde(default)]
+    small_file_max_bytes: u64,
+    /// Cap on file records per batch request; 0 on servers without the endpoint.
+    #[serde(default)]
+    max_batch_files: usize,
 }
 
 #[derive(Serialize)]
@@ -178,6 +185,21 @@ struct IngestStagingWire {
     pack_id: String,
     /// Presigned PUT URL; absent when the backend cannot sign (fall back to chunk frames).
     url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct BatchUploadRespWire {
+    files: Vec<BatchFileRespWire>,
+}
+
+#[derive(Deserialize)]
+struct BatchFileRespWire {
+    token: String,
+    /// Server-computed git blob oid — must match the client's own hash (integrity check).
+    oid: String,
+    #[allow(dead_code)]
+    #[serde(default)]
+    deduplicated: bool,
 }
 
 #[derive(Serialize)]
@@ -571,7 +593,134 @@ impl ArtifactStorageClient {
             }
             use futures::StreamExt as _;
             const TOKENED_UPLOADS_IN_FLIGHT: usize = 4;
-            let mut results = futures::stream::iter(owners.into_iter().map(|i| {
+            // Small files go through the BATCH endpoint when the server has one: many whole
+            // files per request, staged into one segment server-side — per-request overhead
+            // amortizes across the group and the contiguous segment is what commit-time
+            // compose copies instead of re-uploading. Group bodies stay modest (16 MiB) so
+            // in-flight memory is bounded and the server keeps its single-put segment shape.
+            let batch_capable = session.features.iter().any(|f| f == "batch_files")
+                && session.small_file_max_bytes > 0
+                && session.max_batch_files > 0;
+            let mut batch_owners: Vec<usize> = Vec::new();
+            let mut single_owners: Vec<usize> = Vec::new();
+            for i in owners {
+                let total: u64 = chunked[i].chunks.iter().map(|(_, s)| *s as u64).sum();
+                if batch_capable && total < session.small_file_max_bytes {
+                    batch_owners.push(i);
+                } else {
+                    single_owners.push(i);
+                }
+            }
+            const BATCH_GROUP_BYTES: usize = 16 * 1024 * 1024;
+            let mut groups: Vec<Vec<usize>> = Vec::new();
+            {
+                let mut cur: Vec<usize> = Vec::new();
+                let mut cur_bytes = 0usize;
+                for &i in &batch_owners {
+                    let file = &chunked[i];
+                    let record_bytes: usize = 14
+                        + file_tokens[i].as_ref().map(String::len).unwrap_or(0)
+                        + file
+                            .chunks
+                            .iter()
+                            .map(|(_, s)| 36 + *s as usize)
+                            .sum::<usize>();
+                    if !cur.is_empty()
+                        && (cur_bytes + record_bytes > BATCH_GROUP_BYTES
+                            || cur.len() >= session.max_batch_files)
+                    {
+                        groups.push(std::mem::take(&mut cur));
+                        cur_bytes = 0;
+                    }
+                    cur.push(i);
+                    cur_bytes += record_bytes;
+                }
+                if !cur.is_empty() {
+                    groups.push(cur);
+                }
+            }
+            let mut batch_results = futures::stream::iter(groups.into_iter().map(|group| {
+                let session_id = session.session_id.as_str();
+                let file_tokens = &file_tokens;
+                let chunked = &chunked;
+                async move {
+                    let mut body = Vec::new();
+                    let mut group_chunks = 0usize;
+                    let mut group_bytes = 0u64;
+                    let mut expected: Vec<(String, String)> = Vec::new();
+                    for &i in &group {
+                        let file = &chunked[i];
+                        let token = file_tokens[i].clone().expect("owner has a token");
+                        let total: u64 = file.chunks.iter().map(|(_, s)| *s as u64).sum();
+                        body.extend_from_slice(&(token.len() as u16).to_be_bytes());
+                        body.extend_from_slice(&total.to_be_bytes());
+                        body.extend_from_slice(&(file.chunks.len() as u32).to_be_bytes());
+                        body.extend_from_slice(token.as_bytes());
+                        let mut reader: Box<dyn Read> = match &file.source {
+                            PushSource::Path(p) => {
+                                Box::new(std::fs::File::open(p).map_err(io_err)?)
+                            }
+                            PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+                            PushSource::KnownOid(_) => {
+                                unreachable!("known-oid files are not tokened")
+                            }
+                        };
+                        for (hash, size) in &file.chunks {
+                            let mut data = vec![0u8; *size as usize];
+                            reader.read_exact(&mut data).map_err(io_err)?;
+                            body.extend_from_slice(hash);
+                            body.extend_from_slice(&(data.len() as u32).to_be_bytes());
+                            body.extend_from_slice(&data);
+                            group_chunks += 1;
+                            group_bytes += data.len() as u64;
+                        }
+                        expected.push((token, file.blob_oid.clone()));
+                    }
+                    let resp = self
+                        .put_batch_files(
+                            project_id,
+                            repo,
+                            git_username,
+                            git_token,
+                            session_id,
+                            body,
+                        )
+                        .await?;
+                    let by_token: std::collections::HashMap<&str, &str> = resp
+                        .files
+                        .iter()
+                        .map(|f| (f.token.as_str(), f.oid.as_str()))
+                        .collect();
+                    for (token, oid) in &expected {
+                        match by_token.get(token.as_str()) {
+                            Some(server) if server == oid => {}
+                            Some(server) => {
+                                return Err(SdkError::ClientError(format!(
+                                    "server hashed {token:?} to {server} but the client                                      computed {oid}; was the file modified mid-push?"
+                                )));
+                            }
+                            None => {
+                                return Err(SdkError::ClientError(format!(
+                                    "batch upload response is missing token {token:?}"
+                                )));
+                            }
+                        }
+                    }
+                    Ok::<(usize, u64), SdkError>((group_chunks, group_bytes))
+                }
+            }))
+            .buffer_unordered(TOKENED_UPLOADS_IN_FLIGHT);
+            while let Some(done) = batch_results.next().await {
+                let (chunks, bytes) = done?;
+                uploaded_chunks += chunks;
+                uploaded_bytes += bytes;
+                emit(PushEvent::UploadedBatch {
+                    chunks: uploaded_chunks,
+                    bytes: uploaded_bytes,
+                });
+            }
+            drop(batch_results);
+            let mut results = futures::stream::iter(single_owners.into_iter().map(|i| {
                 let file = &chunked[i];
                 let token = file_tokens[i].clone().expect("owner has a token");
                 let session_id = session.session_id.as_str();
@@ -1132,6 +1281,29 @@ impl ArtifactStorageClient {
         Ok(())
     }
 
+    /// PUT one batch-upload body (`.../ingest/sessions/{id}/files`): repeated file records,
+    /// each a complete small file under its own token.
+    #[allow(clippy::too_many_arguments)]
+    async fn put_batch_files(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        session_id: &str,
+        body: Vec<u8>,
+    ) -> Result<BatchUploadRespWire, SdkError> {
+        let (req, _t) = self.git_request(
+            Method::PUT,
+            project_id,
+            repo,
+            Some(&format!("ingest/sessions/{session_id}/files")),
+            git_username,
+            git_token,
+        )?;
+        expect_json(req.body(body).send().await?).await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn put_chunk_frame(
         &self,
@@ -1319,7 +1491,11 @@ mod tests {
         let salt = repo.as_bytes().to_vec();
         let content_a: Vec<u8> = [b"alpha ".as_slice(), &salt].concat();
         let big: Vec<u8> = (0..3usize * 1024 * 1024)
-            .map(|i| (i as u8).wrapping_mul(31).wrapping_add(salt[i % salt.len()]))
+            .map(|i| {
+                (i as u8)
+                    .wrapping_mul(31)
+                    .wrapping_add(salt[i % salt.len()])
+            })
             .collect();
         let report = sdk
             .push_files(
