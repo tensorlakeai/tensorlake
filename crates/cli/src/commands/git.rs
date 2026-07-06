@@ -12,9 +12,49 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
+#[cfg(feature = "git-clone")]
 pub(crate) mod fastclone;
 
-pub use fastclone::parse_cache_max_bytes;
+/// Parse a human cache-size argument (`512MB`, `2GiB`, `1073741824`, ...). Lives here — not in
+/// the feature-gated fast-clone module — because the CLI argument definition needs it even in
+/// builds without the fast-clone engine.
+pub fn parse_cache_max_bytes(value: &str) -> anyhow::Result<u64> {
+    use anyhow::Context as _;
+    let raw = value.trim();
+    if raw.is_empty() {
+        anyhow::bail!("cache size cannot be empty");
+    }
+    let lower = raw.to_ascii_lowercase();
+    let suffixes = [
+        ("tib", 1024_u64.pow(4)),
+        ("tb", 1024_u64.pow(4)),
+        ("t", 1024_u64.pow(4)),
+        ("gib", 1024_u64.pow(3)),
+        ("gb", 1024_u64.pow(3)),
+        ("g", 1024_u64.pow(3)),
+        ("mib", 1024_u64.pow(2)),
+        ("mb", 1024_u64.pow(2)),
+        ("m", 1024_u64.pow(2)),
+        ("kib", 1024),
+        ("kb", 1024),
+        ("k", 1024),
+        ("b", 1),
+    ];
+    let (digits, multiplier) = suffixes
+        .iter()
+        .find_map(|(suffix, multiplier)| {
+            lower
+                .strip_suffix(suffix)
+                .map(|digits| (digits.trim(), *multiplier))
+        })
+        .unwrap_or((raw, 1));
+    let bytes = digits
+        .parse::<u64>()
+        .with_context(|| format!("invalid cache size {value:?}"))?;
+    bytes
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("cache size {value:?} is too large"))
+}
 
 pub fn repo_url(ctx: &CliContext, repo: &str) -> Result<String> {
     let client = artifact_storage_client(ctx)?;
@@ -168,6 +208,26 @@ fn normalize_repo_arg(repo: &str) -> String {
         .unwrap_or_else(|| repo.to_string())
 }
 
+/// Fast clone without the engine: this build was made from the public source tree, which
+/// carries only a resolution placeholder for the private gsvc-codec. Point the user at the
+/// official binary instead of failing cryptically.
+#[cfg(not(feature = "git-clone"))]
+pub async fn clone_repo(
+    _ctx: &CliContext,
+    _repo: &str,
+    _dest: Option<PathBuf>,
+    _cache_dir: Option<PathBuf>,
+    _cache_max_bytes: Option<u64>,
+    _no_checkout: bool,
+) -> Result<()> {
+    Err(CliError::Other(anyhow::anyhow!(
+        "this build of `tl` lacks the fast-clone engine (built without the `git-clone` \
+         feature). Install the official release binary, or build with `just build-cli-full` \
+         from a checkout with artifact_storage access."
+    )))
+}
+
+#[cfg(feature = "git-clone")]
 pub async fn clone_repo(
     ctx: &CliContext,
     repo: &str,

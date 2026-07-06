@@ -1,15 +1,23 @@
-Vendored from artifact_storage commit 01029ba (branch claude/loving-williamson-e0cbed = main
-f968290/#49 + read-path performance round: manifest warmup, readdirplus, oid-keyed block cache)
-crates: gsvc-codec (src/ verbatim; Cargo.toml adapted for the tensorlake workspace)
-Sync: rsync -a --delete <artifact_storage>/crates/gsvc-codec/src/ crates/gsvc-codec/src/ then update this file.
+Private crates from artifact_storage: NOTHING is vendored into this public repo anymore.
 
-gsvc-mount is NOT vendored: it is the private mount core and its source must never be copied into
-this public tree. crates/gsvc-mount here is a resolution-only placeholder (a `compile_error!` lib
-plus a tensorlake-adapted Cargo.toml) so the public repo builds offline with no access to the
-artifact_storage repo. It is consumed only by tensorlake-cli behind the optional `mount` feature,
-so default builds never compile it.
+crates/gsvc-mount and crates/gsvc-codec are resolution-only placeholders (compile_error! bodies)
+so the public tree builds and resolves standalone. The real sources live in the private
+tensorlakeai/artifact_storage repo and are swapped in EPHEMERALLY, only for builds that enable
+the features needing them (`mount`, `git-clone`):
 
-Official mount-enabled binaries are built with `just build-cli-mount`, which copies the real
-gsvc-mount src/ from a sibling artifact_storage checkout over the placeholder for the duration of
-the build (using the placeholder's adapted Cargo.toml) and restores the placeholder afterward.
-Keep the placeholder Cargo.toml's dependency list in sync with the real crate's.
+  * locally:  just build-cli-full   — copies both crates' src/ from a sibling
+              ../artifact_storage checkout for the build, restoring the placeholders afterward
+  * CI:       .github/actions/vendor-private-crates — mints a short-lived GitHub App token
+              (ARTIFACT_STORAGE_APP_ID / _PRIVATE_KEY), sparse-checks-out both crates' src/,
+              and swaps them over the placeholders for the job only
+
+The swapped source compiles against the PLACEHOLDER manifests, so each placeholder Cargo.toml's
+dependency list must mirror the real crate's (crates/gsvc-mount/Cargo.toml and
+crates/gsvc-codec/Cargo.toml in artifact_storage). If upstream dependencies change, update the
+placeholder manifests in the same change that bumps the upstream.
+
+Wire-format coupling still applies even without vendoring: the fast-clone client
+(crates/cli/src/commands/git/fastclone.rs) and the ingest client
+(crates/cloud-sdk/src/artifact_storage/ingest.rs) duplicate artifact_storage wire types
+(FastCloneManifest and friends, ingest request/response shapes). If those change upstream, open
+a companion PR here.

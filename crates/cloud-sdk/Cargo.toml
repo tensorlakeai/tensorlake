@@ -11,7 +11,6 @@ documentation = "https://docs.rs/tensorlake"
 
 [dependencies]
 fastcdc = { workspace = true }
-gsvc-codec = { workspace = true }
 bytes = { workspace = true }
 base64 = { workspace = true }
 bollard = { workspace = true }
@@ -35,6 +34,7 @@ serde_path_to_error = { workspace = true }
 serde_repr = { workspace = true }
 serde_with = { workspace = true }
 sha2 = { workspace = true }
+sha1 = { workspace = true }
 shlex = { workspace = true }
 tar = { workspace = true }
 tempfile = "3"

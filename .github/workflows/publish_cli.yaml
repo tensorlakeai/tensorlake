@@ -55,15 +55,16 @@ jobs:
           key: ${{ matrix.target }}
           cache-bin: false
 
-      - name: Vendor gsvc-mount core
-        if: matrix.mount
-        uses: ./.github/actions/vendor-mount-core
+      # Always: `tl git clone` (git-clone feature) ships on every target; mount is
+      # platform-gated by the matrix.
+      - name: Vendor private artifact_storage crates
+        uses: ./.github/actions/vendor-private-crates
         with:
           app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
           private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
 
       - name: Build CLI
-        run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }} ${{ matrix.mount && '--features mount' || '' }}
+        run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }} ${{ matrix.mount && '--features mount,git-clone' || '--features git-clone' }}
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'

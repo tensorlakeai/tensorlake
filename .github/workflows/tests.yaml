@@ -60,8 +60,8 @@ jobs:
           prefix-key: v1-rust-mount
           cache-bin: false
 
-      - name: Vendor gsvc-mount core
-        uses: ./.github/actions/vendor-mount-core
+      - name: Vendor private artifact_storage crates
+        uses: ./.github/actions/vendor-private-crates
         with:
           app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
           private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
@@ -70,10 +70,10 @@ jobs:
       # rust_tests lane cannot — the feature is off there). Mirrors that lane's build+test scope;
       # clippy is not gated anywhere in this repo, so it is not gated here either.
       - name: Build CLI with mount
-        run: cargo build -p tensorlake-cli --features mount
+        run: cargo build -p tensorlake-cli --features mount,git-clone
 
       - name: Test CLI with mount
-        run: cargo test -p tensorlake-cli --features mount
+        run: cargo test -p tensorlake-cli --features mount,git-clone
 
   windows_build_smoke:
     name: Windows build smoke test

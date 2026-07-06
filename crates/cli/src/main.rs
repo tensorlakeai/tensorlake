@@ -2207,9 +2207,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             branch,
             full_history,
             message,
-        } => {
-            commands::fs::promote(ctx, &path, &branch, full_history, message.as_deref()).await
-        }
+        } => commands::fs::promote(ctx, &path, &branch, full_history, message.as_deref()).await,
         FsCommands::Status { path, json } => commands::fs::status(ctx, &path, json).await,
         FsCommands::Restore { path, version } => commands::fs::restore(ctx, &path, &version).await,
         FsCommands::Diff { path, a, b } => {

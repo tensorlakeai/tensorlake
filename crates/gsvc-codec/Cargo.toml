@@ -1,26 +1,48 @@
+# Resolution-only placeholder for the private `gsvc-codec` packfile codec.
+#
+# The real crate lives in the private artifact_storage repo and is no longer vendored into this
+# public tree. This placeholder exists solely so the public repo *resolves* the optional
+# `gsvc-codec` dependency of `tensorlake-cli` without any access to that repo. Its `src/lib.rs`
+# is a `compile_error!` and is never compiled by a valid build:
+#   * default / `cargo build --workspace` builds — the `git-clone` feature is off, so the
+#     optional dependency is not activated (and the crate is `exclude`d from the workspace, so
+#     `--workspace` does not build it either);
+#   * official `--features git-clone` builds — `just build-cli-full` (or the
+#     vendor-private-crates CI action) copies the real source over this placeholder first, so
+#     this file is not compiled.
+# Only enabling `--features git-clone` *without* the swap compiles it, and then the
+# `compile_error!` explains exactly what to do.
+#
+# Name and edition MUST match the real crate (artifact_storage crates/gsvc-codec), and the
+# dependency list below MUST mirror the real crate's — the swapped-in source compiles against
+# THIS manifest. If the real crate's dependencies change upstream, update this list to match.
 [package]
 name = "gsvc-codec"
-version.workspace = true
-# Vendored verbatim from artifact_storage, which targets edition 2021 (not tensorlake's edition 2024).
-# Pinned explicitly to keep this a byte-for-byte-diffable copy of the upstream crate.
+version = "0.1.0"
 edition = "2021"
-license.workspace = true
-description = "git object & packfile codec (hashing, pack v2 read/write with delta resolution, idx v2)"
+license = "MIT OR Apache-2.0"
+description = "Resolution-only placeholder for the private gsvc-codec packfile codec (see Cargo.toml)."
+publish = false
+
+[lib]
+path = "src/lib.rs"
 
 [dependencies]
-parking_lot.workspace = true
-serde.workspace = true
-thiserror.workspace = true
-bytes.workspace = true
-sha1.workspace = true
-sha2.workspace = true
-flate2.workspace = true
-crc32fast.workspace = true
-rayon.workspace = true
-hex.workspace = true
-tempfile.workspace = true
-tracing.workspace = true
+parking_lot = "0.12"
+serde = { version = "1", features = ["derive"] }
+thiserror = "2"
+bytes = "1"
+sha1 = "0.11"
+sha2 = "0.10"
+# zlib-rs matches artifact_storage's flate2 backend choice, which the real codec is tested
+# against; the default miniz_oxide backend has produced a divergent test result.
+flate2 = { version = "1.1.9", features = ["zlib-rs"] }
+crc32fast = "1"
+rayon = "1"
+hex = "0.4"
+tempfile = "3"
+tracing = "0.1"
 
 [dev-dependencies]
-tempfile.workspace = true
-futures.workspace = true
+tempfile = "3"
+futures = "0.3"

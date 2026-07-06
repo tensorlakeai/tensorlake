@@ -354,7 +354,7 @@ fn chunk_source(
         PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
         PushSource::KnownOid(_) => unreachable!("guarded above"),
     };
-    let mut blob_hasher = gsvc_codec::BlobOidHasher::new(len);
+    let mut blob_hasher = BlobOidHasher::new(len);
     let mut out = Vec::new();
     for chunk in fastcdc::v2020::StreamCDC::new(reader, min as u32, avg as u32, max as u32) {
         let chunk = chunk.map_err(|e| SdkError::ClientError(format!("chunking failed: {e}")))?;
@@ -362,11 +362,35 @@ fn chunk_source(
         blob_hasher.update(&chunk.data);
         out.push((hash, chunk.data.len() as u32));
     }
-    Ok((out, blob_hasher.finalize().to_hex()))
+    Ok((out, blob_hasher.finalize_hex()))
 }
 
 fn io_err(e: std::io::Error) -> SdkError {
     SdkError::Io(e)
+}
+
+/// Git blob-oid hasher: `sha1("blob <len>\0" || bytes)`. This is the single piece of git's
+/// object model the SDK needs, computed locally so the public crate carries no dependency on
+/// the private `gsvc-codec` packfile codec (which is no longer vendored into this repo).
+struct BlobOidHasher(sha1::Sha1);
+
+impl BlobOidHasher {
+    fn new(len: u64) -> BlobOidHasher {
+        use sha1::Digest as _;
+        let mut h = sha1::Sha1::new();
+        h.update(format!("blob {len}\0").as_bytes());
+        BlobOidHasher(h)
+    }
+
+    fn update(&mut self, data: &[u8]) {
+        use sha1::Digest as _;
+        self.0.update(data);
+    }
+
+    fn finalize_hex(self) -> String {
+        use sha1::Digest as _;
+        hex::encode(self.0.finalize())
+    }
 }
 
 /// Retries (beyond the first attempt) for idempotent ingest requests.
@@ -425,9 +449,9 @@ fn chunk_source_whole(source: &PushSource) -> Result<(Vec<([u8; 32], u32)>, Stri
         }
     };
     let hash: [u8; 32] = Sha256::digest(&data).into();
-    let mut blob = gsvc_codec::BlobOidHasher::new(data.len() as u64);
+    let mut blob = BlobOidHasher::new(data.len() as u64);
     blob.update(&data);
-    Ok((vec![(hash, data.len() as u32)], blob.finalize().to_hex()))
+    Ok((vec![(hash, data.len() as u32)], blob.finalize_hex()))
 }
 
 /// Which files take the tokened (verified-at-upload) path: content-bearing files whose bytes the
@@ -1837,9 +1861,9 @@ mod tests {
         assert_eq!(a, b, "CDC must be deterministic across passes");
         assert_eq!(oid_a, oid_b, "blob oid must be deterministic");
         // The single-pass blob oid must equal a straight git blob hash of the same bytes.
-        let mut reference = gsvc_codec::BlobOidHasher::new(data.len() as u64);
+        let mut reference = BlobOidHasher::new(data.len() as u64);
         reference.update(&data);
-        assert_eq!(oid_a, reference.finalize().to_hex());
+        assert_eq!(oid_a, reference.finalize_hex());
         assert_eq!(
             a.iter().map(|(_, s)| *s as usize).sum::<usize>(),
             data.len(),

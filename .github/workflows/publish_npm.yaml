@@ -132,9 +132,10 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Vendor gsvc-mount core
-        if: matrix.mount
-        uses: ./.github/actions/vendor-mount-core
+      # Always: `tl git clone` (git-clone feature) ships on every target; mount is
+      # platform-gated by the matrix.
+      - name: Vendor private artifact_storage crates
+        uses: ./.github/actions/vendor-private-crates
         with:
           app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
           private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
@@ -145,7 +146,7 @@ jobs:
           TENSORLAKE_CLI_TARGET_ID: ${{ matrix.target_id }}
           TENSORLAKE_CLI_TARGET_TRIPLE: ${{ matrix.rust_target }}
           TENSORLAKE_CLI_BUILD_TOOL: ${{ matrix.cli_build_tool }}
-          TENSORLAKE_CLI_FEATURES: ${{ matrix.mount && 'mount' || '' }}
+          TENSORLAKE_CLI_FEATURES: ${{ matrix.mount && 'mount,git-clone' || 'git-clone' }}
 
       - name: Verify packaged CLI binary
         run: |

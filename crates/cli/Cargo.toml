@@ -10,10 +10,15 @@ default = []
 # `tl fs mount`: the local FUSE/overlay mount stack, backed by the private gsvc-mount core.
 # Off by default so this public crate builds with no access to the artifact_storage repo — with the
 # feature off, gsvc-mount (a resolution-only placeholder in crates/gsvc-mount) is never compiled.
-# Do NOT build with `--features mount` directly against the placeholder; use `just build-cli-mount`,
+# Do NOT build with `--features mount` directly against the placeholder; use `just build-cli-full`,
 # which swaps in the real mount core from a sibling artifact_storage checkout (see that recipe and
 # crates/VENDORED_FROM).
 mount = ["dep:gsvc-mount", "dep:libc", "dep:fuser"]
+# `tl git clone`: the fast-clone engine, backed by the private gsvc-codec packfile codec. Same
+# placeholder + ephemeral-vendor arrangement as `mount` (see crates/VENDORED_FROM): off by
+# default so this public crate builds with no access to the artifact_storage repo. Official
+# binaries enable it via `just build-cli-full` locally or the vendor-private-crates CI action.
+git-clone = ["dep:gsvc-codec"]
 
 [[bin]]
 name = "tl"
@@ -61,7 +66,7 @@ hex = { workspace = true }
 rand = { workspace = true }
 shlex = { workspace = true }
 rustpython-parser = "0.3"
-gsvc-codec = { workspace = true }
+gsvc-codec = { workspace = true, optional = true }
 gsvc-mount = { workspace = true, optional = true }
 libc = { version = "0.2", optional = true }
 tracing = { workspace = true }

@@ -1274,12 +1274,11 @@ dependencies = [
 
 [[package]]
 name = "gsvc-codec"
-version = "0.5.59"
+version = "0.1.0"
 dependencies = [
  "bytes",
  "crc32fast",
  "flate2",
- "futures",
  "hex",
  "parking_lot",
  "rayon",
@@ -3535,7 +3534,6 @@ dependencies = [
  "fastcdc",
  "flate2",
  "futures",
- "gsvc-codec",
  "hex",
  "ignore",
  "pin-project-lite",
@@ -3549,6 +3547,7 @@ dependencies = [
  "serde_path_to_error",
  "serde_repr",
  "serde_with",
+ "sha1 0.11.0",
  "sha2",
  "shlex",
  "tar",
