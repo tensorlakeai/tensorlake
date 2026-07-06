@@ -34,8 +34,9 @@ pub mod local;
 #[cfg(unix)]
 pub mod overlay;
 // How the kernel reaches the overlay on macOS: the FSKit extension proxies this wire protocol
-// over localhost TCP (Linux talks to the overlay in-process through the FUSE glue).
-#[cfg(unix)]
+// over localhost TCP (Linux talks to the overlay in-process through the FUSE glue). macOS-only —
+// on Linux the whole module would be dead code.
+#[cfg(target_os = "macos")]
 pub mod vfsserver;
 
 use daemon::MountState;
@@ -440,7 +441,7 @@ pub async fn mount(
     registry_add(&mountpoint, &state_dir)?;
 
     if foreground {
-        #[cfg(unix)]
+        #[cfg(target_os = "macos")]
         vfsserver::TRACE_OPS.store(true, std::sync::atomic::Ordering::Relaxed);
         return daemon::run(ctx, &state_dir).await;
     }
