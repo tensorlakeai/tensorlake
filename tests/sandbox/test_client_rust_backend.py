@@ -42,14 +42,17 @@ class _FakeRustClient:
     def resume_sandbox(self, sandbox_id):
         self.resume_calls.append(sandbox_id)
 
-    def connect_proxy(self, *, proxy_url, sandbox_id, routing_hint=None):
-        self.connect_proxy_calls.append(
-            {
-                "proxy_url": proxy_url,
-                "sandbox_id": sandbox_id,
-                "routing_hint": routing_hint,
-            }
-        )
+    def connect_proxy(
+        self, *, proxy_url, sandbox_id, routing_hint=None, request_timeout_sec=None
+    ):
+        call = {
+            "proxy_url": proxy_url,
+            "sandbox_id": sandbox_id,
+            "routing_hint": routing_hint,
+        }
+        if request_timeout_sec is not None:
+            call["request_timeout_sec"] = request_timeout_sec
+        self.connect_proxy_calls.append(call)
         return _FakeRustProxyClient(proxy_url)
 
     def select_sandbox_proxy_url(
@@ -218,12 +221,40 @@ class _RecordingCreateRustClient:
             "server response did not include sandbox_url; refusing to derive a proxy URL"
         )
 
-    def connect_proxy(self, *, proxy_url, sandbox_id, routing_hint=None):
+    def connect_proxy(
+        self, *, proxy_url, sandbox_id, routing_hint=None, request_timeout_sec=None
+    ):
         return _FakeProxyClient()
 
     def delete_sandbox(self, *, sandbox_id):
         self.delete_calls.append(sandbox_id)
         return "trace-delete"
+
+
+def _sandbox_info_json(
+    sandbox_id: str,
+    *,
+    status: str = "running",
+    sandbox_url: str | None = None,
+    routing_hint: str | None = None,
+) -> str:
+    payload = {
+        "id": sandbox_id,
+        "namespace": "default",
+        "status": status,
+        "resources": {
+            "cpus": 1.0,
+            "memory_mb": 512,
+            "ephemeral_disk_mb": 1024,
+        },
+        "allow_unauthenticated_access": False,
+        "exposed_ports": [],
+    }
+    if sandbox_url is not None:
+        payload["sandbox_url"] = sandbox_url
+    if routing_hint is not None:
+        payload["routing_hint"] = routing_hint
+    return json.dumps(payload)
 
 
 class TestSandboxClientRustBackend(unittest.TestCase):
@@ -703,6 +734,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                     "proxy_url": "https://sbx-1.sandbox.gcp-use4.tensorlake.ai",
                     "sandbox_id": "sbx-1",
                     "routing_hint": "hint-1",
+                    "request_timeout_sec": 300.0,
                 }
             ],
         )
@@ -739,6 +771,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                     "proxy_url": "https://override.example.com",
                     "sandbox_id": "sbx-1",
                     "routing_hint": None,
+                    "request_timeout_sec": 300.0,
                 }
             ],
         )
@@ -792,6 +825,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                     "proxy_url": "https://sbx-canonical.sandbox.tensorlake.ai",
                     "sandbox_id": "sbx-canonical",
                     "routing_hint": "hint-2",
+                    "request_timeout_sec": 1,
                 }
             ],
         )
@@ -916,6 +950,159 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
         self.assertEqual(fake.resume_calls, ["my-env"])
         self.assertEqual(fake.suspend_calls, [])
+
+    def test_handle_resume_wait_rebinds_proxy_from_fresh_info(self):
+        class _ResumeRoutingRustClient(_FakeRustClient):
+            def __init__(self):
+                super().__init__()
+                self._responses = [
+                    _sandbox_info_json(
+                        "sbx-1",
+                        sandbox_url="https://old.sandbox.tensorlake.ai",
+                        routing_hint="old-hint",
+                    ),
+                    _sandbox_info_json(
+                        "sbx-1",
+                        sandbox_url="https://new.sandbox.tensorlake.ai",
+                        routing_hint="new-hint",
+                    ),
+                    _sandbox_info_json(
+                        "sbx-1",
+                        sandbox_url="https://new.sandbox.tensorlake.ai",
+                        routing_hint="new-hint",
+                    ),
+                ]
+
+            def get_sandbox_json(self, sandbox_id):
+                self.last_get_sandbox_id = sandbox_id
+                idx = min(len(self.connect_proxy_calls), len(self._responses) - 1)
+                if self.resume_calls:
+                    idx = min(2, len(self._responses) - 1)
+                return ("trace-get-sandbox", self._responses[idx])
+
+        client = SandboxClient(
+            api_url="http://localhost:8900",
+            api_key="k",
+            request_timeout=9.0,
+            _internal=True,
+        )
+        fake = _ResumeRoutingRustClient()
+        client._rust_client = fake
+        clamped_timeouts = []
+        client._with_request_timeout = lambda request_timeout: (
+            clamped_timeouts.append(request_timeout) or client
+        )
+        sandbox = client.connect("stable-name", request_timeout=7.0)
+
+        sandbox.resume(wait=True, timeout=2.0, poll_interval=0.01)
+
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://old.sandbox.tensorlake.ai",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": "old-hint",
+                    "request_timeout_sec": 7.0,
+                },
+                {
+                    "proxy_url": "https://new.sandbox.tensorlake.ai",
+                    "sandbox_id": "sbx-1",
+                    "routing_hint": "new-hint",
+                    "request_timeout_sec": 7.0,
+                },
+            ],
+        )
+        self.assertEqual(sandbox._proxy_url, "https://new.sandbox.tensorlake.ai")
+        self.assertEqual(sandbox._base_url, "https://new.sandbox.tensorlake.ai")
+        self.assertEqual(sandbox._sandbox_id, "sbx-1")
+        self.assertEqual(sandbox._cached_info.routing_hint, "new-hint")
+        self.assertTrue(clamped_timeouts)
+        self.assertLessEqual(clamped_timeouts[-1], 2.0)
+
+    def test_handle_resume_wait_false_does_not_rebind_proxy(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+        sandbox = client.connect("stable-name")
+
+        sandbox.resume(wait=False)
+
+        self.assertEqual(len(fake.connect_proxy_calls), 1)
+        self.assertEqual(fake.resume_calls, ["sbx-1"])
+
+    def test_handle_resume_requires_routing_info_without_explicit_proxy(self):
+        class _MissingRoutingRustClient(_FakeRustClient):
+            def __init__(self):
+                super().__init__()
+                self._calls = 0
+
+            def get_sandbox_json(self, sandbox_id):
+                self._calls += 1
+                if self._calls == 1:
+                    return (
+                        "trace-get-sandbox",
+                        _sandbox_info_json(
+                            "sbx-1",
+                            sandbox_url="https://old.sandbox.tensorlake.ai",
+                            routing_hint="old-hint",
+                        ),
+                    )
+                return ("trace-get-sandbox", _sandbox_info_json("sbx-1"))
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _MissingRoutingRustClient()
+        client._rust_client = fake
+        client._with_request_timeout = lambda request_timeout: client
+        sandbox = client.connect("stable-name")
+
+        with self.assertRaisesRegex(SandboxError, "refreshed proxy routing"):
+            sandbox.resume(wait=True, timeout=0.02, poll_interval=0.01)
+
+        self.assertEqual(len(fake.connect_proxy_calls), 1)
+
+    def test_handle_resume_rebind_failure_leaves_existing_proxy_intact(self):
+        class _FailingRebindRustClient(_FakeRustClient):
+            def __init__(self):
+                super().__init__()
+                self._calls = 0
+
+            def get_sandbox_json(self, sandbox_id):
+                self._calls += 1
+                if self._calls == 1:
+                    return (
+                        "trace-get-sandbox",
+                        _sandbox_info_json(
+                            "sbx-1",
+                            sandbox_url="https://old.sandbox.tensorlake.ai",
+                            routing_hint="old-hint",
+                        ),
+                    )
+                return (
+                    "trace-get-sandbox",
+                    _sandbox_info_json(
+                        "sbx-1",
+                        sandbox_url="https://new.sandbox.tensorlake.ai",
+                        routing_hint="new-hint",
+                    ),
+                )
+
+            def connect_proxy(self, **kwargs):
+                if self.connect_proxy_calls:
+                    raise RuntimeError("boom")
+                return super().connect_proxy(**kwargs)
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FailingRebindRustClient()
+        client._rust_client = fake
+        client._with_request_timeout = lambda request_timeout: client
+        sandbox = client.connect("stable-name")
+
+        with self.assertRaisesRegex(SandboxError, "boom"):
+            sandbox.resume(wait=True, timeout=2.0, poll_interval=0.01)
+
+        self.assertEqual(sandbox._proxy_url, "https://old.sandbox.tensorlake.ai")
+        self.assertEqual(sandbox._base_url, "https://old.sandbox.tensorlake.ai")
 
     def test_suspend_maps_404_to_sandbox_not_found(self):
         class FakeRustError(Exception):

@@ -187,6 +187,7 @@ class Sandbox:
         routing_hint: str | None = None,
         request_timeout: float | None = None,
         _proxy_rust_client: object | None = None,
+        _explicit_proxy_url: str | None = None,
     ):
         if identifier and sandbox_id and identifier != sandbox_id:
             raise SandboxError(
@@ -217,21 +218,8 @@ class Sandbox:
         self._organization_id = organization_id
         self._project_id = project_id
         self._request_timeout = request_timeout
-        parsed_proxy = urlparse(proxy_url)
-        self._host_header = None
-        if parsed_proxy.hostname in ("localhost", "127.0.0.1"):
-            self._host_header = f"{sandbox_identifier}.local"
-        self._proxy_headers: dict[str, str] = {}
-        if api_key:
-            self._proxy_headers["Authorization"] = f"Bearer {api_key}"
-        if organization_id:
-            self._proxy_headers["X-Forwarded-Organization-Id"] = organization_id
-        if project_id:
-            self._proxy_headers["X-Forwarded-Project-Id"] = project_id
-        if self._host_header:
-            self._proxy_headers["Host"] = self._host_header
-        else:
-            self._proxy_headers["X-Tensorlake-Sandbox-Id"] = sandbox_identifier
+        self._explicit_proxy_url = _explicit_proxy_url
+        self._set_proxy_transport(proxy_url, sandbox_identifier)
 
         if _proxy_rust_client is not None:
             self._rust_client = _proxy_rust_client
@@ -258,6 +246,89 @@ class Sandbox:
                 self._base_url = self._rust_client.base_url()
             except Exception as e:
                 _raise_as_sandbox_error(e)
+
+    def _set_proxy_transport(self, proxy_url: str, sandbox_identifier: str) -> None:
+        self._proxy_url = proxy_url
+        parsed_proxy = urlparse(proxy_url)
+        self._host_header = None
+        if parsed_proxy.hostname in ("localhost", "127.0.0.1"):
+            self._host_header = f"{sandbox_identifier}.local"
+        self._proxy_headers = {}
+        if self._api_key:
+            self._proxy_headers["Authorization"] = f"Bearer {self._api_key}"
+        if self._organization_id:
+            self._proxy_headers["X-Forwarded-Organization-Id"] = self._organization_id
+        if self._project_id:
+            self._proxy_headers["X-Forwarded-Project-Id"] = self._project_id
+        if self._host_header:
+            self._proxy_headers["Host"] = self._host_header
+        else:
+            self._proxy_headers["X-Tensorlake-Sandbox-Id"] = sandbox_identifier
+
+    def _rebind_proxy(self, info: SandboxInfo) -> None:
+        self._require_lifecycle_client("refresh proxy routing")
+        if info.status != SandboxStatus.RUNNING:
+            raise SandboxError(
+                f"Sandbox {info.sandbox_id!r} is {info.status.value}; cannot refresh proxy routing"
+            )
+        if info.sandbox_url is None and self._explicit_proxy_url is None:
+            raise SandboxError(
+                f"Sandbox {info.sandbox_id!r} did not include proxy routing information"
+            )
+
+        proxy_url = self._lifecycle_client._rust_client.select_sandbox_proxy_url(
+            sandbox_id=info.sandbox_id,
+            sandbox_url=info.sandbox_url,
+            ingress_endpoint=info.ingress_endpoint,
+            explicit_proxy_url=self._explicit_proxy_url,
+        )
+        connect_proxy_kwargs = {
+            "proxy_url": proxy_url,
+            "sandbox_id": info.sandbox_id,
+            "routing_hint": info.routing_hint,
+        }
+        if self._request_timeout is not None:
+            connect_proxy_kwargs["request_timeout_sec"] = self._request_timeout
+        try:
+            new_rust_client = self._lifecycle_client._rust_client.connect_proxy(
+                **connect_proxy_kwargs
+            )
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+
+        self._rust_client = new_rust_client
+        self._base_url = self._rust_client.base_url()
+        self._set_proxy_transport(proxy_url, info.sandbox_id)
+        self._cached_info = info
+        self._sandbox_id = info.sandbox_id
+
+    def _fresh_running_info_for_rebind(
+        self,
+        deadline: float,
+        poll_interval: float,
+    ) -> SandboxInfo:
+        self._require_lifecycle_client("refresh proxy routing")
+        identifier = self._lifecycle_identifier()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            request_client = self._lifecycle_client._with_request_timeout(
+                min(remaining, self._lifecycle_client._request_timeout)
+            )
+            info = request_client.get(identifier).value
+            if info.status == SandboxStatus.RUNNING and (
+                info.sandbox_url is not None or self._explicit_proxy_url is not None
+            ):
+                return info
+            if info.status == SandboxStatus.TERMINATED:
+                raise SandboxError(
+                    f"Sandbox {identifier!r} terminated while refreshing proxy routing"
+                )
+            time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
+        raise SandboxError(
+            f"Sandbox {identifier!r} did not provide refreshed proxy routing within timeout"
+        )
 
     # --- Class-level factory methods ---
 
@@ -580,9 +651,15 @@ class Sandbox:
     ) -> None:
         """Resume this sandbox.
 
-        By default blocks until the sandbox is ``Running`` and routable.
-        Pass ``wait=False`` for fire-and-return. No-op (no error) if the
-        sandbox is already Running.
+        By default blocks until the sandbox is ``Running`` and refreshes this
+        handle's cached proxy routing. Rare transient proxy errors may still
+        occur immediately after resume.
+
+        Pass ``wait=False`` for fire-and-return. In that mode this handle's
+        cached proxy routing is not refreshed; use the default ``wait=True``
+        for immediate follow-up operations. If you intentionally use
+        ``wait=False``, wait until the sandbox is running and reconnect to get
+        fresh routing before issuing process/file/PTY operations.
 
         Args:
             wait: If True (default), poll until Running.
@@ -594,9 +671,17 @@ class Sandbox:
                 or terminates unexpectedly.
         """
         self._require_lifecycle_client("resume")
+        deadline = time.monotonic() + timeout
+        remaining = max(0.0, deadline - time.monotonic())
         self._lifecycle_client.resume(
-            self.sandbox_id, wait=wait, timeout=timeout, poll_interval=poll_interval
+            self._lifecycle_identifier(),
+            wait=wait,
+            timeout=remaining,
+            poll_interval=poll_interval,
         )
+        if wait:
+            info = self._fresh_running_info_for_rebind(deadline, poll_interval)
+            self._rebind_proxy(info)
 
     def attach_file_system(
         self,

@@ -672,17 +672,21 @@ export class SandboxClient {
     proxyUrl?: string,
     routingHint?: string,
     requestTimeout?: number,
+    explicitProxyUrl?: string,
   ): Sandbox {
+    const explicitProxyUrlProvided = arguments.length >= 5;
+    const resolvedExplicitProxyUrl = explicitProxyUrlProvided
+      ? explicitProxyUrl ?? undefined
+      : proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
     return new Sandbox({
       sandboxId: identifier,
       proxyUrl,
+      explicitProxyUrl: resolvedExplicitProxyUrl,
       apiKey: this.apiKey,
       organizationId: this.organizationId,
       projectId: this.projectId,
       routingHint,
-      resolveProxyInfo: proxyUrl == null
-        ? async (currentIdentifier) => this.get(currentIdentifier)
-        : undefined,
+      resolveProxyInfo: async (currentIdentifier) => this.get(currentIdentifier),
       requestTimeout,
       nativeClient: this.native,
     });
@@ -729,17 +733,19 @@ export class SandboxClient {
       ingressEndpoint: string | undefined,
       sandboxUrl: string | undefined,
     ) => {
+      const explicitProxyUrl = options?.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
       const selectedProxyUrl = this.native.selectSandboxProxyUrl(
         sandboxId,
         sandboxUrl ?? null,
         ingressEndpoint ?? null,
-        options?.proxyUrl ?? explicitProxyUrlOverride() ?? null,
+        explicitProxyUrl ?? null,
       );
       const sandbox = requestClient.connect(
         sandboxId,
         selectedProxyUrl,
         routingHint,
         requestTimeout,
+        explicitProxyUrl,
       );
       sandbox._setOwner(requestClient);
       sandbox.traceId = result.traceId;

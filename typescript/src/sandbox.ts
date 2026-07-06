@@ -66,12 +66,17 @@ class SandboxProxyConnection {
   ) => Promise<Traced<SandboxInfo>>;
   private resolvePromise: Promise<void> | null = null;
   private routingHint?: string;
+  private readonly optionRoutingHint?: string;
+  private readonly explicitProxyUrl?: string;
+  private resolveGeneration = 0;
 
   constructor(
     private readonly sandbox: Sandbox,
     private readonly options: SandboxOptions,
   ) {
     this.routingHint = options.routingHint;
+    this.optionRoutingHint = options.routingHint;
+    this.explicitProxyUrl = options.explicitProxyUrl ?? explicitProxyUrlOverride() ?? undefined;
     this.resolveProxyInfo = options.resolveProxyInfo;
     if (options.proxyUrl != null) {
       this.nativeProxy = this.configureProxy(
@@ -87,6 +92,9 @@ class SandboxProxyConnection {
   }
 
   async ensureResolved(): Promise<void> {
+    if (this.nativeProxy != null) {
+      return;
+    }
     if (this.resolveProxyInfo == null) {
       return;
     }
@@ -100,21 +108,23 @@ class SandboxProxyConnection {
       sandbox_id: identifier,
     });
 
+    const generation = this.resolveGeneration;
     this.resolvePromise = this.resolveProxyInfo(identifier)
       .then((info) => {
-        this.resolveProxyInfo = undefined;
+        if (generation !== this.resolveGeneration) {
+          return;
+        }
         this.sandbox.traceId = info.traceId;
         this.sandbox._setLifecycleIdentifier(info.sandboxId);
         this.sandbox._setName(info.name ?? null);
-        this.routingHint = this.routingHint ?? info.routingHint;
+        this.routingHint = info.routingHint ?? this.optionRoutingHint;
         const proxyUrl = this.options.nativeClient?.selectSandboxProxyUrl(
           info.sandboxId,
           info.sandboxUrl ?? null,
           info.ingressEndpoint ?? null,
-          this.options.proxyUrl ?? explicitProxyUrlOverride() ?? null,
+          this.explicitProxyUrl ?? null,
         ) ?? info.sandboxUrl
-          ?? this.options.proxyUrl
-          ?? explicitProxyUrlOverride();
+          ?? this.explicitProxyUrl;
         if (proxyUrl == null) {
           throw new SandboxError(
             "server response did not include sandbox_url; refusing to derive a proxy URL",
@@ -140,6 +150,40 @@ class SandboxProxyConnection {
     return this.resolvePromise;
   }
 
+  hasExplicitProxyUrl(): boolean {
+    return this.explicitProxyUrl != null;
+  }
+
+  refreshFromInfo(info: Traced<SandboxInfo>): void {
+    const routingHint = info.routingHint ?? this.optionRoutingHint;
+    const proxyUrl = this.options.nativeClient?.selectSandboxProxyUrl(
+      info.sandboxId,
+      info.sandboxUrl ?? null,
+      info.ingressEndpoint ?? null,
+      this.explicitProxyUrl ?? null,
+    ) ?? info.sandboxUrl
+      ?? this.explicitProxyUrl;
+    if (proxyUrl == null) {
+      throw new SandboxError(
+        "server response did not include sandbox_url; refusing to derive a proxy URL",
+      );
+    }
+    const state = this.buildProxyState(
+      proxyUrl,
+      info.sandboxId,
+      routingHint,
+    );
+    this.resolveGeneration += 1;
+    this.resolvePromise = null;
+    this.routingHint = routingHint;
+    this.nativeProxy = state.nativeProxy;
+    this.baseUrl = state.baseUrl;
+    this.wsHeaders = state.wsHeaders;
+    this.sandbox.traceId = info.traceId;
+    this.sandbox._setLifecycleIdentifier(info.sandboxId);
+    this.sandbox._setName(info.name ?? null);
+  }
+
   /** Await proxy resolution and return the Rust-backed proxy client. */
   async client(): Promise<NativeSandboxProxyClient> {
     await this.ensureResolved();
@@ -161,51 +205,68 @@ class SandboxProxyConnection {
     sandboxId: string,
     routingHint?: string,
   ): NativeSandboxProxyClient {
+    const state = this.buildProxyState(proxyUrl, sandboxId, routingHint);
+    this.baseUrl = state.baseUrl;
+    this.wsHeaders = state.wsHeaders;
+    return state.nativeProxy;
+  }
+
+  private buildProxyState(
+    proxyUrl: string,
+    sandboxId: string,
+    routingHint?: string,
+  ): {
+    nativeProxy: NativeSandboxProxyClient;
+    baseUrl: string;
+    wsHeaders: Record<string, string>;
+  } {
     // `baseUrl`/`wsHeaders` are still computed here for the WebSocket consumers
     // (PTY, tunnel, desktop), which do not flow through the native HTTP client.
     const { baseUrl, hostHeader, sandboxIdHeader } = resolveProxyTarget(
       proxyUrl,
       sandboxId,
     );
-    this.baseUrl = baseUrl;
-    this.wsHeaders = {};
+    const wsHeaders: Record<string, string> = {};
     if (this.options.apiKey) {
-      this.wsHeaders.Authorization = `Bearer ${this.options.apiKey}`;
+      wsHeaders.Authorization = `Bearer ${this.options.apiKey}`;
     }
     if (this.options.organizationId) {
-      this.wsHeaders["X-Forwarded-Organization-Id"] = this.options.organizationId;
+      wsHeaders["X-Forwarded-Organization-Id"] = this.options.organizationId;
     }
     if (this.options.projectId) {
-      this.wsHeaders["X-Forwarded-Project-Id"] = this.options.projectId;
+      wsHeaders["X-Forwarded-Project-Id"] = this.options.projectId;
     }
     if (hostHeader) {
-      this.wsHeaders.Host = hostHeader;
+      wsHeaders.Host = hostHeader;
     }
     if (sandboxIdHeader) {
-      this.wsHeaders["X-Tensorlake-Sandbox-Id"] = sandboxIdHeader;
+      wsHeaders["X-Tensorlake-Sandbox-Id"] = sandboxIdHeader;
     }
 
     // Prefer minting from the shared lifecycle client so the proxy reuses its
     // connection pool; fall back to a standalone client when none was wired.
+    let nativeProxy: NativeSandboxProxyClient;
     if (this.options.nativeClient) {
-      return this.options.nativeClient.connectProxy(
+      nativeProxy = this.options.nativeClient.connectProxy(
         proxyUrl,
         sandboxId,
         routingHint ?? null,
         this.proxyRequestTimeoutSec(),
       );
+    } else {
+      const binding = loadNativeSandboxBinding();
+      nativeProxy = new binding.NativeSandboxProxyClient(
+        proxyUrl,
+        sandboxId,
+        this.options.apiKey ?? null,
+        this.options.organizationId ?? null,
+        this.options.projectId ?? null,
+        routingHint ?? null,
+        null,
+        this.proxyRequestTimeoutSec(),
+      );
     }
-    const binding = loadNativeSandboxBinding();
-    return new binding.NativeSandboxProxyClient(
-      proxyUrl,
-      sandboxId,
-      this.options.apiKey ?? null,
-      this.options.organizationId ?? null,
-      this.options.projectId ?? null,
-      routingHint ?? null,
-      null,
-      this.proxyRequestTimeoutSec(),
-    );
+    return { nativeProxy, baseUrl, wsHeaders };
   }
 
   private proxyRequestTimeoutSec(): number | null {
@@ -231,6 +292,10 @@ function processUserPayload(
     throw new SandboxError("process user must not be empty");
   }
   return user;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 const PTY_OP_DATA = 0x00;
@@ -670,12 +735,46 @@ export class Sandbox {
   /**
    * Resume this sandbox.
    *
-   * By default blocks until the sandbox is `Running` and routable. Pass
-   * `{ wait: false }` for fire-and-return.
+   * By default blocks until the sandbox is `Running` and refreshes this
+   * handle's cached proxy routing. Rare transient proxy errors may still occur
+   * immediately after resume.
+   *
+   * Pass `{ wait: false }` for fire-and-return. That mode does not refresh
+   * cached proxy routing on this handle; use the default wait behavior for
+   * immediate follow-up operations, or wait until the sandbox is running and
+   * reconnect before issuing process/file/PTY operations.
    */
   async resume(options?: SuspendResumeOptions): Promise<void> {
     const client = this.requireLifecycleClient("resume");
-    await client.resume(this.lifecycleIdentifier, options);
+    const wait = options?.wait !== false;
+    const timeout = options?.timeout ?? 300;
+    const pollInterval = options?.pollInterval ?? 1;
+    const deadline = Date.now() + timeout * 1000;
+    await client.resume(this.lifecycleIdentifier, {
+      ...options,
+      timeout: Math.max(0, (deadline - Date.now()) / 1000),
+    });
+    if (!wait) return;
+
+    while (Date.now() < deadline) {
+      const info = await client.get(this.lifecycleIdentifier);
+      if (
+        info.status === SandboxStatus.RUNNING &&
+        (info.sandboxUrl != null || this.proxy.hasExplicitProxyUrl())
+      ) {
+        this.proxy.refreshFromInfo(info);
+        return;
+      }
+      if (info.status === SandboxStatus.TERMINATED) {
+        throw new SandboxError(
+          `Sandbox ${this.lifecycleIdentifier} terminated while refreshing proxy routing`,
+        );
+      }
+      await sleep(Math.min(pollInterval * 1000, Math.max(0, deadline - Date.now())));
+    }
+    throw new SandboxError(
+      `Sandbox ${this.lifecycleIdentifier} did not provide refreshed proxy routing within ${timeout}s`,
+    );
   }
 
   /** Live-copy this running sandbox. */
