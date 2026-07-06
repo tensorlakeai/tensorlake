@@ -52,6 +52,7 @@ zstd = "0.13"
 
 [dev-dependencies]
 data-encoding = "2.5"
+tokio = { workspace = true, features = ["test-util"] }
 zip = "0.6"
 
 [lints.clippy]

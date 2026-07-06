@@ -17,6 +17,10 @@
 //! 4. commit by reference: tokened files publish their verified oid with zero read-back,
 //!    known-oid files move no bytes at all, and bare chunk references are verified by
 //!    server-side read-back.
+//!
+//! Idempotent requests auto-retry transient failures (transport errors, 5xx/429) with
+//! backoff; large tokened offset uploads are the one deliberate exception (a lost success
+//! would make the replayed offset conflict).
 
 use std::io::Read;
 use std::path::PathBuf;
@@ -365,6 +369,47 @@ fn io_err(e: std::io::Error) -> SdkError {
     SdkError::Io(e)
 }
 
+/// Retries (beyond the first attempt) for idempotent ingest requests.
+const TRANSIENT_RETRIES: usize = 3;
+
+/// Only transient failures retry: transport errors and 5xx/429 responses. 4xx rejections are
+/// deterministic and never retried.
+fn is_transient(e: &SdkError) -> bool {
+    match e {
+        SdkError::ServerError { status, .. } => status.is_server_error() || status.as_u16() == 429,
+        SdkError::Http(_) | SdkError::Middleware(_) => true,
+        _ => false,
+    }
+}
+
+/// Run an **idempotent** request with backoff on transient failures. Safe wherever it is used
+/// here because every wrapped operation replays cleanly: batch and small-token completion is
+/// idempotent server-side (identical content → `AlreadyComplete`), untokened chunks and
+/// presigned packs are content-addressed, staging targets and sessions mint fresh ids whose
+/// orphans the server GC's, and commit submission reattaches through its idempotency key.
+/// Large tokened offset requests are deliberately NOT wrapped — a lost success would make the
+/// replayed offset conflict.
+async fn with_transient_retries<T, F, Fut>(mut op: F) -> Result<T, SdkError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, SdkError>>,
+{
+    let mut delay = std::time::Duration::from_millis(250);
+    let mut attempt = 0usize;
+    loop {
+        match op().await {
+            Ok(v) => return Ok(v),
+            Err(e) if attempt < TRANSIENT_RETRIES && is_transient(&e) => {
+                attempt += 1;
+                let jitter = std::time::Duration::from_millis(u64::from(rand::random::<u8>()));
+                tokio::time::sleep(delay + jitter).await;
+                delay = (delay * 4).min(std::time::Duration::from_secs(4));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+}
+
 /// Whole-file identity pass for small staged files: one read yields the git blob oid and the
 /// file's single upload frame. CDC buys nothing under the staged threshold — those chunks are
 /// never registered for dedup server-side — so small files skip the chunker (and, downstream,
@@ -455,15 +500,18 @@ impl ArtifactStorageClient {
         };
 
         // 1. Session: the server dictates chunking parameters and limits.
-        let (req, _trace) = self.git_request(
-            Method::POST,
-            project_id,
-            repo,
-            Some("ingest/sessions"),
-            git_username,
-            git_token,
-        )?;
-        let session: IngestSessionWire = expect_json(req.send().await?).await?;
+        let session: IngestSessionWire = with_transient_retries(|| async {
+            let (req, _trace) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some("ingest/sessions"),
+                git_username,
+                git_token,
+            )?;
+            expect_json(req.send().await?).await
+        })
+        .await?;
 
         // 2. Chunk + hash every file locally: one streaming pass per file yields the CDC chunk
         //    list and the git blob oid together, files fanned across blocking threads.
@@ -1098,25 +1146,32 @@ impl ArtifactStorageClient {
             let bytes: [u8; 16] = rand::random();
             bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
         };
-        let (req, trace_id) = self.git_request(
-            Method::POST,
-            project_id,
-            repo,
-            Some(&commit_suffix),
-            git_username,
-            git_token,
-        )?;
-        let submit = req
-            // Deployed servers from the header-opt-in era only answer the job shape when asked;
-            // the job-only server ignores this. Removable once every environment is job-only.
-            .header("x-commit-async", "1")
-            .header("idempotency-key", &idem_key)
-            .timeout(std::time::Duration::from_secs(60))
-            .json(&body)
-            .send()
-            .await?;
-        let accepted = submit.status().as_u16() == 202;
-        let mut job: CommitJobWire = expect_json(submit).await?;
+        // The idempotency key makes the submit replayable: a retry after a lost response
+        // reattaches to the same durable job instead of double-committing.
+        let (accepted, mut job, trace_id) = with_transient_retries(|| async {
+            let (req, trace_id) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&commit_suffix),
+                git_username,
+                git_token,
+            )?;
+            let submit = req
+                // Deployed servers from the header-opt-in era only answer the job shape when
+                // asked; the job-only server ignores this. Removable once every environment is
+                // job-only.
+                .header("x-commit-async", "1")
+                .header("idempotency-key", &idem_key)
+                .timeout(std::time::Duration::from_secs(60))
+                .json(&body)
+                .send()
+                .await?;
+            let accepted = submit.status().as_u16() == 202;
+            let job: CommitJobWire = expect_json(submit).await?;
+            Ok((accepted, job, trace_id))
+        })
+        .await?;
         if accepted {
             let job_id = job.job_id.clone();
             emit(PushEvent::CommitDetached {
@@ -1128,19 +1183,22 @@ impl ArtifactStorageClient {
             loop {
                 tokio::time::sleep(delay).await;
                 delay = (delay * 2).min(std::time::Duration::from_secs(2));
-                let (req, _t) = self.git_request(
-                    Method::GET,
-                    project_id,
-                    repo,
-                    Some(&poll_suffix),
-                    git_username,
-                    git_token,
-                )?;
-                job = expect_json(
-                    req.timeout(std::time::Duration::from_secs(30))
-                        .send()
-                        .await?,
-                )
+                job = with_transient_retries(|| async {
+                    let (req, _t) = self.git_request(
+                        Method::GET,
+                        project_id,
+                        repo,
+                        Some(&poll_suffix),
+                        git_username,
+                        git_token,
+                    )?;
+                    expect_json(
+                        req.timeout(std::time::Duration::from_secs(30))
+                            .send()
+                            .await?,
+                    )
+                    .await
+                })
                 .await?;
                 match job.state.as_str() {
                     "committed" | "failed" => break,
@@ -1224,16 +1282,18 @@ impl ArtifactStorageClient {
         let mut missing = std::collections::HashSet::new();
         for batch in distinct.chunks(session.max_hashes_per_query.max(1)) {
             let hashes: Vec<String> = batch.iter().map(hex_lower).collect();
-            let (req, _t) = self.git_request(
-                Method::POST,
-                project_id,
-                repo,
-                Some(&format!("ingest/sessions/{}/missing", session.session_id)),
-                git_username,
-                git_token,
-            )?;
-            let resp: MissingRespWire =
-                expect_json(req.json(&MissingWire { hashes: &hashes }).send().await?).await?;
+            let resp: MissingRespWire = with_transient_retries(|| async {
+                let (req, _t) = self.git_request(
+                    Method::POST,
+                    project_id,
+                    repo,
+                    Some(&format!("ingest/sessions/{}/missing", session.session_id)),
+                    git_username,
+                    git_token,
+                )?;
+                expect_json(req.json(&MissingWire { hashes: &hashes }).send().await?).await
+            })
+            .await?;
             for h in resp.missing {
                 let mut arr = [0u8; 32];
                 hex::decode_to_slice(&h, &mut arr)
@@ -1281,15 +1341,18 @@ impl ArtifactStorageClient {
         git_token: &str,
         session_id: &str,
     ) -> Result<IngestStagingWire, SdkError> {
-        let (req, _t) = self.git_request(
-            Method::POST,
-            project_id,
-            repo,
-            Some(&format!("ingest/sessions/{session_id}/staging")),
-            git_username,
-            git_token,
-        )?;
-        expect_json(req.send().await?).await
+        with_transient_retries(|| async {
+            let (req, _t) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&format!("ingest/sessions/{session_id}/staging")),
+                git_username,
+                git_token,
+            )?;
+            expect_json(req.send().await?).await
+        })
+        .await
     }
 
     /// PUT a client-assembled chunk pack directly to its presigned target, then register its
@@ -1311,33 +1374,48 @@ impl ArtifactStorageClient {
             SdkError::ClientError("staged upload requires a presigned url".to_string())
         })?;
         // The signature lives in the query string — no auth headers (an Authorization header
-        // would conflict with the presigned signature).
-        let resp = self.git_client.put(url).body(pack).send().await?;
-        if !resp.status().is_success() {
-            return Err(SdkError::ServerError {
-                status: resp.status(),
-                message: format!("staged pack PUT: {}", resp.text().await.unwrap_or_default()),
-            });
-        }
+        // would conflict with the presigned signature). Content-addressed and same-key: safe
+        // to retry.
+        let pack = bytes::Bytes::from(pack);
+        with_transient_retries(|| {
+            let pack = pack.clone();
+            async move {
+                let resp = self.git_client.put(url).body(pack).send().await?;
+                if !resp.status().is_success() {
+                    return Err(SdkError::ServerError {
+                        status: resp.status(),
+                        message: format!(
+                            "staged pack PUT: {}",
+                            resp.text().await.unwrap_or_default()
+                        ),
+                    });
+                }
+                Ok(())
+            }
+        })
+        .await?;
         // Bounded batches: the server caps entries per registration call.
         const REGISTER_BATCH: usize = 4096;
         let mut remaining = entries;
         while !remaining.is_empty() {
             let take = remaining.len().min(REGISTER_BATCH);
             let batch: Vec<StagedEntryWire> = remaining.drain(..take).collect();
-            let (req, _t) = self.git_request(
-                Method::POST,
-                project_id,
-                repo,
-                Some(&format!("ingest/sessions/{session_id}/staged")),
-                git_username,
-                git_token,
-            )?;
             let body = StagedRegisterWire {
                 pack_id: target.pack_id.clone(),
                 entries: batch,
             };
-            expect_ok(req.json(&body).send().await?).await?;
+            with_transient_retries(|| async {
+                let (req, _t) = self.git_request(
+                    Method::POST,
+                    project_id,
+                    repo,
+                    Some(&format!("ingest/sessions/{session_id}/staged")),
+                    git_username,
+                    git_token,
+                )?;
+                expect_ok(req.json(&body).send().await?).await
+            })
+            .await?;
         }
         Ok(())
     }
@@ -1354,15 +1432,22 @@ impl ArtifactStorageClient {
         session_id: &str,
         body: Vec<u8>,
     ) -> Result<BatchUploadRespWire, SdkError> {
-        let (req, _t) = self.git_request(
-            Method::PUT,
-            project_id,
-            repo,
-            Some(&format!("ingest/sessions/{session_id}/files")),
-            git_username,
-            git_token,
-        )?;
-        expect_json(req.body(body).send().await?).await
+        let body = bytes::Bytes::from(body);
+        with_transient_retries(|| {
+            let body = body.clone();
+            async move {
+                let (req, _t) = self.git_request(
+                    Method::PUT,
+                    project_id,
+                    repo,
+                    Some(&format!("ingest/sessions/{session_id}/files")),
+                    git_username,
+                    git_token,
+                )?;
+                expect_json(req.body(body).send().await?).await
+            }
+        })
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -1382,16 +1467,31 @@ impl ArtifactStorageClient {
                 "ingest/sessions/{session_id}/chunks?file={token}&file_total={total}&file_offset={offset}"
             ),
         };
-        let (req, _t) = self.git_request(
-            Method::PUT,
-            project_id,
-            repo,
-            Some(&suffix),
-            git_username,
-            git_token,
-        )?;
-        let resp = req.body(frame).send().await?;
-        expect_ok(resp).await
+        // Untokened frames are content-addressed and fully idempotent → retried. Tokened
+        // offset requests are not blindly replayable (a lost success makes the replayed
+        // offset conflict), so they keep single-shot semantics.
+        let retriable = file.is_none();
+        let frame = bytes::Bytes::from(frame);
+        let send = || {
+            let frame = frame.clone();
+            let suffix = suffix.clone();
+            async move {
+                let (req, _t) = self.git_request(
+                    Method::PUT,
+                    project_id,
+                    repo,
+                    Some(&suffix),
+                    git_username,
+                    git_token,
+                )?;
+                expect_ok(req.body(frame).send().await?).await
+            }
+        };
+        if retriable {
+            with_transient_retries(send).await
+        } else {
+            send().await
+        }
     }
 }
 
@@ -1451,6 +1551,67 @@ mod tests {
 
     fn h(b: u8) -> [u8; 32] {
         [b; 32]
+    }
+
+    /// Transient failures (5xx/429/transport) retry with backoff and then succeed; 4xx
+    /// rejections are deterministic and never retried.
+    #[tokio::test(start_paused = true)]
+    async fn transient_retries_back_off_and_stop_on_client_errors() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let calls = AtomicUsize::new(0);
+        let out: Result<u32, SdkError> = with_transient_retries(|| {
+            let n = calls.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if n < 2 {
+                    Err(SdkError::ServerError {
+                        status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                        message: "wobble".into(),
+                    })
+                } else {
+                    Ok(7)
+                }
+            }
+        })
+        .await;
+        assert_eq!(out.unwrap(), 7);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "two transient failures retried"
+        );
+
+        let calls = AtomicUsize::new(0);
+        let out: Result<u32, SdkError> = with_transient_retries(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err(SdkError::ServerError {
+                    status: reqwest::StatusCode::BAD_REQUEST,
+                    message: "no".into(),
+                })
+            }
+        })
+        .await;
+        assert!(out.is_err());
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "4xx must not retry: the rejection is deterministic"
+        );
+
+        // Budget exhausted: a persistent 503 surfaces after the final retry.
+        let calls = AtomicUsize::new(0);
+        let out: Result<u32, SdkError> = with_transient_retries(|| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            async {
+                Err(SdkError::ServerError {
+                    status: reqwest::StatusCode::SERVICE_UNAVAILABLE,
+                    message: "down".into(),
+                })
+            }
+        })
+        .await;
+        assert!(out.is_err());
+        assert_eq!(calls.load(Ordering::SeqCst), 1 + TRANSIENT_RETRIES);
     }
 
     /// Small files (under the staged threshold) are always tokened; above it the
