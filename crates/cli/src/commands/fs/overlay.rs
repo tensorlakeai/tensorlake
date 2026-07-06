@@ -151,7 +151,8 @@ enum OHandle {
     /// A merged directory listing, fixed at opendir time.
     Dir {
         /// The directory's own overlay ino, so `readdir_plus` can resolve entries through the
-        /// counted lookup path.
+        /// counted lookup path. Only read by the Linux `readdir_plus` path.
+        #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
         ino: u64,
         entries: Vec<(String, NodeKind)>,
     },
@@ -165,6 +166,9 @@ pub struct OverlayAttr {
     pub size: u64,
     pub perm: u16,
     /// True when the upper layer backs this node (i.e. it is locally dirty).
+    // Serialized into the macOS vfsserver wire protocol and asserted in tests; the Linux FUSE
+    // path doesn't read it, so allow it to be unread off macOS rather than warn.
+    #[cfg_attr(not(target_os = "macos"), allow(dead_code))]
     pub upper: bool,
     /// Content timestamp. Upper-backed nodes report the real file mtime; lower-backed nodes
     /// report when this mount first saw their pinned commit (lower content can only change
@@ -588,6 +592,8 @@ impl OverlayFs {
     /// through [`OverlayFs::lookup`], so it carries **one counted reference** on its overlay
     /// ino, which the kernel balances with later `forget`s; a binding that fails to deliver an
     /// entry to the kernel (reply buffer full) must call [`OverlayFs::forget`] with 1 for it.
+    // Driven by the Linux FUSE readdirplus op; the macOS vfsserver transport doesn't use it.
+    #[cfg_attr(not(target_os = "linux"), allow(dead_code))]
     pub async fn readdir_plus(
         &self,
         fh: u64,
@@ -1161,7 +1167,11 @@ impl OverlayFs {
 /// (branch refresh) or [`OverlayFs::clear_upper`] (post-snapshot upper drop). `staled` entries
 /// need the `(parent_ino, name)` dentry invalidated in addition to the inode, so the next access
 /// re-looks the path up; rebound entries only need the inode's attrs/data dropped.
+///
+/// Consumed by the Linux FUSE notify sink (`inval_entry`/`inval_inode`); the macOS FSKit path
+/// uses a no-op sink, so these fields are unread there.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(target_os = "linux"), allow(dead_code))]
 pub struct OverlayInval {
     pub ino: u64,
     pub parent_ino: Option<u64>,
