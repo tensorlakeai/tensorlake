@@ -416,13 +416,12 @@ enum GitCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Push local files to a repo as one commit (resumable chunk upload; no local git needed)
+    /// Push the current Git worktree to a repo as one commit (resumable chunk upload)
     Push {
         /// Repo name
-        #[arg(long)]
         repo: String,
         /// Target branch
-        #[arg(long, default_value = "main")]
+        #[arg(default_value = "main")]
         branch: String,
         /// Commit message
         #[arg(short, long, default_value = "tl push")]
@@ -430,9 +429,6 @@ enum GitCommands {
         /// Force-with-lease: require the branch to currently equal this commit oid
         #[arg(long)]
         expect_oid: Option<String>,
-        /// Files or directories to push (directories recurse; repo paths are relative to CWD)
-        #[arg(required = true)]
-        paths: Vec<std::path::PathBuf>,
         /// Output JSON
         #[arg(long)]
         json: bool,
@@ -2280,9 +2276,8 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
             branch,
             message,
             expect_oid,
-            paths,
             json,
-        } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, paths, json).await,
+        } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, json).await,
         GitCommands::CommitStatus { repo, job_id } => {
             commands::git::commit_status(ctx, &repo, &job_id).await
         }
@@ -2583,7 +2578,21 @@ mod tests {
             _ => panic!("expected legacy git ops command"),
         }
 
-        assert!(Cli::try_parse_from(["tl", "git", "push", "demo"]).is_err());
+        match parse_command(["tl", "git", "push", "demo"]) {
+            Commands::Git(GitCommands::Push { repo, branch, .. }) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(branch, "main");
+            }
+            _ => panic!("expected git push command"),
+        }
+
+        match parse_command(["tl", "git", "push", "demo", "feature-a"]) {
+            Commands::Git(GitCommands::Push { repo, branch, .. }) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(branch, "feature-a");
+            }
+            _ => panic!("expected git push command"),
+        }
     }
 
     #[test]
