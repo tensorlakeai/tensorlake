@@ -486,7 +486,7 @@ fn parse_remote_message(raw: &str) -> String {
         .unwrap_or_else(|| raw.to_string())
 }
 
-/// `tl git push` — resumable chunked push of local files as one commit, no local git required.
+/// `tl git push` — resumable chunked push of the current Git worktree as one commit.
 /// Retrying after any failure is safe and cheap: the client re-negotiates and uploads only what
 /// the server still lacks.
 pub async fn push(
@@ -495,24 +495,22 @@ pub async fn push(
     branch: &str,
     message: &str,
     expect_oid: Option<String>,
-    paths: Vec<std::path::PathBuf>,
     output_json: bool,
 ) -> Result<()> {
     use tensorlake::artifact_storage::ingest::{PushEvent, PushOptions};
 
+    let root = current_git_worktree_root()?;
     let project_id = project_id(ctx)?;
     let client = artifact_storage_client(ctx)?;
     let credential = push_credential(&client, &project_id, repo).await?;
 
-    // Collect files: directories recurse; repo paths are relative to the CWD (or to the
-    // directory itself for its children), normalized to forward slashes.
+    // Collect files from the worktree root; repo paths are relative to that root and normalized to
+    // forward slashes.
     let mut files = Vec::new();
-    for path in &paths {
-        collect_push_files(path, path, &mut files)?;
-    }
+    collect_push_files(&root, &root, &mut files)?;
     if files.is_empty() {
         return Err(crate::error::CliError::Usage(
-            "no files found under the given paths".to_string(),
+            "no files found under the current Git worktree".to_string(),
         ));
     }
 
@@ -630,6 +628,43 @@ pub async fn push(
     Ok(())
 }
 
+fn current_git_worktree_root() -> Result<std::path::PathBuf> {
+    git_worktree_root_from(&std::env::current_dir()?)
+}
+
+fn git_worktree_root_from(cwd: &std::path::Path) -> Result<std::path::PathBuf> {
+    let output = std::process::Command::new("git")
+        .args(["rev-parse", "--show-toplevel"])
+        .current_dir(cwd)
+        .output()
+        .map_err(|err| {
+            CliError::usage(format!(
+                "tl git push requires Git to locate the current worktree: {err}"
+            ))
+        })?;
+
+    if !output.status.success() {
+        let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+        let suffix = if detail.is_empty() {
+            "not a Git repository".to_string()
+        } else {
+            detail
+        };
+        return Err(CliError::usage(format!(
+            "tl git push must be run inside a Git worktree ({suffix})"
+        )));
+    }
+
+    let root = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    if root.is_empty() {
+        return Err(CliError::usage(
+            "git rev-parse returned an empty worktree root".to_string(),
+        ));
+    }
+
+    Ok(std::path::PathBuf::from(root))
+}
+
 fn collect_push_files(
     root: &std::path::Path,
     path: &std::path::Path,
@@ -742,12 +777,11 @@ pub async fn commit_status(ctx: &CliContext, repo: &str, job_id: &str) -> Result
     Ok(())
 }
 
-/// Repo path for a file under a pushed root: relative to the root's parent (so pushing
-/// `somedir` prefixes its name), built from normal components only. Pushing `.` used to
-/// yield `./arch/boot.c` — the server rejects `.`/`..`/empty components at commit time,
+/// Repo path for a file under the worktree root, built from normal components only. Pushing `.`
+/// used to yield `./arch/boot.c` — the server rejects `.`/`..`/empty components at commit time,
 /// after every chunk was already uploaded, so this must be clean by construction.
 fn repo_path_for(root: &std::path::Path, path: &std::path::Path) -> String {
-    path.strip_prefix(root.parent().unwrap_or(root))
+    path.strip_prefix(root)
         .unwrap_or(path)
         .components()
         .filter_map(|c| match c {
@@ -776,12 +810,27 @@ mod tests {
     }
 
     #[test]
-    fn repo_paths_from_named_dir_keep_the_dir_prefix() {
+    fn repo_paths_from_absolute_root_are_root_relative() {
         let root = std::path::Path::new("/tmp/somedir");
         assert_eq!(
             repo_path_for(root, std::path::Path::new("/tmp/somedir/a/b.txt")),
-            "somedir/a/b.txt"
+            "a/b.txt"
         );
+    }
+
+    #[test]
+    fn git_worktree_root_rejects_non_git_dir() {
+        if std::process::Command::new("git")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let err = git_worktree_root_from(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("tl git push must be run inside a Git worktree"));
     }
 
     #[test]
