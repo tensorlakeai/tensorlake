@@ -55,36 +55,43 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `mount: true` ships the `tl fs mount` stack (private gsvc-mount core, vendored at build
+          # time). Unix only — the stack uses unix-only APIs, so win32 omits it.
           - os: ubuntu-latest
             target_id: linux-x64
             rust_target: x86_64-unknown-linux-gnu.2.28
             rust_target_base: x86_64-unknown-linux-gnu
             libc: gnu
             cli_build_tool: cargo-zigbuild
+            mount: true
           - os: ubuntu-24.04-arm
             target_id: linux-arm64
             rust_target: aarch64-unknown-linux-gnu.2.28
             rust_target_base: aarch64-unknown-linux-gnu
             libc: gnu
             cli_build_tool: cargo-zigbuild
+            mount: true
           - os: ubuntu-latest
             target_id: linux-x64-musl
             rust_target: x86_64-unknown-linux-musl
             rust_target_base: x86_64-unknown-linux-musl
             libc: musl
             cli_build_tool: cargo-zigbuild
+            mount: true
           - os: ubuntu-24.04-arm
             target_id: linux-arm64-musl
             rust_target: aarch64-unknown-linux-musl
             rust_target_base: aarch64-unknown-linux-musl
             libc: musl
             cli_build_tool: cargo-zigbuild
+            mount: true
           - os: macos-14
             target_id: darwin-arm64
             rust_target: ""
             rust_target_base: ""
             libc: ""
             cli_build_tool: cargo
+            mount: true
           - os: windows-latest
             target_id: win32-x64
             rust_target: ""
@@ -125,12 +132,21 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # Always: `tl git clone` (git-clone feature) ships on every target; mount is
+      # platform-gated by the matrix.
+      - name: Vendor private artifact_storage crates
+        uses: ./.github/actions/vendor-private-crates
+        with:
+          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
+          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
+
       - name: Build CLI
         run: npm run build:cli
         env:
           TENSORLAKE_CLI_TARGET_ID: ${{ matrix.target_id }}
           TENSORLAKE_CLI_TARGET_TRIPLE: ${{ matrix.rust_target }}
           TENSORLAKE_CLI_BUILD_TOOL: ${{ matrix.cli_build_tool }}
+          TENSORLAKE_CLI_FEATURES: ${{ matrix.mount && 'mount,git-clone' || 'git-clone' }}
 
       - name: Verify packaged CLI binary
         run: |

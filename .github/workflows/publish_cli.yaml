@@ -19,18 +19,23 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          # `mount: true` ships the `tl fs mount` stack (the private gsvc-mount core, vendored in
+          # at build time). Unix only — the mount stack uses unix-only APIs, so Windows omits it.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
             target_id: linux-x86_64
             archive: tar.gz
+            mount: true
           - os: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             target_id: linux-aarch64
             archive: tar.gz
+            mount: true
           - os: macos-14
             target: aarch64-apple-darwin
             target_id: darwin-aarch64
             archive: tar.gz
+            mount: true
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             target_id: windows-x86_64
@@ -50,8 +55,16 @@ jobs:
           key: ${{ matrix.target }}
           cache-bin: false
 
+      # Always: `tl git clone` (git-clone feature) ships on every target; mount is
+      # platform-gated by the matrix.
+      - name: Vendor private artifact_storage crates
+        uses: ./.github/actions/vendor-private-crates
+        with:
+          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
+          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
+
       - name: Build CLI
-        run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }}
+        run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }} ${{ matrix.mount && '--features mount,git-clone' || '--features git-clone' }}
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
@@ -73,9 +86,83 @@ jobs:
           name: cli-${{ matrix.target_id }}
           path: dist/*
 
+  # TLFS.app: the macOS FSKit extension `tl fs mount` needs (installed on end-user machines by
+  # `tl fs setup`). Built headlessly with swiftc, signed with the Developer ID identity +
+  # Developer ID provisioning profile (FSKit Module capability, no device list), notarized, and
+  # attached to the same release so app and CLI stay in wire-protocol lockstep.
+  # Secrets (see platform/macos/tlfs/README.md):
+  #   TLFS_SIGNING_CERT_P12 / TLFS_SIGNING_CERT_PASSWORD  Developer ID Application cert (.p12, base64)
+  #   TLFS_PROVISION_PROFILE                              Developer ID profile (base64)
+  #   TLFS_NOTARY_KEY / TLFS_NOTARY_KEY_ID / TLFS_NOTARY_ISSUER  App Store Connect API key (.p8 base64)
+  tlfs-app:
+    name: Build TLFS.app (macOS file-system extension)
+    # Flip to false once the signing secrets are provisioned: from then on a release without a
+    # working TLFS.app should fail loudly, not ship silently without it.
+    continue-on-error: true
+    # Needs Xcode 26.x / the macOS 26 SDK (the FSKit surface tlfs uses); adjust the image if the
+    # hosted runner catalog changes.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          version=$(grep -E '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Import Developer ID certificate
+        env:
+          CERT_P12: ${{ secrets.TLFS_SIGNING_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.TLFS_SIGNING_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/tlfs-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          echo "$CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 1800 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" login.keychain
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Stage provisioning profile and notary key
+        env:
+          PROVISION_PROFILE: ${{ secrets.TLFS_PROVISION_PROFILE }}
+          NOTARY_KEY: ${{ secrets.TLFS_NOTARY_KEY }}
+        run: |
+          set -euo pipefail
+          echo "$PROVISION_PROFILE" | base64 -d > "$RUNNER_TEMP/tlfs-developer-id.provisionprofile"
+          echo "$NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/notary-key.p8"
+
+      - name: Build, sign, notarize
+        env:
+          TLFS_PROVISION_PROFILE: ${{ runner.temp }}/tlfs-developer-id.provisionprofile
+          TLFS_NOTARY_KEY_FILE: ${{ runner.temp }}/notary-key.p8
+          TLFS_NOTARY_KEY_ID: ${{ secrets.TLFS_NOTARY_KEY_ID }}
+          TLFS_NOTARY_ISSUER: ${{ secrets.TLFS_NOTARY_ISSUER }}
+          TLFS_VERSION: ${{ steps.version.outputs.version }}
+        run: platform/macos/tlfs/build.sh --release --notarize
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp platform/macos/tlfs/build/TLFS.app.zip "dist/TLFS-${{ steps.version.outputs.version }}.app.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-tlfs-app
+          path: dist/*
+
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, tlfs-app]
+    # tlfs-app is continue-on-error while its secrets are being provisioned; release whatever
+    # artifacts materialized.
+    if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

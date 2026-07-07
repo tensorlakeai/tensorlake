@@ -31,6 +31,95 @@ pub fn credentials_path() -> PathBuf {
     config_dir().join("credentials.toml")
 }
 
+/// Cached minted git credentials: ~/.config/tensorlake/git-credentials.toml
+///
+/// Minted artifact-storage tokens are short-lived and project/repo-scoped, not per-mount, so they
+/// cache globally (same convention and permissions as `credentials.toml`) instead of inside a
+/// workspace directory. Keyed by `<normalized api url>|<project>|<repo scope>`.
+///
+/// This cache and its helpers are only exercised by the `tl fs` mount stack, so they are compiled
+/// only into `--features mount` builds.
+#[cfg(feature = "mount")]
+pub fn git_credentials_path() -> PathBuf {
+    config_dir().join("git-credentials.toml")
+}
+
+#[cfg(feature = "mount")]
+fn git_credential_key(api_url: &str, project: &str, scope: &str) -> String {
+    format!("{}|{project}|{scope}", normalize_api_url(api_url))
+}
+
+/// A cached minted git credential, returned only while comfortably inside its validity window.
+#[cfg(feature = "mount")]
+pub fn load_git_credential(
+    api_url: &str,
+    project: &str,
+    scope: &str,
+) -> Option<(String, String, String)> {
+    const EXPIRY_MARGIN_SECS: i64 = 120;
+    let content = fs::read_to_string(git_credentials_path()).ok()?;
+    let table = parse_toml_table(&content)?;
+    let section = table.get(&git_credential_key(api_url, project, scope))?;
+    let get = |k: &str| section.get(k).and_then(|v| v.as_str()).map(str::to_string);
+    let (username, token, expires_at) = (get("username")?, get("token")?, get("expires_at")?);
+    let expires = chrono::DateTime::parse_from_rfc3339(&expires_at).ok()?;
+    if expires.timestamp() - chrono::Utc::now().timestamp() < EXPIRY_MARGIN_SECS {
+        return None;
+    }
+    Some((username, token, expires_at))
+}
+
+#[cfg(feature = "mount")]
+pub fn save_git_credential(
+    api_url: &str,
+    project: &str,
+    scope: &str,
+    username: &str,
+    token: &str,
+    expires_at: &str,
+) -> Result<()> {
+    let dir = config_dir();
+    fs::create_dir_all(&dir)?;
+    let path = git_credentials_path();
+    let mut table: TomlTable = if path.exists() {
+        let content = fs::read_to_string(&path)?;
+        parse_toml_table(&content).unwrap_or_default()
+    } else {
+        TomlTable::new()
+    };
+    // Drop entries that have already expired while we're here, so the file doesn't accrete.
+    let now = chrono::Utc::now().timestamp();
+    table.retain(|_, v| {
+        v.get("expires_at")
+            .and_then(|e| e.as_str())
+            .and_then(|e| chrono::DateTime::parse_from_rfc3339(e).ok())
+            .is_some_and(|e| e.timestamp() > now)
+    });
+    let mut section = TomlTable::new();
+    section.insert("username".into(), toml::Value::String(username.into()));
+    section.insert("token".into(), toml::Value::String(token.into()));
+    section.insert("expires_at".into(), toml::Value::String(expires_at.into()));
+    table.insert(
+        git_credential_key(api_url, project, scope),
+        toml::Value::Table(section),
+    );
+    let content = toml::to_string_pretty(&toml::Value::Table(table))?;
+    fs::write(&path, &content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
+/// Purge the minted-git-credential cache (e.g. after an authentication failure, so the next run
+/// re-mints instead of retrying a revoked token).
+#[cfg(feature = "mount")]
+pub fn purge_git_credentials() {
+    let _ = fs::remove_file(git_credentials_path());
+}
+
 /// Normalize API URL values for credential table keying.
 ///
 /// This avoids mismatches between equivalent URLs like:

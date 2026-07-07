@@ -12,14 +12,48 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
-mod fastclone;
+#[cfg(feature = "git-clone")]
+pub(crate) mod fastclone;
 
-pub use fastclone::parse_cache_max_bytes;
-
-pub fn repo_url(ctx: &CliContext, repo: &str) -> Result<String> {
-    let client = artifact_storage_client(ctx)?;
-    let project_id = project_id(ctx)?;
-    Ok(client.git_repo_url(&project_id, repo))
+/// Parse a human cache-size argument (`512MB`, `2GiB`, `1073741824`, ...). Lives here — not in
+/// the feature-gated fast-clone module — because the CLI argument definition needs it even in
+/// builds without the fast-clone engine.
+pub fn parse_cache_max_bytes(value: &str) -> anyhow::Result<u64> {
+    use anyhow::Context as _;
+    let raw = value.trim();
+    if raw.is_empty() {
+        anyhow::bail!("cache size cannot be empty");
+    }
+    let lower = raw.to_ascii_lowercase();
+    let suffixes = [
+        ("tib", 1024_u64.pow(4)),
+        ("tb", 1024_u64.pow(4)),
+        ("t", 1024_u64.pow(4)),
+        ("gib", 1024_u64.pow(3)),
+        ("gb", 1024_u64.pow(3)),
+        ("g", 1024_u64.pow(3)),
+        ("mib", 1024_u64.pow(2)),
+        ("mb", 1024_u64.pow(2)),
+        ("m", 1024_u64.pow(2)),
+        ("kib", 1024),
+        ("kb", 1024),
+        ("k", 1024),
+        ("b", 1),
+    ];
+    let (digits, multiplier) = suffixes
+        .iter()
+        .find_map(|(suffix, multiplier)| {
+            lower
+                .strip_suffix(suffix)
+                .map(|digits| (digits.trim(), *multiplier))
+        })
+        .unwrap_or((raw, 1));
+    let bytes = digits
+        .parse::<u64>()
+        .with_context(|| format!("invalid cache size {value:?}"))?;
+    bytes
+        .checked_mul(multiplier)
+        .ok_or_else(|| anyhow::anyhow!("cache size {value:?} is too large"))
 }
 
 pub async fn mint_token(ctx: &CliContext, repo: Option<&str>, output_json: bool) -> Result<()> {
@@ -168,6 +202,26 @@ fn normalize_repo_arg(repo: &str) -> String {
         .unwrap_or_else(|| repo.to_string())
 }
 
+/// Fast clone without the engine: this build was made from the public source tree, which
+/// carries only a resolution placeholder for the private gsvc-codec. Point the user at the
+/// official binary instead of failing cryptically.
+#[cfg(not(feature = "git-clone"))]
+pub async fn clone_repo(
+    _ctx: &CliContext,
+    _repo: &str,
+    _dest: Option<PathBuf>,
+    _cache_dir: Option<PathBuf>,
+    _cache_max_bytes: Option<u64>,
+    _no_checkout: bool,
+) -> Result<()> {
+    Err(CliError::Other(anyhow::anyhow!(
+        "this build of `tl` lacks the fast-clone engine (built without the `git-clone` \
+         feature). Install the official release binary, or build with `just build-cli-full` \
+         from a checkout with artifact_storage access."
+    )))
+}
+
+#[cfg(feature = "git-clone")]
 pub async fn clone_repo(
     ctx: &CliContext,
     repo: &str,
@@ -313,7 +367,7 @@ pub async fn list_operations(
     Ok(())
 }
 
-fn artifact_storage_client(ctx: &CliContext) -> Result<ArtifactStorageClient> {
+pub(crate) fn artifact_storage_client(ctx: &CliContext) -> Result<ArtifactStorageClient> {
     let token = ctx.bearer_token()?;
     let mut builder = ClientBuilder::new(&ctx.api_url).bearer_token(&token);
     let use_scope_headers = ctx.personal_access_token.is_some() && ctx.api_key.is_none();
@@ -327,7 +381,7 @@ fn artifact_storage_client(ctx: &CliContext) -> Result<ArtifactStorageClient> {
     sdk.artifact_storage().map_err(Into::into)
 }
 
-fn project_id(ctx: &CliContext) -> Result<String> {
+pub(crate) fn project_id(ctx: &CliContext) -> Result<String> {
     ctx.effective_project_id()
         .ok_or_else(|| CliError::auth("missing project ID; run `tl init`"))
 }
@@ -448,10 +502,7 @@ pub async fn push(
 
     let project_id = project_id(ctx)?;
     let client = artifact_storage_client(ctx)?;
-    let credential = client
-        .mint_token_for_repo(&project_id, Some(repo))
-        .await?
-        .into_inner();
+    let credential = push_credential(&client, &project_id, repo).await?;
 
     // Collect files: directories recurse; repo paths are relative to the CWD (or to the
     // directory itself for its children), normalized to forward slashes.
@@ -466,29 +517,68 @@ pub async fn push(
     }
 
     let bar = indicatif::ProgressBar::new_spinner();
-    bar.set_message("chunking...");
+    bar.enable_steady_tick(std::time::Duration::from_millis(120));
+    bar.set_message(format!("hashing {} files...", files.len()));
     let bar_for_events = bar.clone();
     let opts = PushOptions {
         branch: branch.to_string(),
         message: message.to_string(),
         base: None,
         expect_oid,
-        progress: Some(std::sync::Arc::new(move |ev: PushEvent| match ev {
-            PushEvent::Hashed {
-                files,
-                chunks,
-                bytes,
-            } => bar_for_events.set_message(format!(
-                "hashed {files} files ({chunks} chunks, {bytes} bytes); negotiating..."
-            )),
-            PushEvent::Negotiated { missing, total } => bar_for_events.set_message(format!(
-                "server lacks {missing}/{total} chunks; uploading..."
-            )),
-            PushEvent::UploadedBatch { chunks, bytes } => {
-                bar_for_events.set_message(format!("uploaded {chunks} chunks ({bytes} bytes)..."))
-            }
-            PushEvent::Committed { ref_name, .. } => {
-                bar_for_events.set_message(format!("committed to {ref_name}"))
+        progress: Some(std::sync::Arc::new(move |ev: PushEvent| {
+            use indicatif::HumanBytes;
+            match ev {
+                PushEvent::Chunking {
+                    files_done,
+                    files_total,
+                    bytes_hashed,
+                } => bar_for_events.set_message(format!(
+                    "hashing {files_done}/{files_total} files ({})...",
+                    HumanBytes(bytes_hashed)
+                )),
+                PushEvent::Hashed {
+                    files,
+                    chunks,
+                    bytes,
+                } => bar_for_events.set_message(format!(
+                    "hashed {files} files ({chunks} chunks, {}); asking the server what it already has...",
+                    HumanBytes(bytes)
+                )),
+                PushEvent::Negotiated { missing, total } => bar_for_events.set_message(format!(
+                    "server lacks {missing} of {total} chunks; uploading..."
+                )),
+                PushEvent::UploadedBatch { chunks, bytes } => bar_for_events.set_message(format!(
+                    "uploaded {chunks} chunks ({})...",
+                    HumanBytes(bytes)
+                )),
+                PushEvent::Committing { files } => bar_for_events.set_message(format!(
+                    "all bytes on the server; committing {files} files (server builds the tree)..."
+                )),
+                PushEvent::CommitDetached { job_id } => {
+                    let line = format!(
+                        "commit running as job {job_id} (survives disconnects; check from \
+                         anywhere with: tl git commit-status --repo <repo> {job_id})"
+                    );
+                    // indicatif drops println on hidden draw targets (piped stderr) — and a
+                    // scripted push is exactly where the out-of-band job id matters.
+                    if bar_for_events.is_hidden() {
+                        println!("{line}");
+                    } else {
+                        bar_for_events.println(line);
+                    }
+                }
+                PushEvent::CommitProgress { phase, done, total } => {
+                    if total > 0 {
+                        bar_for_events.set_message(format!(
+                            "committing: {phase} {done}/{total} chunks..."
+                        ))
+                    } else {
+                        bar_for_events.set_message(format!("committing: {phase}..."))
+                    }
+                }
+                PushEvent::Committed { ref_name, .. } => {
+                    bar_for_events.set_message(format!("committed to {ref_name}"))
+                }
             }
         })),
         ..Default::default()
@@ -558,21 +648,139 @@ fn collect_push_files(
         }
         return Ok(());
     }
-    let repo_path = path
-        .strip_prefix(root.parent().unwrap_or(root))
-        .unwrap_or(path)
-        .to_string_lossy()
-        .replace('\\', "/");
+    let repo_path = repo_path_for(root, path);
+    if repo_path.is_empty() {
+        return Ok(());
+    }
     out.push(PushFile {
+        mode: None,
+        delete: false,
         repo_path,
         source: PushSource::Path(path.to_path_buf()),
     });
     Ok(())
 }
 
+/// Git credential for pushes and job polls. Same dev affordance as `tl fs`
+/// (FsSession::open): a pre-provisioned `TENSORLAKE_GIT_TOKEN` skips platform minting, e.g.
+/// against a local artifact-storage server in open-auth mode.
+async fn push_credential(
+    client: &tensorlake::artifact_storage::ArtifactStorageClient,
+    project_id: &str,
+    repo: &str,
+) -> Result<tensorlake::artifact_storage::models::GitCredential> {
+    if let Ok(token) = std::env::var("TENSORLAKE_GIT_TOKEN") {
+        return Ok(tensorlake::artifact_storage::models::GitCredential {
+            token,
+            token_type: "bearer".to_string(),
+            expires_at: String::new(),
+            git_username: std::env::var("TENSORLAKE_GIT_USERNAME")
+                .unwrap_or_else(|_| "t".to_string()),
+            repo_pattern: "*".to_string(),
+            scopes: Vec::new(),
+        });
+    }
+    Ok(client
+        .mint_token_for_repo(project_id, Some(repo))
+        .await?
+        .into_inner())
+}
+
+/// `tl git commit-status --repo <repo> <job-id>` — the out-of-band view of a detached commit
+/// job's state machine, from any terminal or process.
+pub async fn commit_status(ctx: &CliContext, repo: &str, job_id: &str) -> Result<()> {
+    let project_id = project_id(ctx)?;
+    let client = artifact_storage_client(ctx)?;
+    let credential = push_credential(&client, &project_id, repo).await?;
+    let job = client
+        .commit_job_status(
+            &project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+            job_id,
+        )
+        .await?
+        .into_inner();
+    let state = job["state"].as_str().unwrap_or("?");
+    match state {
+        "committed" => println!(
+            "{} {} -> {}",
+            console::style("committed").green().bold(),
+            job["commit"].as_str().unwrap_or("?"),
+            job["ref_name"].as_str().unwrap_or("?"),
+        ),
+        "failed" => println!(
+            "{} {} ({}){}",
+            console::style("failed").red().bold(),
+            job["error"]["message"].as_str().unwrap_or("?"),
+            job["error"]["kind"].as_str().unwrap_or("?"),
+            if job["error"]["retryable"].as_bool().unwrap_or(false) {
+                " — safe to re-push: uploaded chunks are deduplicated"
+            } else {
+                ""
+            },
+        ),
+        _ => {
+            let phase = job["phase"].as_str().unwrap_or(state);
+            if let (Some(done), Some(total)) = (
+                job["read_back"]["done"].as_u64(),
+                job["read_back"]["total"].as_u64(),
+            ) {
+                let pct = if total > 0 { done * 100 / total } else { 0 };
+                println!(
+                    "{} {phase}: {done}/{total} chunks ({pct}%)",
+                    console::style(state).yellow().bold(),
+                );
+            } else {
+                println!("{} {phase}", console::style(state).yellow().bold());
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Repo path for a file under a pushed root: relative to the root's parent (so pushing
+/// `somedir` prefixes its name), built from normal components only. Pushing `.` used to
+/// yield `./arch/boot.c` — the server rejects `.`/`..`/empty components at commit time,
+/// after every chunk was already uploaded, so this must be clean by construction.
+fn repo_path_for(root: &std::path::Path, path: &std::path::Path) -> String {
+    path.strip_prefix(root.parent().unwrap_or(root))
+        .unwrap_or(path)
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn repo_paths_from_dot_have_no_dot_components() {
+        let root = std::path::Path::new(".");
+        assert_eq!(
+            repo_path_for(root, std::path::Path::new("./.clang-format")),
+            ".clang-format"
+        );
+        assert_eq!(
+            repo_path_for(root, std::path::Path::new("./arch/boot.c")),
+            "arch/boot.c"
+        );
+    }
+
+    #[test]
+    fn repo_paths_from_named_dir_keep_the_dir_prefix() {
+        let root = std::path::Path::new("/tmp/somedir");
+        assert_eq!(
+            repo_path_for(root, std::path::Path::new("/tmp/somedir/a/b.txt")),
+            "somedir/a/b.txt"
+        );
+    }
 
     #[test]
     fn normalize_repo_arg_passes_through_bare_names() {

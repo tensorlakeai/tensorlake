@@ -157,6 +157,12 @@ impl CliContext {
         if self.introspect_cache.is_some() {
             return Ok(());
         }
+        // Dev/self-hosted escape (matches the `tl fs` git-credential override): a pre-provisioned
+        // git token implies there is no platform control plane to introspect against, so the
+        // explicitly configured org/project are taken as-is.
+        if std::env::var("TENSORLAKE_GIT_TOKEN").is_ok() && self.has_org_and_project() {
+            return Ok(());
+        }
 
         let client = self.client()?;
         let resp = client

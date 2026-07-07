@@ -40,6 +40,41 @@ jobs:
       - name: Run Rust workspace tests
         run: cargo test --workspace
 
+  rust_mount_feature:
+    name: Rust mount feature (build, clippy, test)
+    # The `mount` feature needs the private gsvc-mount core, which requires access to the
+    # artifact_storage repo. Skip on pull requests from forks (they cannot read the App secrets);
+    # the default `rust_tests` lane already covers those without the feature.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest-xlarge
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-mount
+          cache-bin: false
+
+      - name: Vendor private artifact_storage crates
+        uses: ./.github/actions/vendor-private-crates
+        with:
+          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
+          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
+
+      # Compile and test the `tl fs mount` stack against the real mount core (the default
+      # rust_tests lane cannot — the feature is off there). Mirrors that lane's build+test scope;
+      # clippy is not gated anywhere in this repo, so it is not gated here either.
+      - name: Build CLI with mount
+        run: cargo build -p tensorlake-cli --features mount,git-clone
+
+      - name: Test CLI with mount
+        run: cargo test -p tensorlake-cli --features mount,git-clone
+
   windows_build_smoke:
     name: Windows build smoke test
     runs-on: windows-latest

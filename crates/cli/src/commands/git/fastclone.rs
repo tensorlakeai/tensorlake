@@ -326,43 +326,6 @@ pub fn format_fast_clone_stats(prefix: &str, stats: &FastCloneStats) -> String {
     out
 }
 
-pub fn parse_cache_max_bytes(value: &str) -> Result<u64> {
-    let raw = value.trim();
-    if raw.is_empty() {
-        bail!("cache size cannot be empty");
-    }
-    let lower = raw.to_ascii_lowercase();
-    let suffixes = [
-        ("tib", 1024_u64.pow(4)),
-        ("tb", 1024_u64.pow(4)),
-        ("t", 1024_u64.pow(4)),
-        ("gib", 1024_u64.pow(3)),
-        ("gb", 1024_u64.pow(3)),
-        ("g", 1024_u64.pow(3)),
-        ("mib", 1024_u64.pow(2)),
-        ("mb", 1024_u64.pow(2)),
-        ("m", 1024_u64.pow(2)),
-        ("kib", 1024),
-        ("kb", 1024),
-        ("k", 1024),
-        ("b", 1),
-    ];
-    let (digits, multiplier) = suffixes
-        .iter()
-        .find_map(|(suffix, multiplier)| {
-            lower
-                .strip_suffix(suffix)
-                .map(|digits| (digits.trim(), *multiplier))
-        })
-        .unwrap_or((raw, 1));
-    let bytes = digits
-        .parse::<u64>()
-        .with_context(|| format!("invalid cache size {value:?}"))?;
-    bytes
-        .checked_mul(multiplier)
-        .ok_or_else(|| anyhow::anyhow!("cache size {value:?} is too large"))
-}
-
 /// Derive the default destination directory from a repository URL, matching `git clone` convention.
 pub fn default_dest_from_url(raw: &str) -> PathBuf {
     let parsed = Url::parse(raw).ok();
