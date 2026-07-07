@@ -56,12 +56,6 @@ pub fn parse_cache_max_bytes(value: &str) -> anyhow::Result<u64> {
         .ok_or_else(|| anyhow::anyhow!("cache size {value:?} is too large"))
 }
 
-pub fn repo_url(ctx: &CliContext, repo: &str) -> Result<String> {
-    let client = artifact_storage_client(ctx)?;
-    let project_id = project_id(ctx)?;
-    Ok(client.git_repo_url(&project_id, repo))
-}
-
 pub async fn mint_token(ctx: &CliContext, repo: Option<&str>, output_json: bool) -> Result<()> {
     let project_id = project_id(ctx)?;
     let credential = artifact_storage_client(ctx)?

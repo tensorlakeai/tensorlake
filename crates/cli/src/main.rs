@@ -180,7 +180,7 @@ enum Commands {
     #[command(subcommand)]
     Secrets(SecretsCommands),
 
-    /// Manage Tensorlake Filesystems
+    /// Manage Tensorlake workspaces (versioned file systems mounted over FUSE)
     #[command(subcommand, name = "fs")]
     Fs(FsCommands),
 
@@ -204,61 +204,58 @@ enum Commands {
 
 use std::path::PathBuf;
 
+/// `--mode` for `tl fs mount`. Absent means writable, except a workspace already mounted
+/// elsewhere defaults to read-only.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum MountWriteMode {
+    Ro,
+    Rw,
+}
+
 #[derive(Subcommand)]
 enum FsCommands {
-    /// Create a new file system (a versioned artifact-storage repository)
-    Create {
-        /// File system name
-        #[arg(short, long)]
-        name: String,
-
-        /// Print the created file system as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// List file systems
-    #[command(name = "ls")]
-    Ls {
-        /// Print file systems as JSON
-        #[arg(long)]
-        json: bool,
-    },
-
-    /// Delete a file system by name
-    #[command(name = "rm")]
-    Rm {
-        /// File system name
-        name: String,
-    },
-
-    /// Mount a file system at a local directory (FUSE): reads stream lazily, writes stay local
-    /// until snapshotted
+    /// Create and mount a workspace, or mount an existing one (FUSE): reads stream lazily,
+    /// writes stay local until snapshotted
     Mount {
-        /// `<file-system>[:<ref-or-commit>]` (defaults to the default branch head)
+        /// `<file-system>[:<ref-or-commit>]` to create a new workspace, or a workspace id
+        /// from `tl fs ls` to mount an existing one (resumes at its last snapshot)
         target: String,
 
         /// Mountpoint directory (created; must be empty)
         path: PathBuf,
 
-        /// Attach to an existing workspace by id (see `tl fs workspace ls`) instead of
-        /// creating a new one; resumes at its last snapshot
-        #[arg(long)]
-        workspace: Option<String>,
-
-        /// Read-only view that follows the branch: reads see new commits as the branch
-        /// advances, writes fail with EROFS
-        #[arg(long, conflicts_with_all = ["workspace", "shared_rw"])]
-        shared_ro: bool,
+        /// Write policy. Defaults to `rw`, but a workspace already mounted elsewhere defaults
+        /// to `ro` — pass `--mode rw` to mount it writable anyway. With a
+        /// `<file-system>[:<branch>]` target, `ro` is a read-only view that follows the branch
+        #[arg(long, value_enum)]
+        mode: Option<MountWriteMode>,
 
         /// Every snapshot automatically publishes to the mounted branch (server-ordered,
         /// one attributed commit per snapshot). Requires `<file-system>:<branch>`
-        #[arg(long, conflicts_with = "workspace")]
+        #[arg(long)]
         shared_rw: bool,
 
         /// Run the mount daemon in the foreground (debugging)
         #[arg(long)]
         foreground: bool,
+    },
+
+    /// List workspaces (all file systems, or one)
+    #[command(name = "ls")]
+    Ls {
+        /// Limit the listing to one file system
+        file_system: Option<String>,
+
+        /// Print workspaces as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Delete a workspace (the only way a workspace dies)
+    #[command(name = "rm")]
+    Rm {
+        /// Workspace id or unique prefix (see `tl fs ls`)
+        workspace_id: String,
     },
 
     /// (internal) Run a mount daemon for an existing state directory
@@ -336,8 +333,8 @@ enum FsCommands {
         delete: bool,
     },
 
-    /// Manage a file system's workspaces
-    #[command(subcommand)]
+    /// (legacy) Old workspace subcommands; workspaces are now managed by `tl fs ls` / `tl fs rm`
+    #[command(subcommand, hide = true)]
     Workspace(WorkspaceCommands),
 }
 
@@ -352,12 +349,12 @@ enum WorkspaceCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Delete a workspace (the only way a workspace dies)
+    /// Delete a workspace
     Rm {
-        /// File system name
+        /// File system name (ignored; the workspace id is resolved on its own)
         file_system: String,
 
-        /// Workspace id (see `tl fs workspace ls`)
+        /// Workspace id (see `tl fs ls`)
         workspace_id: String,
     },
 }
@@ -500,13 +497,8 @@ enum GitCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Print the Git remote URL for a repo
-    Url {
-        /// Repo name
-        repo: String,
-    },
-    /// Print repo information
-    #[command(alias = "status")]
+    /// Print repo information (remote URL, branches, refs)
+    #[command(aliases = ["status", "url"])]
     Info {
         /// Repo name
         repo: String,
@@ -2180,23 +2172,23 @@ async fn run_applications_command(
 async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Result<()> {
     ensure_auth_and_project(ctx).await?;
     let result = match subcmd {
-        FsCommands::Create { name, json } => commands::fs::create(ctx, &name, json).await,
-        FsCommands::Ls { json } => commands::fs::list(ctx, json).await,
-        FsCommands::Rm { name } => commands::fs::remove(ctx, &name).await,
+        FsCommands::Ls { file_system, json } => {
+            commands::fs::ls(ctx, file_system.as_deref(), json).await
+        }
+        FsCommands::Rm { workspace_id } => commands::fs::rm(ctx, &workspace_id).await,
         FsCommands::Mount {
             target,
             path,
-            workspace,
-            shared_ro,
+            mode,
             shared_rw,
             foreground,
         } => {
-            let mode = match (shared_ro, shared_rw) {
-                (true, _) => commands::fs::MountMode::SharedRo,
-                (_, true) => commands::fs::MountMode::SharedRw,
-                _ => commands::fs::MountMode::Workspace,
+            let mode = match mode {
+                Some(MountWriteMode::Ro) => commands::fs::WritePolicy::Ro,
+                Some(MountWriteMode::Rw) => commands::fs::WritePolicy::Rw,
+                None => commands::fs::WritePolicy::Auto,
             };
-            commands::fs::mount(ctx, &target, &path, workspace.as_deref(), mode, foreground).await
+            commands::fs::mount(ctx, &target, &path, mode, shared_rw, foreground).await
         }
         FsCommands::Daemon { state_dir } => commands::fs::daemon::run(ctx, &state_dir).await,
         FsCommands::Snapshot { path, message } => {
@@ -2216,12 +2208,11 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         FsCommands::Unmount { path, delete } => commands::fs::unmount(ctx, &path, delete).await,
         FsCommands::Workspace(cmd) => match cmd {
             WorkspaceCommands::Ls { file_system, json } => {
-                commands::fs::workspace_ls(ctx, &file_system, json).await
+                commands::fs::ls(ctx, Some(&file_system), json).await
             }
-            WorkspaceCommands::Rm {
-                file_system,
-                workspace_id,
-            } => commands::fs::workspace_rm(ctx, &file_system, &workspace_id).await,
+            WorkspaceCommands::Rm { workspace_id, .. } => {
+                commands::fs::rm(ctx, &workspace_id).await
+            }
         },
     };
     // A cached minted git credential can be revoked before its recorded expiry; purge
@@ -2295,10 +2286,6 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
         } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, paths, json).await,
         GitCommands::CommitStatus { repo, job_id } => {
             commands::git::commit_status(ctx, &repo, &job_id).await
-        }
-        GitCommands::Url { repo } => {
-            println!("{}", commands::git::repo_url(ctx, &repo)?);
-            Ok(())
         }
         GitCommands::Info { repo, json } => commands::git::status(ctx, &repo, json).await,
         GitCommands::Repo(repo_cmd) => match repo_cmd {
@@ -2537,6 +2524,15 @@ mod tests {
             _ => panic!("expected git status alias"),
         }
 
+        // `tl git url` merged into `tl git info` (which prints the remote URL).
+        match parse_command(["tl", "git", "url", "demo"]) {
+            Commands::Git(GitCommands::Info { repo, json }) => {
+                assert_eq!(repo, "demo");
+                assert!(!json);
+            }
+            _ => panic!("expected git url alias of info"),
+        }
+
         match parse_command(["tl", "git", "repo", "create", "demo"]) {
             Commands::Git(GitCommands::Repo(GitRepoCommands::Create { repo, .. })) => {
                 assert_eq!(repo, "demo");
@@ -2589,6 +2585,70 @@ mod tests {
         }
 
         assert!(Cli::try_parse_from(["tl", "git", "push", "demo"]).is_err());
+    }
+
+    #[test]
+    fn fs_commands_are_workspace_centric() {
+        match parse_command(["tl", "fs", "mount", "data:main", "./w", "--mode", "ro"]) {
+            Commands::Fs(FsCommands::Mount {
+                target,
+                path,
+                mode,
+                shared_rw,
+                foreground,
+            }) => {
+                assert_eq!(target, "data:main");
+                assert_eq!(path, PathBuf::from("./w"));
+                assert_eq!(mode, Some(MountWriteMode::Ro));
+                assert!(!shared_rw);
+                assert!(!foreground);
+            }
+            _ => panic!("expected fs mount command"),
+        }
+
+        // A bare workspace id mounts an existing workspace; --mode rw forces writes.
+        match parse_command(["tl", "fs", "mount", "0a1b2c3d", "./w", "--mode", "rw"]) {
+            Commands::Fs(FsCommands::Mount { target, mode, .. }) => {
+                assert_eq!(target, "0a1b2c3d");
+                assert_eq!(mode, Some(MountWriteMode::Rw));
+            }
+            _ => panic!("expected fs mount command"),
+        }
+
+        match parse_command(["tl", "fs", "ls"]) {
+            Commands::Fs(FsCommands::Ls {
+                file_system: None,
+                json: false,
+            }) => {}
+            _ => panic!("expected fs ls command"),
+        }
+
+        match parse_command(["tl", "fs", "ls", "data", "--json"]) {
+            Commands::Fs(FsCommands::Ls { file_system, json }) => {
+                assert_eq!(file_system.as_deref(), Some("data"));
+                assert!(json);
+            }
+            _ => panic!("expected fs ls command"),
+        }
+
+        match parse_command(["tl", "fs", "rm", "0a1b2c3d"]) {
+            Commands::Fs(FsCommands::Rm { workspace_id }) => {
+                assert_eq!(workspace_id, "0a1b2c3d");
+            }
+            _ => panic!("expected fs rm command"),
+        }
+
+        // Legacy spellings keep parsing (hidden).
+        assert!(Cli::try_parse_from(["tl", "fs", "workspace", "ls", "data"]).is_ok());
+        assert!(Cli::try_parse_from(["tl", "fs", "workspace", "rm", "data", "0a1b"]).is_ok());
+
+        // The old file-system registry commands are gone: file systems are managed by `tl git`.
+        assert!(Cli::try_parse_from(["tl", "fs", "create", "--name", "data"]).is_err());
+        assert!(Cli::try_parse_from(["tl", "fs", "mount", "data", "./w", "--shared-ro"]).is_err());
+        assert!(
+            Cli::try_parse_from(["tl", "fs", "mount", "data", "./w", "--workspace", "0a1b"])
+                .is_err()
+        );
     }
 
     #[test]

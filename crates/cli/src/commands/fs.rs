@@ -1,9 +1,11 @@
 //! `tl fs` — versioned filesystem workspaces on artifact storage, mounted over FUSE.
 //!
-//! Product model (artifact_storage issue #24): a *file system* is an artifact-storage repo; a
-//! *mount* is a workspace (private leased ref) served by a FUSE daemon — reads stream lazily
-//! from the server through the vendored `gsvc-mount` core's immutable caches, writes land in a
-//! local overlay. **The overlay is the dirty set**: `snapshot` enumerates it (nothing is
+//! Product model (artifact_storage issue #24): the *workspace* is the unit `tl fs` manages —
+//! `mount` creates or attaches one, `ls` lists them, `rm` deletes them. A *file system* is the
+//! artifact-storage repo backing them (managed with `tl git`); a mounted workspace (private
+//! leased ref) is served by a FUSE daemon — reads stream lazily from the server through the
+//! vendored `gsvc-mount` core's immutable caches, writes land in a local overlay.
+//! **The overlay is the dirty set**: `snapshot` enumerates it (nothing is
 //! scanned), seals it into a commit on the workspace ref, and the mount's lower layer follows
 //! the ref to the new snapshot; `promote` CAS-advances a real branch (squash by default);
 //! `restore` refills the overlay from any snapshot. FUSE is the only mount path — Linux builds
@@ -19,7 +21,7 @@ use tensorlake::artifact_storage::ArtifactStorageClient;
 use tensorlake::artifact_storage::ingest::{PushEvent, PushFile, PushOptions, PushSource};
 use tensorlake::artifact_storage::models::GitCredential;
 use tensorlake::artifact_storage::workspaces::{
-    CreateWorkspaceRequest, PromoteWorkspaceRequest, TreeEntry,
+    CreateWorkspaceRequest, PromoteWorkspaceRequest, TreeEntry, WorkspaceInfo,
 };
 
 use crate::auth::context::CliContext;
@@ -118,77 +120,206 @@ impl FsSession {
 }
 
 // ---------------------------------------------------------------------------------------------
-// Registry: a file system is an artifact-storage repo.
+// Workspaces: the unit `tl fs` manages. File systems (artifact-storage repos) are managed with
+// `tl git`; here they are only the containers workspaces live in.
 // ---------------------------------------------------------------------------------------------
 
-pub async fn create(ctx: &CliContext, name: &str, output_json: bool) -> Result<()> {
+/// Write policy for `tl fs mount`, from `--mode`. `Auto` means writable — except when attaching
+/// a workspace that is already mounted live somewhere else, which defaults to read-only.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum WritePolicy {
+    Auto,
+    Ro,
+    Rw,
+}
+
+async fn file_system_names(session: &FsSession) -> Result<Vec<String>> {
+    let (user, token) = session.creds();
+    Ok(session
+        .client
+        .list_repos_with_credential(&session.project_id, user, token)
+        .await?
+        .into_inner()
+        .repos
+        .into_iter()
+        .map(|r| r.name)
+        .collect())
+}
+
+/// Every workspace across the given file systems, newest first: `(file system, workspace)`.
+async fn all_workspaces(
+    session: &FsSession,
+    fs_names: &[String],
+) -> Result<Vec<(String, WorkspaceInfo)>> {
+    let (user, token) = session.creds();
+    let lists: Vec<Result<(String, Vec<WorkspaceInfo>)>> =
+        futures::stream::iter(fs_names.iter().cloned().map(|repo| {
+            let client = session.client.clone();
+            let (project, user, token) = (
+                session.project_id.clone(),
+                user.to_string(),
+                token.to_string(),
+            );
+            async move {
+                let list = client
+                    .list_workspaces(&project, &repo, &user, &token)
+                    .await?
+                    .into_inner();
+                Ok((repo, list))
+            }
+        }))
+        .buffer_unordered(8)
+        .collect()
+        .await;
+    let mut rows = Vec::new();
+    for list in lists {
+        let (repo, workspaces) = list?;
+        rows.extend(workspaces.into_iter().map(|ws| (repo.clone(), ws)));
+    }
+    rows.sort_by_key(|(_, ws)| std::cmp::Reverse(ws.created_at_secs));
+    Ok(rows)
+}
+
+/// Resolve a workspace id (or unique prefix) to its file system + info, scanning every file
+/// system in the project.
+async fn resolve_workspace(
+    session: &FsSession,
+    fs_names: &[String],
+    id: &str,
+) -> Result<Option<(String, WorkspaceInfo)>> {
+    let mut matches: Vec<(String, WorkspaceInfo)> = all_workspaces(session, fs_names)
+        .await?
+        .into_iter()
+        .filter(|(_, ws)| ws.id.starts_with(id))
+        .collect();
+    match matches.len() {
+        0 => Ok(None),
+        1 => Ok(Some(matches.remove(0))),
+        n => Err(CliError::usage(format!(
+            "workspace id {id:?} is ambiguous ({n} matches); use more characters"
+        ))),
+    }
+}
+
+/// `tl fs ls [file-system]` — every live workspace (across all file systems by default), with
+/// where each one is currently mounted on this machine.
+pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) -> Result<()> {
+    let session = FsSession::open(ctx, file_system).await?;
+    let fs_names = match file_system {
+        Some(fs) => vec![fs.to_string()],
+        None => file_system_names(&session).await?,
+    };
+    let rows = all_workspaces(&session, &fs_names).await?;
+    let mounts = live_mounts();
+    let mounted_at = |id: &str| {
+        mounts
+            .iter()
+            .find(|(_, s)| s.workspace_id == id)
+            .map(|(m, _)| m.clone())
+    };
+    if output_json {
+        let out: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|(fs, ws)| {
+                serde_json::json!({
+                    "file_system": fs,
+                    "workspace": ws,
+                    "mounted_at": mounted_at(&ws.id),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&out)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("No workspaces. Create and mount one with: tl fs mount <file-system> <path>");
+        return Ok(());
+    }
+    let mut table = new_table(&[
+        "Workspace",
+        "File system",
+        "Base",
+        "Snapshots",
+        "Mode",
+        "Mounted",
+        "Age",
+    ]);
+    for (fs, ws) in &rows {
+        table.add_row(vec![
+            Cell::new(&ws.id),
+            Cell::new(fs),
+            Cell::new(ws.base_ref.as_deref().unwrap_or(&ws.base[..12])),
+            Cell::new(if ws.head == ws.base { "-" } else { "yes" }),
+            Cell::new(match &ws.shared_target {
+                Some(target) => format!("shared-rw -> {target}"),
+                None => "workspace".to_string(),
+            }),
+            Cell::new(mounted_at(&ws.id).unwrap_or_else(|| "-".to_string())),
+            Cell::new(age_display(ws.created_at_secs)),
+        ]);
+    }
+    println!("{table}");
+    println!("Mount: tl fs mount <workspace> <path> — delete: tl fs rm <workspace>");
+    Ok(())
+}
+
+/// `tl fs rm <workspace-id>` — the one way a workspace dies. Its snapshots become unreachable
+/// (promoted work is unaffected).
+pub async fn rm(ctx: &CliContext, workspace_id: &str) -> Result<()> {
     let session = FsSession::open(ctx, None).await?;
+    let fs_names = file_system_names(&session).await?;
+    let Some((file_system, ws)) = resolve_workspace(&session, &fs_names, workspace_id).await?
+    else {
+        return Err(CliError::usage(format!(
+            "no workspace matches {workspace_id:?} (see: tl fs ls)"
+        )));
+    };
+    if let Some(mountpoint) = live_mount_of(&ws.id) {
+        return Err(CliError::usage(format!(
+            "workspace {} is mounted at {mountpoint}; unmount and delete in one step: tl fs \
+             unmount {mountpoint} --delete",
+            short_id(&ws.id)
+        )));
+    }
     let (user, token) = session.creds();
     session
         .client
-        .create_repo_with_credential(&session.project_id, name, None, user, token)
+        .delete_workspace(&session.project_id, &file_system, user, token, &ws.id)
         .await?;
-    // Seed an initial empty commit so the file system is immediately mountable: a workspace
-    // needs a base commit to exist.
+    println!(
+        "Deleted workspace {} (file system {file_system}).",
+        short_id(&ws.id)
+    );
+    Ok(())
+}
+
+/// A workspace needs a base commit, but a file system fresh out of `tl git create` has an
+/// unborn default branch. Seed it with an empty initial commit so the first mount just works.
+async fn ensure_seeded(session: &FsSession, default_branch: &str, repo: &str) -> Result<()> {
+    let (user, token) = session.creds();
+    let status = session
+        .client
+        .ref_status(&session.project_id, repo, user, token, default_branch)
+        .await?
+        .into_inner();
+    if status.oid.is_some() {
+        return Ok(());
+    }
     session
         .client
         .push_files(
             &session.project_id,
-            name,
+            repo,
             user,
             token,
             Vec::new(),
             PushOptions {
+                branch: default_branch.to_string(),
                 message: "Initialize file system".to_string(),
                 ..Default::default()
             },
         )
         .await?;
-    if output_json {
-        println!("{}", serde_json::json!({ "name": name }));
-    } else {
-        println!("Created file system '{name}'.");
-        println!("Mount it with: tl fs mount {name} ./work");
-    }
-    Ok(())
-}
-
-pub async fn list(ctx: &CliContext, output_json: bool) -> Result<()> {
-    let session = FsSession::open(ctx, None).await?;
-    let (user, token) = session.creds();
-    let repos = session
-        .client
-        .list_repos_with_credential(&session.project_id, user, token)
-        .await?
-        .into_inner();
-    if output_json {
-        println!("{}", serde_json::to_string_pretty(&repos)?);
-        return Ok(());
-    }
-    if repos.repos.is_empty() {
-        println!("No file systems found.");
-        return Ok(());
-    }
-    let mut table = new_table(&["Name", "Default branch", "Status"]);
-    for repo in &repos.repos {
-        table.add_row(vec![
-            Cell::new(&repo.name),
-            Cell::new(&repo.default_branch),
-            Cell::new(&repo.status),
-        ]);
-    }
-    println!("{table}");
-    Ok(())
-}
-
-pub async fn remove(ctx: &CliContext, name: &str) -> Result<()> {
-    let session = FsSession::open(ctx, Some(name)).await?;
-    let (user, token) = session.creds();
-    session
-        .client
-        .delete_repo_with_credential(&session.project_id, name, user, token)
-        .await?;
-    println!("Deleted file system '{name}'.");
     Ok(())
 }
 
@@ -262,31 +393,76 @@ fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
     Ok((mountpoint, PathBuf::from(state_dir)))
 }
 
+#[cfg(unix)]
+fn daemon_alive(pid: i32) -> bool {
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+// Mounts don't exist off unix; compile stub, like the kernel-view helpers below.
+#[cfg(not(unix))]
+fn daemon_alive(_pid: i32) -> bool {
+    false
+}
+
+/// Local mounts whose daemon is still running: `(mountpoint, state)`.
+fn live_mounts() -> Vec<(String, MountState)> {
+    registry_load()
+        .iter()
+        .filter_map(|(mountpoint, state_dir)| {
+            let state_dir = PathBuf::from(state_dir.as_str()?);
+            let state = daemon::load_mount_state(&state_dir).ok()?;
+            let alive = daemon::daemon_pid(&state_dir).is_some_and(daemon_alive);
+            alive.then(|| (mountpoint.clone(), state))
+        })
+        .collect()
+}
+
+/// Where a workspace is live-mounted on this machine, if anywhere.
+fn live_mount_of(workspace_id: &str) -> Option<String> {
+    live_mounts()
+        .into_iter()
+        .find(|(_, state)| state.workspace_id == workspace_id)
+        .map(|(mountpoint, _)| mountpoint)
+}
+
+/// State dir for a new mount of `workspace_id`. The workspace's canonical dir is reused when
+/// free (that's what lets a plain re-mount resume its local cache); when another registered
+/// mount of the same workspace holds it, pick a fresh suffixed dir — concurrent second mounts
+/// (read-only views especially) must never share overlay state with the writer.
+fn alloc_state_dir(workspace_id: &str) -> PathBuf {
+    let registered: std::collections::HashSet<PathBuf> = registry_load()
+        .values()
+        .filter_map(|v| v.as_str().map(PathBuf::from))
+        .collect();
+    let root = daemon::state_dir_root();
+    let mut n = 1u32;
+    loop {
+        let candidate = if n == 1 {
+            root.join(workspace_id)
+        } else {
+            root.join(format!("{workspace_id}.{n}"))
+        };
+        if !registered.contains(&candidate) {
+            return candidate;
+        }
+        n += 1;
+    }
+}
+
 // ---------------------------------------------------------------------------------------------
 // Mount / unmount
 // ---------------------------------------------------------------------------------------------
 
-/// How a mount treats the branch it was created from. Every mode is still a private,
-/// single-writer workspace — modes vary only what the view follows and what happens to writes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum MountMode {
-    /// Private workspace; publish with explicit `promote`.
-    Workspace,
-    /// Read session following the branch: reads see new commits, writes answer EROFS.
-    SharedRo,
-    /// Private workspace whose every snapshot auto-publishes to the branch (server-ordered).
-    SharedRw,
-}
-
-/// `tl fs mount <file-system>[:<ref-or-commit>] <path>` — create a workspace (or attach to an
-/// existing one with `--workspace <id>`, resuming at its last snapshot) and start its FUSE
-/// daemon. Reads stream lazily; nothing is copied to disk up front.
+/// `tl fs mount <target> <path>` — how workspaces are born and revived.
+/// `<file-system>[:<ref-or-commit>]` creates a new workspace on that file system;
+/// `<workspace-id>` (or a unique prefix; see `tl fs ls`) mounts an existing one, resuming at
+/// its last snapshot. Reads stream lazily; nothing is copied to disk up front.
 pub async fn mount(
     ctx: &CliContext,
     target: &str,
     path: &Path,
-    workspace: Option<&str>,
-    mode: MountMode,
+    mode: WritePolicy,
+    shared_rw: bool,
     foreground: bool,
 ) -> Result<()> {
     // Bail before creating a workspace or spawning the daemon-wait loop.
@@ -295,28 +471,18 @@ pub async fn mount(
             "tl fs mount is supported on Linux (FUSE) and macOS (FSKit) only.",
         ));
     }
-    let (repo, base) = match target.split_once(':') {
-        Some((repo, base)) => (repo, Some(base.to_string())),
+    let (name, base) = match target.split_once(':') {
+        Some((name, base)) => (name, Some(base.to_string())),
         None => (target, None),
     };
-    if workspace.is_some() && base.is_some() {
+    if shared_rw && mode == WritePolicy::Ro {
         return Err(CliError::usage(
-            "--workspace attaches at the workspace's own head; drop the :<ref-or-commit> suffix",
+            "--shared-rw publishes every snapshot; it cannot be combined with --mode ro",
         ));
     }
-    if mode == MountMode::SharedRw && base.is_none() {
+    if shared_rw && base.is_none() {
         return Err(CliError::usage(
             "--shared-rw needs the branch to publish to: tl fs mount <file-system>:<branch> ...",
-        ));
-    }
-    if mode == MountMode::SharedRo
-        && base
-            .as_deref()
-            .is_some_and(|b| b.len() == 40 && b.bytes().all(|c| c.is_ascii_hexdigit()))
-    {
-        return Err(CliError::usage(
-            "--shared-ro follows a branch; a fixed commit never advances (mount it without \
-             --shared-ro instead)",
         ));
     }
     std::fs::create_dir_all(path)?;
@@ -330,112 +496,156 @@ pub async fn mount(
             path.display()
         )));
     }
-    let session = FsSession::open(ctx, Some(repo)).await?;
+    let session = FsSession::open(ctx, None).await?;
     let (user, token) = session.creds();
-    // Attach = reconnect: the workspace ref (and everything snapshotted onto it) survived
-    // whatever happened to the previous mount — sandbox crash, timeout, unmount.
-    let (ws, attached) = match workspace {
-        Some(id) => {
-            // Accept the short id every listing displays: resolve a <40-hex prefix against the
-            // live workspace list, requiring uniqueness.
-            let full_id = if id.len() < 40 {
-                let all = session
-                    .client
-                    .list_workspaces(&session.project_id, repo, user, token)
-                    .await?
-                    .into_inner();
-                let matches: Vec<String> = all
-                    .iter()
-                    .map(|w| w.id.clone())
-                    .filter(|wid| wid.starts_with(id))
-                    .collect();
-                match matches.as_slice() {
-                    [one] => one.clone(),
-                    [] => {
-                        return Err(CliError::usage(format!(
-                            "no workspace matches {id:?} (see: tl fs workspace ls {repo})"
-                        )));
-                    }
-                    many => {
-                        return Err(CliError::usage(format!(
-                            "workspace id {id:?} is ambiguous ({} matches); use more characters",
-                            many.len()
-                        )));
-                    }
-                }
-            } else {
-                id.to_string()
-            };
-            (
-                session
-                    .client
-                    .get_workspace(&session.project_id, repo, user, token, &full_id)
-                    .await?
-                    .into_inner(),
-                true,
-            )
+    let file_systems = session
+        .client
+        .list_repos_with_credential(&session.project_id, user, token)
+        .await?
+        .into_inner();
+    let known_fs = |n: &str| file_systems.repos.iter().find(|r| r.name == n);
+
+    // `<file-system>[:<base>]` creates a workspace; a bare target that names no file system is
+    // resolved as a workspace id (unique prefix) and attached. Attach = reconnect: the
+    // workspace ref (and everything snapshotted onto it) survived whatever happened to the
+    // previous mount — sandbox crash, timeout, unmount.
+    let attach = if base.is_none() && known_fs(name).is_none() {
+        let fs_names: Vec<String> = file_systems.repos.iter().map(|r| r.name.clone()).collect();
+        match resolve_workspace(&session, &fs_names, name).await? {
+            Some(found) => Some(found),
+            None => {
+                return Err(CliError::usage(format!(
+                    "no file system or workspace matches {name:?}. See `tl fs ls`, or create \
+                     the file system first: tl git create {name}"
+                )));
+            }
         }
-        None => (
-            session
+    } else {
+        if base.is_some() && known_fs(name).is_none() {
+            return Err(CliError::usage(format!(
+                "no file system named {name:?}; create it first: tl git create {name}"
+            )));
+        }
+        None
+    };
+
+    let (repo, ws, attached, read_only, follow_ref) = match attach {
+        Some((repo, ws)) => {
+            if shared_rw {
+                return Err(CliError::usage(
+                    "--shared-rw is chosen when creating a workspace on a branch: tl fs mount \
+                     <file-system>:<branch> --shared-rw <path>",
+                ));
+            }
+            // Single-writer by default: a workspace live-mounted elsewhere attaches read-only
+            // unless the user explicitly takes writes with --mode rw.
+            let mounted_at = live_mount_of(&ws.id);
+            let read_only = match mode {
+                WritePolicy::Rw => false,
+                WritePolicy::Ro => true,
+                WritePolicy::Auto => mounted_at.is_some(),
+            };
+            match (&mounted_at, mode) {
+                (Some(at), WritePolicy::Auto) => eprintln!(
+                    "{} workspace is already mounted at {at}; mounting read-only (pass \
+                     --mode rw to mount it writable anyway)",
+                    style("note:").yellow(),
+                ),
+                (Some(at), WritePolicy::Rw) => eprintln!(
+                    "{} workspace is also mounted writable at {at}; two writers race snapshots",
+                    style("warning:").yellow(),
+                ),
+                _ => {}
+            }
+            // A read-only view follows the workspace ref, so it sees each snapshot as the
+            // writer seals one; a writable attach of a shared-rw workspace keeps following the
+            // branch its snapshots publish to.
+            let follow_ref = if read_only {
+                Some(ws.ref_name.clone())
+            } else {
+                ws.shared_target
+                    .as_ref()
+                    .map(|target| format!("refs/heads/{target}"))
+            };
+            (repo, ws, true, read_only, follow_ref)
+        }
+        None => {
+            let read_only = mode == WritePolicy::Ro;
+            if base.is_none() {
+                let default_branch = known_fs(name)
+                    .expect("checked above")
+                    .default_branch
+                    .clone();
+                ensure_seeded(&session, &default_branch, name).await?;
+            }
+            let ws = session
                 .client
                 .create_workspace(
                     &session.project_id,
-                    repo,
+                    name,
                     user,
                     token,
                     &CreateWorkspaceRequest {
                         base: base.clone(),
-                        shared_target: (mode == MountMode::SharedRw)
-                            .then(|| base.clone().expect("guarded above")),
+                        shared_target: shared_rw.then(|| base.clone().expect("guarded above")),
                     },
                 )
                 .await?
-                .into_inner(),
-            false,
-        ),
-    };
-
-    // Shared modes follow the branch itself (default mode follows the workspace ref): shared-ro
-    // as a pure read session, shared-rw so every writer's view converges on the reconciled
-    // branch rather than staying pinned to its own snapshots. An explicit `:branch` names it;
-    // for shared-ro without one, the workspace's resolved base ref (the repo HEAD) is the branch.
-    let follow_ref = match mode {
-        MountMode::SharedRo => {
-            let branch_ref = match &base {
-                Some(b) => format!("refs/heads/{b}"),
-                None => {
-                    let base_ref = ws.base_ref.clone().unwrap_or_default();
-                    if !base_ref.starts_with("refs/heads/") {
-                        return Err(CliError::usage(
-                            "--shared-ro follows a branch, and the repo HEAD did not resolve to \
-                             one; name it explicitly: tl fs mount <file-system>:<branch> --shared-ro",
-                        ));
+                .into_inner();
+            // What the view follows. Writable workspaces follow their own ref; shared-rw
+            // follows the branch it publishes to, so every writer's view converges on the
+            // reconciled branch rather than staying pinned to its own snapshots. A read-only
+            // view follows the named branch (or the repo HEAD's branch) so new commits appear —
+            // except a fixed commit base, which is a pinned view that never advances.
+            let follow_ref = if shared_rw {
+                Some(format!(
+                    "refs/heads/{}",
+                    base.clone()
+                        .expect("shared-rw requires <file-system>:<branch>")
+                ))
+            } else if read_only {
+                match &base {
+                    Some(b) if b.len() == 40 && b.bytes().all(|c| c.is_ascii_hexdigit()) => {
+                        Some(ws.ref_name.clone())
                     }
-                    base_ref
+                    Some(b) => Some(format!("refs/heads/{b}")),
+                    None => {
+                        let base_ref = ws.base_ref.clone().unwrap_or_default();
+                        if !base_ref.starts_with("refs/heads/") {
+                            // The read session never got a branch to follow; don't leak the
+                            // workspace that was just created for it.
+                            let _ = session
+                                .client
+                                .delete_workspace(&session.project_id, name, user, token, &ws.id)
+                                .await;
+                            return Err(CliError::usage(
+                                "--mode ro follows a branch, and the repo HEAD did not resolve \
+                                 to one; name it explicitly: tl fs mount <file-system>:<branch> \
+                                 --mode ro <path>",
+                            ));
+                        }
+                        Some(base_ref)
+                    }
                 }
+            } else {
+                None
             };
-            Some(branch_ref)
+            (name.to_string(), ws, false, read_only, follow_ref)
         }
-        MountMode::SharedRw => Some(format!(
-            "refs/heads/{}",
-            base.clone()
-                .expect("shared-rw requires <file-system>:<branch>")
-        )),
-        _ => None,
     };
 
     let mountpoint = canonical_mountpoint(path)?;
-    let state_dir = daemon::state_dir_root().join(&ws.id);
+    let state_dir = alloc_state_dir(&ws.id);
     daemon::save_mount_state(
         &state_dir,
         &MountState {
             project_id: session.project_id.clone(),
-            repo: repo.to_string(),
+            repo: repo.clone(),
             workspace_id: ws.id.clone(),
             ref_name: ws.ref_name.clone(),
             mountpoint: PathBuf::from(&mountpoint),
             follow_ref,
-            read_only: Some(mode == MountMode::SharedRo),
+            read_only: Some(read_only),
         },
     )?;
     registry_add(&mountpoint, &state_dir)?;
@@ -461,9 +671,15 @@ pub async fn mount(
             Ok(resp) => {
                 if attached {
                     println!(
-                        "Attached workspace {} at {} (resumed at its last snapshot)",
+                        "Mounted workspace {} ({}) at {}{}",
                         short_id(&ws.id),
+                        repo,
                         mountpoint,
+                        if read_only {
+                            ", read-only, follows its snapshots"
+                        } else {
+                            ", resumed at its last snapshot"
+                        },
                     );
                 } else {
                     println!(
@@ -472,23 +688,26 @@ pub async fn mount(
                         ws.base_ref.as_deref().unwrap_or(&ws.base[..12]),
                         mountpoint,
                         short_id(&ws.id),
-                        match mode {
-                            MountMode::Workspace => "",
-                            MountMode::SharedRo => ", read-only, follows the branch",
-                            MountMode::SharedRw => ", snapshots auto-publish to the branch",
+                        if shared_rw {
+                            ", snapshots auto-publish to the branch"
+                        } else if read_only {
+                            ", read-only, follows the branch"
+                        } else {
+                            ""
                         },
                     );
                 }
-                match mode {
-                    MountMode::SharedRo => println!(
-                        "Reading commit {}; new commits on the branch appear as it advances.",
+                if read_only {
+                    println!(
+                        "Reading commit {}; new commits appear as the followed ref advances.",
                         resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
-                    ),
-                    _ => println!(
+                    );
+                } else {
+                    println!(
                         "Lower commit {}. Work in the mount, then: tl fs snapshot {}",
                         resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
                         path.display()
-                    ),
+                    );
                 }
                 return Ok(());
             }
@@ -502,7 +721,7 @@ pub async fn mount(
                 if !attached {
                     let _ = session
                         .client
-                        .delete_workspace(&session.project_id, repo, user, token, &ws.id)
+                        .delete_workspace(&session.project_id, &repo, user, token, &ws.id)
                         .await;
                 }
                 let _ = std::fs::remove_dir_all(&state_dir);
@@ -516,7 +735,7 @@ pub async fn mount(
 }
 
 /// Unmount: stop the daemon (unmounts the kernel fs) and forget the mount. The workspace — and
-/// every snapshot on it — stays on the server until `tl fs workspace rm` (or `--delete` here);
+/// every snapshot on it — stays on the server until `tl fs rm` (or `--delete` here);
 /// unsnapshotted overlay changes are local and die with the mount's state directory.
 pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> {
     let (mountpoint, state_dir) = state_dir_for(path)?;
@@ -561,11 +780,10 @@ pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> 
         );
     } else {
         println!(
-            "Unmounted {mountpoint}. Workspace {} kept — reattach with: tl fs mount {} \
-             --workspace {} <path>",
+            "Unmounted {mountpoint}. Workspace {} kept — mount it again with: tl fs mount {} \
+             <path>",
             short_id(&state.workspace_id),
-            state.repo,
-            state.workspace_id,
+            short_id(&state.workspace_id),
         );
     }
     Ok(())
@@ -1271,59 +1489,6 @@ pub async fn diff(ctx: &CliContext, path: &Path, a: Option<&str>, b: Option<&str
             "diff takes no versions (local vs snapshot) or two (snapshot vs snapshot)",
         )),
     }
-}
-
-/// `tl fs workspace ls <file-system>` — every live workspace, with enough context to pick one
-/// to reattach to (`tl fs mount <fs> --workspace <id> <path>`).
-pub async fn workspace_ls(ctx: &CliContext, file_system: &str, output_json: bool) -> Result<()> {
-    let session = FsSession::open(ctx, Some(file_system)).await?;
-    let (user, token) = session.creds();
-    let list = session
-        .client
-        .list_workspaces(&session.project_id, file_system, user, token)
-        .await?
-        .into_inner();
-    if output_json {
-        println!("{}", serde_json::to_string_pretty(&list)?);
-        return Ok(());
-    }
-    if list.is_empty() {
-        println!("No workspaces.");
-        return Ok(());
-    }
-    let mut table = new_table(&["Workspace", "Base", "Head", "Snapshots", "Mode", "Age"]);
-    for ws in &list {
-        table.add_row(vec![
-            Cell::new(&ws.id),
-            Cell::new(ws.base_ref.as_deref().unwrap_or(&ws.base[..12])),
-            Cell::new(&ws.head[..12]),
-            Cell::new(if ws.head == ws.base { "-" } else { "yes" }),
-            Cell::new(match &ws.shared_target {
-                Some(target) => format!("shared-rw -> {target}"),
-                None => "workspace".to_string(),
-            }),
-            Cell::new(age_display(ws.created_at_secs)),
-        ]);
-    }
-    println!("{table}");
-    println!(
-        "Reattach: tl fs mount {file_system} --workspace <id> <path> — delete: tl fs workspace \
-         rm {file_system} <id>"
-    );
-    Ok(())
-}
-
-/// `tl fs workspace rm <file-system> <workspace-id>` — the one way a workspace dies. Its
-/// snapshots become unreachable (promoted work is unaffected).
-pub async fn workspace_rm(ctx: &CliContext, file_system: &str, workspace_id: &str) -> Result<()> {
-    let session = FsSession::open(ctx, Some(file_system)).await?;
-    let (user, token) = session.creds();
-    session
-        .client
-        .delete_workspace(&session.project_id, file_system, user, token, workspace_id)
-        .await?;
-    println!("Deleted workspace {}.", short_id(workspace_id));
-    Ok(())
 }
 
 /// Full recursive listing of `version`: repo path -> entry. Directories are traversed
