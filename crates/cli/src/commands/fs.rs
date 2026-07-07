@@ -949,14 +949,17 @@ pub async fn mount(
         return daemon::run(ctx, &state_dir).await;
     }
 
-    // Detach the daemon and wait for its control socket to answer.
+    // Detach the daemon and wait for its control socket to answer. Its stderr lands in the
+    // state dir so a daemon that dies on startup (no /dev/fuse access, missing fusermount3,
+    // FSKit extension disabled) explains itself instead of just never answering.
     let exe = std::env::current_exe()?;
+    let daemon_log = state_dir.join("daemon.log");
     std::process::Command::new(exe)
         .args(["fs", "daemon", "--state-dir"])
         .arg(&state_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&daemon_log)?)
         .spawn()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
@@ -1017,10 +1020,24 @@ pub async fn mount(
                         .delete_workspace(&session.project_id, &repo, user, token, &ws.id)
                         .await;
                 }
+                // The daemon's own last words are the diagnosis; read them before the state
+                // dir (and the log with it) goes away.
+                let last_words = std::fs::read_to_string(&daemon_log)
+                    .ok()
+                    .map(|log| {
+                        let mut tail: Vec<&str> =
+                            log.lines().filter(|l| !l.trim().is_empty()).collect();
+                        tail = tail.split_off(tail.len().saturating_sub(5));
+                        tail.join("\n  ")
+                    })
+                    .filter(|tail| !tail.is_empty())
+                    .map(|tail| format!(" Daemon log:\n  {tail}\n"))
+                    .unwrap_or_default();
                 let _ = std::fs::remove_dir_all(&state_dir);
                 return Err(CliError::usage(format!(
-                    "mount daemon did not come up: {e}. Linux builds need /dev/fuse; macOS needs the \
-                     TensorLake FSKit extension enabled."
+                    "mount daemon did not come up: {e}.{last_words}\nLinux needs /dev/fuse \
+                     accessible (mode 666) and the fuse3 package (fusermount3 + /etc/mtab); \
+                     macOS needs the TensorLake file-system extension (tl fs setup)."
                 )));
             }
         }
