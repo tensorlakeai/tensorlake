@@ -44,15 +44,20 @@ mirror the overlay's op set. The canonical definition lives in the daemon at
 `crates/cli/src/commands/fs/vfsserver.rs`; keep both sides in lockstep — there is no
 version negotiation beyond the HELLO check yet.
 
-## Build and install
+## Build and install (development)
 
-Requirements: macOS 15.4+ (FSKit), a provisioning profile for an explicit App ID with
-the **FSKit Module** capability (restricted entitlement), Apple Development signing
-identity. Current profile: App ID `ai.tensorlake.tlfs.fsmodule`, team `9DQWQ9K87W`.
+Requirements: macOS 26 SDK (Xcode 26.x), a provisioning profile for the explicit App ID
+`ai.tensorlake.tlfs.fsmodule` (team `9DQWQ9K87W`) with the **FSKit Module** capability
+(restricted entitlement), Apple Development signing identity.
 
 ```sh
 TLFS_PROVISION_PROFILE=~/Downloads/tlfsfsmoduledev.provisionprofile ./build.sh
 ```
+
+A dev build launches **only on Macs whose UDID is in the development profile** — AMFI
+validates the restricted entitlement against the embedded profile, and development
+profiles carry a device allowlist. That is fine for iteration and useless for users;
+see Distribution below.
 
 The script builds `build/TLFS.app` with the appex embedded, then registers it
 (`lsregister`, `pluginkit -a`, `pluginkit -e use`). If the module does not appear in
@@ -64,6 +69,50 @@ those; they are all still true.
 
 The daemon mounts with `/sbin/mount -F -t tlfs tlfs://127.0.0.1:<port>/<secret> <dir>`
 (`daemon.rs` does this automatically on macOS) and unmounts with plain `umount`.
+
+## Distribution (end users)
+
+Any Mac, outside the App Store: Developer ID signing + notarization. The `tlfs-app` job
+in `.github/workflows/publish_cli.yaml` builds this on release and attaches
+`TLFS-<version>.app.zip` to the `cli-v<version>` GitHub release; end users install it
+with **`tl fs setup`** (downloads the asset matching the CLI version, ditto-installs to
+`/Applications`, launches it once to register the extension, and walks the System
+Settings toggle). `tl fs setup --check` diagnoses an install. Keeping app and CLI on one
+release tag is also the wire-protocol-skew defense: the VFS protocol has no version
+negotiation beyond HELLO.
+
+One-time Apple portal prerequisites (team `9DQWQ9K87W`):
+
+1. **Developer ID Application certificate** — export as .p12 for CI.
+2. **Developer ID provisioning profile** for App ID `ai.tensorlake.tlfs.fsmodule` with
+   the FSKit Module capability. Unlike the development profile there is no device list,
+   so the appex launches on any Mac. If the FSKit capability is not offered when
+   creating a Developer ID profile, request it from Apple developer support.
+3. **App Store Connect API key** (Developer role) for `notarytool`.
+
+CI secrets: `TLFS_SIGNING_CERT_P12` + `TLFS_SIGNING_CERT_PASSWORD`,
+`TLFS_PROVISION_PROFILE` (base64), `TLFS_NOTARY_KEY` (base64 .p8) +
+`TLFS_NOTARY_KEY_ID` + `TLFS_NOTARY_ISSUER`. The job is `continue-on-error` until these
+exist; flip that once they do.
+
+Local release build (same thing CI runs):
+
+```sh
+TLFS_PROVISION_PROFILE=~/profiles/tlfs-developer-id.provisionprofile \
+TLFS_NOTARY_PROFILE=tlfs-notary \
+  ./build.sh --release --notarize    # emits build/TLFS.app.zip, stapled
+```
+
+Signing chain notes: release mode signs with hardened runtime and a secure timestamp
+(`--timestamp`; dev mode uses `--timestamp=none`, which notarization rejects), embeds
+the Developer ID profile, notarizes the zipped app, and staples the ticket into the
+bundle so Gatekeeper passes offline. The embedded profile's validity is tied to the
+Developer ID cert — renewing the cert means re-signing and re-shipping the app, or
+mounts on user machines start failing with AMFI launch denials.
+
+Target floor: `arm64-apple-macos26.0` (Apple Silicon, macOS 26+). The cache-coherence
+behavior below was measured on macOS 26.5 lifs, and the generic-URL-resource FSKit
+surface is 26-era; do not silently lower `LSMinimumSystemVersion`.
 
 ## Semantics notes
 

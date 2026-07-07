@@ -456,7 +456,8 @@ async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<(Attached,
     if !status.success() {
         return Err(CliError::usage(
             "mount(8) failed: is the TensorLake file-system extension installed and enabled? \
-             (System Settings -> General -> Login Items & Extensions -> File System Extensions)",
+             Run `tl fs setup`, then enable it under System Settings -> General -> Login Items \
+             & Extensions -> File System Extensions.",
         ));
     }
     Ok((

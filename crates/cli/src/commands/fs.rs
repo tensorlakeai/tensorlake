@@ -293,6 +293,218 @@ pub async fn rm(ctx: &CliContext, workspace_id: &str) -> Result<()> {
     Ok(())
 }
 
+// ---------------------------------------------------------------------------------------------
+// `tl fs setup` — install/verify the macOS FSKit extension mounts need on end-user machines.
+// ---------------------------------------------------------------------------------------------
+
+/// `tl fs setup [--from <path-or-url>] [--check]`. Linux mounts talk to /dev/fuse directly and
+/// need nothing; macOS mounts go through the TLFS FSKit extension, which ships as a notarized
+/// app bundle attached to the CLI release. This installs it and walks the one manual step Apple
+/// keeps for the user (the System Settings toggle).
+pub async fn setup(from: Option<&str>, check_only: bool) -> Result<()> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (from, check_only);
+        Err(CliError::usage(
+            "tl fs setup installs the macOS file-system extension; Linux mounts use FUSE \
+             (/dev/fuse) and need no setup.",
+        ))
+    }
+    #[cfg(target_os = "macos")]
+    {
+        setup_macos(from, check_only).await
+    }
+}
+
+#[cfg(target_os = "macos")]
+const FSKIT_APP_PATH: &str = "/Applications/TLFS.app";
+#[cfg(target_os = "macos")]
+const FSKIT_MODULE_ID: &str = "ai.tensorlake.tlfs.fsmodule";
+
+/// The release asset built by `platform/macos/tlfs/build.sh --release --notarize` and attached
+/// to the same GitHub release as this CLI version, so extension and daemon stay in wire-protocol
+/// lockstep (there is no version negotiation beyond the HELLO check).
+#[cfg(target_os = "macos")]
+fn default_app_url() -> String {
+    format!(
+        "https://github.com/tensorlakeai/tensorlake/releases/download/cli-v{v}/TLFS-{v}.app.zip",
+        v = env!("CARGO_PKG_VERSION"),
+    )
+}
+
+/// pluginkit's status for the module: `Some('+')` registered and elected, `Some('-')` registered
+/// but disabled/ignored, `None` unknown to pluginkit.
+#[cfg(target_os = "macos")]
+fn appex_registration() -> Option<char> {
+    let out = std::process::Command::new("pluginkit")
+        .args(["-m", "-i", FSKIT_MODULE_ID])
+        .output()
+        .ok()?;
+    String::from_utf8_lossy(&out.stdout).trim().chars().next()
+}
+
+#[cfg(target_os = "macos")]
+fn print_enable_instructions() {
+    println!();
+    println!(
+        "{}",
+        style("One manual step remains (Apple requires the user to flip it):").bold()
+    );
+    println!("  System Settings -> General -> Login Items & Extensions -> File System");
+    println!("  Extensions -> enable {}", style("TLFS").bold());
+    println!();
+    println!("Then mount with: tl fs mount <file-system> <path>");
+    // Best-effort deep link into the extensions pane; the printed path is the contract.
+    let _ = std::process::Command::new("open")
+        .arg("x-apple.systempreferences:com.apple.ExtensionsPreferences")
+        .status();
+}
+
+#[cfg(target_os = "macos")]
+async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
+    let installed = Path::new(FSKIT_APP_PATH).exists();
+    let registration = appex_registration();
+    if check_only {
+        println!(
+            "{} {}",
+            style("app:").dim(),
+            if installed {
+                format!("installed at {FSKIT_APP_PATH}")
+            } else {
+                "not installed".to_string()
+            }
+        );
+        println!(
+            "{} {}",
+            style("extension:").dim(),
+            match registration {
+                Some('+') => "registered and enabled".to_string(),
+                Some('-') => "registered but not enabled".to_string(),
+                Some(other) => format!("registered (pluginkit state {other:?})"),
+                None => "not registered".to_string(),
+            }
+        );
+        if !installed || registration != Some('+') {
+            println!("Run `tl fs setup` to install and enable it.");
+        }
+        return Ok(());
+    }
+
+    // Stage the app bundle: default to the release asset matching this CLI version, or take a
+    // local .app / .zip / URL override (dev builds, air-gapped installs).
+    let staging = std::env::temp_dir().join(format!("tlfs-setup-{}", std::process::id()));
+    std::fs::create_dir_all(&staging)?;
+    let source = from.map(str::to_string).unwrap_or_else(default_app_url);
+    let app_src: PathBuf = if source.starts_with("http://") || source.starts_with("https://") {
+        println!("Downloading {source}");
+        let response = reqwest::get(&source).await.map_err(anyhow::Error::from)?;
+        if !response.status().is_success() {
+            return Err(CliError::usage(format!(
+                "download failed ({}): {source}\nIs the TLFS app published for this CLI \
+                 version? Pass --from <path-or-url> to install a specific build.",
+                response.status()
+            )));
+        }
+        let archive = staging.join("TLFS.app.zip");
+        std::fs::write(
+            &archive,
+            response.bytes().await.map_err(anyhow::Error::from)?,
+        )?;
+        unzip_app(&archive, &staging)?
+    } else if source.ends_with(".zip") {
+        unzip_app(Path::new(&source), &staging)?
+    } else {
+        PathBuf::from(&source)
+    };
+    if !app_src
+        .join("Contents/Extensions/TLFSModule.appex")
+        .exists()
+    {
+        return Err(CliError::usage(format!(
+            "{} does not look like a TLFS app bundle (no Contents/Extensions/TLFSModule.appex)",
+            app_src.display()
+        )));
+    }
+
+    // Install into /Applications with ditto (preserves signatures, xattrs, and the notarization
+    // staple — a plain copy can strip what Gatekeeper checks).
+    if installed {
+        std::fs::remove_dir_all(FSKIT_APP_PATH).map_err(|e| {
+            CliError::usage(format!(
+                "could not replace {FSKIT_APP_PATH}: {e}. Unmount any tl fs mounts and retry \
+                 (or remove it manually)."
+            ))
+        })?;
+    }
+    let status = std::process::Command::new("ditto")
+        .arg(&app_src)
+        .arg(FSKIT_APP_PATH)
+        .status()?;
+    if !status.success() {
+        return Err(CliError::usage(format!(
+            "installing to {FSKIT_APP_PATH} failed; retry with write access to /Applications"
+        )));
+    }
+    println!("Installed {FSKIT_APP_PATH}");
+
+    // Launching the (headless) host app once is what makes LaunchServices register the embedded
+    // extension on a fresh machine — no lsregister/pluginkit surgery on user installs.
+    let _ = std::process::Command::new("open")
+        .args(["-g", "-j", FSKIT_APP_PATH])
+        .status();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
+    let registration = loop {
+        match appex_registration() {
+            Some(state) => break Some(state),
+            None if std::time::Instant::now() < deadline => {
+                tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+            }
+            None => break None,
+        }
+    };
+    let _ = std::fs::remove_dir_all(&staging);
+    match registration {
+        Some('+') => {
+            println!("Extension registered and enabled.");
+            println!("Mount with: tl fs mount <file-system> <path>");
+        }
+        Some(_) => print_enable_instructions(),
+        None => {
+            println!(
+                "{} the extension did not register; open {FSKIT_APP_PATH} once and re-run \
+                 `tl fs setup --check`",
+                style("warning:").yellow()
+            );
+            print_enable_instructions();
+        }
+    }
+    Ok(())
+}
+
+/// Unpack a TLFS app archive with ditto (keeps signatures/staple intact) and return the .app.
+#[cfg(target_os = "macos")]
+fn unzip_app(archive: &Path, staging: &Path) -> Result<PathBuf> {
+    let dest = staging.join("unpacked");
+    std::fs::create_dir_all(&dest)?;
+    let status = std::process::Command::new("ditto")
+        .arg("-x")
+        .arg("-k")
+        .arg(archive)
+        .arg(&dest)
+        .status()?;
+    if !status.success() {
+        return Err(CliError::usage(format!(
+            "could not unpack {}",
+            archive.display()
+        )));
+    }
+    std::fs::read_dir(&dest)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .find(|p| p.extension().is_some_and(|ext| ext == "app"))
+        .ok_or_else(|| CliError::usage(format!("no .app found inside {}", archive.display())))
+}
+
 /// A workspace needs a base commit, but a file system fresh out of `tl git create` has an
 /// unborn default branch. Seed it with an empty initial commit so the first mount just works.
 async fn ensure_seeded(session: &FsSession, default_branch: &str, repo: &str) -> Result<()> {

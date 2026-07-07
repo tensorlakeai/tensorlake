@@ -214,6 +214,18 @@ enum MountWriteMode {
 
 #[derive(Subcommand)]
 enum FsCommands {
+    /// Install or verify the TensorLake file-system extension (macOS; Linux needs no setup)
+    Setup {
+        /// App bundle to install: a path to TLFS.app / a .zip, or an https URL. Defaults to
+        /// the release asset matching this CLI version
+        #[arg(long)]
+        from: Option<String>,
+
+        /// Report the install state without changing anything
+        #[arg(long)]
+        check: bool,
+    },
+
     /// Create and mount a workspace, or mount an existing one (FUSE): reads stream lazily,
     /// writes stay local until snapshotted
     Mount {
@@ -2170,8 +2182,16 @@ async fn run_applications_command(
 // answers with a clear "not available" error instead of the real implementation.
 #[cfg(feature = "mount")]
 async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Result<()> {
+    // Setup installs a local app bundle; it must work before the user has logged in.
+    let subcmd = match subcmd {
+        FsCommands::Setup { from, check } => {
+            return commands::fs::setup(from.as_deref(), check).await;
+        }
+        other => other,
+    };
     ensure_auth_and_project(ctx).await?;
     let result = match subcmd {
+        FsCommands::Setup { .. } => unreachable!("handled before the auth guard"),
         FsCommands::Ls { file_system, json } => {
             commands::fs::ls(ctx, file_system.as_deref(), json).await
         }
@@ -2636,6 +2656,14 @@ mod tests {
                 assert_eq!(workspace_id, "0a1b2c3d");
             }
             _ => panic!("expected fs rm command"),
+        }
+
+        match parse_command(["tl", "fs", "setup", "--check"]) {
+            Commands::Fs(FsCommands::Setup {
+                from: None,
+                check: true,
+            }) => {}
+            _ => panic!("expected fs setup command"),
         }
 
         // Legacy spellings keep parsing (hidden).
