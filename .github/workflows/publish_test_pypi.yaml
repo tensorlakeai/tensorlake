@@ -142,6 +142,12 @@ jobs:
 
   publish:
     name: Publish to TestPyPI
+    # Dispatch-only: publishing every PR's dev version filled the TestPyPI project's 10 GB
+    # size cap (each run uploads the full multi-platform rust wheel set), which then failed
+    # every PR. PRs still build the sdist and all wheels above as a packaging smoke check;
+    # the publish + integration chain runs on demand. If the cap is raised or old dev
+    # releases are pruned, this can go back to running per-PR.
+    if: github.event_name == 'workflow_dispatch'
     needs: [build-sdist, build-wheels]
     runs-on: ubuntu-latest
     environment:
