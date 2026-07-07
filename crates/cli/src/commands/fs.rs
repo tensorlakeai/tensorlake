@@ -1034,10 +1034,31 @@ pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> 
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     let pid = daemon::daemon_pid(&state_dir);
-    let _ = daemon::control(&state_dir, "shutdown").await;
+    // The daemon replies to `shutdown` only once the kernel released the volume, so this call
+    // covers the slow phase (FSKit teardown on macOS takes seconds); spin so it doesn't look
+    // hung. A busy volume answers ok:false — surface it and leave the mount fully intact.
+    let bar = indicatif::ProgressBar::new_spinner();
+    bar.enable_steady_tick(std::time::Duration::from_millis(120));
+    bar.set_message(format!(
+        "unmounting {mountpoint} (waiting for the kernel to release the volume)..."
+    ));
+    if let Err(e) = daemon::control(&state_dir, "shutdown").await {
+        // A dead daemon is not an obstacle — the mount is already gone; clean up local state.
+        // Anything else (EBUSY, most likely) means the volume is still live and serving.
+        let message = e.to_string();
+        if !message.contains("mount daemon is not running") {
+            bar.finish_and_clear();
+            return Err(CliError::usage(format!(
+                "could not unmount {mountpoint}: {message}\nThe volume stays mounted and \
+                 usable. Close whatever is using it (shells cd'd inside, editors holding \
+                 files), then re-run: tl fs unmount {mountpoint}"
+            )));
+        }
+    }
     // Wait for the daemon to actually exit before tearing down its state dir: the shutdown op
     // races the process exit, and deleting upper/control state under a live daemon is how
-    // daemons leak (and how a reattach ends up sharing a state dir with a zombie).
+    // daemons leak (and how a reattach ends up sharing a state dir with a zombie). The kernel
+    // already let go by the time shutdown answered, so this is quick.
     if let Some(pid) = pid {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
         while unsafe { libc::kill(pid, 0) } == 0 {
@@ -1050,6 +1071,7 @@ pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> 
             tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
     }
+    bar.finish_and_clear();
     if delete {
         let session = FsSession::open(ctx, Some(&state.repo)).await?;
         let (user, token) = session.creds();

@@ -349,14 +349,24 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
                         },
                         "shutdown" => {
-                            let resp = serde_json::json!({ "ok": true });
-                            let mut stream = reader.into_inner();
-                            let _ = stream.write_all(format!("{resp}\n").as_bytes()).await;
-                            unmount(&mountpoint);
-                            // Exit outright: session-wait is not guaranteed to return after an
-                            // external unmount (observed leaked daemons on Linux), and the
-                            // daemon's one job is over. The reply above already flushed.
-                            std::process::exit(0);
+                            // Unmount BEFORE replying: the reply is the CLI's signal that the
+                            // kernel released the volume (the slow phase on macOS — fskitd
+                            // teardown). A busy volume (a shell cd'd inside) keeps the daemon
+                            // serving — exiting with the volume still attached is how zombie
+                            // mounts are born.
+                            if unmount(&mountpoint).await {
+                                let resp = serde_json::json!({ "ok": true });
+                                let mut stream = reader.into_inner();
+                                let _ = stream.write_all(format!("{resp}\n").as_bytes()).await;
+                                // Exit outright: session-wait is not guaranteed to return after
+                                // an external unmount (observed leaked daemons on Linux), and
+                                // the daemon's one job is over. The reply above already flushed.
+                                std::process::exit(0);
+                            }
+                            serde_json::json!({
+                                "ok": false,
+                                "error": "the volume is busy (something is still using it)",
+                            })
                         }
                         other => {
                             serde_json::json!({ "ok": false, "error": format!("unknown op {other:?}") })
@@ -449,10 +459,16 @@ async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<(Attached,
         .await
         .map_err(|e| CliError::usage(format!("vfs server: {e}")))?;
     let url = format!("tlfs://127.0.0.1:{}/{}", server.port, server.secret);
+    // nobrowse asks for MNT_DONTBROWSE: no Finder sidebar entry, no mds indexing crawl (the
+    // classic macOS unmount-delayer), no .DS_Store turds in workspaces. Advisory for now —
+    // fskitd on 26.5 accepts but does not apply it (mount table shows no nobrowse; measured) —
+    // kept so the behavior arrives for free when FSKit honors it.
     let status = tokio::process::Command::new("/sbin/mount")
         .arg("-F")
         .arg("-t")
         .arg("tlfs")
+        .arg("-o")
+        .arg("nobrowse")
         .arg(&url)
         .arg(mountpoint)
         .status()
@@ -474,31 +490,82 @@ async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<(Attached,
 
 #[cfg(target_os = "macos")]
 fn is_mounted(mountpoint: &Path) -> bool {
+    // Read the kernel's mount table with MNT_NOWAIT instead of statfs(mountpoint): statfs
+    // calls into the filesystem and BLOCKS (uninterruptibly) while an unmount of it is in
+    // flight — the exact moment this question gets asked. Measured: a busy-volume unmount
+    // wedged the daemon in statfs for 50 minutes. getfsstat with MNT_NOWAIT only copies
+    // cached table entries and never touches the fs.
     use std::os::unix::ffi::OsStrExt;
-    let Ok(c_path) = std::ffi::CString::new(mountpoint.as_os_str().as_bytes()) else {
-        return false;
-    };
-    let mut sfs: libc::statfs = unsafe { std::mem::zeroed() };
-    if unsafe { libc::statfs(c_path.as_ptr(), &mut sfs) } != 0 {
+    let want = mountpoint.as_os_str().as_bytes();
+    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
+    if count <= 0 {
         return false;
     }
-    let fstype = unsafe { std::ffi::CStr::from_ptr(sfs.f_fstypename.as_ptr()) };
-    fstype.to_string_lossy() == "tlfs"
+    // Room for a few mounts appearing between the two calls; the kernel truncates to fit.
+    let capacity = count as usize + 8;
+    let mut stats: Vec<libc::statfs> = Vec::with_capacity(capacity);
+    let bufsize = (capacity * std::mem::size_of::<libc::statfs>()) as libc::c_int;
+    let written = unsafe { libc::getfsstat(stats.as_mut_ptr(), bufsize, libc::MNT_NOWAIT) };
+    if written <= 0 {
+        return false;
+    }
+    unsafe { stats.set_len(written as usize) };
+    stats.iter().any(|sfs| {
+        let name = unsafe { std::ffi::CStr::from_ptr(sfs.f_mntonname.as_ptr()) };
+        let fstype = unsafe { std::ffi::CStr::from_ptr(sfs.f_fstypename.as_ptr()) };
+        fstype.to_bytes() == b"tlfs" && name.to_bytes() == want
+    })
 }
 
-/// Ask the kernel to unmount; the daemon then observes the detach and exits.
+/// Ask the kernel to unmount, bounded. A busy volume (a shell cd'd inside) makes umount(8)
+/// fail with EBUSY; on macOS/FSKit a teardown can also wedge in-kernel, so the wait is capped
+/// and the mount table (never the filesystem itself — see is_mounted) is the arbiter on every
+/// non-success path. Returns whether the volume is actually detached.
 #[cfg(unix)]
-fn unmount(mountpoint: &Path) {
+async fn unmount(mountpoint: &Path) -> bool {
     #[cfg(target_os = "linux")]
-    let status = std::process::Command::new("fusermount")
-        .arg("-u")
-        .arg(mountpoint)
-        .status();
+    let mut cmd = {
+        let mut cmd = tokio::process::Command::new("fusermount");
+        cmd.arg("-u");
+        cmd
+    };
     #[cfg(not(target_os = "linux"))]
-    let status = std::process::Command::new("umount")
-        .arg(mountpoint)
-        .status();
-    if let Err(e) = status {
-        tracing::warn!("unmount of {} failed: {e}", mountpoint.display());
+    let mut cmd = tokio::process::Command::new("umount");
+    cmd.arg(mountpoint)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null());
+    let mut child = match cmd.spawn() {
+        Ok(child) => child,
+        Err(e) => {
+            tracing::warn!("unmount of {} failed to spawn: {e}", mountpoint.display());
+            return !still_mounted(mountpoint);
+        }
+    };
+    match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
+        Ok(Ok(status)) if status.success() => true,
+        // Fast failure (EBUSY) — or, on timeout, a wedged teardown whose child is deliberately
+        // left running (killing it would not abort an in-flight detach anyway).
+        _ => !still_mounted(mountpoint),
+    }
+}
+
+/// Whether the kernel still shows a live mount at `mountpoint`.
+#[cfg(unix)]
+fn still_mounted(mountpoint: &Path) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        is_mounted(mountpoint)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let path = mountpoint.to_string_lossy();
+        std::fs::read_to_string("/proc/self/mounts")
+            .map(|mounts| {
+                mounts
+                    .lines()
+                    .any(|line| line.split_whitespace().nth(1) == Some(path.as_ref()))
+            })
+            .unwrap_or(false)
     }
 }
