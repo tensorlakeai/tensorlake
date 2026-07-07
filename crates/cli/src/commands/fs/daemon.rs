@@ -47,6 +47,10 @@ type InvalSink = Arc<dyn Fn(Vec<OverlayInval>) + Send + Sync>;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct MountState {
     pub project_id: String,
+    /// Scope for platform token minting with a PAT. Absent in state files written before
+    /// path-addressed commands resolved their scope from the mount instead of the CWD.
+    #[serde(default)]
+    pub organization_id: Option<String>,
     pub repo: String,
     pub workspace_id: String,
     pub ref_name: String,

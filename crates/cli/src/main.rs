@@ -2164,6 +2164,18 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         }
         other => other,
     };
+    // Path-addressed commands carry their scope in the mount state; resolve it from there so
+    // they work from any CWD instead of triggering the interactive init flow (which, run from
+    // inside a mount, would write .tensorlake/config.toml into the workspace).
+    match &subcmd {
+        FsCommands::Snapshot { path, .. }
+        | FsCommands::Promote { path, .. }
+        | FsCommands::Status { path, .. }
+        | FsCommands::Restore { path, .. }
+        | FsCommands::Diff { path, .. }
+        | FsCommands::Unmount { path, .. } => commands::fs::hydrate_scope_from_mount(ctx, path),
+        _ => {}
+    }
     ensure_auth_and_project(ctx).await?;
     let result = match subcmd {
         FsCommands::Setup { .. } => unreachable!("handled before the auth guard"),

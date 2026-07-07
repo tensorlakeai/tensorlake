@@ -612,7 +612,9 @@ pub async fn push(
             })
         );
     } else {
-        let deduped = report.chunks_total - report.chunks_uploaded;
+        // Small files skip chunk negotiation, so uploads can exceed the negotiated count;
+        // saturate instead of panicking on the subtraction.
+        let deduped = report.chunks_total.saturating_sub(report.chunks_uploaded);
         println!(
             "{} {} -> {} ({} files, {} of {} chunks uploaded, {} deduplicated, {} bytes on the wire)",
             console::style("pushed").green().bold(),
