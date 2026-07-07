@@ -344,31 +344,6 @@ enum FsCommands {
         #[arg(long)]
         delete: bool,
     },
-
-    /// (legacy) Old workspace subcommands; workspaces are now managed by `tl fs ls` / `tl fs rm`
-    #[command(subcommand, hide = true)]
-    Workspace(WorkspaceCommands),
-}
-
-#[derive(Subcommand)]
-enum WorkspaceCommands {
-    /// List a file system's workspaces
-    Ls {
-        /// File system name
-        file_system: String,
-
-        /// Print workspaces as JSON
-        #[arg(long)]
-        json: bool,
-    },
-    /// Delete a workspace
-    Rm {
-        /// File system name (ignored; the workspace id is resolved on its own)
-        file_system: String,
-
-        /// Workspace id (see `tl fs ls`)
-        workspace_id: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -2226,14 +2201,6 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             commands::fs::diff(ctx, &path, a.as_deref(), b.as_deref()).await
         }
         FsCommands::Unmount { path, delete } => commands::fs::unmount(ctx, &path, delete).await,
-        FsCommands::Workspace(cmd) => match cmd {
-            WorkspaceCommands::Ls { file_system, json } => {
-                commands::fs::ls(ctx, Some(&file_system), json).await
-            }
-            WorkspaceCommands::Rm { workspace_id, .. } => {
-                commands::fs::rm(ctx, &workspace_id).await
-            }
-        },
     };
     // A cached minted git credential can be revoked before its recorded expiry; purge
     // the cache on an auth failure so the next invocation re-mints instead of retrying
@@ -2666,9 +2633,8 @@ mod tests {
             _ => panic!("expected fs setup command"),
         }
 
-        // Legacy spellings keep parsing (hidden).
-        assert!(Cli::try_parse_from(["tl", "fs", "workspace", "ls", "data"]).is_ok());
-        assert!(Cli::try_parse_from(["tl", "fs", "workspace", "rm", "data", "0a1b"]).is_ok());
+        // The workspace subgroup is gone: workspaces ARE the `tl fs` surface.
+        assert!(Cli::try_parse_from(["tl", "fs", "workspace", "ls", "data"]).is_err());
 
         // The old file-system registry commands are gone: file systems are managed by `tl git`.
         assert!(Cli::try_parse_from(["tl", "fs", "create", "--name", "data"]).is_err());
