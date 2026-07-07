@@ -505,6 +505,39 @@ async fn install_app(app_src: &Path, already_installed: bool, staging: &Path) ->
     Ok(())
 }
 
+/// Mount's pre-flight: make sure the FSKit extension is ready before any workspace is created.
+/// Auto-runs the install half of `tl fs setup` when the extension is missing entirely; the
+/// System Settings toggle is the one step Apple reserves for the user, so a disabled extension
+/// stops with instructions instead. Only mount needs this — every other command talks to the
+/// server or to an existing mount's daemon.
+#[cfg(target_os = "macos")]
+async fn ensure_fskit_ready() -> Result<()> {
+    match appex_registration() {
+        // Registered and elected: /Applications install or a dev build-dir registration alike.
+        Some('+') => return Ok(()),
+        Some(_) => {
+            print_enable_instructions();
+            return Err(CliError::usage(
+                "the TensorLake file-system extension is installed but not enabled; enable it \
+                 and re-run",
+            ));
+        }
+        None => {}
+    }
+    eprintln!(
+        "{} the TensorLake file-system extension is not installed; running `tl fs setup` first",
+        style("note:").yellow()
+    );
+    setup(None, false).await?;
+    if appex_registration() == Some('+') {
+        Ok(())
+    } else {
+        Err(CliError::usage(
+            "finish enabling the extension in System Settings, then re-run the mount",
+        ))
+    }
+}
+
 /// Unpack a TLFS app archive with ditto (keeps signatures/staple intact) and return the .app.
 #[cfg(target_os = "macos")]
 fn unzip_app(archive: &Path, staging: &Path) -> Result<PathBuf> {
@@ -707,6 +740,8 @@ pub async fn mount(
             "tl fs mount is supported on Linux (FUSE) and macOS (FSKit) only.",
         ));
     }
+    #[cfg(target_os = "macos")]
+    ensure_fskit_ready().await?;
     let (name, base) = match target.split_once(':') {
         Some((name, base)) => (name, Some(base.to_string())),
         None => (target, None),

@@ -80,7 +80,9 @@ zip into the darwin CLI binary** (`TLFS_APP_ZIP` + `crates/cli/build.rs`), so
 app to `/Applications`, launches it once to register the extension, and walks the System
 Settings toggle. Source builds have nothing embedded and fall back to downloading the
 release asset matching the CLI version; `--from <path-or-url>` overrides either path.
-`tl fs setup --check` diagnoses an install. Embedding (and failing that, the shared
+`tl fs setup --check` diagnoses an install. Users rarely run setup by hand: `tl fs
+mount` pre-flights the extension and auto-runs the install when it is missing, stopping
+only for the Settings toggle (the one step Apple reserves for the user). Embedding (and failing that, the shared
 release tag) is the wire-protocol-skew defense: the VFS protocol has no version
 negotiation beyond HELLO.
 
