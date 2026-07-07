@@ -662,6 +662,27 @@ fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
     Ok((mountpoint, PathBuf::from(state_dir)))
 }
 
+/// Path-addressed commands (snapshot/promote/status/restore/diff/unmount) know their scope
+/// from the mount they operate on; seed the auth context from the mount state so they work
+/// from any working directory. Without this, running `tl fs snapshot` from a CWD with no
+/// `.tensorlake/config.toml` up-tree dropped into the interactive init flow — which, run from
+/// inside the mount, wrote its config INTO the workspace and the snapshot sealed it.
+pub fn hydrate_scope_from_mount(ctx: &mut CliContext, path: &Path) {
+    if ctx.effective_project_id().is_some() {
+        return;
+    }
+    let Ok((_, state_dir)) = state_dir_for(path) else {
+        return;
+    };
+    let Ok(state) = daemon::load_mount_state(&state_dir) else {
+        return;
+    };
+    ctx.project_id = Some(state.project_id);
+    if ctx.organization_id.is_none() {
+        ctx.organization_id = state.organization_id;
+    }
+}
+
 #[cfg(unix)]
 fn daemon_alive(pid: i32) -> bool {
     unsafe { libc::kill(pid, 0) == 0 }
@@ -911,6 +932,7 @@ pub async fn mount(
         &state_dir,
         &MountState {
             project_id: session.project_id.clone(),
+            organization_id: ctx.effective_organization_id(),
             repo: repo.clone(),
             workspace_id: ws.id.clone(),
             ref_name: ws.ref_name.clone(),
@@ -1222,9 +1244,14 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
         .chain(deletes.iter().cloned())
         .collect();
     revalidate_paths(Path::new(&mountpoint), &sealed);
+    // Small files skip chunk negotiation (token-only commits), so uploads can exceed the
+    // negotiated chunk count — clamp so the summary never reads "3 of 0 chunks".
     println!(
         "Snapshot {} ({} file(s), {} of {} chunks uploaded)",
-        report.commit, report.files, report.chunks_uploaded, report.chunks_total,
+        report.commit,
+        report.files,
+        report.chunks_uploaded,
+        report.chunks_total.max(report.chunks_uploaded),
     );
     Ok(())
 }
