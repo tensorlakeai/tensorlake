@@ -14,6 +14,10 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target_id }})
+    # The darwin build embeds the notarized TLFS.app.zip from tlfs-app into the binary, so
+    # `tl fs setup` installs offline. tlfs-app is continue-on-error: when it produced nothing,
+    # the darwin binary falls back to downloading the release asset at setup time.
+    needs: tlfs-app
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -63,6 +67,26 @@ jobs:
           app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
           private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
 
+      - name: Fetch notarized TLFS.app (embedded into `tl fs setup`)
+        if: matrix.target_id == 'darwin-aarch64'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-tlfs-app
+          path: tlfs-dist
+
+      - name: Point the build at the TLFS app zip
+        if: matrix.target_id == 'darwin-aarch64'
+        shell: bash
+        run: |
+          zip=$(ls tlfs-dist/TLFS-*.app.zip 2>/dev/null | head -1 || true)
+          if [ -n "$zip" ]; then
+            echo "TLFS_APP_ZIP=$(pwd)/$zip" >> "$GITHUB_ENV"
+            echo "Embedding $zip"
+          else
+            echo "No TLFS app artifact; `tl fs setup` will download the release asset instead"
+          fi
+
       - name: Build CLI
         run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }} ${{ matrix.mount && '--features mount,git-clone' || '--features git-clone' }}
 
@@ -96,9 +120,6 @@ jobs:
   #   TLFS_NOTARY_KEY / TLFS_NOTARY_KEY_ID / TLFS_NOTARY_ISSUER  App Store Connect API key (.p8 base64)
   tlfs-app:
     name: Build TLFS.app (macOS file-system extension)
-    # Flip to false once the signing secrets are provisioned: from then on a release without a
-    # working TLFS.app should fail loudly, not ship silently without it.
-    continue-on-error: true
     # Needs Xcode 26.x / the macOS 26 SDK (the FSKit surface tlfs uses); adjust the image if the
     # hosted runner catalog changes.
     runs-on: macos-26
@@ -160,9 +181,6 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build, tlfs-app]
-    # tlfs-app is continue-on-error while its secrets are being provisioned; release whatever
-    # artifacts materialized.
-    if: ${{ always() && needs.build.result == 'success' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

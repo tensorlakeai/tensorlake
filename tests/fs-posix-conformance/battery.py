@@ -173,7 +173,9 @@ def contended_lock(test, path, holder, probe):
             report("PASS", test)
         else:
             report(
-                "FAIL", test, f"conflict_detected={conflicted} grantable_after={granted}"
+                "FAIL",
+                test,
+                f"conflict_detected={conflicted} grantable_after={granted}",
             )
     finally:
         release.set()
@@ -265,7 +267,9 @@ def main():
     def _():
         d = os.path.join(ws, "sq")
         os.makedirs(d, exist_ok=True)
-        sqlite_concurrent("c02_sqlite_rollback_journal", os.path.join(d, "rb.db"), "delete")
+        sqlite_concurrent(
+            "c02_sqlite_rollback_journal", os.path.join(d, "rb.db"), "delete"
+        )
 
     @run("c03_ofd_locks")
     def _():
@@ -277,12 +281,17 @@ def main():
     @run("c04_posix_locks")
     def _():
         contended_lock(
-            "c04_posix_locks", os.path.join(ws, "locks.bin"), posix_lock_holder, probe_posix
+            "c04_posix_locks",
+            os.path.join(ws, "locks.bin"),
+            posix_lock_holder,
+            probe_posix,
         )
 
     @run("c05_flock")
     def _():
-        contended_lock("c05_flock", os.path.join(ws, "locks.bin"), flock_holder, probe_flock)
+        contended_lock(
+            "c05_flock", os.path.join(ws, "locks.bin"), flock_holder, probe_flock
+        )
 
     @run("c06_fsync_file_and_dir")
     def _():
@@ -333,7 +342,9 @@ def main():
         os.close(fd)
         try:
             os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
-            report("FAIL", "c09_o_excl_and_mkdir_lock", "second O_EXCL create succeeded")
+            report(
+                "FAIL", "c09_o_excl_and_mkdir_lock", "second O_EXCL create succeeded"
+            )
             return
         except FileExistsError:
             pass
@@ -395,7 +406,9 @@ def main():
             report("PASS", "c11_hardlinks")
         else:
             report(
-                "FAIL", "c11_hardlinks", f"read={through!r} inos={sa.st_ino},{sb.st_ino}"
+                "FAIL",
+                "c11_hardlinks",
+                f"read={through!r} inos={sa.st_ino},{sb.st_ino}",
             )
         farm = os.path.join(ws, "farm")
         os.makedirs(farm, exist_ok=True)
@@ -466,7 +479,11 @@ def main():
         if got == want:
             report("PASS", "s01_seeded_content_integrity")
         else:
-            report("FAIL", "s01_seeded_content_integrity", "blob.bin diverged after reattach")
+            report(
+                "FAIL",
+                "s01_seeded_content_integrity",
+                "blob.bin diverged after reattach",
+            )
 
     @run("s02_seeded_modify_preserves_content")
     def _():
@@ -478,7 +495,9 @@ def main():
         if data[:-1] == pattern(1 << 20, 7) and data[-1:] == b"!":
             report("PASS", "s02_seeded_modify_preserves_content")
         else:
-            report("FAIL", "s02_seeded_modify_preserves_content", "copy-up corrupted bytes")
+            report(
+                "FAIL", "s02_seeded_modify_preserves_content", "copy-up corrupted bytes"
+            )
 
     @run("s03_sqlite_wal_on_seeded_db")
     def _():
@@ -491,12 +510,19 @@ def main():
         import subprocess
 
         out = subprocess.run(
-            [os.path.join(ws, SEEDED["script"])], capture_output=True, text=True, timeout=30
+            [os.path.join(ws, SEEDED["script"])],
+            capture_output=True,
+            text=True,
+            timeout=30,
         )
         if out.returncode == 0 and out.stdout.strip() == "conformance-ok":
             report("PASS", "s04_exec_seeded_script")
         else:
-            report("FAIL", "s04_exec_seeded_script", f"rc={out.returncode} out={out.stdout!r}")
+            report(
+                "FAIL",
+                "s04_exec_seeded_script",
+                f"rc={out.returncode} out={out.stdout!r}",
+            )
 
     @run("s05_seeded_symlink")
     def _():
@@ -511,7 +537,11 @@ def main():
         p = os.path.join(ws, SEEDED["files"][0])
         os.unlink(p)
         if os.path.exists(p):
-            report("FAIL", "s06_delete_seeded_then_excl_create", "unlink did not hide the path")
+            report(
+                "FAIL",
+                "s06_delete_seeded_then_excl_create",
+                "unlink did not hide the path",
+            )
             return
         fd = os.open(p, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644)
         os.close(fd)

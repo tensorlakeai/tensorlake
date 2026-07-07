@@ -1083,6 +1083,9 @@ fn default_cache_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // Moved out of this feature-gated module (the CLI argument definition needs it in every
+    // build), but its behavior belongs with the fast-clone tests.
+    use crate::commands::git::parse_cache_max_bytes;
 
     #[test]
     fn default_dest_uses_repo_segment_from_project_scoped_url() {

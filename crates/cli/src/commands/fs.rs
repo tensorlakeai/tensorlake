@@ -321,6 +321,14 @@ const FSKIT_APP_PATH: &str = "/Applications/TLFS.app";
 #[cfg(target_os = "macos")]
 const FSKIT_MODULE_ID: &str = "ai.tensorlake.tlfs.fsmodule";
 
+/// Official darwin release builds carry the notarized TLFS.app.zip inside the binary (see
+/// crates/cli/build.rs), so setup needs no network and cannot skew versions. Source builds
+/// don't embed it and fall back to the release download.
+#[cfg(all(target_os = "macos", tlfs_app_embedded))]
+const EMBEDDED_APP_ZIP: Option<&[u8]> = Some(include_bytes!(env!("TLFS_APP_ZIP")));
+#[cfg(all(target_os = "macos", not(tlfs_app_embedded)))]
+const EMBEDDED_APP_ZIP: Option<&[u8]> = None;
+
 /// The release asset built by `platform/macos/tlfs/build.sh --release --notarize` and attached
 /// to the same GitHub release as this CLI version, so extension and daemon stay in wire-protocol
 /// lockstep (there is no version negotiation beyond the HELLO check).
@@ -390,10 +398,19 @@ async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
         return Ok(());
     }
 
-    // Stage the app bundle: default to the release asset matching this CLI version, or take a
-    // local .app / .zip / URL override (dev builds, air-gapped installs).
+    // Stage the app bundle. Priority: an explicit --from override, then the copy embedded in
+    // this binary (official release builds), then the release asset matching this CLI version.
     let staging = std::env::temp_dir().join(format!("tlfs-setup-{}", std::process::id()));
     std::fs::create_dir_all(&staging)?;
+    if from.is_none()
+        && let Some(zip) = EMBEDDED_APP_ZIP
+    {
+        println!("Installing the TLFS app embedded in this CLI build.");
+        let archive = staging.join("TLFS.app.zip");
+        std::fs::write(&archive, zip)?;
+        let app_src = unzip_app(&archive, &staging)?;
+        return install_app(&app_src, installed, &staging).await;
+    }
     let source = from.map(str::to_string).unwrap_or_else(default_app_url);
     let app_src: PathBuf = if source.starts_with("http://") || source.starts_with("https://") {
         println!("Downloading {source}");
@@ -416,6 +433,13 @@ async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
     } else {
         PathBuf::from(&source)
     };
+    install_app(&app_src, installed, &staging).await
+}
+
+/// Install a staged TLFS.app into /Applications, register its extension, and walk the user
+/// through the System Settings toggle.
+#[cfg(target_os = "macos")]
+async fn install_app(app_src: &Path, already_installed: bool, staging: &Path) -> Result<()> {
     if !app_src
         .join("Contents/Extensions/TLFSModule.appex")
         .exists()
@@ -428,7 +452,7 @@ async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
 
     // Install into /Applications with ditto (preserves signatures, xattrs, and the notarization
     // staple — a plain copy can strip what Gatekeeper checks).
-    if installed {
+    if already_installed {
         std::fs::remove_dir_all(FSKIT_APP_PATH).map_err(|e| {
             CliError::usage(format!(
                 "could not replace {FSKIT_APP_PATH}: {e}. Unmount any tl fs mounts and retry \
@@ -437,7 +461,7 @@ async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
         })?;
     }
     let status = std::process::Command::new("ditto")
-        .arg(&app_src)
+        .arg(app_src)
         .arg(FSKIT_APP_PATH)
         .status()?;
     if !status.success() {
@@ -462,7 +486,7 @@ async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
             None => break None,
         }
     };
-    let _ = std::fs::remove_dir_all(&staging);
+    let _ = std::fs::remove_dir_all(staging);
     match registration {
         Some('+') => {
             println!("Extension registered and enabled.");
@@ -479,6 +503,39 @@ async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// Mount's pre-flight: make sure the FSKit extension is ready before any workspace is created.
+/// Auto-runs the install half of `tl fs setup` when the extension is missing entirely; the
+/// System Settings toggle is the one step Apple reserves for the user, so a disabled extension
+/// stops with instructions instead. Only mount needs this — every other command talks to the
+/// server or to an existing mount's daemon.
+#[cfg(target_os = "macos")]
+async fn ensure_fskit_ready() -> Result<()> {
+    match appex_registration() {
+        // Registered and elected: /Applications install or a dev build-dir registration alike.
+        Some('+') => return Ok(()),
+        Some(_) => {
+            print_enable_instructions();
+            return Err(CliError::usage(
+                "the TensorLake file-system extension is installed but not enabled; enable it \
+                 and re-run",
+            ));
+        }
+        None => {}
+    }
+    eprintln!(
+        "{} the TensorLake file-system extension is not installed; running `tl fs setup` first",
+        style("note:").yellow()
+    );
+    setup(None, false).await?;
+    if appex_registration() == Some('+') {
+        Ok(())
+    } else {
+        Err(CliError::usage(
+            "finish enabling the extension in System Settings, then re-run the mount",
+        ))
+    }
 }
 
 /// Unpack a TLFS app archive with ditto (keeps signatures/staple intact) and return the .app.
@@ -683,6 +740,8 @@ pub async fn mount(
             "tl fs mount is supported on Linux (FUSE) and macOS (FSKit) only.",
         ));
     }
+    #[cfg(target_os = "macos")]
+    ensure_fskit_ready().await?;
     let (name, base) = match target.split_once(':') {
         Some((name, base)) => (name, Some(base.to_string())),
         None => (target, None),
