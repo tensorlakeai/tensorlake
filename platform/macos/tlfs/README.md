@@ -73,12 +73,15 @@ The daemon mounts with `/sbin/mount -F -t tlfs tlfs://127.0.0.1:<port>/<secret> 
 ## Distribution (end users)
 
 Any Mac, outside the App Store: Developer ID signing + notarization. The `tlfs-app` job
-in `.github/workflows/publish_cli.yaml` builds this on release and attaches
-`TLFS-<version>.app.zip` to the `cli-v<version>` GitHub release; end users install it
-with **`tl fs setup`** (downloads the asset matching the CLI version, ditto-installs to
-`/Applications`, launches it once to register the extension, and walks the System
-Settings toggle). `tl fs setup --check` diagnoses an install. Keeping app and CLI on one
-release tag is also the wire-protocol-skew defense: the VFS protocol has no version
+in `.github/workflows/publish_cli.yaml` builds this on release, attaches
+`TLFS-<version>.app.zip` to the `cli-v<version>` GitHub release, and **embeds the same
+zip into the darwin CLI binary** (`TLFS_APP_ZIP` + `crates/cli/build.rs`), so
+**`tl fs setup`** on an official build installs offline: it ditto-installs the embedded
+app to `/Applications`, launches it once to register the extension, and walks the System
+Settings toggle. Source builds have nothing embedded and fall back to downloading the
+release asset matching the CLI version; `--from <path-or-url>` overrides either path.
+`tl fs setup --check` diagnoses an install. Embedding (and failing that, the shared
+release tag) is the wire-protocol-skew defense: the VFS protocol has no version
 negotiation beyond HELLO.
 
 One-time Apple portal prerequisites (team `9DQWQ9K87W`):
