@@ -496,7 +496,6 @@ enum GitCommands {
     /// Check a detached commit job's progress (job id is printed when a push detaches)
     CommitStatus {
         /// Repo name
-        #[arg(long)]
         repo: String,
         /// Commit job id
         job_id: String,
@@ -2701,6 +2700,19 @@ mod tests {
             }
             _ => panic!("expected git push command"),
         }
+
+        // commit-status takes the repo positionally, like every other repo-addressed command.
+        match parse_command(["tl", "git", "commit-status", "demo", "job-123"]) {
+            Commands::Git(GitCommands::CommitStatus { repo, job_id }) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(job_id, "job-123");
+            }
+            _ => panic!("expected git commit-status command"),
+        }
+        assert!(
+            Cli::try_parse_from(["tl", "git", "commit-status", "--repo", "demo", "job-123"])
+                .is_err()
+        );
     }
 
     #[test]

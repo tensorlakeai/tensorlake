@@ -749,7 +749,7 @@ pub async fn push(
                 PushEvent::CommitDetached { job_id } => {
                     let line = format!(
                         "commit running as job {job_id} (survives disconnects; check from \
-                         anywhere with: tl git commit-status --repo <repo> {job_id})"
+                         anywhere with: tl git commit-status <repo> {job_id})"
                     );
                     // indicatif drops println on hidden draw targets (piped stderr) — and a
                     // scripted push is exactly where the out-of-band job id matters.
@@ -859,7 +859,7 @@ fn git_worktree_root_from(cwd: &std::path::Path) -> Result<std::path::PathBuf> {
     Ok(std::path::PathBuf::from(root))
 }
 
-/// `tl git commit-status --repo <repo> <job-id>` — the out-of-band view of a detached commit
+/// `tl git commit-status <repo> <job-id>` — the out-of-band view of a detached commit
 /// job's state machine, from any terminal or process.
 pub async fn commit_status(ctx: &CliContext, repo: &str, job_id: &str) -> Result<()> {
     let project_id = project_id(ctx)?;
