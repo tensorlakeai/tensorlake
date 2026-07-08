@@ -51,6 +51,14 @@ pub struct MountState {
     /// path-addressed commands resolved their scope from the mount instead of the CWD.
     #[serde(default)]
     pub organization_id: Option<String>,
+    /// Who the mount belongs to: every file is presented as owned by this uid/gid. Differs
+    /// from the daemon's identity under `sudo tl fs mount` (daemon root, owner the invoking
+    /// user) — the escape hatch for environments without unprivileged FUSE. Absent in state
+    /// files from before that; the daemon then presents its own identity.
+    #[serde(default)]
+    pub owner_uid: Option<u32>,
+    #[serde(default)]
+    pub owner_gid: Option<u32>,
     pub repo: String,
     pub workspace_id: String,
     pub ref_name: String,
@@ -283,9 +291,14 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
 
     let mountpoint = state.mountpoint.clone();
 
+    let owner = (
+        state.owner_uid.unwrap_or_else(|| unsafe { libc::getuid() }),
+        state.owner_gid.unwrap_or_else(|| unsafe { libc::getgid() }),
+    );
+
     // Attach the kernel: platform-specific. Only after this succeeds does the control socket
     // exist — the socket answering is what `tl fs mount` treats as success.
-    let (served, invalidate) = attach(overlay.clone(), &mountpoint).await?;
+    let (served, invalidate) = attach(overlay.clone(), &mountpoint, owner).await?;
 
     // Follow the workspace ref, pushing each refresh's exact delta to the kernel. Spawned after
     // attach because the invalidation sink is born with the kernel session.
@@ -420,9 +433,13 @@ impl Attached {
 }
 
 #[cfg(target_os = "linux")]
-async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<(Attached, InvalSink)> {
+async fn attach(
+    overlay: Arc<OverlayFs>,
+    mountpoint: &Path,
+    owner: (u32, u32),
+) -> Result<(Attached, InvalSink)> {
     let (mounted_tx, mounted_rx) = tokio::sync::oneshot::channel();
-    let fuse = super::fusefs::WorkspaceFuse::new(overlay, tokio::runtime::Handle::current());
+    let fuse = super::fusefs::WorkspaceFuse::new(overlay, tokio::runtime::Handle::current(), owner);
     let mp = mountpoint.to_path_buf();
     let served = tokio::task::spawn_blocking(move || fuse.run(&mp, mounted_tx));
     let notifier = match mounted_rx.await {
@@ -454,7 +471,13 @@ async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<(Attached,
 /// TensorLake FSKit extension. There is no notify channel in the FSKit protocol, so the
 /// invalidation sink is a no-op — FSKit revalidates through its own attribute traffic.
 #[cfg(target_os = "macos")]
-async fn attach(overlay: Arc<OverlayFs>, mountpoint: &Path) -> Result<(Attached, InvalSink)> {
+async fn attach(
+    overlay: Arc<OverlayFs>,
+    mountpoint: &Path,
+    _owner: (u32, u32),
+) -> Result<(Attached, InvalSink)> {
+    // Ownership presentation is a Linux concern: FSKit user mounts never need sudo, so the
+    // daemon and the human are the same identity.
     let server = super::vfsserver::serve(overlay)
         .await
         .map_err(|e| CliError::usage(format!("vfs server: {e}")))?;

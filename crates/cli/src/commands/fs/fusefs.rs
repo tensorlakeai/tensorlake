@@ -45,7 +45,7 @@ fn file_type(kind: NodeKind) -> fuser::FileType {
     }
 }
 
-fn file_attr(attr: &OverlayAttr) -> fuser::FileAttr {
+fn file_attr(attr: &OverlayAttr, owner: (u32, u32)) -> fuser::FileAttr {
     // The overlay's content timestamp (see OverlayAttr::mtime): stable while content is
     // unchanged, moves when it can have changed — what kernel cache revalidation needs.
     let mtime = attr.mtime;
@@ -60,8 +60,8 @@ fn file_attr(attr: &OverlayAttr) -> fuser::FileAttr {
         kind: file_type(attr.kind),
         perm: attr.perm,
         nlink: 1,
-        uid: unsafe { libc::getuid() },
-        gid: unsafe { libc::getgid() },
+        uid: owner.0,
+        gid: owner.1,
         rdev: 0,
         blksize: 4096,
         flags: 0,
@@ -71,11 +71,14 @@ fn file_attr(attr: &OverlayAttr) -> fuser::FileAttr {
 pub struct WorkspaceFuse {
     fs: Arc<OverlayFs>,
     rt: tokio::runtime::Handle,
+    /// Presented as every file's uid/gid. Differs from the daemon's identity under
+    /// `sudo tl fs mount`: the daemon is root, the mount belongs to the invoking user.
+    owner: (u32, u32),
 }
 
 impl WorkspaceFuse {
-    pub fn new(fs: Arc<OverlayFs>, rt: tokio::runtime::Handle) -> WorkspaceFuse {
-        WorkspaceFuse { fs, rt }
+    pub fn new(fs: Arc<OverlayFs>, rt: tokio::runtime::Handle, owner: (u32, u32)) -> WorkspaceFuse {
+        WorkspaceFuse { fs, rt, owner }
     }
 
     /// Establish the kernel mount (fails fast when FUSE is unavailable), then serve until
@@ -89,11 +92,18 @@ impl WorkspaceFuse {
         mountpoint: &Path,
         mounted: tokio::sync::oneshot::Sender<fuser::Notifier>,
     ) -> std::io::Result<()> {
-        let options = vec![
+        let mut options = vec![
             fuser::MountOption::FSName("tlfs".to_string()),
             fuser::MountOption::DefaultPermissions,
             fuser::MountOption::NoAtime,
         ];
+        // A sudo mount serves a different human than the daemon's identity: without
+        // allow_other, FUSE rejects every access by anyone but the mounting user (root),
+        // making the volume invisible to the person who asked for it. DefaultPermissions
+        // stays on, so the presented owner's file modes still gate access.
+        if self.owner != unsafe { (libc::getuid(), libc::getgid()) } {
+            options.push(fuser::MountOption::AllowOther);
+        }
         let mut session = fuser::Session::new(self, mountpoint, &options)?;
         let _ = mounted.send(session.notifier());
         session.run()
@@ -110,7 +120,7 @@ impl fuser::Filesystem for WorkspaceFuse {
     ) {
         let name = name.to_string_lossy();
         match self.rt.block_on(self.fs.lookup(parent, &name)) {
-            Ok(attr) => reply.entry(&TTL, &file_attr(&attr), 0),
+            Ok(attr) => reply.entry(&TTL, &file_attr(&attr, self.owner), 0),
             Err(e) => reply.error(errno(&e)),
         }
     }
@@ -127,7 +137,7 @@ impl fuser::Filesystem for WorkspaceFuse {
         reply: fuser::ReplyAttr,
     ) {
         match self.rt.block_on(self.fs.getattr(ino)) {
-            Ok(attr) => reply.attr(&TTL, &file_attr(&attr)),
+            Ok(attr) => reply.attr(&TTL, &file_attr(&attr, self.owner)),
             Err(e) => reply.error(errno(&e)),
         }
     }
@@ -151,7 +161,7 @@ impl fuser::Filesystem for WorkspaceFuse {
         reply: fuser::ReplyAttr,
     ) {
         match self.rt.block_on(self.fs.setattr(ino, size, mode)) {
-            Ok(attr) => reply.attr(&TTL, &file_attr(&attr)),
+            Ok(attr) => reply.attr(&TTL, &file_attr(&attr, self.owner)),
             Err(e) => reply.error(errno(&e)),
         }
     }
@@ -229,7 +239,7 @@ impl fuser::Filesystem for WorkspaceFuse {
                             entry.next_offset as i64,
                             &entry.name,
                             &TTL,
-                            &file_attr(&attr),
+                            &file_attr(&attr, self.owner),
                             0,
                         )
                     {
@@ -365,7 +375,7 @@ impl fuser::Filesystem for WorkspaceFuse {
         let name = name.to_string_lossy();
         let exec = mode & 0o111 != 0;
         match self.rt.block_on(self.fs.create(parent, &name, exec)) {
-            Ok((attr, fh)) => reply.created(&TTL, &file_attr(&attr), 0, fh, 0),
+            Ok((attr, fh)) => reply.created(&TTL, &file_attr(&attr, self.owner), 0, fh, 0),
             Err(e) => reply.error(errno(&e)),
         }
     }
@@ -381,7 +391,7 @@ impl fuser::Filesystem for WorkspaceFuse {
     ) {
         let name = name.to_string_lossy();
         match self.rt.block_on(self.fs.mkdir(parent, &name)) {
-            Ok(attr) => reply.entry(&TTL, &file_attr(&attr), 0),
+            Ok(attr) => reply.entry(&TTL, &file_attr(&attr, self.owner), 0),
             Err(e) => reply.error(errno(&e)),
         }
     }
@@ -397,7 +407,7 @@ impl fuser::Filesystem for WorkspaceFuse {
         let name = link_name.to_string_lossy();
         let target = target.to_string_lossy();
         match self.rt.block_on(self.fs.symlink(parent, &name, &target)) {
-            Ok(attr) => reply.entry(&TTL, &file_attr(&attr), 0),
+            Ok(attr) => reply.entry(&TTL, &file_attr(&attr, self.owner), 0),
             Err(e) => reply.error(errno(&e)),
         }
     }
