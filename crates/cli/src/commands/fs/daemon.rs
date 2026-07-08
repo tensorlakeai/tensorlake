@@ -523,24 +523,31 @@ fn is_mounted(mountpoint: &Path) -> bool {
 /// non-success path. Returns whether the volume is actually detached.
 #[cfg(unix)]
 async fn unmount(mountpoint: &Path) -> bool {
+    // fuse3 systems ship only `fusermount3`, fuse2 systems only `fusermount` — try in that
+    // order (measured: Ubuntu 24.04's fuse3 has no `fusermount` compat name, and the old
+    // single-name spawn failed instantly, misreporting a free volume as busy).
     #[cfg(target_os = "linux")]
-    let mut cmd = {
-        let mut cmd = tokio::process::Command::new("fusermount");
-        cmd.arg("-u");
-        cmd
-    };
+    let unmounters: &[(&str, &[&str])] = &[("fusermount3", &["-u"]), ("fusermount", &["-u"])];
     #[cfg(not(target_os = "linux"))]
-    let mut cmd = tokio::process::Command::new("umount");
-    cmd.arg(mountpoint)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null());
-    let mut child = match cmd.spawn() {
-        Ok(child) => child,
-        Err(e) => {
-            tracing::warn!("unmount of {} failed to spawn: {e}", mountpoint.display());
-            return !still_mounted(mountpoint);
+    let unmounters: &[(&str, &[&str])] = &[("umount", &[])];
+    let mut child = None;
+    for (helper, args) in unmounters {
+        let mut cmd = tokio::process::Command::new(helper);
+        cmd.args(*args)
+            .arg(mountpoint)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        match cmd.spawn() {
+            Ok(spawned) => {
+                child = Some(spawned);
+                break;
+            }
+            Err(e) => tracing::warn!("could not spawn {helper}: {e}"),
         }
+    }
+    let Some(mut child) = child else {
+        return !still_mounted(mountpoint);
     };
     match tokio::time::timeout(Duration::from_secs(10), child.wait()).await {
         Ok(Ok(status)) if status.success() => true,

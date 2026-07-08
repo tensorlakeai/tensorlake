@@ -538,6 +538,54 @@ async fn ensure_fskit_ready() -> Result<()> {
     }
 }
 
+/// Mount's pre-flight on Linux: unprivileged FUSE needs /dev/fuse to be openable plus the
+/// setuid fusermount3 helper (fuse3 package) — mount(2) itself needs CAP_SYS_ADMIN regardless
+/// of device permissions. Checking up front turns "mount daemon did not come up" into the
+/// exact missing piece, and heads off the `sudo tl fs mount` reflex: a root mount is visible
+/// ONLY to root (FUSE denies other users without allow_other), with state and credentials
+/// under /root.
+#[cfg(target_os = "linux")]
+fn ensure_fuse_ready() -> Result<()> {
+    if unsafe { libc::geteuid() } == 0 {
+        eprintln!(
+            "{} mounting as root: the volume will be accessible ONLY to root (FUSE default), \
+             and mount state lands in root's home. Prefer unprivileged mounts — they work \
+             wherever /dev/fuse is mode 666 and the fuse3 package is installed.",
+            style("warning:").yellow()
+        );
+        return Ok(());
+    }
+    if let Err(e) = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open("/dev/fuse")
+    {
+        return Err(CliError::usage(format!(
+            "cannot open /dev/fuse ({e}); unprivileged mounts need it read/write. Fix:\n  \
+             sudo chmod 666 /dev/fuse\n(the fuse3 package's udev rule persists this on most \
+             distros; on minimal images add a tmpfiles.d entry: z /dev/fuse 0666 - - -)"
+        )));
+    }
+    let helper_on_path = |name: &str| {
+        std::env::var_os("PATH")
+            .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+    };
+    if !helper_on_path("fusermount3") && !helper_on_path("fusermount") {
+        return Err(CliError::usage(
+            "fusermount3 not found; unprivileged FUSE mounts go through the setuid helper from \
+             the fuse3 package. Fix:\n  sudo apt-get install fuse3",
+        ));
+    }
+    if !Path::new("/etc/mtab").exists() {
+        eprintln!(
+            "{} /etc/mtab is missing; fusermount3 will refuse to unmount later. Fix:\n  \
+             sudo ln -s /proc/self/mounts /etc/mtab",
+            style("warning:").yellow()
+        );
+    }
+    Ok(())
+}
+
 /// Unpack a TLFS app archive with ditto (keeps signatures/staple intact) and return the .app.
 #[cfg(target_os = "macos")]
 fn unzip_app(archive: &Path, staging: &Path) -> Result<PathBuf> {
@@ -763,6 +811,8 @@ pub async fn mount(
     }
     #[cfg(target_os = "macos")]
     ensure_fskit_ready().await?;
+    #[cfg(target_os = "linux")]
+    ensure_fuse_ready()?;
     let (name, base) = match target.split_once(':') {
         Some((name, base)) => (name, Some(base.to_string())),
         None => (target, None),
@@ -949,14 +999,17 @@ pub async fn mount(
         return daemon::run(ctx, &state_dir).await;
     }
 
-    // Detach the daemon and wait for its control socket to answer.
+    // Detach the daemon and wait for its control socket to answer. Its stderr lands in the
+    // state dir so a daemon that dies on startup (no /dev/fuse access, missing fusermount3,
+    // FSKit extension disabled) explains itself instead of just never answering.
     let exe = std::env::current_exe()?;
+    let daemon_log = state_dir.join("daemon.log");
     std::process::Command::new(exe)
         .args(["fs", "daemon", "--state-dir"])
         .arg(&state_dir)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
+        .stderr(std::fs::File::create(&daemon_log)?)
         .spawn()?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
     loop {
@@ -1017,10 +1070,24 @@ pub async fn mount(
                         .delete_workspace(&session.project_id, &repo, user, token, &ws.id)
                         .await;
                 }
+                // The daemon's own last words are the diagnosis; read them before the state
+                // dir (and the log with it) goes away.
+                let last_words = std::fs::read_to_string(&daemon_log)
+                    .ok()
+                    .map(|log| {
+                        let mut tail: Vec<&str> =
+                            log.lines().filter(|l| !l.trim().is_empty()).collect();
+                        tail = tail.split_off(tail.len().saturating_sub(5));
+                        tail.join("\n  ")
+                    })
+                    .filter(|tail| !tail.is_empty())
+                    .map(|tail| format!(" Daemon log:\n  {tail}\n"))
+                    .unwrap_or_default();
                 let _ = std::fs::remove_dir_all(&state_dir);
                 return Err(CliError::usage(format!(
-                    "mount daemon did not come up: {e}. Linux builds need /dev/fuse; macOS needs the \
-                     TensorLake FSKit extension enabled."
+                    "mount daemon did not come up: {e}.{last_words}\nLinux needs /dev/fuse \
+                     accessible (mode 666) and the fuse3 package (fusermount3 + /etc/mtab); \
+                     macOS needs the TensorLake file-system extension (tl fs setup)."
                 )));
             }
         }
