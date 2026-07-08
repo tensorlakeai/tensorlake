@@ -93,7 +93,7 @@ pub struct FastCloneBlob {
     pub path: String,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct FastCloneOptions {
     /// Clean https(s) repo URL, no embedded credentials (e.g. from `repo_url()`).
     pub repo_url: String,
@@ -105,6 +105,20 @@ pub struct FastCloneOptions {
     pub checkout: bool,
     /// Optional progress sink. Rendering (spinner, logs, bars) is the caller's concern.
     pub progress: Option<FastCloneProgress>,
+}
+
+impl std::fmt::Debug for FastCloneOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FastCloneOptions")
+            .field("repo_url", &self.repo_url)
+            .field("dest", &self.dest)
+            .field("cache_dir", &self.cache_dir)
+            .field("cache_max_bytes", &self.cache_max_bytes)
+            .field("credential", &self.credential)
+            .field("checkout", &self.checkout)
+            .field("progress", &self.progress.as_ref().map(|_| "<callback>"))
+            .finish()
+    }
 }
 
 #[derive(Clone, Debug)]
