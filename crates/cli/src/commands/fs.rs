@@ -1146,15 +1146,31 @@ pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> 
     ));
     if let Err(e) = daemon::control(&state_dir, "shutdown").await {
         // A dead daemon is not an obstacle — the mount is already gone; clean up local state.
-        // Anything else (EBUSY, most likely) means the volume is still live and serving.
+        // A busy volume means it is still live and serving. There is a third shape (measured):
+        // the daemon unmounts, replies, and exits so fast that the reply read loses the race
+        // and errors — poll briefly, and if the daemon is gone and the kernel released the
+        // volume, that IS success.
         let message = e.to_string();
         if !message.contains("mount daemon is not running") {
-            bar.finish_and_clear();
-            return Err(CliError::usage(format!(
-                "could not unmount {mountpoint}: {message}\nThe volume stays mounted and \
-                 usable. Close whatever is using it (shells cd'd inside, editors holding \
-                 files), then re-run: tl fs unmount {mountpoint}"
-            )));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let settled = loop {
+                let daemon_gone = daemon::daemon_pid(&state_dir).is_none_or(|p| !daemon_alive(p));
+                if daemon_gone && !daemon::still_mounted(Path::new(&mountpoint)) {
+                    break true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break false;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            };
+            if !settled {
+                bar.finish_and_clear();
+                return Err(CliError::usage(format!(
+                    "could not unmount {mountpoint}: {message}\nThe volume stays mounted and \
+                     usable. Close whatever is using it (shells cd'd inside, editors holding \
+                     files), then re-run: tl fs unmount {mountpoint}"
+                )));
+            }
         }
     }
     // Wait for the daemon to actually exit before tearing down its state dir: the shutdown op

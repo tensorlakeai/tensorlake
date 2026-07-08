@@ -371,9 +371,13 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 let resp = serde_json::json!({ "ok": true });
                                 let mut stream = reader.into_inner();
                                 let _ = stream.write_all(format!("{resp}\n").as_bytes()).await;
+                                // Orderly FIN before exiting: dying with the reply still in
+                                // flight can surface client-side as a lost reply (measured on
+                                // Linux; the CLI then double-checks the mount table).
+                                let _ = stream.shutdown().await;
                                 // Exit outright: session-wait is not guaranteed to return after
                                 // an external unmount (observed leaked daemons on Linux), and
-                                // the daemon's one job is over. The reply above already flushed.
+                                // the daemon's one job is over.
                                 std::process::exit(0);
                             }
                             serde_json::json!({
@@ -548,9 +552,15 @@ fn is_mounted(mountpoint: &Path) -> bool {
 async fn unmount(mountpoint: &Path) -> bool {
     // fuse3 systems ship only `fusermount3`, fuse2 systems only `fusermount` — try in that
     // order (measured: Ubuntu 24.04's fuse3 has no `fusermount` compat name, and the old
-    // single-name spawn failed instantly, misreporting a free volume as busy).
+    // single-name spawn failed instantly, misreporting a free volume as busy). A root daemon
+    // (`sudo tl fs mount`) unmounts directly with umount(8): the sudo path serves exactly the
+    // environments where no fusermount helper exists at all.
     #[cfg(target_os = "linux")]
-    let unmounters: &[(&str, &[&str])] = &[("fusermount3", &["-u"]), ("fusermount", &["-u"])];
+    let unmounters: &[(&str, &[&str])] = if unsafe { libc::geteuid() } == 0 {
+        &[("umount", &[])]
+    } else {
+        &[("fusermount3", &["-u"]), ("fusermount", &["-u"])]
+    };
     #[cfg(not(target_os = "linux"))]
     let unmounters: &[(&str, &[&str])] = &[("umount", &[])];
     let mut child = None;
@@ -582,7 +592,7 @@ async fn unmount(mountpoint: &Path) -> bool {
 
 /// Whether the kernel still shows a live mount at `mountpoint`.
 #[cfg(unix)]
-fn still_mounted(mountpoint: &Path) -> bool {
+pub(crate) fn still_mounted(mountpoint: &Path) -> bool {
     #[cfg(target_os = "macos")]
     {
         is_mounted(mountpoint)
