@@ -8,7 +8,7 @@ function packageRoot() {
   return path.resolve(__dirname, "..");
 }
 
-function binaryTargetId(platform = process.platform, arch = process.arch) {
+function baseTargetId(platform = process.platform, arch = process.arch) {
   return `${platform}-${arch}`;
 }
 
@@ -34,32 +34,18 @@ function linuxLibcFamily(options = {}) {
 }
 
 function packageTargetId(platform = process.platform, arch = process.arch, options = {}) {
-  const baseTargetId = binaryTargetId(platform, arch);
+  const targetId = baseTargetId(platform, arch);
   if (platform !== "linux") {
-    return baseTargetId;
+    return targetId;
   }
   if (!options.libc && !options.report && platform !== process.platform) {
-    return baseTargetId;
+    return targetId;
   }
-  return linuxLibcFamily(options) === "musl" ? `${baseTargetId}-musl` : baseTargetId;
+  return linuxLibcFamily(options) === "musl" ? `${targetId}-musl` : targetId;
 }
 
 function nativeTargetId(platform = process.platform, arch = process.arch, options = {}) {
   return packageTargetId(platform, arch, options);
-}
-
-function binaryPath(binaryName, options = {}) {
-  const platform = options.platform ?? process.platform;
-  const arch = options.arch ?? process.arch;
-  const extension = platform === "win32" ? ".exe" : "";
-  const root = options.packageRoot ?? packageRoot();
-  return path.join(
-    root,
-    "dist",
-    "bin",
-    binaryTargetId(platform, arch),
-    `${binaryName}${extension}`,
-  );
 }
 
 function nativeBindingPath(options = {}) {
@@ -92,23 +78,6 @@ function exitWithSpawnResult(result) {
     process.exit(1);
   }
   process.exit(result.status ?? 1);
-}
-
-function runBinary(binaryName) {
-  const targetId = binaryTargetId();
-  const executable = binaryPath(binaryName);
-  if (!fs.existsSync(executable)) {
-    console.error(
-      `Missing packaged binary '${binaryName}' for ${targetId}. Run 'npm run build' in tensorlake before packaging or install a package published with support for your platform.`,
-    );
-    process.exit(1);
-  }
-
-  const result = spawnSync(executable, process.argv.slice(2), {
-    stdio: "inherit",
-    env: process.env,
-  });
-  exitWithSpawnResult(result);
 }
 
 function findPython() {
@@ -155,11 +124,8 @@ function runPythonModule(moduleName, helpText) {
 }
 
 module.exports = {
-  binaryPath,
-  binaryTargetId,
   loadNative,
   nativeTargetId,
   nativeBindingPath,
-  runBinary,
   runPythonModule,
 };

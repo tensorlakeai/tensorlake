@@ -33,11 +33,17 @@ Tensorlake Sandboxes are stateful Firecracker MicroVMs built for instant, statef
 * **Live migration** — Sandboxes automatically move between machines during updates with only a brief pause of a few seconds.
 * **Scale** — Supports up to 5 million sandboxes in a single project.
 
-### Installation
+### Python SDK Installation
 
 ```bash
 pip install tensorlake
 ```
+
+### CLI Installation
+
+The `tl` / `tensorlake` CLI is distributed as a standalone binary from the
+[GitHub releases page](https://github.com/tensorlakeai/tensorlake/releases), not
+through PyPI or npm.
 
 ### Setup
 
@@ -45,7 +51,7 @@ Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/) and get your API 
 
 ```bash
 export TENSORLAKE_API_KEY="your-api-key"
-tensorlake login
+tl login
 ```
 
 ### Create Your First Sandbox (CLI)
@@ -54,19 +60,19 @@ Create a sandbox, run a command, and clean up:
 
 ```bash
 # Create a sandbox
-tensorlake sbx create --image tensorlake/tensorlake/ubuntu-minimal
+tl sbx create --image tensorlake/tensorlake/ubuntu-minimal
 
 # Run a command inside it
-tensorlake sbx exec <sandbox-id> -- sh -lc "printf 'Hello from the sandbox!\n'"
+tl sbx exec <sandbox-id> -- sh -lc "printf 'Hello from the sandbox!\n'"
 
 # Copy a file into the sandbox
-tensorlake sbx cp ./my_script.py <sandbox-id>:/tmp/my_script.py
+tl sbx cp ./my_script.py <sandbox-id>:/tmp/my_script.py
 
 # Open an interactive terminal
-tensorlake sbx ssh <sandbox-id>
+tl sbx ssh <sandbox-id>
 
 # Terminate when done
-tensorlake sbx terminate <sandbox-id>
+tl sbx terminate <sandbox-id>
 ```
 
 `--image` expects a sandbox image name such as `tensorlake/ubuntu-minimal` or a registered Sandbox Image name, not an arbitrary Docker image reference.
@@ -248,10 +254,10 @@ Sandboxes are created in under a second via Lattice, a dynamic cluster scheduler
 Spin up a sandbox as an isolated execution environment for an agent's tools or generated code, run commands or processes inside it, read and write files, and terminate it when done — all from the Python or TypeScript SDK, or the CLI.
 
 **What languages and interfaces are supported?**
-Tensorlake provides a Python SDK, a TypeScript SDK, and a CLI (`tensorlake` / `tl`), plus an HTTP API for invoking orchestration applications.
+Tensorlake provides a Python SDK, a TypeScript SDK, a standalone CLI (`tensorlake` / `tl`), plus an HTTP API for invoking orchestration applications.
 
 **How do I get started?**
-Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), run `pip install tensorlake`, set your `TENSORLAKE_API_KEY`, and create your first sandbox. See the [documentation](https://docs.tensorlake.ai) for full guides.
+Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), run `pip install tensorlake` for the Python SDK, install the standalone CLI if you want command-line access, set your `TENSORLAKE_API_KEY`, and create your first sandbox. See the [documentation](https://docs.tensorlake.ai) for full guides.
 
 ## Learn More
 

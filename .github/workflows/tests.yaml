@@ -55,8 +55,6 @@ jobs:
 
   windows_build_smoke:
     name: Windows build smoke test
-    # The customer Windows wheel ships `git-clone`; it needs the private gsvc-codec source.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -72,37 +70,18 @@ jobs:
         with:
           targets: x86_64-pc-windows-msvc
 
-      - name: Vendor private artifact_storage crates
-        uses: ./.github/actions/vendor-private-crates
-        with:
-          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
-          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
-
-      - name: Build Cloud SDK wheel
-        uses: PyO3/maturin-action@v1
-        env:
-          CARGO_TARGET_DIR: target
-        with:
-          target: x86_64-pc-windows-msvc
-          args: --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk -i python
-          sccache: 'true'
-
-      - name: Bundle Cloud SDK extension into tensorlake wheel
-        run: |
-          python .github/scripts/bundle_cloud_sdk_wheel.py "dist-cloud-sdk/tensorlake_rust_cloud_sdk-*.whl" src/tensorlake --require-abi3
-
       - name: Build tensorlake wheel
         uses: PyO3/maturin-action@v1
         env:
           CARGO_TARGET_DIR: target
         with:
           target: x86_64-pc-windows-msvc
-          args: --release --out dist --features git-clone
+          args: --release --out dist
           sccache: 'true'
 
       - name: Verify wheel imports Rust Cloud SDK extension
         run: |
-          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --expect-script function-executor --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
 
       - name: Build Node.js native binding
         env:

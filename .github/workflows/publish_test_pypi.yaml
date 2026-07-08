@@ -56,9 +56,6 @@ jobs:
   build-wheels:
     needs: [prepare]
     name: Build wheels on ${{ matrix.platform.os }} (${{ matrix.platform.target }})
-    # Wheel builds include the customer CLI feature set and need private artifact_storage crates.
-    # Fork PRs cannot access those secrets, so they only run the sdist job.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
@@ -67,34 +64,20 @@ jobs:
           - os: namespace-profile-rust-builder-amd64
             target: x86_64
             manylinux: auto
-            cloud_sdk_interpreter: /opt/python/cp310-cp310/bin/python
-            cli_features: mount,git-clone
           # Native arm64 runner + native PyPA image: the manylinux2014-cross image's
           # GCC 4.8 miscompiles ring's aarch64 crypto (TLS BadSignature at runtime).
           - os: ubuntu-24.04-arm
             target: aarch64
             manylinux: '2014'
             manylinux_container: quay.io/pypa/manylinux2014_aarch64:latest
-            cloud_sdk_interpreter: /opt/python/cp310-cp310/bin/python
-            cli_features: mount,git-clone
           - os: macos-14
             target: aarch64
             rust_target: aarch64-apple-darwin
-            cloud_sdk_interpreter: python3.10
-            cli_features: mount,git-clone
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             rust_target: x86_64-pc-windows-msvc
-            cloud_sdk_interpreter: python
-            cli_features: git-clone
     steps:
       - uses: actions/checkout@v4
-
-      - name: Vendor private artifact_storage crates
-        uses: ./.github/actions/vendor-private-crates
-        with:
-          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
-          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
 
       - name: Bump version
         run: python .github/scripts/bump_version.py ${{ needs.prepare.outputs.version }}
@@ -117,35 +100,20 @@ jobs:
           prefix-key: v1-rust-no-bin
           cache-bin: false
 
-      - name: Build Cloud SDK wheel
-        uses: PyO3/maturin-action@v1
-        env:
-          CARGO_TARGET_DIR: target
-        with:
-          target: ${{ matrix.platform.target }}
-          args: --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist-cloud-sdk -i ${{ matrix.platform.cloud_sdk_interpreter }}
-          manylinux: ${{ matrix.platform.manylinux || 'auto' }}
-          container: ${{ matrix.platform.manylinux_container || '' }}
-          sccache: 'true'
-
-      - name: Bundle Cloud SDK extension into tensorlake wheel
-        run: |
-          python .github/scripts/bundle_cloud_sdk_wheel.py "dist-cloud-sdk/tensorlake_rust_cloud_sdk-*.whl" src/tensorlake --require-abi3
-
       - name: Build wheels
         uses: PyO3/maturin-action@v1
         env:
           CARGO_TARGET_DIR: target
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist --features ${{ matrix.platform.cli_features }}
+          args: --release --out dist
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
           container: ${{ matrix.platform.manylinux_container || '' }}
           sccache: 'true'
 
       - name: Verify wheel imports Rust Cloud SDK extension
         run: |
-          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --tls-check https://api.tensorlake.ai --cli-check https://api.tensorlake.ai
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --tls-check https://api.tensorlake.ai --expect-script function-executor --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4

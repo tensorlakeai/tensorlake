@@ -1,14 +1,12 @@
 {
   "name": "tensorlake",
   "version": "0.5.62",
-  "description": "TensorLake SDK and CLI for applications, sandboxes, and cloud services",
+  "description": "TensorLake SDK for applications, sandboxes, and cloud services",
   "type": "module",
   "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "tl": "./bin/tl.cjs",
-    "tensorlake": "./bin/tensorlake.cjs",
     "tensorlake-deploy": "./bin/tensorlake-deploy.cjs",
     "tensorlake-create-sandbox-image": "./bin/tensorlake-create-sandbox-image.cjs",
     "tensorlake-import-sandbox-image": "./bin/tensorlake-import-sandbox-image.cjs",
@@ -33,9 +31,8 @@
   ],
   "scripts": {
     "build:sdk": "tsup",
-    "build:cli": "node ./scripts/prepare-package.mjs",
     "build:native": "node ./scripts/build-native.mjs",
-    "build": "npm run build:sdk && npm run build:cli && npm run build:native",
+    "build": "npm run build:sdk && npm run build:native",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude tests/integration.test.ts",
     "test:integration": "vitest run tests/integration.test.ts",
@@ -51,8 +48,7 @@
     "sandbox",
     "cloud",
     "sdk",
-    "applications",
-    "cli"
+    "applications"
   ],
   "repository": {
     "type": "git",

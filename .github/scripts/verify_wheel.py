@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import subprocess
 import tempfile
 import venv
@@ -32,14 +31,6 @@ finally:
 print(f"TLS check passed: request to {url} succeeded")
 """
 
-_TLS_ERROR_SIGNATURES = (
-    "badsignature",
-    "invalid peer certificate",
-    "error sending request",
-    "connection",
-)
-
-
 def _venv_python(venv_dir: Path) -> Path:
     if os.name == "nt":
         return venv_dir / "Scripts" / "python.exe"
@@ -52,33 +43,25 @@ def _venv_scripts_dir(venv_dir: Path) -> Path:
     return venv_dir / "bin"
 
 
-def _run_cli_check(venv_dir: Path, url: str) -> None:
-    scripts_dir = _venv_scripts_dir(venv_dir)
-    search_path = os.pathsep.join([str(scripts_dir), os.environ.get("PATH", "")])
-    cli = shutil.which("tensorlake", path=search_path)
-    if cli is None or not Path(cli).is_relative_to(venv_dir):
-        raise SystemExit(f"CLI check FAILED: no tensorlake executable in {scripts_dir}")
+def _script_candidates(scripts_dir: Path, name: str) -> list[Path]:
+    candidates = [scripts_dir / name]
+    if os.name == "nt":
+        candidates.extend(
+            [
+                scripts_dir / f"{name}.exe",
+                scripts_dir / f"{name}.cmd",
+                scripts_dir / f"{name}.bat",
+            ]
+        )
+    return candidates
 
-    env = {k: v for k, v in os.environ.items() if not k.startswith("TENSORLAKE_")}
-    proc = subprocess.run(
-        [cli, "--api-key", "invalid", "--api-url", url, "whoami"],
-        capture_output=True,
-        text=True,
-        timeout=300,
-        env=env,
+
+def _find_venv_script(venv_dir: Path, name: str) -> Path | None:
+    scripts_dir = _venv_scripts_dir(venv_dir)
+    return next(
+        (candidate for candidate in _script_candidates(scripts_dir, name) if candidate.exists()),
+        None,
     )
-    output = proc.stdout + proc.stderr
-    lowered = output.lower()
-    matched = [s for s in _TLS_ERROR_SIGNATURES if s in lowered]
-    if matched:
-        raise SystemExit(
-            f"CLI check FAILED: TLS/connection error signatures {matched} in output:\n{output}"
-        )
-    if proc.returncode == 0:
-        raise SystemExit(
-            f"CLI check FAILED: expected auth failure for invalid API key, got exit 0:\n{output}"
-        )
-    print(f"CLI check passed: auth failure without TLS errors (exit {proc.returncode})")
 
 
 def main() -> int:
@@ -101,10 +84,18 @@ def main() -> int:
         "require an HTTP-level auth error (catches miscompiled TLS crypto)",
     )
     parser.add_argument(
-        "--cli-check",
-        metavar="URL",
-        help="Run the wheel-bundled tensorlake CLI against URL with an invalid API key "
-        "and require an auth error rather than a TLS/connection error",
+        "--expect-script",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Require an installed script with NAME in the wheel's virtualenv",
+    )
+    parser.add_argument(
+        "--reject-script",
+        action="append",
+        default=[],
+        metavar="NAME",
+        help="Require that no installed script with NAME exists in the wheel's virtualenv",
     )
     args = parser.parse_args()
 
@@ -151,8 +142,21 @@ def main() -> int:
                 check=True,
             )
 
-        if args.cli_check:
-            _run_cli_check(venv_dir, args.cli_check)
+        for script_name in args.expect_script:
+            script_path = _find_venv_script(venv_dir, script_name)
+            if script_path is None:
+                raise SystemExit(
+                    f"Script check FAILED: expected {script_name!r} in {_venv_scripts_dir(venv_dir)}"
+                )
+            print(f"Verified installed script: {script_path}")
+
+        for script_name in args.reject_script:
+            script_path = _find_venv_script(venv_dir, script_name)
+            if script_path is not None:
+                raise SystemExit(
+                    f"Script check FAILED: unexpected {script_name!r} installed at {script_path}"
+                )
+            print(f"Verified script is absent: {script_name}")
 
     return 0
 
