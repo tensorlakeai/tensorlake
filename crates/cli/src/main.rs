@@ -532,8 +532,8 @@ enum GitCommands {
     },
     /// Mint a short-lived Git credential for this project
     Token {
-        /// Limit the credential to one repository and grant only Git read/write scopes
-        #[arg(long)]
+        /// Limit the credential to one repository and grant only Git read/write scopes;
+        /// omit for a project-wide credential
         repo: Option<String>,
         /// Output JSON
         #[arg(long)]
@@ -2601,13 +2601,23 @@ mod tests {
             _ => panic!("expected git op ls command"),
         }
 
-        match parse_command(["tl", "git", "token", "--repo", "demo"]) {
+        // token takes the repo positionally, like every other repo-addressed command;
+        // omitting it mints a project-wide credential.
+        match parse_command(["tl", "git", "token", "demo"]) {
             Commands::Git(GitCommands::Token { repo, json }) => {
                 assert_eq!(repo.as_deref(), Some("demo"));
                 assert!(!json);
             }
             _ => panic!("expected git token command"),
         }
+        match parse_command(["tl", "git", "token", "--json"]) {
+            Commands::Git(GitCommands::Token { repo, json }) => {
+                assert_eq!(repo, None);
+                assert!(json);
+            }
+            _ => panic!("expected git token command"),
+        }
+        assert!(Cli::try_parse_from(["tl", "git", "token", "--repo", "demo"]).is_err());
 
         match parse_command(["tl", "git", "info", "demo", "--json"]) {
             Commands::Git(GitCommands::Info { repo, json }) => {
