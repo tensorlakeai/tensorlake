@@ -20,6 +20,9 @@ use reqwest::Method;
 use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
+use tensorlake::artifact_storage::ArtifactStorageClient;
+use tensorlake::artifact_storage::ingest::PushOptions;
+use tensorlake::artifact_storage::merge::MergeRequest;
 use tensorlake::document_ai::DocumentAiClient;
 use tensorlake::file_systems::FileSystemsClient;
 use tensorlake::file_systems::models::CreateFileSystemRequest;
@@ -259,6 +262,382 @@ impl CloudApiClient {
                 let file_systems = FileSystemsClient::new(client, organization_id, project_id);
                 file_systems.delete(&file_system_id).await?;
                 Ok(())
+            }
+        })
+    }
+
+    fn git_repo_url(&self, project_id: String, repo: String) -> PyResult<String> {
+        let client = self.artifact_storage_client().map_err(into_py_error)?;
+        Ok(client.git_repo_url(&project_id, &repo))
+    }
+
+    #[pyo3(signature = (project_id, repo, default_branch=None))]
+    fn create_git_repo(
+        &self,
+        project_id: String,
+        repo: String,
+        default_branch: Option<String>,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            let default_branch = default_branch.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client
+                    .create_repo(&project_id, &repo, default_branch.as_deref())
+                    .await?;
+                let url = client.git_repo_url(&project_id, &repo);
+                let response = serde_json::json!({
+                    "repo": repo,
+                    "url": url,
+                });
+                let mut value = serde_json::to_value(response).map_err(SdkError::from)?;
+                if let Some(obj) = value.as_object_mut() {
+                    obj.insert(
+                        "trace_id".to_string(),
+                        serde_json::Value::String(traced.trace_id),
+                    );
+                }
+                serde_json::to_string(&value).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn list_git_repos(&self, project_id: String) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client.list_repos(&project_id).await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn delete_git_repo(&self, project_id: String, repo: String) -> PyResult<()> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                client.delete_repo(&project_id, &repo).await?;
+                Ok(())
+            }
+        })
+    }
+
+    fn fork_git_repo(
+        &self,
+        project_id: String,
+        repo: String,
+        base_repo: String,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            let base_repo = base_repo.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client.fork_repo(&project_id, &repo, &base_repo).await?;
+                let url = client.git_repo_url(&project_id, &repo);
+                let response = serde_json::json!({
+                    "repo": repo,
+                    "url": url,
+                    "base_repo": base_repo,
+                    "trace_id": traced.trace_id,
+                });
+                serde_json::to_string(&response).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn archive_git_repo(&self, project_id: String, repo: String) -> PyResult<()> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                client.archive_repo(&project_id, &repo).await?;
+                Ok(())
+            }
+        })
+    }
+
+    fn restore_git_repo(&self, project_id: String, repo: String) -> PyResult<()> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                client.restore_repo(&project_id, &repo).await?;
+                Ok(())
+            }
+        })
+    }
+
+    fn git_repo_info(&self, project_id: String, repo: String) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client.repo_info(&project_id, &repo).await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn list_git_branches(&self, project_id: String, repo: String) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client.list_branches(&project_id, &repo).await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn list_git_refs(&self, project_id: String, repo: String) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client.list_refs(&project_id, &repo).await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn delete_git_branch(&self, project_id: String, repo: String, branch: String) -> PyResult<()> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            let branch = branch.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                client.delete_branch(&project_id, &repo, &branch).await?;
+                Ok(())
+            }
+        })
+    }
+
+    fn list_git_operations(&self, project_id: String, repo: String) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client.list_operations(&project_id, &repo).await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    #[pyo3(signature = (project_id, repo=None))]
+    fn git_credential(&self, project_id: String, repo: Option<String>) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let credential = match repo.as_deref() {
+                    Some(repo) => client.git_credential_for_repo(&project_id, repo).await?,
+                    None => client.git_credential_for_project(&project_id).await?,
+                };
+                serde_json::to_string(&credential).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn git_commit_status(
+        &self,
+        project_id: String,
+        repo: String,
+        job_id: String,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            let job_id = job_id.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let credential = client.git_credential_for_repo(&project_id, &repo).await?;
+                let traced = client
+                    .commit_job_status(
+                        &project_id,
+                        &repo,
+                        &credential.git_username,
+                        &credential.token,
+                        &job_id,
+                    )
+                    .await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn push_git_worktree(
+        &self,
+        project_id: String,
+        repo: String,
+        root: String,
+        branch: String,
+        message: String,
+        expect_oid: Option<String>,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            let root = root.clone();
+            let branch = branch.clone();
+            let message = message.clone();
+            let expect_oid = expect_oid.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let credential = client.git_credential_for_repo(&project_id, &repo).await?;
+                let opts = PushOptions {
+                    branch,
+                    message,
+                    expect_oid,
+                    ..Default::default()
+                };
+                let traced = client
+                    .push_worktree(
+                        &project_id,
+                        &repo,
+                        &credential.git_username,
+                        &credential.token,
+                        PathBuf::from(root),
+                        opts,
+                    )
+                    .await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    #[pyo3(signature = (project_id, repo, ours, theirs, preflight=false, deep=false, materialize=false, message=None, base=None))]
+    fn merge_git_repo(
+        &self,
+        project_id: String,
+        repo: String,
+        ours: String,
+        theirs: String,
+        preflight: bool,
+        deep: bool,
+        materialize: bool,
+        message: Option<String>,
+        base: Option<String>,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            let ours = ours.clone();
+            let theirs = theirs.clone();
+            let message = message.clone();
+            let base = base.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let request = MergeRequest {
+                    ours,
+                    theirs,
+                    base,
+                    deep,
+                    mode: (!preflight).then(|| "commit".to_string()),
+                    policy: materialize.then(|| "materialize".to_string()),
+                    message,
+                    ..Default::default()
+                };
+                let traced = client.merge_repo(&project_id, &repo, &request).await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn git_commit_conflicts(
+        &self,
+        project_id: String,
+        repo: String,
+        commit: String,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let repo = repo.clone();
+            let commit = commit.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client
+                    .get_commit_conflicts(&project_id, &repo, &commit)
+                    .await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
             }
         })
     }
@@ -2619,6 +2998,13 @@ where
 }
 
 impl CloudApiClient {
+    fn artifact_storage_client(&self) -> Result<ArtifactStorageClient, SdkError> {
+        ArtifactStorageClient::new(
+            self.client.clone(),
+            tensorlake::resolve_artifact_storage_url(&self.api_url),
+        )
+    }
+
     fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
         F: FnMut(Client) -> Fut,

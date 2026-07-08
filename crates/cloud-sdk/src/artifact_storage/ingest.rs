@@ -23,9 +23,10 @@
 //! would make the replayed offset conflict).
 
 use std::io::Read;
-use std::path::PathBuf;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
+use ignore::WalkBuilder;
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -134,7 +135,7 @@ impl Default for PushOptions {
 }
 
 /// Outcome of a push.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize)]
 pub struct PushReport {
     pub commit: String,
     pub tree: String,
@@ -224,45 +225,45 @@ struct StagedRegisterWire {
     entries: Vec<StagedEntryWire>,
 }
 
-#[derive(Deserialize)]
-struct CommitJobReadBackWire {
-    done: u64,
-    total: u64,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CommitJobReadBack {
+    pub done: u64,
+    pub total: u64,
 }
 
-#[derive(Default, Deserialize)]
-struct CommitJobErrorWire {
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+pub struct CommitJobError {
     #[serde(default)]
-    kind: String,
+    pub kind: String,
     #[serde(default)]
-    message: String,
+    pub message: String,
     #[serde(default)]
-    retryable: bool,
+    pub retryable: bool,
 }
 
 /// A commit job's state machine as rendered by the server (submission response and polls).
 /// This is the only commit protocol: both the branch-commit and workspace-snapshot endpoints
 /// answer it, and success embeds the commit fields at the top level.
-#[derive(Deserialize)]
-struct CommitJobWire {
-    job_id: String,
-    state: String,
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct CommitJobStatus {
+    pub job_id: String,
+    pub state: String,
     #[serde(default)]
-    phase: Option<String>,
+    pub phase: Option<String>,
     #[serde(default)]
-    read_back: Option<CommitJobReadBackWire>,
+    pub read_back: Option<CommitJobReadBack>,
     #[serde(default)]
-    commit: Option<String>,
+    pub commit: Option<String>,
     #[serde(default)]
-    tree: Option<String>,
+    pub tree: Option<String>,
     #[serde(default)]
-    ref_name: Option<String>,
+    pub ref_name: Option<String>,
     #[serde(default)]
-    parent: Option<String>,
+    pub parent: Option<String>,
     #[serde(default)]
-    created: Option<bool>,
+    pub created: Option<bool>,
     #[serde(default)]
-    error: Option<CommitJobErrorWire>,
+    pub error: Option<CommitJobError>,
 }
 
 /// zstd level for staged chunk frames — the server stores frames verbatim, so this matches its
@@ -349,7 +350,7 @@ fn chunk_source(
             ));
         }
     };
-    let reader: Box<dyn Read> = match source {
+    let reader: Box<dyn Read + Send> = match source {
         PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
         PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
         PushSource::KnownOid(_) => unreachable!("guarded above"),
@@ -504,7 +505,128 @@ fn dedup_needed_chunks(
         .collect()
 }
 
+fn collect_worktree_files(root: &Path, out: &mut Vec<PushFile>) -> Result<(), SdkError> {
+    let mut walker = WalkBuilder::new(root);
+    walker
+        // Git tracks dotfiles by default; only ignore patterns should exclude them.
+        .hidden(false)
+        // `git add` does not read ripgrep-style `.ignore` files.
+        .ignore(false)
+        // Keep snapshot roots self-contained instead of reading parent `.gitignore` files.
+        .parents(false)
+        // Honor Git's ignore sources, including `.gitignore` in roots that are not full repos.
+        .require_git(false)
+        .git_ignore(true)
+        .git_exclude(true)
+        .git_global(true)
+        .follow_links(false)
+        .sort_by_file_path(|a, b| a.cmp(b))
+        .filter_entry(|entry| entry.file_name() != ".git");
+
+    for entry in walker.build() {
+        let entry = entry.map_err(|err| SdkError::ClientError(err.to_string()))?;
+        let path = entry.path();
+        let meta = std::fs::symlink_metadata(path)?;
+        if meta.is_dir() {
+            continue;
+        }
+
+        let repo_path = repo_path_for_worktree(root, path);
+        if repo_path.is_empty() {
+            continue;
+        }
+
+        let file_type = meta.file_type();
+        if file_type.is_symlink() {
+            let target = std::fs::read_link(path)?;
+            out.push(PushFile {
+                repo_path,
+                source: PushSource::Bytes(symlink_target_bytes(&target)),
+                mode: Some(0o120000),
+                delete: false,
+            });
+        } else if file_type.is_file() {
+            out.push(PushFile {
+                repo_path,
+                source: PushSource::Path(path.to_path_buf()),
+                mode: Some(regular_file_mode(&meta)),
+                delete: false,
+            });
+        }
+    }
+
+    Ok(())
+}
+
+fn regular_file_mode(meta: &std::fs::Metadata) -> u32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if meta.permissions().mode() & 0o111 != 0 {
+            0o100755
+        } else {
+            0o100644
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = meta;
+        0o100644
+    }
+}
+
+fn symlink_target_bytes(target: &Path) -> Vec<u8> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::ffi::OsStrExt;
+        target.as_os_str().as_bytes().to_vec()
+    }
+    #[cfg(not(unix))]
+    {
+        target.to_string_lossy().into_owned().into_bytes()
+    }
+}
+
+/// Repo path for a file under a worktree root, using forward slashes and only normal path
+/// components. This keeps `.` and `..` out of server commit payloads.
+fn repo_path_for_worktree(root: &Path, path: &Path) -> String {
+    path.strip_prefix(root)
+        .unwrap_or(path)
+        .components()
+        .filter_map(|c| match c {
+            Component::Normal(part) => Some(part.to_string_lossy()),
+            _ => None,
+        })
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 impl ArtifactStorageClient {
+    /// Push every Git-visible file under `root` as one commit. `.git` is skipped, `.gitignore`
+    /// rules are honored, repository paths are rooted at `root`, and regular-file executable bits
+    /// plus symlinks are preserved.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn push_worktree(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        root: impl AsRef<Path>,
+        opts: PushOptions,
+    ) -> Result<Traced<PushReport>, SdkError> {
+        let root = root.as_ref();
+        let mut files = Vec::new();
+        collect_worktree_files(root, &mut files)?;
+        if files.is_empty() {
+            return Err(SdkError::ClientError(
+                "no files found under the Git worktree".to_string(),
+            ));
+        }
+        self.push_files(project_id, repo, git_username, git_token, files, opts)
+            .await
+    }
+
     /// Push a set of files as one commit, transferring only chunks the server lacks. Safe to
     /// retry wholesale on any failure: completed work is discovered, not redone.
     #[allow(clippy::too_many_arguments)]
@@ -778,7 +900,7 @@ impl ArtifactStorageClient {
                         body.extend_from_slice(&total.to_be_bytes());
                         body.extend_from_slice(&(file.chunks.len() as u32).to_be_bytes());
                         body.extend_from_slice(token.as_bytes());
-                        let mut reader: Box<dyn Read> = match &file.source {
+                        let mut reader: Box<dyn Read + Send> = match &file.source {
                             PushSource::Path(p) => {
                                 Box::new(std::fs::File::open(p).map_err(io_err)?)
                             }
@@ -849,7 +971,7 @@ impl ArtifactStorageClient {
                 let batch_bytes = opts.upload_batch_bytes;
                 async move {
                     let total: u64 = file.chunks.iter().map(|(_, s)| *s as u64).sum();
-                    let mut reader: Box<dyn Read> = match &file.source {
+                    let mut reader: Box<dyn Read + Send> = match &file.source {
                         PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
                         PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
                         PushSource::KnownOid(_) => unreachable!("known-oid files are not tokened"),
@@ -959,7 +1081,7 @@ impl ArtifactStorageClient {
                 if file.chunks.is_empty() {
                     continue; // deletes and known-oid references carry no bytes
                 }
-                let mut reader: Box<dyn Read> = match &file.source {
+                let mut reader: Box<dyn Read + Send> = match &file.source {
                     PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
                     PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
                     PushSource::KnownOid(_) => unreachable!("no chunks to upload"),
@@ -1058,7 +1180,7 @@ impl ArtifactStorageClient {
                 if file.chunks.is_empty() {
                     continue; // deletes and known-oid references carry no bytes
                 }
-                let mut reader: Box<dyn Read> = match &file.source {
+                let mut reader: Box<dyn Read + Send> = match &file.source {
                     PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
                     PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
                     PushSource::KnownOid(_) => unreachable!("no chunks to upload"),
@@ -1192,7 +1314,7 @@ impl ArtifactStorageClient {
                 .send()
                 .await?;
             let accepted = submit.status().as_u16() == 202;
-            let job: CommitJobWire = expect_json(submit).await?;
+            let job: CommitJobStatus = expect_json(submit).await?;
             Ok((accepted, job, trace_id))
         })
         .await?;
@@ -1337,7 +1459,7 @@ impl ArtifactStorageClient {
         git_username: &str,
         git_token: &str,
         job_id: &str,
-    ) -> Result<Traced<serde_json::Value>, SdkError> {
+    ) -> Result<Traced<CommitJobStatus>, SdkError> {
         let (req, trace_id) = self.git_request(
             Method::GET,
             project_id,
@@ -1683,6 +1805,95 @@ mod tests {
             !need.contains(&h(2)),
             "chunks only a tokened file carries ride the tokened stream"
         );
+    }
+
+    #[test]
+    fn worktree_repo_paths_from_dot_have_no_dot_components() {
+        let root = std::path::Path::new(".");
+        assert_eq!(
+            repo_path_for_worktree(root, std::path::Path::new("./.clang-format")),
+            ".clang-format"
+        );
+        assert_eq!(
+            repo_path_for_worktree(root, std::path::Path::new("./arch/boot.c")),
+            "arch/boot.c"
+        );
+    }
+
+    #[test]
+    fn worktree_repo_paths_from_absolute_root_are_root_relative() {
+        let root = std::path::Path::new("/tmp/somedir");
+        assert_eq!(
+            repo_path_for_worktree(root, std::path::Path::new("/tmp/somedir/a/b.txt")),
+            "a/b.txt"
+        );
+    }
+
+    #[test]
+    fn collect_worktree_files_skips_git_metadata() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), "a").unwrap();
+        std::fs::create_dir(dir.path().join(".git")).unwrap();
+        std::fs::write(dir.path().join(".git").join("config"), "ignored").unwrap();
+
+        let mut files = Vec::new();
+        collect_worktree_files(dir.path(), &mut files).unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].repo_path, "a.txt");
+    }
+
+    #[test]
+    fn collect_worktree_files_honors_gitignore_without_git_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join(".gitignore"), "ignored.bin\n").unwrap();
+        std::fs::write(dir.path().join("ignored.bin"), "ignored").unwrap();
+        std::fs::write(dir.path().join("kept.tensorlake-test"), "kept").unwrap();
+
+        let mut files = Vec::new();
+        collect_worktree_files(dir.path(), &mut files).unwrap();
+
+        let paths: Vec<_> = files.iter().map(|file| file.repo_path.as_str()).collect();
+        assert_eq!(paths, vec![".gitignore", "kept.tensorlake-test"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_worktree_files_preserves_executable_mode() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join("script.sh");
+        std::fs::write(&script, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let mut files = Vec::new();
+        collect_worktree_files(dir.path(), &mut files).unwrap();
+
+        assert_eq!(files.len(), 1);
+        assert_eq!(files[0].repo_path, "script.sh");
+        assert_eq!(files[0].mode, Some(0o100755));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_worktree_files_preserves_symlink_mode_and_target() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("target.txt"), "target").unwrap();
+        std::os::unix::fs::symlink("target.txt", dir.path().join("link.txt")).unwrap();
+
+        let mut files = Vec::new();
+        collect_worktree_files(dir.path(), &mut files).unwrap();
+
+        let link = files
+            .iter()
+            .find(|file| file.repo_path == "link.txt")
+            .expect("symlink should be collected");
+        assert_eq!(link.mode, Some(0o120000));
+        match &link.source {
+            PushSource::Bytes(bytes) => assert_eq!(bytes, b"target.txt"),
+            other => panic!("expected symlink bytes, got {other:?}"),
+        }
     }
 
     /// The commit wire shape for a known-oid file: `oid` set, no chunks, no content.

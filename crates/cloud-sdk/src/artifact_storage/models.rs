@@ -71,6 +71,14 @@ pub struct ListBranchesResponse {
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RepoInfo {
+    pub repo: String,
+    pub url: String,
+    pub branches: Vec<Branch>,
+    pub refs: Vec<GitRef>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct OperationRef {
     pub name: String,
     pub old: Option<String>,

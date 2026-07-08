@@ -3520,8 +3520,9 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.61"
+version = "0.5.62"
 dependencies = [
+ "anyhow",
  "base64",
  "bollard",
  "bytes",
@@ -3529,11 +3530,13 @@ dependencies = [
  "data-encoding",
  "derive_builder",
  "des",
+ "dirs",
  "docker-credentials-config",
  "eventsource-stream",
  "fastcdc",
  "flate2",
  "futures",
+ "gsvc-codec",
  "hex",
  "ignore",
  "pin-project-lite",
@@ -3566,7 +3569,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.61"
+version = "0.5.62"
 dependencies = [
  "anyhow",
  "base64",
@@ -3586,10 +3589,10 @@ dependencies = [
  "fuser",
  "futures",
  "gethostname",
- "gsvc-codec",
  "gsvc-mount",
  "hex",
  "http-body-util",
+ "ignore",
  "indicatif",
  "libc",
  "minijinja",
@@ -3617,7 +3620,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.61"
+version = "0.5.62"
 dependencies = [
  "napi",
  "napi-build",
@@ -3631,7 +3634,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.61"
+version = "0.5.62"
 dependencies = [
  "futures",
  "pyo3",

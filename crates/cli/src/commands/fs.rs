@@ -11,12 +11,15 @@
 //! `restore` refills the overlay from any snapshot. FUSE is the only mount path — Linux builds
 //! carry it unconditionally, macOS requires macFUSE and the `macfuse` build feature.
 
-use std::path::{Path, PathBuf};
+use std::collections::HashMap;
+use std::path::{Component, Path, PathBuf};
 use std::sync::Arc;
 
 use comfy_table::Cell;
 use console::style;
 use futures::StreamExt;
+use ignore::Match;
+use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tensorlake::artifact_storage::ArtifactStorageClient;
 use tensorlake::artifact_storage::ingest::{PushEvent, PushFile, PushOptions, PushSource};
 use tensorlake::artifact_storage::models::GitCredential;
@@ -1182,8 +1185,90 @@ pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> 
 /// Overlay upserts as `(repo path, upper file, git mode)`.
 type OverlayUpserts = Vec<(String, PathBuf, u32)>;
 
+struct SnapshotIgnore {
+    mount_root: PathBuf,
+    ignored_names: Vec<String>,
+    gitignores: HashMap<PathBuf, Gitignore>,
+}
+
+impl SnapshotIgnore {
+    fn new(mount_root: &Path) -> Self {
+        Self {
+            mount_root: mount_root.to_path_buf(),
+            ignored_names: local::ignored_names(mount_root),
+            gitignores: HashMap::new(),
+        }
+    }
+
+    fn matcher_for(&mut self, rel_dir: &Path) -> Result<&Gitignore> {
+        if !self.gitignores.contains_key(rel_dir) {
+            let abs_dir = self.mount_root.join(rel_dir);
+            let mut builder = GitignoreBuilder::new(&abs_dir);
+            let gitignore = abs_dir.join(".gitignore");
+            if gitignore.is_file()
+                && let Some(err) = builder.add(&gitignore)
+            {
+                return Err(CliError::usage(format!(
+                    "failed to read {}: {err}",
+                    gitignore.display()
+                )));
+            }
+            let matcher = builder.build().map_err(|err| {
+                CliError::usage(format!("failed to parse {}: {err}", gitignore.display()))
+            })?;
+            self.gitignores.insert(rel_dir.to_path_buf(), matcher);
+        }
+        Ok(self.gitignores.get(rel_dir).expect("matcher inserted"))
+    }
+
+    fn is_ignored(&mut self, rel: &str, is_dir: bool) -> Result<bool> {
+        let rel_path = Path::new(rel);
+        for component in rel_path.components() {
+            let Component::Normal(name) = component else {
+                continue;
+            };
+            let name = name.to_string_lossy();
+            if self.ignored_names.iter().any(|ignored| ignored == &*name)
+                || local::is_metadata_turd(&name)
+            {
+                return Ok(true);
+            }
+        }
+
+        let abs = self.mount_root.join(rel_path);
+        let mut ignored = false;
+        for dir in gitignore_dirs_for(rel_path) {
+            match self
+                .matcher_for(&dir)?
+                .matched_path_or_any_parents(&abs, is_dir)
+            {
+                Match::Ignore(_) => ignored = true,
+                Match::Whitelist(_) => ignored = false,
+                Match::None => {}
+            }
+        }
+        Ok(ignored)
+    }
+}
+
+fn gitignore_dirs_for(rel: &Path) -> Vec<PathBuf> {
+    let mut dirs = vec![PathBuf::new()];
+    let Some(parent) = rel.parent() else {
+        return dirs;
+    };
+
+    let mut current = PathBuf::new();
+    for component in parent.components() {
+        if let Component::Normal(name) = component {
+            current.push(name);
+            dirs.push(current.clone());
+        }
+    }
+    dirs
+}
+
 fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpserts, Vec<String>)> {
-    let ignored = local::ignored_names(mount_root);
+    let mut ignored = SnapshotIgnore::new(mount_root);
     let mut upserts = Vec::new();
     let mut deletes = Vec::new();
     let upper = state_dir.join("upper");
@@ -1192,17 +1277,13 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
     fn walk(
         root: &Path,
         dir: &Path,
-        ignored: &[String],
+        ignored: &mut SnapshotIgnore,
         out: &mut dyn FnMut(String, PathBuf, &std::fs::Metadata),
     ) -> Result<()> {
         let Ok(read) = std::fs::read_dir(dir) else {
             return Ok(());
         };
         for entry in read.flatten() {
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if ignored.contains(&name) || local::is_metadata_turd(&name) {
-                continue;
-            }
             let abs = entry.path();
             let meta = std::fs::symlink_metadata(&abs)?;
             let rel = abs
@@ -1212,6 +1293,9 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
                 .map(|c| c.as_os_str().to_string_lossy())
                 .collect::<Vec<_>>()
                 .join("/");
+            if ignored.is_ignored(&rel, meta.is_dir())? {
+                continue;
+            }
             if meta.file_type().is_symlink() || meta.is_file() {
                 out(rel, abs, &meta);
             } else if meta.is_dir() {
@@ -1221,7 +1305,7 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
         Ok(())
     }
 
-    walk(&upper, &upper, &ignored, &mut |rel, abs, meta| {
+    walk(&upper, &upper, &mut ignored, &mut |rel, abs, meta| {
         #[cfg(unix)]
         let exec = {
             use std::os::unix::fs::PermissionsExt;
@@ -1239,7 +1323,7 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
         };
         upserts.push((rel, abs, mode));
     })?;
-    walk(&wh, &wh, &ignored, &mut |rel, _abs, _meta| {
+    walk(&wh, &wh, &mut ignored, &mut |rel, _abs, _meta| {
         deletes.push(rel);
     })?;
     // A whiteout under a path that upper re-created is already shadowed; don't double-send.
@@ -2158,6 +2242,8 @@ fn age_display(created_at_secs: u64) -> String {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
     #[test]
     fn registry_document_parses_as_table() {
         // toml 0.9 rejects top-level documents through Value::from_str; the registry must
@@ -2168,5 +2254,28 @@ mod tests {
             table.get("/Users/u/work").and_then(|v| v.as_str()),
             Some("/Users/u/.local/share/tensorlake/mounts/abc")
         );
+    }
+
+    #[test]
+    fn snapshot_enumeration_honors_gitignore_for_upserts_and_deletes() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let upper = state.path().join("upper");
+        let wh = state.path().join("wh");
+        std::fs::create_dir_all(&upper).unwrap();
+        std::fs::create_dir_all(&wh).unwrap();
+
+        std::fs::write(mount.path().join(".gitignore"), "*.tmp\nignored/\n").unwrap();
+        std::fs::write(upper.join("keep.txt"), "keep").unwrap();
+        std::fs::write(upper.join("drop.tmp"), "ignored").unwrap();
+        std::fs::create_dir_all(upper.join("ignored")).unwrap();
+        std::fs::write(upper.join("ignored/file.txt"), "ignored").unwrap();
+        std::fs::write(wh.join("drop.tmp"), "").unwrap();
+
+        let (upserts, deletes) = enumerate_overlay(state.path(), mount.path()).unwrap();
+
+        let upsert_paths: Vec<_> = upserts.iter().map(|(path, _, _)| path.as_str()).collect();
+        assert_eq!(upsert_paths, vec!["keep.txt"]);
+        assert!(deletes.is_empty());
     }
 }

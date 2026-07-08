@@ -169,6 +169,24 @@ where
 }
 
 impl ArtifactStorageClient {
+    /// Credential-aware wrapper for server-side repository merge.
+    pub async fn merge_repo(
+        &self,
+        project_id: &str,
+        repo: &str,
+        request: &MergeRequest,
+    ) -> Result<Traced<MergeReport>, SdkError> {
+        let credential = self.git_credential_for_repo(project_id, repo).await?;
+        self.repo_merge(
+            project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+            request,
+        )
+        .await
+    }
+
     /// Server-side three-way merge between two commitishes. Preflight (the default mode) never
     /// writes; commit mode CAS-advances the `ours` branch. A `fail`-policy conflict returns
     /// `Ok` with `clean: false`, `commit: None`, and the conflict list (the server's `409`
@@ -194,6 +212,25 @@ impl ArtifactStorageClient {
                 .await?
                 .unwrap_or_else(|report| report);
         Ok(Traced::new(trace_id, report))
+    }
+
+    /// The structured conflict record of a `materialize`-policy merge commit. `Ok(None)` =
+    /// the commit merged cleanly (or the server doesn't know it).
+    pub async fn get_commit_conflicts(
+        &self,
+        project_id: &str,
+        repo: &str,
+        commit: &str,
+    ) -> Result<Traced<Option<MergeConflictRecord>>, SdkError> {
+        let credential = self.git_credential_for_repo(project_id, repo).await?;
+        self.commit_conflicts(
+            project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+            commit,
+        )
+        .await
     }
 
     /// The structured conflict record of a `materialize`-policy merge commit. `Ok(None)` =
