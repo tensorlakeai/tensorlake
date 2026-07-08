@@ -5,6 +5,7 @@ from tensorlake.image import (
     import_sandbox_image,
     list_sandbox_images,
 )
+from tensorlake.repositories import RepositoryClient
 from tensorlake.sandbox import (
     FileSystem,
     FileSystemMount,
@@ -12,7 +13,6 @@ from tensorlake.sandbox import (
     delete_file_system,
     list_file_systems,
 )
-from tensorlake.repositories import RepositoryClient
 
 __all__ = [
     "Image",
