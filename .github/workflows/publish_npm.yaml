@@ -55,49 +55,38 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # `mount: true` ships the `tl fs mount` stack (private gsvc-mount core, vendored at build
-          # time). Unix only — the stack uses unix-only APIs, so win32 omits it.
+          # Customer Unix binaries ship the full CLI feature set (`tl fs mount` + fast clone).
+          # Linux CLI binaries are musl-linked under the normal Linux target ids so the wrapper
+          # can use one CLI per arch on both glibc and musl hosts.
+          # Windows has no `tl fs mount` backend today, so it ships fast clone only.
           - os: ubuntu-latest
             target_id: linux-x64
-            rust_target: x86_64-unknown-linux-gnu.2.28
-            rust_target_base: x86_64-unknown-linux-gnu
-            libc: gnu
-            cli_build_tool: cargo-zigbuild
-            mount: true
-          - os: ubuntu-24.04-arm
-            target_id: linux-arm64
-            rust_target: aarch64-unknown-linux-gnu.2.28
-            rust_target_base: aarch64-unknown-linux-gnu
-            libc: gnu
-            cli_build_tool: cargo-zigbuild
-            mount: true
-          - os: ubuntu-latest
-            target_id: linux-x64-musl
             rust_target: x86_64-unknown-linux-musl
             rust_target_base: x86_64-unknown-linux-musl
             libc: musl
             cli_build_tool: cargo-zigbuild
-            mount: true
+            cli_features: mount,git-clone
           - os: ubuntu-24.04-arm
-            target_id: linux-arm64-musl
+            target_id: linux-arm64
             rust_target: aarch64-unknown-linux-musl
             rust_target_base: aarch64-unknown-linux-musl
             libc: musl
             cli_build_tool: cargo-zigbuild
-            mount: true
+            cli_features: mount,git-clone
           - os: macos-14
             target_id: darwin-arm64
             rust_target: ""
             rust_target_base: ""
             libc: ""
             cli_build_tool: cargo
-            mount: true
+            cli_features: mount,git-clone
           - os: windows-latest
             target_id: win32-x64
             rust_target: ""
             rust_target_base: ""
             libc: ""
             cli_build_tool: cargo
+            cli_features: git-clone
     steps:
       - uses: actions/checkout@v4
 
@@ -132,8 +121,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Always: `tl git clone` (git-clone feature) ships on every target; mount is
-      # platform-gated by the matrix.
+      # Customer builds must compile the private mount/clone cores before enabling the release
+      # feature set. Windows does not compile `mount`, but the source swap is harmless there.
       - name: Vendor private artifact_storage crates
         uses: ./.github/actions/vendor-private-crates
         with:
@@ -146,7 +135,7 @@ jobs:
           TENSORLAKE_CLI_TARGET_ID: ${{ matrix.target_id }}
           TENSORLAKE_CLI_TARGET_TRIPLE: ${{ matrix.rust_target }}
           TENSORLAKE_CLI_BUILD_TOOL: ${{ matrix.cli_build_tool }}
-          TENSORLAKE_CLI_FEATURES: ${{ matrix.mount && 'mount,git-clone' || 'git-clone' }}
+          TENSORLAKE_CLI_FEATURES: ${{ matrix.cli_features }}
 
       - name: Verify packaged CLI binary
         run: |
@@ -160,16 +149,12 @@ jobs:
           set -euo pipefail
           binary="dist/bin/${{ matrix.target_id }}/tl"
           required_versions="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu || true)"
-          max_glibc="$(printf '%s\n' "$required_versions" | tail -n1)"
-          echo "Maximum required glibc: ${max_glibc:-none}"
-          if [ "${{ matrix.libc }}" = "musl" ] && [ -n "$max_glibc" ]; then
+          if [ -n "$required_versions" ]; then
             echo "Musl CLI unexpectedly references glibc symbols."
+            printf '%s\n' "$required_versions"
             exit 1
           fi
-          if [ "${{ matrix.libc }}" = "gnu" ] && [ -n "$max_glibc" ] && [ "$(printf '%s\n%s\n' "GLIBC_2.28" "$max_glibc" | sort -V | tail -n1)" != "GLIBC_2.28" ]; then
-            echo "CLI requires $max_glibc, above the GLIBC_2.28 compatibility floor."
-            exit 1
-          fi
+          echo "No glibc symbols referenced."
 
       - name: Upload CLI artifact
         uses: actions/upload-artifact@v4
@@ -327,18 +312,6 @@ jobs:
         with:
           name: cli-linux-arm64
           path: typescript/dist/bin/linux-arm64
-
-      - name: Download Linux musl CLI artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-linux-x64-musl
-          path: typescript/dist/bin/linux-x64-musl
-
-      - name: Download Linux arm64 musl CLI artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-linux-arm64-musl
-          path: typescript/dist/bin/linux-arm64-musl
 
       - name: Download macOS arm64 CLI artifact
         uses: actions/download-artifact@v4

@@ -16,10 +16,14 @@ permissions:
   contents: read
 
 jobs:
-  rust_tests:
-    name: Rust workspace tests
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
+  rust_full_feature_workspace:
+    name: Rust full-feature workspace tests
+    # The customer CLI feature set needs the private gsvc-mount and gsvc-codec cores, which require
+    # access to the artifact_storage repo. Skip on pull requests from forks (they cannot read the
+    # App secrets).
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest-xlarge
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
 
@@ -34,30 +38,7 @@ jobs:
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
-          prefix-key: v1-rust-no-bin
-          cache-bin: false
-
-      - name: Run Rust workspace tests
-        run: cargo test --workspace
-
-  rust_mount_feature:
-    name: Rust mount feature (build, clippy, test)
-    # The `mount` feature needs the private gsvc-mount core, which requires access to the
-    # artifact_storage repo. Skip on pull requests from forks (they cannot read the App secrets);
-    # the default `rust_tests` lane already covers those without the feature.
-    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest-xlarge
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: v1-rust-mount
+          prefix-key: v1-rust-full-feature
           cache-bin: false
 
       - name: Vendor private artifact_storage crates
@@ -66,17 +47,16 @@ jobs:
           app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
           private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
 
-      # Compile and test the `tl fs mount` stack against the real mount core (the default
-      # rust_tests lane cannot — the feature is off there). Mirrors that lane's build+test scope;
-      # clippy is not gated anywhere in this repo, so it is not gated here either.
-      - name: Build CLI with mount
+      - name: Build full-feature CLI
         run: cargo build -p tensorlake-cli --features mount,git-clone
 
-      - name: Test CLI with mount
-        run: cargo test -p tensorlake-cli --features mount,git-clone
+      - name: Run Rust workspace tests with customer features
+        run: cargo test --workspace --features tensorlake-cli/mount,tensorlake-cli/git-clone,tensorlake/git-clone
 
   windows_build_smoke:
     name: Windows build smoke test
+    # The customer Windows wheel ships `git-clone`; it needs the private gsvc-codec source.
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -91,6 +71,12 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
         with:
           targets: x86_64-pc-windows-msvc
+
+      - name: Vendor private artifact_storage crates
+        uses: ./.github/actions/vendor-private-crates
+        with:
+          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
+          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
 
       - name: Build Cloud SDK wheel
         uses: PyO3/maturin-action@v1
@@ -111,7 +97,7 @@ jobs:
           CARGO_TARGET_DIR: target
         with:
           target: x86_64-pc-windows-msvc
-          args: --release --out dist
+          args: --release --out dist --features git-clone
           sccache: 'true'
 
       - name: Verify wheel imports Rust Cloud SDK extension
@@ -152,8 +138,8 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
-      - name: Build and lint tensorlake
-        run: make build && make check
+      - name: Install, build Rust SDK extension, and lint tensorlake
+        run: poetry install --with=dev && make build_cloud_sdk && make check
 
       - name: Run sandbox/image SDK unit tests
         env:
@@ -198,8 +184,8 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
-      - name: Build tensorlake
-        run: make build
+      - name: Install Python dependencies
+        run: poetry install --with=dev
 
       - name: Run Sandbox integration tests
         run: make test_sandbox

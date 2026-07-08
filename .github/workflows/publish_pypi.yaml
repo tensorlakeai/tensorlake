@@ -49,6 +49,7 @@ jobs:
             target: x86_64
             manylinux: auto
             cloud_sdk_interpreter: /opt/python/cp310-cp310/bin/python
+            cli_features: mount,git-clone
           # Native arm64 runner + native PyPA image: the manylinux2014-cross image's
           # GCC 4.8 miscompiles ring's aarch64 crypto (TLS BadSignature at runtime).
           - os: ubuntu-24.04-arm
@@ -56,16 +57,25 @@ jobs:
             manylinux: '2014'
             manylinux_container: quay.io/pypa/manylinux2014_aarch64:latest
             cloud_sdk_interpreter: /opt/python/cp310-cp310/bin/python
+            cli_features: mount,git-clone
           - os: macos-14
             target: aarch64
             rust_target: aarch64-apple-darwin
             cloud_sdk_interpreter: python3.10
+            cli_features: mount,git-clone
           - os: windows-latest
             target: x86_64-pc-windows-msvc
             rust_target: x86_64-pc-windows-msvc
             cloud_sdk_interpreter: python
+            cli_features: git-clone
     steps:
       - uses: actions/checkout@v4
+
+      - name: Vendor private artifact_storage crates
+        uses: ./.github/actions/vendor-private-crates
+        with:
+          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
+          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -106,7 +116,7 @@ jobs:
           CARGO_TARGET_DIR: target
         with:
           target: ${{ matrix.platform.target }}
-          args: --release --out dist
+          args: --release --out dist --features ${{ matrix.platform.cli_features }}
           manylinux: ${{ matrix.platform.manylinux || 'auto' }}
           container: ${{ matrix.platform.manylinux_container || '' }}
           sccache: 'true'

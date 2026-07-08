@@ -27,7 +27,7 @@ describe("runtime binary selection", () => {
     ).toBe(path.join(root, "dist", "bin", "win32-x64", "tl.exe"));
     expect(
       binaryPath("tl", { packageRoot: root, platform: "linux", arch: "x64", libc: "musl" }),
-    ).toBe(path.join(root, "dist", "bin", "linux-x64-musl", "tl"));
+    ).toBe(path.join(root, "dist", "bin", "linux-x64", "tl"));
   });
 
   it("selects libc-specific native binding targets on Linux", () => {

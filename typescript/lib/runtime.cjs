@@ -57,7 +57,7 @@ function binaryPath(binaryName, options = {}) {
     root,
     "dist",
     "bin",
-    packageTargetId(platform, arch, options),
+    binaryTargetId(platform, arch),
     `${binaryName}${extension}`,
   );
 }
@@ -95,7 +95,7 @@ function exitWithSpawnResult(result) {
 }
 
 function runBinary(binaryName) {
-  const targetId = packageTargetId();
+  const targetId = binaryTargetId();
   const executable = binaryPath(binaryName);
   if (!fs.existsSync(executable)) {
     console.error(
