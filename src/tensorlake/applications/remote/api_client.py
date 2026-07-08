@@ -1,7 +1,7 @@
 import json
 import os
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from tensorlake.applications.interface.exceptions import (
     InternalError,
@@ -26,6 +26,7 @@ class Application(BaseModel):
     name: str
     description: str
     tags: dict[str, str]
+    allow: list[str] = Field(default_factory=list)
     version: str
     tombstoned: bool = False
     created_at: int | None = None

@@ -93,6 +93,12 @@ class RequestContext:
         )
 
     @property
+    def headers(self) -> dict[str, str]:
+        raise InternalError(
+            "RequestContext subclasses must implement headers property."
+        )
+
+    @property
     def state(self) -> RequestState:
         raise InternalError("RequestContext subclasses must implement state property.")
 

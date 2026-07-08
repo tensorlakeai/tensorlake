@@ -19,7 +19,7 @@ from .exceptions import (
     TimeoutError,
 )
 from .file import File
-from .function import Function
+from .function import ApplicationCapability, Function
 from .futures import RETURN_WHEN, Future
 from .logger import Logger
 from .request import Request
@@ -36,6 +36,7 @@ from .run import (
 
 __all__ = [
     "application",
+    "ApplicationCapability",
     "cls",
     "run_local_application",
     "run_remote_application",
