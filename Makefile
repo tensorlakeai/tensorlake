@@ -7,9 +7,9 @@ build:
 	@poetry build
 	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/ 2>/dev/null || true
 
-# Local development install: builds the Rust CLI (debug) and installs everything
-# into the active Poetry virtualenv so that `tl`, `tensorlake`, and all wrapper
-# scripts (tensorlake-deploy, tensorlake-parse, etc.) are on PATH.
+# Local development install: builds the Rust Cloud SDK extension and installs the
+# Python SDK into the active Poetry virtualenv so helper scripts such as
+# `tensorlake-deploy` and `function-executor` are on PATH.
 # Note: proto stubs are pre-generated and committed; run `make build_proto`
 # separately only when you change .proto files.
 install-dev:
@@ -18,23 +18,20 @@ install-dev:
 	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/
 	@echo "Done. Activate the venv with 'poetry shell' or prefix commands with 'poetry run'."
 
-# Same as install-dev but compiles the Rust CLI with optimisations (slower build,
-# faster binary — useful for manual performance testing).
+# Same as install-dev but compiles the Rust Cloud SDK extension with optimisations.
 install-dev-release:
 	@poetry install --with=dev
 	@poetry run maturin develop --release
 	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/
 	@echo "Done. Activate the venv with 'poetry shell' or prefix commands with 'poetry run'."
 
-# Global install: builds the Rust extension and the Python package and installs
-# both into the user's Python environment (~/.local/) so that `tl`, `tensorlake`,
-# and all wrapper scripts work from any directory without activating a virtualenv.
+# Global install: builds the Python SDK wheel with the Rust Cloud SDK extension
+# and installs it into the user's Python environment (~/.local/).
 # After running, ensure ~/.local/bin is on your PATH.
 install-global:
 	@rm -rf dist
-	@poetry run maturin build --release --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --out dist
-	@pip3 install --user --break-system-packages --force-reinstall dist/*.whl
-	@pip3 install --user --break-system-packages -e .
+	@poetry run maturin build --release --out dist
+	@pip3 install --user --break-system-packages --force-reinstall dist/tensorlake-*.whl
 	@echo "Done. Make sure ~/.local/bin is on your PATH."
 	@echo "  fish: fish_add_path ~/.local/bin"
 	@echo "  bash/zsh: export PATH=\"\$$HOME/.local/bin:\$$PATH\""
@@ -82,21 +79,15 @@ test_sandbox:
 	@$(MAKE) build_cloud_sdk
 	cd tests/sandbox && poetry run python test_lifecycle.py -v
 
-# Replicates the PyPI publish workflow locally: builds the _cloud_sdk Rust
-# extension, bundles its native module into the main wheel, then installs into a
-# temporary venv and verifies imports — all without touching PyPI.
+# Replicates the PyPI publish workflow locally: builds the tensorlake wheel with
+# the _cloud_sdk Rust extension, then installs into a temporary venv and verifies
+# imports and package scripts — all without touching PyPI.
 build_release:
 	@rm -rf dist
-	@echo "--- Building Cloud SDK extension ---"
-	@poetry run maturin build --manifest-path crates/rust-cloud-sdk-py/Cargo.toml --release --out dist
-	@echo "--- Bundling native Cloud SDK extension into src/tensorlake/ ---"
-	@poetry run python .github/scripts/bundle_cloud_sdk_wheel.py "dist/tensorlake_rust_cloud_sdk-*.whl" src/tensorlake --require-abi3
-	@echo "--- Building main wheel ---"
+	@echo "--- Building tensorlake wheel ---"
 	@poetry run maturin build --release --out dist
-	@echo "--- Removing bundled native module from source tree ---"
-	@poetry run python -c "import pathlib; [p.unlink() for p in [*pathlib.Path('src/tensorlake').glob('_cloud_sdk*.so'), *pathlib.Path('src/tensorlake').glob('_cloud_sdk*.pyd')]]"
 	@echo "--- Verifying wheel in a clean venv ---"
-	@poetry run python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy
+	@poetry run python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --expect-script function-executor --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
 	@echo "--- Done. Wheel is in dist/ ---"
 
 bump_version:
@@ -107,4 +98,10 @@ bump_version:
 	done
 	@echo "Version bumped to $(VERSION)"
 
-.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox install-dev install-dev-release install-global build_release bump_version
+.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
+
+# POSIX conformance for `tl fs mount` (Linux + FUSE + working credentials). Runs the ported
+# issue-#24 battery against a real mounted workspace, in fresh and snapshot-reattached phases.
+# Build tl first (cargo build -p tl) or point TL_BIN at a binary.
+fs-posix-conformance:
+	bash tests/fs-posix-conformance/run_conformance.sh

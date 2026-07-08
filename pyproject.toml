@@ -1,6 +1,6 @@
 [project]
 name = "tensorlake"
-version = "0.5.59"
+version = "0.5.62"
 description = "Tensorlake SDK for agent sandboxes and sandbox-native orchestration"
 readme = "README.md"
 authors = [{ name = "Tensorlake Inc.", email = "support@tensorlake.ai" }]
@@ -22,16 +22,17 @@ Repository = "https://github.com/tensorlakeai/tensorlake"
 requires = ["maturin>=1.9,<2.0"]
 build-backend = "maturin"
 
+[project.scripts]
+function-executor = "tensorlake.function_executor.main:main"
+tensorlake-deploy = "tensorlake.cli.deploy:deploy_entrypoint"
+
 [tool.maturin]
-bindings = "bin"
-manifest-path = "crates/cli/Cargo.toml"
-module-name = "tensorlake"
+bindings = "pyo3"
+manifest-path = "crates/rust-cloud-sdk-py/Cargo.toml"
+module-name = "tensorlake._cloud_sdk"
 python-source = "src"
-data = "tensorlake.data"
 include = [
     { path = "LICENSE", format = "sdist" },
-    { path = "src/tensorlake/_cloud_sdk*.so", format = "wheel" },
-    { path = "src/tensorlake/_cloud_sdk*.pyd", format = "wheel" },
 ]
 
 [tool.black]

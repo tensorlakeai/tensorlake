@@ -131,6 +131,41 @@ export interface NativeSandboxClient {
   ): string;
 }
 
+export interface NativeRepositoryClient {
+  gitRepoUrl(repo: string): string;
+  createRepo(repo: string, defaultBranch?: string | null): Promise<TracedJson>;
+  listRepos(): Promise<TracedJson>;
+  deleteRepo(repo: string): Promise<string>;
+  forkRepo(repo: string, baseRepo: string): Promise<TracedJson>;
+  archiveRepo(repo: string): Promise<string>;
+  restoreRepo(repo: string): Promise<string>;
+  repoInfo(repo: string): Promise<TracedJson>;
+  listBranches(repo: string): Promise<TracedJson>;
+  listRefs(repo: string): Promise<TracedJson>;
+  deleteBranch(repo: string, branch: string): Promise<string>;
+  listOperations(repo: string): Promise<TracedJson>;
+  gitCredential(repo?: string | null): Promise<string>;
+  commitStatus(repo: string, jobId: string): Promise<TracedJson>;
+  pushWorktree(
+    repo: string,
+    root: string,
+    branch: string,
+    message: string,
+    expectOid?: string | null,
+  ): Promise<TracedJson>;
+  mergeRepo(
+    repo: string,
+    ours: string,
+    theirs: string,
+    preflight: boolean,
+    deep: boolean,
+    materialize: boolean,
+    message?: string | null,
+    base?: string | null,
+  ): Promise<TracedJson>;
+  commitConflicts(repo: string, commit: string): Promise<TracedJson>;
+}
+
 interface NativeSandboxClientCtor {
   new (
     apiUrl: string,
@@ -141,6 +176,17 @@ interface NativeSandboxClientCtor {
     userAgent?: string | null,
     requestTimeoutSec?: number | null,
   ): NativeSandboxClient;
+}
+
+interface NativeRepositoryClientCtor {
+  new (
+    apiUrl: string,
+    apiKey?: string | null,
+    organizationId?: string | null,
+    projectId?: string | null,
+    userAgent?: string | null,
+    requestTimeoutSec?: number | null,
+  ): NativeRepositoryClient;
 }
 
 interface NativeSandboxProxyClientCtor {
@@ -159,6 +205,7 @@ interface NativeSandboxProxyClientCtor {
 export interface NativeSandboxBinding {
   NativeSandboxClient: NativeSandboxClientCtor;
   NativeSandboxProxyClient: NativeSandboxProxyClientCtor;
+  NativeRepositoryClient?: NativeRepositoryClientCtor;
   /** Validate a managed-process name; throws on failure. Single source-of-truth rule in Rust. */
   validateManagedName: (name: string) => void;
 }

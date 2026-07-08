@@ -8,6 +8,7 @@
 
 #![deny(clippy::all)]
 
+mod repositories;
 mod sandbox;
 
 use std::path::PathBuf;

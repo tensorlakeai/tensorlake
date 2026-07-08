@@ -2,14 +2,18 @@
 members = [
     "crates/cloud-sdk",
     "crates/cli",
-    "crates/gsvc-codec",
     "crates/rust-cloud-sdk-node",
     "crates/rust-cloud-sdk-py",
 ]
+# gsvc-mount is a resolution-only placeholder for the private mount core (see its Cargo.toml and
+# the workspace.dependencies note below). Excluded so `cargo build --workspace` never compiles the
+# placeholder; it is only ever built when `tensorlake-cli --features mount` activates it, at which
+# point official builds swap in the real crate via a Cargo `paths` override.
+exclude = ["crates/gsvc-mount", "crates/gsvc-codec"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.59"
+version = "0.5.62"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 edition = "2024"
 license = "Apache-2.0"
@@ -20,9 +24,19 @@ fastcdc = "3"
 
 # Internal crates
 tensorlake = { path = "crates/cloud-sdk" }
-# Vendored from artifact_storage (crates/gsvc-codec) to back `tl git clone`.
-# See AGENTS.md in that repo: open a companion PR there if this crate's wire format changes upstream.
+# Resolution-only placeholder for the private gsvc-codec packfile codec (backs `tl git clone`).
+# The real source is no longer vendored here: official builds swap it in ephemerally — see
+# crates/VENDORED_FROM and the `build-cli-full` justfile recipe / vendor-private-crates CI action.
 gsvc-codec = { path = "crates/gsvc-codec" }
+# Private mount core for `tl fs mount`. The source is NOT vendored into this public tree; the
+# `crates/gsvc-mount` here is a resolution-only placeholder (a `compile_error!` stub) so the public
+# repo builds with no access to the private artifact_storage repo. It is consumed only by
+# `tensorlake-cli` behind the optional `mount` feature, so default builds never compile it.
+# Official release binaries are built with `--features mount` and a Cargo `paths` override that
+# points this crate at the real gsvc-mount in a sibling artifact_storage checkout (see the
+# `build-cli-full` recipe in the justfile). Keep the placeholder's name/version in sync with the
+# real crate so the override matches.
+gsvc-mount = { path = "crates/gsvc-mount" }
 
 # Async runtime
 tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time", "process", "io-std", "io-util", "signal"] }
@@ -82,8 +96,8 @@ tempfile = "3"
 tracing = "0.1"
 
 # Compression & archives
-# zlib-rs matches artifact_storage's flate2 feature choice, which gsvc-codec (vendored from there)
-# is tested against; the default miniz_oxide backend has produced a divergent test result.
+# zlib-rs matches artifact_storage's flate2 feature choice, which the (ephemerally vendored)
+# gsvc-codec is tested against; the default miniz_oxide backend has produced a divergent test result.
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 tar = "0.4"
 

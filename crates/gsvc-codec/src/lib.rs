@@ -1,56 +1,22 @@
-//! `gsvc-codec` — the git object & packfile codec for the fast git service.
+//! Resolution-only placeholder for the private `gsvc-codec` packfile codec.
 //!
-//! This crate is a pure, dependency-light implementation of the parts of git's on-disk format we
-//! need on the hot path:
+//! The real crate is not vendored into this public repository (it used to be; it is not
+//! anymore). This file exists only so the optional `gsvc-codec` dependency of the Rust SDK's
+//! `git-clone` feature resolves without access to the private artifact_storage repo. It is never
+//! compiled by a valid build — see this crate's `Cargo.toml`.
 //!
-//! * [`Oid`] / [`ChunkHash`] — object and chunk addresses.
-//! * [`Object`] / [`Kind`] / [`hash`] — the git object model and content hashing.
-//! * [`pack`] — packfile v2 read (full `OFS_DELTA`/`REF_DELTA` resolution) and write.
-//! * [`idx`] — pack index v2 generation and oid→offset lookup for byte-range serving.
-//! * [`delta`] — the delta instruction codec shared by the pack reader and (eventually) repacker.
+//! If you are reading this because the build failed: you enabled `--features git-clone` without
+//! the real source in place. Build the official binary via the justfile recipe instead:
 //!
-//! It deliberately has no I/O, async, or storage concerns — those live in `gsvc-store` and above —
-//! so it stays trivially testable and reusable.
+//! ```text
+//! just build-cli-full
+//! ```
+//!
+//! which copies the real source in from a sibling artifact_storage checkout for the build.
 
-pub mod async_stream;
-mod bitmap;
-mod chunkloc;
-mod commitgraph;
-mod delta;
-mod error;
-pub mod graph;
-mod idx;
-pub mod latency;
-mod object;
-mod oid;
-mod pack;
-
-pub use async_stream::{
-    object_frame, parse_pack_streaming_async, AsyncPackSink, AsyncPackWriter, BaseResolver,
-    ByteSink, ByteSource, ChunkSource, NoBases,
-};
-pub use bitmap::{Bitmap, PackBitmaps};
-pub use chunkloc::ChunkLoc;
-pub use commitgraph::{CommitGraph, CommitNode};
-pub use delta::{apply_delta, encode_delta, encode_trivial_delta, DeltaIndex};
-pub use error::CodecError;
-pub use graph::{
-    commit_links, encode_commit, encode_tree, links_of, tag_target, tree_entries, Links, TreeEntry,
-};
-pub use idx::{write_idx_v2, IdxV2};
-pub use object::{hash, BlobOidHasher, Kind, Object, ResumableBlobOidHasher};
-pub use oid::{ChunkHash, Oid};
-pub use pack::{
-    build_pack, build_pack_at_level, build_pack_delta, build_pack_delta_for_serving,
-    decode_pack_object_index_sidecar, decode_pack_source_index_sidecar,
-    encode_pack_object_index_sidecar, encode_pack_source_index_sidecar,
-    inflate_full_payload_range_to_temp, pack_ref_delta_bases, parse_pack,
-    plan_pack_file_optimization, plan_pack_tree_index, plan_pack_tree_index_with_external_bases,
-    read_pack_entry, resolve_pack_file, resolve_pack_file_with_log_context, resolve_pack_parallel,
-    resolve_scanned_pack_with_external_bases, resolve_scanned_pack_with_log_context,
-    stream_indexed_full_blob_range_to_temp, stream_indexed_full_blob_to_temp,
-    write_pack_object_index_sidecar, write_pack_source_index_sidecar, BuiltPack, ExternalBase,
-    FileBackedBlob, PackCommitIndexEntry, PackEntry, PackObjectEntry, PackObjectKind,
-    PackOptimizationPlan, PackResolveLogContext, PackTreeIndexEntry, PackTreeIndexPlan,
-    PackedEntry, ParsedPack, ReceivePackSpooler, ResolvedPack, ScannedPack,
-};
+compile_error!(
+    "the `git-clone` feature requires the private gsvc-codec packfile codec, which is not \
+     vendored into this public repo. Build the official binary with `just build-cli-full` (it \
+     swaps in the real source from a sibling artifact_storage checkout), or build without \
+     `--features git-clone`.",
+);

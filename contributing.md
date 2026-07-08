@@ -42,7 +42,7 @@ We welcome many types of contributions, including:
 
 - Python 3.10 or higher
 - [Poetry 2.0.0](https://python-poetry.org/) for Python dependency management
-- [Rust](https://rustup.rs/) (stable toolchain) — required to build the CLI binary
+- [Rust](https://rustup.rs/) (stable toolchain) — required to build the Rust Cloud SDK extension and CLI binary
 - Git
 
 Install Rust via rustup if you don't have it:
@@ -61,7 +61,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 2. **Choose your install method**
 
-   **Option A — Global install (recommended):** installs into your user Python environment (`~/.local/`) so `tl` and `tensorlake` work from any directory without activating a virtualenv.
+   **Option A — Global install (recommended):** installs the Python SDK and helper scripts into your user Python environment (`~/.local/`) without activating a virtualenv.
 
    ```bash
    make install-global
@@ -78,7 +78,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    export PATH="$HOME/.local/bin:$PATH"
    ```
 
-   **Option B — Virtualenv install:** installs into the Poetry-managed virtualenv. The binaries are only available while the venv is active.
+   **Option B — Virtualenv install:** installs into the Poetry-managed virtualenv. The helper scripts are only available while the venv is active.
 
    ```bash
    make install-dev
@@ -89,9 +89,12 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
 
 3. **Verify the installation**
    ```bash
-   tl --help
-   tensorlake --help
+   python -c "import tensorlake; import tensorlake._cloud_sdk"
+   function-executor --help
    ```
+
+   To work on the standalone Rust CLI locally, run `just build-cli` or
+   `just build-cli-full` when you need the private mount/clone feature set.
 
 ### Project Structure
 
@@ -108,7 +111,7 @@ tensorlake/
 ├── tensorlake.data/scripts/     # Python wrapper scripts installed alongside the CLI
 ├── tests/                       # Test suite
 ├── Makefile                     # Build and development commands
-├── pyproject.toml               # Python project configuration (maturin backend)
+├── pyproject.toml               # Python SDK configuration (maturin Cloud SDK backend)
 └── Cargo.toml                   # Rust workspace configuration
 ```
 
@@ -118,7 +121,7 @@ The CLI is a **Rust binary** (`tl` / `tensorlake`) that delegates work to **Pyth
 
 For example, `tl deploy app.py` spawns `tensorlake-deploy app.py`, reads its NDJSON output on stdout, and renders it as human-readable text.
 
-Wrapper scripts live in `tensorlake.data/scripts/` and are installed into the virtualenv's `bin/` directory during `make install-dev`. They must be on `PATH` (alongside the Rust binary) for the affected CLI commands to work.
+Wrapper scripts live in `tensorlake.data/scripts/` for local development and are also exposed as Python package entry points. They must be on `PATH` (alongside the standalone Rust binary) for the affected CLI commands to work.
 
 | Rust command | Spawns wrapper script |
 |---|---|
@@ -131,10 +134,10 @@ Wrapper scripts live in `tensorlake.data/scripts/` and are installed into the vi
 ### Available Makefile Commands
 
 ```bash
-# Global install: build Rust CLI (release) + install Python package into ~/.local/
+# Global install: build Python SDK wheel with Rust Cloud SDK extension into ~/.local/
 make install-global
 
-# Virtualenv install: build Rust CLI (debug) + install into Poetry venv
+# Virtualenv install: build Rust Cloud SDK extension + install into Poetry venv
 make install-dev
 
 # Same as install-dev but with release optimisations

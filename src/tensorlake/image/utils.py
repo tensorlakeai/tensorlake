@@ -4,7 +4,10 @@ from typing import List
 from ._dockerfile import image_has_workdir, render_op_line
 from .image import Image
 
-_SDK_VERSION: str = importlib.metadata.version("tensorlake")
+try:
+    _SDK_VERSION: str = importlib.metadata.version("tensorlake")
+except importlib.metadata.PackageNotFoundError:
+    _SDK_VERSION = "unknown"
 
 
 def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) -> str:

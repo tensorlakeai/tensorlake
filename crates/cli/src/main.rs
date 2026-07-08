@@ -180,7 +180,7 @@ enum Commands {
     #[command(subcommand)]
     Secrets(SecretsCommands),
 
-    /// Manage Tensorlake Filesystems
+    /// Manage Tensorlake workspaces (versioned file systems mounted over FUSE)
     #[command(subcommand, name = "fs")]
     Fs(FsCommands),
 
@@ -202,36 +202,170 @@ enum Commands {
     Sbx(SbxCommands),
 }
 
+use std::path::PathBuf;
+
+/// `--mode` for `tl fs mount`. Absent means writable, except a workspace already mounted
+/// elsewhere defaults to read-only.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+enum MountWriteMode {
+    Ro,
+    Rw,
+}
+
 #[derive(Subcommand)]
 enum FsCommands {
-    /// Register a new file system
-    Create {
-        /// File system name
-        #[arg(short, long)]
-        name: String,
-
-        /// Optional human-readable description
-        #[arg(short, long)]
-        description: Option<String>,
-
-        /// Print the created file system as JSON
+    /// Install or verify the TensorLake file-system extension (macOS; Linux needs no setup)
+    Setup {
+        /// App bundle to install: a path to TLFS.app / a .zip, or an https URL. Defaults to
+        /// the release asset matching this CLI version
         #[arg(long)]
-        json: bool,
+        from: Option<String>,
+
+        /// Report the install state without changing anything
+        #[arg(long)]
+        check: bool,
     },
 
-    /// List registered file systems
+    /// Create and mount a workspace, or mount an existing one (FUSE): reads stream lazily,
+    /// writes stay local until snapshotted
+    Mount {
+        /// `<file-system>[:<ref-or-commit>]` to create a new workspace, or a workspace id
+        /// from `tl fs ls` to mount an existing one (resumes at its last snapshot)
+        target: String,
+
+        /// Mountpoint directory (created; must be empty)
+        path: PathBuf,
+
+        /// Write policy. Defaults to `rw`, but a workspace already mounted elsewhere defaults
+        /// to `ro` — pass `--mode rw` to mount it writable anyway. With a
+        /// `<file-system>[:<branch>]` target, `ro` is a read-only view that follows the branch
+        #[arg(long, value_enum)]
+        mode: Option<MountWriteMode>,
+
+        /// Every snapshot automatically publishes to the mounted branch (server-ordered,
+        /// one attributed commit per snapshot). Requires `<file-system>:<branch>`
+        #[arg(long)]
+        shared_rw: bool,
+
+        /// Run the mount daemon in the foreground (debugging)
+        #[arg(long)]
+        foreground: bool,
+    },
+
+    /// List workspaces (all file systems, or one)
     #[command(name = "ls")]
     Ls {
-        /// Print file systems as JSON
+        /// Limit the listing to one file system
+        file_system: Option<String>,
+
+        /// Print workspaces as JSON
         #[arg(long)]
         json: bool,
     },
 
-    /// Delete a file system by id
+    /// Delete a workspace (the only way a workspace dies)
     #[command(name = "rm")]
     Rm {
-        /// File system id (e.g. `file_system_...`)
-        file_system_id: String,
+        /// Workspace id or unique prefix (see `tl fs ls`)
+        workspace_id: String,
+    },
+
+    /// (internal) Run a mount daemon for an existing state directory
+    #[command(hide = true)]
+    Daemon {
+        #[arg(long)]
+        state_dir: PathBuf,
+    },
+
+    /// Seal local changes into a snapshot on the workspace ref
+    Snapshot {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Snapshot message
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+
+    /// Publish the workspace's snapshot onto a real branch (squash by default)
+    Promote {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Target branch
+        branch: String,
+
+        /// Land the full checkpoint chain instead of a single squashed commit
+        #[arg(long)]
+        full_history: bool,
+
+        /// Merge onto a moved target (two-parent merge commit); conflicts are reported
+        /// and nothing is published
+        #[arg(long, conflicts_with = "full_history")]
+        merge: bool,
+
+        /// Commit message for the squashed promote
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+
+    /// Pull the target branch into the workspace (server-side rebase-style merge)
+    Sync {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Branch to pull from (default: the branch the workspace was created from)
+        #[arg(long)]
+        target: Option<String>,
+
+        /// Fail on conflicts instead of materializing diff3 markers into the workspace
+        #[arg(long)]
+        fail_on_conflict: bool,
+
+        /// Commit message for the sync merge commit
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+
+    /// Show workspace, lease, and local-change status for a mount
+    Status {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Print status as JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Restore a mount's tracked files to a snapshot or commit
+    Restore {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Snapshot/commit hex, branch, or ref to restore to
+        version: String,
+    },
+
+    /// List changed paths: local vs last snapshot, or between two snapshots
+    Diff {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Older snapshot/commit (omit both for local vs last snapshot)
+        a: Option<String>,
+
+        /// Newer snapshot/commit
+        b: Option<String>,
+    },
+
+    /// Unmount: detach and forget local state; the workspace stays until deleted
+    Unmount {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Also delete the server-side workspace
+        #[arg(long)]
+        delete: bool,
     },
 }
 
@@ -305,13 +439,12 @@ enum GitCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Push local files to a repo as one commit (resumable chunk upload; no local git needed)
+    /// Push the current Git worktree to a repo as one commit (resumable chunk upload)
     Push {
         /// Repo name
-        #[arg(long)]
         repo: String,
         /// Target branch
-        #[arg(long, default_value = "main")]
+        #[arg(default_value = "main")]
         branch: String,
         /// Commit message
         #[arg(short, long, default_value = "tl push")]
@@ -319,12 +452,53 @@ enum GitCommands {
         /// Force-with-lease: require the branch to currently equal this commit oid
         #[arg(long)]
         expect_oid: Option<String>,
-        /// Files or directories to push (directories recurse; repo paths are relative to CWD)
-        #[arg(required = true)]
-        paths: Vec<std::path::PathBuf>,
         /// Output JSON
         #[arg(long)]
         json: bool,
+    },
+    /// Server-side three-way merge of one branch (or commit) into another
+    Merge {
+        /// Repo name
+        repo: String,
+        /// Target branch the merge lands on (ours)
+        ours: String,
+        /// Branch or commit to merge in (theirs)
+        theirs: String,
+        /// Report what the merge would do without publishing anything
+        #[arg(long)]
+        preflight: bool,
+        /// Preflight: run the text merges for exact conflict answers instead of potential ones
+        #[arg(long)]
+        deep: bool,
+        /// Land conflicts as diff3 markers plus a structured conflict record instead of failing
+        #[arg(long, conflicts_with = "preflight")]
+        materialize: bool,
+        /// Merge commit message
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Merge base override (commit hex)
+        #[arg(long)]
+        base: Option<String>,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the structured conflict record of a materialized merge commit
+    Conflicts {
+        /// Repo name
+        repo: String,
+        /// Merge commit oid (hex)
+        commit: String,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check a detached commit job's progress (job id is printed when a push detaches)
+    CommitStatus {
+        /// Repo name
+        repo: String,
+        /// Commit job id
+        job_id: String,
     },
     /// List repos in the current project
     #[command(alias = "list")]
@@ -365,13 +539,8 @@ enum GitCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Print the Git remote URL for a repo
-    Url {
-        /// Repo name
-        repo: String,
-    },
-    /// Print repo information
-    #[command(alias = "status")]
+    /// Print repo information (remote URL, branches, refs)
+    #[command(aliases = ["status", "url"])]
     Info {
         /// Repo name
         repo: String,
@@ -1546,20 +1715,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 }
             }
         }
-        Commands::Fs(subcmd) => {
-            ensure_auth_and_project(ctx).await?;
-            match subcmd {
-                FsCommands::Create {
-                    name,
-                    description,
-                    json,
-                } => commands::fs::create(ctx, &name, description.as_deref(), json).await,
-                FsCommands::Ls { json } => commands::fs::list(ctx, json).await,
-                FsCommands::Rm { file_system_id } => {
-                    commands::fs::remove(ctx, &file_system_id).await
-                }
-            }
-        }
+        Commands::Fs(subcmd) => run_fs_command(ctx, subcmd).await,
         Commands::SshKeys(subcmd) => {
             // SSH keys live on the user, not on a project — only auth (PAT or
             // logged-in session) is required, no org/project context.
@@ -2050,6 +2206,113 @@ async fn run_applications_command(
     }
 }
 
+// `tl fs` drives the local FUSE/overlay mount stack, which is backed by the private gsvc-mount
+// core and therefore only compiled into `--features mount` release builds. The command surface
+// (FsCommands) is always parsed so `tl fs --help` documents it, but a build without the feature
+// answers with a clear "not available" error instead of the real implementation.
+#[cfg(feature = "mount")]
+async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Result<()> {
+    // Setup installs a local app bundle; it must work before the user has logged in.
+    let subcmd = match subcmd {
+        FsCommands::Setup { from, check } => {
+            return commands::fs::setup(from.as_deref(), check).await;
+        }
+        other => other,
+    };
+    // Path-addressed commands carry their scope in the mount state; resolve it from there so
+    // they work from any CWD instead of triggering the interactive init flow (which, run from
+    // inside a mount, would write .tensorlake/config.toml into the workspace).
+    match &subcmd {
+        FsCommands::Snapshot { path, .. }
+        | FsCommands::Promote { path, .. }
+        | FsCommands::Sync { path, .. }
+        | FsCommands::Status { path, .. }
+        | FsCommands::Restore { path, .. }
+        | FsCommands::Diff { path, .. }
+        | FsCommands::Unmount { path, .. } => commands::fs::hydrate_scope_from_mount(ctx, path),
+        _ => {}
+    }
+    ensure_auth_and_project(ctx).await?;
+    let result = match subcmd {
+        FsCommands::Setup { .. } => unreachable!("handled before the auth guard"),
+        FsCommands::Ls { file_system, json } => {
+            commands::fs::ls(ctx, file_system.as_deref(), json).await
+        }
+        FsCommands::Rm { workspace_id } => commands::fs::rm(ctx, &workspace_id).await,
+        FsCommands::Mount {
+            target,
+            path,
+            mode,
+            shared_rw,
+            foreground,
+        } => {
+            let mode = match mode {
+                Some(MountWriteMode::Ro) => commands::fs::WritePolicy::Ro,
+                Some(MountWriteMode::Rw) => commands::fs::WritePolicy::Rw,
+                None => commands::fs::WritePolicy::Auto,
+            };
+            commands::fs::mount(ctx, &target, &path, mode, shared_rw, foreground).await
+        }
+        FsCommands::Daemon { state_dir } => commands::fs::daemon::run(ctx, &state_dir).await,
+        FsCommands::Snapshot { path, message } => {
+            commands::fs::snapshot(ctx, &path, message.as_deref()).await
+        }
+        FsCommands::Promote {
+            path,
+            branch,
+            full_history,
+            merge,
+            message,
+        } => {
+            commands::fs::promote(ctx, &path, &branch, full_history, merge, message.as_deref())
+                .await
+        }
+        FsCommands::Sync {
+            path,
+            target,
+            fail_on_conflict,
+            message,
+        } => {
+            commands::fs::sync(
+                ctx,
+                &path,
+                target.as_deref(),
+                fail_on_conflict,
+                message.as_deref(),
+            )
+            .await
+        }
+        FsCommands::Status { path, json } => commands::fs::status(ctx, &path, json).await,
+        FsCommands::Restore { path, version } => commands::fs::restore(ctx, &path, &version).await,
+        FsCommands::Diff { path, a, b } => {
+            commands::fs::diff(ctx, &path, a.as_deref(), b.as_deref()).await
+        }
+        FsCommands::Unmount { path, delete } => commands::fs::unmount(ctx, &path, delete).await,
+    };
+    // A cached minted git credential can be revoked before its recorded expiry; purge
+    // the cache on an auth failure so the next invocation re-mints instead of retrying
+    // a dead token.
+    if let Err(
+        CliError::Auth(_)
+        | CliError::Sdk(
+            tensorlake::error::SdkError::Authentication(_)
+            | tensorlake::error::SdkError::Authorization(_),
+        ),
+    ) = &result
+    {
+        crate::config::files::purge_git_credentials();
+    }
+    result
+}
+
+#[cfg(not(feature = "mount"))]
+async fn run_fs_command(_ctx: &mut CliContext, _subcmd: FsCommands) -> error::Result<()> {
+    Err(CliError::usage(
+        "`tl fs` local mounts are not available in this build. Install the official `tl` release, \
+         which is compiled with mount support.",
+    ))
+}
+
 async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> error::Result<()> {
     match subcmd {
         SshKeysCommands::Ls => commands::ssh_keys::list(ctx).await,
@@ -2092,12 +2355,38 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
             branch,
             message,
             expect_oid,
-            paths,
             json,
-        } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, paths, json).await,
-        GitCommands::Url { repo } => {
-            println!("{}", commands::git::repo_url(ctx, &repo)?);
-            Ok(())
+        } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, json).await,
+        GitCommands::Merge {
+            repo,
+            ours,
+            theirs,
+            preflight,
+            deep,
+            materialize,
+            message,
+            base,
+            json,
+        } => {
+            commands::git::merge(
+                ctx,
+                &repo,
+                &ours,
+                &theirs,
+                preflight,
+                deep,
+                materialize,
+                message.as_deref(),
+                base.as_deref(),
+                json,
+            )
+            .await
+        }
+        GitCommands::Conflicts { repo, commit, json } => {
+            commands::git::commit_conflicts(ctx, &repo, &commit, json).await
+        }
+        GitCommands::CommitStatus { repo, job_id } => {
+            commands::git::commit_status(ctx, &repo, &job_id).await
         }
         GitCommands::Info { repo, json } => commands::git::status(ctx, &repo, json).await,
         GitCommands::Repo(repo_cmd) => match repo_cmd {
@@ -2336,6 +2625,15 @@ mod tests {
             _ => panic!("expected git status alias"),
         }
 
+        // `tl git url` merged into `tl git info` (which prints the remote URL).
+        match parse_command(["tl", "git", "url", "demo"]) {
+            Commands::Git(GitCommands::Info { repo, json }) => {
+                assert_eq!(repo, "demo");
+                assert!(!json);
+            }
+            _ => panic!("expected git url alias of info"),
+        }
+
         match parse_command(["tl", "git", "repo", "create", "demo"]) {
             Commands::Git(GitCommands::Repo(GitRepoCommands::Create { repo, .. })) => {
                 assert_eq!(repo, "demo");
@@ -2387,7 +2685,105 @@ mod tests {
             _ => panic!("expected legacy git ops command"),
         }
 
-        assert!(Cli::try_parse_from(["tl", "git", "push", "demo"]).is_err());
+        match parse_command(["tl", "git", "push", "demo"]) {
+            Commands::Git(GitCommands::Push { repo, branch, .. }) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(branch, "main");
+            }
+            _ => panic!("expected git push command"),
+        }
+
+        match parse_command(["tl", "git", "push", "demo", "feature-a"]) {
+            Commands::Git(GitCommands::Push { repo, branch, .. }) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(branch, "feature-a");
+            }
+            _ => panic!("expected git push command"),
+        }
+
+        // commit-status takes the repo positionally, like every other repo-addressed command.
+        match parse_command(["tl", "git", "commit-status", "demo", "job-123"]) {
+            Commands::Git(GitCommands::CommitStatus { repo, job_id }) => {
+                assert_eq!(repo, "demo");
+                assert_eq!(job_id, "job-123");
+            }
+            _ => panic!("expected git commit-status command"),
+        }
+        assert!(
+            Cli::try_parse_from(["tl", "git", "commit-status", "--repo", "demo", "job-123"])
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn fs_commands_are_workspace_centric() {
+        match parse_command(["tl", "fs", "mount", "data:main", "./w", "--mode", "ro"]) {
+            Commands::Fs(FsCommands::Mount {
+                target,
+                path,
+                mode,
+                shared_rw,
+                foreground,
+            }) => {
+                assert_eq!(target, "data:main");
+                assert_eq!(path, PathBuf::from("./w"));
+                assert_eq!(mode, Some(MountWriteMode::Ro));
+                assert!(!shared_rw);
+                assert!(!foreground);
+            }
+            _ => panic!("expected fs mount command"),
+        }
+
+        // A bare workspace id mounts an existing workspace; --mode rw forces writes.
+        match parse_command(["tl", "fs", "mount", "0a1b2c3d", "./w", "--mode", "rw"]) {
+            Commands::Fs(FsCommands::Mount { target, mode, .. }) => {
+                assert_eq!(target, "0a1b2c3d");
+                assert_eq!(mode, Some(MountWriteMode::Rw));
+            }
+            _ => panic!("expected fs mount command"),
+        }
+
+        match parse_command(["tl", "fs", "ls"]) {
+            Commands::Fs(FsCommands::Ls {
+                file_system: None,
+                json: false,
+            }) => {}
+            _ => panic!("expected fs ls command"),
+        }
+
+        match parse_command(["tl", "fs", "ls", "data", "--json"]) {
+            Commands::Fs(FsCommands::Ls { file_system, json }) => {
+                assert_eq!(file_system.as_deref(), Some("data"));
+                assert!(json);
+            }
+            _ => panic!("expected fs ls command"),
+        }
+
+        match parse_command(["tl", "fs", "rm", "0a1b2c3d"]) {
+            Commands::Fs(FsCommands::Rm { workspace_id }) => {
+                assert_eq!(workspace_id, "0a1b2c3d");
+            }
+            _ => panic!("expected fs rm command"),
+        }
+
+        match parse_command(["tl", "fs", "setup", "--check"]) {
+            Commands::Fs(FsCommands::Setup {
+                from: None,
+                check: true,
+            }) => {}
+            _ => panic!("expected fs setup command"),
+        }
+
+        // The workspace subgroup is gone: workspaces ARE the `tl fs` surface.
+        assert!(Cli::try_parse_from(["tl", "fs", "workspace", "ls", "data"]).is_err());
+
+        // The old file-system registry commands are gone: file systems are managed by `tl git`.
+        assert!(Cli::try_parse_from(["tl", "fs", "create", "--name", "data"]).is_err());
+        assert!(Cli::try_parse_from(["tl", "fs", "mount", "data", "./w", "--shared-ro"]).is_err());
+        assert!(
+            Cli::try_parse_from(["tl", "fs", "mount", "data", "./w", "--workspace", "0a1b"])
+                .is_err()
+        );
     }
 
     #[test]

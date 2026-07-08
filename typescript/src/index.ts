@@ -6,6 +6,7 @@ export { Desktop } from "./desktop.js";
 export { TcpTunnel } from "./tunnel.js";
 export { CloudClient } from "./cloud-client.js";
 export { APIClient } from "./api-client.js";
+export { RepositoryClient } from "./repositories.js";
 export {
   createSandboxImage,
   importSandboxImage,
@@ -167,3 +168,28 @@ export type {
   ImageBuildOperation,
   ImageBuildOperationType as ImageBuildOperationTypeValue,
 } from "./image.js";
+
+export type {
+  Branch,
+  CommitJobError,
+  CommitJobReadBack,
+  CommitJobStatus,
+  ConflictPath,
+  ConflictTerm,
+  GitCredential,
+  GitRef,
+  GitRepository,
+  MergeConflict,
+  MergeConflictRecord,
+  MergeEntry,
+  MergeOptions,
+  MergeReport,
+  MergeStats,
+  Operation,
+  OperationRef,
+  PushReport,
+  PushWorktreeOptions,
+  RepositoryClientOptions,
+  RepositoryHandle,
+  RepositoryInfo,
+} from "./repositories.js";

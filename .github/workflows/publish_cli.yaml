@@ -14,34 +14,59 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.target_id }})
+    # The darwin build embeds the notarized TLFS.app.zip from tlfs-app into the binary, so
+    # `tl fs setup` installs offline. tlfs-app is continue-on-error: when it produced nothing,
+    # the darwin binary falls back to downloading the release asset at setup time.
+    needs: tlfs-app
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         include:
+          # Customer Unix binaries ship the full CLI feature set (`tl fs mount` + fast clone).
+          # Linux binaries are musl-linked so they do not depend on a host glibc floor.
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
+            rust_target_base: x86_64-unknown-linux-musl
             target_id: linux-x86_64
             archive: tar.gz
+            libc: musl
+            build_tool: cargo-zigbuild
+            features: mount,git-clone
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
+            rust_target_base: aarch64-unknown-linux-musl
             target_id: linux-aarch64
             archive: tar.gz
+            libc: musl
+            build_tool: cargo-zigbuild
+            features: mount,git-clone
           - os: macos-14
             target: aarch64-apple-darwin
+            rust_target_base: aarch64-apple-darwin
             target_id: darwin-aarch64
             archive: tar.gz
+            build_tool: cargo
+            features: mount,git-clone
+          # Windows has no `tl fs mount` backend today; it still ships fast clone.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            rust_target_base: x86_64-pc-windows-msvc
             target_id: windows-x86_64
             archive: zip
+            build_tool: cargo
+            features: git-clone
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust_target_base }}
+
+      - name: Setup Zig
+        if: matrix.build_tool == 'cargo-zigbuild'
+        uses: mlugg/setup-zig@v2
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -50,22 +75,96 @@ jobs:
           key: ${{ matrix.target }}
           cache-bin: false
 
-      - name: Build CLI
-        run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }}
+      - name: Install cargo-zigbuild
+        if: matrix.build_tool == 'cargo-zigbuild'
+        run: cargo install cargo-zigbuild --locked
+
+      # Customer builds must compile the private mount/clone cores before enabling the release
+      # feature set. Windows does not compile `mount`, but the source swap is harmless there.
+      - name: Vendor private artifact_storage crates
+        uses: ./.github/actions/vendor-private-crates
+        with:
+          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
+          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
+
+      - name: Fetch notarized TLFS.app (embedded into `tl fs setup`)
+        if: matrix.target_id == 'darwin-aarch64'
+        continue-on-error: true
+        uses: actions/download-artifact@v4
+        with:
+          name: cli-tlfs-app
+          path: tlfs-dist
+
+      - name: Point the build at the TLFS app zip
+        if: matrix.target_id == 'darwin-aarch64'
+        shell: bash
+        run: |
+          zip=$(ls tlfs-dist/TLFS-*.app.zip 2>/dev/null | head -1 || true)
+          if [ -n "$zip" ]; then
+            echo "TLFS_APP_ZIP=$(pwd)/$zip" >> "$GITHUB_ENV"
+            echo "Embedding $zip"
+          else
+            echo "No TLFS app artifact; `tl fs setup` will download the release asset instead"
+          fi
+
+      - name: Build CLI with cargo-zigbuild
+        if: matrix.build_tool == 'cargo-zigbuild'
+        run: cargo zigbuild --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }} --features ${{ matrix.features }}
+
+      - name: Build CLI with cargo
+        if: matrix.build_tool == 'cargo'
+        run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }} --features ${{ matrix.features }}
+
+      - name: Locate CLI binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=""
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            ext=".exe"
+          fi
+          candidates=(
+            "target/${{ matrix.rust_target_base }}/release/tensorlake${ext}"
+            "target/${{ matrix.target }}/release/tensorlake${ext}"
+          )
+          for candidate in "${candidates[@]}"; do
+            if [ -f "$candidate" ]; then
+              echo "CLI_BINARY=$candidate" >> "$GITHUB_ENV"
+              echo "Using $candidate"
+              exit 0
+            fi
+          done
+          printf 'Expected compiled binary in one of:\n' >&2
+          printf '  %s\n' "${candidates[@]}" >&2
+          exit 1
+
+      - name: Verify Linux CLI libc compatibility
+        if: startsWith(matrix.target_id, 'linux-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$CLI_BINARY"
+          required_versions="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu || true)"
+          if [ -n "$required_versions" ]; then
+            echo "Musl CLI unexpectedly references glibc symbols."
+            printf '%s\n' "$required_versions"
+            exit 1
+          fi
+          echo "No glibc symbols referenced."
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           mkdir -p dist
-          tar -C target/${{ matrix.target }}/release -czf dist/tensorlake-cli-${{ matrix.target_id }}.tar.gz tensorlake
+          tar -C "$(dirname "$CLI_BINARY")" -czf dist/tensorlake-cli-${{ matrix.target_id }}.tar.gz "$(basename "$CLI_BINARY")"
 
       - name: Package (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path target/${{ matrix.target }}/release/tensorlake.exe -DestinationPath dist/tensorlake-cli-${{ matrix.target_id }}.zip
+          Compress-Archive -Path $env:CLI_BINARY -DestinationPath dist/tensorlake-cli-${{ matrix.target_id }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -73,9 +172,77 @@ jobs:
           name: cli-${{ matrix.target_id }}
           path: dist/*
 
+  # TLFS.app: the macOS FSKit extension `tl fs mount` needs (installed on end-user machines by
+  # `tl fs setup`). Built headlessly with swiftc, signed with the Developer ID identity +
+  # Developer ID provisioning profile (FSKit Module capability, no device list), notarized, and
+  # attached to the same release so app and CLI stay in wire-protocol lockstep.
+  # Secrets (see platform/macos/tlfs/README.md):
+  #   TLFS_SIGNING_CERT_P12 / TLFS_SIGNING_CERT_PASSWORD  Developer ID Application cert (.p12, base64)
+  #   TLFS_PROVISION_PROFILE                              Developer ID profile (base64)
+  #   TLFS_NOTARY_KEY / TLFS_NOTARY_KEY_ID / TLFS_NOTARY_ISSUER  App Store Connect API key (.p8 base64)
+  tlfs-app:
+    name: Build TLFS.app (macOS file-system extension)
+    # Needs Xcode 26.x / the macOS 26 SDK (the FSKit surface tlfs uses); adjust the image if the
+    # hosted runner catalog changes.
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Extract version from Cargo.toml
+        id: version
+        run: |
+          version=$(grep -E '^version = ' Cargo.toml | head -1 | sed 's/version = "\(.*\)"/\1/')
+          echo "version=$version" >> $GITHUB_OUTPUT
+
+      - name: Import Developer ID certificate
+        env:
+          CERT_P12: ${{ secrets.TLFS_SIGNING_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.TLFS_SIGNING_CERT_PASSWORD }}
+        run: |
+          set -euo pipefail
+          keychain="$RUNNER_TEMP/tlfs-signing.keychain-db"
+          keychain_password="$(uuidgen)"
+          echo "$CERT_P12" | base64 -d > "$RUNNER_TEMP/cert.p12"
+          security create-keychain -p "$keychain_password" "$keychain"
+          security set-keychain-settings -lut 1800 "$keychain"
+          security unlock-keychain -p "$keychain_password" "$keychain"
+          security import "$RUNNER_TEMP/cert.p12" -k "$keychain" -P "$CERT_PASSWORD" -T /usr/bin/codesign
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$keychain_password" "$keychain" > /dev/null
+          security list-keychains -d user -s "$keychain" login.keychain
+          rm -f "$RUNNER_TEMP/cert.p12"
+
+      - name: Stage provisioning profile and notary key
+        env:
+          PROVISION_PROFILE: ${{ secrets.TLFS_PROVISION_PROFILE }}
+          NOTARY_KEY: ${{ secrets.TLFS_NOTARY_KEY }}
+        run: |
+          set -euo pipefail
+          echo "$PROVISION_PROFILE" | base64 -d > "$RUNNER_TEMP/tlfs-developer-id.provisionprofile"
+          echo "$NOTARY_KEY" | base64 -d > "$RUNNER_TEMP/notary-key.p8"
+
+      - name: Build, sign, notarize
+        env:
+          TLFS_PROVISION_PROFILE: ${{ runner.temp }}/tlfs-developer-id.provisionprofile
+          TLFS_NOTARY_KEY_FILE: ${{ runner.temp }}/notary-key.p8
+          TLFS_NOTARY_KEY_ID: ${{ secrets.TLFS_NOTARY_KEY_ID }}
+          TLFS_NOTARY_ISSUER: ${{ secrets.TLFS_NOTARY_ISSUER }}
+          TLFS_VERSION: ${{ steps.version.outputs.version }}
+        run: platform/macos/tlfs/build.sh --release --notarize
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp platform/macos/tlfs/build/TLFS.app.zip "dist/TLFS-${{ steps.version.outputs.version }}.app.zip"
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: cli-tlfs-app
+          path: dist/*
+
   release:
     name: Create GitHub Release
-    needs: build
+    needs: [build, tlfs-app]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

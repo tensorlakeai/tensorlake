@@ -70,7 +70,7 @@ fn make_napi_error(category: &str, status: Option<u16>, message: String) -> napi
 
 /// Map an [`SdkError`] to a structured napi error. Mirrors the Python binding's
 /// `into_sandbox_py_error` so both SDKs classify failures identically.
-fn into_napi_error(error: SdkError) -> napi::Error {
+pub(crate) fn into_napi_error(error: SdkError) -> napi::Error {
     match error {
         SdkError::Authentication(message) => make_napi_error("sdk_usage", Some(401), message),
         SdkError::Authorization(message) => make_napi_error("sdk_usage", Some(403), message),
@@ -99,7 +99,7 @@ fn into_napi_error(error: SdkError) -> napi::Error {
     }
 }
 
-fn usage_error(message: String) -> napi::Error {
+pub(crate) fn usage_error(message: String) -> napi::Error {
     make_napi_error("sdk_usage", None, message)
 }
 
@@ -153,7 +153,11 @@ where
 }
 
 /// Run `op` with bounded retries, mapping any terminal error to a napi error.
-async fn with_retry<C, T, F, Fut>(client: C, max_retries: usize, op: F) -> napi::Result<T>
+pub(crate) async fn with_retry<C, T, F, Fut>(
+    client: C,
+    max_retries: usize,
+    op: F,
+) -> napi::Result<T>
 where
     C: Clone,
     F: Fn(C) -> Fut,
@@ -166,7 +170,7 @@ where
 
 // ---- Misc helpers (ported from the Python binding) ------------------------
 
-fn duration_from_seconds(name: &str, seconds: f64) -> napi::Result<Duration> {
+pub(crate) fn duration_from_seconds(name: &str, seconds: f64) -> napi::Result<Duration> {
     if !seconds.is_finite() || seconds <= 0.0 {
         return Err(usage_error(format!(
             "{name} must be a positive finite number"

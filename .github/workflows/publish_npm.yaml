@@ -48,119 +48,6 @@ jobs:
           name: sdk-dist
           path: typescript/dist
 
-  build-cli-binaries:
-    name: Build CLI binaries (${{ matrix.target_id }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: ubuntu-latest
-            target_id: linux-x64
-            rust_target: x86_64-unknown-linux-gnu.2.28
-            rust_target_base: x86_64-unknown-linux-gnu
-            libc: gnu
-            cli_build_tool: cargo-zigbuild
-          - os: ubuntu-24.04-arm
-            target_id: linux-arm64
-            rust_target: aarch64-unknown-linux-gnu.2.28
-            rust_target_base: aarch64-unknown-linux-gnu
-            libc: gnu
-            cli_build_tool: cargo-zigbuild
-          - os: ubuntu-latest
-            target_id: linux-x64-musl
-            rust_target: x86_64-unknown-linux-musl
-            rust_target_base: x86_64-unknown-linux-musl
-            libc: musl
-            cli_build_tool: cargo-zigbuild
-          - os: ubuntu-24.04-arm
-            target_id: linux-arm64-musl
-            rust_target: aarch64-unknown-linux-musl
-            rust_target_base: aarch64-unknown-linux-musl
-            libc: musl
-            cli_build_tool: cargo-zigbuild
-          - os: macos-14
-            target_id: darwin-arm64
-            rust_target: ""
-            rust_target_base: ""
-            libc: ""
-            cli_build_tool: cargo
-          - os: windows-latest
-            target_id: win32-x64
-            rust_target: ""
-            rust_target_base: ""
-            libc: ""
-            cli_build_tool: cargo
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-          cache: "npm"
-          cache-dependency-path: typescript/package-lock.json
-
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Setup Zig
-        if: matrix.cli_build_tool == 'cargo-zigbuild'
-        uses: mlugg/setup-zig@v2
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: v1-rust-no-bin
-          cache-bin: false
-
-      - name: Install cargo-zigbuild
-        if: matrix.cli_build_tool == 'cargo-zigbuild'
-        run: cargo install cargo-zigbuild --locked
-
-      - name: Install Rust target
-        if: matrix.rust_target_base != ''
-        run: rustup target add ${{ matrix.rust_target_base }}
-
-      - name: Install dependencies
-        run: npm ci
-
-      - name: Build CLI
-        run: npm run build:cli
-        env:
-          TENSORLAKE_CLI_TARGET_ID: ${{ matrix.target_id }}
-          TENSORLAKE_CLI_TARGET_TRIPLE: ${{ matrix.rust_target }}
-          TENSORLAKE_CLI_BUILD_TOOL: ${{ matrix.cli_build_tool }}
-
-      - name: Verify packaged CLI binary
-        run: |
-          node -e "const cp = require('node:child_process'); const path = require('node:path'); const ext = process.platform === 'win32' ? '.exe' : ''; const binary = path.join('dist', 'bin', process.env.TARGET_ID, 'tl' + ext); const result = cp.spawnSync(binary, ['--help'], { stdio: 'inherit' }); if (result.error) throw result.error; process.exit(result.status ?? 1);"
-        env:
-          TARGET_ID: ${{ matrix.target_id }}
-
-      - name: Verify Linux CLI libc compatibility
-        if: startsWith(matrix.target_id, 'linux-')
-        run: |
-          set -euo pipefail
-          binary="dist/bin/${{ matrix.target_id }}/tl"
-          required_versions="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu || true)"
-          max_glibc="$(printf '%s\n' "$required_versions" | tail -n1)"
-          echo "Maximum required glibc: ${max_glibc:-none}"
-          if [ "${{ matrix.libc }}" = "musl" ] && [ -n "$max_glibc" ]; then
-            echo "Musl CLI unexpectedly references glibc symbols."
-            exit 1
-          fi
-          if [ "${{ matrix.libc }}" = "gnu" ] && [ -n "$max_glibc" ] && [ "$(printf '%s\n%s\n' "GLIBC_2.28" "$max_glibc" | sort -V | tail -n1)" != "GLIBC_2.28" ]; then
-            echo "CLI requires $max_glibc, above the GLIBC_2.28 compatibility floor."
-            exit 1
-          fi
-
-      - name: Upload CLI artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: cli-${{ matrix.target_id }}
-          path: typescript/dist/bin/${{ matrix.target_id }}
-
   build-native-binaries:
     name: Build native binding (${{ matrix.target_id }})
     runs-on: ${{ matrix.os }}
@@ -272,7 +159,6 @@ jobs:
     name: Publish to npm
     needs:
       - build-sdk-and-test
-      - build-cli-binaries
       - build-native-binaries
     runs-on: ubuntu-latest
     environment:
@@ -299,42 +185,6 @@ jobs:
         with:
           name: sdk-dist
           path: typescript/dist
-
-      - name: Download Linux CLI artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-linux-x64
-          path: typescript/dist/bin/linux-x64
-
-      - name: Download Linux arm64 CLI artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-linux-arm64
-          path: typescript/dist/bin/linux-arm64
-
-      - name: Download Linux musl CLI artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-linux-x64-musl
-          path: typescript/dist/bin/linux-x64-musl
-
-      - name: Download Linux arm64 musl CLI artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-linux-arm64-musl
-          path: typescript/dist/bin/linux-arm64-musl
-
-      - name: Download macOS arm64 CLI artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-darwin-arm64
-          path: typescript/dist/bin/darwin-arm64
-
-      - name: Download Windows x64 CLI artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: cli-win32-x64
-          path: typescript/dist/bin/win32-x64
 
       - name: Download Linux native artifact
         uses: actions/download-artifact@v4
@@ -371,9 +221,6 @@ jobs:
         with:
           name: native-win32-x64
           path: typescript/dist/native/win32-x64
-
-      - name: Restore executable bits for Unix CLI binaries
-        run: find dist/bin -type f ! -name "*.exe" -exec chmod 755 {} +
 
       - name: Verify package contents
         run: npm pack --dry-run --ignore-scripts
