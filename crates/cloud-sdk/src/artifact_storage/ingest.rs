@@ -449,10 +449,17 @@ fn chunk_source_whole(source: &PushSource) -> Result<(Vec<([u8; 32], u32)>, Stri
             ));
         }
     };
-    let hash: [u8; 32] = Sha256::digest(&data).into();
     let mut blob = BlobOidHasher::new(data.len() as u64);
     blob.update(&data);
-    Ok((vec![(hash, data.len() as u32)], blob.finalize_hex()))
+    // An empty file has an empty chunk list (like the CDC path) so it publishes as inline
+    // `content` — a zero-length chunk frame is rejected by the server.
+    let chunks = if data.is_empty() {
+        Vec::new()
+    } else {
+        let hash: [u8; 32] = Sha256::digest(&data).into();
+        vec![(hash, data.len() as u32)]
+    };
+    Ok((chunks, blob.finalize_hex()))
 }
 
 /// Which files take the tokened (verified-at-upload) path: content-bearing files whose bytes the
@@ -1985,6 +1992,14 @@ mod tests {
                         mode: None,
                         delete: false,
                     },
+                    // Zero-byte file: must publish as inline content, never as a
+                    // zero-length chunk (the server rejects those).
+                    PushFile {
+                        repo_path: "empty.txt".to_string(),
+                        source: PushSource::Bytes(Vec::new()),
+                        mode: None,
+                        delete: false,
+                    },
                 ],
                 PushOptions {
                     message: "seed".into(),
@@ -1994,7 +2009,17 @@ mod tests {
             .await
             .unwrap()
             .into_inner();
-        assert_eq!(report.files, 3);
+        assert_eq!(report.files, 4);
+        assert_eq!(
+            report
+                .file_blob_oids
+                .iter()
+                .find(|(p, _)| p == "empty.txt")
+                .unwrap()
+                .1,
+            "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+            "empty file must carry git's empty-blob oid"
+        );
         let a_oid = report
             .file_blob_oids
             .iter()
@@ -2093,5 +2118,30 @@ mod tests {
             hash,
             "framed bytes must hash to the declared id"
         );
+    }
+
+    /// The whole-file (small staged) pass must match the CDC pass's contract for empty files:
+    /// no chunks — a zero-length chunk frame is rejected by the server ("chunk length 0
+    /// outside (0, 8388608]"), and an empty chunk list is what routes the file to inline
+    /// `content` at commit.
+    #[test]
+    fn whole_file_pass_yields_no_chunks_for_empty_files() {
+        let (chunks, oid) = chunk_source_whole(&PushSource::Bytes(Vec::new())).unwrap();
+        assert!(chunks.is_empty(), "an empty file must have no chunks");
+        assert_eq!(
+            oid, "e69de29bb2d1d6434b8b29ae775ad8c2e48c5391",
+            "must still hash to git's empty-blob oid"
+        );
+        let (cdc_chunks, cdc_oid) =
+            chunk_source(&PushSource::Bytes(Vec::new()), 256, 1024, 4096).unwrap();
+        assert_eq!(chunks, cdc_chunks, "both passes must agree on empty input");
+        assert_eq!(oid, cdc_oid);
+
+        // Non-empty small files still produce exactly one whole-file chunk.
+        let data = b"hello".to_vec();
+        let (chunks, _) = chunk_source_whole(&PushSource::Bytes(data.clone())).unwrap();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].1 as usize, data.len());
+        assert_eq!(chunks[0].0, <[u8; 32]>::from(Sha256::digest(&data)));
     }
 }
