@@ -31,6 +31,7 @@ finally:
 print(f"TLS check passed: request to {url} succeeded")
 """
 
+
 def _venv_python(venv_dir: Path) -> Path:
     if os.name == "nt":
         return venv_dir / "Scripts" / "python.exe"
@@ -59,7 +60,11 @@ def _script_candidates(scripts_dir: Path, name: str) -> list[Path]:
 def _find_venv_script(venv_dir: Path, name: str) -> Path | None:
     scripts_dir = _venv_scripts_dir(venv_dir)
     return next(
-        (candidate for candidate in _script_candidates(scripts_dir, name) if candidate.exists()),
+        (
+            candidate
+            for candidate in _script_candidates(scripts_dir, name)
+            if candidate.exists()
+        ),
         None,
     )
 
