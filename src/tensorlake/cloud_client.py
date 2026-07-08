@@ -240,3 +240,153 @@ class CloudClient:
             )
         except Exception as e:
             _raise_as_tensorlake_error(e)
+
+    # -- Git repository operations --
+
+    def git_repo_url(self, project_id: str, repo: str) -> str:
+        try:
+            return self._client.git_repo_url(project_id, repo)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def create_git_repo(
+        self,
+        project_id: str,
+        repo: str,
+        default_branch: str | None = None,
+    ) -> str:
+        try:
+            return self._client.create_git_repo(project_id, repo, default_branch)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def list_git_repos(self, project_id: str) -> str:
+        try:
+            return self._client.list_git_repos(project_id)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def delete_git_repo(self, project_id: str, repo: str) -> None:
+        try:
+            self._client.delete_git_repo(project_id, repo)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def fork_git_repo(self, project_id: str, repo: str, base_repo: str) -> str:
+        try:
+            return self._client.fork_git_repo(project_id, repo, base_repo)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def archive_git_repo(self, project_id: str, repo: str) -> None:
+        try:
+            self._client.archive_git_repo(project_id, repo)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def restore_git_repo(self, project_id: str, repo: str) -> None:
+        try:
+            self._client.restore_git_repo(project_id, repo)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def git_repo_info(self, project_id: str, repo: str) -> str:
+        try:
+            return self._client.git_repo_info(project_id, repo)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def list_git_branches(self, project_id: str, repo: str) -> str:
+        try:
+            return self._client.list_git_branches(project_id, repo)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def list_git_refs(self, project_id: str, repo: str) -> str:
+        try:
+            return self._client.list_git_refs(project_id, repo)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def delete_git_branch(self, project_id: str, repo: str, branch: str) -> None:
+        try:
+            self._client.delete_git_branch(project_id, repo, branch)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def list_git_operations(self, project_id: str, repo: str) -> str:
+        try:
+            return self._client.list_git_operations(project_id, repo)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def git_credential(self, project_id: str, repo: str | None = None) -> str:
+        try:
+            return self._client.git_credential(project_id, repo)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def git_commit_status(self, project_id: str, repo: str, job_id: str) -> str:
+        try:
+            return self._client.git_commit_status(project_id, repo, job_id)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def push_git_worktree(
+        self,
+        project_id: str,
+        repo: str,
+        root: str,
+        branch: str,
+        message: str,
+        expect_oid: str | None = None,
+    ) -> str:
+        try:
+            return self._client.push_git_worktree(
+                project_id,
+                repo,
+                root,
+                branch,
+                message,
+                expect_oid,
+            )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def merge_git_repo(
+        self,
+        project_id: str,
+        repo: str,
+        ours: str,
+        theirs: str,
+        preflight: bool = False,
+        deep: bool = False,
+        materialize: bool = False,
+        message: str | None = None,
+        base: str | None = None,
+    ) -> str:
+        try:
+            return self._client.merge_git_repo(
+                project_id,
+                repo,
+                ours,
+                theirs,
+                preflight,
+                deep,
+                materialize,
+                message,
+                base,
+            )
+        except Exception as e:
+            _raise_as_tensorlake_error(e)
+
+    def git_commit_conflicts(
+        self,
+        project_id: str,
+        repo: str,
+        commit: str,
+    ) -> str:
+        try:
+            return self._client.git_commit_conflicts(project_id, repo, commit)
+        except Exception as e:
+            _raise_as_tensorlake_error(e)

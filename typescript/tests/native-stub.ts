@@ -1,6 +1,7 @@
 import { vi } from "vitest";
 import {
   __setNativeSandboxBindingForTest,
+  type NativeRepositoryClient,
   type NativeSandboxBinding,
   type NativeSandboxClient,
   type NativeSandboxProxyClient,
@@ -33,10 +34,14 @@ export interface NativeStub {
   client: FakeFns;
   /** Fake `NativeSandboxProxyClient` (process/file/stream ops). */
   proxy: FakeFns;
+  /** Fake `NativeRepositoryClient`. */
+  repository: FakeFns;
   /** Args the `NativeSandboxClient` constructor was last called with. */
   clientCtorArgs: unknown[];
   /** Args the `NativeSandboxProxyClient` constructor was last called with. */
   proxyCtorArgs: unknown[];
+  /** Args the `NativeRepositoryClient` constructor was last called with. */
+  repositoryCtorArgs: unknown[];
 }
 
 const tracedJson = (json = "{}") => async () => ({ traceId: "t", json });
@@ -116,6 +121,35 @@ function makeClient(proxy: FakeFns): FakeFns {
   };
 }
 
+function makeRepository(): FakeFns {
+  return {
+    gitRepoUrl: vi.fn((repo: string) => `https://git.tensorlake.ai/project_1/${repo}`),
+    createRepo: vi.fn(tracedJson()),
+    listRepos: vi.fn(tracedJson('{"project":"project_1","repos":[]}')),
+    deleteRepo: vi.fn(tracedId()),
+    forkRepo: vi.fn(tracedJson()),
+    archiveRepo: vi.fn(tracedId()),
+    restoreRepo: vi.fn(tracedId()),
+    repoInfo: vi.fn(tracedJson()),
+    listBranches: vi.fn(tracedJson('{"repo":"repo","branches":[]}')),
+    listRefs: vi.fn(tracedJson('{"repo":"repo","refs":[]}')),
+    deleteBranch: vi.fn(tracedId()),
+    listOperations: vi.fn(tracedJson('{"repo":"repo","operations":[]}')),
+    gitCredential: vi.fn(async () => JSON.stringify({
+      token: "tok",
+      tokenType: "bearer",
+      expiresAt: "",
+      gitUsername: "t",
+      repoPattern: "*",
+      scopes: [],
+    })),
+    commitStatus: vi.fn(tracedJson()),
+    pushWorktree: vi.fn(tracedJson()),
+    mergeRepo: vi.fn(tracedJson()),
+    commitConflicts: vi.fn(tracedJson("null")),
+  };
+}
+
 /**
  * Install a fake native binding. Pass `overrides.client` / `overrides.proxy`
  * to replace specific method implementations (e.g. assert on args or return
@@ -124,17 +158,22 @@ function makeClient(proxy: FakeFns): FakeFns {
 export function installNativeStub(overrides?: {
   client?: Record<string, unknown>;
   proxy?: Record<string, unknown>;
+  repository?: Record<string, unknown>;
 }): NativeStub {
   const proxy = makeProxy();
   const client = makeClient(proxy);
+  const repository = makeRepository();
   Object.assign(proxy, overrides?.proxy ?? {});
   Object.assign(client, overrides?.client ?? {});
+  Object.assign(repository, overrides?.repository ?? {});
 
   const stub: NativeStub = {
     client,
     proxy,
+    repository,
     clientCtorArgs: [],
     proxyCtorArgs: [],
+    repositoryCtorArgs: [],
   };
 
   const binding: NativeSandboxBinding = {
@@ -159,6 +198,12 @@ export function installNativeStub(overrides?: {
         return proxy as unknown as NativeSandboxProxyClient;
       }
     } as unknown as NativeSandboxBinding["NativeSandboxProxyClient"],
+    NativeRepositoryClient: class {
+      constructor(...args: unknown[]) {
+        stub.repositoryCtorArgs = args;
+        return repository as unknown as NativeRepositoryClient;
+      }
+    } as unknown as NonNullable<NativeSandboxBinding["NativeRepositoryClient"]>,
   };
   __setNativeSandboxBindingForTest(binding);
   return stub;

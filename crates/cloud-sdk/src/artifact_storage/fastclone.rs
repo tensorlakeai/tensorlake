@@ -23,12 +23,12 @@ use std::fs;
 use std::io::{Read as _, Seek as _, SeekFrom, Write as _};
 use std::path::{Component, Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use flate2::Compression;
 use gsvc_codec::{BlobOidHasher, IdxV2, Oid};
-use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::Url;
 use serde::{Deserialize, Serialize};
 use sha1::{Digest, Sha1};
@@ -103,28 +103,19 @@ pub struct FastCloneOptions {
     /// Basic-auth credential for the gsvc origin, e.g. from a minted git token.
     pub credential: Option<BasicAuth>,
     pub checkout: bool,
-    /// Spinner already shown by the caller (e.g. while minting a credential); reused and
-    /// switched to a byte progress bar once the manifest's artifact sizes are known.
-    pub progress: Option<ProgressBar>,
+    /// Optional progress sink. Rendering (spinner, logs, bars) is the caller's concern.
+    pub progress: Option<FastCloneProgress>,
 }
 
-/// A spinner for indeterminate-length work (auth, manifest fetch), or `None` when stderr isn't a
-/// TTY. `fast_clone` converts it into a byte progress bar once download sizes are known.
-pub fn new_spinner(message: &str) -> Option<ProgressBar> {
-    if !std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-        return None;
-    }
-    let pb = ProgressBar::new_spinner();
-    pb.set_style(
-        ProgressStyle::default_spinner()
-            .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
-            .template("{spinner} {msg}")
-            .unwrap(),
-    );
-    pb.set_message(message.to_string());
-    pb.enable_steady_tick(std::time::Duration::from_millis(80));
-    Some(pb)
+#[derive(Clone, Debug)]
+pub enum FastCloneEvent {
+    FetchingManifest,
+    DownloadPlan { bytes: u64 },
+    DownloadedBytes { bytes: u64 },
+    InstallingObjects { dest: PathBuf },
 }
+
+pub type FastCloneProgress = Arc<dyn Fn(FastCloneEvent) + Send + Sync>;
 
 #[derive(Clone, Debug, Default)]
 pub struct FastCloneStats {
@@ -151,19 +142,16 @@ struct HttpCtx {
     client: reqwest::Client,
     origin: Url,
     auth: Option<BasicAuth>,
-    progress: Option<ProgressBar>,
+    progress: Option<FastCloneProgress>,
 }
 
-fn byte_progress_style() -> ProgressStyle {
-    ProgressStyle::with_template(
-        "{spinner} {bytes}/{total_bytes} ({bytes_per_sec}, eta {eta}) {msg}",
-    )
-    .unwrap()
-    .tick_strings(&["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"])
+fn emit(ctx: &HttpCtx, event: FastCloneEvent) {
+    if let Some(progress) = &ctx.progress {
+        progress(event);
+    }
 }
 
-/// Run a fast clone into `opts.dest`. `opts.progress`, if set, is shown while resolving the
-/// manifest and then converted into a byte progress bar once download sizes are known.
+/// Run a fast clone into `opts.dest`.
 pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
     ensure_clone_target_available(&opts.dest)?;
     let mut clean_base = Url::parse(&opts.repo_url)
@@ -175,13 +163,14 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         let path = format!("{}/", clean_base.path());
         clean_base.set_path(&path);
     }
-    let mut ctx = HttpCtx {
+    let ctx = HttpCtx {
         client: reqwest::Client::builder().build()?,
         origin: clean_base.clone(),
         auth: opts.credential.clone(),
         progress: opts.progress,
     };
     let manifest_url = clean_base.join("fast/clone-manifest")?;
+    emit(&ctx, FastCloneEvent::FetchingManifest);
     let manifest: FastCloneManifest = get_json(&ctx, manifest_url).await?;
     if manifest.version != 1 {
         bail!(
@@ -200,18 +189,7 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         .map(|p| p.pack_bytes + p.idx_bytes)
         .sum::<u64>()
         + manifest.large_blobs.iter().map(|b| b.bytes).sum::<u64>();
-    if let Some(pb) = &ctx.progress {
-        pb.set_style(byte_progress_style());
-        pb.set_length(total_bytes);
-        pb.set_position(0);
-        pb.set_message("fetching pack artifacts");
-    } else if std::io::IsTerminal::is_terminal(&std::io::stderr()) {
-        let pb = ProgressBar::new(total_bytes);
-        pb.set_style(byte_progress_style());
-        pb.set_message("fetching pack artifacts");
-        pb.enable_steady_tick(std::time::Duration::from_millis(80));
-        ctx.progress = Some(pb);
-    }
+    emit(&ctx, FastCloneEvent::DownloadPlan { bytes: total_bytes });
 
     let mut stats = FastCloneStats {
         packs: manifest.packs.len(),
@@ -262,10 +240,12 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         }
     }
 
-    if let Some(pb) = ctx.progress.take() {
-        pb.finish_and_clear();
-    }
-    eprintln!("installing objects into {}", opts.dest.display());
+    emit(
+        &ctx,
+        FastCloneEvent::InstallingObjects {
+            dest: opts.dest.clone(),
+        },
+    );
 
     run_git_outside(&mut stats, &["init", "-q", opts.dest.to_str().unwrap()])?;
     let git_dir = opts.dest.join(".git");
@@ -380,9 +360,12 @@ where
         match file_size(path)? {
             Some(size) if size == expected_bytes => match validate(path) {
                 Ok(()) => {
-                    if let Some(pb) = &ctx.progress {
-                        pb.inc(expected_bytes);
-                    }
+                    emit(
+                        ctx,
+                        FastCloneEvent::DownloadedBytes {
+                            bytes: expected_bytes,
+                        },
+                    );
                     return Ok(false);
                 }
                 Err(_) => {
@@ -413,9 +396,12 @@ where
                     let _ = fs::remove_file(path);
                     fs::rename(&tmp, path)
                         .with_context(|| format!("commit cache artifact {}", path.display()))?;
-                    if let Some(pb) = &ctx.progress {
-                        pb.inc(expected_bytes);
-                    }
+                    emit(
+                        ctx,
+                        FastCloneEvent::DownloadedBytes {
+                            bytes: expected_bytes,
+                        },
+                    );
                     return Ok(true);
                 }
                 Err(_) => {
@@ -463,9 +449,12 @@ where
     let mut written = resume_from;
     while let Some(chunk) = resp.chunk().await? {
         written += chunk.len() as u64;
-        if let Some(pb) = &ctx.progress {
-            pb.inc(chunk.len() as u64);
-        }
+        emit(
+            ctx,
+            FastCloneEvent::DownloadedBytes {
+                bytes: chunk.len() as u64,
+            },
+        );
         out.write_all(&chunk).await?;
     }
     out.flush().await?;
@@ -502,9 +491,12 @@ async fn ensure_loose_blob_cached(
     if path.exists() {
         match validate_loose_blob_cache(path, oid, expected_bytes) {
             Ok(()) => {
-                if let Some(pb) = &ctx.progress {
-                    pb.inc(expected_bytes);
-                }
+                emit(
+                    ctx,
+                    FastCloneEvent::DownloadedBytes {
+                        bytes: expected_bytes,
+                    },
+                );
                 return Ok(false);
             }
             Err(_) => {
@@ -538,9 +530,12 @@ async fn ensure_loose_blob_cached(
     let mut written = 0u64;
     while let Some(chunk) = resp.chunk().await? {
         written += chunk.len() as u64;
-        if let Some(pb) = &ctx.progress {
-            pb.inc(chunk.len() as u64);
-        }
+        emit(
+            ctx,
+            FastCloneEvent::DownloadedBytes {
+                bytes: chunk.len() as u64,
+            },
+        );
         hasher.update(&chunk);
         enc.write_all(&chunk)?;
     }
@@ -1083,9 +1078,6 @@ fn default_cache_dir() -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Moved out of this feature-gated module (the CLI argument definition needs it in every
-    // build), but its behavior belongs with the fast-clone tests.
-    use crate::commands::git::parse_cache_max_bytes;
 
     #[test]
     fn default_dest_uses_repo_segment_from_project_scoped_url() {
@@ -1097,16 +1089,6 @@ mod tests {
             default_dest_from_url("https://git.example.com/demo/myrepo.git"),
             PathBuf::from("myrepo")
         );
-    }
-
-    #[test]
-    fn parse_cache_max_bytes_accepts_suffixes() {
-        assert_eq!(parse_cache_max_bytes("512").unwrap(), 512);
-        assert_eq!(
-            parse_cache_max_bytes("2GiB").unwrap(),
-            2 * 1024 * 1024 * 1024
-        );
-        assert_eq!(parse_cache_max_bytes("10 mb").unwrap(), 10 * 1024 * 1024);
     }
 
     #[test]

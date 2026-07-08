@@ -18,7 +18,7 @@ mount = ["dep:gsvc-mount", "dep:libc", "dep:fuser"]
 # placeholder + ephemeral-vendor arrangement as `mount` (see crates/VENDORED_FROM): off by
 # default so this public crate builds with no access to the artifact_storage repo. Official
 # binaries enable it via `just build-cli-full` locally or the vendor-private-crates CI action.
-git-clone = ["dep:gsvc-codec"]
+git-clone = ["tensorlake/git-clone"]
 
 [[bin]]
 name = "tl"
@@ -66,12 +66,12 @@ hex = { workspace = true }
 rand = { workspace = true }
 shlex = { workspace = true }
 rustpython-parser = "0.3"
-gsvc-codec = { workspace = true, optional = true }
 gsvc-mount = { workspace = true, optional = true }
 libc = { version = "0.2", optional = true }
 tracing = { workspace = true }
 flate2 = { workspace = true }
 sha1 = { workspace = true }
+ignore = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"

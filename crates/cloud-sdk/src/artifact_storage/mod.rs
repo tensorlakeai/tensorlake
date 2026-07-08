@@ -6,6 +6,8 @@ use crate::{
     error::SdkError,
 };
 
+#[cfg(feature = "git-clone")]
+pub mod fastclone;
 pub mod ingest;
 pub mod merge;
 pub mod models;
@@ -13,7 +15,7 @@ pub mod workspaces;
 
 use models::{
     CreateRepoRequest, GitCredential, ListBranchesResponse, ListOperationsResponse,
-    ListRefsResponse, ListReposResponse, MintGitTokenRequest,
+    ListRefsResponse, ListReposResponse, MintGitTokenRequest, RepoInfo,
 };
 
 #[derive(Clone)]
@@ -69,13 +71,55 @@ impl ArtifactStorageClient {
         self.api_client.execute_json(req).await
     }
 
+    pub fn git_credential_from_env() -> Option<GitCredential> {
+        std::env::var("TENSORLAKE_GIT_TOKEN")
+            .ok()
+            .map(|token| GitCredential {
+                token,
+                token_type: "bearer".to_string(),
+                expires_at: String::new(),
+                git_username: std::env::var("TENSORLAKE_GIT_USERNAME")
+                    .unwrap_or_else(|_| "t".to_string()),
+                repo_pattern: "*".to_string(),
+                scopes: Vec::new(),
+            })
+    }
+
+    /// Resolve the Git credential used by repository helpers.
+    ///
+    /// `TENSORLAKE_GIT_TOKEN` is honored first for local artifact-storage development; otherwise
+    /// the SDK mints a short-lived token scoped to `repo`.
+    pub async fn git_credential_for_repo(
+        &self,
+        project_id: &str,
+        repo: &str,
+    ) -> Result<GitCredential, SdkError> {
+        if let Some(credential) = Self::git_credential_from_env() {
+            return Ok(credential);
+        }
+        Ok(self
+            .mint_token_for_repo(project_id, Some(repo))
+            .await?
+            .into_inner())
+    }
+
+    pub async fn git_credential_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<GitCredential, SdkError> {
+        if let Some(credential) = Self::git_credential_from_env() {
+            return Ok(credential);
+        }
+        Ok(self.mint_token(project_id).await?.into_inner())
+    }
+
     pub async fn create_repo(
         &self,
         project_id: &str,
         repo: &str,
         default_branch: Option<&str>,
     ) -> Result<Traced<()>, SdkError> {
-        let credential = self.mint_token(project_id).await?;
+        let credential = self.git_credential_for_project(project_id).await?;
         self.create_repo_with_credential(
             project_id,
             repo,
@@ -115,7 +159,7 @@ impl ArtifactStorageClient {
         repo: &str,
         base_repo: &str,
     ) -> Result<Traced<()>, SdkError> {
-        let credential = self.mint_token(project_id).await?;
+        let credential = self.git_credential_for_project(project_id).await?;
         self.fork_repo_with_credential(
             project_id,
             repo,
@@ -148,7 +192,7 @@ impl ArtifactStorageClient {
     }
 
     pub async fn delete_repo(&self, project_id: &str, repo: &str) -> Result<Traced<()>, SdkError> {
-        let credential = self.mint_token(project_id).await?;
+        let credential = self.git_credential_for_repo(project_id, repo).await?;
         self.delete_repo_with_credential(
             project_id,
             repo,
@@ -191,7 +235,7 @@ impl ArtifactStorageClient {
         repo: &str,
         status: &str,
     ) -> Result<Traced<()>, SdkError> {
-        let credential = self.mint_token(project_id).await?;
+        let credential = self.git_credential_for_repo(project_id, repo).await?;
         self.set_repo_status_with_credential(
             project_id,
             repo,
@@ -227,7 +271,7 @@ impl ArtifactStorageClient {
         &self,
         project_id: &str,
     ) -> Result<Traced<ListReposResponse>, SdkError> {
-        let credential = self.mint_token(project_id).await?;
+        let credential = self.git_credential_for_project(project_id).await?;
         self.list_repos_with_credential(project_id, &credential.git_username, &credential.token)
             .await
     }
@@ -253,7 +297,7 @@ impl ArtifactStorageClient {
         project_id: &str,
         repo: &str,
     ) -> Result<Traced<ListRefsResponse>, SdkError> {
-        let credential = self.mint_token_for_repo(project_id, Some(repo)).await?;
+        let credential = self.git_credential_for_repo(project_id, repo).await?;
         self.list_refs_with_credential(
             project_id,
             repo,
@@ -282,12 +326,48 @@ impl ArtifactStorageClient {
         decode_json(response, trace_id).await
     }
 
+    pub async fn repo_info(
+        &self,
+        project_id: &str,
+        repo: &str,
+    ) -> Result<Traced<RepoInfo>, SdkError> {
+        let credential = self.git_credential_for_repo(project_id, repo).await?;
+        let branches = self
+            .list_branches_with_credential(
+                project_id,
+                repo,
+                &credential.git_username,
+                &credential.token,
+            )
+            .await?;
+        let refs = self
+            .list_refs_with_credential(
+                project_id,
+                repo,
+                &credential.git_username,
+                &credential.token,
+            )
+            .await?;
+        let trace_id = refs.trace_id.clone();
+        let branches = branches.into_inner();
+        let refs = refs.into_inner();
+        Ok(Traced::new(
+            trace_id,
+            RepoInfo {
+                repo: repo.to_string(),
+                url: self.git_repo_url(project_id, repo),
+                branches: branches.branches,
+                refs: refs.refs,
+            },
+        ))
+    }
+
     pub async fn list_branches(
         &self,
         project_id: &str,
         repo: &str,
     ) -> Result<Traced<ListBranchesResponse>, SdkError> {
-        let credential = self.mint_token_for_repo(project_id, Some(repo)).await?;
+        let credential = self.git_credential_for_repo(project_id, repo).await?;
         self.list_branches_with_credential(
             project_id,
             repo,
@@ -322,7 +402,7 @@ impl ArtifactStorageClient {
         repo: &str,
         branch: &str,
     ) -> Result<Traced<()>, SdkError> {
-        let credential = self.mint_token_for_repo(project_id, Some(repo)).await?;
+        let credential = self.git_credential_for_repo(project_id, repo).await?;
         self.delete_branch_with_credential(
             project_id,
             repo,
@@ -371,6 +451,21 @@ impl ArtifactStorageClient {
         )?;
         let response = request.send().await?;
         decode_json(response, trace_id).await
+    }
+
+    pub async fn list_operations(
+        &self,
+        project_id: &str,
+        repo: &str,
+    ) -> Result<Traced<ListOperationsResponse>, SdkError> {
+        let credential = self.git_credential_for_repo(project_id, repo).await?;
+        self.list_operations_with_credential(
+            project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+        )
+        .await
     }
 
     fn git_request(
