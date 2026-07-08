@@ -17,7 +17,7 @@ codec into `crates/` so a CI job can build the CLI with `--features mount,git-cl
 
 The calling job must run `actions/checkout` for this repo first, then call this action before the
 build step, and add `--features git-clone` (plus `mount` on mount-capable targets; or
-`TENSORLAKE_CLI_FEATURES=git-clone` / `mount,git-clone` for the npm build) to that build.
+`mount,git-clone` for official standalone CLI builds) to that build.
 
 ## One-time setup
 
@@ -40,8 +40,7 @@ default (no-mount) lanes still run for them, so external contributors' PRs build
 
 ## Consumers
 
-- `.github/workflows/tests.yaml` — `rust_mount_feature` (build + test with mount).
+- `.github/workflows/tests.yaml` — full-feature Rust workspace tests.
 - `.github/workflows/publish_cli.yaml` — release `tensorlake` binaries (Linux + macOS).
-- `.github/workflows/publish_npm.yaml` — `build-cli-binaries` `tl` binaries (Linux + macOS).
 
 Local equivalent (no App needed, uses a sibling artifact_storage checkout): `just build-cli-mount`.

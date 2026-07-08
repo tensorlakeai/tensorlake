@@ -37,8 +37,8 @@ jobs:
           virtualenvs-create: true
           virtualenvs-in-project: true
 
-      - name: Build tensorlake
-        run: make build
+      - name: Install Python dependencies
+        run: poetry install --with=dev
 
       - name: Set up Docker
         uses: docker/setup-docker-action@v4

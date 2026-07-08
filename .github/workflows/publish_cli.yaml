@@ -23,34 +23,50 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          # `mount: true` ships the `tl fs mount` stack (the private gsvc-mount core, vendored in
-          # at build time). Unix only — the mount stack uses unix-only APIs, so Windows omits it.
+          # Customer Unix binaries ship the full CLI feature set (`tl fs mount` + fast clone).
+          # Linux binaries are musl-linked so they do not depend on a host glibc floor.
           - os: ubuntu-latest
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
+            rust_target_base: x86_64-unknown-linux-musl
             target_id: linux-x86_64
             archive: tar.gz
-            mount: true
+            libc: musl
+            build_tool: cargo-zigbuild
+            features: mount,git-clone
           - os: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
+            rust_target_base: aarch64-unknown-linux-musl
             target_id: linux-aarch64
             archive: tar.gz
-            mount: true
+            libc: musl
+            build_tool: cargo-zigbuild
+            features: mount,git-clone
           - os: macos-14
             target: aarch64-apple-darwin
+            rust_target_base: aarch64-apple-darwin
             target_id: darwin-aarch64
             archive: tar.gz
-            mount: true
+            build_tool: cargo
+            features: mount,git-clone
+          # Windows has no `tl fs mount` backend today; it still ships fast clone.
           - os: windows-latest
             target: x86_64-pc-windows-msvc
+            rust_target_base: x86_64-pc-windows-msvc
             target_id: windows-x86_64
             archive: zip
+            build_tool: cargo
+            features: git-clone
     steps:
       - uses: actions/checkout@v4
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
         with:
-          targets: ${{ matrix.target }}
+          targets: ${{ matrix.rust_target_base }}
+
+      - name: Setup Zig
+        if: matrix.build_tool == 'cargo-zigbuild'
+        uses: mlugg/setup-zig@v2
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -59,8 +75,12 @@ jobs:
           key: ${{ matrix.target }}
           cache-bin: false
 
-      # Always: `tl git clone` (git-clone feature) ships on every target; mount is
-      # platform-gated by the matrix.
+      - name: Install cargo-zigbuild
+        if: matrix.build_tool == 'cargo-zigbuild'
+        run: cargo install cargo-zigbuild --locked
+
+      # Customer builds must compile the private mount/clone cores before enabling the release
+      # feature set. Windows does not compile `mount`, but the source swap is harmless there.
       - name: Vendor private artifact_storage crates
         uses: ./.github/actions/vendor-private-crates
         with:
@@ -87,22 +107,64 @@ jobs:
             echo "No TLFS app artifact; `tl fs setup` will download the release asset instead"
           fi
 
-      - name: Build CLI
-        run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }} ${{ matrix.mount && '--features mount,git-clone' || '--features git-clone' }}
+      - name: Build CLI with cargo-zigbuild
+        if: matrix.build_tool == 'cargo-zigbuild'
+        run: cargo zigbuild --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }} --features ${{ matrix.features }}
+
+      - name: Build CLI with cargo
+        if: matrix.build_tool == 'cargo'
+        run: cargo build --release -p tensorlake-cli --bin tensorlake --target ${{ matrix.target }} --features ${{ matrix.features }}
+
+      - name: Locate CLI binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          ext=""
+          if [ "${{ matrix.archive }}" = "zip" ]; then
+            ext=".exe"
+          fi
+          candidates=(
+            "target/${{ matrix.rust_target_base }}/release/tensorlake${ext}"
+            "target/${{ matrix.target }}/release/tensorlake${ext}"
+          )
+          for candidate in "${candidates[@]}"; do
+            if [ -f "$candidate" ]; then
+              echo "CLI_BINARY=$candidate" >> "$GITHUB_ENV"
+              echo "Using $candidate"
+              exit 0
+            fi
+          done
+          printf 'Expected compiled binary in one of:\n' >&2
+          printf '  %s\n' "${candidates[@]}" >&2
+          exit 1
+
+      - name: Verify Linux CLI libc compatibility
+        if: startsWith(matrix.target_id, 'linux-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          binary="$CLI_BINARY"
+          required_versions="$(readelf --version-info "$binary" | grep -oE 'GLIBC_[0-9]+\.[0-9]+' | sort -Vu || true)"
+          if [ -n "$required_versions" ]; then
+            echo "Musl CLI unexpectedly references glibc symbols."
+            printf '%s\n' "$required_versions"
+            exit 1
+          fi
+          echo "No glibc symbols referenced."
 
       - name: Package (tar.gz)
         if: matrix.archive == 'tar.gz'
         shell: bash
         run: |
           mkdir -p dist
-          tar -C target/${{ matrix.target }}/release -czf dist/tensorlake-cli-${{ matrix.target_id }}.tar.gz tensorlake
+          tar -C "$(dirname "$CLI_BINARY")" -czf dist/tensorlake-cli-${{ matrix.target_id }}.tar.gz "$(basename "$CLI_BINARY")"
 
       - name: Package (zip)
         if: matrix.archive == 'zip'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path dist | Out-Null
-          Compress-Archive -Path target/${{ matrix.target }}/release/tensorlake.exe -DestinationPath dist/tensorlake-cli-${{ matrix.target_id }}.zip
+          Compress-Archive -Path $env:CLI_BINARY -DestinationPath dist/tensorlake-cli-${{ matrix.target_id }}.zip
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4

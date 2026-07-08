@@ -99,9 +99,9 @@ check-python-fmt:
     poetry run black --check src/tensorlake --extend-exclude vendor
     poetry run isort --check src/tensorlake --profile black --extend-skip vendor
 
-# ─── Maturin (Python + Rust packaging) ───────────────────────────────────────
+# ─── Maturin (Python SDK + Rust Cloud SDK packaging) ─────────────────────────
 
-# Development install (builds Rust binary + installs Python package)
+# Development install (builds Rust Cloud SDK extension + installs Python package)
 develop:
     maturin develop
 
