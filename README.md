@@ -35,6 +35,14 @@ Tensorlake Sandboxes are stateful Firecracker MicroVMs built for instant, statef
 
 ### Installation
 
+Install the `tensorlake` / `tl` CLI with the install script:
+
+```bash
+curl -fsSL https://tensorlake.ai/install | sh
+```
+
+Install the Python SDK with pip:
+
 ```bash
 pip install tensorlake
 ```
@@ -251,7 +259,7 @@ Spin up a sandbox as an isolated execution environment for an agent's tools or g
 Tensorlake provides a Python SDK, a TypeScript SDK, and a CLI (`tensorlake` / `tl`), plus an HTTP API for invoking orchestration applications.
 
 **How do I get started?**
-Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), run `pip install tensorlake`, set your `TENSORLAKE_API_KEY`, and create your first sandbox. See the [documentation](https://docs.tensorlake.ai) for full guides.
+Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), install the CLI with `curl -fsSL https://tensorlake.ai/install | sh`, set your `TENSORLAKE_API_KEY`, and create your first sandbox. See the [documentation](https://docs.tensorlake.ai) for full guides.
 
 ## Learn More
 
