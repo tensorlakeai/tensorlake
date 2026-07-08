@@ -21,7 +21,8 @@ use tensorlake::artifact_storage::ArtifactStorageClient;
 use tensorlake::artifact_storage::ingest::{PushEvent, PushFile, PushOptions, PushSource};
 use tensorlake::artifact_storage::models::GitCredential;
 use tensorlake::artifact_storage::workspaces::{
-    CreateWorkspaceRequest, PromoteWorkspaceRequest, TreeEntry, WorkspaceInfo,
+    CreateWorkspaceRequest, PromoteOutcome, PromoteWorkspaceRequest, SyncWorkspaceRequest,
+    TreeEntry, WorkspaceInfo,
 };
 
 use crate::auth::context::CliContext;
@@ -930,6 +931,7 @@ pub async fn mount(
                     &CreateWorkspaceRequest {
                         base: base.clone(),
                         shared_target: shared_rw.then(|| base.clone().expect("guarded above")),
+                        ..Default::default()
                     },
                 )
                 .await?
@@ -1350,6 +1352,7 @@ pub async fn promote(
     path: &Path,
     branch: &str,
     full_history: bool,
+    merge: bool,
     message: Option<&str>,
 ) -> Result<()> {
     let (mountpoint, state_dir) = state_dir_for(path)?;
@@ -1375,7 +1378,9 @@ pub async fn promote(
         branch: branch.to_string(),
         expect_oid: None,
         full_history,
+        mode: merge.then(|| "merge".to_string()),
         message: message.map(str::to_string),
+        ..Default::default()
     };
     // A squash promote reads the snapshot's commit-index row, which materializes asynchronously
     // after the snapshot publishes; a promote issued right behind a snapshot can land in that
@@ -1395,7 +1400,25 @@ pub async fn promote(
                 )
                 .await
             {
-                Ok(resp) => break resp.into_inner(),
+                Ok(resp) => match resp.into_inner() {
+                    PromoteOutcome::Promoted(resp) => break resp,
+                    PromoteOutcome::Conflicted(report) => {
+                        eprintln!(
+                            "{} promote to {branch} conflicts on {} path(s); nothing was published:",
+                            style("error:").red(),
+                            report.conflicts.len(),
+                        );
+                        for c in &report.conflicts {
+                            eprintln!("  {:<14} {}", style(&c.kind).yellow(), c.path);
+                        }
+                        return Err(CliError::usage(format!(
+                            "pull {branch} into the workspace, resolve, and promote again:\n  tl fs sync {}\n  # fix the conflict markers, then\n  tl fs snapshot {} && tl fs promote {} {branch} --merge",
+                            path.display(),
+                            path.display(),
+                            path.display(),
+                        )));
+                    }
+                },
                 Err(tensorlake::error::SdkError::ServerError { status, message })
                     if status.as_u16() == 425 && std::time::Instant::now() < deadline =>
                 {
@@ -1411,12 +1434,140 @@ pub async fn promote(
         short_id(&state.workspace_id),
         resp.ref_name,
         resp.commit,
-        if resp.squashed {
+        if resp.fast_forwarded {
+            " (fast-forward)"
+        } else if resp.merged {
+            " (merge)"
+        } else if resp.squashed {
             " (squashed)"
         } else {
             " (full history)"
         },
     );
+    Ok(())
+}
+
+/// Sync: pull the target branch into a behind workspace — one server-side rebase-style merge
+/// commit on the target head; the mount's lower layer then advances to it. Under the default
+/// materialize policy conflicts land as diff3 markers in the workspace files; resolve them and
+/// snapshot. Local overlay changes would shadow synced content (markers included), so a dirty
+/// mount must snapshot first.
+pub async fn sync(
+    ctx: &CliContext,
+    path: &Path,
+    target: Option<&str>,
+    fail_on_conflict: bool,
+    message: Option<&str>,
+) -> Result<()> {
+    let (mountpoint, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    if state.read_only() {
+        return Err(CliError::usage(format!(
+            "this is a read-only mount following {}; it syncs automatically",
+            state.follow_ref.as_deref().unwrap_or("the branch"),
+        )));
+    }
+    let session = FsSession::open(ctx, Some(&state.repo)).await?;
+    heartbeat(&session, &state).await?;
+    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
+    if !upserts.is_empty() || !deletes.is_empty() {
+        return Err(CliError::usage(format!(
+            "{} local change(s) not in any snapshot would shadow synced content. Run `tl fs snapshot {}` first.",
+            upserts.len() + deletes.len(),
+            path.display(),
+        )));
+    }
+    let (user, token) = session.creds();
+    let request = SyncWorkspaceRequest {
+        target: target.map(str::to_string),
+        policy: fail_on_conflict.then(|| "fail".to_string()),
+        message: message.map(str::to_string),
+        ..Default::default()
+    };
+    // Same 425 contract as promote: a sync issued right behind a snapshot can catch the
+    // commit index still materializing.
+    let resp = {
+        let deadline = std::time::Instant::now() + TOO_EARLY_DEADLINE;
+        loop {
+            match session
+                .client
+                .workspace_sync(
+                    &session.project_id,
+                    &state.repo,
+                    user,
+                    token,
+                    &state.workspace_id,
+                    &request,
+                )
+                .await
+            {
+                Ok(resp) => break resp.into_inner(),
+                Err(tensorlake::error::SdkError::ServerError { status, .. })
+                    if status.as_u16() == 425 && std::time::Instant::now() < deadline =>
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+                }
+                Err(e) => return Err(e.into()),
+            }
+        }
+    };
+    if resp.up_to_date {
+        println!(
+            "Already up to date with {}.",
+            &resp.target_head[..resp.target_head.len().min(12)]
+        );
+        return Ok(());
+    }
+    if !resp.clean && fail_on_conflict {
+        eprintln!(
+            "{} sync conflicts on {} path(s); the workspace is unchanged:",
+            style("error:").red(),
+            resp.conflicts.len(),
+        );
+        for c in &resp.conflicts {
+            eprintln!("  {:<14} {}", style(&c.kind).yellow(), c.path);
+        }
+        return Err(CliError::usage(
+            "rerun without --fail-on-conflict to materialize the conflicts as diff3 markers",
+        ));
+    }
+    // The workspace ref moved server-side; swap the mount's lower layer now instead of
+    // waiting out the follow poll, then make sure the kernel drops stale views of the
+    // conflicted paths (their content changed to marker text behind its back).
+    daemon::control(&state_dir, "refresh").await?;
+    if !resp.conflicts.is_empty() {
+        let mut changed = std::collections::BTreeSet::new();
+        let mut expect = std::collections::BTreeMap::new();
+        for c in &resp.conflicts {
+            changed.insert(c.path.clone());
+            expect.insert(c.path.clone(), PathExpect::Present);
+        }
+        converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
+    }
+    println!(
+        "Synced with {} ({} path(s) pulled){}.",
+        &resp.target_head[..resp.target_head.len().min(12)],
+        resp.changed_paths,
+        if resp.fast_forwarded {
+            "; workspace fast-forwarded"
+        } else {
+            ""
+        },
+    );
+    if !resp.conflicts.is_empty() {
+        println!(
+            "{} {} conflict(s) materialized as diff3 markers:",
+            style("note:").yellow(),
+            resp.conflicts.len(),
+        );
+        for c in &resp.conflicts {
+            println!("  {:<14} {}", style(&c.kind).yellow(), c.path);
+        }
+        println!(
+            "Resolve the markers, then `tl fs snapshot {}`.",
+            path.display()
+        );
+    }
     Ok(())
 }
 

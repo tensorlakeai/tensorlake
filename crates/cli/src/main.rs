@@ -299,7 +299,30 @@ enum FsCommands {
         #[arg(long)]
         full_history: bool,
 
+        /// Merge onto a moved target (two-parent merge commit); conflicts are reported
+        /// and nothing is published
+        #[arg(long, conflicts_with = "full_history")]
+        merge: bool,
+
         /// Commit message for the squashed promote
+        #[arg(short, long)]
+        message: Option<String>,
+    },
+
+    /// Pull the target branch into the workspace (server-side rebase-style merge)
+    Sync {
+        /// A mounted directory
+        path: PathBuf,
+
+        /// Branch to pull from (default: the branch the workspace was created from)
+        #[arg(long)]
+        target: Option<String>,
+
+        /// Fail on conflicts instead of materializing diff3 markers into the workspace
+        #[arg(long)]
+        fail_on_conflict: bool,
+
+        /// Commit message for the sync merge commit
         #[arg(short, long)]
         message: Option<String>,
     },
@@ -429,6 +452,43 @@ enum GitCommands {
         /// Force-with-lease: require the branch to currently equal this commit oid
         #[arg(long)]
         expect_oid: Option<String>,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Server-side three-way merge of one branch (or commit) into another
+    Merge {
+        /// Repo name
+        repo: String,
+        /// Target branch the merge lands on (ours)
+        ours: String,
+        /// Branch or commit to merge in (theirs)
+        theirs: String,
+        /// Report what the merge would do without publishing anything
+        #[arg(long)]
+        preflight: bool,
+        /// Preflight: run the text merges for exact conflict answers instead of potential ones
+        #[arg(long)]
+        deep: bool,
+        /// Land conflicts as diff3 markers plus a structured conflict record instead of failing
+        #[arg(long, conflicts_with = "preflight")]
+        materialize: bool,
+        /// Merge commit message
+        #[arg(short, long)]
+        message: Option<String>,
+        /// Merge base override (commit hex)
+        #[arg(long)]
+        base: Option<String>,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show the structured conflict record of a materialized merge commit
+    Conflicts {
+        /// Repo name
+        repo: String,
+        /// Merge commit oid (hex)
+        commit: String,
         /// Output JSON
         #[arg(long)]
         json: bool,
@@ -2166,6 +2226,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
     match &subcmd {
         FsCommands::Snapshot { path, .. }
         | FsCommands::Promote { path, .. }
+        | FsCommands::Sync { path, .. }
         | FsCommands::Status { path, .. }
         | FsCommands::Restore { path, .. }
         | FsCommands::Diff { path, .. }
@@ -2201,8 +2262,27 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             path,
             branch,
             full_history,
+            merge,
             message,
-        } => commands::fs::promote(ctx, &path, &branch, full_history, message.as_deref()).await,
+        } => {
+            commands::fs::promote(ctx, &path, &branch, full_history, merge, message.as_deref())
+                .await
+        }
+        FsCommands::Sync {
+            path,
+            target,
+            fail_on_conflict,
+            message,
+        } => {
+            commands::fs::sync(
+                ctx,
+                &path,
+                target.as_deref(),
+                fail_on_conflict,
+                message.as_deref(),
+            )
+            .await
+        }
         FsCommands::Status { path, json } => commands::fs::status(ctx, &path, json).await,
         FsCommands::Restore { path, version } => commands::fs::restore(ctx, &path, &version).await,
         FsCommands::Diff { path, a, b } => {
@@ -2278,6 +2358,34 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
             expect_oid,
             json,
         } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, json).await,
+        GitCommands::Merge {
+            repo,
+            ours,
+            theirs,
+            preflight,
+            deep,
+            materialize,
+            message,
+            base,
+            json,
+        } => {
+            commands::git::merge(
+                ctx,
+                &repo,
+                &ours,
+                &theirs,
+                preflight,
+                deep,
+                materialize,
+                message.as_deref(),
+                base.as_deref(),
+                json,
+            )
+            .await
+        }
+        GitCommands::Conflicts { repo, commit, json } => {
+            commands::git::commit_conflicts(ctx, &repo, &commit, json).await
+        }
         GitCommands::CommitStatus { repo, job_id } => {
             commands::git::commit_status(ctx, &repo, &job_id).await
         }
