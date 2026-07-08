@@ -41,9 +41,12 @@ pip install tensorlake
 
 ### CLI Installation
 
-The `tl` / `tensorlake` CLI is distributed as a standalone binary from the
-[GitHub releases page](https://github.com/tensorlakeai/tensorlake/releases), not
-through PyPI or npm.
+The `tl` CLI is distributed as a standalone binary, not through PyPI or npm.
+Install it with the install script:
+
+```bash
+curl -fsSL https://tensorlake.ai/install | sh
+```
 
 ### Setup
 
@@ -254,10 +257,10 @@ Sandboxes are created in under a second via Lattice, a dynamic cluster scheduler
 Spin up a sandbox as an isolated execution environment for an agent's tools or generated code, run commands or processes inside it, read and write files, and terminate it when done — all from the Python or TypeScript SDK, or the CLI.
 
 **What languages and interfaces are supported?**
-Tensorlake provides a Python SDK, a TypeScript SDK, a standalone CLI (`tensorlake` / `tl`), plus an HTTP API for invoking orchestration applications.
+Tensorlake provides a Python SDK, a TypeScript SDK, and a standalone CLI (`tl`), plus an HTTP API for invoking orchestration applications.
 
 **How do I get started?**
-Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), run `pip install tensorlake` for the Python SDK, install the standalone CLI if you want command-line access, set your `TENSORLAKE_API_KEY`, and create your first sandbox. See the [documentation](https://docs.tensorlake.ai) for full guides.
+Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), run `pip install tensorlake` for the Python SDK, install the CLI with `curl -fsSL https://tensorlake.ai/install | sh`, set your `TENSORLAKE_API_KEY`, and create your first sandbox. See the [documentation](https://docs.tensorlake.ai) for full guides.
 
 ## Learn More
 
