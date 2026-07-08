@@ -14,6 +14,7 @@ use crate::Traced;
 use crate::error::SdkError;
 
 use super::ingest::expect_json;
+use super::merge::{MergeConflict, MergeReport, MergeStats, Signature, expect_json_or_conflict};
 use super::{ArtifactStorageClient, decode_empty};
 
 /// One workspace joined across its identity record, ref, and lease rows.
@@ -48,6 +49,10 @@ pub struct CreateWorkspaceRequest {
     /// Shared-rw mode: reconcile every snapshot into this branch (short name) in server order.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub shared_target: Option<String>,
+    /// Shared-rw conflict handling: `"materialize"` (default — three-way merge, diff3 markers
+    /// on conflicts) or `"lww"` (legacy last-writer-wins overwrite).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reconcile_policy: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -67,16 +72,87 @@ pub struct PromoteWorkspaceRequest {
     /// Land the full checkpoint chain instead of the default squash.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub full_history: bool,
+    /// `"squash"` (default) | `"full_history"` | `"merge"`. Takes precedence over the legacy
+    /// `full_history` flag. `merge` lands a two-parent merge commit when the target moved
+    /// since the workspace forked; conflicts come back as `PromoteOutcome::Conflicted`
+    /// (`fail` policy — the workspace is the resolution surface).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<Signature>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct PromoteWorkspaceResponse {
     pub commit: String,
     pub ref_name: String,
     pub created: bool,
     pub squashed: bool,
+    /// Merge-mode promote landed a merge (or found nothing to do).
+    #[serde(default)]
+    pub merged: bool,
+    /// Merge mode advanced the ref to the workspace tip with no new commit object.
+    #[serde(default)]
+    pub fast_forwarded: bool,
+}
+
+/// A merge-mode promote either lands or reports why it can't — conflicts are a normal outcome,
+/// not a transport error (the server's `409` report body).
+#[derive(Clone, Debug)]
+pub enum PromoteOutcome {
+    Promoted(PromoteWorkspaceResponse),
+    /// `fail`-policy conflicts: nothing was published; the target branch and the workspace are
+    /// both untouched. Sync the workspace, resolve, and promote again.
+    Conflicted(MergeReport),
+}
+
+/// Ref-level promote preflight: did the target move since the workspace forked?
+/// (Tree-level conflict prediction is `repo_merge` in preflight mode.)
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct PromotePreflight {
+    pub target_ref: String,
+    /// Absent when the target branch does not exist yet.
+    pub target_head: Option<String>,
+    pub workspace_base: String,
+    pub workspace_head: String,
+    pub moved: bool,
+    pub fast_forward: bool,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct SyncWorkspaceRequest {
+    /// Branch to pull from (short name). Defaults to the workspace's shared-rw target, else
+    /// the ref it was created from.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<String>,
+    /// `"materialize"` (default — conflicts land as diff3 markers in the workspace, with the
+    /// commit's structured conflict record) or `"fail"` (a conflicted sync changes nothing and
+    /// returns the report).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<Signature>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct SyncWorkspaceResponse {
+    /// The workspace ref after the sync (unchanged when `up_to_date`, or when a
+    /// `fail`-policy sync hit conflicts).
+    pub workspace_head: String,
+    pub target_head: String,
+    /// The workspace's fork point after the sync.
+    pub base: String,
+    pub clean: bool,
+    pub up_to_date: bool,
+    /// The workspace had no snapshots: its ref moved to the target head with no new commit.
+    pub fast_forwarded: bool,
+    pub changed_paths: u64,
+    pub conflicts: Vec<MergeConflict>,
+    pub stats: MergeStats,
 }
 
 /// One ref's head and movement generation — the poll target for branch/workspace following.
@@ -188,7 +264,10 @@ impl ArtifactStorageClient {
         Ok(Traced::new(trace_id, hb))
     }
 
-    /// CAS-advance a real branch to the workspace's snapshot (squash by default).
+    /// CAS-advance a real branch to the workspace's snapshot (squash by default). Merge mode
+    /// (`mode: "merge"`) lands a two-parent merge commit when the target moved; its conflicts
+    /// are returned as `PromoteOutcome::Conflicted`, not an error. A plain `409` (concurrent
+    /// ref move) still surfaces as `SdkError::ServerError`.
     pub async fn workspace_promote(
         &self,
         project_id: &str,
@@ -197,7 +276,7 @@ impl ArtifactStorageClient {
         git_token: &str,
         workspace_id: &str,
         request: &PromoteWorkspaceRequest,
-    ) -> Result<Traced<PromoteWorkspaceResponse>, SdkError> {
+    ) -> Result<Traced<PromoteOutcome>, SdkError> {
         let (req, trace_id) = self.git_request(
             Method::POST,
             project_id,
@@ -206,7 +285,70 @@ impl ArtifactStorageClient {
             git_username,
             git_token,
         )?;
-        let resp = expect_json(req.json(request).send().await?).await?;
+        let outcome = expect_json_or_conflict::<PromoteWorkspaceResponse, MergeReport>(
+            req.json(request).send().await?,
+        )
+        .await?
+        .map(PromoteOutcome::Promoted)
+        .unwrap_or_else(PromoteOutcome::Conflicted);
+        Ok(Traced::new(trace_id, outcome))
+    }
+
+    /// Ref-level promote preflight: whether `target` moved since the workspace forked, and
+    /// whether a promote would fast-forward.
+    pub async fn workspace_promote_preflight(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        target: &str,
+    ) -> Result<Traced<PromotePreflight>, SdkError> {
+        let suffix = format!(
+            "workspaces/{workspace_id}/promote/preflight?target={}",
+            url::form_urlencoded::byte_serialize(target.as_bytes()).collect::<String>()
+        );
+        let (req, trace_id) = self.git_request(
+            Method::GET,
+            project_id,
+            repo,
+            Some(&suffix),
+            git_username,
+            git_token,
+        )?;
+        let preflight = expect_json(req.send().await?).await?;
+        Ok(Traced::new(trace_id, preflight))
+    }
+
+    /// Pull the target branch into a behind workspace, rebase-style: one merge commit on the
+    /// target head, workspace history kept linear, the pre-sync chain preserved under a
+    /// presync ref. Under the default `materialize` policy conflicts land as diff3 markers in
+    /// the workspace; under `fail` a conflicted sync changes nothing and the returned report
+    /// has `clean: false` with `workspace_head` untouched. Snapshot uncommitted mount changes
+    /// before syncing.
+    pub async fn workspace_sync(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        request: &SyncWorkspaceRequest,
+    ) -> Result<Traced<SyncWorkspaceResponse>, SdkError> {
+        let (req, trace_id) = self.git_request(
+            Method::POST,
+            project_id,
+            repo,
+            Some(&format!("workspaces/{workspace_id}/sync")),
+            git_username,
+            git_token,
+        )?;
+        let resp = expect_json_or_conflict::<SyncWorkspaceResponse, SyncWorkspaceResponse>(
+            req.json(request).send().await?,
+        )
+        .await?
+        .unwrap_or_else(|conflicted| conflicted);
         Ok(Traced::new(trace_id, resp))
     }
 
@@ -320,5 +462,40 @@ impl ArtifactStorageClient {
         }
         let bytes = resp.bytes().await?.to_vec();
         Ok(Traced::new(trace_id, bytes))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Promote responses from servers that predate merge mode decode with the new fields
+    /// defaulting to false.
+    #[test]
+    fn promote_response_tolerates_old_servers() {
+        let body = r#"{"commit": "aa", "ref_name": "refs/heads/main", "created": false, "squashed": true}"#;
+        let resp: PromoteWorkspaceResponse = serde_json::from_str(body).unwrap();
+        assert!(resp.squashed);
+        assert!(!resp.merged);
+        assert!(!resp.fast_forwarded);
+    }
+
+    /// The sync response decodes the full server shape, conflicts included.
+    #[test]
+    fn sync_response_decodes_server_shape() {
+        let body = r#"{
+            "workspace_head": "ws1", "target_head": "t1", "base": "t1",
+            "clean": false, "up_to_date": false, "fast_forwarded": false,
+            "changed_paths": 2,
+            "conflicts": [{"path": "f", "kind": "content", "potential": false,
+                           "ours": {"mode": 33188, "oid": "o"}, "base": {"mode": 33188, "oid": "b"},
+                           "theirs": {"mode": 33188, "oid": "t"}}],
+            "stats": {"trees_read": 4, "entries_compared": 9, "blobs_merged": 1, "wall_ms": 0.7}
+        }"#;
+        let resp: SyncWorkspaceResponse = serde_json::from_str(body).unwrap();
+        assert!(!resp.clean);
+        assert_eq!(resp.base, "t1");
+        assert_eq!(resp.conflicts.len(), 1);
+        assert_eq!(resp.conflicts[0].kind, "content");
     }
 }

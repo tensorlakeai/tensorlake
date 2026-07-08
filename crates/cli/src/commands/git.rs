@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use comfy_table::Cell;
 use console::style;
 use tensorlake::artifact_storage::ArtifactStorageClient;
+use tensorlake::artifact_storage::merge::MergeRequest;
 use tensorlake::artifact_storage::models::{
     ListBranchesResponse, ListOperationsResponse, ListRefsResponse, ListReposResponse,
 };
@@ -364,6 +365,166 @@ pub async fn list_operations(
         return Ok(());
     }
     print_operations_table(&response);
+    Ok(())
+}
+
+/// Server-side three-way merge of `theirs` into `ours` (gsvc merge design §9.3). Preflight
+/// never writes; commit mode CAS-advances the `ours` branch. A `fail`-policy conflict prints
+/// the report and exits non-zero — nothing was published.
+#[allow(clippy::too_many_arguments)]
+pub async fn merge(
+    ctx: &CliContext,
+    repo: &str,
+    ours: &str,
+    theirs: &str,
+    preflight: bool,
+    deep: bool,
+    materialize: bool,
+    message: Option<&str>,
+    base: Option<&str>,
+    output_json: bool,
+) -> Result<()> {
+    let project_id = project_id(ctx)?;
+    let client = artifact_storage_client(ctx)?;
+    let cred = client
+        .mint_token_for_repo(&project_id, Some(repo))
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner();
+    let request = MergeRequest {
+        ours: ours.to_string(),
+        theirs: theirs.to_string(),
+        base: base.map(str::to_string),
+        deep,
+        mode: (!preflight).then(|| "commit".to_string()),
+        policy: materialize.then(|| "materialize".to_string()),
+        message: message.map(str::to_string),
+        ..Default::default()
+    };
+    let report = client
+        .repo_merge(&project_id, repo, &cred.git_username, &cred.token, &request)
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner();
+    if output_json {
+        print_json(&report)?;
+        // A fail-policy conflict published nothing; the exit code says so even in JSON mode.
+        if !preflight && report.commit.is_none() && !report.clean {
+            return Err(CliError::usage("merge conflicts; nothing was published"));
+        }
+        return Ok(());
+    }
+    let short = |oid: &str| oid[..oid.len().min(12)].to_string();
+    if let Some(b) = &report.merge_base {
+        print_field("merge base", &short(b));
+    } else {
+        print_field("merge base", "none (unrelated histories)");
+    }
+    print_field("changed paths", &report.changed_paths.to_string());
+    if !report.conflicts.is_empty() {
+        println!(
+            "{} {} conflict(s):",
+            style("conflicts:").dim(),
+            report.conflicts.len()
+        );
+        for c in &report.conflicts {
+            println!(
+                "  {:<14} {}{}",
+                style(&c.kind).yellow(),
+                c.path,
+                if c.potential { " (potential)" } else { "" },
+            );
+        }
+        if report.conflicts.iter().any(|c| c.potential) {
+            println!("  (run with --deep for exact content-merge answers)");
+        }
+    }
+    if preflight {
+        if report.already_merged {
+            println!("{theirs} is already merged into {ours}; a merge would change nothing.");
+        } else if report.clean {
+            println!(
+                "Clean merge{}.",
+                if report.fast_forward {
+                    " (fast-forward)"
+                } else {
+                    ""
+                }
+            );
+        }
+        return Ok(());
+    }
+    match report.commit {
+        Some(commit) => {
+            println!(
+                "Merged {theirs} into {ours} at {}{}",
+                short(&commit),
+                if report.fast_forwarded {
+                    " (fast-forward)"
+                } else if !report.clean {
+                    " (conflicts materialized as diff3 markers)"
+                } else {
+                    ""
+                },
+            );
+            Ok(())
+        }
+        None if report.already_merged => {
+            println!("{theirs} is already merged into {ours}; nothing to do.");
+            Ok(())
+        }
+        None => Err(CliError::usage(format!(
+            "merge conflicts; nothing was published. Rerun with --materialize to land the conflicts as diff3 markers, or resolve on a workspace forked from {ours}.",
+        ))),
+    }
+}
+
+/// The structured conflict record of a materialize-policy merge commit.
+pub async fn commit_conflicts(
+    ctx: &CliContext,
+    repo: &str,
+    commit: &str,
+    output_json: bool,
+) -> Result<()> {
+    let project_id = project_id(ctx)?;
+    let client = artifact_storage_client(ctx)?;
+    let cred = client
+        .mint_token_for_repo(&project_id, Some(repo))
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner();
+    let record = client
+        .commit_conflicts(&project_id, repo, &cred.git_username, &cred.token, commit)
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner();
+    let Some(record) = record else {
+        println!("no conflict record: {commit} merged cleanly (or is unknown here)");
+        return Ok(());
+    };
+    if output_json {
+        return print_json(&record);
+    }
+    let short = |oid: &str| oid[..oid.len().min(12)].to_string();
+    print_field("ours", &short(&record.ours_commit));
+    print_field("theirs", &short(&record.theirs_commit));
+    if let Some(base) = &record.base_commit {
+        print_field("base", &short(base));
+    }
+    println!(
+        "{} {} path(s):",
+        style("conflicts:").dim(),
+        record.paths.len()
+    );
+    for p in &record.paths {
+        println!("  {:<14} {}", style(&p.kind).yellow(), p.path);
+    }
+    if record.truncated_paths > 0 {
+        println!(
+            "  … and {} more (record truncated; the commit's marker content is complete)",
+            record.truncated_paths
+        );
+    }
     Ok(())
 }
 

@@ -7,6 +7,7 @@ use crate::{
 };
 
 pub mod ingest;
+pub mod merge;
 pub mod models;
 pub mod workspaces;
 
