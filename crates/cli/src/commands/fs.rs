@@ -542,21 +542,45 @@ async fn ensure_fskit_ready() -> Result<()> {
     }
 }
 
-/// Mount's pre-flight on Linux: unprivileged FUSE needs /dev/fuse to be openable plus the
+/// Who a new mount belongs to: the human who asked for it. Under `sudo tl fs mount` that is
+/// the invoking user (SUDO_UID/SUDO_GID), not root — the daemon presents every file as theirs
+/// and mounts with allow_other so the volume is actually usable by them.
+fn mount_owner() -> (u32, u32) {
+    #[cfg(unix)]
+    {
+        let sudo_id = |key: &str| std::env::var(key).ok().and_then(|v| v.parse::<u32>().ok());
+        if unsafe { libc::geteuid() } == 0
+            && let (Some(uid), Some(gid)) = (sudo_id("SUDO_UID"), sudo_id("SUDO_GID"))
+        {
+            return (uid, gid);
+        }
+        unsafe { (libc::getuid(), libc::getgid()) }
+    }
+    #[cfg(not(unix))]
+    {
+        (0, 0)
+    }
+}
+
+/// Mount's pre-flight on Linux. Unprivileged FUSE needs /dev/fuse to be openable plus the
 /// setuid fusermount3 helper (fuse3 package) — mount(2) itself needs CAP_SYS_ADMIN regardless
-/// of device permissions. Checking up front turns "mount daemon did not come up" into the
-/// exact missing piece, and heads off the `sudo tl fs mount` reflex: a root mount is visible
-/// ONLY to root (FUSE denies other users without allow_other), with state and credentials
-/// under /root.
+/// of device permissions, and not every environment grants either. `sudo tl fs mount` is the
+/// universal fallback: root mounts directly, and the volume is presented to (and owned by)
+/// the invoking user, not root. Checking up front turns "mount daemon did not come up" into
+/// the exact missing piece.
 #[cfg(target_os = "linux")]
 fn ensure_fuse_ready() -> Result<()> {
     if unsafe { libc::geteuid() } == 0 {
-        eprintln!(
-            "{} mounting as root: the volume will be accessible ONLY to root (FUSE default), \
-             and mount state lands in root's home. Prefer unprivileged mounts — they work \
-             wherever /dev/fuse is mode 666 and the fuse3 package is installed.",
-            style("warning:").yellow()
-        );
+        let (uid, _) = mount_owner();
+        if uid != 0 {
+            eprintln!(
+                "{} mounting via sudo: the volume is presented to uid {uid} ({}). Mount state \
+                 lives in root's home — run the other commands (snapshot, promote, unmount) \
+                 with sudo too.",
+                style("note:").yellow(),
+                std::env::var("SUDO_USER").unwrap_or_else(|_| "the invoking user".to_string()),
+            );
+        }
         return Ok(());
     }
     if let Err(e) = std::fs::OpenOptions::new()
@@ -565,9 +589,10 @@ fn ensure_fuse_ready() -> Result<()> {
         .open("/dev/fuse")
     {
         return Err(CliError::usage(format!(
-            "cannot open /dev/fuse ({e}); unprivileged mounts need it read/write. Fix:\n  \
-             sudo chmod 666 /dev/fuse\n(the fuse3 package's udev rule persists this on most \
-             distros; on minimal images add a tmpfiles.d entry: z /dev/fuse 0666 - - -)"
+            "cannot open /dev/fuse ({e}); unprivileged mounts need it read/write.\nEither run \
+             with sudo (works everywhere; the mount is presented to your user):\n  sudo tl fs \
+             mount ...\nor enable unprivileged FUSE:\n  sudo chmod 666 /dev/fuse\n(the fuse3 \
+             package's udev rule persists this on most distros)"
         )));
     }
     let helper_on_path = |name: &str| {
@@ -577,7 +602,9 @@ fn ensure_fuse_ready() -> Result<()> {
     if !helper_on_path("fusermount3") && !helper_on_path("fusermount") {
         return Err(CliError::usage(
             "fusermount3 not found; unprivileged FUSE mounts go through the setuid helper from \
-             the fuse3 package. Fix:\n  sudo apt-get install fuse3",
+             the fuse3 package.\nEither run with sudo (works everywhere; the mount is presented \
+             to your user):\n  sudo tl fs mount ...\nor enable unprivileged FUSE:\n  sudo \
+             apt-get install fuse3",
         ));
     }
     if !Path::new("/etc/mtab").exists() {
@@ -983,11 +1010,14 @@ pub async fn mount(
 
     let mountpoint = canonical_mountpoint(path)?;
     let state_dir = alloc_state_dir(&ws.id);
+    let (owner_uid, owner_gid) = mount_owner();
     daemon::save_mount_state(
         &state_dir,
         &MountState {
             project_id: session.project_id.clone(),
             organization_id: ctx.effective_organization_id(),
+            owner_uid: Some(owner_uid),
+            owner_gid: Some(owner_gid),
             repo: repo.clone(),
             workspace_id: ws.id.clone(),
             ref_name: ws.ref_name.clone(),
@@ -1116,15 +1146,31 @@ pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> 
     ));
     if let Err(e) = daemon::control(&state_dir, "shutdown").await {
         // A dead daemon is not an obstacle — the mount is already gone; clean up local state.
-        // Anything else (EBUSY, most likely) means the volume is still live and serving.
+        // A busy volume means it is still live and serving. There is a third shape (measured):
+        // the daemon unmounts, replies, and exits so fast that the reply read loses the race
+        // and errors — poll briefly, and if the daemon is gone and the kernel released the
+        // volume, that IS success.
         let message = e.to_string();
         if !message.contains("mount daemon is not running") {
-            bar.finish_and_clear();
-            return Err(CliError::usage(format!(
-                "could not unmount {mountpoint}: {message}\nThe volume stays mounted and \
-                 usable. Close whatever is using it (shells cd'd inside, editors holding \
-                 files), then re-run: tl fs unmount {mountpoint}"
-            )));
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            let settled = loop {
+                let daemon_gone = daemon::daemon_pid(&state_dir).is_none_or(|p| !daemon_alive(p));
+                if daemon_gone && !daemon::still_mounted(Path::new(&mountpoint)) {
+                    break true;
+                }
+                if std::time::Instant::now() >= deadline {
+                    break false;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            };
+            if !settled {
+                bar.finish_and_clear();
+                return Err(CliError::usage(format!(
+                    "could not unmount {mountpoint}: {message}\nThe volume stays mounted and \
+                     usable. Close whatever is using it (shells cd'd inside, editors holding \
+                     files), then re-run: tl fs unmount {mountpoint}"
+                )));
+            }
         }
     }
     // Wait for the daemon to actually exit before tearing down its state dir: the shutdown op
