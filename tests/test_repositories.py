@@ -194,7 +194,9 @@ class TestRepositoryClient(unittest.TestCase):
             clear=False,
         )
         self._env.start()
-        self._client_patch = patch("tensorlake.repositories.CloudClient", _FakeCloudClient)
+        self._client_patch = patch(
+            "tensorlake.repositories.CloudClient", _FakeCloudClient
+        )
         self._client_patch.start()
 
     def tearDown(self):
@@ -317,7 +319,9 @@ class TestRepositoryClient(unittest.TestCase):
             fake.calls,
             [("introspect",), ("create", "project-from-key", "linux", None)],
         )
-        self.assertEqual(created.url, "https://git.tensorlake.ai/project-from-key/linux")
+        self.assertEqual(
+            created.url, "https://git.tensorlake.ai/project-from-key/linux"
+        )
 
     def test_rejects_pat_without_api_key(self):
         with patch.dict(

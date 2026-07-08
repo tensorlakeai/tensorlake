@@ -257,9 +257,7 @@ class RepositoryClient:
                     "Repository SDKs require TENSORLAKE_API_KEY. "
                     "Personal access tokens are CLI-only."
                 )
-            raise RepositoryError(
-                "Missing TENSORLAKE_API_KEY credentials."
-            )
+            raise RepositoryError("Missing TENSORLAKE_API_KEY credentials.")
 
         self._client = CloudClient(
             api_url=api_url or ctx.api_url,
@@ -268,7 +266,9 @@ class RepositoryClient:
             project_id=None,
             namespace=ctx.namespace,
         )
-        self.project_id = project_id or ctx.project_id or self._project_id_from_api_key()
+        self.project_id = (
+            project_id or ctx.project_id or self._project_id_from_api_key()
+        )
 
     def _project_id_from_api_key(self) -> str:
         payload = _load_json(self._client.introspect_api_key_json())
@@ -339,7 +339,9 @@ class RepositoryClient:
     def operations(self, repo: str) -> list[Operation]:
         raw = self._client.list_git_operations(self.project_id, repo)
         payload = _load_json(raw)
-        return [Operation.model_validate(item) for item in payload.get("operations", [])]
+        return [
+            Operation.model_validate(item) for item in payload.get("operations", [])
+        ]
 
     def credential(self, repo: str | None = None) -> GitCredential:
         raw = self._client.git_credential(self.project_id, repo)
