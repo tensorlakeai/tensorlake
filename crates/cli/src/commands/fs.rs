@@ -832,6 +832,7 @@ pub async fn mount(
     path: &Path,
     mode: WritePolicy,
     shared_rw: bool,
+    auto_commit_interval_secs: Option<u64>,
     foreground: bool,
 ) -> Result<()> {
     // Bail before creating a workspace or spawning the daemon-wait loop.
@@ -851,6 +852,11 @@ pub async fn mount(
     if shared_rw && mode == WritePolicy::Ro {
         return Err(CliError::usage(
             "--shared-rw publishes every snapshot; it cannot be combined with --mode ro",
+        ));
+    }
+    if auto_commit_interval_secs.is_some() && mode == WritePolicy::Ro {
+        return Err(CliError::usage(
+            "--auto-commit-interval-secs seals local writes; a read-only mount has none",
         ));
     }
     if shared_rw && base.is_none() {
@@ -1008,6 +1014,15 @@ pub async fn mount(
         }
     };
 
+    // An attach can resolve read-only implicitly (the workspace is live-mounted elsewhere);
+    // nothing server-side was created on that path, so erroring here leaks nothing.
+    if auto_commit_interval_secs.is_some() && read_only {
+        return Err(CliError::usage(
+            "--auto-commit-interval-secs needs a writable mount; this workspace is already \
+             mounted elsewhere and attached read-only (pass --mode rw to take writes)",
+        ));
+    }
+
     let mountpoint = canonical_mountpoint(path)?;
     let state_dir = alloc_state_dir(&ws.id);
     let (owner_uid, owner_gid) = mount_owner();
@@ -1024,6 +1039,7 @@ pub async fn mount(
             mountpoint: PathBuf::from(&mountpoint),
             follow_ref,
             read_only: Some(read_only),
+            auto_commit_interval_secs,
         },
     )?;
     registry_add(&mountpoint, &state_dir)?;
@@ -1088,6 +1104,11 @@ pub async fn mount(
                         "Lower commit {}. Work in the mount, then: tl fs snapshot {}",
                         resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
                         path.display()
+                    );
+                }
+                if let Some(secs) = auto_commit_interval_secs {
+                    println!(
+                        "Auto-commit: local changes seal into a snapshot every {secs}s (async)."
                     );
                 }
                 return Ok(());
@@ -1381,26 +1402,10 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
     Ok((upserts, deletes))
 }
 
-pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> Result<()> {
-    let (mountpoint, state_dir) = state_dir_for(path)?;
-    let state = daemon::load_mount_state(&state_dir)?;
-    if state.read_only() {
-        return Err(CliError::usage(format!(
-            "this is a read-only mount following {}; there is nothing to {}",
-            state.follow_ref.as_deref().unwrap_or("the branch"),
-            "snapshot",
-        )));
-    }
-    let session = FsSession::open(ctx, Some(&state.repo)).await?;
-    heartbeat(&session, &state).await?;
-
-    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-    if upserts.is_empty() && deletes.is_empty() {
-        println!("Nothing to snapshot: workspace is clean.");
-        return Ok(());
-    }
+/// An enumerated dirty set as push files. Shared by `snapshot` and the daemon's auto-commit.
+fn overlay_push_files(upserts: &OverlayUpserts, deletes: &[String]) -> Result<Vec<PushFile>> {
     let mut files = Vec::with_capacity(upserts.len() + deletes.len());
-    for (rel, abs, mode) in &upserts {
+    for (rel, abs, mode) in upserts {
         // A symlink's blob content is its target path; reading through `abs` would upload the
         // target file's bytes instead.
         let source = if *mode == 0o120000 {
@@ -1420,7 +1425,7 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
             delete: false,
         });
     }
-    for rel in &deletes {
+    for rel in deletes {
         files.push(PushFile {
             repo_path: rel.clone(),
             source: PushSource::Bytes(Vec::new()),
@@ -1428,6 +1433,28 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
             delete: true,
         });
     }
+    Ok(files)
+}
+
+pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> Result<()> {
+    let (mountpoint, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    if state.read_only() {
+        return Err(CliError::usage(format!(
+            "this is a read-only mount following {}; there is nothing to {}",
+            state.follow_ref.as_deref().unwrap_or("the branch"),
+            "snapshot",
+        )));
+    }
+    let session = FsSession::open(ctx, Some(&state.repo)).await?;
+    heartbeat(&session, &state).await?;
+
+    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
+    if upserts.is_empty() && deletes.is_empty() {
+        println!("Nothing to snapshot: workspace is clean.");
+        return Ok(());
+    }
+    let files = overlay_push_files(&upserts, &deletes)?;
 
     let (user, token) = session.creds();
     let progress: Arc<dyn Fn(PushEvent) + Send + Sync> = Arc::new(|ev| {
@@ -1752,6 +1779,13 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
             style("mode:").dim()
         );
     }
+    if let Some(secs) = state.auto_commit_interval_secs {
+        println!(
+            "{} local changes seal into a snapshot every {secs}s (local: below stays dirty \
+             until tl fs snapshot clears it)",
+            style("auto-commit:").dim()
+        );
+    }
     match &daemon_commit {
         Some(commit) => println!("{} mounted at {commit}", style("daemon:").dim()),
         None => println!(
@@ -1926,6 +1960,9 @@ pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()>
         expect.insert(p.clone(), e);
         changed.insert(p);
     }
+    // The upper was refilled behind the daemon's back; rebuild its dirty index so an
+    // auto-commit mount seals the restored state (clear_upper above reset the index).
+    daemon::control(&state_dir, "reindex").await?;
     converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
     println!(
         "Restored {} to {} ({restored} file(s) refreshed, {removed} removed).",

@@ -10,6 +10,7 @@
 //! {"op":"ping"}        -> {"ok":true,"commit":"<hex>"}
 //! {"op":"refresh"}     -> poll the workspace ref now; reply with the (possibly new) commit
 //! {"op":"clear_upper"} -> drop all overlay state (post-snapshot / restore)
+//! {"op":"reindex"}     -> rebuild the overlay's dirty index from disk (post-restore)
 //! {"op":"shutdown"}    -> unmount and exit
 //! ```
 //!
@@ -73,6 +74,12 @@ pub struct MountState {
     /// when they followed, which is what the accessor falls back to.
     #[serde(default)]
     pub read_only: Option<bool>,
+    /// Periodic auto-commit: the daemon seals the overlay's dirty set into a snapshot commit
+    /// every this many seconds. The overlay is kept (only `tl fs snapshot` seals-and-clears),
+    /// so writes racing an auto-commit are never dropped — they ride the next one. Absent on
+    /// mounts that didn't opt in and in state files from before the feature.
+    #[serde(default)]
+    pub auto_commit_interval_secs: Option<u64>,
 }
 
 impl MountState {
@@ -198,16 +205,24 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     let project = project_id(ctx)?;
 
     // Initial credential: the dev override, or a fresh mint.
-    let (token, mut expires_at) = match std::env::var("TENSORLAKE_GIT_TOKEN") {
-        Ok(token) => (token, None),
+    let (git_username, token, mut expires_at) = match std::env::var("TENSORLAKE_GIT_TOKEN") {
+        Ok(token) => (
+            std::env::var("TENSORLAKE_GIT_USERNAME").unwrap_or_else(|_| "t".to_string()),
+            token,
+            None,
+        ),
         Err(_) => {
             let cred = sdk
                 .mint_token_for_repo(&project, Some(&state.repo))
                 .await?
                 .into_inner();
-            (cred.token, Some(cred.expires_at))
+            (cred.git_username, cred.token, Some(cred.expires_at))
         }
     };
+    // The daemon's long-lived `(user, token)` credential: heartbeats and auto-commits read it,
+    // and the rotation task below swaps it in place before expiry — a static copy would start
+    // failing an hour into the mount's life.
+    let api_creds = Arc::new(std::sync::Mutex::new((git_username, token.clone())));
 
     let client = FsClient::new(
         sdk.git_base_url(),
@@ -246,6 +261,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         let sdk = sdk.clone();
         let (project, repo) = (project.clone(), state.repo.clone());
         let rotate = rotating_client;
+        let creds = api_creds.clone();
         tokio::spawn(async move {
             loop {
                 let due = expires_in(expires_at.as_deref().unwrap_or_default())
@@ -254,7 +270,8 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 match sdk.mint_token_for_repo(&project, Some(&repo)).await {
                     Ok(cred) => {
                         let cred = cred.into_inner();
-                        rotate.set_token(Some(cred.token));
+                        rotate.set_token(Some(cred.token.clone()));
+                        *creds.lock().expect("creds lock") = (cred.git_username, cred.token);
                         expires_at = Some(cred.expires_at);
                     }
                     Err(e) => {
@@ -274,12 +291,12 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
             state.repo.clone(),
             state.workspace_id.clone(),
         );
-        let creds = crate::commands::fs::FsSession::open(ctx, Some(&state.repo)).await?;
+        let creds = api_creds.clone();
         tokio::spawn(async move {
             loop {
-                let (user, token) = creds.creds();
+                let (user, token) = creds.lock().expect("creds lock").clone();
                 if let Err(e) = sdk
-                    .workspace_heartbeat(&project, &repo, user, token, &ws)
+                    .workspace_heartbeat(&project, &repo, &user, &token, &ws)
                     .await
                 {
                     tracing::warn!("workspace heartbeat failed: {e}");
@@ -307,6 +324,153 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         let invalidate = invalidate.clone();
         gsvc_mount::spawn_ref_watcher(&core, move |delta| {
             invalidate(overlay.translate_delta(&delta));
+        });
+    }
+
+    // Auto-commit: seal dirty paths into snapshot commits every interval, event-driven. The
+    // overlay records every mutation in its dirty index, so nothing is ever scanned — an idle
+    // tick is one atomic load. Each seal pushes only paths touched since the last sealed
+    // generation: everything sealed earlier is already served by the lower (the workspace ref
+    // advances with each snapshot), so commits are incremental deltas, and unchanged dirty
+    // files are never re-hashed or re-sent. The overlay is deliberately NOT cleared — the
+    // on-demand snapshot's clear-after-push is only safe with writes quiesced; here the upper
+    // keeps shadowing the byte-identical sealed content.
+    if let Some(secs) = state.auto_commit_interval_secs
+        && !state.read_only()
+    {
+        use tensorlake::artifact_storage::ingest::PushOptions;
+        let sdk = sdk.clone();
+        let creds = api_creds.clone();
+        let (project, repo, ws) = (
+            project.clone(),
+            state.repo.clone(),
+            state.workspace_id.clone(),
+        );
+        let state_dir = state_dir.to_path_buf();
+        let mountpoint = mountpoint.clone();
+        let overlay = overlay.clone();
+        let core = core.clone();
+        let invalidate = invalidate.clone();
+        tokio::spawn(async move {
+            let mut sealed_gen = 0u64;
+            // Paths published by the last two seals: the guard set for deletes racing the
+            // lower's advance past their seal (see resolve_seal's tombstone arm).
+            let mut recent_seals: std::collections::VecDeque<std::collections::HashSet<String>> =
+                std::collections::VecDeque::new();
+            // Chunk lists from previous seals (path -> the pushed CDC chunk list): the append
+            // fast path's memory. A re-touched file whose writes never went below a cached
+            // boundary seals as a `StablePrefix` — only bytes past that boundary are re-read.
+            // Daemon-local; a restart just means one full-cost seal per file to re-learn.
+            let mut chunk_cache: std::collections::HashMap<String, ChunkList> =
+                std::collections::HashMap::new();
+            loop {
+                tokio::time::sleep(Duration::from_secs(secs.max(1))).await;
+                let delta = overlay.dirty_since(sealed_gen);
+                let watermark = delta.watermark;
+                if delta.is_empty() {
+                    sealed_gen = watermark;
+                    continue;
+                }
+                // Resolution reads ignore files through the mountpoint — FUSE round-trips
+                // served by this very process. Run it on the blocking pool so it can never
+                // starve the runtime workers serving it.
+                let recently: std::collections::HashSet<String> =
+                    recent_seals.iter().flatten().cloned().collect();
+                let cached: std::collections::HashMap<String, ChunkList> = delta
+                    .upserts
+                    .iter()
+                    .filter_map(|(path, _)| {
+                        chunk_cache
+                            .get(path)
+                            .map(|chunks| (path.clone(), chunks.clone()))
+                    })
+                    .collect();
+                let (sd, mp) = (state_dir.clone(), mountpoint.clone());
+                let resolved = tokio::task::spawn_blocking(move || {
+                    resolve_seal(&sd, &mp, &delta, &recently, &cached)
+                })
+                .await;
+                // eprintln, not tracing: the daemon installs no subscriber, and its stderr is
+                // the state dir's daemon.log — the one place a user can see an async flush fail.
+                let resolved = match resolved {
+                    Ok(Ok(resolved)) => resolved,
+                    Ok(Err(e)) => {
+                        eprintln!("auto-commit: resolving the dirty delta failed: {e}");
+                        continue;
+                    }
+                    Err(e) => {
+                        eprintln!("auto-commit: resolution task failed: {e}");
+                        continue;
+                    }
+                };
+                if resolved.files.is_empty() {
+                    // The whole delta was ignored paths, bare directories, or files that were
+                    // born and died between seals: sealed through, nothing to publish.
+                    sealed_gen = watermark;
+                    overlay.prune_dirty(watermark);
+                    continue;
+                }
+                let (user, token) = creds.lock().expect("creds lock").clone();
+                let delete_paths: Vec<String> = resolved
+                    .files
+                    .iter()
+                    .filter(|f| f.delete)
+                    .map(|f| f.repo_path.clone())
+                    .collect();
+                match sdk
+                    .push_files(
+                        &project,
+                        &repo,
+                        &user,
+                        &token,
+                        resolved.files,
+                        PushOptions {
+                            message: "tl fs auto-commit".to_string(),
+                            workspace_snapshot: Some(ws.clone()),
+                            collect_file_chunks: true,
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    Ok(report) => {
+                        sealed_gen = watermark;
+                        overlay.prune_dirty(watermark);
+                        recent_seals.push_back(resolved.sealed_upserts);
+                        if recent_seals.len() > 2 {
+                            recent_seals.pop_front();
+                        }
+                        let report = report.into_inner();
+                        // Remember what each file's content chunked to; a blunt cap bounds
+                        // daemon memory (a full re-learn is just one full-cost seal per file).
+                        for (path, chunks) in &report.file_chunks {
+                            chunk_cache.insert(path.clone(), chunks.clone());
+                        }
+                        for path in &delete_paths {
+                            chunk_cache.remove(path);
+                        }
+                        if chunk_cache.len() > 8192 {
+                            chunk_cache.clear();
+                        }
+                        // Advance the lower to the sealed commit now instead of waiting out
+                        // the follow poll: from here on, a delete of a just-sealed path sees
+                        // lower presence and whiteouts normally.
+                        match core.poll_ref().await {
+                            Ok(Some(refresh)) => invalidate(overlay.translate_delta(&refresh)),
+                            Ok(None) => {}
+                            Err(e) => eprintln!(
+                                "auto-commit: post-seal refresh failed (follow poll catches \
+                                 up): {e}"
+                            ),
+                        }
+                        if !resolved.tombstoned.is_empty() {
+                            invalidate(overlay.invals_for(&resolved.tombstoned));
+                        }
+                        eprintln!("auto-commit sealed snapshot {}", report.commit);
+                    }
+                    Err(e) => eprintln!("auto-commit push failed (will retry): {e}"),
+                }
+            }
         });
     }
 
@@ -361,6 +525,13 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             }
                             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
                         },
+                        // The upper was mutated out-of-band (restore writes into the state dir
+                        // from the CLI process); rebuild the dirty index from disk so an
+                        // auto-commit mount seals the new state.
+                        "reindex" => match overlay.rebuild_dirty_index() {
+                            Ok(()) => serde_json::json!({ "ok": true }),
+                            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+                        },
                         "shutdown" => {
                             // Unmount BEFORE replying: the reply is the CLI's signal that the
                             // kernel released the volume (the slow phase on macOS — fskitd
@@ -400,6 +571,167 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     let result = served.wait().await;
     let _ = std::fs::remove_file(&sock_path);
     result
+}
+
+/// A pushed file's CDC chunk list, as returned in `PushReport::file_chunks`.
+#[cfg(unix)]
+type ChunkList = Vec<([u8; 32], u32)>;
+
+/// One tick's seal work, resolved from the overlay's event delta against the on-disk overlay
+/// state. Produced by [`resolve_seal`].
+#[cfg(unix)]
+struct ResolvedSeal {
+    files: Vec<tensorlake::artifact_storage::ingest::PushFile>,
+    /// Paths whose content this seal publishes — the next ticks' resurrection guard.
+    sealed_upserts: std::collections::HashSet<String>,
+    /// Vanished-but-recently-sealed paths that got a whiteout written here; their merged view
+    /// flipped without a kernel-visible operation, so the kernel needs invalidations.
+    tombstoned: Vec<String>,
+}
+
+/// Resolve an event delta into upload-ready push files. The dirty index's kinds are routing
+/// hints; the on-disk overlay is the authority — a path is an upsert if the upper serves it,
+/// a delete if a whiteout covers it, and skipped when it is a bare directory or ignored.
+///
+/// The subtle arm is the tombstone: a path sealed by a recent commit, then deleted before the
+/// lower advanced to that commit. The unlink saw no lower presence, so no whiteout was written
+/// — once the lower catches up the path would silently resurrect. Recognize it by membership
+/// in the recent seals, write the whiteout the unlink would have, and publish the delete.
+///
+/// Runs on the blocking pool: the ignore rules read `.gitignore` files through the mountpoint,
+/// which this very daemon serves.
+#[cfg(unix)]
+fn resolve_seal(
+    state_dir: &Path,
+    mount_root: &Path,
+    delta: &super::overlay::DirtyDelta,
+    recently_sealed: &std::collections::HashSet<String>,
+    chunk_cache: &std::collections::HashMap<String, ChunkList>,
+) -> crate::error::Result<ResolvedSeal> {
+    let mut ignore = super::SnapshotIgnore::new(mount_root);
+    let upper = state_dir.join("upper");
+    let wh = state_dir.join("wh");
+    let mut upserts: super::OverlayUpserts = Vec::new();
+    let mut deletes: Vec<String> = Vec::new();
+    let mut tombstoned: Vec<String> = Vec::new();
+    let mut vanished: Vec<String> = Vec::new();
+
+    for (path, _) in &delta.upserts {
+        let abs = upper.join(path);
+        let Ok(meta) = std::fs::symlink_metadata(&abs) else {
+            // Gone from the upper with no delete event in this delta (a rename or unlink
+            // racing the tick): route through the delete resolution below.
+            vanished.push(path.clone());
+            continue;
+        };
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            // Directories materialize through their children; git has no empty trees.
+            continue;
+        }
+        if ignore.is_ignored(path, false)? {
+            continue;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let mode = if meta.file_type().is_symlink() {
+            0o120000
+        } else if meta.permissions().mode() & 0o111 != 0 {
+            0o100755
+        } else {
+            0o100644
+        };
+        upserts.push((path.clone(), abs, mode));
+    }
+    for path in delta.deletes.iter().chain(vanished.iter()) {
+        if upper.join(path).symlink_metadata().is_ok() {
+            // Re-created since the event; its own upsert event covers it.
+            continue;
+        }
+        if ignore.is_ignored(path, false)? {
+            continue;
+        }
+        if whited_out_on_disk(&wh, path) {
+            deletes.push(path.clone());
+        } else if recently_sealed.contains(path) {
+            super::write_whiteout(&wh, path)?;
+            deletes.push(path.clone());
+            tombstoned.push(path.clone());
+        }
+        // Neither: born and died locally between seals — nothing was ever published.
+    }
+    upserts.sort_by(|a, b| a.0.cmp(&b.0));
+    deletes.sort();
+    deletes.dedup();
+    let mut files = super::overlay_push_files(&upserts, &deletes)?;
+
+    // Append fast path: a file with a cached chunk list from its previous seal, whose writes
+    // since then never went below a cached boundary, seals as a `StablePrefix` — the push
+    // reads only bytes past that boundary. The cached FINAL chunk is never reused (it was cut
+    // at the old EOF, not at a content-chosen boundary), and neither is anything at or past
+    // the lowest written offset.
+    let min_write: std::collections::HashMap<&str, u64> = delta
+        .upserts
+        .iter()
+        .map(|(path, min)| (path.as_str(), *min))
+        .collect();
+    use tensorlake::artifact_storage::ingest::PushSource;
+    for file in &mut files {
+        if file.delete || file.mode == Some(0o120000) {
+            continue;
+        }
+        let (Some(min_offset), Some(cached)) = (
+            min_write.get(file.repo_path.as_str()),
+            chunk_cache.get(&file.repo_path),
+        ) else {
+            continue;
+        };
+        let usable = &cached[..cached.len().saturating_sub(1)];
+        let mut stable: ChunkList = Vec::new();
+        let mut end = 0u64;
+        for (hash, size) in usable {
+            if end + *size as u64 > *min_offset {
+                break;
+            }
+            end += *size as u64;
+            stable.push((*hash, *size));
+        }
+        if stable.is_empty() {
+            continue;
+        }
+        if let PushSource::Path(path) = &file.source {
+            file.source = PushSource::StablePrefix {
+                path: path.clone(),
+                stable_chunks: stable,
+            };
+        }
+    }
+
+    Ok(ResolvedSeal {
+        sealed_upserts: upserts.iter().map(|(p, _, _)| p.clone()).collect(),
+        files,
+        tombstoned,
+    })
+}
+
+/// Whether a whiteout marker covers `path` (at the path or any ancestor) — the on-disk mirror
+/// of the overlay's whiteout rule, so resolution can run without the overlay.
+#[cfg(unix)]
+fn whited_out_on_disk(wh: &Path, path: &str) -> bool {
+    let mut probe = String::with_capacity(path.len());
+    for component in path.split('/') {
+        if !probe.is_empty() {
+            probe.push('/');
+        }
+        probe.push_str(component);
+        let marker_is_file = wh
+            .join(&probe)
+            .symlink_metadata()
+            .map(|m| m.is_file())
+            .unwrap_or(false);
+        if marker_is_file {
+            return true;
+        }
+    }
+    false
 }
 
 /// A live kernel attachment; `wait` returns when the mount ends.
@@ -607,5 +939,203 @@ pub(crate) fn still_mounted(mountpoint: &Path) -> bool {
                     .any(|line| line.split_whitespace().nth(1) == Some(path.as_ref()))
             })
             .unwrap_or(false)
+    }
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::super::overlay::DirtyDelta;
+    use super::*;
+
+    pub(super) fn state_with(upper: &[(&str, &str)], wh: &[&str]) -> tempfile::TempDir {
+        let state = tempfile::tempdir().unwrap();
+        for (path, content) in upper {
+            let abs = state.path().join("upper").join(path);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, content).unwrap();
+        }
+        for path in wh {
+            let abs = state.path().join("wh").join(path);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, b"").unwrap();
+        }
+        state
+    }
+
+    fn delta(upserts: &[&str], deletes: &[&str]) -> DirtyDelta {
+        // Structural events pin min_write_offset to 0; extent-carrying cases build their own.
+        DirtyDelta {
+            upserts: upserts.iter().map(|s| (s.to_string(), 0)).collect(),
+            deletes: deletes.iter().map(|s| s.to_string()).collect(),
+            watermark: 1,
+        }
+    }
+
+    fn no_cache() -> std::collections::HashMap<String, ChunkList> {
+        std::collections::HashMap::new()
+    }
+
+    #[test]
+    fn resolve_seal_routes_upserts_deletes_and_skips() {
+        let state = state_with(
+            &[("kept.txt", "hi"), ("dir/nested.txt", "deep")],
+            &["gone.txt"],
+        );
+        let mount = tempfile::tempdir().unwrap();
+        std::fs::write(mount.path().join(".gitignore"), "*.tmp\n").unwrap();
+        std::fs::write(state.path().join("upper/junk.tmp"), "x").unwrap();
+        std::fs::create_dir_all(state.path().join("upper/empty-dir")).unwrap();
+
+        let resolved = resolve_seal(
+            state.path(),
+            mount.path(),
+            &delta(
+                &["dir", "dir/nested.txt", "empty-dir", "junk.tmp", "kept.txt"],
+                &["gone.txt"],
+            ),
+            &std::collections::HashSet::new(),
+            &no_cache(),
+        )
+        .unwrap();
+
+        let mut published: Vec<(&str, bool)> = resolved
+            .files
+            .iter()
+            .map(|f| (f.repo_path.as_str(), f.delete))
+            .collect();
+        published.sort();
+        // Directories and gitignored paths never publish; whiteouts publish as deletes.
+        assert_eq!(
+            published,
+            vec![
+                ("dir/nested.txt", false),
+                ("gone.txt", true),
+                ("kept.txt", false),
+            ]
+        );
+        assert!(resolved.sealed_upserts.contains("kept.txt"));
+        assert!(resolved.tombstoned.is_empty());
+    }
+
+    #[test]
+    fn resolve_seal_tombstones_vanished_recently_sealed_paths() {
+        // The resurrection race: a path sealed by the previous commit, then deleted before the
+        // lower advanced — no upper file, no whiteout. The delete must still publish, and a
+        // whiteout must be written so the local view stays deleted once the lower catches up.
+        let state = state_with(&[], &[]);
+        let mount = tempfile::tempdir().unwrap();
+        let recently: std::collections::HashSet<String> = ["sealed-then-deleted.txt".to_string()]
+            .into_iter()
+            .collect();
+
+        let resolved = resolve_seal(
+            state.path(),
+            mount.path(),
+            &delta(&[], &["sealed-then-deleted.txt", "never-sealed.txt"]),
+            &recently,
+            &no_cache(),
+        )
+        .unwrap();
+
+        let published: Vec<(&str, bool)> = resolved
+            .files
+            .iter()
+            .map(|f| (f.repo_path.as_str(), f.delete))
+            .collect();
+        // The never-sealed path was born and died locally: nothing to publish for it.
+        assert_eq!(published, vec![("sealed-then-deleted.txt", true)]);
+        assert_eq!(resolved.tombstoned, vec!["sealed-then-deleted.txt"]);
+        assert!(
+            state.path().join("wh/sealed-then-deleted.txt").is_file(),
+            "the whiteout the unlink would have written"
+        );
+    }
+
+    #[test]
+    fn resolve_seal_skips_recreated_paths_and_honors_ancestor_whiteouts() {
+        let state = state_with(&[("back.txt", "again")], &["dead-dir"]);
+        let mount = tempfile::tempdir().unwrap();
+
+        let resolved = resolve_seal(
+            state.path(),
+            mount.path(),
+            // back.txt carries a stale delete event but the upper serves it again; a child of
+            // a whiteouted directory is covered by the ancestor marker.
+            &delta(&[], &["back.txt", "dead-dir/child.txt"]),
+            &std::collections::HashSet::new(),
+            &no_cache(),
+        )
+        .unwrap();
+
+        let published: Vec<(&str, bool)> = resolved
+            .files
+            .iter()
+            .map(|f| (f.repo_path.as_str(), f.delete))
+            .collect();
+        assert_eq!(published, vec![("dead-dir/child.txt", true)]);
+    }
+}
+
+#[cfg(all(test, unix))]
+mod stable_prefix_tests {
+    use tensorlake::artifact_storage::ingest::PushSource;
+
+    use super::super::overlay::DirtyDelta;
+    use super::tests::state_with;
+    use super::*;
+
+    fn resolve_with_cache(min_offset: u64) -> ResolvedSeal {
+        let state = state_with(&[("log.bin", "0123456789")], &[]);
+        let mount = tempfile::tempdir().unwrap();
+        // The previous seal chunked the 10-byte file as 4+4+2; the trailing 2-byte chunk was
+        // cut at the old EOF and must never be reused as a stable boundary.
+        let cache: std::collections::HashMap<String, ChunkList> = [(
+            "log.bin".to_string(),
+            vec![([1u8; 32], 4), ([2u8; 32], 4), ([3u8; 32], 2)],
+        )]
+        .into_iter()
+        .collect();
+        resolve_seal(
+            state.path(),
+            mount.path(),
+            &DirtyDelta {
+                upserts: vec![("log.bin".to_string(), min_offset)],
+                deletes: Vec::new(),
+                watermark: 1,
+            },
+            &std::collections::HashSet::new(),
+            &cache,
+        )
+        .unwrap()
+    }
+
+    fn stable_of(resolved: &ResolvedSeal) -> Option<Vec<u32>> {
+        match &resolved.files[0].source {
+            PushSource::StablePrefix { stable_chunks, .. } => {
+                Some(stable_chunks.iter().map(|(_, s)| *s).collect())
+            }
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn append_reuses_all_but_the_eof_cut_chunk() {
+        // Writes started at the old EOF (10): both content-boundary chunks are stable.
+        let resolved = resolve_with_cache(10);
+        assert_eq!(stable_of(&resolved), Some(vec![4, 4]));
+    }
+
+    #[test]
+    fn mid_file_write_keeps_only_chunks_fully_before_it() {
+        // A write at offset 5 lands inside the second chunk: only the first survives.
+        let resolved = resolve_with_cache(5);
+        assert_eq!(stable_of(&resolved), Some(vec![4]));
+    }
+
+    #[test]
+    fn structural_change_falls_back_to_a_full_read() {
+        let resolved = resolve_with_cache(0);
+        assert_eq!(stable_of(&resolved), None);
+        assert!(matches!(resolved.files[0].source, PushSource::Path(_)));
     }
 }

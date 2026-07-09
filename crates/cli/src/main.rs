@@ -247,6 +247,12 @@ enum FsCommands {
         #[arg(long)]
         shared_rw: bool,
 
+        /// Automatically seal local changes into a snapshot commit every N seconds (async,
+        /// in the mount daemon). Local overlay state is kept; `tl fs snapshot` remains the
+        /// on-demand seal. Requires a writable mount
+        #[arg(long, value_parser = clap::value_parser!(u64).range(1..))]
+        auto_commit_interval_secs: Option<u64>,
+
         /// Run the mount daemon in the foreground (debugging)
         #[arg(long)]
         foreground: bool,
@@ -2244,6 +2250,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             path,
             mode,
             shared_rw,
+            auto_commit_interval_secs,
             foreground,
         } => {
             let mode = match mode {
@@ -2251,7 +2258,16 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
                 Some(MountWriteMode::Rw) => commands::fs::WritePolicy::Rw,
                 None => commands::fs::WritePolicy::Auto,
             };
-            commands::fs::mount(ctx, &target, &path, mode, shared_rw, foreground).await
+            commands::fs::mount(
+                ctx,
+                &target,
+                &path,
+                mode,
+                shared_rw,
+                auto_commit_interval_secs,
+                foreground,
+            )
+            .await
         }
         FsCommands::Daemon { state_dir } => commands::fs::daemon::run(ctx, &state_dir).await,
         FsCommands::Snapshot { path, message } => {
@@ -2733,12 +2749,14 @@ mod tests {
                 path,
                 mode,
                 shared_rw,
+                auto_commit_interval_secs,
                 foreground,
             }) => {
                 assert_eq!(target, "data:main");
                 assert_eq!(path, PathBuf::from("./w"));
                 assert_eq!(mode, Some(MountWriteMode::Ro));
                 assert!(!shared_rw);
+                assert_eq!(auto_commit_interval_secs, None);
                 assert!(!foreground);
             }
             _ => panic!("expected fs mount command"),
@@ -2752,6 +2770,38 @@ mod tests {
             }
             _ => panic!("expected fs mount command"),
         }
+
+        match parse_command([
+            "tl",
+            "fs",
+            "mount",
+            "data",
+            "./w",
+            "--auto-commit-interval-secs",
+            "30",
+        ]) {
+            Commands::Fs(FsCommands::Mount {
+                auto_commit_interval_secs,
+                ..
+            }) => {
+                assert_eq!(auto_commit_interval_secs, Some(30));
+            }
+            _ => panic!("expected fs mount command"),
+        }
+
+        // Zero is rejected at parse time: an interval of 0 is not a debounce, it's a busy loop.
+        assert!(
+            Cli::try_parse_from([
+                "tl",
+                "fs",
+                "mount",
+                "data",
+                "./w",
+                "--auto-commit-interval-secs",
+                "0",
+            ])
+            .is_err()
+        );
 
         match parse_command(["tl", "fs", "ls"]) {
             Commands::Fs(FsCommands::Ls {

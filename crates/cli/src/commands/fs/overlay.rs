@@ -144,8 +144,9 @@ impl InodeTable {
 
 /// An open handle in the merged namespace.
 enum OHandle {
-    /// Backed by a real upper file (reads and writes are positional on this descriptor).
-    Upper { file: std::fs::File },
+    /// Backed by a real upper file (reads and writes are positional on this descriptor). The
+    /// path is carried so writes can feed the dirty index — a write only knows its handle.
+    Upper { file: std::fs::File, path: String },
     /// Backed by the read-only core.
     Lower { core_fh: u64 },
     /// A merged directory listing, fixed at opendir time.
@@ -195,6 +196,49 @@ pub struct OverlayFs {
     next_fh: AtomicU64,
     /// When each lower commit was first served by this mount — the stable mtime for its nodes.
     lower_times: Mutex<HashMap<String, std::time::SystemTime>>,
+    /// Global mutation clock: bumped by every recorded namespace/content change. The dirty
+    /// index below is keyed to it, so "anything new since generation G?" is one atomic load.
+    write_gen: AtomicU64,
+    /// Event-driven dirty index: `path -> (generation, kind of last mutation)`. Every mutating
+    /// op records here as it happens, so the auto-commit sealer never walks the upper tree —
+    /// it asks [`OverlayFs::dirty_since`] for the exact delta. Rebuilt from the on-disk overlay
+    /// at startup (and after out-of-band upper refills — restore) and pruned after each seal.
+    dirty: Mutex<HashMap<String, DirtyEntry>>,
+}
+
+/// What the last recorded mutation of a path was. `Upsert` covers create/write/copy-up/rename
+/// destinations; `Delete` covers unlink/rmdir/rename sources. Last event wins — the sealer
+/// re-resolves against the on-disk overlay anyway, the kind is only a routing hint.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DirtyKind {
+    Upsert,
+    Delete,
+}
+
+struct DirtyEntry {
+    generation: u64,
+    kind: DirtyKind,
+    /// Lowest byte offset any write touched over this entry's lifetime: bytes below it are
+    /// unchanged since the entry was born (i.e. since the last sealed-and-pruned state), which
+    /// is what lets a sealer reuse a previous push's chunk list for the untouched prefix.
+    /// Structural mutations (create, truncate, rename, mode) pin it to 0 — nothing stable.
+    min_write_offset: u64,
+}
+
+/// Everything that changed after a given generation, plus the clock value the snapshot was
+/// taken at. Sealing through `watermark` and pruning to it leaves exactly the mutations that
+/// raced the seal pending for the next tick. Upserts carry their entry's
+/// [`min write offset`](DirtyEntry::min_write_offset).
+pub struct DirtyDelta {
+    pub upserts: Vec<(String, u64)>,
+    pub deletes: Vec<String>,
+    pub watermark: u64,
+}
+
+impl DirtyDelta {
+    pub fn is_empty(&self) -> bool {
+        self.upserts.is_empty() && self.deletes.is_empty()
+    }
 }
 
 fn not_found() -> MountError {
@@ -235,7 +279,7 @@ impl OverlayFs {
         let wh = state_dir.join("wh");
         std::fs::create_dir_all(&upper).map_err(io_err)?;
         std::fs::create_dir_all(&wh).map_err(io_err)?;
-        Ok(Arc::new(OverlayFs {
+        let fs = Arc::new(OverlayFs {
             core,
             upper,
             wh,
@@ -244,7 +288,154 @@ impl OverlayFs {
             handles: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             lower_times: Mutex::new(HashMap::new()),
-        }))
+            write_gen: AtomicU64::new(0),
+            dirty: Mutex::new(HashMap::new()),
+        });
+        // Baseline: dirt left by a previous daemon (re-mount, crash) predates any events this
+        // process will see; seed the index from disk so the first seal covers it.
+        fs.rebuild_dirty_index()?;
+        Ok(fs)
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Dirty tracking: the event feed behind auto-commit. Every mutating op below records the
+    // path it touched, so sealing never scans — and an idle tick is one atomic load.
+    // -------------------------------------------------------------------------------------
+
+    fn record(&self, path: &str, kind: DirtyKind) {
+        self.record_at(path, kind, 0);
+    }
+
+    /// A content write at `offset`: like [`OverlayFs::record`], but bytes below the offset are
+    /// left claimable as stable.
+    fn record_write(&self, path: &str, offset: u64) {
+        self.record_at(path, DirtyKind::Upsert, offset);
+    }
+
+    fn record_at(&self, path: &str, kind: DirtyKind, offset: u64) {
+        let generation = self.write_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut dirty = self.dirty.lock().expect("dirty lock");
+        match dirty.get_mut(path) {
+            Some(entry) => {
+                entry.generation = generation;
+                // A kind flip (delete then re-create, or vice versa) restarts content
+                // identity: nothing before this event is stable.
+                if entry.kind != kind {
+                    entry.min_write_offset = 0;
+                }
+                entry.kind = kind;
+                entry.min_write_offset = entry.min_write_offset.min(offset);
+            }
+            None => {
+                dirty.insert(
+                    path.to_string(),
+                    DirtyEntry {
+                        generation,
+                        kind,
+                        min_write_offset: offset,
+                    },
+                );
+            }
+        }
+    }
+
+    /// Every path mutated after `since`, split by the kind of its last mutation. The watermark
+    /// is the clock at snapshot time: a caller that seals this delta records the watermark and
+    /// prunes to it — mutations racing the seal carry higher generations and stay pending.
+    pub fn dirty_since(&self, since: u64) -> DirtyDelta {
+        let watermark = self.write_gen.load(Ordering::SeqCst);
+        let dirty = self.dirty.lock().expect("dirty lock");
+        let mut upserts = Vec::new();
+        let mut deletes = Vec::new();
+        for (path, entry) in dirty.iter() {
+            if entry.generation <= since {
+                continue;
+            }
+            match entry.kind {
+                DirtyKind::Upsert => upserts.push((path.clone(), entry.min_write_offset)),
+                DirtyKind::Delete => deletes.push(path.clone()),
+            }
+        }
+        upserts.sort();
+        deletes.sort();
+        DirtyDelta {
+            upserts,
+            deletes,
+            watermark,
+        }
+    }
+
+    /// Drop index entries sealed through `upto` so the map holds only unsealed dirt.
+    pub fn prune_dirty(&self, upto: u64) {
+        self.dirty
+            .lock()
+            .expect("dirty lock")
+            .retain(|_, entry| entry.generation > upto);
+    }
+
+    /// Rebuild the dirty index from the on-disk overlay: every upper file/symlink is an
+    /// upsert, every whiteout marker a delete. For dirt this process did not witness as
+    /// events — startup, and `tl fs restore` refilling the upper out-of-band (the CLI writes
+    /// straight into the state dir and then asks for a reindex).
+    pub fn rebuild_dirty_index(&self) -> Result<(), MountError> {
+        fn walk(root: &Path, dir: &Path, out: &mut dyn FnMut(String)) -> std::io::Result<()> {
+            let Ok(read) = std::fs::read_dir(dir) else {
+                return Ok(());
+            };
+            for entry in read.flatten() {
+                let abs = entry.path();
+                let meta = std::fs::symlink_metadata(&abs)?;
+                if meta.is_dir() && !meta.file_type().is_symlink() {
+                    walk(root, &abs, out)?;
+                } else {
+                    let rel = abs
+                        .strip_prefix(root)
+                        .expect("under root")
+                        .components()
+                        .map(|c| c.as_os_str().to_string_lossy())
+                        .collect::<Vec<_>>()
+                        .join("/");
+                    out(rel);
+                }
+            }
+            Ok(())
+        }
+        self.dirty.lock().expect("dirty lock").clear();
+        walk(&self.upper, &self.upper, &mut |rel| {
+            self.record(&rel, DirtyKind::Upsert)
+        })
+        .map_err(io_err)?;
+        walk(&self.wh, &self.wh, &mut |rel| {
+            self.record(&rel, DirtyKind::Delete)
+        })
+        .map_err(io_err)?;
+        Ok(())
+    }
+
+    /// Kernel invalidations for paths whose merged view changed without a kernel-visible
+    /// operation (the sealer writing a whiteout for a vanished-but-sealed path). Paths the
+    /// kernel never interned need nothing.
+    pub(super) fn invals_for(&self, paths: &[String]) -> Vec<OverlayInval> {
+        let inodes = self.inodes.lock().expect("inode lock");
+        paths
+            .iter()
+            .filter_map(|path| {
+                let &ino = inodes.index.get(path)?;
+                let (parent_ino, name) = match path.rfind('/') {
+                    Some(i) => (
+                        inodes.index.get(&path[..i]).copied(),
+                        path[i + 1..].to_string(),
+                    ),
+                    None => (Some(ROOT_INO), path.clone()),
+                };
+                Some(OverlayInval {
+                    ino,
+                    parent_ino,
+                    name,
+                    staled: true,
+                })
+            })
+            .collect()
     }
 
     /// Every mutating entry point funnels through this guard: a shared-ro mount is a window
@@ -663,7 +854,13 @@ impl OverlayFs {
                 .write(write)
                 .open(self.upper_path(&node.path))
                 .map_err(io_err)?;
-            (OHandle::Upper { file }, None)
+            (
+                OHandle::Upper {
+                    file,
+                    path: node.path.clone(),
+                },
+                None,
+            )
         } else {
             let core_ino = self.lower_binding(&node).await?;
             let ident = self
@@ -694,7 +891,7 @@ impl OverlayFs {
         let core_fh = {
             let handles = self.handles.lock().expect("handle lock");
             match handles.get(&fh) {
-                Some(OHandle::Upper { file }) => {
+                Some(OHandle::Upper { file, .. }) => {
                     use std::os::unix::fs::FileExt;
                     let mut buf = vec![0u8; size as usize];
                     let n = file.read_at(&mut buf, offset).map_err(io_err)?;
@@ -711,24 +908,30 @@ impl OverlayFs {
     pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, MountError> {
         self.write_guard()?;
         use std::os::unix::fs::FileExt;
-        let handles = self.handles.lock().expect("handle lock");
-        match handles.get(&fh) {
-            Some(OHandle::Upper { file }) => {
-                file.write_all_at(data, offset).map_err(io_err)?;
-                Ok(data.len() as u32)
+        let path = {
+            let handles = self.handles.lock().expect("handle lock");
+            match handles.get(&fh) {
+                Some(OHandle::Upper { file, path }) => {
+                    file.write_all_at(data, offset).map_err(io_err)?;
+                    path.clone()
+                }
+                // open(write=true) always yields an upper handle; a write on a lower handle
+                // means the kernel opened read-only, which it won't for writes.
+                Some(OHandle::Lower { .. }) => {
+                    return Err(MountError::Protocol(
+                        "write on read-only handle".to_string(),
+                    ));
+                }
+                _ => return Err(not_found()),
             }
-            // open(write=true) always yields an upper handle; a write on a lower handle means
-            // the kernel opened read-only, which it won't for writes.
-            Some(OHandle::Lower { .. }) => Err(MountError::Protocol(
-                "write on read-only handle".to_string(),
-            )),
-            _ => Err(not_found()),
-        }
+        };
+        self.record_write(&path, offset);
+        Ok(data.len() as u32)
     }
 
     pub fn fsync(&self, fh: u64) -> Result<(), MountError> {
         let handles = self.handles.lock().expect("handle lock");
-        if let Some(OHandle::Upper { file }) = handles.get(&fh) {
+        if let Some(OHandle::Upper { file, .. }) = handles.get(&fh) {
             file.sync_all().map_err(io_err)?;
         }
         Ok(())
@@ -893,14 +1096,19 @@ impl OverlayFs {
                 .map_err(io_err)?;
         }
         self.clear_whiteout(&path);
+        self.record(&path, DirtyKind::Upsert);
         let meta = dest.symlink_metadata().map_err(io_err)?;
-        let (ino, _, _) = self.inodes.lock().expect("inode lock").intern(path, None);
+        let (ino, _, _) = self
+            .inodes
+            .lock()
+            .expect("inode lock")
+            .intern(path.clone(), None);
         let attr = self.attr_from_meta(ino, &meta);
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed);
         self.handles
             .lock()
             .expect("handle lock")
-            .insert(fh, OHandle::Upper { file });
+            .insert(fh, OHandle::Upper { file, path });
         Ok((attr, fh))
     }
 
@@ -917,6 +1125,7 @@ impl OverlayFs {
         let dest = self.upper_path(&path);
         std::fs::create_dir_all(&dest).map_err(io_err)?;
         self.clear_whiteout(&path);
+        self.record(&path, DirtyKind::Upsert);
         let meta = dest.symlink_metadata().map_err(io_err)?;
         let (ino, _, _) = self.inodes.lock().expect("inode lock").intern(path, None);
         Ok(self.attr_from_meta(ino, &meta))
@@ -944,6 +1153,7 @@ impl OverlayFs {
         let _ = std::fs::remove_file(&dest);
         std::os::unix::fs::symlink(target, &dest).map_err(io_err)?;
         self.clear_whiteout(&path);
+        self.record(&path, DirtyKind::Upsert);
         let meta = dest.symlink_metadata().map_err(io_err)?;
         let (ino, _, _) = self.inodes.lock().expect("inode lock").intern(path, None);
         Ok(self.attr_from_meta(ino, &meta))
@@ -963,6 +1173,7 @@ impl OverlayFs {
         } else if !had_upper {
             return Err(not_found());
         }
+        self.record(&path, DirtyKind::Delete);
         Ok(())
     }
 
@@ -987,6 +1198,7 @@ impl OverlayFs {
         if self.lower_has(parent_node.core_ino(), name).await {
             self.set_whiteout(&path)?;
         }
+        self.record(&path, DirtyKind::Delete);
         Ok(())
     }
 
@@ -1039,6 +1251,8 @@ impl OverlayFs {
             self.set_whiteout(&src)?;
         }
         self.clear_whiteout(&dst);
+        self.record(&src, DirtyKind::Delete);
+        self.record(&dst, DirtyKind::Upsert);
         // The destination path may already be interned (overwrite): its ino now serves upper
         // content automatically since attribute resolution is dynamic.
         Ok(())
@@ -1070,6 +1284,7 @@ impl OverlayFs {
                 std::fs::set_permissions(&dest, std::fs::Permissions::from_mode(perm))
                     .map_err(io_err)?;
             }
+            self.record(&node.path, DirtyKind::Upsert);
         }
         self.getattr(ino).await
     }
@@ -1159,6 +1374,8 @@ impl OverlayFs {
                 }
             }
         }
+        // The dirty index described the dropped state; sealers fast-forward to the watermark.
+        self.dirty.lock().expect("dirty lock").clear();
         Ok(affected)
     }
 }
