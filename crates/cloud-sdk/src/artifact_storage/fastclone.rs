@@ -215,8 +215,11 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
     // `(bytes, downloaded)` so the stats fold below stays order-independent. Artifacts are
     // independent immutable files with distinct cache paths, so a bounded number download
     // concurrently — wall-clock is set by the largest artifact, not the sum of all of them.
+    // `queued` dedups by cache path: concurrent jobs for one path would corrupt its shared
+    // `.partial` staging file, where the sequential loop just found the second copy cached.
     type Job<'a> = futures::future::BoxFuture<'a, Result<(u64, bool)>>;
     let mut jobs: Vec<Job<'_>> = Vec::new();
+    let mut queued: HashSet<PathBuf> = HashSet::new();
     for pack in &manifest.packs {
         let _storage_id = Oid::from_hex(&pack.pack_id)
             .with_context(|| format!("bad fast-clone pack id {}", pack.pack_id))?;
@@ -230,36 +233,43 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         let pack_url = resolve_artifact_url(&clean_base, &pack.pack_path)?;
         let idx_url = resolve_artifact_url(&clean_base, &pack.idx_path)?;
 
-        let (ctx_ref, pack_bytes) = (&ctx, pack.pack_bytes);
-        jobs.push(Box::pin(async move {
-            let downloaded =
-                ensure_cached_artifact(ctx_ref, pack_url, &pack_cache, pack_bytes, |path| {
-                    validate_pack_cache(path, pack_bytes, pack_hash)
-                })
-                .await?;
-            Ok((pack_bytes, downloaded))
-        }));
-        let (ctx_ref, idx_bytes) = (&ctx, pack.idx_bytes);
-        jobs.push(Box::pin(async move {
-            let downloaded =
-                ensure_cached_artifact(ctx_ref, idx_url, &idx_cache, idx_bytes, |path| {
-                    validate_idx_cache(path, idx_bytes, pack_hash)
-                })
-                .await?;
-            Ok((idx_bytes, downloaded))
-        }));
+        if queued.insert(pack_cache.clone()) {
+            let (ctx_ref, pack_bytes) = (&ctx, pack.pack_bytes);
+            jobs.push(Box::pin(async move {
+                let downloaded =
+                    ensure_cached_artifact(ctx_ref, pack_url, &pack_cache, pack_bytes, |path| {
+                        validate_pack_cache(path, pack_bytes, pack_hash)
+                    })
+                    .await?;
+                Ok((pack_bytes, downloaded))
+            }));
+        }
+        if queued.insert(idx_cache.clone()) {
+            let (ctx_ref, idx_bytes) = (&ctx, pack.idx_bytes);
+            jobs.push(Box::pin(async move {
+                let downloaded =
+                    ensure_cached_artifact(ctx_ref, idx_url, &idx_cache, idx_bytes, |path| {
+                        validate_idx_cache(path, idx_bytes, pack_hash)
+                    })
+                    .await?;
+                Ok((idx_bytes, downloaded))
+            }));
+        }
     }
     for blob in &manifest.large_blobs {
         let oid = Oid::from_hex(&blob.oid).with_context(|| format!("bad blob oid {}", blob.oid))?;
         stats.large_blob_bytes += blob.bytes;
         let blob_cache = cache_dir.join(format!("blob-{}.loose", blob.oid));
         let blob_url = resolve_artifact_url(&clean_base, &blob.path)?;
-        let (ctx_ref, blob_bytes) = (&ctx, blob.bytes);
-        jobs.push(Box::pin(async move {
-            let downloaded =
-                ensure_loose_blob_cached(ctx_ref, blob_url, &blob_cache, oid, blob_bytes).await?;
-            Ok((blob_bytes, downloaded))
-        }));
+        if queued.insert(blob_cache.clone()) {
+            let (ctx_ref, blob_bytes) = (&ctx, blob.bytes);
+            jobs.push(Box::pin(async move {
+                let downloaded =
+                    ensure_loose_blob_cached(ctx_ref, blob_url, &blob_cache, oid, blob_bytes)
+                        .await?;
+                Ok((blob_bytes, downloaded))
+            }));
+        }
     }
     {
         use futures::StreamExt as _;
@@ -317,12 +327,22 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
     // Serving-side maintenance structures: without a commit-graph the first `git log`/`blame` in
     // a large repo pays a full history walk, and a multi-pack install pays per-pack lookups until
     // a multi-pack-index exists. Both are derived data — a failure (old git, exotic pack) must
-    // not fail an otherwise-complete clone, so errors are recorded in stats and ignored.
-    let _ = run_git(
+    // not fail an otherwise-complete clone, so the commands are recorded in stats but their
+    // errors are ignored. `--changed-paths` (Bloom filters for path-scoped history) predates
+    // some deployed gits, so a plain commit-graph is the fallback.
+    if run_git(
         &mut stats,
         &opts.dest,
         &["commit-graph", "write", "--reachable", "--changed-paths"],
-    );
+    )
+    .is_err()
+    {
+        let _ = run_git(
+            &mut stats,
+            &opts.dest,
+            &["commit-graph", "write", "--reachable"],
+        );
+    }
     if manifest.packs.len() > 1 {
         let _ = run_git(&mut stats, &opts.dest, &["multi-pack-index", "write"]);
     }
