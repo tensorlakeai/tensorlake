@@ -48,6 +48,9 @@ pub struct PushFile {
     pub delete: bool,
 }
 
+// Variants get added (StablePrefix arrived after KnownOid, and more will follow); external
+// matches must carry a wildcard arm so additions stay semver-compatible on this published crate.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum PushSource {
     /// Read (twice: hash pass + upload pass) from the local filesystem.
@@ -63,6 +66,25 @@ pub enum PushSource {
     /// Requires a server advertising the `oid_files` ingest capability; `push_files` fails
     /// fast otherwise (an older server would ignore the field and publish an empty file).
     KnownOid(String),
+    /// The append fast path: a file whose leading bytes are byte-identical to a previous push
+    /// of the same content, described by that push's CDC chunk list. Only bytes past the
+    /// prefix are read and chunked, so a growing log seals in O(appended bytes) instead of
+    /// O(file size). The caller owns the stability claim (e.g. a mount overlay's write
+    /// extents prove no write touched the prefix) and must end the prefix on a boundary a
+    /// previous CDC pass produced (`PushReport::file_chunks`) — FastCDC restarts its state at
+    /// every boundary, so chunking resumed there matches a full re-chunk exactly.
+    ///
+    /// These files always take the dedup upload path (never tokened), and their
+    /// `PushReport::file_blob_oids` entry is empty: the blob oid is a whole-content hash this
+    /// path deliberately never computes — the server derives identity from commit-time
+    /// read-back of the chunk list. Falls back to a full read (as `Path`) when the file
+    /// shrank below the prefix, the prefix is empty, or the file is under the server's
+    /// small-file threshold.
+    StablePrefix {
+        path: PathBuf,
+        /// `(sha256, size)` covering exactly the file's leading bytes, in file order.
+        stable_chunks: Vec<([u8; 32], u32)>,
+    },
 }
 
 /// Progress events, emitted in order. Rendering (progress bars, logs) is the caller's concern.
@@ -118,6 +140,10 @@ pub struct PushOptions {
     /// When set, the commit publishes as a snapshot on this workspace's ref
     /// (`workspaces/{id}/snapshots`) instead of advancing `branch`; `branch`/`base` are ignored.
     pub workspace_snapshot: Option<String>,
+    /// Return every CDC-path file's chunk list in `PushReport::file_chunks`, so the caller can
+    /// hand them back as `PushSource::StablePrefix` prefixes on the next push of the same
+    /// content. Off by default: the lists cost memory proportional to the push.
+    pub collect_file_chunks: bool,
 }
 
 impl Default for PushOptions {
@@ -130,11 +156,15 @@ impl Default for PushOptions {
             upload_batch_bytes: 48 * 1024 * 1024,
             progress: None,
             workspace_snapshot: None,
+            collect_file_chunks: false,
         }
     }
 }
 
 /// Outcome of a push.
+// Fields get added (file_chunks most recently); non_exhaustive keeps external full-literal
+// construction/destructuring from breaking on this published crate's lockstep releases.
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize)]
 pub struct PushReport {
     pub commit: String,
@@ -148,8 +178,14 @@ pub struct PushReport {
     pub chunks_uploaded: usize,
     pub bytes_uploaded: u64,
     /// Client-computed git blob oid per file (`(repo_path, hex oid)`), from the chunk pass.
-    /// Deletes carry an empty oid.
+    /// Deletes carry an empty oid — as do `StablePrefix` fast-path files, which never hash
+    /// their full content.
     pub file_blob_oids: Vec<(String, String)>,
+    /// CDC chunk lists per content file (`(repo_path, [(sha256, size)])`), populated only
+    /// when `PushOptions::collect_file_chunks` is set. The raw material for the next push's
+    /// `PushSource::StablePrefix`. Never serialized: caller-local plumbing, not wire data.
+    #[serde(skip_serializing)]
+    pub file_chunks: Vec<(String, Vec<([u8; 32], u32)>)>,
 }
 
 #[derive(Deserialize)]
@@ -330,6 +366,9 @@ struct ChunkedFile {
     /// The file is a `PushSource::KnownOid` reference: commit by oid, move no bytes.
     known_oid: bool,
     blob_oid: String,
+    /// The chunk list came from the CDC chunker (not the whole-file small path), so it is
+    /// boundary-stable and reusable as a future `StablePrefix`.
+    cdc: bool,
 }
 
 /// One streaming pass over the source produces both the CDC chunk list and the git blob oid
@@ -344,16 +383,18 @@ fn chunk_source(
     let len: u64 = match source {
         PushSource::Path(p) => std::fs::metadata(p).map_err(io_err)?.len(),
         PushSource::Bytes(b) => b.len() as u64,
-        PushSource::KnownOid(_) => {
+        PushSource::KnownOid(_) | PushSource::StablePrefix { .. } => {
             return Err(SdkError::ClientError(
-                "known-oid sources carry no bytes to chunk".to_string(),
+                "source kind carries no full byte stream to chunk".to_string(),
             ));
         }
     };
     let reader: Box<dyn Read + Send + '_> = match source {
         PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
         PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.as_slice())),
-        PushSource::KnownOid(_) => unreachable!("guarded above"),
+        PushSource::KnownOid(_) | PushSource::StablePrefix { .. } => {
+            unreachable!("guarded above")
+        }
     };
     let mut blob_hasher = BlobOidHasher::new(len);
     let mut out = Vec::new();
@@ -364,6 +405,32 @@ fn chunk_source(
         out.push((hash, chunk.data.len() as u32));
     }
     Ok((out, blob_hasher.finalize_hex()))
+}
+
+/// The append fast path behind [`PushSource::StablePrefix`]: keep the caller's prefix chunk
+/// list verbatim and read only bytes past it. FastCDC restarts its rolling state at every
+/// emitted boundary, so resuming at a previous pass's boundary yields exactly the chunks a
+/// full re-chunk would from that offset. No blob oid comes out of this — the prefix is never
+/// read (see the variant's docs).
+fn chunk_stable_prefix(
+    path: &Path,
+    stable_chunks: &[([u8; 32], u32)],
+    min: usize,
+    avg: usize,
+    max: usize,
+) -> Result<Vec<([u8; 32], u32)>, SdkError> {
+    use std::io::Seek as _;
+    let stable_len: u64 = stable_chunks.iter().map(|(_, s)| *s as u64).sum();
+    let mut file = std::fs::File::open(path).map_err(io_err)?;
+    file.seek(std::io::SeekFrom::Start(stable_len))
+        .map_err(io_err)?;
+    let mut out = stable_chunks.to_vec();
+    for chunk in fastcdc::v2020::StreamCDC::new(file, min as u32, avg as u32, max as u32) {
+        let chunk = chunk.map_err(|e| SdkError::ClientError(format!("chunking failed: {e}")))?;
+        let hash: [u8; 32] = Sha256::digest(&chunk.data).into();
+        out.push((hash, chunk.data.len() as u32));
+    }
+    Ok(out)
 }
 
 fn io_err(e: std::io::Error) -> SdkError {
@@ -447,9 +514,9 @@ fn chunk_source_whole(source: &PushSource) -> Result<(Vec<([u8; 32], u32)>, Stri
             &owned
         }
         PushSource::Bytes(b) => b,
-        PushSource::KnownOid(_) => {
+        PushSource::KnownOid(_) | PushSource::StablePrefix { .. } => {
             return Err(SdkError::ClientError(
-                "known-oid sources carry no bytes to hash".to_string(),
+                "source kind carries no full byte stream to hash".to_string(),
             ));
         }
     };
@@ -466,6 +533,46 @@ fn chunk_source_whole(source: &PushSource) -> Result<(Vec<([u8; 32], u32)>, Stri
     Ok((chunks, blob.finalize_hex()))
 }
 
+/// A chunk-bearing source re-opened for the upload pass. Chunks are visited in file order;
+/// [`UploadReader::skip`] seeks past chunks the upload does not need, so a mostly-deduped file
+/// (an appended log especially) never re-reads the bytes the server already has.
+enum UploadReader<'a> {
+    File(std::fs::File),
+    // Borrowed, not cloned: pushes are zero-copy over in-memory sources.
+    Bytes(std::io::Cursor<&'a [u8]>),
+}
+
+impl<'a> UploadReader<'a> {
+    fn open(source: &'a PushSource) -> Result<UploadReader<'a>, SdkError> {
+        match source {
+            PushSource::Path(p) => Ok(UploadReader::File(std::fs::File::open(p).map_err(io_err)?)),
+            PushSource::StablePrefix { path, .. } => Ok(UploadReader::File(
+                std::fs::File::open(path).map_err(io_err)?,
+            )),
+            PushSource::Bytes(b) => Ok(UploadReader::Bytes(std::io::Cursor::new(b.as_slice()))),
+            PushSource::KnownOid(_) => Err(SdkError::ClientError(
+                "known-oid sources carry no bytes to upload".to_string(),
+            )),
+        }
+    }
+
+    fn read_exact(&mut self, buf: &mut [u8]) -> Result<(), SdkError> {
+        match self {
+            UploadReader::File(f) => f.read_exact(buf).map_err(io_err),
+            UploadReader::Bytes(c) => c.read_exact(buf).map_err(io_err),
+        }
+    }
+
+    fn skip(&mut self, n: u64) -> Result<(), SdkError> {
+        use std::io::Seek as _;
+        match self {
+            UploadReader::File(f) => f.seek(std::io::SeekFrom::Current(n as i64)).map(|_| ()),
+            UploadReader::Bytes(c) => c.seek(std::io::SeekFrom::Current(n as i64)).map(|_| ()),
+        }
+        .map_err(io_err)
+    }
+}
+
 /// Which files take the tokened (verified-at-upload) path: content-bearing files whose bytes the
 /// server mostly lacks. Mostly-present files stay on the dedup path (upload only missing chunks,
 /// accept commit-time read-back proportional to reused bytes); deletes and known-oid references
@@ -479,6 +586,11 @@ fn elect_tokened(
         .iter()
         .map(|file| {
             if file.delete || file.known_oid || file.chunks.is_empty() {
+                return false;
+            }
+            // Stable-prefix files never computed a blob oid (tokening's identity check needs
+            // one) and exist to avoid re-reading their prefix (tokening streams every byte).
+            if matches!(file.source, PushSource::StablePrefix { .. }) {
                 return false;
             }
             let total: u64 = file.chunks.iter().map(|(_, s)| *s as u64).sum();
@@ -697,6 +809,7 @@ impl ArtifactStorageClient {
                         delete: true,
                         known_oid: false,
                         blob_oid: String::new(),
+                        cdc: false,
                     });
                 }
                 if let PushSource::KnownOid(oid) = &f.source {
@@ -715,19 +828,50 @@ impl ArtifactStorageClient {
                         mode: f.mode,
                         delete: false,
                         known_oid: true,
+                        cdc: false,
                     });
                 }
+                let mut f = f;
                 let source_len: u64 = match &f.source {
                     PushSource::Path(p) => std::fs::metadata(p).map_err(io_err)?.len(),
                     PushSource::Bytes(b) => b.len() as u64,
+                    PushSource::StablePrefix { path, .. } => {
+                        std::fs::metadata(path).map_err(io_err)?.len()
+                    }
                     PushSource::KnownOid(_) => unreachable!("handled above"),
                 };
                 let whole = small_max > 0 && source_len < small_max;
+                // A stable prefix is only usable on the CDC path and only while the file still
+                // covers it; otherwise demote to a plain path so every downstream stage (small
+                // staging, tokened election, oid computation) treats the file normally.
+                if let PushSource::StablePrefix {
+                    path,
+                    stable_chunks,
+                } = &f.source
+                {
+                    let stable_len: u64 = stable_chunks.iter().map(|(_, s)| *s as u64).sum();
+                    if whole || stable_chunks.is_empty() || stable_len > source_len {
+                        f.source = PushSource::Path(path.clone());
+                    }
+                }
                 tokio::task::spawn_blocking(move || {
-                    let (chunks, blob_oid) = if whole {
-                        chunk_source_whole(&f.source)?
-                    } else {
-                        chunk_source(&f.source, min, avg, max)?
+                    let (chunks, blob_oid, cdc) = match &f.source {
+                        PushSource::StablePrefix {
+                            path,
+                            stable_chunks,
+                        } => (
+                            chunk_stable_prefix(path, stable_chunks, min, avg, max)?,
+                            String::new(),
+                            true,
+                        ),
+                        source if whole => {
+                            let (chunks, oid) = chunk_source_whole(source)?;
+                            (chunks, oid, false)
+                        }
+                        source => {
+                            let (chunks, oid) = chunk_source(source, min, avg, max)?;
+                            (chunks, oid, true)
+                        }
                     };
                     Ok(ChunkedFile {
                         repo_path: f.repo_path,
@@ -737,6 +881,7 @@ impl ArtifactStorageClient {
                         delete: false,
                         known_oid: false,
                         blob_oid,
+                        cdc,
                     })
                 })
                 .await
@@ -916,8 +1061,8 @@ impl ArtifactStorageClient {
                                 Box::new(std::fs::File::open(p).map_err(io_err)?)
                             }
                             PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.as_slice())),
-                            PushSource::KnownOid(_) => {
-                                unreachable!("known-oid files are not tokened")
+                            PushSource::KnownOid(_) | PushSource::StablePrefix { .. } => {
+                                unreachable!("never tokened")
                             }
                         };
                         for (hash, size) in &file.chunks {
@@ -985,7 +1130,9 @@ impl ArtifactStorageClient {
                     let mut reader: Box<dyn Read + Send + '_> = match &file.source {
                         PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
                         PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.as_slice())),
-                        PushSource::KnownOid(_) => unreachable!("known-oid files are not tokened"),
+                        PushSource::KnownOid(_) | PushSource::StablePrefix { .. } => {
+                            unreachable!("never tokened")
+                        }
                     };
                     // The whole file goes in ONE request when it fits a batch (required for
                     // small files on staging servers — they cannot resume — and one round trip
@@ -1092,17 +1239,14 @@ impl ArtifactStorageClient {
                 if file.chunks.is_empty() {
                     continue; // deletes and known-oid references carry no bytes
                 }
-                let mut reader: Box<dyn Read + Send + '_> = match &file.source {
-                    PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
-                    PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.as_slice())),
-                    PushSource::KnownOid(_) => unreachable!("no chunks to upload"),
-                };
+                let mut reader = UploadReader::open(&file.source)?;
                 for (hash, size) in &file.chunks {
-                    let mut data = vec![0u8; *size as usize];
-                    reader.read_exact(&mut data).map_err(io_err)?;
                     if !to_upload.remove(hash) {
+                        reader.skip(*size as u64)?;
                         continue;
                     }
+                    let mut data = vec![0u8; *size as usize];
+                    reader.read_exact(&mut data)?;
                     let zframe = zstd::encode_all(&data[..], STAGED_ZSTD_LEVEL)
                         .map_err(|e| SdkError::ClientError(format!("zstd encode: {e}")))?;
                     entries.push(StagedEntryWire {
@@ -1191,17 +1335,14 @@ impl ArtifactStorageClient {
                 if file.chunks.is_empty() {
                     continue; // deletes and known-oid references carry no bytes
                 }
-                let mut reader: Box<dyn Read + Send + '_> = match &file.source {
-                    PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
-                    PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.as_slice())),
-                    PushSource::KnownOid(_) => unreachable!("no chunks to upload"),
-                };
+                let mut reader = UploadReader::open(&file.source)?;
                 for (hash, size) in &file.chunks {
-                    let mut data = vec![0u8; *size as usize];
-                    reader.read_exact(&mut data).map_err(io_err)?;
                     if !to_upload.remove(hash) {
+                        reader.skip(*size as u64)?;
                         continue;
                     }
+                    let mut data = vec![0u8; *size as usize];
+                    reader.read_exact(&mut data)?;
                     frame.extend_from_slice(hash);
                     frame.extend_from_slice(&(data.len() as u32).to_be_bytes());
                     frame.extend_from_slice(&data);
@@ -1419,6 +1560,15 @@ impl ArtifactStorageClient {
                 chunks_total: distinct.len(),
                 chunks_uploaded: uploaded_chunks,
                 bytes_uploaded: uploaded_bytes,
+                file_chunks: if opts.collect_file_chunks {
+                    chunked
+                        .iter()
+                        .filter(|f| !f.delete && !f.known_oid && f.cdc)
+                        .map(|f| (f.repo_path.clone(), f.chunks.clone()))
+                        .collect()
+                } else {
+                    Vec::new()
+                },
                 file_blob_oids: chunked
                     .into_iter()
                     .map(|f| (f.repo_path, f.blob_oid))
@@ -1695,6 +1845,7 @@ mod tests {
     use super::*;
 
     fn cf(chunks: Vec<([u8; 32], u32)>, delete: bool, known_oid: bool) -> ChunkedFile {
+        let cdc = !delete && !known_oid && !chunks.is_empty();
         ChunkedFile {
             repo_path: "p".to_string(),
             source: PushSource::Bytes(Vec::new()),
@@ -1703,6 +1854,7 @@ mod tests {
             delete,
             known_oid,
             blob_oid: String::new(),
+            cdc,
         }
     }
 
@@ -2147,5 +2299,39 @@ mod tests {
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].1 as usize, data.len());
         assert_eq!(chunks[0].0, <[u8; 32]>::from(Sha256::digest(&data)));
+    }
+
+    /// The append fast path's whole premise: FastCDC restarts its state at every emitted
+    /// boundary, so chunking resumed at a previous pass's boundary yields exactly what a full
+    /// re-chunk of the grown file yields from that offset — the reused prefix plus the resumed
+    /// tail must equal the full pass chunk-for-chunk.
+    #[test]
+    fn stable_prefix_chunking_matches_a_full_rechunk() {
+        let (min, avg, max) = (256 * 1024, 1024 * 1024, 4 * 1024 * 1024);
+        let old: Vec<u8> = (0..5_000_000usize).map(|i| (i % 251) as u8).collect();
+        let appended: Vec<u8> = (0..2_000_000usize).map(|i| (i % 13) as u8).collect();
+        let mut grown = old.clone();
+        grown.extend_from_slice(&appended);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("grown.bin");
+        std::fs::write(&path, &grown).unwrap();
+
+        let (old_chunks, _) = chunk_source(&PushSource::Bytes(old), min, avg, max).unwrap();
+        // The sealer's contract: the final chunk of the previous pass was cut at the old EOF
+        // (not a content boundary) and is dropped before reuse.
+        let stable = &old_chunks[..old_chunks.len() - 1];
+        let resumed = chunk_stable_prefix(&path, stable, min, avg, max).unwrap();
+
+        let (full, _) = chunk_source(&PushSource::Path(path.clone()), min, avg, max).unwrap();
+        assert_eq!(
+            resumed, full,
+            "prefix + resumed tail must equal a full re-chunk exactly"
+        );
+        assert_eq!(
+            resumed.iter().map(|(_, s)| *s as u64).sum::<u64>(),
+            grown.len() as u64,
+            "chunks must cover the grown file exactly"
+        );
     }
 }
