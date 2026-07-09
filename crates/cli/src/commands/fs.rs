@@ -306,17 +306,24 @@ pub async fn rm(ctx: &CliContext, workspace_id: &str) -> Result<()> {
 /// app bundle attached to the CLI release. This installs it and walks the one manual step Apple
 /// keeps for the user (the System Settings toggle).
 pub async fn setup(from: Option<&str>, check_only: bool) -> Result<()> {
-    #[cfg(not(target_os = "macos"))]
-    {
-        let _ = (from, check_only);
-        Err(CliError::usage(
-            "tl fs setup installs the macOS file-system extension; Linux mounts use FUSE \
-             (/dev/fuse) and need no setup.",
-        ))
-    }
     #[cfg(target_os = "macos")]
     {
         setup_macos(from, check_only).await
+    }
+    #[cfg(target_os = "linux")]
+    {
+        // Nothing to install on Linux (mounts go straight to /dev/fuse); `setup` is purely a
+        // diagnosis command there, identical to `setup --check`.
+        let _ = (from, check_only);
+        diagnose_linux();
+        Ok(())
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    {
+        let _ = (from, check_only);
+        Err(CliError::usage(
+            "tl fs mounts are supported on Linux (FUSE) and macOS (FSKit) only.",
+        ))
     }
 }
 
@@ -324,6 +331,45 @@ pub async fn setup(from: Option<&str>, check_only: bool) -> Result<()> {
 const FSKIT_APP_PATH: &str = "/Applications/TLFS.app";
 #[cfg(target_os = "macos")]
 const FSKIT_MODULE_ID: &str = "ai.tensorlake.tlfs.fsmodule";
+/// FSKit floor. The TLFS extension is built against the macOS 26 SDK and its Info.plist sets
+/// LSMinimumSystemVersion 26.0 (see platform/macos/tlfs/); LaunchServices refuses to register a
+/// bundle whose minimum exceeds the running OS, so on anything older the extension silently
+/// never registers. Name the floor instead of leaving that as a dead-end registration loop.
+#[cfg(target_os = "macos")]
+const MACOS_MIN_MAJOR: u32 = 26;
+#[cfg(target_os = "macos")]
+const MACOS_MIN_NAME: &str = "macOS 26 (Tahoe)";
+
+/// The running macOS product version (`26.1`, …), via sw_vers. `None` if it can't be read.
+#[cfg(target_os = "macos")]
+fn macos_product_version() -> Option<String> {
+    let out = std::process::Command::new("sw_vers")
+        .arg("-productVersion")
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+/// `Ok(version_string)` when the OS meets the FSKit floor (or its version can't be parsed — we
+/// don't block on uncertainty; the mount would surface the real error). `Err(guidance)` when it
+/// is provably too old.
+#[cfg(target_os = "macos")]
+fn macos_version_supported() -> std::result::Result<String, String> {
+    let version = macos_product_version().unwrap_or_default();
+    match version
+        .split('.')
+        .next()
+        .and_then(|m| m.parse::<u32>().ok())
+    {
+        Some(major) if major < MACOS_MIN_MAJOR => Err(format!(
+            "tl fs on macOS needs {MACOS_MIN_NAME} or later on Apple Silicon; this machine is \
+             macOS {version}. The TLFS file-system extension uses FSKit APIs introduced in \
+             {MACOS_MIN_NAME}, so mounts cannot work on this OS."
+        )),
+        _ => Ok(version),
+    }
+}
 
 /// Official darwin release builds carry the notarized TLFS.app.zip inside the binary (see
 /// crates/cli/build.rs), so setup needs no network and cannot skew versions. Source builds
@@ -516,7 +562,22 @@ fn print_enable_instructions() {
 #[cfg(target_os = "macos")]
 async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
     let installed = Path::new(FSKIT_APP_PATH).exists();
+    let os = macos_version_supported();
     if check_only {
+        // OS floor first: when this fails nothing downstream can work, and it explains the
+        // otherwise-baffling "extension never registers" state on older macOS.
+        match &os {
+            Ok(version) => println!(
+                "{} macOS {} (meets the {MACOS_MIN_NAME} floor)",
+                style("os:").dim(),
+                if version.is_empty() {
+                    "(unknown)"
+                } else {
+                    version
+                },
+            ),
+            Err(msg) => println!("{} {}", style("os:").red().bold(), msg),
+        }
         let gates = FskitGates::read();
         println!(
             "{} {}",
@@ -550,10 +611,44 @@ async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
                          rewrites an allowlist it cannot parse)",
             }
         );
-        if !installed || !gates.ready() {
-            println!("Run `tl fs setup` to install and enable it.");
+        // A single verdict + the one next action, so the user never has to interpret the gates.
+        println!();
+        if os.is_err() {
+            println!(
+                "{} this macOS is too old for tl fs; nothing to do here.",
+                style("✗").red().bold()
+            );
+        } else if !installed {
+            println!(
+                "{} not installed. Run `tl fs setup` to install and enable it.",
+                style("✗").red().bold()
+            );
+        } else if gates.ready() {
+            println!(
+                "{} ready — mount with: tl fs mount <file-system> <path>",
+                style("✓").green().bold()
+            );
+        } else if gates.allowlisted() == Some(false) || gates.registration != Some('+') {
+            println!(
+                "{} installed but disabled. Run `tl fs setup` to enable it (or turn on TLFS \
+                 under System Settings -> General -> Login Items & Extensions -> File System \
+                 Extensions).",
+                style("✗").yellow().bold()
+            );
+        } else {
+            println!(
+                "{} the fskit allowlist is unreadable; enable TLFS under System Settings -> \
+                 General -> Login Items & Extensions -> File System Extensions.",
+                style("✗").yellow().bold()
+            );
         }
         return Ok(());
+    }
+
+    // Refuse to install on an OS that can never run the extension — otherwise the bundle lands
+    // in /Applications but never registers, and the user chases a phantom.
+    if let Err(msg) = os {
+        return Err(CliError::usage(msg));
     }
 
     // Stage the app bundle. Priority: an explicit --from override, then the copy embedded in
@@ -674,6 +769,11 @@ async fn install_app(app_src: &Path, already_installed: bool, staging: &Path) ->
 /// needs this — every other command talks to the server or to an existing mount's daemon.
 #[cfg(target_os = "macos")]
 async fn ensure_fskit_ready() -> Result<()> {
+    // OS floor first — on older macOS the extension can never register, so every gate below
+    // would read "not installed" and send the user in circles.
+    if let Err(msg) = macos_version_supported() {
+        return Err(CliError::usage(msg));
+    }
     let gates = FskitGates::read();
     if gates.ready() {
         return Ok(());
@@ -724,6 +824,12 @@ fn mount_owner() -> (u32, u32) {
 /// the invoking user, not root. Checking up front turns "mount daemon did not come up" into
 /// the exact missing piece.
 #[cfg(target_os = "linux")]
+fn helper_on_path(name: &str) -> bool {
+    std::env::var_os("PATH")
+        .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
+}
+
+#[cfg(target_os = "linux")]
 fn ensure_fuse_ready() -> Result<()> {
     if unsafe { libc::geteuid() } == 0 {
         let (uid, _) = mount_owner();
@@ -747,19 +853,16 @@ fn ensure_fuse_ready() -> Result<()> {
             "cannot open /dev/fuse ({e}); unprivileged mounts need it read/write.\nEither run \
              with sudo (works everywhere; the mount is presented to your user):\n  sudo tl fs \
              mount ...\nor enable unprivileged FUSE:\n  sudo chmod 666 /dev/fuse\n(the fuse3 \
-             package's udev rule persists this on most distros)"
+             package's udev rule persists this on most distros)\nRun `tl fs setup` for a full \
+             diagnosis."
         )));
     }
-    let helper_on_path = |name: &str| {
-        std::env::var_os("PATH")
-            .is_some_and(|path| std::env::split_paths(&path).any(|dir| dir.join(name).is_file()))
-    };
     if !helper_on_path("fusermount3") && !helper_on_path("fusermount") {
         return Err(CliError::usage(
             "fusermount3 not found; unprivileged FUSE mounts go through the setuid helper from \
              the fuse3 package.\nEither run with sudo (works everywhere; the mount is presented \
              to your user):\n  sudo tl fs mount ...\nor enable unprivileged FUSE:\n  sudo \
-             apt-get install fuse3",
+             apt-get install fuse3\nRun `tl fs setup` for a full diagnosis.",
         ));
     }
     if !Path::new("/etc/mtab").exists() {
@@ -770,6 +873,87 @@ fn ensure_fuse_ready() -> Result<()> {
         );
     }
     Ok(())
+}
+
+/// `tl fs setup` / `--check` on Linux: report each thing an unprivileged FUSE mount needs, then
+/// a single verdict + the exact fix. Running as root short-circuits — mount(2) is direct and
+/// needs none of the userspace plumbing.
+#[cfg(target_os = "linux")]
+fn diagnose_linux() {
+    if unsafe { libc::geteuid() } == 0 {
+        println!(
+            "{} running as root: mounts use mount(2) directly — no /dev/fuse permission, \
+             fusermount3, or fuse3 package required.",
+            style("✓").green().bold()
+        );
+        return;
+    }
+
+    let dev_fuse = Path::new("/dev/fuse");
+    let dev_exists = dev_fuse.exists();
+    let dev_openable = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(dev_fuse)
+        .is_ok();
+    println!(
+        "{} {}",
+        style("/dev/fuse:").dim(),
+        if !dev_exists {
+            "missing (kernel has no FUSE support?)".to_string()
+        } else if dev_openable {
+            "openable read/write".to_string()
+        } else {
+            "present but not readable/writable (needs mode 666, or use sudo)".to_string()
+        }
+    );
+
+    let helper = helper_on_path("fusermount3") || helper_on_path("fusermount");
+    println!(
+        "{} {}",
+        style("fusermount3:").dim(),
+        if helper {
+            "found (fuse3 installed)"
+        } else {
+            "not found (install the fuse3 package, or use sudo)"
+        }
+    );
+
+    let mtab = Path::new("/etc/mtab").exists();
+    println!(
+        "{} {}",
+        style("/etc/mtab:").dim(),
+        if mtab {
+            "present"
+        } else {
+            "missing (unprivileged unmount will fail without it)"
+        }
+    );
+
+    println!();
+    if dev_openable && helper && mtab {
+        println!(
+            "{} ready — mount with: tl fs mount <file-system> <path>",
+            style("✓").green().bold()
+        );
+    } else {
+        println!(
+            "{} unprivileged FUSE is not fully set up. Fastest path — run with sudo (works \
+             everywhere; the mount is presented to your user):",
+            style("✗").yellow().bold()
+        );
+        println!("  sudo tl fs mount <file-system> <path>");
+        println!("Or enable unprivileged FUSE once (needs root):");
+        if !helper {
+            println!("  sudo apt-get install fuse3   # provides the setuid fusermount3 helper");
+        }
+        if dev_exists && !dev_openable {
+            println!("  sudo chmod 666 /dev/fuse");
+        }
+        if !mtab {
+            println!("  sudo ln -s /proc/self/mounts /etc/mtab");
+        }
+    }
 }
 
 /// Unpack a TLFS app archive with ditto (keeps signatures/staple intact) and return the .app.

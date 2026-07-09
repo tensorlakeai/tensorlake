@@ -214,14 +214,15 @@ enum MountWriteMode {
 
 #[derive(Subcommand)]
 enum FsCommands {
-    /// Install or verify the TensorLake file-system extension (macOS; Linux needs no setup)
+    /// Install, enable, and diagnose the mount prerequisites (macOS FSKit extension; Linux
+    /// FUSE). Run it to fix mounts that won't come up, or with --check to only diagnose
     Setup {
         /// App bundle to install: a path to TLFS.app / a .zip, or an https URL. Defaults to
-        /// the release asset matching this CLI version
+        /// the release asset matching this CLI version (macOS only)
         #[arg(long)]
         from: Option<String>,
 
-        /// Report the install state without changing anything
+        /// Only diagnose and report; change nothing
         #[arg(long)]
         check: bool,
     },
