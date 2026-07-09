@@ -559,96 +559,111 @@ fn print_enable_instructions() {
         .status();
 }
 
+/// The macOS diagnosis: OS floor, install, and the two enablement gates, then one ✓/✗ verdict
+/// with the single next action. Printed by `--check`, and automatically whenever `setup` or a
+/// mount ends in a not-ready state — the report is never hidden behind a flag.
+#[cfg(target_os = "macos")]
+fn report_macos() {
+    let installed = Path::new(FSKIT_APP_PATH).exists();
+    let os = macos_version_supported();
+    // OS floor first: when this fails nothing downstream can work, and it explains the
+    // otherwise-baffling "extension never registers" state on older macOS.
+    match &os {
+        Ok(version) => println!(
+            "{} macOS {} (meets the {MACOS_MIN_NAME} floor)",
+            style("os:").dim(),
+            if version.is_empty() {
+                "(unknown)"
+            } else {
+                version
+            },
+        ),
+        Err(msg) => println!("{} {}", style("os:").red().bold(), msg),
+    }
+    let gates = FskitGates::read();
+    println!(
+        "{} {}",
+        style("app:").dim(),
+        if installed {
+            format!("installed at {FSKIT_APP_PATH}")
+        } else {
+            "not installed".to_string()
+        }
+    );
+    println!(
+        "{} {}",
+        style("extension:").dim(),
+        match gates.registration {
+            Some('+') => "registered and elected".to_string(),
+            Some('-') => "registered but not elected".to_string(),
+            Some(other) => format!("registered (pluginkit state {other:?})"),
+            None => "not registered".to_string(),
+        }
+    );
+    // The gate mount(8) actually cares about: pluginkit election alone still fails with
+    // "Module … is disabled!" until the id is in fskit_agent's allowlist.
+    println!(
+        "{} {}",
+        style("fskit allowlist:").dim(),
+        match gates.allowlisted() {
+            Some(true) => "enabled (mounts will work)",
+            Some(false) => "NOT enabled (mount -F will report the module disabled)",
+            None =>
+                "unreadable — manage the toggle in System Settings (the CLI never \
+                     rewrites an allowlist it cannot parse)",
+        }
+    );
+    // A single verdict + the one next action, so the user never has to interpret the gates.
+    println!();
+    if os.is_err() {
+        println!(
+            "{} this macOS is too old for tl fs; nothing to do here.",
+            style("✗").red().bold()
+        );
+    } else if !installed {
+        println!(
+            "{} not installed. Run `tl fs setup` to install and enable it.",
+            style("✗").red().bold()
+        );
+    } else if gates.ready() {
+        println!(
+            "{} ready — mount with: tl fs mount <file-system> <path>",
+            style("✓").green().bold()
+        );
+    } else if gates.allowlisted() == Some(false) || gates.registration != Some('+') {
+        println!(
+            "{} installed but disabled. Run `tl fs setup` to enable it (or turn on TLFS \
+             under System Settings -> General -> Login Items & Extensions -> File System \
+             Extensions).",
+            style("✗").yellow().bold()
+        );
+    } else {
+        println!(
+            "{} the fskit allowlist is unreadable; enable TLFS under System Settings -> \
+             General -> Login Items & Extensions -> File System Extensions.",
+            style("✗").yellow().bold()
+        );
+    }
+}
+
 #[cfg(target_os = "macos")]
 async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
     let installed = Path::new(FSKIT_APP_PATH).exists();
     let os = macos_version_supported();
     if check_only {
-        // OS floor first: when this fails nothing downstream can work, and it explains the
-        // otherwise-baffling "extension never registers" state on older macOS.
-        match &os {
-            Ok(version) => println!(
-                "{} macOS {} (meets the {MACOS_MIN_NAME} floor)",
-                style("os:").dim(),
-                if version.is_empty() {
-                    "(unknown)"
-                } else {
-                    version
-                },
-            ),
-            Err(msg) => println!("{} {}", style("os:").red().bold(), msg),
-        }
-        let gates = FskitGates::read();
-        println!(
-            "{} {}",
-            style("app:").dim(),
-            if installed {
-                format!("installed at {FSKIT_APP_PATH}")
-            } else {
-                "not installed".to_string()
-            }
-        );
-        println!(
-            "{} {}",
-            style("extension:").dim(),
-            match gates.registration {
-                Some('+') => "registered and elected".to_string(),
-                Some('-') => "registered but not elected".to_string(),
-                Some(other) => format!("registered (pluginkit state {other:?})"),
-                None => "not registered".to_string(),
-            }
-        );
-        // The gate mount(8) actually cares about: pluginkit election alone still fails with
-        // "Module … is disabled!" until the id is in fskit_agent's allowlist.
-        println!(
-            "{} {}",
-            style("fskit allowlist:").dim(),
-            match gates.allowlisted() {
-                Some(true) => "enabled (mounts will work)",
-                Some(false) => "NOT enabled (mount -F will report the module disabled)",
-                None =>
-                    "unreadable — manage the toggle in System Settings (the CLI never \
-                         rewrites an allowlist it cannot parse)",
-            }
-        );
-        // A single verdict + the one next action, so the user never has to interpret the gates.
-        println!();
-        if os.is_err() {
-            println!(
-                "{} this macOS is too old for tl fs; nothing to do here.",
-                style("✗").red().bold()
-            );
-        } else if !installed {
-            println!(
-                "{} not installed. Run `tl fs setup` to install and enable it.",
-                style("✗").red().bold()
-            );
-        } else if gates.ready() {
-            println!(
-                "{} ready — mount with: tl fs mount <file-system> <path>",
-                style("✓").green().bold()
-            );
-        } else if gates.allowlisted() == Some(false) || gates.registration != Some('+') {
-            println!(
-                "{} installed but disabled. Run `tl fs setup` to enable it (or turn on TLFS \
-                 under System Settings -> General -> Login Items & Extensions -> File System \
-                 Extensions).",
-                style("✗").yellow().bold()
-            );
-        } else {
-            println!(
-                "{} the fskit allowlist is unreadable; enable TLFS under System Settings -> \
-                 General -> Login Items & Extensions -> File System Extensions.",
-                style("✗").yellow().bold()
-            );
-        }
+        report_macos();
         return Ok(());
     }
 
     // Refuse to install on an OS that can never run the extension — otherwise the bundle lands
-    // in /Applications but never registers, and the user chases a phantom.
-    if let Err(msg) = os {
-        return Err(CliError::usage(msg));
+    // in /Applications but never registers, and the user chases a phantom. Show the full report
+    // so the version line is right there with the error.
+    if os.is_err() {
+        report_macos();
+        return Err(CliError::usage(
+            "this macOS is too old for the TensorLake file-system extension (see the report \
+             above)",
+        ));
     }
 
     // Stage the app bundle. Priority: an explicit --from override, then the copy embedded in
@@ -740,22 +755,17 @@ async fn install_app(app_src: &Path, already_installed: bool, staging: &Path) ->
         }
     };
     let _ = std::fs::remove_dir_all(staging);
-    if registered {
-        // Registered with LaunchServices; now flip the remaining gates (pluginkit election +
-        // fskit_agent's allowlist) automatically — the System Settings toggle is flaky on some
-        // machines, so it is the fallback rather than the happy path.
-        if enable_fskit_module().await {
-            println!("Extension registered and enabled.");
-            println!("Mount with: tl fs mount <file-system> <path>");
-        } else {
-            print_enable_instructions();
-        }
+    // Registered with LaunchServices; now flip the remaining gates (pluginkit election +
+    // fskit_agent's allowlist) automatically — the System Settings toggle is flaky on some
+    // machines, so it is the fallback rather than the happy path. On any not-ready outcome
+    // (didn't register, election/allowlist didn't take), print the full diagnosis inline —
+    // never make the user re-run with --check to find out what's wrong.
+    if registered && enable_fskit_module().await {
+        println!("Extension registered and enabled.");
+        println!("Mount with: tl fs mount <file-system> <path>");
     } else {
-        println!(
-            "{} the extension did not register; open {FSKIT_APP_PATH} once and re-run \
-             `tl fs setup --check`",
-            style("warning:").yellow()
-        );
+        println!();
+        report_macos();
         print_enable_instructions();
     }
     Ok(())
@@ -784,12 +794,15 @@ async fn ensure_fskit_ready() -> Result<()> {
              first",
             style("note:").yellow()
         );
+        // setup() prints its own full diagnosis on any not-ready outcome.
         setup(None, false).await?;
         if FskitGates::read().ready() {
             return Ok(());
         }
     } else {
-        print_enable_instructions();
+        // Installed but disabled — don't repair from a routine mount (that would override the
+        // user's Settings toggle); just show the full diagnosis so the fix is obvious.
+        report_macos();
     }
     Err(CliError::usage(
         "the TensorLake file-system extension is disabled; run `tl fs setup` to enable it \
@@ -844,25 +857,19 @@ fn ensure_fuse_ready() -> Result<()> {
         }
         return Ok(());
     }
-    if let Err(e) = std::fs::OpenOptions::new()
+    let dev_openable = std::fs::OpenOptions::new()
         .read(true)
         .write(true)
         .open("/dev/fuse")
-    {
-        return Err(CliError::usage(format!(
-            "cannot open /dev/fuse ({e}); unprivileged mounts need it read/write.\nEither run \
-             with sudo (works everywhere; the mount is presented to your user):\n  sudo tl fs \
-             mount ...\nor enable unprivileged FUSE:\n  sudo chmod 666 /dev/fuse\n(the fuse3 \
-             package's udev rule persists this on most distros)\nRun `tl fs setup` for a full \
-             diagnosis."
-        )));
-    }
-    if !helper_on_path("fusermount3") && !helper_on_path("fusermount") {
+        .is_ok();
+    let helper = helper_on_path("fusermount3") || helper_on_path("fusermount");
+    if !dev_openable || !helper {
+        // Print the full diagnosis inline (the same report as `tl fs setup`) so the exact
+        // missing pieces and their fixes are right here — never hidden behind a separate flag.
+        println!();
+        diagnose_linux();
         return Err(CliError::usage(
-            "fusermount3 not found; unprivileged FUSE mounts go through the setuid helper from \
-             the fuse3 package.\nEither run with sudo (works everywhere; the mount is presented \
-             to your user):\n  sudo tl fs mount ...\nor enable unprivileged FUSE:\n  sudo \
-             apt-get install fuse3\nRun `tl fs setup` for a full diagnosis.",
+            "the mount prerequisites are not set up (see the diagnosis above)",
         ));
     }
     if !Path::new("/etc/mtab").exists() {
