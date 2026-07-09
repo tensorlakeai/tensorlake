@@ -332,22 +332,21 @@ impl ArtifactStorageClient {
         repo: &str,
     ) -> Result<Traced<RepoInfo>, SdkError> {
         let credential = self.git_credential_for_repo(project_id, repo).await?;
-        let branches = self
-            .list_branches_with_credential(
+        // Independent reads — issue them concurrently.
+        let (branches, refs) = tokio::try_join!(
+            self.list_branches_with_credential(
+                project_id,
+                repo,
+                &credential.git_username,
+                &credential.token,
+            ),
+            self.list_refs_with_credential(
                 project_id,
                 repo,
                 &credential.git_username,
                 &credential.token,
             )
-            .await?;
-        let refs = self
-            .list_refs_with_credential(
-                project_id,
-                repo,
-                &credential.git_username,
-                &credential.token,
-            )
-            .await?;
+        )?;
         let trace_id = refs.trace_id.clone();
         let branches = branches.into_inner();
         let refs = refs.into_inner();

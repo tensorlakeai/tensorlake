@@ -210,6 +210,16 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         large_blobs: manifest.large_blobs.len(),
         ..Default::default()
     };
+
+    // One download job per artifact (pack, idx, or loose blob), each yielding
+    // `(bytes, downloaded)` so the stats fold below stays order-independent. Artifacts are
+    // independent immutable files with distinct cache paths, so a bounded number download
+    // concurrently — wall-clock is set by the largest artifact, not the sum of all of them.
+    // `queued` dedups by cache path: concurrent jobs for one path would corrupt its shared
+    // `.partial` staging file, where the sequential loop just found the second copy cached.
+    type Job<'a> = futures::future::BoxFuture<'a, Result<(u64, bool)>>;
+    let mut jobs: Vec<Job<'_>> = Vec::new();
+    let mut queued: HashSet<PathBuf> = HashSet::new();
     for pack in &manifest.packs {
         let _storage_id = Oid::from_hex(&pack.pack_id)
             .with_context(|| format!("bad fast-clone pack id {}", pack.pack_id))?;
@@ -223,23 +233,27 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         let pack_url = resolve_artifact_url(&clean_base, &pack.pack_path)?;
         let idx_url = resolve_artifact_url(&clean_base, &pack.idx_path)?;
 
-        if ensure_cached_artifact(&ctx, pack_url, &pack_cache, pack.pack_bytes, |path| {
-            validate_pack_cache(path, pack.pack_bytes, pack_hash)
-        })
-        .await?
-        {
-            stats.downloaded_bytes += pack.pack_bytes;
-        } else {
-            stats.reused_bytes += pack.pack_bytes;
+        if queued.insert(pack_cache.clone()) {
+            let (ctx_ref, pack_bytes) = (&ctx, pack.pack_bytes);
+            jobs.push(Box::pin(async move {
+                let downloaded =
+                    ensure_cached_artifact(ctx_ref, pack_url, &pack_cache, pack_bytes, |path| {
+                        validate_pack_cache(path, pack_bytes, pack_hash)
+                    })
+                    .await?;
+                Ok((pack_bytes, downloaded))
+            }));
         }
-        if ensure_cached_artifact(&ctx, idx_url, &idx_cache, pack.idx_bytes, |path| {
-            validate_idx_cache(path, pack.idx_bytes, pack_hash)
-        })
-        .await?
-        {
-            stats.downloaded_bytes += pack.idx_bytes;
-        } else {
-            stats.reused_bytes += pack.idx_bytes;
+        if queued.insert(idx_cache.clone()) {
+            let (ctx_ref, idx_bytes) = (&ctx, pack.idx_bytes);
+            jobs.push(Box::pin(async move {
+                let downloaded =
+                    ensure_cached_artifact(ctx_ref, idx_url, &idx_cache, idx_bytes, |path| {
+                        validate_idx_cache(path, idx_bytes, pack_hash)
+                    })
+                    .await?;
+                Ok((idx_bytes, downloaded))
+            }));
         }
     }
     for blob in &manifest.large_blobs {
@@ -247,10 +261,27 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         stats.large_blob_bytes += blob.bytes;
         let blob_cache = cache_dir.join(format!("blob-{}.loose", blob.oid));
         let blob_url = resolve_artifact_url(&clean_base, &blob.path)?;
-        if ensure_loose_blob_cached(&ctx, blob_url, &blob_cache, oid, blob.bytes).await? {
-            stats.downloaded_bytes += blob.bytes;
-        } else {
-            stats.reused_bytes += blob.bytes;
+        if queued.insert(blob_cache.clone()) {
+            let (ctx_ref, blob_bytes) = (&ctx, blob.bytes);
+            jobs.push(Box::pin(async move {
+                let downloaded =
+                    ensure_loose_blob_cached(ctx_ref, blob_url, &blob_cache, oid, blob_bytes)
+                        .await?;
+                Ok((blob_bytes, downloaded))
+            }));
+        }
+    }
+    {
+        use futures::StreamExt as _;
+        const DOWNLOADS_IN_FLIGHT: usize = 4;
+        let mut results = futures::stream::iter(jobs).buffer_unordered(DOWNLOADS_IN_FLIGHT);
+        while let Some(done) = results.next().await {
+            let (bytes, downloaded) = done?;
+            if downloaded {
+                stats.downloaded_bytes += bytes;
+            } else {
+                stats.reused_bytes += bytes;
+            }
         }
     }
 
@@ -292,6 +323,28 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
 
     if opts.checkout && !manifest.refs.is_empty() {
         run_git(&mut stats, &opts.dest, &["reset", "--hard", "-q", "HEAD"])?;
+    }
+    // Serving-side maintenance structures: without a commit-graph the first `git log`/`blame` in
+    // a large repo pays a full history walk, and a multi-pack install pays per-pack lookups until
+    // a multi-pack-index exists. Both are derived data — a failure (old git, exotic pack) must
+    // not fail an otherwise-complete clone, so the commands are recorded in stats but their
+    // errors are ignored. `--changed-paths` (Bloom filters for path-scoped history) predates
+    // some deployed gits, so a plain commit-graph is the fallback.
+    if run_git(
+        &mut stats,
+        &opts.dest,
+        &["commit-graph", "write", "--reachable", "--changed-paths"],
+    )
+    .is_err()
+    {
+        let _ = run_git(
+            &mut stats,
+            &opts.dest,
+            &["commit-graph", "write", "--reachable"],
+        );
+    }
+    if manifest.packs.len() > 1 {
+        let _ = run_git(&mut stats, &opts.dest, &["multi-pack-index", "write"]);
     }
     if let Some(max_bytes) = opts.cache_max_bytes {
         let protected = protected_cache_entries(&manifest)?;
@@ -1259,5 +1312,116 @@ mod tests {
 
         assert!(downloaded);
         assert_eq!(std::fs::read(&dest).unwrap(), payload);
+    }
+
+    /// Live integration: push through the ingest API, then fast-clone the repo and prove the
+    /// installed checkout is a working Git repo with the maintenance structures in place
+    /// (commit-graph always; multi-pack-index only for multi-pack installs).
+    ///
+    /// `cargo run -p gsvc-server` in an artifact_storage checkout, then
+    /// `cargo test -p tensorlake --features git-clone --lib fast_clone_roundtrip -- --ignored`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires a local artifact-storage server on 127.0.0.1:8080 and git on PATH"]
+    async fn fast_clone_roundtrip_against_local_server() {
+        use crate::artifact_storage::ArtifactStorageClient;
+        use crate::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
+
+        const BASE: &str = "http://127.0.0.1:8080";
+        if std::net::TcpStream::connect_timeout(
+            &"127.0.0.1:8080".parse().unwrap(),
+            std::time::Duration::from_millis(500),
+        )
+        .is_err()
+        {
+            eprintln!("skipping: no local artifact-storage server");
+            return;
+        }
+        let client = crate::ClientBuilder::new(BASE)
+            .bearer_token("dummy")
+            .build()
+            .unwrap();
+        let sdk = ArtifactStorageClient::new(client, BASE).unwrap();
+        let repo = format!(
+            "fastclone-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sdk.create_repo_with_credential("fastclonetest", &repo, None, "t", "devtoken")
+            .await
+            .unwrap();
+        let salt = repo.as_bytes().to_vec();
+        let payload: Vec<u8> = (0..512 * 1024usize)
+            .map(|i| (i as u8).wrapping_mul(7).wrapping_add(salt[i % salt.len()]))
+            .collect();
+        sdk.push_files(
+            "fastclonetest",
+            &repo,
+            "t",
+            "devtoken",
+            vec![
+                PushFile {
+                    repo_path: "README.md".to_string(),
+                    source: PushSource::Bytes(b"fast clone roundtrip\n".to_vec()),
+                    mode: None,
+                    delete: false,
+                },
+                PushFile {
+                    repo_path: "data.bin".to_string(),
+                    source: PushSource::Bytes(payload.clone()),
+                    mode: None,
+                    delete: false,
+                },
+            ],
+            PushOptions {
+                message: "seed".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        let tmp = tempfile::tempdir().unwrap();
+        let dest = tmp.path().join("checkout");
+        let stats = fast_clone(FastCloneOptions {
+            repo_url: format!("{BASE}/fastclonetest/{repo}"),
+            dest: dest.clone(),
+            cache_dir: Some(tmp.path().join("cache")),
+            cache_max_bytes: None,
+            credential: Some(BasicAuth {
+                username: "t".to_string(),
+                password: Some("devtoken".to_string()),
+            }),
+            checkout: true,
+            progress: None,
+        })
+        .await
+        .unwrap();
+        assert!(stats.packs >= 1);
+        assert_eq!(std::fs::read(dest.join("data.bin")).unwrap(), payload);
+
+        // The maintenance structures land best-effort; with a stock git on PATH they must exist.
+        let objects = dest.join(".git/objects");
+        assert!(
+            objects.join("info/commit-graph").exists()
+                || objects.join("info/commit-graphs").exists(),
+            "fast clone should write a commit-graph"
+        );
+        if stats.packs > 1 {
+            assert!(
+                objects.join("pack/multi-pack-index").exists(),
+                "multi-pack installs should write a multi-pack-index"
+            );
+        }
+
+        // The checkout is an ordinary git repo: history walks work.
+        let log = Command::new("git")
+            .args(["log", "--oneline"])
+            .current_dir(&dest)
+            .output()
+            .unwrap();
+        assert!(log.status.success());
+        assert!(!log.stdout.is_empty());
     }
 }
