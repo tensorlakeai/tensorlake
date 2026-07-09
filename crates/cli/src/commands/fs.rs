@@ -679,7 +679,10 @@ async fn enable_fskit_module() -> bool {
         && !ids.iter().any(|id| id == FSKIT_MODULE_ID)
     {
         ids.push(FSKIT_MODULE_ID.to_string());
-        let _ = write_enabled_modules(&ids);
+        // A failed write means the allowlist gate can never open; don't wait out the poll.
+        if !write_enabled_modules(&ids) {
+            return false;
+        }
     }
     // The election is asynchronous; poll the on-disk gates briefly instead of trusting our
     // own writes.
