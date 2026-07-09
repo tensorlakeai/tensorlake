@@ -625,11 +625,53 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         });
     }
 
+    // ^C / SIGTERM: detach before dying. Without this the volume outlives the process — on
+    // macOS the FSKit extension proxies to this daemon over TCP, so the kernel keeps serving
+    // the mountpoint as ECONNREFUSED forever (and a killed FUSE daemon leaves an ENOTCONN
+    // mount on Linux). Mirrors the `shutdown` op: unmount first, refuse to die on a busy
+    // volume — a second signal force-exits, accepting the zombie (`tl fs unmount` clears it).
+    {
+        let mountpoint = mountpoint.clone();
+        let sock_path = sock_path.clone();
+        let pid_path = pid_file(state_dir);
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let (Ok(mut int), Ok(mut term)) = (
+                signal(SignalKind::interrupt()),
+                signal(SignalKind::terminate()),
+            ) else {
+                return;
+            };
+            tokio::select! { _ = int.recv() => {}, _ = term.recv() => {} }
+            eprintln!("unmounting {} ...", mountpoint.display());
+            if unmount(&mountpoint).await {
+                // The pid file dies with us: left behind, a recycled pid would make a later
+                // `tl fs unmount` wait on (and then SIGKILL) an unrelated process.
+                let _ = std::fs::remove_file(&sock_path);
+                let _ = std::fs::remove_file(&pid_path);
+                std::process::exit(0);
+            }
+            eprintln!(
+                "the volume is busy (something is still using it); close shells and editors \
+                 inside it, or send the signal again to exit anyway (the volume then stays \
+                 attached until `tl fs unmount {}`)",
+                mountpoint.display()
+            );
+            tokio::select! { _ = int.recv() => {}, _ = term.recv() => {} }
+            std::process::exit(1);
+        });
+    }
+
     // Serve until the kernel lets go of the mountpoint.
     let result = served.wait().await;
     let _ = std::fs::remove_file(&sock_path);
     result
 }
+
+/// fskit_agent's "Module … is disabled!" answer, matched in mount(8) output here and by the
+/// setup probe in fs.rs — one marker so the two verdicts can never drift apart.
+#[cfg(target_os = "macos")]
+pub(crate) const MODULE_DISABLED_MARKER: &str = "is disabled";
 
 /// A pushed file's CDC chunk list, as returned in `PushReport::file_chunks`.
 #[cfg(unix)]
@@ -921,7 +963,7 @@ async fn attach(
     // classic macOS unmount-delayer), no .DS_Store turds in workspaces. Advisory for now —
     // fskitd on 26.5 accepts but does not apply it (mount table shows no nobrowse; measured) —
     // kept so the behavior arrives for free when FSKit honors it.
-    let status = tokio::process::Command::new("/sbin/mount")
+    let out = tokio::process::Command::new("/sbin/mount")
         .arg("-F")
         .arg("-t")
         .arg("tlfs")
@@ -929,14 +971,27 @@ async fn attach(
         .arg("nobrowse")
         .arg(&url)
         .arg(mountpoint)
-        .status()
+        .output()
         .await?;
-    if !status.success() {
-        return Err(CliError::usage(
+    if !out.status.success() {
+        // mount's own words first (output() swallowed the inherited stderr), then guidance
+        // matched to the failure: "Module … is disabled!" is fskit_agent answering from the
+        // allowlist snapshot it took at launch — enablement written after that launch is
+        // invisible to it until it restarts, which `tl fs setup` now does.
+        let err = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        eprint!("{err}");
+        return Err(CliError::usage(if err.contains(MODULE_DISABLED_MARKER) {
+            "mount(8) failed: the extension is enabled on disk, but the running fskit_agent \
+             predates the enablement. Re-run `tl fs setup` (it restarts the agent), or reboot."
+        } else {
             "mount(8) failed: is the TensorLake file-system extension installed and enabled? \
              Run `tl fs setup`, then enable it under System Settings -> General -> Login Items \
-             & Extensions -> File System Extensions.",
-        ));
+             & Extensions -> File System Extensions."
+        }));
     }
     Ok((
         Attached::FsKit {
@@ -946,18 +1001,18 @@ async fn attach(
     ))
 }
 
+/// The kernel mount table, copied with MNT_NOWAIT instead of statfs(mountpoint): statfs
+/// calls into the filesystem and BLOCKS (uninterruptibly) while an unmount of it is in
+/// flight — the exact moment these questions get asked. Measured: a busy-volume unmount
+/// wedged the daemon in statfs for 50 minutes. getfsstat with MNT_NOWAIT only copies
+/// cached table entries and never touches any fs. The one copy of this unsafe buffer dance:
+/// every mount-table question (is our volume attached? is anything attached here? is
+/// fskit_agent serving something?) filters this snapshot.
 #[cfg(target_os = "macos")]
-fn is_mounted(mountpoint: &Path) -> bool {
-    // Read the kernel's mount table with MNT_NOWAIT instead of statfs(mountpoint): statfs
-    // calls into the filesystem and BLOCKS (uninterruptibly) while an unmount of it is in
-    // flight — the exact moment this question gets asked. Measured: a busy-volume unmount
-    // wedged the daemon in statfs for 50 minutes. getfsstat with MNT_NOWAIT only copies
-    // cached table entries and never touches the fs.
-    use std::os::unix::ffi::OsStrExt;
-    let want = mountpoint.as_os_str().as_bytes();
+pub(crate) fn mount_table() -> Vec<libc::statfs> {
     let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
     if count <= 0 {
-        return false;
+        return Vec::new();
     }
     // Room for a few mounts appearing between the two calls; the kernel truncates to fit.
     let capacity = count as usize + 8;
@@ -965,10 +1020,26 @@ fn is_mounted(mountpoint: &Path) -> bool {
     let bufsize = (capacity * std::mem::size_of::<libc::statfs>()) as libc::c_int;
     let written = unsafe { libc::getfsstat(stats.as_mut_ptr(), bufsize, libc::MNT_NOWAIT) };
     if written <= 0 {
-        return false;
+        return Vec::new();
     }
     unsafe { stats.set_len(written as usize) };
-    stats.iter().any(|sfs| {
+    stats
+}
+
+/// Whether any volume (any filesystem type) is attached at `mountpoint`.
+#[cfg(target_os = "macos")]
+pub(crate) fn mounted_at(mountpoint: &str) -> bool {
+    mount_table().iter().any(|sfs| {
+        let name = unsafe { std::ffi::CStr::from_ptr(sfs.f_mntonname.as_ptr()) };
+        name.to_bytes() == mountpoint.as_bytes()
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn is_mounted(mountpoint: &Path) -> bool {
+    use std::os::unix::ffi::OsStrExt;
+    let want = mountpoint.as_os_str().as_bytes();
+    mount_table().iter().any(|sfs| {
         let name = unsafe { std::ffi::CStr::from_ptr(sfs.f_mntonname.as_ptr()) };
         let fstype = unsafe { std::ffi::CStr::from_ptr(sfs.f_fstypename.as_ptr()) };
         fstype.to_bytes() == b"tlfs" && name.to_bytes() == want
@@ -980,7 +1051,7 @@ fn is_mounted(mountpoint: &Path) -> bool {
 /// and the mount table (never the filesystem itself — see is_mounted) is the arbiter on every
 /// non-success path. Returns whether the volume is actually detached.
 #[cfg(unix)]
-async fn unmount(mountpoint: &Path) -> bool {
+pub(crate) async fn unmount(mountpoint: &Path) -> bool {
     // fuse3 systems ship only `fusermount3`, fuse2 systems only `fusermount` — try in that
     // order (measured: Ubuntu 24.04's fuse3 has no `fusermount` compat name, and the old
     // single-name spawn failed instantly, misreporting a free volume as busy). A root daemon
@@ -1033,9 +1104,13 @@ pub(crate) fn still_mounted(mountpoint: &Path) -> bool {
         let path = mountpoint.to_string_lossy();
         std::fs::read_to_string("/proc/self/mounts")
             .map(|mounts| {
-                mounts
-                    .lines()
-                    .any(|line| line.split_whitespace().nth(1) == Some(path.as_ref()))
+                mounts.lines().any(|line| {
+                    // <source> <mountpoint> <fstype> …; ours are `tlfs <path> fuse …`. The
+                    // source check is what keeps `tl fs unmount` from ever treating someone
+                    // else's sshfs/rclone mount at the path as one of ours.
+                    let mut fields = line.split_whitespace();
+                    fields.next() == Some("tlfs") && fields.next() == Some(path.as_ref())
+                })
             })
             .unwrap_or(false)
     }
