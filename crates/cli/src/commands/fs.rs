@@ -355,12 +355,153 @@ fn appex_registration() -> Option<char> {
     String::from_utf8_lossy(&out.stdout).trim().chars().next()
 }
 
+/// fskit_agent's per-user allowlist — the third enablement gate, and the one the System
+/// Settings "File System Extensions" toggle actually writes. A plain array of bundle ids.
+/// `None` when the home directory is unresolvable (never fabricate a relative path: a plist
+/// written under `./Library/...` is one fskit_agent will never read).
+#[cfg(target_os = "macos")]
+fn fskit_enabled_modules_path() -> Option<PathBuf> {
+    Some(
+        dirs::home_dir()?
+            .join("Library/Group Containers/group.com.apple.fskit.settings/enabledModules.plist"),
+    )
+}
+
+/// The allowlist's contents. `Some(vec![])` for a missing file (a fresh machine — safe to
+/// create); `None` when the file exists but cannot be read or parsed as a string array.
+/// Callers must NEVER rewrite it in the `None` state: the file is shared with every other
+/// FSKit extension on the machine, and clobbering it from a bad read would disable them all.
+#[cfg(target_os = "macos")]
+fn fskit_enabled_modules() -> Option<Vec<String>> {
+    let path = fskit_enabled_modules_path()?;
+    if !path.exists() {
+        return Some(Vec::new());
+    }
+    let out = std::process::Command::new("plutil")
+        .args(["-convert", "json", "-o", "-"])
+        .arg(&path)
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    serde_json::from_slice(&out.stdout).ok()
+}
+
+/// The gates between an installed app bundle and a serving mount. pluginkit's `+` is
+/// necessary but NOT sufficient — measured: an elected module still fails `mount -F` with
+/// "Module … is disabled!" until its id appears in the allowlist. Every caller judges
+/// readiness through this one snapshot so the criteria cannot drift apart.
+#[cfg(target_os = "macos")]
+struct FskitGates {
+    /// pluginkit registration/election state (`'+'` = elected, `'-'` = ignored,
+    /// `None` = unregistered).
+    registration: Option<char>,
+    /// The allowlist, when it read cleanly.
+    modules: Option<Vec<String>>,
+}
+
+#[cfg(target_os = "macos")]
+impl FskitGates {
+    fn read() -> FskitGates {
+        FskitGates {
+            registration: appex_registration(),
+            modules: fskit_enabled_modules(),
+        }
+    }
+
+    /// `Some(bool)`: the allowlist read cleanly and does/doesn't contain the module.
+    /// `None`: unreadable — only System Settings can manage it safely.
+    fn allowlisted(&self) -> Option<bool> {
+        self.modules
+            .as_ref()
+            .map(|ids| ids.iter().any(|id| id == FSKIT_MODULE_ID))
+    }
+
+    /// Both gates verifiably open: mount(8) will be served.
+    fn ready(&self) -> bool {
+        self.registration == Some('+') && self.allowlisted() == Some(true)
+    }
+}
+
+/// Rewrite the allowlist: plutil converts our JSON from stdin straight onto the plist path —
+/// no temp file, no cleanup.
+#[cfg(target_os = "macos")]
+fn write_enabled_modules(ids: &[String]) -> bool {
+    let Some(path) = fskit_enabled_modules_path() else {
+        return false;
+    };
+    let write = || -> std::io::Result<bool> {
+        use std::io::Write as _;
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut child = std::process::Command::new("plutil")
+            .args(["-convert", "xml1", "-", "-o"])
+            .arg(&path)
+            .stdin(std::process::Stdio::piped())
+            .spawn()?;
+        child
+            .stdin
+            .take()
+            .expect("stdin piped above")
+            .write_all(&serde_json::to_vec(ids)?)?;
+        Ok(child.wait()?.success())
+    };
+    write().unwrap_or(false)
+}
+
+/// Best-effort CLI substitute for the System Settings toggle, which is flaky on some machines
+/// (measured: the pane failed to even show the FSKit entry after an OS upgrade). Elect the
+/// plugin if needed, append the id to the allowlist (never rewriting one that didn't parse),
+/// nudge fskit_agent to re-read, then settle on the honest gate state — success means the
+/// gates are verifiably open, not that our writes landed. Settings remains the fallback.
+///
+/// Deliberately invoked only from `tl fs setup` and the fresh-install bootstrap: this mutates
+/// the same state the Settings toggle owns, so it runs on explicit user intent, never as a
+/// side effect of a routine mount.
+#[cfg(target_os = "macos")]
+async fn enable_fskit_module() -> bool {
+    let gates = FskitGates::read();
+    if gates.ready() {
+        return true;
+    }
+    if gates.registration != Some('+') {
+        let _ = std::process::Command::new("pluginkit")
+            .args(["-e", "use", "-i", FSKIT_MODULE_ID])
+            .status();
+    }
+    if let Some(mut ids) = gates.modules
+        && !ids.iter().any(|id| id == FSKIT_MODULE_ID)
+    {
+        ids.push(FSKIT_MODULE_ID.to_string());
+        if write_enabled_modules(&ids) {
+            // fskit_agent only re-reads the allowlist on launch; nudge it gently — it serves
+            // every FSKit volume on the machine (other vendors' modules, FSKit-based USB
+            // media), so SIGTERM lets it quiesce, never SIGKILL. It relaunches on demand.
+            let _ = std::process::Command::new("pkill")
+                .args(["-x", "fskit_agent"])
+                .status();
+        }
+    }
+    // The election and the agent relaunch are asynchronous; poll the real state briefly
+    // instead of trusting our own writes.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+    loop {
+        if FskitGates::read().ready() {
+            return true;
+        }
+        if std::time::Instant::now() >= deadline {
+            return false;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+    }
+}
+
 #[cfg(target_os = "macos")]
 fn print_enable_instructions() {
     println!();
     println!(
         "{}",
-        style("One manual step remains (Apple requires the user to flip it):").bold()
+        style("One manual step remains — enable the extension in System Settings:").bold()
     );
     println!("  System Settings -> General -> Login Items & Extensions -> File System");
     println!("  Extensions -> enable {}", style("TLFS").bold());
@@ -375,8 +516,8 @@ fn print_enable_instructions() {
 #[cfg(target_os = "macos")]
 async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
     let installed = Path::new(FSKIT_APP_PATH).exists();
-    let registration = appex_registration();
     if check_only {
+        let gates = FskitGates::read();
         println!(
             "{} {}",
             style("app:").dim(),
@@ -389,14 +530,27 @@ async fn setup_macos(from: Option<&str>, check_only: bool) -> Result<()> {
         println!(
             "{} {}",
             style("extension:").dim(),
-            match registration {
-                Some('+') => "registered and enabled".to_string(),
-                Some('-') => "registered but not enabled".to_string(),
+            match gates.registration {
+                Some('+') => "registered and elected".to_string(),
+                Some('-') => "registered but not elected".to_string(),
                 Some(other) => format!("registered (pluginkit state {other:?})"),
                 None => "not registered".to_string(),
             }
         );
-        if !installed || registration != Some('+') {
+        // The gate mount(8) actually cares about: pluginkit election alone still fails with
+        // "Module … is disabled!" until the id is in fskit_agent's allowlist.
+        println!(
+            "{} {}",
+            style("fskit allowlist:").dim(),
+            match gates.allowlisted() {
+                Some(true) => "enabled (mounts will work)",
+                Some(false) => "NOT enabled (mount -F will report the module disabled)",
+                None =>
+                    "unreadable — manage the toggle in System Settings (the CLI never \
+                         rewrites an allowlist it cannot parse)",
+            }
+        );
+        if !installed || !gates.ready() {
             println!("Run `tl fs setup` to install and enable it.");
         }
         return Ok(());
@@ -481,65 +635,66 @@ async fn install_app(app_src: &Path, already_installed: bool, staging: &Path) ->
         .args(["-g", "-j", FSKIT_APP_PATH])
         .status();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(15);
-    let registration = loop {
+    let registered = loop {
         match appex_registration() {
-            Some(state) => break Some(state),
+            Some(_) => break true,
             None if std::time::Instant::now() < deadline => {
                 tokio::time::sleep(std::time::Duration::from_millis(500)).await;
             }
-            None => break None,
+            None => break false,
         }
     };
     let _ = std::fs::remove_dir_all(staging);
-    match registration {
-        Some('+') => {
+    if registered {
+        // Registered with LaunchServices; now flip the remaining gates (pluginkit election +
+        // fskit_agent's allowlist) automatically — the System Settings toggle is flaky on some
+        // machines, so it is the fallback rather than the happy path.
+        if enable_fskit_module().await {
             println!("Extension registered and enabled.");
             println!("Mount with: tl fs mount <file-system> <path>");
-        }
-        Some(_) => print_enable_instructions(),
-        None => {
-            println!(
-                "{} the extension did not register; open {FSKIT_APP_PATH} once and re-run \
-                 `tl fs setup --check`",
-                style("warning:").yellow()
-            );
+        } else {
             print_enable_instructions();
         }
+    } else {
+        println!(
+            "{} the extension did not register; open {FSKIT_APP_PATH} once and re-run \
+             `tl fs setup --check`",
+            style("warning:").yellow()
+        );
+        print_enable_instructions();
     }
     Ok(())
 }
 
-/// Mount's pre-flight: make sure the FSKit extension is ready before any workspace is created.
-/// Auto-runs the install half of `tl fs setup` when the extension is missing entirely; the
-/// System Settings toggle is the one step Apple reserves for the user, so a disabled extension
-/// stops with instructions instead. Only mount needs this — every other command talks to the
-/// server or to an existing mount's daemon.
+/// Mount's pre-flight: make sure the FSKit extension is ready before any workspace is
+/// created — and only LOOK. Repair (election, allowlist writes, agent nudges) lives in
+/// `tl fs setup`, which the user invokes deliberately: a routine mount must never silently
+/// re-enable an extension someone turned off in System Settings. The one exception is a
+/// missing install, where mount bootstraps a fresh machine by running setup once. Only mount
+/// needs this — every other command talks to the server or to an existing mount's daemon.
 #[cfg(target_os = "macos")]
 async fn ensure_fskit_ready() -> Result<()> {
-    match appex_registration() {
-        // Registered and elected: /Applications install or a dev build-dir registration alike.
-        Some('+') => return Ok(()),
-        Some(_) => {
-            print_enable_instructions();
-            return Err(CliError::usage(
-                "the TensorLake file-system extension is installed but not enabled; enable it \
-                 and re-run",
-            ));
+    let gates = FskitGates::read();
+    if gates.ready() {
+        return Ok(());
+    }
+    if gates.registration.is_none() {
+        eprintln!(
+            "{} the TensorLake file-system extension is not installed; running `tl fs setup` \
+             first",
+            style("note:").yellow()
+        );
+        setup(None, false).await?;
+        if FskitGates::read().ready() {
+            return Ok(());
         }
-        None => {}
-    }
-    eprintln!(
-        "{} the TensorLake file-system extension is not installed; running `tl fs setup` first",
-        style("note:").yellow()
-    );
-    setup(None, false).await?;
-    if appex_registration() == Some('+') {
-        Ok(())
     } else {
-        Err(CliError::usage(
-            "finish enabling the extension in System Settings, then re-run the mount",
-        ))
+        print_enable_instructions();
     }
+    Err(CliError::usage(
+        "the TensorLake file-system extension is disabled; run `tl fs setup` to enable it \
+         (or flip it in System Settings), then re-run the mount",
+    ))
 }
 
 /// Who a new mount belongs to: the human who asked for it. Under `sudo tl fs mount` that is
@@ -944,11 +1099,21 @@ pub async fn mount(
         }
         None => {
             let read_only = mode == WritePolicy::Ro;
-            if base.is_none() {
-                let default_branch = known_fs(name)
-                    .expect("checked above")
-                    .default_branch
-                    .clone();
+            // Seed an unborn default branch whether it is implied OR named (either spelling):
+            // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
+            // fail with `base "main" does not resolve to a commit` while plain
+            // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
+            // write to the server (and with read-scoped credentials the seed push would fail
+            // opaquely); ro keeps the clear server error. Other branch names stay strict —
+            // seeding cannot conjure them.
+            let default_branch = known_fs(name)
+                .expect("checked above")
+                .default_branch
+                .clone();
+            let names_default = base.as_deref().is_none_or(|b| {
+                b == default_branch || b.strip_prefix("refs/heads/") == Some(&default_branch)
+            });
+            if names_default && !read_only {
                 ensure_seeded(&session, &default_branch, name).await?;
             }
             let ws = session
