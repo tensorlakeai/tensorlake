@@ -1318,13 +1318,14 @@ mod tests {
     /// installed checkout is a working Git repo with the maintenance structures in place
     /// (commit-graph always; multi-pack-index only for multi-pack installs).
     ///
-    /// `cargo run -p gsvc-server` in an artifact_storage checkout, then
-    /// `cargo test -p tensorlake --features git-clone --lib fast_clone_roundtrip -- --ignored`.
+    /// `cargo run -p gsvc-server` in an artifact_storage checkout, then (with the real
+    /// gsvc-codec swapped in — see crates/VENDORED_FROM)
+    /// `cargo test -p tensorlake-cli --features git-clone --bin tl fast_clone_roundtrip -- --ignored`.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires a local artifact-storage server on 127.0.0.1:8080 and git on PATH"]
     async fn fast_clone_roundtrip_against_local_server() {
-        use crate::artifact_storage::ArtifactStorageClient;
-        use crate::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
+        use tensorlake::artifact_storage::ArtifactStorageClient;
+        use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
 
         const BASE: &str = "http://127.0.0.1:8080";
         if std::net::TcpStream::connect_timeout(
@@ -1336,7 +1337,7 @@ mod tests {
             eprintln!("skipping: no local artifact-storage server");
             return;
         }
-        let client = crate::ClientBuilder::new(BASE)
+        let client = tensorlake::ClientBuilder::new(BASE)
             .bearer_token("dummy")
             .build()
             .unwrap();

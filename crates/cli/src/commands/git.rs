@@ -1,3 +1,9 @@
+// The fast-clone engine (`tl git clone`), backed by the private gsvc-codec packfile codec —
+// compiled only into official `--features git-clone` builds. See crates/cli/Cargo.toml and
+// crates/VENDORED_FROM.
+#[cfg(feature = "git-clone")]
+pub mod fastclone;
+
 use std::path::PathBuf;
 
 use comfy_table::Cell;
@@ -247,10 +253,10 @@ fn fastclone_byte_progress_style() -> indicatif::ProgressStyle {
 #[cfg(feature = "git-clone")]
 fn fastclone_progress(
     spinner: Option<indicatif::ProgressBar>,
-) -> Option<tensorlake::artifact_storage::fastclone::FastCloneProgress> {
+) -> Option<fastclone::FastCloneProgress> {
     let pb = spinner?;
     Some(std::sync::Arc::new(move |ev| {
-        use tensorlake::artifact_storage::fastclone::FastCloneEvent;
+        use self::fastclone::FastCloneEvent;
         match ev {
             FastCloneEvent::FetchingManifest => pb.set_message("fetching clone manifest"),
             FastCloneEvent::DownloadPlan { bytes } => {
@@ -277,8 +283,6 @@ pub async fn clone_repo(
     cache_max_bytes: Option<u64>,
     no_checkout: bool,
 ) -> Result<()> {
-    use tensorlake::artifact_storage::fastclone;
-
     let repo = &normalize_repo_arg(repo);
     let project_id = project_id(ctx)?;
     let client = artifact_storage_client(ctx)?;
