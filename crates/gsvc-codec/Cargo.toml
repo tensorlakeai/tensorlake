@@ -2,7 +2,7 @@
 #
 # The real crate lives in the private artifact_storage repo and is no longer vendored into this
 # public tree. This placeholder exists solely so the public repo *resolves* the optional
-# `gsvc-codec` dependency of the Rust SDK's `git-clone` feature without any access to that repo.
+# `gsvc-codec` dependency of the CLI's `git-clone` feature without any access to that repo.
 # Its `src/lib.rs` is a `compile_error!` and is never compiled by a valid build:
 #   * default / `cargo build --workspace` builds — the `git-clone` feature is off, so the
 #     optional dependency is not activated (and the crate is `exclude`d from the workspace, so

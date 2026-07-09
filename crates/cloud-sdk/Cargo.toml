@@ -22,7 +22,6 @@ utoipa = { workspace = true, optional = true }
 derive_builder = { workspace = true }
 flate2 = { workspace = true }
 futures = { workspace = true }
-gsvc-codec = { workspace = true, optional = true }
 hex = { workspace = true }
 ignore = { workspace = true }
 pin-project-lite = { workspace = true }
@@ -62,6 +61,5 @@ zip = "0.6"
 too_many_arguments = "allow"
 
 [features]
-git-clone = ["dep:gsvc-codec"]
 integration-tests = []
 openapi = ["utoipa"]

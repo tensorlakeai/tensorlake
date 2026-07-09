@@ -6,8 +6,6 @@ use crate::{
     error::SdkError,
 };
 
-#[cfg(feature = "git-clone")]
-pub mod fastclone;
 pub mod ingest;
 pub mod merge;
 pub mod models;
