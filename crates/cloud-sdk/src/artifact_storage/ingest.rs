@@ -48,6 +48,9 @@ pub struct PushFile {
     pub delete: bool,
 }
 
+// Variants get added (StablePrefix arrived after KnownOid, and more will follow); external
+// matches must carry a wildcard arm so additions stay semver-compatible on this published crate.
+#[non_exhaustive]
 #[derive(Clone, Debug)]
 pub enum PushSource {
     /// Read (twice: hash pass + upload pass) from the local filesystem.
@@ -159,6 +162,9 @@ impl Default for PushOptions {
 }
 
 /// Outcome of a push.
+// Fields get added (file_chunks most recently); non_exhaustive keeps external full-literal
+// construction/destructuring from breaking on this published crate's lockstep releases.
+#[non_exhaustive]
 #[derive(Clone, Debug, Serialize)]
 pub struct PushReport {
     pub commit: String,

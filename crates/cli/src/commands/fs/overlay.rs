@@ -204,6 +204,8 @@ pub struct OverlayFs {
     /// it asks [`OverlayFs::dirty_since`] for the exact delta. Rebuilt from the on-disk overlay
     /// at startup (and after out-of-band upper refills — restore) and pruned after each seal.
     dirty: Mutex<HashMap<String, DirtyEntry>>,
+    /// Out-of-band mutation epoch: see [`OverlayFs::epoch`].
+    epoch: AtomicU64,
 }
 
 /// What the last recorded mutation of a path was. `Upsert` covers create/write/copy-up/rename
@@ -290,6 +292,7 @@ impl OverlayFs {
             lower_times: Mutex::new(HashMap::new()),
             write_gen: AtomicU64::new(0),
             dirty: Mutex::new(HashMap::new()),
+            epoch: AtomicU64::new(0),
         });
         // Baseline: dirt left by a previous daemon (re-mount, crash) predates any events this
         // process will see; seed the index from disk so the first seal covers it.
@@ -313,8 +316,13 @@ impl OverlayFs {
     }
 
     fn record_at(&self, path: &str, kind: DirtyKind, offset: u64) {
-        let generation = self.write_gen.fetch_add(1, Ordering::SeqCst) + 1;
         let mut dirty = self.dirty.lock().expect("dirty lock");
+        // The clock bump happens UNDER the map lock: a sealer that loaded watermark W is then
+        // guaranteed to either see this entry (we inserted before it acquired the lock) or to
+        // have loaded W < generation (we bumped after its load) — a generation can never be
+        // both covered by a watermark and invisible to that watermark's delta, which is what
+        // made a racing write silently unsealable forever.
+        let generation = self.write_gen.fetch_add(1, Ordering::SeqCst) + 1;
         match dirty.get_mut(path) {
             Some(entry) => {
                 entry.generation = generation;
@@ -344,6 +352,15 @@ impl OverlayFs {
     /// prunes to it — mutations racing the seal carry higher generations and stay pending.
     pub fn dirty_since(&self, since: u64) -> DirtyDelta {
         let watermark = self.write_gen.load(Ordering::SeqCst);
+        // The idle fast path: nothing was recorded since the caller's last seal, so don't
+        // lock or scan (with failing pushes the map can hold a large unsealed backlog).
+        if watermark == since {
+            return DirtyDelta {
+                upserts: Vec::new(),
+                deletes: Vec::new(),
+                watermark,
+            };
+        }
         let dirty = self.dirty.lock().expect("dirty lock");
         let mut upserts = Vec::new();
         let mut deletes = Vec::new();
@@ -373,11 +390,31 @@ impl OverlayFs {
             .retain(|_, entry| entry.generation > upto);
     }
 
+    /// The path's current lowest written offset, if it is dirty. A sealer that built a stable
+    /// prefix from an earlier snapshot of this value re-checks it here just before pushing: a
+    /// racing write below the prefix invalidates the claim.
+    pub fn min_write_offset(&self, path: &str) -> Option<u64> {
+        self.dirty
+            .lock()
+            .expect("dirty lock")
+            .get(path)
+            .map(|entry| entry.min_write_offset)
+    }
+
+    /// The out-of-band mutation epoch: bumped whenever something other than kernel ops rewrote
+    /// the overlay's state wholesale (`clear_upper`, `rebuild_dirty_index`). Sealer-side caches
+    /// (chunk lists, recently-sealed guards, in-flight resolutions) describe the previous
+    /// epoch's world and must be discarded when this moves.
+    pub fn epoch(&self) -> u64 {
+        self.epoch.load(Ordering::SeqCst)
+    }
+
     /// Rebuild the dirty index from the on-disk overlay: every upper file/symlink is an
     /// upsert, every whiteout marker a delete. For dirt this process did not witness as
     /// events — startup, and `tl fs restore` refilling the upper out-of-band (the CLI writes
     /// straight into the state dir and then asks for a reindex).
     pub fn rebuild_dirty_index(&self) -> Result<(), MountError> {
+        self.epoch.fetch_add(1, Ordering::SeqCst);
         fn walk(root: &Path, dir: &Path, out: &mut dyn FnMut(String)) -> std::io::Result<()> {
             let Ok(read) = std::fs::read_dir(dir) else {
                 return Ok(());
@@ -1253,6 +1290,45 @@ impl OverlayFs {
         self.clear_whiteout(&dst);
         self.record(&src, DirtyKind::Delete);
         self.record(&dst, DirtyKind::Upsert);
+        // A directory rename moved a whole subtree with the two events above naming only the
+        // directory — but seals publish FILES: without per-child events the relocated files
+        // never seal and previously-sealed old paths never tombstone. Walk the moved tree
+        // (it's local upper state) and record both sides for every leaf.
+        if dst_upper
+            .symlink_metadata()
+            .map(|m| m.is_dir() && !m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            fn leaves(root: &Path, dir: &Path, out: &mut Vec<String>) {
+                let Ok(read) = std::fs::read_dir(dir) else {
+                    return;
+                };
+                for entry in read.flatten() {
+                    let abs = entry.path();
+                    let Ok(meta) = std::fs::symlink_metadata(&abs) else {
+                        continue;
+                    };
+                    if meta.is_dir() && !meta.file_type().is_symlink() {
+                        leaves(root, &abs, out);
+                    } else {
+                        out.push(
+                            abs.strip_prefix(root)
+                                .expect("under root")
+                                .components()
+                                .map(|c| c.as_os_str().to_string_lossy())
+                                .collect::<Vec<_>>()
+                                .join("/"),
+                        );
+                    }
+                }
+            }
+            let mut moved = Vec::new();
+            leaves(&dst_upper, &dst_upper, &mut moved);
+            for rel in moved {
+                self.record(&format!("{src}/{rel}"), DirtyKind::Delete);
+                self.record(&format!("{dst}/{rel}"), DirtyKind::Upsert);
+            }
+        }
         // The destination path may already be interned (overwrite): its ino now serves upper
         // content automatically since attribute resolution is dynamic.
         Ok(())
@@ -1375,7 +1451,10 @@ impl OverlayFs {
             }
         }
         // The dirty index described the dropped state; sealers fast-forward to the watermark.
+        // The epoch bump tells them their other caches (chunk lists, sealed guards, in-flight
+        // resolutions) describe a dead world too.
         self.dirty.lock().expect("dirty lock").clear();
+        self.epoch.fetch_add(1, Ordering::SeqCst);
         Ok(affected)
     }
 }

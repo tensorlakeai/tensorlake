@@ -1962,7 +1962,16 @@ pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()>
     }
     // The upper was refilled behind the daemon's back; rebuild its dirty index so an
     // auto-commit mount seals the restored state (clear_upper above reset the index).
-    daemon::control(&state_dir, "reindex").await?;
+    // Tolerated failure: a still-running daemon from an older tl binary doesn't know the op,
+    // and the restore has already materially completed — failing here would skip the
+    // kernel-view convergence below and report a false failure.
+    if let Err(e) = daemon::control(&state_dir, "reindex").await {
+        eprintln!(
+            "{} the mount daemon predates auto-commit ({e}); if this mount uses \
+             --auto-commit-interval-secs, remount so the restored state seals",
+            style("warning:").yellow()
+        );
+    }
     converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
     println!(
         "Restored {} to {} ({restored} file(s) refreshed, {removed} removed).",
