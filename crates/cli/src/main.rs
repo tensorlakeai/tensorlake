@@ -257,6 +257,10 @@ enum FsCommands {
         /// Run the mount daemon in the foreground (debugging)
         #[arg(long)]
         foreground: bool,
+
+        /// Log every VFS operation the mount serves to stderr (macOS; requires --foreground)
+        #[arg(long, requires = "foreground")]
+        trace_ops: bool,
     },
 
     /// List workspaces (all file systems, or one)
@@ -2253,6 +2257,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             shared_rw,
             auto_commit_interval_secs,
             foreground,
+            trace_ops,
         } => {
             let mode = match mode {
                 Some(MountWriteMode::Ro) => commands::fs::WritePolicy::Ro,
@@ -2267,6 +2272,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
                 shared_rw,
                 auto_commit_interval_secs,
                 foreground,
+                trace_ops,
             )
             .await
         }
@@ -2752,6 +2758,7 @@ mod tests {
                 shared_rw,
                 auto_commit_interval_secs,
                 foreground,
+                trace_ops,
             }) => {
                 assert_eq!(target, "data:main");
                 assert_eq!(path, PathBuf::from("./w"));
@@ -2759,6 +2766,7 @@ mod tests {
                 assert!(!shared_rw);
                 assert_eq!(auto_commit_interval_secs, None);
                 assert!(!foreground);
+                assert!(!trace_ops);
             }
             _ => panic!("expected fs mount command"),
         }

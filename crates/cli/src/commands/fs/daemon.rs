@@ -625,6 +625,39 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         });
     }
 
+    // ^C / SIGTERM: detach before dying. Without this the volume outlives the process — on
+    // macOS the FSKit extension proxies to this daemon over TCP, so the kernel keeps serving
+    // the mountpoint as ECONNREFUSED forever (and a killed FUSE daemon leaves an ENOTCONN
+    // mount on Linux). Mirrors the `shutdown` op: unmount first, refuse to die on a busy
+    // volume — a second signal force-exits, accepting the zombie (`tl fs unmount` clears it).
+    {
+        let mountpoint = mountpoint.clone();
+        let sock_path = sock_path.clone();
+        tokio::spawn(async move {
+            use tokio::signal::unix::{SignalKind, signal};
+            let (Ok(mut int), Ok(mut term)) = (
+                signal(SignalKind::interrupt()),
+                signal(SignalKind::terminate()),
+            ) else {
+                return;
+            };
+            tokio::select! { _ = int.recv() => {}, _ = term.recv() => {} }
+            eprintln!("unmounting {} ...", mountpoint.display());
+            if unmount(&mountpoint).await {
+                let _ = std::fs::remove_file(&sock_path);
+                std::process::exit(0);
+            }
+            eprintln!(
+                "the volume is busy (something is still using it); close shells and editors \
+                 inside it, or send the signal again to exit anyway (the volume then stays \
+                 attached until `tl fs unmount {}`)",
+                mountpoint.display()
+            );
+            tokio::select! { _ = int.recv() => {}, _ = term.recv() => {} }
+            std::process::exit(1);
+        });
+    }
+
     // Serve until the kernel lets go of the mountpoint.
     let result = served.wait().await;
     let _ = std::fs::remove_file(&sock_path);
@@ -921,7 +954,7 @@ async fn attach(
     // classic macOS unmount-delayer), no .DS_Store turds in workspaces. Advisory for now —
     // fskitd on 26.5 accepts but does not apply it (mount table shows no nobrowse; measured) —
     // kept so the behavior arrives for free when FSKit honors it.
-    let status = tokio::process::Command::new("/sbin/mount")
+    let out = tokio::process::Command::new("/sbin/mount")
         .arg("-F")
         .arg("-t")
         .arg("tlfs")
@@ -929,14 +962,27 @@ async fn attach(
         .arg("nobrowse")
         .arg(&url)
         .arg(mountpoint)
-        .status()
+        .output()
         .await?;
-    if !status.success() {
-        return Err(CliError::usage(
+    if !out.status.success() {
+        // mount's own words first (output() swallowed the inherited stderr), then guidance
+        // matched to the failure: "Module … is disabled!" is fskit_agent answering from the
+        // allowlist snapshot it took at launch — enablement written after that launch is
+        // invisible to it until it restarts, which `tl fs setup` now does.
+        let err = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        eprint!("{err}");
+        return Err(CliError::usage(if err.contains("is disabled") {
+            "mount(8) failed: the extension is enabled on disk, but the running fskit_agent \
+             predates the enablement. Re-run `tl fs setup` (it restarts the agent), or reboot."
+        } else {
             "mount(8) failed: is the TensorLake file-system extension installed and enabled? \
              Run `tl fs setup`, then enable it under System Settings -> General -> Login Items \
-             & Extensions -> File System Extensions.",
-        ));
+             & Extensions -> File System Extensions."
+        }));
     }
     Ok((
         Attached::FsKit {
@@ -980,7 +1026,7 @@ fn is_mounted(mountpoint: &Path) -> bool {
 /// and the mount table (never the filesystem itself — see is_mounted) is the arbiter on every
 /// non-success path. Returns whether the volume is actually detached.
 #[cfg(unix)]
-async fn unmount(mountpoint: &Path) -> bool {
+pub(crate) async fn unmount(mountpoint: &Path) -> bool {
     // fuse3 systems ship only `fusermount3`, fuse2 systems only `fusermount` — try in that
     // order (measured: Ubuntu 24.04's fuse3 has no `fusermount` compat name, and the old
     // single-name spawn failed instantly, misreporting a free volume as busy). A root daemon
