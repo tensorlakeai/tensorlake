@@ -529,35 +529,17 @@ async fn wait_pid_exit(pid: libc::pid_t, timeout: std::time::Duration) -> bool {
     }
 }
 
-/// Any mounted volume whose file system ships as an FSKit module on macOS 26 — the set
-/// fskit_agent could be actively serving. apfs is deliberately absent: an FSKit apfs module
-/// exists, but the system's apfs volumes are kext-mounted at boot, and counting them would
-/// make this always true on every Mac. Conservative by construction — a kext-mounted USB
-/// msdos volume also matches, which merely downgrades the repair to the manual fallback.
+/// Whether fskit_agent is serving any live volume. Guessing by fstype cannot answer this —
+/// FSKit's whole point is third-party modules with arbitrary type names — but livefsd's
+/// per-boot record lists every FSKit-served mount regardless of vendor. An entry whose
+/// mountpoint is no longer attached is a stale leftover and doesn't count. Unreadable state
+/// reads as busy: never SIGKILL on uncertainty.
 #[cfg(target_os = "macos")]
-fn fskit_volume_mounted() -> bool {
-    // MNT_NOWAIT: copy cached mount-table entries without calling into any filesystem
-    // (statfs-style calls block uninterruptibly while an unmount is in flight).
-    let count = unsafe { libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT) };
-    if count <= 0 {
-        return false;
-    }
-    // Room for a few mounts appearing between the two calls; the kernel truncates to fit.
-    let capacity = count as usize + 8;
-    let mut stats: Vec<libc::statfs> = Vec::with_capacity(capacity);
-    let bufsize = (capacity * std::mem::size_of::<libc::statfs>()) as libc::c_int;
-    let written = unsafe { libc::getfsstat(stats.as_mut_ptr(), bufsize, libc::MNT_NOWAIT) };
-    if written <= 0 {
-        return false;
-    }
-    unsafe { stats.set_len(written as usize) };
-    stats.iter().any(|sfs| {
-        let fstype = unsafe { std::ffi::CStr::from_ptr(sfs.f_fstypename.as_ptr()) };
-        matches!(
-            fstype.to_bytes(),
-            b"tlfs" | b"msdos" | b"exfat" | b"ntfs" | b"ftp"
-        )
-    })
+fn fskit_agent_busy() -> bool {
+    let Some(mounts) = livefs_mounted_on() else {
+        return true;
+    };
+    mounts.iter().any(|path| daemon::mounted_at(path))
 }
 
 /// Get the live fskit_agent to drop its stale allowlist snapshot: it re-reads the file only at
@@ -578,7 +560,9 @@ async fn restart_fskit_agent() -> bool {
     if wait_pid_exit(pid, std::time::Duration::from_secs(2)).await {
         return true;
     }
-    if fskit_volume_mounted() {
+    // Sampled immediately before the kill (the SIGTERM grace above is the racy window a
+    // volume could attach in). A microscopic window remains — inherent to kill-by-pid.
+    if fskit_agent_busy() {
         return false;
     }
     unsafe { libc::kill(pid, libc::SIGKILL) };
@@ -599,31 +583,41 @@ async fn probe_module_served() -> Option<bool> {
     // Port 1 (tcpmux): nothing listens there, so the module fails before any protocol
     // traffic — and without a real tlfs server behind the URL the mount cannot succeed, so
     // the probe can never leave a volume behind.
+    // Both recognizable verdicts arrive in well under a second (the agent answers its
+    // disabled verdict from memory; port 1 answers with an instant RST) — the timeout only
+    // bounds a wedged fskitd, where the verdict is None anyway. kill_on_drop reaps the child
+    // on timeout so probes never accumulate; the dir is removed only after the child is done.
     let result = tokio::time::timeout(
-        std::time::Duration::from_secs(15),
+        std::time::Duration::from_secs(5),
         tokio::process::Command::new("/sbin/mount")
             .args(["-F", "-t", "tlfs", "tlfs://127.0.0.1:1/probe"])
             .arg(&dir)
+            // The verdict is matched on message text; keep the tool side unlocalized.
+            .env("LC_ALL", "C")
+            .kill_on_drop(true)
             .output(),
     )
     .await;
+    let verdict = (|| {
+        let out = result.ok()?.ok()?;
+        if out.status.success() {
+            return Some(true);
+        }
+        let err = format!(
+            "{}{}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr)
+        );
+        if err.contains(daemon::MODULE_DISABLED_MARKER) {
+            Some(false)
+        } else if err.contains("Connection refused") {
+            Some(true)
+        } else {
+            None
+        }
+    })();
     let _ = std::fs::remove_dir(&dir);
-    let out = result.ok()?.ok()?;
-    if out.status.success() {
-        return Some(true);
-    }
-    let err = format!(
-        "{}{}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr)
-    );
-    if err.contains("is disabled") {
-        Some(false)
-    } else if err.contains("Connection refused") {
-        Some(true)
-    } else {
-        None
-    }
+    verdict
 }
 
 /// fskitd's (LiveFS) per-boot record of live FSKit mounts. Root-owned but world-readable.
@@ -639,18 +633,29 @@ const LIVEFS_SETTINGS: &str = "/Library/Application Support/livefsd/settings.pli
 /// -remove mounts.<i>` remedy; `None` when the file is absent/unreadable or holds no record
 /// for the path.
 #[cfg(target_os = "macos")]
-fn livefs_stale_record_index(mountpoint: &str) -> Option<usize> {
+fn livefs_mounted_on() -> Option<Vec<String>> {
     let out = std::process::Command::new("plutil")
         .args(["-convert", "json", "-o", "-", LIVEFS_SETTINGS])
         .output()
         .ok()
         .filter(|out| out.status.success())?;
     let settings: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-    settings
-        .get("mounts")?
-        .as_array()?
+    Some(
+        settings
+            .get("mounts")?
+            .as_array()?
+            .iter()
+            .filter_map(|m| m.get("mountedOn").and_then(|p| p.as_str()))
+            .map(str::to_string)
+            .collect(),
+    )
+}
+
+#[cfg(target_os = "macos")]
+fn livefs_stale_record_index(mountpoint: &str) -> Option<usize> {
+    livefs_mounted_on()?
         .iter()
-        .position(|m| m.get("mountedOn").and_then(|p| p.as_str()) == Some(mountpoint))
+        .position(|mounted_on| mounted_on == mountpoint)
 }
 
 /// Best-effort CLI substitute for the System Settings toggle, which is flaky on some machines
@@ -696,7 +701,18 @@ async fn enable_fskit_module() -> bool {
     // Files right ≠ served: ask the live agent, restart it if it answers from a pre-write
     // snapshot, and ask again.
     match probe_module_served().await {
-        Some(true) | None => true,
+        Some(true) => true,
+        None => {
+            // No evidence either way (probe couldn't run, or unrecognized error text — e.g.
+            // a future macOS rewording). The on-disk gates are open, so proceed, but say so
+            // instead of silently claiming a verified end-to-end success.
+            eprintln!(
+                "{} could not verify the live agent (probe inconclusive); the on-disk gates \
+                 are open — if mounts still fail, re-run `tl fs setup`",
+                style("note:").yellow()
+            );
+            true
+        }
         Some(false) => {
             if !restart_fskit_agent().await {
                 return false;
@@ -800,9 +816,14 @@ async fn report_macos() {
                  and still refuses the module. Run `tl fs setup` to restart it (or reboot).",
                 style("✗").yellow().bold()
             ),
-            _ => println!(
+            Some(true) => println!(
                 "{} ready — mount with: tl fs mount <file-system> <path>",
                 style("✓").green().bold()
+            ),
+            None => println!(
+                "{} gates are open on disk, but the live agent could not be probed \
+                 (inconclusive). Mounts should work; if they fail, re-run `tl fs setup`.",
+                style("~").yellow().bold()
             ),
         }
     } else if gates.allowlisted() == Some(false) || gates.registration != Some('+') {
@@ -1415,13 +1436,29 @@ pub async fn mount(
             }));
         }
         if let Some(index) = livefs_stale_record_index(&mountpoint) {
+            // A record backed by a volume that is still attached (any filesystem type) is a
+            // LIVE record, not a stale one — removing it would corrupt fskitd's view of a
+            // healthy mount. The only correct guidance there is "this path is taken".
+            if daemon::mounted_at(&mountpoint) {
+                return Err(CliError::usage(format!(
+                    "{mountpoint} already hosts a mounted volume; unmount it or pick a \
+                     different path"
+                )));
+            }
+            // The remedy self-verifies at execution time: livefsd's mounts array shifts as
+            // volumes attach/detach, so a frozen index could point at a live record by the
+            // time the user pastes the command — the guard re-checks the entry still names
+            // this path before removing anything.
             return Err(CliError::usage(format!(
                 "macOS still has a record of a dead mount at {mountpoint} (a volume that \
                  vanished without a proper unmount), and fskitd refuses to mount there again \
-                 (\"a file with the same name already exists\"). Clear it with:\n  sudo \
-                 plutil -remove mounts.{index} \"{LIVEFS_SETTINGS}\"\n  sudo launchctl \
-                 kickstart -k system/com.apple.filesystems.fskitd\nor reboot, or mount at a \
-                 different path."
+                 (\"a file with the same name already exists\"). Clear it with:\n  sudo sh \
+                 -c '[ \"$(plutil -extract mounts.{index}.mountedOn raw \
+                 \"{LIVEFS_SETTINGS}\")\" = \"{mountpoint}\" ] && plutil -remove \
+                 mounts.{index} \"{LIVEFS_SETTINGS}\" || echo \"records shifted; re-run tl \
+                 fs mount for a fresh command\"'\n  sudo launchctl kickstart -k \
+                 system/com.apple.filesystems.fskitd\nor reboot, or mount at a different \
+                 path."
             )));
         }
     }
@@ -1732,6 +1769,63 @@ pub async fn mount(
 /// Unmount: stop the daemon (unmounts the kernel fs) and forget the mount. The workspace — and
 /// every snapshot on it — stays on the server until `tl fs rm` (or `--delete` here);
 /// unsnapshotted overlay changes are local and die with the mount's state directory.
+/// The pid of a live `tl fs daemon` serving `mountpoint`, if one is visible. Guards leftover
+/// detach against yanking a healthy volume whose registry record is out of reach — a sudo run
+/// sees root's empty registry, and a corrupted registry file reads as empty. Positive matches
+/// only: a daemon whose state dir we cannot read (another user's, without sudo) doesn't block.
+fn live_daemon_for(mountpoint: &str) -> Option<i32> {
+    let out = std::process::Command::new("ps")
+        .args(["-axo", "pid=,command="])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())?;
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for line in stdout.lines() {
+        let Some(state_dir) = line.split("fs daemon --state-dir ").nth(1) else {
+            continue;
+        };
+        let Ok(state) = daemon::load_mount_state(Path::new(state_dir.trim())) else {
+            continue;
+        };
+        if state.mountpoint.to_string_lossy() == mountpoint
+            && let Some(pid) = line
+                .trim_start()
+                .split_whitespace()
+                .next()
+                .and_then(|pid| pid.parse::<i32>().ok())
+            && daemon_alive(pid)
+        {
+            return Some(pid);
+        }
+    }
+    None
+}
+
+/// Detach a tlfs volume left attached with no daemon behind it (macOS FSKit keeps serving
+/// ECONNREFUSED after its daemon dies; a killed FUSE daemon leaves an ENOTCONN mount on
+/// Linux). No-op when nothing tlfs is attached; refuses when a live daemon is actually
+/// serving the path or the volume is busy.
+async fn detach_leftover(mountpoint: &str) -> Result<()> {
+    if !daemon::still_mounted(Path::new(mountpoint)) {
+        return Ok(());
+    }
+    if let Some(pid) = live_daemon_for(mountpoint) {
+        return Err(CliError::usage(format!(
+            "a live mount daemon (pid {pid}) is serving {mountpoint}; its record is not in \
+             this user's registry — run `tl fs unmount {mountpoint}` as the user who mounted \
+             it"
+        )));
+    }
+    if !daemon::unmount(Path::new(mountpoint)).await {
+        return Err(CliError::usage(format!(
+            "could not detach the volume at {mountpoint} (its daemon is already gone): it \
+             is busy. Close whatever is using it (shells cd'd inside, editors holding \
+             files), then re-run: tl fs unmount {mountpoint}"
+        )));
+    }
+    Ok(())
+}
+
 pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> {
     let (mountpoint, state_dir) = match state_dir_for(path) {
         Ok(found) => found,
@@ -1743,13 +1837,7 @@ pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> 
             if !daemon::still_mounted(Path::new(&mountpoint)) {
                 return Err(e);
             }
-            if !daemon::unmount(Path::new(&mountpoint)).await {
-                return Err(CliError::usage(format!(
-                    "could not detach the orphaned volume at {mountpoint}: it is busy. Close \
-                     whatever is using it (shells cd'd inside, editors holding files), then \
-                     re-run: tl fs unmount {mountpoint}"
-                )));
-            }
+            detach_leftover(&mountpoint).await?;
             println!(
                 "Detached the orphaned volume at {mountpoint} (no local mount state remained)."
             );
@@ -1784,15 +1872,9 @@ pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> 
         // volume, that IS success.
         let message = e.to_string();
         if message.contains("mount daemon is not running") {
-            if daemon::still_mounted(Path::new(&mountpoint))
-                && !daemon::unmount(Path::new(&mountpoint)).await
-            {
+            if let Err(e) = detach_leftover(&mountpoint).await {
                 bar.finish_and_clear();
-                return Err(CliError::usage(format!(
-                    "could not detach the volume at {mountpoint} (its daemon is already \
-                     gone): it is busy. Close whatever is using it, then re-run: tl fs \
-                     unmount {mountpoint}"
-                )));
+                return Err(e);
             }
         } else {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
