@@ -389,9 +389,9 @@ fn chunk_source(
             ));
         }
     };
-    let reader: Box<dyn Read + Send> = match source {
+    let reader: Box<dyn Read + Send + '_> = match source {
         PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
-        PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+        PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.as_slice())),
         PushSource::KnownOid(_) | PushSource::StablePrefix { .. } => {
             unreachable!("guarded above")
         }
@@ -507,9 +507,13 @@ where
 /// never registered for dedup server-side — so small files skip the chunker (and, downstream,
 /// the `missing` negotiation) entirely.
 fn chunk_source_whole(source: &PushSource) -> Result<(Vec<([u8; 32], u32)>, String), SdkError> {
-    let data: Vec<u8> = match source {
-        PushSource::Path(p) => std::fs::read(p).map_err(io_err)?,
-        PushSource::Bytes(b) => b.clone(),
+    let owned: Vec<u8>;
+    let data: &[u8] = match source {
+        PushSource::Path(p) => {
+            owned = std::fs::read(p).map_err(io_err)?;
+            &owned
+        }
+        PushSource::Bytes(b) => b,
         PushSource::KnownOid(_) | PushSource::StablePrefix { .. } => {
             return Err(SdkError::ClientError(
                 "source kind carries no full byte stream to hash".to_string(),
@@ -532,19 +536,20 @@ fn chunk_source_whole(source: &PushSource) -> Result<(Vec<([u8; 32], u32)>, Stri
 /// A chunk-bearing source re-opened for the upload pass. Chunks are visited in file order;
 /// [`UploadReader::skip`] seeks past chunks the upload does not need, so a mostly-deduped file
 /// (an appended log especially) never re-reads the bytes the server already has.
-enum UploadReader {
+enum UploadReader<'a> {
     File(std::fs::File),
-    Bytes(std::io::Cursor<Vec<u8>>),
+    // Borrowed, not cloned: pushes are zero-copy over in-memory sources.
+    Bytes(std::io::Cursor<&'a [u8]>),
 }
 
-impl UploadReader {
-    fn open(source: &PushSource) -> Result<UploadReader, SdkError> {
+impl<'a> UploadReader<'a> {
+    fn open(source: &'a PushSource) -> Result<UploadReader<'a>, SdkError> {
         match source {
             PushSource::Path(p) => Ok(UploadReader::File(std::fs::File::open(p).map_err(io_err)?)),
             PushSource::StablePrefix { path, .. } => Ok(UploadReader::File(
                 std::fs::File::open(path).map_err(io_err)?,
             )),
-            PushSource::Bytes(b) => Ok(UploadReader::Bytes(std::io::Cursor::new(b.clone()))),
+            PushSource::Bytes(b) => Ok(UploadReader::Bytes(std::io::Cursor::new(b.as_slice()))),
             PushSource::KnownOid(_) => Err(SdkError::ClientError(
                 "known-oid sources carry no bytes to upload".to_string(),
             )),
@@ -1051,11 +1056,11 @@ impl ArtifactStorageClient {
                         body.extend_from_slice(&total.to_be_bytes());
                         body.extend_from_slice(&(file.chunks.len() as u32).to_be_bytes());
                         body.extend_from_slice(token.as_bytes());
-                        let mut reader: Box<dyn Read + Send> = match &file.source {
+                        let mut reader: Box<dyn Read + Send + '_> = match &file.source {
                             PushSource::Path(p) => {
                                 Box::new(std::fs::File::open(p).map_err(io_err)?)
                             }
-                            PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+                            PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.as_slice())),
                             PushSource::KnownOid(_) | PushSource::StablePrefix { .. } => {
                                 unreachable!("never tokened")
                             }
@@ -1122,9 +1127,9 @@ impl ArtifactStorageClient {
                 let batch_bytes = opts.upload_batch_bytes;
                 async move {
                     let total: u64 = file.chunks.iter().map(|(_, s)| *s as u64).sum();
-                    let mut reader: Box<dyn Read + Send> = match &file.source {
+                    let mut reader: Box<dyn Read + Send + '_> = match &file.source {
                         PushSource::Path(p) => Box::new(std::fs::File::open(p).map_err(io_err)?),
-                        PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.clone())),
+                        PushSource::Bytes(b) => Box::new(std::io::Cursor::new(b.as_slice())),
                         PushSource::KnownOid(_) | PushSource::StablePrefix { .. } => {
                             unreachable!("never tokened")
                         }
