@@ -161,6 +161,7 @@ async fn test_create_then_delete_sandbox_image() {
                     cpus: Some(1.0),
                     memory_mb: Some(1024),
                     is_public: false,
+                    streaming: false,
                     user_agent: None,
                     docker_compat: false,
                 },

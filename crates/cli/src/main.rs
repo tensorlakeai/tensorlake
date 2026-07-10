@@ -1318,6 +1318,13 @@ enum ImageCommands {
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
+        /// Build a content-addressed streaming image (non-default). Streaming
+        /// images cold-boot by faulting content on demand instead of
+        /// localizing a monolithic snapshot; the FROM image must be an
+        /// unregistered OCI image (base builds only).
+        #[arg(long, hide = true)]
+        streaming: bool,
+
         /// Print the registered sandbox image JSON response to stdout
         #[arg(long = "json", hide = true)]
         json: bool,
@@ -2062,6 +2069,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             memory,
                             public,
                             docker_compat,
+                            streaming,
                             json,
                         } => {
                             let disk_mb = if let Some(value) = disk_mb {
@@ -2085,6 +2093,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 memory,
                                 public,
                                 docker_compat,
+                                streaming,
                                 json,
                             )
                             .await

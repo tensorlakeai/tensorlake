@@ -209,6 +209,12 @@ pub struct CommonBuildOptions {
     pub cpus: Option<f64>,
     pub memory_mb: Option<i64>,
     pub is_public: bool,
+    /// Non-default opt-in: build a content-addressed streaming (cas-streaming)
+    /// image. Streaming builds are base-only — the Dockerfile FROM must be an
+    /// unregistered OCI image — and complete through the platform's trusted
+    /// CAS ingest, so registration takes longer while the image is verified
+    /// and admitted.
+    pub streaming: bool,
     pub user_agent: Option<String>,
     pub docker_compat: bool,
 }
@@ -330,6 +336,8 @@ struct PreparedSandboxTemplateBuild {
     #[serde(default)]
     snapshot_uri: Option<String>,
     rootfs_node_kind: String,
+    #[serde(default)]
+    rootfs_format: Option<String>,
     builder: PreparedRootfsBuilder,
     parent: Option<PreparedRootfsParent>,
     /// New-path marker: when present, platform-api stopped pre-signing S3 and
@@ -371,6 +379,8 @@ struct CompleteSandboxTemplateBuildRequest {
     rootfs_node_kind: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     parent_manifest_uri: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    rootfs_format: Option<String>,
 }
 
 /// Build a sandbox image from a Dockerfile (path or inline text). To import a
@@ -475,13 +485,24 @@ where
         "Preparing rootfs build...".to_string(),
     ));
     let platform_client = platform_client(&ctx)?;
-    let (prepared, mut prepared_spec) =
-        prepare_rootfs_build(&ctx, &platform_client, &plan, options.is_public).await?;
+    let (prepared, mut prepared_spec) = prepare_rootfs_build(
+        &ctx,
+        &platform_client,
+        &plan,
+        options.is_public,
+        options.streaming,
+    )
+    .await?;
     emit(SandboxImageBuildEvent::Status(format!(
-        "Build mode: Rootfs{}",
+        "Build mode: Rootfs{}{}",
         match prepared.rootfs_node_kind.as_str() {
             "diff" => "Diff",
             _ => "Base",
+        },
+        if prepared.rootfs_format.as_deref() == Some("cas-streaming") {
+            " (content-addressed streaming)"
+        } else {
+            ""
         }
     )));
 
@@ -666,18 +687,43 @@ where
                 &prepared,
                 &metadata,
                 signed_snapshot_uri.as_deref(),
+                rootfs_disk_bytes,
             )?;
 
-            emit(SandboxImageBuildEvent::Status(
-                "Completing image registration...".to_string(),
-            ));
-            let registered = complete_rootfs_build(
+            if complete_request.rootfs_format.as_deref() == Some("cas-streaming") {
+                emit(SandboxImageBuildEvent::Status(
+                    "Submitting the image for verification and admission into the streaming \
+                     CAS..."
+                        .to_string(),
+                ));
+            } else {
+                emit(SandboxImageBuildEvent::Status(
+                    "Completing image registration...".to_string(),
+                ));
+            }
+            let (complete_status, completed) = complete_rootfs_build(
                 &ctx,
                 &platform_client,
                 &prepared.build_id,
                 &complete_request,
             )
             .await?;
+            // cas-streaming completions are asynchronous: the platform answers
+            // 202 immediately while the trusted service verifies the staged
+            // chunks; poll the build until it settles.
+            let registered = if complete_request.rootfs_format.as_deref() == Some("cas-streaming")
+                && (complete_status == reqwest::StatusCode::ACCEPTED
+                    || completed.get("status").and_then(Value::as_str) == Some("ingesting"))
+            {
+                emit(SandboxImageBuildEvent::Status(
+                    "Verifying and admitting the image into the streaming CAS (this can take \
+                     a few minutes for large images)..."
+                        .to_string(),
+                ));
+                wait_for_build_completed(&ctx, &platform_client, &prepared.build_id).await?
+            } else {
+                completed
+            };
             let template_id = registered.get("id").and_then(Value::as_str).unwrap_or("-");
             emit(SandboxImageBuildEvent::Status(format!(
                 "Image '{}' registered ({})",
@@ -934,6 +980,7 @@ async fn prepare_rootfs_build(
     client: &Client,
     plan: &DockerfileBuildPlan,
     is_public: bool,
+    streaming: bool,
 ) -> Result<(PreparedSandboxTemplateBuild, Value)> {
     // Resolve every external image reference against the platform's template
     // registry. The final-stage FROM is treated separately so its resolution
@@ -973,19 +1020,32 @@ async fn prepare_rootfs_build(
     } else {
         "base"
     };
+    // Streaming images are content-addressed and self-contained: fail before
+    // any sandbox spins up if the FROM resolved to a registered template.
+    if streaming && (parent_template_payload.is_some() || !additional_payload.is_empty()) {
+        return Err(SandboxImageBuildError::usage(
+            "--streaming builds support only base images: the Dockerfile FROM (and any \
+             COPY --from references) must be unregistered OCI images, not registered \
+             Tensorlake templates",
+        ));
+    }
     let parent_template_json = parent_template_payload.unwrap_or(Value::Null);
 
+    let mut prepare_body = json!({
+        "name": plan.registered_name,
+        "dockerfile": plan.dockerfile_text,
+        "baseImage": plan.base_image,
+        "public": is_public,
+        "rootfsNodeKind": rootfs_node_kind,
+        "parentTemplate": parent_template_json,
+        "additionalLocalImages": additional_payload,
+    });
+    if streaming {
+        prepare_body["rootfsFormat"] = Value::String("cas-streaming".to_string());
+    }
     let request = client
         .request(Method::POST, &sandbox_template_builds_path(ctx))
-        .json(&json!({
-            "name": plan.registered_name,
-            "dockerfile": plan.dockerfile_text,
-            "baseImage": plan.base_image,
-            "public": is_public,
-            "rootfsNodeKind": rootfs_node_kind,
-            "parentTemplate": parent_template_json,
-            "additionalLocalImages": additional_payload,
-        }))
+        .json(&prepare_body)
         .build()?;
     let response = client.execute_raw(request).await?;
 
@@ -1008,7 +1068,7 @@ async fn complete_rootfs_build(
     client: &Client,
     build_id: &str,
     request: &CompleteSandboxTemplateBuildRequest,
-) -> Result<Value> {
+) -> Result<(reqwest::StatusCode, Value)> {
     let path = format!(
         "{}/{}/complete",
         sandbox_template_builds_path(ctx),
@@ -1017,8 +1077,8 @@ async fn complete_rootfs_build(
     let request = client.request(Method::POST, &path).json(request).build()?;
     let response = client.execute_raw(request).await?;
 
-    if !response.status().is_success() {
-        let status = response.status();
+    let status = response.status();
+    if !status.is_success() {
         let body = response.text().await.unwrap_or_default();
         return Err(SandboxImageBuildError::other(format!(
             "failed to complete sandbox image build (HTTP {}): {}",
@@ -1026,7 +1086,67 @@ async fn complete_rootfs_build(
         )));
     }
 
-    response.json().await.map_err(Into::into)
+    Ok((status, response.json().await?))
+}
+
+/// Interval between build-status polls while a cas-streaming admission runs.
+const BUILD_STATUS_POLL_INTERVAL: Duration = Duration::from_secs(3);
+/// Upper bound on the admission wait: large images verify at IO speed, so
+/// half an hour is far beyond any healthy run.
+const BUILD_STATUS_POLL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// Poll the build endpoint until the asynchronous (cas-streaming) completion
+/// settles. Returns the registered template from the completed status.
+async fn wait_for_build_completed(
+    ctx: &ResolvedBuildContext,
+    client: &Client,
+    build_id: &str,
+) -> Result<Value> {
+    let path = format!("{}/{}", sandbox_template_builds_path(ctx), build_id);
+    let deadline = std::time::Instant::now() + BUILD_STATUS_POLL_TIMEOUT;
+    loop {
+        let request = client.request(Method::GET, &path).build()?;
+        let response = client.execute_raw(request).await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(SandboxImageBuildError::other(format!(
+                "failed to poll sandbox image build (HTTP {}): {}",
+                status, body
+            )));
+        }
+        let status: Value = response.json().await?;
+        match status.get("status").and_then(Value::as_str) {
+            Some("completed") => {
+                return status.get("template").cloned().ok_or_else(|| {
+                    SandboxImageBuildError::other(
+                        "build completed but the status payload has no template",
+                    )
+                });
+            }
+            Some("failed") => {
+                let error = status
+                    .get("error")
+                    .and_then(Value::as_str)
+                    .unwrap_or("admission failed");
+                return Err(SandboxImageBuildError::other(format!(
+                    "streaming image admission failed: {error}"
+                )));
+            }
+            Some("ingesting") | Some("prepared") => {}
+            other => {
+                return Err(SandboxImageBuildError::other(format!(
+                    "unexpected build status {other:?}"
+                )));
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(SandboxImageBuildError::other(
+                "timed out waiting for the streaming image admission",
+            ));
+        }
+        tokio::time::sleep(BUILD_STATUS_POLL_INTERVAL).await;
+    }
 }
 
 fn sandbox_template_builds_path(ctx: &ResolvedBuildContext) -> String {
@@ -1535,7 +1655,31 @@ fn complete_request_from_metadata(
     prepared: &PreparedSandboxTemplateBuild,
     metadata: &Value,
     signed_snapshot_uri: Option<&str>,
+    rootfs_disk_bytes: u64,
 ) -> Result<CompleteSandboxTemplateBuildRequest> {
+    // cas-streaming builds: the builder staged a pre-chunked image; the
+    // registered identity comes from the platform's trusted verify-and-admit,
+    // so the completion only reports the staged artifacts and declared sizes.
+    if metadata_string(metadata, "rootfs_format", "rootfsFormat").as_deref()
+        == Some("cas-streaming")
+    {
+        return Ok(CompleteSandboxTemplateBuildRequest {
+            snapshot_id: metadata_string(metadata, "snapshot_id", "snapshotId")
+                .unwrap_or_else(|| prepared.snapshot_id.clone()),
+            snapshot_uri: completion_snapshot_uri(prepared, metadata, signed_snapshot_uri)?,
+            snapshot_format_version: "content_addressed_streaming_v1".to_string(),
+            snapshot_size_bytes: required_metadata_u64(
+                metadata,
+                "image_size_bytes",
+                "imageSizeBytes",
+            )?,
+            rootfs_disk_bytes,
+            rootfs_node_kind: "base".to_string(),
+            parent_manifest_uri: None,
+            rootfs_format: Some("cas-streaming".to_string()),
+        });
+    }
+
     let rootfs_node_kind = metadata_string(metadata, "rootfs_node_kind", "rootfsNodeKind")
         .unwrap_or_else(|| prepared.rootfs_node_kind.clone());
     let parent_manifest_uri = metadata_string(metadata, "parent_manifest_uri", "parentManifestUri")
@@ -1573,6 +1717,7 @@ fn complete_request_from_metadata(
         rootfs_disk_bytes: required_metadata_u64(metadata, "rootfs_disk_bytes", "rootfsDiskBytes")?,
         rootfs_node_kind,
         parent_manifest_uri,
+        rootfs_format: None,
     })
 }
 
@@ -3426,6 +3571,53 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
     }
 
     #[test]
+    fn complete_request_for_cas_streaming_uses_staged_identity_and_format() {
+        let prepared = PreparedSandboxTemplateBuild {
+            build_id: "build-1".to_string(),
+            snapshot_id: "snapshot-1".to_string(),
+            snapshot_uri: Some(
+                "s3://bucket/projects/p/sandbox-template-builds/b/snapshot-1.pack".to_string(),
+            ),
+            rootfs_node_kind: "base".to_string(),
+            rootfs_format: Some("cas-streaming".to_string()),
+            builder: PreparedRootfsBuilder {
+                image: "tensorlake/rootfs-builder".to_string(),
+                command: "tl-rootfs-build".to_string(),
+                cpus: 2.0,
+                memory_mb: 4096,
+                disk_mb: 30720,
+            },
+            parent: None,
+            snapshot_rel_path: None,
+        };
+        // ext4-everywhere: the builder structure-chunks on its own CPUs and
+        // stages a candidate manifest + content pack, reporting only the
+        // staged-artifact kind + declared sizes; the registered identity (tlsnap
+        // URI + image digest) comes from the platform's trusted verify-and-admit,
+        // not the builder.
+        let metadata = json!({
+            "rootfsFormat": "cas-streaming",
+            "stagedArtifact": "chunked-ext4",
+            "snapshotId": "snapshot-1",
+            "imageSizeBytes": 600_000_000u64,
+        });
+        let request =
+            complete_request_from_metadata(&prepared, &metadata, None, 10 * 1024 * 1024 * 1024)
+                .unwrap();
+        assert_eq!(request.snapshot_id, "snapshot-1");
+        assert_eq!(request.snapshot_uri, prepared.snapshot_uri.clone().unwrap());
+        assert_eq!(
+            request.snapshot_format_version,
+            "content_addressed_streaming_v1"
+        );
+        assert_eq!(request.snapshot_size_bytes, 600_000_000);
+        assert_eq!(request.rootfs_disk_bytes, 10 * 1024 * 1024 * 1024);
+        assert_eq!(request.rootfs_node_kind, "base");
+        assert_eq!(request.rootfs_format.as_deref(), Some("cas-streaming"));
+        assert!(request.parent_manifest_uri.is_none());
+    }
+
+    #[test]
     fn build_rootfs_spec_adds_builder_inputs() {
         let prepared_spec = json!({
             "buildId": "build-1",
@@ -3626,7 +3818,9 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             "parent_manifest_uri": "s3://bucket/parent.tlsnap"
         });
 
-        let request = complete_request_from_metadata(&prepared, &metadata, None).unwrap();
+        let request =
+            complete_request_from_metadata(&prepared, &metadata, None, 10 * 1024 * 1024 * 1024)
+                .unwrap();
         let body = serde_json::to_value(&request).unwrap();
         assert_eq!(body["snapshotId"], "snapshot-1");
         assert_eq!(body["snapshotUri"], "s3://bucket/child.tlsnap");
@@ -3652,6 +3846,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             &prepared,
             &metadata,
             Some("s3://bucket/from-signed.tlsnap"),
+            10 * 1024 * 1024 * 1024,
         )
         .unwrap();
         assert_eq!(request.snapshot_uri, "s3://bucket/from-signed.tlsnap");
@@ -3672,6 +3867,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             &prepared,
             &metadata,
             Some("s3://bucket/from-signed.tlsnap"),
+            10 * 1024 * 1024 * 1024,
         )
         .unwrap();
         assert_eq!(request.snapshot_uri, "s3://bucket/from-signed.tlsnap");
@@ -3693,6 +3889,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             &prepared,
             &metadata,
             Some("s3://bucket/from-signed.tlsnap"),
+            10 * 1024 * 1024 * 1024,
         )
         .unwrap_err();
         assert!(
@@ -3714,7 +3911,9 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
         });
 
-        let error = complete_request_from_metadata(&prepared, &metadata, None).unwrap_err();
+        let error =
+            complete_request_from_metadata(&prepared, &metadata, None, 10 * 1024 * 1024 * 1024)
+                .unwrap_err();
         assert!(
             error.to_string().contains("snapshot_uri"),
             "expected snapshot_uri error, got: {error}"
@@ -3730,7 +3929,9 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             "rootfs_disk_bytes": 10 * 1024 * 1024 * 1024_u64
         });
 
-        let request = complete_request_from_metadata(&prepared, &metadata, None).unwrap();
+        let request =
+            complete_request_from_metadata(&prepared, &metadata, None, 10 * 1024 * 1024 * 1024)
+                .unwrap();
         assert_eq!(request.snapshot_id, "snapshot-prepared");
         assert_eq!(request.snapshot_uri, "s3://bucket/prepared.tlsnap");
         assert_eq!(
@@ -3850,6 +4051,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             snapshot_id: "snapshot-prepared".to_string(),
             snapshot_uri: Some("s3://bucket/prepared.tlsnap".to_string()),
             rootfs_node_kind: rootfs_node_kind.to_string(),
+            rootfs_format: None,
             builder: PreparedRootfsBuilder {
                 image: "tensorlake/rootfs-builder".to_string(),
                 command: "tl-rootfs-build".to_string(),

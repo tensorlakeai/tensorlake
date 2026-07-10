@@ -39,6 +39,7 @@ pub async fn run(
             cpus,
             memory_mb,
             is_public,
+            streaming: false,
             user_agent: Some(format!(
                 "Tensorlake CLI (rust/{})",
                 env!("CARGO_PKG_VERSION")
