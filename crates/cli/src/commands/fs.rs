@@ -2358,8 +2358,20 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
     bar.set_message("refreshing mount view...");
     // Swap the mount's lower layer to the new snapshot, then drop the overlay: the content the
     // upper layer held is now served (identically) by the lower commit.
-    daemon::control(&state_dir, "refresh").await?;
+    let refresh = daemon::control(&state_dir, "refresh").await?;
     daemon::control(&state_dir, "clear_upper").await?;
+    // The refresh may also have adopted foreign ref movement (a concurrent writer advanced the
+    // workspace ref past our snapshot commit), and the drained probe list can carry a backlog
+    // from background polls. Converge those the same way sync does — macOS only; the FUSE
+    // notifier already handled them on Linux. Our own sealed paths were upper-shadowed at
+    // refresh time and filter out of the probe list; the revalidate below covers them.
+    if cfg!(target_os = "macos") {
+        let (expect, _complete, _new_daemon) = parse_refresh_probes(&refresh);
+        if !expect.is_empty() {
+            let changed: std::collections::BTreeSet<String> = expect.keys().cloned().collect();
+            converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
+        }
+    }
     // Content is byte-identical across the swap, but the previously-dirty paths' attributes
     // changed backing (upper mtimes -> lower commit time); refresh the kernel's view.
     let sealed: Vec<String> = upserts
@@ -2588,17 +2600,42 @@ pub async fn sync(
         ));
     }
     // The workspace ref moved server-side; swap the mount's lower layer now instead of
-    // waiting out the follow poll, then make sure the kernel drops stale views of the
-    // conflicted paths (their content changed to marker text behind its back).
-    daemon::control(&state_dir, "refresh").await?;
-    if !resp.conflicts.is_empty() {
-        let mut changed = std::collections::BTreeSet::new();
-        let mut expect = std::collections::BTreeMap::new();
-        for c in &resp.conflicts {
-            changed.insert(c.path.clone());
-            expect.insert(c.path.clone(), PathExpect::Present);
-        }
+    // waiting out the follow poll, then make sure the kernel drops stale views of every
+    // path the pull changed. This matters most for names that newly appeared: a lookup
+    // answered ENOENT before the sync can live on as a kernel-cached negative dentry that
+    // readdir traffic never revalidates (`ls` shows the file, `cat` says ENOENT), and on
+    // macOS there is no daemon-side notify channel to drop it — probing from out here is
+    // the only lever. Conflict paths get the same treatment (their content changed to
+    // marker text behind the kernel's back).
+    let refresh = daemon::control(&state_dir, "refresh").await?;
+    let (mut expect, complete, new_daemon) = parse_refresh_probes(&refresh);
+    // On Linux the daemon already pushed exact FUSE invalidations for these paths while
+    // serving the refresh; probing would redo that work through the mount. macOS (FSKit)
+    // has no notify channel — probing from out here is the only lever there.
+    if !cfg!(target_os = "macos") {
+        expect.clear();
+    }
+    for c in &resp.conflicts {
+        expect.insert(c.path.clone(), PathExpect::Present);
+    }
+    if !expect.is_empty() {
+        let changed: std::collections::BTreeSet<String> = expect.keys().cloned().collect();
         converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
+    }
+    if cfg!(target_os = "macos") {
+        if !new_daemon {
+            eprintln!(
+                "{} the mount daemon predates this CLI; newly pulled files can transiently \
+                 answer ENOENT — remount to fix",
+                style("warning:").yellow(),
+            );
+        } else if !complete {
+            eprintln!(
+                "{} a refresh could not enumerate newly added paths; files pulled by this \
+                 sync can transiently answer ENOENT (kernel cache, ~30s)",
+                style("warning:").yellow(),
+            );
+        }
     }
     println!(
         "Synced with {} ({} path(s) pulled){}.",
@@ -3031,43 +3068,76 @@ fn converge_kernel_view(
     changed: &std::collections::BTreeSet<String>,
     expect: &std::collections::BTreeMap<String, PathExpect>,
 ) {
-    let changed: Vec<String> = changed.iter().cloned().collect();
+    // The first round nudges every changed path; later rounds re-probe only what has not
+    // settled, and the deadline is consulted per path so one huge round cannot blow far
+    // through the budget (a branch-jump sync can carry tens of thousands of paths).
+    let mut unsettled: Vec<String> = changed.iter().cloned().collect();
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-    loop {
-        revalidate_paths(mountpoint, &changed);
-        let mut settled = true;
-        for (p, e) in expect {
-            let full = mountpoint.join(p);
-            match e {
-                PathExpect::Absent => {
-                    if open_truth(&full, false).is_some() {
-                        settled = false;
-                    }
-                }
-                PathExpect::Present => {
-                    if open_truth(&full, false).is_none() {
+    'rounds: loop {
+        revalidate_paths(mountpoint, &unsettled);
+        let mut still = Vec::new();
+        for p in unsettled {
+            if std::time::Instant::now() > deadline {
+                break 'rounds;
+            }
+            let full = mountpoint.join(&p);
+            let settled = match expect.get(&p) {
+                // A changed path with no expectation only needed the nudge above.
+                None => true,
+                Some(PathExpect::Absent) => open_truth(&full, false).is_none(),
+                Some(PathExpect::Present) => {
+                    open_truth(&full, false).is_some() || {
                         probe_negative_dentry(&full);
-                        if open_truth(&full, false).is_none() {
-                            settled = false;
-                        }
+                        open_truth(&full, false).is_some()
                     }
                 }
-                PathExpect::FileSize(size) => {
+                Some(PathExpect::FileSize(size)) => {
                     if open_truth(&full, true).is_none() {
                         probe_negative_dentry(&full);
                     }
-                    match open_truth(&full, true) {
-                        Some(len) if len == *size => {}
-                        _ => settled = false,
-                    }
+                    matches!(open_truth(&full, true), Some(len) if len == *size)
                 }
+            };
+            if !settled {
+                still.push(p);
             }
         }
-        if settled || std::time::Instant::now() > deadline {
+        if still.is_empty() || std::time::Instant::now() > deadline {
             break;
         }
+        unsettled = still;
         std::thread::sleep(std::time::Duration::from_millis(25));
     }
+}
+
+/// Parse a daemon `refresh` reply's drained probe expectations into converge inputs. Returns
+/// `(expectation map, complete, new_daemon)`: `complete` is false when some refresh since the
+/// last drain could not enumerate first-appearance names (stat-walk fallback), and
+/// `new_daemon` is false when the reply carries no `changed` key at all — a still-running
+/// daemon from an older tl binary, which cannot report probe lists.
+fn parse_refresh_probes(
+    reply: &serde_json::Value,
+) -> (std::collections::BTreeMap<String, PathExpect>, bool, bool) {
+    let new_daemon = reply.get("changed").is_some();
+    let items: Vec<overlay::KernelExpectation> =
+        serde_json::from_value(reply.get("changed").cloned().unwrap_or_default())
+            .unwrap_or_default();
+    let mut expect = std::collections::BTreeMap::new();
+    for e in items {
+        let want = match (e.present, e.size) {
+            (false, _) => PathExpect::Absent,
+            // A size means content changed behind the kernel: the prober must purge cached
+            // pages, not just confirm existence.
+            (true, Some(size)) => PathExpect::FileSize(size),
+            (true, None) => PathExpect::Present,
+        };
+        expect.insert(e.path, want);
+    }
+    let complete = reply
+        .get("complete")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(true);
+    (expect, complete, new_daemon)
 }
 
 /// Write a whiteout marker file, superseding any container of child markers at the same path

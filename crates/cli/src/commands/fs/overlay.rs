@@ -1724,46 +1724,56 @@ impl OverlayFs {
     // Kernel-cache invalidation
     // -------------------------------------------------------------------------------------
 
-    /// Translate a core refresh delta into this overlay's ino space for kernel invalidation.
+    /// Translate a core refresh delta into everything the daemon needs to converge kernel
+    /// caches, in one pass: FUSE invalidations in this overlay's ino space (Linux notify sink)
+    /// and merged-coordinate probe expectations (macOS, where FSKit has no notify channel and
+    /// `tl fs sync` probes from outside the mount instead).
+    ///
     /// Entries whose kernel-visible content the lower change cannot affect — upper-shadowed or
-    /// whited-out paths — are dropped, as are paths the kernel never looked up here.
-    pub fn translate_delta(&self, delta: &gsvc_mount::RefreshDelta) -> Vec<OverlayInval> {
+    /// whited-out paths — are dropped, as are paths the kernel never looked up here (a rebound
+    /// or staled path with no interned ino, or an appeared name whose parent was never
+    /// interned, has no kernel cache entry — positive or negative — to converge). Appeared
+    /// paths have no ino by definition; they translate to an entry invalidation on their live
+    /// parent directory, which is what drops a kernel negative dentry cached from an `ENOENT`
+    /// answered before the refresh.
+    pub fn refresh_outputs(&self, delta: &gsvc_mount::RefreshDelta) -> RefreshOutputs {
         // Delta paths are lower coordinates; a pending rename serves that content under its
         // destination, so the kernel-visible path (and the interned ino) lives there. The
         // source coordinates are whiteouted and filter out below.
-        let reverse: Vec<(String, String)> = {
-            let redirects = self.redirects.lock().expect("redirect lock");
-            redirects
-                .iter()
-                .map(|(d, s)| (s.clone(), d.clone()))
-                .collect()
-        };
-        let merged_path = |lower: &str| -> String {
-            for (src, dst) in &reverse {
-                if lower == src {
-                    return dst.clone();
-                }
-                if let Some(rest) = lower.strip_prefix(&format!("{src}/")) {
-                    return format!("{dst}/{rest}");
-                }
-            }
-            lower.to_string()
-        };
-        let mut out = Vec::new();
+        //
+        // Filter pass first, without the inode lock: the shadow checks stat the upper tree,
+        // and a branch-jump delta can carry tens of thousands of paths — the lock is taken
+        // once, after the filesystem work, for the pure ino mapping.
+        enum Kind {
+            Rebound { size: Option<u64> },
+            Staled,
+            Appeared,
+        }
+        let reverse = self.reverse_redirects();
         let tagged = delta
             .rebound
             .iter()
-            .map(|e| (e, false))
-            .chain(delta.staled.iter().map(|e| (e, true)));
-        for (entry, staled) in tagged {
-            let path = merged_path(&entry.path);
+            .map(|e| (e.path.as_str(), Kind::Rebound { size: e.size }))
+            .chain(delta.staled.iter().map(|e| (e.path.as_str(), Kind::Staled)))
+            .chain(
+                delta
+                    .appeared
+                    .iter()
+                    .flatten()
+                    .map(|p| (p.as_str(), Kind::Appeared)),
+            );
+        let mut visible: Vec<(String, Kind)> = Vec::new();
+        for (lower, kind) in tagged {
+            let path = merged_of(&reverse, lower);
             if self.upper_meta(&path).is_some() || self.whited_out(&path) {
                 continue;
             }
-            let inodes = self.inodes.lock().expect("inode lock");
-            let Some(&ino) = inodes.index.get(&path) else {
-                continue;
-            };
+            visible.push((path, kind));
+        }
+
+        let mut out = RefreshOutputs::default();
+        let inodes = self.inodes.lock().expect("inode lock");
+        for (path, kind) in visible {
             let (parent_ino, name) = match path.rfind('/') {
                 Some(i) => (
                     inodes.index.get(&path[..i]).copied(),
@@ -1771,14 +1781,74 @@ impl OverlayFs {
                 ),
                 None => (Some(ROOT_INO), path.clone()),
             };
-            out.push(OverlayInval {
-                ino,
-                parent_ino,
-                name,
-                staled,
-            });
+            match kind {
+                // Rebound/staled: the kernel holds cache entries for this path only if it
+                // looked it up here (which interned it) and has not since forgotten it.
+                Kind::Rebound { size } => {
+                    let Some(&ino) = inodes.index.get(&path) else {
+                        continue;
+                    };
+                    out.invals.push(OverlayInval {
+                        ino,
+                        parent_ino,
+                        name,
+                        staled: false,
+                    });
+                    out.expectations.push(KernelExpectation {
+                        path,
+                        present: true,
+                        size,
+                    });
+                }
+                Kind::Staled => {
+                    let Some(&ino) = inodes.index.get(&path) else {
+                        continue;
+                    };
+                    out.invals.push(OverlayInval {
+                        ino,
+                        parent_ino,
+                        name,
+                        staled: true,
+                    });
+                    out.expectations.push(KernelExpectation {
+                        path,
+                        present: false,
+                        size: None,
+                    });
+                }
+                Kind::Appeared => {
+                    // A parent the kernel never looked up holds no dentries (negative or
+                    // otherwise) for children — nothing to drop or probe.
+                    let Some(parent_ino) = parent_ino else {
+                        continue;
+                    };
+                    // `ino` is the parent on purpose: the appeared name has no ino, and the
+                    // parent's kernel attrs/readdir cache went stale the moment the name
+                    // appeared under it.
+                    out.invals.push(OverlayInval {
+                        ino: parent_ino,
+                        parent_ino: Some(parent_ino),
+                        name,
+                        staled: true,
+                    });
+                    out.expectations.push(KernelExpectation {
+                        path,
+                        present: true,
+                        size: None,
+                    });
+                }
+            }
         }
         out
+    }
+
+    /// The redirect table inverted for lower→merged translation (source path -> destination).
+    fn reverse_redirects(&self) -> Vec<(String, String)> {
+        let redirects = self.redirects.lock().expect("redirect lock");
+        redirects
+            .iter()
+            .map(|(d, s)| (s.clone(), d.clone()))
+            .collect()
     }
 
     // -------------------------------------------------------------------------------------
@@ -2016,10 +2086,50 @@ pub struct RedirectFile {
     pub mode: u32,
 }
 
-/// One kernel invalidation in the overlay's ino space, produced by [`OverlayFs::translate_delta`]
+/// Translate a lower-coordinate path to its merged (kernel-visible) coordinates through an
+/// inverted redirect table (see [`OverlayFs::reverse_redirects`]).
+fn merged_of(reverse: &[(String, String)], lower: &str) -> String {
+    for (src, dst) in reverse {
+        if lower == src {
+            return dst.clone();
+        }
+        if let Some(rest) = lower.strip_prefix(&format!("{src}/")) {
+            return format!("{dst}/{rest}");
+        }
+    }
+    lower.to_string()
+}
+
+/// Everything a refresh delta implies for kernel-cache convergence, produced in one pass by
+/// [`OverlayFs::refresh_outputs`]: push invalidations for the Linux FUSE notify sink, and probe
+/// expectations for consumers without a notify channel (macOS — drained to `tl fs sync` through
+/// the daemon's `refresh` control reply).
+#[derive(Debug, Default)]
+pub struct RefreshOutputs {
+    pub invals: Vec<OverlayInval>,
+    pub expectations: Vec<KernelExpectation>,
+}
+
+/// One merged-coordinate kernel-view expectation: after the refresh, `path` should resolve
+/// (`present`, with `size` bytes when a file's content changed — the prober must purge cached
+/// pages, not just confirm existence) or be gone. Serialized verbatim into the daemon's
+/// `refresh` control reply (`"changed"`), and parsed back by `tl fs sync` — one shared type so
+/// the wire shape cannot drift between the two sides.
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct KernelExpectation {
+    pub path: String,
+    pub present: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<u64>,
+}
+
+/// One kernel invalidation in the overlay's ino space, produced by [`OverlayFs::refresh_outputs`]
 /// (branch refresh) or [`OverlayFs::clear_upper`] (post-snapshot upper drop). `staled` entries
 /// need the `(parent_ino, name)` dentry invalidated in addition to the inode, so the next access
-/// re-looks the path up; rebound entries only need the inode's attrs/data dropped.
+/// re-looks the path up; rebound entries only need the inode's attrs/data dropped. For a path
+/// that newly appeared at a refresh there is no ino to invalidate: `ino` carries the parent
+/// directory (its readdir cache went stale) and `(parent_ino, name)` drops any negative dentry
+/// the kernel cached for the name before it existed.
 ///
 /// Consumed by the Linux FUSE notify sink (`inval_entry`/`inval_inode`); the macOS FSKit path
 /// uses a no-op sink, so these fields are unread there.
