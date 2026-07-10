@@ -4,6 +4,10 @@
 #[cfg(feature = "git-clone")]
 pub mod fastclone;
 
+// `tl git setup` and the git credential helper it registers, which together make plain
+// `git push`/`git pull` work against artifact-storage repos.
+pub mod setup;
+
 use std::path::PathBuf;
 
 use comfy_table::Cell;
@@ -339,7 +343,7 @@ pub async fn clone_repo(
     let progress = fastclone_progress(spinner.clone());
     let opts = fastclone::FastCloneOptions {
         repo_url: repo_url.clone(),
-        dest,
+        dest: dest.clone(),
         cache_dir,
         cache_max_bytes,
         credential: Some(fastclone::BasicAuth {
@@ -352,6 +356,13 @@ pub async fn clone_repo(
     let stats = fastclone::fast_clone(opts).await?;
     if let Some(pb) = spinner {
         pb.finish_and_clear();
+    }
+    // Register the credential helper in the new checkout's local config (same wiring as
+    // `tl git setup`) so plain `git fetch`/`git push` there authenticate automatically once the
+    // clone-time token expires. The clone itself succeeded; a config failure only warrants a
+    // warning.
+    if let Err(err) = setup::configure_credential_helper(ctx, &dest, client.git_base_url()) {
+        eprintln!("warning: could not register the git credential helper: {err}");
     }
     println!(
         "{}",
@@ -742,7 +753,7 @@ pub async fn push(
 ) -> Result<()> {
     use tensorlake::artifact_storage::ingest::PushOptions;
 
-    let root = current_git_worktree_root()?;
+    let root = current_git_worktree_root("tl git push")?;
     let project_id = project_id(ctx)?;
     let client = artifact_storage_client(ctx)?;
     let credential = client
@@ -808,18 +819,18 @@ pub async fn push(
     Ok(())
 }
 
-fn current_git_worktree_root() -> Result<std::path::PathBuf> {
-    git_worktree_root_from(&std::env::current_dir()?)
+fn current_git_worktree_root(command: &str) -> Result<std::path::PathBuf> {
+    git_worktree_root_from(&std::env::current_dir()?, command)
 }
 
-fn git_worktree_root_from(cwd: &std::path::Path) -> Result<std::path::PathBuf> {
+fn git_worktree_root_from(cwd: &std::path::Path, command: &str) -> Result<std::path::PathBuf> {
     let output = std::process::Command::new("git")
         .args(["rev-parse", "--show-toplevel"])
         .current_dir(cwd)
         .output()
         .map_err(|err| {
             CliError::usage(format!(
-                "tl git push requires Git to locate the current worktree: {err}"
+                "{command} requires Git to locate the current worktree: {err}"
             ))
         })?;
 
@@ -831,7 +842,7 @@ fn git_worktree_root_from(cwd: &std::path::Path) -> Result<std::path::PathBuf> {
             detail
         };
         return Err(CliError::usage(format!(
-            "tl git push must be run inside a Git worktree ({suffix})"
+            "{command} must be run inside a Git worktree ({suffix})"
         )));
     }
 
@@ -922,7 +933,9 @@ mod tests {
         }
 
         let dir = tempfile::tempdir().unwrap();
-        let err = git_worktree_root_from(dir.path()).unwrap_err().to_string();
+        let err = git_worktree_root_from(dir.path(), "tl git push")
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("tl git push must be run inside a Git worktree"));
     }
 

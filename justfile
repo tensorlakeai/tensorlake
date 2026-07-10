@@ -1,5 +1,9 @@
 # Tensorlake SDK — Rust + Python build tasks
 
+# Where the private artifact_storage checkout lives (used by build-cli-full).
+# Override with e.g. `ARTIFACT_STORAGE_DIR=~/src/artifact_storage just build-cli-full`.
+ARTIFACT_STORAGE_DIR := env("ARTIFACT_STORAGE_DIR", "../artifact_storage")
+
 # Default recipe: show available commands
 default:
     @just --list
@@ -28,14 +32,16 @@ build-cli-release:
 # placeholders are committed under crates/. This recipe copies the real sources over the
 # placeholders for the duration of the build and restores them afterward (even on failure), so
 # the private source is never committed here. Requires the private artifact_storage repo checked
-# out as a sibling directory.
+# out as a sibling directory, or wherever ARTIFACT_STORAGE_DIR points.
 build-cli-full *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail
+    artifact_storage="{{ARTIFACT_STORAGE_DIR}}"
     for crate in gsvc-mount gsvc-codec; do
-        if [ ! -d "../artifact_storage/crates/$crate/src" ]; then
-            echo "error: ../artifact_storage/crates/$crate/src not found." >&2
-            echo "Check out github.com/tensorlakeai/artifact_storage as a sibling of this repo." >&2
+        if [ ! -d "$artifact_storage/crates/$crate/src" ]; then
+            echo "error: $artifact_storage/crates/$crate/src not found." >&2
+            echo "Check out github.com/tensorlakeai/artifact_storage as a sibling of this repo," >&2
+            echo "or point ARTIFACT_STORAGE_DIR at an existing checkout." >&2
             exit 1
         fi
     done
@@ -49,7 +55,8 @@ build-cli-full *ARGS:
     # Swap in the real sources, keeping the placeholders' tensorlake-adapted Cargo.tomls.
     for crate in gsvc-mount gsvc-codec; do
         rm -f "crates/$crate/src"/*.rs
-        cp "../artifact_storage/crates/$crate/src"/*.rs "crates/$crate/src"/
+        echo "swapping crates/$crate/src with $artifact_storage/crates/$crate/src"
+        cp "$artifact_storage/crates/$crate/src"/*.rs "crates/$crate/src"/
     done
     cargo build -p tensorlake-cli --release --features mount,git-clone {{ARGS}}
 

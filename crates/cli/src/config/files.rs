@@ -37,20 +37,17 @@ pub fn credentials_path() -> PathBuf {
 /// cache globally (same convention and permissions as `credentials.toml`) instead of inside a
 /// workspace directory. Keyed by `<normalized api url>|<project>|<repo scope>`.
 ///
-/// This cache and its helpers are only exercised by the `tl fs` mount stack, so they are compiled
-/// only into `--features mount` builds.
-#[cfg(feature = "mount")]
+/// Shared by the `tl fs` mount stack and the `tl git credential-helper` git integration, which
+/// runs on every `git fetch`/`git push` and must not pay a mint round trip each time.
 pub fn git_credentials_path() -> PathBuf {
     config_dir().join("git-credentials.toml")
 }
 
-#[cfg(feature = "mount")]
 fn git_credential_key(api_url: &str, project: &str, scope: &str) -> String {
     format!("{}|{project}|{scope}", normalize_api_url(api_url))
 }
 
 /// A cached minted git credential, returned only while comfortably inside its validity window.
-#[cfg(feature = "mount")]
 pub fn load_git_credential(
     api_url: &str,
     project: &str,
@@ -69,7 +66,6 @@ pub fn load_git_credential(
     Some((username, token, expires_at))
 }
 
-#[cfg(feature = "mount")]
 pub fn save_git_credential(
     api_url: &str,
     project: &str,
@@ -115,7 +111,6 @@ pub fn save_git_credential(
 
 /// Purge the minted-git-credential cache (e.g. after an authentication failure, so the next run
 /// re-mints instead of retrying a revoked token).
-#[cfg(feature = "mount")]
 pub fn purge_git_credentials() {
     let _ = fs::remove_file(git_credentials_path());
 }
