@@ -46,6 +46,8 @@ pub struct SandboxImageBuildOptionsJs {
     pub docker_compat: Option<bool>,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<String>,
+    /// Opt into the non-default content-addressed streaming image format.
+    pub streaming: Option<bool>,
 }
 
 #[napi(object)]
@@ -127,6 +129,7 @@ pub async fn build_sandbox_image(
             cpus: options.cpus,
             memory_mb: options.memory_mb,
             is_public: options.is_public.unwrap_or(false),
+            streaming: options.streaming.unwrap_or(false),
             user_agent: options.user_agent,
             docker_compat: options.docker_compat.unwrap_or(false),
         },
@@ -172,6 +175,7 @@ pub async fn import_sandbox_image(
             cpus: options.cpus,
             memory_mb: options.memory_mb,
             is_public: options.is_public.unwrap_or(false),
+            streaming: false,
             user_agent: options.user_agent,
             docker_compat: options.docker_compat.unwrap_or(false),
         },

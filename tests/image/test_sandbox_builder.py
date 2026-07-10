@@ -93,7 +93,8 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             False,
             None,
             None,
-            ANY,
+            streaming=False,
+            emit=ANY,
         )
 
 
@@ -138,7 +139,8 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             False,
             None,
             None,
-            ANY,
+            streaming=False,
+            emit=ANY,
         )
 
     def test_missing_dockerfile_raises_load_error(self):
@@ -162,8 +164,8 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
         ctx = _make_ctx()
         emitted: list[dict] = []
 
-        def fake_rust_builder(*args):
-            args[-1]({"type": "status", "message": "builder running"})
+        def fake_rust_builder(*args, **kwargs):
+            kwargs["emit"]({"type": "status", "message": "builder running"})
             return '{"id":"tpl-1","snapshot_id":"snap-1"}'
 
         with (
