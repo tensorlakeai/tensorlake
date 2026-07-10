@@ -1420,10 +1420,11 @@ impl ArtifactStorageClient {
                 }
             })
             .collect();
-        let (commit_suffix, branch) = match &opts.workspace_snapshot {
-            Some(ws_id) => (format!("workspaces/{ws_id}/snapshots"), None),
-            None => ("commits".to_string(), Some(opts.branch.clone())),
-        };
+        let commit_suffix = commit_submit_suffix(opts.workspace_snapshot.as_deref());
+        let branch = opts
+            .workspace_snapshot
+            .is_none()
+            .then(|| opts.branch.clone());
         let body = CommitWire {
             branch,
             message: opts.message.clone(),
@@ -1476,7 +1477,9 @@ impl ArtifactStorageClient {
                 job_id: job_id.clone(),
             });
             // Poll the job's state machine to terminal. Each poll is a fresh, short request.
-            let poll_suffix = format!("{commit_suffix}/jobs/{job_id}");
+            // The poll route is the repo-scoped commit-job route for every commit kind — a
+            // detached snapshot has no `workspaces/{id}/snapshots/jobs/{id}` route to poll.
+            let poll_suffix = commit_job_poll_suffix(&job_id);
             let mut delay = std::time::Duration::from_millis(500);
             loop {
                 tokio::time::sleep(delay).await;
@@ -1625,7 +1628,7 @@ impl ArtifactStorageClient {
             Method::GET,
             project_id,
             repo,
-            Some(&format!("commits/jobs/{job_id}")),
+            Some(&commit_job_poll_suffix(job_id)),
             git_username,
             git_token,
         )?;
@@ -1816,6 +1819,24 @@ fn frame_payload_bytes(frame: &[u8]) -> u64 {
 
 fn hex_lower(h: &[u8; 32]) -> String {
     hex::encode(h)
+}
+
+/// Route suffix for *submitting* a commit. A workspace snapshot commits on the workspace ref
+/// (`workspaces/{id}/snapshots`); an ordinary push commits on a branch (`commits`).
+fn commit_submit_suffix(workspace_snapshot: Option<&str>) -> String {
+    match workspace_snapshot {
+        Some(ws_id) => format!("workspaces/{ws_id}/snapshots"),
+        None => "commits".to_string(),
+    }
+}
+
+/// Route suffix for *polling* a detached commit job — always the repo-scoped commit-job route,
+/// regardless of how the commit was submitted. Server-side the job lookup is kind-agnostic
+/// (`get_commit_job(repo, job_id)` serves snapshot jobs too) and `commits/jobs/{id}` is the only
+/// job-poll route that exists: there is no `workspaces/{id}/snapshots/jobs/{id}`. Polling the
+/// submit suffix instead would 404 a detached snapshot even though its job completes server-side.
+fn commit_job_poll_suffix(job_id: &str) -> String {
+    format!("commits/jobs/{job_id}")
 }
 
 pub(super) async fn expect_json<T: serde::de::DeserializeOwned>(
@@ -2075,6 +2096,29 @@ mod tests {
         assert_eq!(json["oid"], "00112233445566778899aabbccddeeff00112233");
         assert!(json.get("chunks").is_none());
         assert!(json.get("content").is_none());
+    }
+
+    /// A commit's *submit* route depends on its kind, but a detached job is *polled* at the
+    /// repo-scoped commit-job route for every kind. The server has no
+    /// `workspaces/{id}/snapshots/jobs/{id}` endpoint — only `commits/jobs/{id}`, whose lookup is
+    /// kind-agnostic — so polling the submit suffix would 404 an otherwise-successful detached
+    /// snapshot. Regression guard for that mismatch.
+    #[test]
+    fn detached_job_always_polls_commit_job_route() {
+        // Submit suffix differs by kind.
+        assert_eq!(
+            commit_submit_suffix(Some("ws-42")),
+            "workspaces/ws-42/snapshots"
+        );
+        assert_eq!(commit_submit_suffix(None), "commits");
+
+        // Poll suffix does not: always the repo-scoped commit-job route, snapshot or branch.
+        assert_eq!(commit_job_poll_suffix("job-abc"), "commits/jobs/job-abc");
+        // The bug was building the poll route from the snapshot submit suffix.
+        assert_ne!(
+            commit_job_poll_suffix("job-abc"),
+            format!("{}/jobs/job-abc", commit_submit_suffix(Some("ws-42")))
+        );
     }
 
     /// Live integration: the reworked upload paths against a running artifact-storage server
