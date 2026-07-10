@@ -11,8 +11,8 @@ class _Logger:
 
 
 class TestRequestContextHeaders(unittest.TestCase):
-    def test_headers_returns_copy(self):
-        headers = {"x-trace-id": "trace-123"}
+    def test_headers_are_immutable_case_insensitive_copy(self):
+        headers = {"X-Trace-Id": "trace-123"}
         context = RequestContextHTTPClient(
             request_id="request-1",
             allocation_id="allocation-1",
@@ -25,10 +25,31 @@ class TestRequestContextHeaders(unittest.TestCase):
             headers=headers,
         )
 
-        headers["x-trace-id"] = "changed"
-        context.headers["x-trace-id"] = "mutated"
+        headers["X-Trace-Id"] = "changed"
 
-        self.assertEqual(context.headers, {"x-trace-id": "trace-123"})
+        self.assertEqual(context.headers["x-trace-id"], "trace-123")
+        self.assertEqual(context.headers["X-TRACE-ID"], "trace-123")
+        self.assertEqual(context.headers.get("x-trace-id"), "trace-123")
+        self.assertEqual(context.headers.getlist("x-trace-id"), ["trace-123"])
+        self.assertEqual(dict(context.headers.items()), {"X-Trace-Id": "trace-123"})
+        with self.assertRaises(TypeError):
+            context.headers["x-trace-id"] = "mutated"
+
+    def test_headers_support_duplicate_values(self):
+        context = RequestContextHTTPClient(
+            request_id="request-1",
+            allocation_id="allocation-1",
+            function_name="fn",
+            function_run_id="run-1",
+            server_base_url="http://127.0.0.1:1",
+            http_client=None,
+            blob_store=None,
+            logger=_Logger(),
+            headers=[("X-Token", "first"), ("x-token", "second")],
+        )
+
+        self.assertEqual(context.headers["X-Token"], "second")
+        self.assertEqual(context.headers.getlist("x-token"), ["first", "second"])
 
 
 if __name__ == "__main__":

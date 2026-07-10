@@ -68,6 +68,16 @@ def deploy_applications(
                 code_zip=app_code,
                 upgrade_running_requests=upgrade_running_requests,
             )
+            if hasattr(api_client, "ensure_application_public_endpoint"):
+                api_client.ensure_application_public_endpoint(
+                    application_name=app_manifest.name,
+                    allow=app_manifest.allow,
+                )
+            elif hasattr(api_client, "ensure_application_public_endpoint_json"):
+                api_client.ensure_application_public_endpoint_json(
+                    application_name=app_manifest.name,
+                    allow=app_manifest.allow,
+                )
     finally:
         if should_close:
             api_client.close()

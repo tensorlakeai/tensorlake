@@ -2,6 +2,7 @@ from typing import Any
 
 from ..request_context.contextvar import get_current_request_context
 from .exceptions import InternalError
+from .http import Headers
 
 
 class RequestState:
@@ -93,7 +94,7 @@ class RequestContext:
         )
 
     @property
-    def headers(self) -> dict[str, str]:
+    def headers(self) -> Headers:
         raise InternalError(
             "RequestContext subclasses must implement headers property."
         )
