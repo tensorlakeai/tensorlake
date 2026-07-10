@@ -13,7 +13,6 @@
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
-use std::sync::Arc;
 
 use comfy_table::Cell;
 use console::style;
@@ -21,7 +20,7 @@ use futures::StreamExt;
 use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tensorlake::artifact_storage::ArtifactStorageClient;
-use tensorlake::artifact_storage::ingest::{PushEvent, PushFile, PushOptions, PushSource};
+use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
 use tensorlake::artifact_storage::models::GitCredential;
 use tensorlake::artifact_storage::workspaces::{
     CreateWorkspaceRequest, PromoteOutcome, PromoteWorkspaceRequest, SyncWorkspaceRequest,
@@ -2207,24 +2206,32 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
 
+    let started = std::time::Instant::now();
+    let bar = indicatif::ProgressBar::new_spinner();
+    bar.enable_steady_tick(std::time::Duration::from_millis(120));
+    bar.set_message("enumerating workspace changes...");
+
     let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
     let renames = pending_renames(&state_dir);
     if upserts.is_empty() && deletes.is_empty() && renames.is_empty() {
+        bar.finish_and_clear();
         println!("Nothing to snapshot: workspace is clean.");
         return Ok(());
     }
+    let t_enumerate = started.elapsed();
+    bar.set_message(format!(
+        "preparing {} change(s)...",
+        upserts.len() + deletes.len() + renames.len()
+    ));
     let mut files = overlay_push_files(&upserts, &deletes)?;
     if !renames.is_empty() {
         redirect_push_files(&state_dir, renames.len(), &mut files).await?;
     }
     let files = files;
+    let t_prepare = started.elapsed() - t_enumerate;
 
     let (user, token) = session.creds();
-    let progress: Arc<dyn Fn(PushEvent) + Send + Sync> = Arc::new(|ev| {
-        if let PushEvent::Negotiated { missing, total } = ev {
-            eprintln!("uploading {missing} of {total} chunks (rest already stored)");
-        }
-    });
+    let progress = super::push_progress_spinner(&bar);
     let report = session
         .client
         .push_files(
@@ -2242,7 +2249,12 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
         )
         .await?
         .into_inner();
+    // `push` covers the whole push_files call: local chunk/hash, chunk negotiation, byte upload,
+    // and the server-side commit (tree build + read-back) — for a large snapshot the commit, not
+    // the transfer, can dominate this bucket.
+    let t_push = started.elapsed() - t_prepare - t_enumerate;
 
+    bar.set_message("refreshing mount view...");
     // Swap the mount's lower layer to the new snapshot, then drop the overlay: the content the
     // upper layer held is now served (identically) by the lower commit.
     daemon::control(&state_dir, "refresh").await?;
@@ -2255,16 +2267,37 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
         .chain(deletes.iter().cloned())
         .collect();
     revalidate_paths(Path::new(&mountpoint), &sealed);
+    let total = started.elapsed();
+    let t_refresh = total - t_push - t_prepare - t_enumerate;
+    bar.finish_and_clear();
     // Small files skip chunk negotiation (token-only commits), so uploads can exceed the
     // negotiated chunk count — clamp so the summary never reads "3 of 0 chunks".
     println!(
-        "Snapshot {} ({} file(s), {} of {} chunks uploaded)",
+        "Snapshot {} ({} file(s), {} of {} chunks uploaded in {})",
         report.commit,
         report.files,
         report.chunks_uploaded,
         report.chunks_total.max(report.chunks_uploaded),
+        fmt_dur(total),
+    );
+    println!(
+        "  enumerate {}  prepare {}  push {}  refresh {}",
+        fmt_dur(t_enumerate),
+        fmt_dur(t_prepare),
+        fmt_dur(t_push),
+        fmt_dur(t_refresh),
     );
     Ok(())
+}
+
+/// Render a phase duration compactly: sub-second phases as whole milliseconds (`42ms`), longer
+/// ones as fractional seconds (`1.83s`). `{:.2}s` alone would flatten every fast phase to `0.00s`.
+fn fmt_dur(d: std::time::Duration) -> String {
+    if d.as_secs() == 0 {
+        format!("{}ms", d.as_millis())
+    } else {
+        format!("{:.2}s", d.as_secs_f64())
+    }
 }
 
 pub async fn promote(
