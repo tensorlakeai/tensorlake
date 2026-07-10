@@ -689,7 +689,11 @@ impl OverlayFs {
 
     /// The recorded source when `path` is itself a pending-rename destination root.
     fn redirect_source(&self, path: &str) -> Option<String> {
-        self.redirects.lock().expect("redirect lock").get(path).cloned()
+        self.redirects
+            .lock()
+            .expect("redirect lock")
+            .get(path)
+            .cloned()
     }
 
     /// Whether `path` is a pending-rename destination root or sits under one.
@@ -1729,7 +1733,10 @@ impl OverlayFs {
         // source coordinates are whiteouted and filter out below.
         let reverse: Vec<(String, String)> = {
             let redirects = self.redirects.lock().expect("redirect lock");
-            redirects.iter().map(|(d, s)| (s.clone(), d.clone())).collect()
+            redirects
+                .iter()
+                .map(|(d, s)| (s.clone(), d.clone()))
+                .collect()
         };
         let merged_path = |lower: &str| -> String {
             for (src, dst) in &reverse {
@@ -1758,7 +1765,10 @@ impl OverlayFs {
                 continue;
             };
             let (parent_ino, name) = match path.rfind('/') {
-                Some(i) => (inodes.index.get(&path[..i]).copied(), path[i + 1..].to_string()),
+                Some(i) => (
+                    inodes.index.get(&path[..i]).copied(),
+                    path[i + 1..].to_string(),
+                ),
                 None => (Some(ROOT_INO), path.clone()),
             };
             out.push(OverlayInval {
@@ -1850,8 +1860,10 @@ impl OverlayFs {
     /// The pending rename table (destination -> true-lower source), for status display.
     pub fn redirect_entries(&self) -> Vec<(String, String)> {
         let redirects = self.redirects.lock().expect("redirect lock");
-        let mut entries: Vec<(String, String)> =
-            redirects.iter().map(|(d, s)| (d.clone(), s.clone())).collect();
+        let mut entries: Vec<(String, String)> = redirects
+            .iter()
+            .map(|(d, s)| (d.clone(), s.clone()))
+            .collect();
         entries.sort();
         entries
     }
@@ -2062,7 +2074,10 @@ mod tests {
         // A file created in the upper (git's `config.lock`) — no lower binding.
         let (ino, _, _) = t.intern("config.lock".to_string(), None);
         let released = t.rename("config.lock", "config");
-        assert!(released.is_empty(), "pure-upper rename releases no core refs");
+        assert!(
+            released.is_empty(),
+            "pure-upper rename releases no core refs"
+        );
         assert!(
             !t.index.contains_key("config.lock"),
             "source path is vacated"
@@ -2619,7 +2634,10 @@ mod tests {
             dir_names(&fs, moved.ino).await,
             vec!["lib.rs", "sub", "tool.sh"]
         );
-        assert_eq!(read_all(&fs, moved.ino, "lib.rs").await, b"pub fn lib2() {}\n");
+        assert_eq!(
+            read_all(&fs, moved.ino, "lib.rs").await,
+            b"pub fn lib2() {}\n"
+        );
 
         // 3. A second move re-keys the same entry (chain stays one hop).
         fs.rename(ROOT_INO, "moved", ROOT_INO, "moved2")
@@ -2645,8 +2663,7 @@ mod tests {
         //    for the copy-up, and the source delete the whiteout produced.
         let seals = fs.expand_redirects().await.unwrap();
         assert_eq!(seals.len(), 1);
-        let mut sealed_paths: Vec<&str> =
-            seals[0].files.iter().map(|f| f.path.as_str()).collect();
+        let mut sealed_paths: Vec<&str> = seals[0].files.iter().map(|f| f.path.as_str()).collect();
         sealed_paths.sort();
         assert_eq!(
             sealed_paths,

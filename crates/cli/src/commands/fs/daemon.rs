@@ -617,9 +617,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 let dsts: Vec<String> =
                                     redirect_seals.iter().map(|s| s.dst.clone()).collect();
                                 if let Err(e) = overlay.consume_redirects(&dsts) {
-                                    eprintln!(
-                                        "auto-commit: consuming sealed renames failed: {e}"
-                                    );
+                                    eprintln!("auto-commit: consuming sealed renames failed: {e}");
                                 }
                             } else {
                                 eprintln!(

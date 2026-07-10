@@ -299,8 +299,8 @@ enum FsCommands {
 
     /// Seal local changes into a snapshot on the workspace ref
     Snapshot {
-        /// A mounted directory
-        path: PathBuf,
+        /// A mounted directory (default: the mount containing the current directory)
+        path: Option<PathBuf>,
 
         /// Snapshot message
         #[arg(short, long)]
@@ -308,9 +308,10 @@ enum FsCommands {
     },
 
     /// Publish the workspace's snapshot onto a real branch (squash by default)
+    #[command(allow_missing_positional = true)]
     Promote {
-        /// A mounted directory
-        path: PathBuf,
+        /// A mounted directory (default: the mount containing the current directory)
+        path: Option<PathBuf>,
 
         /// Target branch
         branch: String,
@@ -331,8 +332,8 @@ enum FsCommands {
 
     /// Pull the target branch into the workspace (server-side rebase-style merge)
     Sync {
-        /// A mounted directory
-        path: PathBuf,
+        /// A mounted directory (default: the mount containing the current directory)
+        path: Option<PathBuf>,
 
         /// Branch to pull from (default: the branch the workspace was created from)
         #[arg(long)]
@@ -349,8 +350,8 @@ enum FsCommands {
 
     /// Show workspace, lease, and local-change status for a mount
     Status {
-        /// A mounted directory
-        path: PathBuf,
+        /// A mounted directory (default: the mount containing the current directory)
+        path: Option<PathBuf>,
 
         /// Print status as JSON
         #[arg(long)]
@@ -358,9 +359,10 @@ enum FsCommands {
     },
 
     /// Restore a mount's tracked files to a snapshot or commit
+    #[command(allow_missing_positional = true)]
     Restore {
-        /// A mounted directory
-        path: PathBuf,
+        /// A mounted directory (default: the mount containing the current directory)
+        path: Option<PathBuf>,
 
         /// Snapshot/commit hex, branch, or ref to restore to
         version: String,
@@ -368,8 +370,8 @@ enum FsCommands {
 
     /// List changed paths: local vs last snapshot, or between two snapshots
     Diff {
-        /// A mounted directory
-        path: PathBuf,
+        /// A mounted directory (default: the mount containing the current directory)
+        path: Option<PathBuf>,
 
         /// Older snapshot/commit (omit both for local vs last snapshot)
         a: Option<String>,
@@ -380,8 +382,8 @@ enum FsCommands {
 
     /// Unmount: detach and forget local state; the workspace stays until deleted
     Unmount {
-        /// A mounted directory
-        path: PathBuf,
+        /// A mounted directory (default: the mount containing the current directory)
+        path: Option<PathBuf>,
 
         /// Also delete the server-side workspace
         #[arg(long)]
@@ -2248,20 +2250,57 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         }
         other => other,
     };
+    // Path-addressed commands default their mounted-directory argument to the mount containing
+    // the CWD; resolve it up front so scope hydration and the command agree on the path.
+    let mut subcmd = subcmd;
+    let mut mount_dir: Option<std::path::PathBuf> = None;
+    match &mut subcmd {
+        FsCommands::Promote { path, branch, .. } => {
+            if path.is_none() {
+                // With the path omitted, a sole positional that is itself a mounted
+                // directory is a forgotten branch — reject it before it becomes a publish
+                // onto a branch named after the directory.
+                commands::fs::reject_mount_like_positional(
+                    branch,
+                    "branch",
+                    "tl fs promote [PATH] <BRANCH>",
+                )?;
+            }
+            mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
+        }
+        FsCommands::Restore { path, version } => {
+            if path.is_none() {
+                commands::fs::reject_mount_like_positional(
+                    version,
+                    "snapshot or ref",
+                    "tl fs restore [PATH] <VERSION>",
+                )?;
+            }
+            mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
+        }
+        FsCommands::Diff { path, a, b } => {
+            let (path, ra, rb) = commands::fs::resolve_diff_args(path.take(), a.take(), b.take())?;
+            *a = ra;
+            *b = rb;
+            mount_dir = Some(path);
+        }
+        FsCommands::Snapshot { path, .. }
+        | FsCommands::Sync { path, .. }
+        | FsCommands::Status { path, .. }
+        | FsCommands::Unmount { path, .. } => {
+            mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
+        }
+        _ => {}
+    }
     // Path-addressed commands carry their scope in the mount state; resolve it from there so
     // they work from any CWD instead of triggering the interactive init flow (which, run from
     // inside a mount, would write .tensorlake/config.toml into the workspace).
-    match &subcmd {
-        FsCommands::Snapshot { path, .. }
-        | FsCommands::Promote { path, .. }
-        | FsCommands::Sync { path, .. }
-        | FsCommands::Status { path, .. }
-        | FsCommands::Restore { path, .. }
-        | FsCommands::Diff { path, .. }
-        | FsCommands::Unmount { path, .. } => commands::fs::hydrate_scope_from_mount(ctx, path),
-        _ => {}
+    if let Some(mount_dir) = &mount_dir {
+        commands::fs::hydrate_scope_from_mount(ctx, mount_dir);
     }
     ensure_auth_and_project(ctx).await?;
+    // Set for exactly the path-addressed commands, whose dispatch arms are the only readers.
+    let mount_dir = move || mount_dir.expect("resolved for every path-addressed command above");
     let result = match subcmd {
         FsCommands::Setup { .. } => unreachable!("handled before the auth guard"),
         FsCommands::Ls { file_system, json } => {
@@ -2300,40 +2339,51 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             state_dir,
             log_level,
         } => commands::fs::daemon::run(ctx, &state_dir, &log_level).await,
-        FsCommands::Snapshot { path, message } => {
-            commands::fs::snapshot(ctx, &path, message.as_deref()).await
+        FsCommands::Snapshot { message, .. } => {
+            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref()).await
         }
         FsCommands::Promote {
-            path,
             branch,
             full_history,
             merge,
             message,
+            ..
         } => {
-            commands::fs::promote(ctx, &path, &branch, full_history, merge, message.as_deref())
-                .await
+            commands::fs::promote(
+                ctx,
+                &mount_dir(),
+                &branch,
+                full_history,
+                merge,
+                message.as_deref(),
+            )
+            .await
         }
         FsCommands::Sync {
-            path,
             target,
             fail_on_conflict,
             message,
+            ..
         } => {
             commands::fs::sync(
                 ctx,
-                &path,
+                &mount_dir(),
                 target.as_deref(),
                 fail_on_conflict,
                 message.as_deref(),
             )
             .await
         }
-        FsCommands::Status { path, json } => commands::fs::status(ctx, &path, json).await,
-        FsCommands::Restore { path, version } => commands::fs::restore(ctx, &path, &version).await,
-        FsCommands::Diff { path, a, b } => {
-            commands::fs::diff(ctx, &path, a.as_deref(), b.as_deref()).await
+        FsCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
+        FsCommands::Restore { version, .. } => {
+            commands::fs::restore(ctx, &mount_dir(), &version).await
         }
-        FsCommands::Unmount { path, delete } => commands::fs::unmount(ctx, &path, delete).await,
+        FsCommands::Diff { a, b, .. } => {
+            commands::fs::diff(ctx, &mount_dir(), a.as_deref(), b.as_deref()).await
+        }
+        FsCommands::Unmount { delete, .. } => {
+            commands::fs::unmount(ctx, &mount_dir(), delete).await
+        }
     };
     // A cached minted git credential can be revoked before its recorded expiry; purge
     // the cache on an auth failure so the next invocation re-mints instead of retrying
@@ -2867,6 +2917,53 @@ mod tests {
             }) => {}
             _ => panic!("expected fs setup command"),
         }
+
+        // Path-addressed commands default the mounted directory to the mount containing the
+        // CWD, so the path positional is optional everywhere.
+        match parse_command(["tl", "fs", "snapshot"]) {
+            Commands::Fs(FsCommands::Snapshot {
+                path: None,
+                message: None,
+            }) => {}
+            _ => panic!("expected fs snapshot command"),
+        }
+
+        match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip"]) {
+            Commands::Fs(FsCommands::Snapshot { path, message }) => {
+                assert_eq!(path, Some(PathBuf::from("./w")));
+                assert_eq!(message.as_deref(), Some("wip"));
+            }
+            _ => panic!("expected fs snapshot command"),
+        }
+
+        // Promote/restore have a required positional after the optional path; with a single
+        // value the path is the one skipped (allow_missing_positional).
+        match parse_command(["tl", "fs", "promote", "main"]) {
+            Commands::Fs(FsCommands::Promote { path, branch, .. }) => {
+                assert_eq!(path, None);
+                assert_eq!(branch, "main");
+            }
+            _ => panic!("expected fs promote command"),
+        }
+
+        match parse_command(["tl", "fs", "promote", "./w", "main"]) {
+            Commands::Fs(FsCommands::Promote { path, branch, .. }) => {
+                assert_eq!(path, Some(PathBuf::from("./w")));
+                assert_eq!(branch, "main");
+            }
+            _ => panic!("expected fs promote command"),
+        }
+
+        match parse_command(["tl", "fs", "restore", "0a1b2c3d"]) {
+            Commands::Fs(FsCommands::Restore { path, version }) => {
+                assert_eq!(path, None);
+                assert_eq!(version, "0a1b2c3d");
+            }
+            _ => panic!("expected fs restore command"),
+        }
+
+        assert!(Cli::try_parse_from(["tl", "fs", "promote"]).is_err());
+        assert!(Cli::try_parse_from(["tl", "fs", "restore"]).is_err());
 
         // The workspace subgroup is gone: workspaces ARE the `tl fs` surface.
         assert!(Cli::try_parse_from(["tl", "fs", "workspace", "ls", "data"]).is_err());
