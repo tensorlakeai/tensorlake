@@ -261,6 +261,11 @@ enum FsCommands {
         /// Log every VFS operation the mount serves to stderr (macOS; requires --foreground)
         #[arg(long, requires = "foreground")]
         trace_ops: bool,
+
+        /// Daemon log level (off, error, warn, info, debug, trace). Detached daemons log to
+        /// `daemon.log` in the mount's state directory; foreground runs log to the terminal.
+        #[arg(long, default_value = "info")]
+        log_level: String,
     },
 
     /// List workspaces (all file systems, or one)
@@ -286,6 +291,10 @@ enum FsCommands {
     Daemon {
         #[arg(long)]
         state_dir: PathBuf,
+
+        /// Log level (off, error, warn, info, debug, trace)
+        #[arg(long, default_value = "info")]
+        log_level: String,
     },
 
     /// Seal local changes into a snapshot on the workspace ref
@@ -2267,6 +2276,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             auto_commit_interval_secs,
             foreground,
             trace_ops,
+            log_level,
         } => {
             let mode = match mode {
                 Some(MountWriteMode::Ro) => commands::fs::WritePolicy::Ro,
@@ -2282,10 +2292,14 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
                 auto_commit_interval_secs,
                 foreground,
                 trace_ops,
+                &log_level,
             )
             .await
         }
-        FsCommands::Daemon { state_dir } => commands::fs::daemon::run(ctx, &state_dir).await,
+        FsCommands::Daemon {
+            state_dir,
+            log_level,
+        } => commands::fs::daemon::run(ctx, &state_dir, &log_level).await,
         FsCommands::Snapshot { path, message } => {
             commands::fs::snapshot(ctx, &path, message.as_deref()).await
         }
@@ -2768,6 +2782,7 @@ mod tests {
                 auto_commit_interval_secs,
                 foreground,
                 trace_ops,
+                log_level,
             }) => {
                 assert_eq!(target, "data:main");
                 assert_eq!(path, PathBuf::from("./w"));
@@ -2776,6 +2791,7 @@ mod tests {
                 assert_eq!(auto_commit_interval_secs, None);
                 assert!(!foreground);
                 assert!(!trace_ops);
+                assert_eq!(log_level, "info");
             }
             _ => panic!("expected fs mount command"),
         }

@@ -65,6 +65,8 @@ fn errno(e: &MountError) -> i32 {
         MountError::NotADirectory => libc::ENOTDIR,
         MountError::IsADirectory => libc::EISDIR,
         MountError::Exists => libc::EEXIST,
+        MountError::NotEmpty => libc::ENOTEMPTY,
+        MountError::Unsupported(_) => libc::ENOTSUP,
         MountError::IndexNotReady(_) => libc::EAGAIN,
         MountError::BadHandle => libc::EBADF,
         MountError::ReadOnly => libc::EROFS,
@@ -499,5 +501,21 @@ mod tests {
         assert!(r.u64().is_err());
         let mut r = Reader::new(&[255, 255, 255, 255]);
         assert!(r.bytes().is_err());
+    }
+
+    #[test]
+    fn not_empty_maps_to_enotempty_not_eio() {
+        // rmdir of a non-empty directory must surface ENOTEMPTY; the old Protocol("directory
+        // not empty") fell through to the EIO catch-all and `rm` reported "Input/output error".
+        assert_eq!(errno(&MountError::NotEmpty), libc::ENOTEMPTY);
+        assert_ne!(errno(&MountError::NotEmpty), libc::EIO);
+    }
+
+    #[test]
+    fn unsupported_maps_to_enotsup_not_eio() {
+        // Renaming a committed directory is unsupported; it must surface ENOTSUP, not the
+        // Protocol->EIO catch-all that read as a bewildering "Input/output error".
+        assert_eq!(errno(&MountError::Unsupported(String::new())), libc::ENOTSUP);
+        assert_ne!(errno(&MountError::Unsupported(String::new())), libc::EIO);
     }
 }

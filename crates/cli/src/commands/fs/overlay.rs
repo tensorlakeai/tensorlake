@@ -36,6 +36,10 @@ struct ONode {
     /// The core ref-generation this binding was made at; a mismatch with the core's current
     /// generation means the followed ref advanced and the binding must be re-walked.
     bound_gen: std::sync::atomic::AtomicU64,
+    /// The redirect-table generation this binding was made at (see
+    /// [`OverlayFs::redirect_gen`]); a mismatch means a pending directory rename changed how
+    /// this path maps onto the lower and the binding must be re-walked.
+    bound_rgen: std::sync::atomic::AtomicU64,
     /// Content identity at the last `open` of this node (the lower blob oid; `None` for
     /// upper-backed opens). An open whose identity matches gets `FOPEN_KEEP_CACHE`: same oid
     /// means byte-identical content, so the kernel page cache from earlier opens is still
@@ -50,6 +54,10 @@ impl ONode {
 
     fn bound_gen(&self) -> u64 {
         self.bound_gen.load(Ordering::SeqCst)
+    }
+
+    fn bound_rgen(&self) -> u64 {
+        self.bound_rgen.load(Ordering::SeqCst)
     }
 }
 
@@ -70,6 +78,7 @@ impl InodeTable {
                     path: String::new(),
                     core_ino: Mutex::new(Some(ROOT_INO)),
                     bound_gen: std::sync::atomic::AtomicU64::new(0),
+                    bound_rgen: std::sync::atomic::AtomicU64::new(0),
                     last_open_oid: Mutex::new(None),
                 }),
                 1,
@@ -113,6 +122,7 @@ impl InodeTable {
             path: path.clone(),
             core_ino: Mutex::new(fresh_core),
             bound_gen: std::sync::atomic::AtomicU64::new(0),
+            bound_rgen: std::sync::atomic::AtomicU64::new(0),
             last_open_oid: Mutex::new(None),
         });
         self.nodes.insert(ino, (node.clone(), 1));
@@ -134,12 +144,152 @@ impl InodeTable {
         if *count == 0 {
             let node = node.clone();
             self.nodes.remove(&ino);
-            self.index.remove(&node.path);
+            // Only evict the index entry if it still points here. A rename may have re-keyed
+            // this path onto a different ino (overwrite: the old occupant lingers by ino until
+            // forgotten while its path now resolves to the moved node) — evicting blindly would
+            // strand the live entry.
+            if self.index.get(&node.path).copied() == Some(ino) {
+                self.index.remove(&node.path);
+            }
             Some(node)
         } else {
             None
         }
     }
+
+    /// Re-key interned nodes after a successful upper rename `src` -> `dst`.
+    ///
+    /// A FUSE `rename` keeps the source's nodeid and re-points its dentry at the destination,
+    /// then issues ino-based ops (`getattr`, `open`, `read`) against it. This table is path-keyed,
+    /// so unless the moved node's path follows, resolution walks the now-vacated source path and
+    /// returns `ENOENT` — the file lists in `readdir` (a fresh directory read) yet stats as gone.
+    /// (That is exactly what breaks `git init`/`git clone`, which write `HEAD`, `config`, refs and
+    /// every lockfile via write-temp-then-rename.)
+    ///
+    /// Handles subtree moves — a renamed directory carries its interned descendants — and
+    /// overwrite: a node already at `dst` is dropped from the index (it survives by ino until the
+    /// kernel forgets it, guarded by the path-conditional eviction in [`Self::forget`]). The moved
+    /// node's lower binding is dropped and re-resolved lazily against the destination path; any
+    /// counted core reference it held is returned for the caller to release.
+    #[must_use = "returned core inos must be released via MountCore::forget"]
+    fn rename(&mut self, src: &str, dst: &str) -> Vec<u64> {
+        let prefix = format!("{src}/");
+        let affected: Vec<String> = self
+            .index
+            .keys()
+            .filter(|p| p.as_str() == src || p.starts_with(&prefix))
+            .cloned()
+            .collect();
+        let mut released = Vec::new();
+        for old in affected {
+            let ino = self.index.remove(&old).expect("just enumerated from index");
+            let new = if old == src {
+                dst.to_string()
+            } else {
+                format!("{dst}/{}", &old[prefix.len()..])
+            };
+            let (node, count) = self.nodes.remove(&ino).expect("indexed node");
+            if let Some(core) = *node.core_ino.lock().expect("core ino lock") {
+                released.push(core);
+            }
+            let renamed = Arc::new(ONode {
+                path: new.clone(),
+                core_ino: Mutex::new(None),
+                bound_gen: AtomicU64::new(0),
+                bound_rgen: AtomicU64::new(0),
+                last_open_oid: Mutex::new(node.last_open_oid.lock().expect("oid lock").clone()),
+            });
+            self.index.insert(new, ino);
+            self.nodes.insert(ino, (renamed, count));
+        }
+        released
+    }
+}
+
+/// The true-lower path serving `path` under a pending-rename table: the longest matching
+/// destination prefix rewritten to its recorded source. Entries store true-lower coordinates
+/// (composed at insert), so one hop resolves chains.
+fn remap_through_redirects(redirects: &HashMap<String, String>, path: &str) -> String {
+    if redirects.is_empty() {
+        return path.to_string();
+    }
+    let mut probe = path;
+    loop {
+        if let Some(src) = redirects.get(probe) {
+            return format!("{src}{}", &path[probe.len()..]);
+        }
+        match probe.rfind('/') {
+            Some(i) => probe = &probe[..i],
+            None => return path.to_string(),
+        }
+    }
+}
+
+/// Record a committed-directory move `src` -> `dst` in the pending-rename table. `true_src`
+/// is `src` already resolved to true-lower coordinates. The destination is replaced
+/// wholesale (a pending rename previously rooted there dies), pending renames nested inside
+/// the moved subtree follow their new ancestor name (their recorded sources are already in
+/// true-lower coordinates and don't change), and a source that is itself pending re-keys
+/// instead of chaining.
+fn record_committed_rename(
+    redirects: &mut HashMap<String, String>,
+    src: &str,
+    dst: &str,
+    true_src: String,
+) {
+    let dst_prefix = format!("{dst}/");
+    redirects.retain(|k, _| k != dst && !k.starts_with(&dst_prefix));
+    let src_prefix = format!("{src}/");
+    let nested: Vec<String> = redirects
+        .keys()
+        .filter(|k| k.starts_with(&src_prefix))
+        .cloned()
+        .collect();
+    for key in nested {
+        let value = redirects.remove(&key).expect("just enumerated");
+        redirects.insert(format!("{dst}/{}", &key[src_prefix.len()..]), value);
+    }
+    redirects.remove(src);
+    redirects.insert(dst.to_string(), true_src);
+}
+
+/// Whether `path` is hidden by a whiteout marker under `wh_root`, honoring pending-rename
+/// shielding. Markers are files; a directory at a wh path is only the container for child
+/// markers (wh/dir/b.txt marks dir/b.txt, not dir). A marker on an ancestor whiteouts the
+/// whole subtree — descendants must test as whited out too, or a node cached by inode keeps
+/// serving content from under a deleted directory.
+///
+/// A pending rename recorded *under* a marker shields its subtree: dropping redirects when
+/// their destination is removed (rmdir/overwrite) means a live entry below an ancestor
+/// marker can only postdate it — the destination was created inside a deleted-then-recreated
+/// directory, and its content must show. Deeper markers (deletions inside the renamed tree)
+/// still apply on the rest of the walk.
+fn whited_out_under(wh_root: &Path, redirects: &HashMap<String, String>, path: &str) -> bool {
+    if path.is_empty() {
+        return false;
+    }
+    let mut probe = String::with_capacity(path.len());
+    for component in path.split('/') {
+        if !probe.is_empty() {
+            probe.push('/');
+        }
+        probe.push_str(component);
+        let marker_is_file = wh_root
+            .join(&probe)
+            .symlink_metadata()
+            .map(|m| m.is_file())
+            .unwrap_or(false);
+        if marker_is_file {
+            let shielded = redirects.keys().any(|root| {
+                (path == root.as_str() || path.starts_with(&format!("{root}/")))
+                    && root.starts_with(&format!("{probe}/"))
+            });
+            if !shielded {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 /// An open handle in the merged namespace.
@@ -206,6 +356,17 @@ pub struct OverlayFs {
     dirty: Mutex<HashMap<String, DirtyEntry>>,
     /// Out-of-band mutation epoch: see [`OverlayFs::epoch`].
     epoch: AtomicU64,
+    /// Pending committed-directory renames: merged-namespace destination path -> lower source
+    /// path in **true lower coordinates** (composed through existing entries at insert, so
+    /// resolution is always one hop). A `rename(2)` of a lower-backed directory records here
+    /// instead of materializing the subtree; reads under the destination resolve through the
+    /// remap, and the seal reconciles each entry into by-oid upserts plus the source delete.
+    /// Persisted to `<state dir>/redirects.json` alongside `upper/` and `wh/`.
+    redirects: Mutex<HashMap<String, String>>,
+    redirects_path: PathBuf,
+    /// Bumped on every redirect-table mutation. Lower bindings record it
+    /// ([`ONode::bound_rgen`]) so cached path walks re-resolve when the remap changes.
+    redirect_gen: AtomicU64,
 }
 
 /// What the last recorded mutation of a path was. `Upsert` covers create/write/copy-up/rename
@@ -281,6 +442,15 @@ impl OverlayFs {
         let wh = state_dir.join("wh");
         std::fs::create_dir_all(&upper).map_err(io_err)?;
         std::fs::create_dir_all(&wh).map_err(io_err)?;
+        let redirects_path = state_dir.join("redirects.json");
+        // Pending renames from a previous daemon (re-mount, crash) still gate the merged
+        // namespace; an unreadable file is corrupt state worth failing loudly on.
+        let redirects: HashMap<String, String> = match std::fs::read(&redirects_path) {
+            Ok(raw) => serde_json::from_slice(&raw)
+                .map_err(|e| MountError::Protocol(format!("corrupt redirects.json: {e}")))?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+            Err(e) => return Err(io_err(e)),
+        };
         let fs = Arc::new(OverlayFs {
             core,
             upper,
@@ -293,6 +463,9 @@ impl OverlayFs {
             write_gen: AtomicU64::new(0),
             dirty: Mutex::new(HashMap::new()),
             epoch: AtomicU64::new(0),
+            redirects: Mutex::new(redirects),
+            redirects_path,
+            redirect_gen: AtomicU64::new(0),
         });
         // Baseline: dirt left by a previous daemon (re-mount, crash) predates any events this
         // process will see; seed the index from disk so the first seal covers it.
@@ -497,29 +670,64 @@ impl OverlayFs {
     }
 
     fn whited_out(&self, path: &str) -> bool {
-        // Markers are files; a directory at a wh path is only the container for child markers
-        // (wh/dir/b.txt marks dir/b.txt, not dir). A marker on an ancestor whiteouts the whole
-        // subtree — descendants must test as whited out too, or a node cached by inode keeps
-        // serving content from under a deleted directory.
-        if path.is_empty() {
-            return false;
-        }
-        let mut probe = String::with_capacity(path.len());
-        for component in path.split('/') {
-            if !probe.is_empty() {
-                probe.push('/');
-            }
-            probe.push_str(component);
-            let marker_is_file = self
-                .wh_path(&probe)
-                .symlink_metadata()
-                .map(|m| m.is_file())
-                .unwrap_or(false);
-            if marker_is_file {
-                return true;
-            }
-        }
-        false
+        whited_out_under(
+            &self.wh,
+            &self.redirects.lock().expect("redirect lock"),
+            path,
+        )
+    }
+
+    // -------------------------------------------------------------------------------------
+    // Pending directory renames (redirects)
+    // -------------------------------------------------------------------------------------
+
+    /// The true-lower path serving `path`: the longest pending-rename prefix rewritten to its
+    /// recorded source (entries store true-lower coordinates, so one hop resolves chains).
+    fn remap_lower(&self, path: &str) -> String {
+        remap_through_redirects(&self.redirects.lock().expect("redirect lock"), path)
+    }
+
+    /// The recorded source when `path` is itself a pending-rename destination root.
+    fn redirect_source(&self, path: &str) -> Option<String> {
+        self.redirects.lock().expect("redirect lock").get(path).cloned()
+    }
+
+    /// Whether `path` is a pending-rename destination root or sits under one.
+    fn redirect_covers(&self, path: &str) -> bool {
+        let redirects = self.redirects.lock().expect("redirect lock");
+        redirects
+            .keys()
+            .any(|root| path == root.as_str() || path.starts_with(&format!("{root}/")))
+    }
+
+    /// Child names of pending-rename destination roots directly inside `dir`.
+    fn redirect_roots_under(&self, dir: &str) -> Vec<String> {
+        let redirects = self.redirects.lock().expect("redirect lock");
+        redirects
+            .keys()
+            .filter_map(|root| {
+                let rest = if dir.is_empty() {
+                    root.as_str()
+                } else {
+                    root.strip_prefix(&format!("{dir}/"))?
+                };
+                (!rest.is_empty() && !rest.contains('/')).then(|| rest.to_string())
+            })
+            .collect()
+    }
+
+    /// Write the table through to `redirects.json` (tmp + rename: a crash never leaves a
+    /// torn file — pending renames gate the merged namespace and the seal).
+    fn persist_redirects(&self, redirects: &HashMap<String, String>) -> Result<(), MountError> {
+        let tmp = self.redirects_path.with_extension("json.tmp");
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec_pretty(redirects)
+                .map_err(|e| MountError::Protocol(format!("encode redirects: {e}")))?,
+        )
+        .map_err(io_err)?;
+        std::fs::rename(&tmp, &self.redirects_path).map_err(io_err)?;
+        Ok(())
     }
 
     fn upper_meta(&self, path: &str) -> Option<std::fs::Metadata> {
@@ -600,6 +808,20 @@ impl OverlayFs {
             debug_assert!(release.is_none());
             return Ok(self.attr_from_meta(ino, &meta));
         }
+        // A pending rename serves its destination root here: the name exists in neither the
+        // upper nor the parent's lower listing — resolve through the remapped walk.
+        if self.redirect_source(&path).is_some() {
+            let attr = self.walk_lower(&path).await?;
+            let (ino, release) = {
+                let mut inodes = self.inodes.lock().expect("inode lock");
+                let (ino, _, release) = inodes.intern(path, Some(attr.ino));
+                (ino, release)
+            };
+            if let Some(stale) = release {
+                self.core.forget(stale, 1);
+            }
+            return Ok(self.attr_from_core(ino, &attr));
+        }
         if self.whited_out(&path) {
             return Err(not_found());
         }
@@ -629,39 +851,22 @@ impl OverlayFs {
         if node.path.is_empty() {
             return Ok(ROOT_INO);
         }
-        // Capture the generation BEFORE resolving: an advance racing the walk just means one
+        // Capture the generations BEFORE resolving: an advance racing the walk just means one
         // redundant re-walk later, never a stale binding recorded as fresh.
         let generation = self.core.current_generation();
+        let rgeneration = self.redirect_gen.load(Ordering::SeqCst);
         if let Some(ino) = node.core_ino()
             && node.bound_gen() == generation
+            && node.bound_rgen() == rgeneration
         {
             return Ok(ino);
         }
-        let mut cur = ROOT_INO;
-        let mut chain: Vec<u64> = Vec::new();
-        for component in node.path.split('/') {
-            match settle_lower!(self.core.lookup(cur, component).await) {
-                Ok(attr) => {
-                    chain.push(attr.ino);
-                    cur = attr.ino;
-                }
-                Err(e) => {
-                    for ino in chain {
-                        self.core.forget(ino, 1);
-                    }
-                    return Err(e);
-                }
-            }
-        }
-        // Keep one core reference on the leaf (owned by this node, repaid on forget); the
-        // intermediate lookups are repaid immediately.
-        let leaf = *chain.last().expect("path is never empty here");
-        for ino in &chain[..chain.len() - 1] {
-            self.core.forget(*ino, 1);
-        }
+        let attr = self.walk_lower(&node.path).await?;
+        let leaf = attr.ino;
         let mut stored = node.core_ino.lock().expect("core ino lock");
         let old = stored.replace(leaf);
         node.bound_gen.store(generation, Ordering::SeqCst);
+        node.bound_rgen.store(rgeneration, Ordering::SeqCst);
         drop(stored);
         if let Some(old) = old {
             if old != leaf {
@@ -670,6 +875,41 @@ impl OverlayFs {
                 // Same core node re-resolved: repay the duplicate reference.
                 self.core.forget(leaf, 1);
             }
+        }
+        Ok(leaf)
+    }
+
+    /// Walk a merged path component-by-component through the core, following any pending
+    /// rename remap. Returns the leaf's attributes holding **one counted core reference**
+    /// (on `attr.ino`) that the caller must own or repay.
+    async fn walk_lower(&self, merged_path: &str) -> Result<NodeAttr, MountError> {
+        let lower = self.remap_lower(merged_path);
+        self.walk_true_lower(&lower).await
+    }
+
+    /// [`Self::walk_lower`] without the pending-rename remap: resolve a path exactly as the
+    /// current lower commit spells it.
+    async fn walk_true_lower(&self, lower: &str) -> Result<NodeAttr, MountError> {
+        let mut cur = ROOT_INO;
+        let mut chain: Vec<NodeAttr> = Vec::new();
+        for component in lower.split('/') {
+            match settle_lower!(self.core.lookup(cur, component).await) {
+                Ok(attr) => {
+                    cur = attr.ino;
+                    chain.push(attr);
+                }
+                Err(e) => {
+                    for attr in chain {
+                        self.core.forget(attr.ino, 1);
+                    }
+                    return Err(e);
+                }
+            }
+        }
+        // Keep the reference on the leaf; the intermediate lookups are repaid immediately.
+        let leaf = chain.pop().expect("path is never empty here");
+        for attr in chain {
+            self.core.forget(attr.ino, 1);
         }
         Ok(leaf)
     }
@@ -746,6 +986,15 @@ impl OverlayFs {
                 };
                 seen.insert(name.clone());
                 merged.push((name, kind));
+            }
+        }
+
+        // Pending-rename destinations rooted here: physically absent from both the upper and
+        // this directory's lower listing, but part of the merged namespace. An upper dir of
+        // the same name (child copy-ups) already listed above; `seen` dedups.
+        for name in self.redirect_roots_under(&node.path) {
+            if seen.insert(name.clone()) {
+                merged.push((name, NodeKind::Dir));
             }
         }
 
@@ -1086,6 +1335,10 @@ impl OverlayFs {
         if self.upper_path(path).symlink_metadata().is_ok() {
             return true;
         }
+        // A pending rename occupies its destination root.
+        if self.redirect_source(path).is_some() {
+            return true;
+        }
         if self.whited_out(path) {
             return false;
         }
@@ -1226,12 +1479,17 @@ impl OverlayFs {
         // lookup() above took a reference; balance it.
         self.forget(attr.ino, 1);
         if !empty {
-            return Err(MountError::Protocol("directory not empty".to_string()));
+            // A real errno, not the Protocol->EIO catch-all: `rm`/`rmdir` on a non-empty
+            // directory must see ENOTEMPTY, or it reports a bewildering "Input/output error".
+            return Err(MountError::NotEmpty);
         }
         let dest = self.upper_path(&path);
         if dest.symlink_metadata().is_ok() {
             std::fs::remove_dir_all(&dest).map_err(io_err)?;
         }
+        // A pending rename rooted here dies with the directory: its true source was
+        // whiteouted when the rename was recorded, so nothing further hides.
+        self.drop_redirect_tree(&path)?;
         if self.lower_has(parent_node.core_ino(), name).await {
             self.set_whiteout(&path)?;
         }
@@ -1239,10 +1497,82 @@ impl OverlayFs {
         Ok(())
     }
 
+    /// Move a committed (lower-backed) directory by recording a pending rename: the table
+    /// entry re-points the merged destination at the true-lower source, local state under the
+    /// source (child copy-ups in the upper, deletion markers in `wh/`) rides along, and no
+    /// content moves. The seal reconciles the entry into by-oid upserts plus the source
+    /// delete. Moving a destination that is itself pending re-keys the existing entry, so
+    /// chains stay one hop.
+    fn rename_committed_dir(&self, src: &str, dst: &str) -> Result<(), MountError> {
+        let true_src = self.remap_lower(src);
+        {
+            let mut redirects = self.redirects.lock().expect("redirect lock");
+            record_committed_rename(&mut redirects, src, dst, true_src);
+            self.persist_redirects(&redirects)?;
+        }
+        self.redirect_gen.fetch_add(1, Ordering::SeqCst);
+        // Stale deletion markers at the destination belong to whatever the replace displaced.
+        let dst_wh = self.wh_path(dst);
+        if dst_wh
+            .symlink_metadata()
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
+            std::fs::remove_dir_all(&dst_wh).map_err(io_err)?;
+        }
+        // Local state under the source rides along: child copy-ups in the upper...
+        let src_upper = self.upper_path(src);
+        if src_upper.symlink_metadata().is_ok() {
+            let dst_upper = self.upper_path(dst);
+            if dst_upper.symlink_metadata().is_ok() {
+                std::fs::remove_dir_all(&dst_upper).map_err(io_err)?;
+            }
+            std::fs::rename(&src_upper, &dst_upper).map_err(io_err)?;
+        }
+        // ...and deletions of paths inside the moved subtree.
+        let src_wh = self.wh_path(src);
+        if src_wh
+            .symlink_metadata()
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
+            if let Some(dir) = dst_wh.parent() {
+                std::fs::create_dir_all(dir).map_err(io_err)?;
+            }
+            std::fs::rename(&src_wh, &dst_wh).map_err(io_err)?;
+        }
+        Ok(())
+    }
+
+    /// Drop the pending rename rooted at `path` (and defensively any nested under it) because
+    /// its destination was removed or replaced. Stale deletion markers under the destination
+    /// go with it — they described children of the dead entry and must not publish as deletes
+    /// of paths that never existed. Returns whether an entry was dropped.
+    fn drop_redirect_tree(&self, path: &str) -> Result<bool, MountError> {
+        let dropped = {
+            let mut redirects = self.redirects.lock().expect("redirect lock");
+            let prefix = format!("{path}/");
+            let before = redirects.len();
+            redirects.retain(|k, _| k != path && !k.starts_with(&prefix));
+            let dropped = redirects.len() != before;
+            if dropped {
+                self.persist_redirects(&redirects)?;
+            }
+            dropped
+        };
+        if dropped {
+            self.redirect_gen.fetch_add(1, Ordering::SeqCst);
+            let wh = self.wh_path(path);
+            if wh.symlink_metadata().map(|m| m.is_dir()).unwrap_or(false) {
+                std::fs::remove_dir_all(&wh).map_err(io_err)?;
+            }
+        }
+        Ok(dropped)
+    }
+
     /// Rename. Upper-only sources rename in place; a lower-backed file copies up, writes the
-    /// destination, and whiteouts the source. Renaming a directory with lower presence is not
-    /// supported (v1) — copy-up of a whole subtree belongs in a snapshot/promote flow, not a
-    /// syscall.
+    /// destination, and whiteouts the source. A lower-backed (committed) directory moves as a
+    /// pending rename — see [`OverlayFs::rename_committed_dir`].
     pub async fn rename(
         &self,
         parent: u64,
@@ -1262,27 +1592,40 @@ impl OverlayFs {
         }
 
         let src_meta = src_upper.symlink_metadata().ok();
+        let src_redirect = self.redirect_source(&src).is_some();
         let lower_src = self.lower_has(parent_node.core_ino(), name).await;
-        match src_meta {
-            Some(_) => {
-                std::fs::rename(&src_upper, &dst_upper).map_err(io_err)?;
-            }
-            None if lower_src => {
+        let upper_dir_over_redirect = src_redirect
+            && src_meta
+                .as_ref()
+                .map(|m| m.is_dir() && !m.file_type().is_symlink())
+                .unwrap_or(false);
+        let mut committed_dir_move = false;
+        if src_meta.is_some() && !upper_dir_over_redirect {
+            std::fs::rename(&src_upper, &dst_upper).map_err(io_err)?;
+        } else if lower_src || src_redirect {
+            let attr = self.lookup(parent, name).await?;
+            let node = self.node(attr.ino)?;
+            let kind = attr.kind;
+            self.forget(attr.ino, 1);
+            if matches!(kind, NodeKind::Dir) {
+                // A committed directory moves as a pending rename: metadata only, the seal
+                // reconciles it into by-oid upserts plus the source delete. Materializing the
+                // subtree here would put unbounded network I/O inside a syscall. An upper dir
+                // of the same name (child copy-ups) rides along inside the move.
+                self.rename_committed_dir(&src, &dst)?;
+                committed_dir_move = true;
+            } else {
                 // Copy the lower file up directly at the destination.
-                let attr = self.lookup(parent, name).await?;
-                let node = self.node(attr.ino)?;
-                if matches!(attr.kind, NodeKind::Dir) {
-                    self.forget(attr.ino, 1);
-                    return Err(MountError::Protocol(
-                        "renaming a committed directory is not supported; snapshot first"
-                            .to_string(),
-                    ));
-                }
                 self.copy_up(&node).await?;
-                self.forget(attr.ino, 1);
                 std::fs::rename(self.upper_path(&src), &dst_upper).map_err(io_err)?;
             }
-            None => return Err(not_found()),
+        } else {
+            return Err(not_found());
+        }
+        if !committed_dir_move {
+            // Whatever the destination held is replaced wholesale; a pending rename that was
+            // rooted there dies with it.
+            self.drop_redirect_tree(&dst)?;
         }
         if lower_src {
             self.set_whiteout(&src)?;
@@ -1329,8 +1672,16 @@ impl OverlayFs {
                 self.record(&format!("{dst}/{rel}"), DirtyKind::Upsert);
             }
         }
-        // The destination path may already be interned (overwrite): its ino now serves upper
-        // content automatically since attribute resolution is dynamic.
+        // Re-key the in-memory node table: the kernel keeps the source's nodeid and re-points its
+        // dentry at the destination, then addresses it by ino — so the moved node's path must
+        // follow it, or ino-based getattr/open resolve the vacated source path and return ENOENT.
+        let released = {
+            let mut inodes = self.inodes.lock().expect("inode lock");
+            inodes.rename(&src, &dst)
+        };
+        for core in released {
+            self.core.forget(core, 1);
+        }
         Ok(())
     }
 
@@ -1373,6 +1724,24 @@ impl OverlayFs {
     /// Entries whose kernel-visible content the lower change cannot affect — upper-shadowed or
     /// whited-out paths — are dropped, as are paths the kernel never looked up here.
     pub fn translate_delta(&self, delta: &gsvc_mount::RefreshDelta) -> Vec<OverlayInval> {
+        // Delta paths are lower coordinates; a pending rename serves that content under its
+        // destination, so the kernel-visible path (and the interned ino) lives there. The
+        // source coordinates are whiteouted and filter out below.
+        let reverse: Vec<(String, String)> = {
+            let redirects = self.redirects.lock().expect("redirect lock");
+            redirects.iter().map(|(d, s)| (s.clone(), d.clone())).collect()
+        };
+        let merged_path = |lower: &str| -> String {
+            for (src, dst) in &reverse {
+                if lower == src {
+                    return dst.clone();
+                }
+                if let Some(rest) = lower.strip_prefix(&format!("{src}/")) {
+                    return format!("{dst}/{rest}");
+                }
+            }
+            lower.to_string()
+        };
         let mut out = Vec::new();
         let tagged = delta
             .rebound
@@ -1380,21 +1749,22 @@ impl OverlayFs {
             .map(|e| (e, false))
             .chain(delta.staled.iter().map(|e| (e, true)));
         for (entry, staled) in tagged {
-            if self.upper_meta(&entry.path).is_some() || self.whited_out(&entry.path) {
+            let path = merged_path(&entry.path);
+            if self.upper_meta(&path).is_some() || self.whited_out(&path) {
                 continue;
             }
             let inodes = self.inodes.lock().expect("inode lock");
-            let Some(&ino) = inodes.index.get(&entry.path) else {
+            let Some(&ino) = inodes.index.get(&path) else {
                 continue;
             };
-            let parent_ino = match entry.path.rfind('/') {
-                Some(i) => inodes.index.get(&entry.path[..i]).copied(),
-                None => Some(ROOT_INO),
+            let (parent_ino, name) = match path.rfind('/') {
+                Some(i) => (inodes.index.get(&path[..i]).copied(), path[i + 1..].to_string()),
+                None => (Some(ROOT_INO), path.clone()),
             };
             out.push(OverlayInval {
                 ino,
                 parent_ino,
-                name: entry.name.clone(),
+                name,
                 staled,
             });
         }
@@ -1421,7 +1791,11 @@ impl OverlayFs {
                 .iter()
                 .filter(|(ino, _)| **ino != ROOT_INO)
                 .filter(|(_, (node, _))| {
-                    self.upper_meta(&node.path).is_some() || self.whited_out(&node.path)
+                    self.upper_meta(&node.path).is_some()
+                        || self.whited_out(&node.path)
+                        // Pending-rename paths flip from remapped resolution to the advanced
+                        // lower serving them directly; force fresh lookups there too.
+                        || self.redirect_covers(&node.path)
                 })
                 .map(|(&ino, (node, _))| {
                     let (parent_ino, name) = match node.path.rfind('/') {
@@ -1450,6 +1824,16 @@ impl OverlayFs {
                 }
             }
         }
+        // Pending renames were sealed into the commit this drop follows (or replaced by a
+        // restore); either way the advanced lower serves their destinations directly now.
+        {
+            let mut redirects = self.redirects.lock().expect("redirect lock");
+            if !redirects.is_empty() {
+                redirects.clear();
+                self.persist_redirects(&redirects)?;
+            }
+        }
+        self.redirect_gen.fetch_add(1, Ordering::SeqCst);
         // The dirty index described the dropped state; sealers fast-forward to the watermark.
         // The epoch bump tells them their other caches (chunk lists, sealed guards, in-flight
         // resolutions) describe a dead world too.
@@ -1457,6 +1841,167 @@ impl OverlayFs {
         self.epoch.fetch_add(1, Ordering::SeqCst);
         Ok(affected)
     }
+
+    /// Whether any pending directory renames await the next seal.
+    pub fn has_redirects(&self) -> bool {
+        !self.redirects.lock().expect("redirect lock").is_empty()
+    }
+
+    /// The pending rename table (destination -> true-lower source), for status display.
+    pub fn redirect_entries(&self) -> Vec<(String, String)> {
+        let redirects = self.redirects.lock().expect("redirect lock");
+        let mut entries: Vec<(String, String)> =
+            redirects.iter().map(|(d, s)| (d.clone(), s.clone())).collect();
+        entries.sort();
+        entries
+    }
+
+    /// Expand every pending rename into the per-file upserts a seal must publish: each file
+    /// the destination serves from the lower, as `(merged path, blob oid, git mode)` — the
+    /// content already exists server-side, so a sealer commits these **by oid reference**,
+    /// uploading nothing. Children the overlay already covers otherwise are skipped: upper
+    /// copy-ups seal through the regular walk, whiteouts are deletions.
+    pub async fn expand_redirects(&self) -> Result<Vec<RedirectSeal>, MountError> {
+        let pending = self.redirect_entries();
+        let mut out = Vec::new();
+        for (dst, src) in pending {
+            let mut files = Vec::new();
+            let mut dirs = vec![dst.clone()];
+            while let Some(dir) = dirs.pop() {
+                let dir_attr = self.walk_lower(&dir).await?;
+                let fh = match self.core.opendir(dir_attr.ino) {
+                    Ok(fh) => fh,
+                    Err(e) => {
+                        self.core.forget(dir_attr.ino, 1);
+                        return Err(e);
+                    }
+                };
+                let mut offset = 0u64;
+                let result: Result<(), MountError> = async {
+                    loop {
+                        let page = settle_lower!(self.core.readdir(fh, offset, 4096).await)?;
+                        if page.is_empty() {
+                            return Ok(());
+                        }
+                        offset = page.last().expect("nonempty page").next_offset;
+                        for entry in page {
+                            let child = Self::child_path(&dir, &entry.name);
+                            if self.whited_out(&child) {
+                                continue;
+                            }
+                            match entry.kind {
+                                NodeKind::Dir => dirs.push(child),
+                                NodeKind::File | NodeKind::Symlink => {
+                                    // An upper file shadows the lower one; the regular seal
+                                    // walk publishes it.
+                                    if self.upper_meta(&child).is_some() {
+                                        continue;
+                                    }
+                                    let attr = settle_lower!(
+                                        self.core.lookup(dir_attr.ino, &entry.name).await
+                                    )?;
+                                    let oid = attr.oid.clone();
+                                    let perm = attr.perm;
+                                    self.core.forget(attr.ino, 1);
+                                    if oid.is_empty() {
+                                        // Sealing by reference needs the identity; publishing
+                                        // without it would silently drop the file.
+                                        return Err(MountError::Protocol(format!(
+                                            "no oid for {child} under pending rename {dst}"
+                                        )));
+                                    }
+                                    let mode = match entry.kind {
+                                        NodeKind::Symlink => 0o120000,
+                                        _ if perm & 0o111 != 0 => 0o100755,
+                                        _ => 0o100644,
+                                    };
+                                    files.push(RedirectFile {
+                                        path: child,
+                                        oid,
+                                        mode,
+                                    });
+                                }
+                            }
+                        }
+                    }
+                }
+                .await;
+                self.core.releasedir(fh);
+                self.core.forget(dir_attr.ino, 1);
+                result?;
+            }
+            out.push(RedirectSeal { dst, src, files });
+        }
+        Ok(out)
+    }
+
+    /// Drop pending renames that a previous seal already published: once the lower advances
+    /// to the sealed commit, the tree serves each destination directly and the recorded
+    /// source is gone — remapping through the entry would dangle. Detected, never assumed:
+    /// an entry is reaped only when its source is absent **and** its destination present in
+    /// the current lower. Heals the crash/race window between a seal landing and its
+    /// [`Self::consume_redirects`]. Returns the consumed destinations.
+    pub async fn reap_sealed_redirects(&self) -> Result<Vec<String>, MountError> {
+        let mut consumed = Vec::new();
+        for (dst, src) in self.redirect_entries() {
+            match self.walk_true_lower(&src).await {
+                Err(MountError::NotFound(_)) => {}
+                Ok(attr) => {
+                    self.core.forget(attr.ino, 1);
+                    continue;
+                }
+                Err(e) => return Err(e),
+            }
+            match self.walk_true_lower(&dst).await {
+                Ok(attr) => {
+                    self.core.forget(attr.ino, 1);
+                    consumed.push(dst);
+                }
+                Err(MountError::NotFound(_)) => {}
+                Err(e) => return Err(e),
+            }
+        }
+        if !consumed.is_empty() {
+            self.consume_redirects(&consumed)?;
+        }
+        Ok(consumed)
+    }
+
+    /// Drop pending renames a seal just published: the commit the workspace ref now points at
+    /// serves their destinations directly. Callers must refresh the lower **first** — dropping
+    /// against the old commit would leave the destinations unresolvable.
+    pub fn consume_redirects(&self, dsts: &[String]) -> Result<(), MountError> {
+        {
+            let mut redirects = self.redirects.lock().expect("redirect lock");
+            let before = redirects.len();
+            redirects.retain(|k, _| !dsts.contains(k));
+            if redirects.len() == before {
+                return Ok(());
+            }
+            self.persist_redirects(&redirects)?;
+        }
+        self.redirect_gen.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+}
+
+/// One pending rename, expanded for sealing: every file the destination serves from the
+/// lower, ready to commit by oid reference.
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct RedirectSeal {
+    pub dst: String,
+    pub src: String,
+    pub files: Vec<RedirectFile>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+pub struct RedirectFile {
+    /// Merged-namespace path (under the destination root).
+    pub path: String,
+    /// Git blob oid (40-hex) of the content, already present server-side.
+    pub oid: String,
+    /// Git mode (`0o100644`, `0o100755`, `0o120000`).
+    pub mode: u32,
 }
 
 /// One kernel invalidation in the overlay's ino space, produced by [`OverlayFs::translate_delta`]
@@ -1503,6 +2048,194 @@ mod tests {
     use tensorlake::artifact_storage::ArtifactStorageClient;
     use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
     use tensorlake::artifact_storage::workspaces::CreateWorkspaceRequest;
+
+    // ---------------------------------------------------------------------------------------
+    // Inode-table re-keying (pure, no server): the rename fix that lets `git init`/`git clone`
+    // work on the mount. A FUSE rename keeps the source nodeid and re-points its dentry at the
+    // destination, so the node's path must follow or ino-based ops resolve the vacated source
+    // path and return ENOENT.
+    // ---------------------------------------------------------------------------------------
+
+    #[test]
+    fn inode_table_rename_rekeys_source_ino_to_destination() {
+        let mut t = InodeTable::new();
+        // A file created in the upper (git's `config.lock`) — no lower binding.
+        let (ino, _, _) = t.intern("config.lock".to_string(), None);
+        let released = t.rename("config.lock", "config");
+        assert!(released.is_empty(), "pure-upper rename releases no core refs");
+        assert!(
+            !t.index.contains_key("config.lock"),
+            "source path is vacated"
+        );
+        assert_eq!(
+            t.index.get("config").copied(),
+            Some(ino),
+            "the same nodeid now resolves to the destination"
+        );
+        assert_eq!(
+            t.get(ino).unwrap().path,
+            "config",
+            "the node's path followed the rename"
+        );
+    }
+
+    #[test]
+    fn inode_table_rename_carries_interned_subtree() {
+        let mut t = InodeTable::new();
+        let (dir, _, _) = t.intern("d".to_string(), None);
+        let (child, _, _) = t.intern("d/x".to_string(), None);
+        let released = t.rename("d", "d2");
+        assert!(released.is_empty());
+        assert_eq!(t.index.get("d2").copied(), Some(dir));
+        assert_eq!(
+            t.index.get("d2/x").copied(),
+            Some(child),
+            "descendants move with the directory"
+        );
+        assert_eq!(t.get(child).unwrap().path, "d2/x");
+        assert!(!t.index.contains_key("d/x"));
+    }
+
+    #[test]
+    fn inode_table_rename_does_not_touch_prefix_siblings() {
+        let mut t = InodeTable::new();
+        let (_, _, _) = t.intern("d".to_string(), None);
+        let (sibling, _, _) = t.intern("dxy".to_string(), None);
+        let _ = t.rename("d", "d2");
+        assert_eq!(
+            t.index.get("dxy").copied(),
+            Some(sibling),
+            "a name that merely shares the prefix is not a descendant"
+        );
+    }
+
+    #[test]
+    fn inode_table_rename_overwrite_orphans_destination_until_forgotten() {
+        let mut t = InodeTable::new();
+        let (src, _, _) = t.intern("src".to_string(), None);
+        let (dst, _, _) = t.intern("dst".to_string(), None);
+        let _ = t.rename("src", "dst");
+        assert_eq!(
+            t.index.get("dst").copied(),
+            Some(src),
+            "destination path resolves to the moved (source) nodeid"
+        );
+        // The overwritten node lingers by ino until the kernel forgets it; forgetting it must not
+        // evict the re-keyed entry that now owns its former path.
+        let dropped = t.forget(dst, 1);
+        assert!(dropped.is_some(), "orphan is dropped at zero lookups");
+        assert_eq!(
+            t.index.get("dst").copied(),
+            Some(src),
+            "forgetting the orphan preserves the live entry"
+        );
+    }
+
+    fn table(entries: &[(&str, &str)]) -> HashMap<String, String> {
+        entries
+            .iter()
+            .map(|(d, s)| (d.to_string(), s.to_string()))
+            .collect()
+    }
+
+    #[test]
+    fn redirect_remap_follows_longest_prefix() {
+        let t = table(&[("moved", "old"), ("moved/inner2", "elsewhere/inner")]);
+        assert_eq!(remap_through_redirects(&t, "moved"), "old");
+        assert_eq!(remap_through_redirects(&t, "moved/a/b.txt"), "old/a/b.txt");
+        // The deeper entry wins for its own subtree.
+        assert_eq!(
+            remap_through_redirects(&t, "moved/inner2/x"),
+            "elsewhere/inner/x"
+        );
+        // Prefix-shaped but not a path prefix: no remap.
+        assert_eq!(remap_through_redirects(&t, "movedx"), "movedx");
+        assert_eq!(remap_through_redirects(&t, "untouched/f"), "untouched/f");
+    }
+
+    #[test]
+    fn record_committed_rename_composes_chains_and_carries_nested_entries() {
+        let mut t = HashMap::new();
+        // mv a b — first move records true coordinates.
+        record_committed_rename(&mut t, "a", "b", "a".to_string());
+        assert_eq!(t.get("b").map(String::as_str), Some("a"));
+        // mv committed dir inside the pending tree: b/sub -> c (true src resolves through b).
+        let true_src = remap_through_redirects(&t, "b/sub");
+        record_committed_rename(&mut t, "b/sub", "c", true_src);
+        assert_eq!(t.get("c").map(String::as_str), Some("a/sub"), "one hop");
+        // mv b d — the root re-keys, nothing chains through the dead name.
+        let true_src = remap_through_redirects(&t, "b");
+        record_committed_rename(&mut t, "b", "d", true_src);
+        assert!(!t.contains_key("b"));
+        assert_eq!(t.get("d").map(String::as_str), Some("a"));
+        // A nested pending rename rides an ancestor move: mv x d/y, then mv d e.
+        record_committed_rename(&mut t, "x", "d/y", "x".to_string());
+        let true_src = remap_through_redirects(&t, "d");
+        record_committed_rename(&mut t, "d", "e", true_src);
+        assert_eq!(t.get("e").map(String::as_str), Some("a"));
+        assert_eq!(
+            t.get("e/y").map(String::as_str),
+            Some("x"),
+            "nested entry follows its new ancestor name"
+        );
+        assert!(!t.contains_key("d/y"));
+    }
+
+    #[test]
+    fn record_committed_rename_overwrite_drops_the_displaced_entry() {
+        let mut t = table(&[("dst", "old1"), ("dst/nested", "old2")]);
+        record_committed_rename(&mut t, "src", "dst", "src".to_string());
+        assert_eq!(t.len(), 1);
+        assert_eq!(
+            t.get("dst").map(String::as_str),
+            Some("src"),
+            "the replaced destination's entries die with it"
+        );
+    }
+
+    #[test]
+    fn whiteout_shielding_shows_redirects_under_ancestor_markers() {
+        // Defense-in-depth configuration: a subtree marker on an ancestor of a live pending
+        // rename. Normal flows can't build it (recreating the ancestor clears its marker, and
+        // a destination needs a visible parent), but if it ever arises the entry — which by
+        // the drop-on-remove invariant postdates any marker above it — must win.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wh = tmp.path();
+        std::fs::write(wh.join("dir"), b"").unwrap();
+        let t = table(&[("dir/moved", "old")]);
+        assert!(!whited_out_under(wh, &t, "dir/moved"));
+        assert!(
+            !whited_out_under(wh, &t, "dir/moved/child.txt"),
+            "content under the destination shows too"
+        );
+        assert!(
+            whited_out_under(wh, &t, "dir/other"),
+            "the marker still hides everything the rename does not cover"
+        );
+        // A marker AT the destination root itself is not shielded by its own entry.
+        let t2 = table(&[("dir", "old")]);
+        assert!(
+            whited_out_under(wh, &t2, "dir"),
+            "a marker at the root outranks the entry"
+        );
+    }
+
+    #[test]
+    fn whiteouts_inside_a_renamed_tree_still_apply() {
+        // The normal case: files deleted under a pending-rename destination carry ordinary
+        // child markers, and the walk past the (unmarked) ancestors must honor them.
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let wh = tmp.path();
+        std::fs::create_dir_all(wh.join("moved")).unwrap();
+        std::fs::write(wh.join("moved/gone.txt"), b"").unwrap();
+        let t = table(&[("moved", "old")]);
+        assert!(whited_out_under(wh, &t, "moved/gone.txt"));
+        assert!(!whited_out_under(wh, &t, "moved/kept.txt"));
+        assert!(
+            !whited_out_under(wh, &t, "moved"),
+            "the container dir is not a marker"
+        );
+    }
 
     const BASE: &str = "http://127.0.0.1:8080";
     const PROJECT: &str = "overlaytest";
@@ -1698,8 +2431,12 @@ mod tests {
         assert_eq!(dir_names(&fs, dir.ino).await, vec!["a.txt"]);
         assert!(state.path().join("wh/dir/b.txt").is_file());
 
-        // 5. rmdir refuses non-empty; empties then whiteouts a lower dir.
-        assert!(fs.rmdir(ROOT_INO, "dir").await.is_err());
+        // 5. rmdir refuses non-empty (as ENOTEMPTY, not the Protocol->EIO catch-all); empties
+        //    then whiteouts a lower dir.
+        assert!(matches!(
+            fs.rmdir(ROOT_INO, "dir").await,
+            Err(MountError::NotEmpty)
+        ));
         fs.unlink(dir.ino, "a.txt").await.unwrap();
         fs.rmdir(ROOT_INO, "dir").await.unwrap();
         assert!(fs.lookup(ROOT_INO, "dir").await.is_err());
@@ -1773,6 +2510,218 @@ mod tests {
         // git drops empty trees: bin/ vanished with its only file.
         let names = dir_names(&fs, ROOT_INO).await;
         assert_eq!(names, vec!["README.md", "lnk", "new.txt", "run2.sh"]);
+
+        sdk.delete_workspace(PROJECT, &repo, "t", TOKEN, &ws.id)
+            .await
+            .unwrap();
+    }
+
+    /// Committed-directory rename end to end: the pending-rename redirect serves reads at the
+    /// destination without materializing anything, local edits and deletes inside the moved
+    /// tree layer on top, the seal publishes by-oid references plus the source delete, and
+    /// after the ref advances the reaped/cleared overlay serves the destination from the
+    /// lower — byte-identical.
+    #[tokio::test]
+    #[ignore = "requires a local artifact-storage server on 127.0.0.1:8080"]
+    async fn overlay_renames_committed_directory_and_seals_by_reference() {
+        if !server_up() {
+            eprintln!("skipping: no local artifact-storage server");
+            return;
+        }
+        let sdk = sdk();
+        let repo = format!(
+            "ofsmv-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sdk.create_repo_with_credential(PROJECT, &repo, None, "t", TOKEN)
+            .await
+            .unwrap();
+        sdk.push_files(
+            PROJECT,
+            &repo,
+            "t",
+            TOKEN,
+            vec![
+                push_file("keep.md", b"stay\n", 0o100644),
+                push_file("pkg/lib.rs", b"pub fn lib() {}\n", 0o100644),
+                push_file("pkg/sub/deep.txt", b"deep\n", 0o100644),
+                push_file("pkg/tool.sh", b"#!/bin/sh\n", 0o100755),
+                push_file("pkg/gone.txt", b"delete me\n", 0o100644),
+            ],
+            PushOptions {
+                message: "seed".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let ws = sdk
+            .create_workspace(
+                PROJECT,
+                &repo,
+                "t",
+                TOKEN,
+                &CreateWorkspaceRequest::default(),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        let client = FsClient::new(BASE, PROJECT, &repo, Some(TOKEN.to_string())).unwrap();
+        let core = MountCore::new(
+            client,
+            MountOptions {
+                reference: ws.ref_name.clone(),
+                follow: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let fs: Arc<OverlayFs> = OverlayFs::new(core.clone(), state.path(), false).unwrap();
+
+        // 1. mv pkg moved — instant, nothing materializes.
+        fs.rename(ROOT_INO, "pkg", ROOT_INO, "moved").await.unwrap();
+        assert!(fs.lookup(ROOT_INO, "pkg").await.is_err(), "source gone");
+        assert!(
+            !state.path().join("upper/moved").exists(),
+            "no copy-up happened"
+        );
+        assert_eq!(dir_names(&fs, ROOT_INO).await, vec!["keep.md", "moved"]);
+        let moved = fs.lookup(ROOT_INO, "moved").await.unwrap();
+        assert!(matches!(moved.kind, NodeKind::Dir));
+        assert_eq!(
+            dir_names(&fs, moved.ino).await,
+            vec!["gone.txt", "lib.rs", "sub", "tool.sh"]
+        );
+        assert_eq!(
+            read_all(&fs, moved.ino, "lib.rs").await,
+            b"pub fn lib() {}\n"
+        );
+        let tool = fs.lookup(moved.ino, "tool.sh").await.unwrap();
+        assert_eq!(tool.perm & 0o111, 0o111, "exec bit survives the remap");
+        fs.forget(tool.ino, 1);
+        let sub = fs.lookup(moved.ino, "sub").await.unwrap();
+        assert_eq!(read_all(&fs, sub.ino, "deep.txt").await, b"deep\n");
+
+        // 2. Edits inside the moved tree: an upper copy-up shadows, a delete whiteouts.
+        let lib = fs.lookup(moved.ino, "lib.rs").await.unwrap();
+        let (fh, _) = fs.open(lib.ino, true).await.unwrap();
+        fs.write(fh, 0, b"pub fn lib2() {}\n").unwrap();
+        fs.setattr(lib.ino, Some(17), None).await.unwrap();
+        fs.release(fh);
+        fs.forget(lib.ino, 1);
+        fs.unlink(moved.ino, "gone.txt").await.unwrap();
+        assert_eq!(
+            dir_names(&fs, moved.ino).await,
+            vec!["lib.rs", "sub", "tool.sh"]
+        );
+        assert_eq!(read_all(&fs, moved.ino, "lib.rs").await, b"pub fn lib2() {}\n");
+
+        // 3. A second move re-keys the same entry (chain stays one hop).
+        fs.rename(ROOT_INO, "moved", ROOT_INO, "moved2")
+            .await
+            .unwrap();
+        assert!(fs.lookup(ROOT_INO, "moved").await.is_err());
+        fs.forget(moved.ino, 1);
+        fs.forget(sub.ino, 1);
+        let moved2 = fs.lookup(ROOT_INO, "moved2").await.unwrap();
+        assert_eq!(
+            dir_names(&fs, moved2.ino).await,
+            vec!["lib.rs", "sub", "tool.sh"]
+        );
+        assert_eq!(
+            read_all(&fs, moved2.ino, "lib.rs").await,
+            b"pub fn lib2() {}\n",
+            "the copy-up rode the second move"
+        );
+        assert_eq!(fs.redirect_entries(), vec![("moved2".into(), "pkg".into())]);
+
+        // 4. Seal exactly as `tl fs snapshot` would: the expansion's by-oid upserts (the
+        //    upper-shadowed lib.rs and whiteouted gone.txt are excluded), the regular upsert
+        //    for the copy-up, and the source delete the whiteout produced.
+        let seals = fs.expand_redirects().await.unwrap();
+        assert_eq!(seals.len(), 1);
+        let mut sealed_paths: Vec<&str> =
+            seals[0].files.iter().map(|f| f.path.as_str()).collect();
+        sealed_paths.sort();
+        assert_eq!(
+            sealed_paths,
+            vec!["moved2/sub/deep.txt", "moved2/tool.sh"],
+            "shadowed and deleted children stay out of the by-oid set"
+        );
+        let tool_mode = seals[0]
+            .files
+            .iter()
+            .find(|f| f.path == "moved2/tool.sh")
+            .unwrap()
+            .mode;
+        assert_eq!(tool_mode, 0o100755, "exec mode carried by reference");
+        let mut files: Vec<PushFile> = seals[0]
+            .files
+            .iter()
+            .map(|f| PushFile {
+                repo_path: f.path.clone(),
+                source: PushSource::KnownOid(f.oid.clone()),
+                mode: Some(f.mode),
+                delete: false,
+            })
+            .collect();
+        files.push(PushFile {
+            repo_path: "moved2/lib.rs".into(),
+            source: PushSource::Path(state.path().join("upper/moved2/lib.rs")),
+            mode: Some(0o100644),
+            delete: false,
+        });
+        files.push(PushFile {
+            repo_path: "pkg".into(),
+            source: PushSource::Bytes(Vec::new()),
+            mode: None,
+            delete: true,
+        });
+        sdk.push_files(
+            PROJECT,
+            &repo,
+            "t",
+            TOKEN,
+            files,
+            PushOptions {
+                message: "rename snapshot".into(),
+                workspace_snapshot: Some(ws.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+
+        // 5. Ref advance + reap: the entry is detected as sealed (src gone, dst present) and
+        //    consumed; clear_upper drops the copy-up and whiteout.
+        assert!(core.poll_ref().await.unwrap().is_some(), "ref moved");
+        let consumed = fs.reap_sealed_redirects().await.unwrap();
+        assert_eq!(consumed, vec!["moved2".to_string()]);
+        assert!(!fs.has_redirects());
+        fs.clear_upper().unwrap();
+
+        // 6. The lower now serves the destination directly, byte-identical.
+        fs.forget(moved2.ino, 1);
+        assert!(fs.lookup(ROOT_INO, "pkg").await.is_err());
+        let moved2 = fs.lookup(ROOT_INO, "moved2").await.unwrap();
+        assert!(!moved2.upper);
+        assert_eq!(
+            dir_names(&fs, moved2.ino).await,
+            vec!["lib.rs", "sub", "tool.sh"]
+        );
+        assert_eq!(
+            read_all(&fs, moved2.ino, "lib.rs").await,
+            b"pub fn lib2() {}\n"
+        );
+        let sub2 = fs.lookup(moved2.ino, "sub").await.unwrap();
+        assert_eq!(read_all(&fs, sub2.ino, "deep.txt").await, b"deep\n");
+        let tool2 = fs.lookup(moved2.ino, "tool.sh").await.unwrap();
+        assert_eq!(tool2.perm & 0o111, 0o111);
 
         sdk.delete_workspace(PROJECT, &repo, "t", TOKEN, &ws.id)
             .await
