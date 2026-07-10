@@ -1,5 +1,6 @@
+import json
 import os
-from typing import List, Set
+from typing import Any, List, Set
 
 from ..applications import filter_applications
 from ..interface.function import Function
@@ -18,7 +19,7 @@ def deploy_applications(
     upgrade_running_requests: bool = True,
     load_source_dir_modules: bool = False,
     api_client=None,
-) -> None:
+) -> dict[str, str]:
     """Deploys all applications in the supplied .py file so they are runnable in remote mode (i.e. on Tensorlake Cloud).
 
     `application_file_path` is a path to the .py file where the applications are defined.
@@ -30,6 +31,9 @@ def deploy_applications(
 
     Raises SDKUsageError if the client configuration is not valid for the operation.
     Raises TensorlakeError on other errors.
+
+    Returns a mapping from application name to enabled public endpoint URL. Applications without
+    an enabled public endpoint are omitted.
     """
     # Work with absolute paths to make sure that the path comparisons work correctly.
     applications_file_path: str = os.path.abspath(applications_file_path)
@@ -58,6 +62,7 @@ def deploy_applications(
         )
         should_close = True
 
+    public_endpoint_urls: dict[str, str] = {}
     try:
         for application in filter_applications(functions):
             app_manifest: ApplicationManifest = create_application_manifest(
@@ -69,15 +74,43 @@ def deploy_applications(
                 upgrade_running_requests=upgrade_running_requests,
             )
             if hasattr(api_client, "ensure_application_public_endpoint"):
-                api_client.ensure_application_public_endpoint(
+                endpoint_response = api_client.ensure_application_public_endpoint(
                     application_name=app_manifest.name,
                     allow=app_manifest.allow,
                 )
             elif hasattr(api_client, "ensure_application_public_endpoint_json"):
-                api_client.ensure_application_public_endpoint_json(
+                endpoint_response = api_client.ensure_application_public_endpoint_json(
                     application_name=app_manifest.name,
                     allow=app_manifest.allow,
                 )
+            else:
+                endpoint_response = None
+
+            public_endpoint_url = _enabled_public_endpoint_url(endpoint_response)
+            if public_endpoint_url is not None:
+                public_endpoint_urls[app_manifest.name] = public_endpoint_url
     finally:
         if should_close:
             api_client.close()
+
+    return public_endpoint_urls
+
+
+def _enabled_public_endpoint_url(response: Any) -> str | None:
+    if response is None:
+        return None
+    if isinstance(response, str):
+        response = json.loads(response)
+    elif hasattr(response, "model_dump"):
+        response = response.model_dump()
+    if not isinstance(response, dict) or not response.get(
+        "allow_unauthorized_requests"
+    ):
+        return None
+
+    for endpoint in response.get("endpoints", []):
+        if isinstance(endpoint, dict) and endpoint.get("enabled"):
+            url = endpoint.get("url")
+            if isinstance(url, str) and url:
+                return url
+    return None

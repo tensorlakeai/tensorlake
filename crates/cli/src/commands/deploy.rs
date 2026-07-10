@@ -143,6 +143,9 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                     .and_then(|v| v.as_str())
                     .unwrap_or("");
                 eprintln!("🚀 Application `{}` deployed successfully", application);
+                if let Some(message) = public_endpoint_message(&event) {
+                    eprintln!("{}", message);
+                }
                 if let Some(curl_command) = event.get("curl_command").and_then(|v| v.as_str()) {
                     eprintln!(
                         "\n💡 To invoke it, you can use the following cURL command:\n\n{}",
@@ -191,6 +194,14 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn public_endpoint_message(event: &serde_json::Value) -> Option<String> {
+    event
+        .get("public_endpoint_url")
+        .and_then(|value| value.as_str())
+        .filter(|url| !url.is_empty())
+        .map(|url| format!("🌍 Public endpoint: {url}"))
+}
+
 async fn terminate_child(child: &mut tokio::process::Child) -> Result<()> {
     // Best-effort cancellation of the spawned Python process when the user presses Ctrl+C.
     match child.start_kill() {
@@ -200,4 +211,30 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<()> {
     }
     let _ = child.wait().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::public_endpoint_message;
+
+    #[test]
+    fn formats_public_endpoint_with_earth_label() {
+        let event = serde_json::json!({
+            "public_endpoint_url": "https://api.tensorlake.ai/applications/public/endpoint_123"
+        });
+
+        assert_eq!(
+            public_endpoint_message(&event).as_deref(),
+            Some("🌍 Public endpoint: https://api.tensorlake.ai/applications/public/endpoint_123")
+        );
+    }
+
+    #[test]
+    fn omits_missing_public_endpoint() {
+        assert_eq!(public_endpoint_message(&serde_json::json!({})), None);
+        assert_eq!(
+            public_endpoint_message(&serde_json::json!({"public_endpoint_url": null})),
+            None
+        );
+    }
 }
