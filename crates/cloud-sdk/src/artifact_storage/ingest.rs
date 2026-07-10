@@ -288,6 +288,11 @@ pub struct CommitJobStatus {
     /// `?wait_generation=` long polls. Absent on older servers.
     #[serde(default)]
     pub generation: Option<u64>,
+    /// The route this job is polled at, named by 202 submission responses (absent
+    /// elsewhere/on older servers). Mirrored from the server wire; not yet consumed —
+    /// `commit_job_get` builds the identical route itself.
+    #[serde(default)]
+    pub poll_url: Option<String>,
     #[serde(default)]
     pub phase: Option<String>,
     #[serde(default)]
@@ -1491,21 +1496,23 @@ impl ArtifactStorageClient {
                 job_id: job_id.clone(),
             });
             // Poll the job's state machine to terminal, through the same request the
-            // out-of-band status API uses. Once the server reports a `generation`, each
-            // poll long-polls on it (`?wait_generation=`): one held request per state
-            // transition instead of a blind cadence. Servers without generations (or a
-            // poll that came back without being held) fall back to the sleep below.
+            // out-of-band status API uses. A server that reports a `generation` (any server
+            // that can answer a 202: the field and `?wait_generation=` support shipped
+            // together) holds each poll until the state machine moves, so the loop only
+            // paces itself between polls:
+            //  - after an advance, a short floor — the executor bumps the generation on
+            //    every throttled read-back tick (up to 2/s), and re-polling faster than
+            //    this just re-samples the same counters at more than double the request
+            //    cost;
+            //  - otherwise the plain backoff — servers without generations (pre-`#59`),
+            //    and holds that expired with nothing new.
+            // The terminal check runs before any sleep, so completion is observed the
+            // moment its poll returns.
             let mut delay = std::time::Duration::from_millis(500);
             // Seed from the 202 body: with a generation in hand the first poll already
-            // long-polls (no blind sleep); without one (older server) start on the backoff.
+            // long-polls; without one (older server) it is a plain immediate status read.
             let mut last_gen: Option<u64> = job.generation;
-            let mut held = last_gen.is_some();
             loop {
-                if !held {
-                    tokio::time::sleep(delay).await;
-                    delay = (delay * 2).min(std::time::Duration::from_secs(2));
-                }
-                let sent = std::time::Instant::now();
                 job = with_transient_retries(|| async {
                     self.commit_job_get(
                         project_id,
@@ -1519,40 +1526,34 @@ impl ArtifactStorageClient {
                     .map(Traced::into_inner)
                 })
                 .await?;
-                // "Held" = the server honored the long poll: the generation moved, or the
-                // request visibly dwelt server-side (timeout expiry). An immediate answer
-                // with an unchanged generation means the parameter was ignored — keep the
-                // backoff so that server isn't hammered.
-                let advanced = match (last_gen, job.generation) {
-                    (Some(prev), Some(cur)) => cur > prev,
-                    (None, Some(_)) => true,
-                    _ => false,
-                };
-                held = advanced
-                    || (last_gen.is_some() && sent.elapsed() >= std::time::Duration::from_secs(5));
-                if advanced {
-                    delay = std::time::Duration::from_millis(500);
-                }
-                if job.generation.is_some() {
-                    last_gen = job.generation;
-                }
                 match job.state.as_str() {
                     "committed" | "failed" => break,
                     _ => {
-                        if let Some(rb) = &job.read_back {
-                            emit(PushEvent::CommitProgress {
-                                phase: job.phase.clone().unwrap_or_else(|| job.state.clone()),
-                                done: rb.done,
-                                total: rb.total,
-                            });
-                        } else {
-                            emit(PushEvent::CommitProgress {
-                                phase: job.phase.clone().unwrap_or_else(|| job.state.clone()),
-                                done: 0,
-                                total: 0,
-                            });
-                        }
+                        let (done, total) = job
+                            .read_back
+                            .as_ref()
+                            .map_or((0, 0), |rb| (rb.done, rb.total));
+                        emit(PushEvent::CommitProgress {
+                            phase: job.phase.clone().unwrap_or_else(|| job.state.clone()),
+                            done,
+                            total,
+                        });
                     }
+                }
+                let advanced = match (last_gen, job.generation) {
+                    (Some(prev), Some(cur)) => cur > prev,
+                    (None, Some(_)) => true, // first sighting: switch to long polling
+                    _ => false,
+                };
+                if job.generation.is_some() {
+                    last_gen = job.generation;
+                }
+                if advanced {
+                    delay = std::time::Duration::from_millis(500);
+                    tokio::time::sleep(std::time::Duration::from_secs(1)).await;
+                } else {
+                    tokio::time::sleep(delay).await;
+                    delay = (delay * 2).min(std::time::Duration::from_secs(2));
                 }
             }
         }
@@ -1680,14 +1681,21 @@ impl ArtifactStorageClient {
         job_id: &str,
         wait_generation: Option<u64>,
     ) -> Result<Traced<CommitJobStatus>, SdkError> {
-        let mut suffix = format!("commits/jobs/{}", super::encode_path_segment(job_id));
-        if let Some(g) = wait_generation {
-            use std::fmt::Write as _;
-            let _ = write!(
-                suffix,
-                "?wait_generation={g}&timeout_ms={JOB_LONG_POLL_TIMEOUT_MS}"
-            );
-        }
+        let id = super::encode_path_segment(job_id);
+        // The request timeout is derived from the hold so the two cannot drift: a full-window
+        // hold plus 10s of connect/transfer margin must return normally, never trip the
+        // timeout — a tripped long-poll reads as transient, retries re-hold, and the whole
+        // push can fail against a job that is succeeding.
+        let (suffix, timeout) = match wait_generation {
+            Some(g) => (
+                format!("commits/jobs/{id}?wait_generation={g}&timeout_ms={JOB_LONG_POLL_TIMEOUT_MS}"),
+                std::time::Duration::from_millis(JOB_LONG_POLL_TIMEOUT_MS + 10_000),
+            ),
+            None => (
+                format!("commits/jobs/{id}"),
+                std::time::Duration::from_secs(30),
+            ),
+        };
         let (req, trace_id) = self.git_request(
             Method::GET,
             project_id,
@@ -1696,12 +1704,7 @@ impl ArtifactStorageClient {
             git_username,
             git_token,
         )?;
-        let value = expect_json(
-            req.timeout(std::time::Duration::from_secs(30))
-                .send()
-                .await?,
-        )
-        .await?;
+        let value = expect_json(req.timeout(timeout).send().await?).await?;
         Ok(Traced::new(trace_id, value))
     }
 
@@ -2179,6 +2182,7 @@ mod tests {
                         "job_id": "j-1",
                         "state": "running",
                         "generation": 1,
+                        "poll_url": "/project/p/repos/r/commits/jobs/j-1",
                     })
                     .to_string(),
                 )
@@ -2192,6 +2196,21 @@ mod tests {
                         "commit": "c".repeat(40),
                         "tree": "d".repeat(40),
                         "ref_name": "refs/workspaces/ws-1",
+                        "created": true,
+                    })
+                    .to_string(),
+                )
+            } else if path.ends_with("/commits") {
+                // Branch-commit submit: answers terminally within the grace window (201).
+                (
+                    "201 Created",
+                    serde_json::json!({
+                        "job_id": "j-2",
+                        "state": "committed",
+                        "generation": 2,
+                        "commit": "e".repeat(40),
+                        "tree": "d".repeat(40),
+                        "ref_name": "refs/heads/main",
                         "created": true,
                     })
                     .to_string(),
@@ -2294,14 +2313,44 @@ mod tests {
             .await
             .expect("push must survive a 202 detach")
             .into_inner();
+
+        // Same client, ordinary branch push: pins the other submit route ("commits") that
+        // used to be covered only as a helper-string assert.
+        let branch_report = sdk
+            .push_files(
+                "p",
+                "r",
+                "u",
+                "tok",
+                vec![PushFile {
+                    repo_path: "b.txt".to_string(),
+                    source: PushSource::KnownOid("b".repeat(40)),
+                    mode: None,
+                    delete: false,
+                }],
+                PushOptions {
+                    message: "m2".to_string(),
+                    branch: "main".to_string(),
+                    ..Default::default()
+                },
+            )
+            .await
+            .expect("branch push must succeed")
+            .into_inner();
         server.abort();
 
         assert_eq!(report.commit, "c".repeat(40));
+        assert_eq!(branch_report.commit, "e".repeat(40));
         let seen = seen.lock().unwrap().clone();
         assert!(
             seen.iter()
                 .any(|l| l.starts_with("POST /project/p/repos/r/workspaces/ws-1/snapshots")),
             "snapshot submit must use the workspace route; saw: {seen:?}"
+        );
+        assert!(
+            seen.iter()
+                .any(|l| l.starts_with("POST /project/p/repos/r/commits HTTP")),
+            "branch submit must use the commits route; saw: {seen:?}"
         );
         let polls: Vec<&String> = seen.iter().filter(|l| l.starts_with("GET ")).collect();
         assert!(
