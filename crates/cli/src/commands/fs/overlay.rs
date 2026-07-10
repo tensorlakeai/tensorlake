@@ -134,11 +134,64 @@ impl InodeTable {
         if *count == 0 {
             let node = node.clone();
             self.nodes.remove(&ino);
-            self.index.remove(&node.path);
+            // Only evict the index entry if it still points here. A rename may have re-keyed
+            // this path onto a different ino (overwrite: the old occupant lingers by ino until
+            // forgotten while its path now resolves to the moved node) — evicting blindly would
+            // strand the live entry.
+            if self.index.get(&node.path).copied() == Some(ino) {
+                self.index.remove(&node.path);
+            }
             Some(node)
         } else {
             None
         }
+    }
+
+    /// Re-key interned nodes after a successful upper rename `src` -> `dst`.
+    ///
+    /// A FUSE `rename` keeps the source's nodeid and re-points its dentry at the destination,
+    /// then issues ino-based ops (`getattr`, `open`, `read`) against it. This table is path-keyed,
+    /// so unless the moved node's path follows, resolution walks the now-vacated source path and
+    /// returns `ENOENT` — the file lists in `readdir` (a fresh directory read) yet stats as gone.
+    /// (That is exactly what breaks `git init`/`git clone`, which write `HEAD`, `config`, refs and
+    /// every lockfile via write-temp-then-rename.)
+    ///
+    /// Handles subtree moves — a renamed directory carries its interned descendants — and
+    /// overwrite: a node already at `dst` is dropped from the index (it survives by ino until the
+    /// kernel forgets it, guarded by the path-conditional eviction in [`Self::forget`]). The moved
+    /// node's lower binding is dropped and re-resolved lazily against the destination path; any
+    /// counted core reference it held is returned for the caller to release.
+    #[must_use = "returned core inos must be released via MountCore::forget"]
+    fn rename(&mut self, src: &str, dst: &str) -> Vec<u64> {
+        let prefix = format!("{src}/");
+        let affected: Vec<String> = self
+            .index
+            .keys()
+            .filter(|p| p.as_str() == src || p.starts_with(&prefix))
+            .cloned()
+            .collect();
+        let mut released = Vec::new();
+        for old in affected {
+            let ino = self.index.remove(&old).expect("just enumerated from index");
+            let new = if old == src {
+                dst.to_string()
+            } else {
+                format!("{dst}/{}", &old[prefix.len()..])
+            };
+            let (node, count) = self.nodes.remove(&ino).expect("indexed node");
+            if let Some(core) = *node.core_ino.lock().expect("core ino lock") {
+                released.push(core);
+            }
+            let renamed = Arc::new(ONode {
+                path: new.clone(),
+                core_ino: Mutex::new(None),
+                bound_gen: AtomicU64::new(0),
+                last_open_oid: Mutex::new(node.last_open_oid.lock().expect("oid lock").clone()),
+            });
+            self.index.insert(new, ino);
+            self.nodes.insert(ino, (renamed, count));
+        }
+        released
     }
 }
 
@@ -1226,7 +1279,9 @@ impl OverlayFs {
         // lookup() above took a reference; balance it.
         self.forget(attr.ino, 1);
         if !empty {
-            return Err(MountError::Protocol("directory not empty".to_string()));
+            // A real errno, not the Protocol->EIO catch-all: `rm`/`rmdir` on a non-empty
+            // directory must see ENOTEMPTY, or it reports a bewildering "Input/output error".
+            return Err(MountError::NotEmpty);
         }
         let dest = self.upper_path(&path);
         if dest.symlink_metadata().is_ok() {
@@ -1273,7 +1328,10 @@ impl OverlayFs {
                 let node = self.node(attr.ino)?;
                 if matches!(attr.kind, NodeKind::Dir) {
                     self.forget(attr.ino, 1);
-                    return Err(MountError::Protocol(
+                    // ENOTSUP, not the Protocol->EIO catch-all: whole-subtree copy-up is a
+                    // snapshot/promote concern, not a syscall, and a bare "Input/output error"
+                    // gives the user nothing to act on.
+                    return Err(MountError::Unsupported(
                         "renaming a committed directory is not supported; snapshot first"
                             .to_string(),
                     ));
@@ -1329,8 +1387,16 @@ impl OverlayFs {
                 self.record(&format!("{dst}/{rel}"), DirtyKind::Upsert);
             }
         }
-        // The destination path may already be interned (overwrite): its ino now serves upper
-        // content automatically since attribute resolution is dynamic.
+        // Re-key the in-memory node table: the kernel keeps the source's nodeid and re-points its
+        // dentry at the destination, then addresses it by ino — so the moved node's path must
+        // follow it, or ino-based getattr/open resolve the vacated source path and return ENOENT.
+        let released = {
+            let mut inodes = self.inodes.lock().expect("inode lock");
+            inodes.rename(&src, &dst)
+        };
+        for core in released {
+            self.core.forget(core, 1);
+        }
         Ok(())
     }
 
@@ -1503,6 +1569,88 @@ mod tests {
     use tensorlake::artifact_storage::ArtifactStorageClient;
     use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
     use tensorlake::artifact_storage::workspaces::CreateWorkspaceRequest;
+
+    // ---------------------------------------------------------------------------------------
+    // Inode-table re-keying (pure, no server): the rename fix that lets `git init`/`git clone`
+    // work on the mount. A FUSE rename keeps the source nodeid and re-points its dentry at the
+    // destination, so the node's path must follow or ino-based ops resolve the vacated source
+    // path and return ENOENT.
+    // ---------------------------------------------------------------------------------------
+
+    #[test]
+    fn inode_table_rename_rekeys_source_ino_to_destination() {
+        let mut t = InodeTable::new();
+        // A file created in the upper (git's `config.lock`) — no lower binding.
+        let (ino, _, _) = t.intern("config.lock".to_string(), None);
+        let released = t.rename("config.lock", "config");
+        assert!(released.is_empty(), "pure-upper rename releases no core refs");
+        assert!(
+            !t.index.contains_key("config.lock"),
+            "source path is vacated"
+        );
+        assert_eq!(
+            t.index.get("config").copied(),
+            Some(ino),
+            "the same nodeid now resolves to the destination"
+        );
+        assert_eq!(
+            t.get(ino).unwrap().path,
+            "config",
+            "the node's path followed the rename"
+        );
+    }
+
+    #[test]
+    fn inode_table_rename_carries_interned_subtree() {
+        let mut t = InodeTable::new();
+        let (dir, _, _) = t.intern("d".to_string(), None);
+        let (child, _, _) = t.intern("d/x".to_string(), None);
+        let released = t.rename("d", "d2");
+        assert!(released.is_empty());
+        assert_eq!(t.index.get("d2").copied(), Some(dir));
+        assert_eq!(
+            t.index.get("d2/x").copied(),
+            Some(child),
+            "descendants move with the directory"
+        );
+        assert_eq!(t.get(child).unwrap().path, "d2/x");
+        assert!(!t.index.contains_key("d/x"));
+    }
+
+    #[test]
+    fn inode_table_rename_does_not_touch_prefix_siblings() {
+        let mut t = InodeTable::new();
+        let (_, _, _) = t.intern("d".to_string(), None);
+        let (sibling, _, _) = t.intern("dxy".to_string(), None);
+        let _ = t.rename("d", "d2");
+        assert_eq!(
+            t.index.get("dxy").copied(),
+            Some(sibling),
+            "a name that merely shares the prefix is not a descendant"
+        );
+    }
+
+    #[test]
+    fn inode_table_rename_overwrite_orphans_destination_until_forgotten() {
+        let mut t = InodeTable::new();
+        let (src, _, _) = t.intern("src".to_string(), None);
+        let (dst, _, _) = t.intern("dst".to_string(), None);
+        let _ = t.rename("src", "dst");
+        assert_eq!(
+            t.index.get("dst").copied(),
+            Some(src),
+            "destination path resolves to the moved (source) nodeid"
+        );
+        // The overwritten node lingers by ino until the kernel forgets it; forgetting it must not
+        // evict the re-keyed entry that now owns its former path.
+        let dropped = t.forget(dst, 1);
+        assert!(dropped.is_some(), "orphan is dropped at zero lookups");
+        assert_eq!(
+            t.index.get("dst").copied(),
+            Some(src),
+            "forgetting the orphan preserves the live entry"
+        );
+    }
 
     const BASE: &str = "http://127.0.0.1:8080";
     const PROJECT: &str = "overlaytest";
@@ -1698,8 +1846,12 @@ mod tests {
         assert_eq!(dir_names(&fs, dir.ino).await, vec!["a.txt"]);
         assert!(state.path().join("wh/dir/b.txt").is_file());
 
-        // 5. rmdir refuses non-empty; empties then whiteouts a lower dir.
-        assert!(fs.rmdir(ROOT_INO, "dir").await.is_err());
+        // 5. rmdir refuses non-empty (as ENOTEMPTY, not the Protocol->EIO catch-all); empties
+        //    then whiteouts a lower dir.
+        assert!(matches!(
+            fs.rmdir(ROOT_INO, "dir").await,
+            Err(MountError::NotEmpty)
+        ));
         fs.unlink(dir.ino, "a.txt").await.unwrap();
         fs.rmdir(ROOT_INO, "dir").await.unwrap();
         assert!(fs.lookup(ROOT_INO, "dir").await.is_err());

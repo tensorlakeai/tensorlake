@@ -180,19 +180,42 @@ fn expires_in(expires_at: &str) -> Duration {
 }
 
 /// Run the daemon in the foreground of the current process. `tl fs mount` spawns this as a
-/// detached child (`tl fs daemon --state-dir ...`).
-pub async fn run(ctx: &CliContext, state_dir: &Path) -> Result<()> {
+/// detached child (`tl fs daemon --state-dir ...`) with stderr pointed at the state dir's
+/// `daemon.log`.
+pub async fn run(ctx: &CliContext, state_dir: &Path, log_level: &str) -> Result<()> {
     #[cfg(not(unix))]
     {
-        let _ = (ctx, state_dir);
+        let _ = (ctx, state_dir, log_level);
         Err(CliError::usage(
             "tl fs mount is supported on Linux (FUSE) and macOS (FSKit) only.",
         ))
     }
     #[cfg(unix)]
     {
+        init_logging(log_level)?;
         run_mount(ctx, state_dir).await
     }
+}
+
+/// Install the daemon's tracing subscriber, writing to stderr — which the detached spawn
+/// redirects to the state dir's `daemon.log` (foreground runs log to the terminal). Without
+/// this every `tracing::warn!` in the daemon is silently discarded.
+#[cfg(unix)]
+fn init_logging(level: &str) -> Result<()> {
+    use std::str::FromStr;
+    let level = tracing_subscriber::filter::LevelFilter::from_str(level).map_err(|_| {
+        CliError::usage(format!(
+            "invalid --log-level {level:?} (use off, error, warn, info, debug, or trace)"
+        ))
+    })?;
+    // try_init: the foreground path may run inside a process that already installed a
+    // subscriber; keep whatever is there rather than panic.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(level)
+        .with_writer(std::io::stderr)
+        .with_ansi(false)
+        .try_init();
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -316,6 +339,13 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     // Attach the kernel: platform-specific. Only after this succeeds does the control socket
     // exist — the socket answering is what `tl fs mount` treats as success.
     let (served, invalidate) = attach(overlay.clone(), &mountpoint, owner).await?;
+    tracing::info!(
+        repo = %state.repo,
+        workspace = %state.workspace_id,
+        mountpoint = %mountpoint.display(),
+        commit = %core.current_commit(),
+        "mount daemon serving"
+    );
 
     // Follow the workspace ref, pushing each refresh's exact delta to the kernel. Spawned after
     // attach because the invalidation sink is born with the kernel session.
@@ -596,6 +626,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             // teardown). A busy volume (a shell cd'd inside) keeps the daemon
                             // serving — exiting with the volume still attached is how zombie
                             // mounts are born.
+                            tracing::info!(mountpoint = %mountpoint.display(), "shutdown requested; unmounting");
                             if unmount(&mountpoint).await {
                                 let resp = serde_json::json!({ "ok": true });
                                 let mut stream = reader.into_inner();
@@ -609,6 +640,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 // the daemon's one job is over.
                                 std::process::exit(0);
                             }
+                            tracing::warn!(mountpoint = %mountpoint.display(), "unmount refused: volume busy");
                             serde_json::json!({
                                 "ok": false,
                                 "error": "the volume is busy (something is still using it)",
@@ -664,6 +696,11 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
 
     // Serve until the kernel lets go of the mountpoint.
     let result = served.wait().await;
+    if let Err(e) = &result {
+        tracing::error!("mount session ended with error: {e}");
+    } else {
+        tracing::info!("mount session ended");
+    }
     let _ = std::fs::remove_file(&sock_path);
     result
 }

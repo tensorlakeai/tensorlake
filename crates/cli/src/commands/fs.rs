@@ -1378,6 +1378,7 @@ pub async fn mount(
     auto_commit_interval_secs: Option<u64>,
     foreground: bool,
     trace_ops: bool,
+    log_level: &str,
 ) -> Result<()> {
     #[cfg(not(target_os = "macos"))]
     let _ = trace_ops;
@@ -1655,17 +1656,19 @@ pub async fn mount(
     if foreground {
         #[cfg(target_os = "macos")]
         vfsserver::TRACE_OPS.store(trace_ops, std::sync::atomic::Ordering::Relaxed);
-        return daemon::run(ctx, &state_dir).await;
+        return daemon::run(ctx, &state_dir, log_level).await;
     }
 
-    // Detach the daemon and wait for its control socket to answer. Its stderr lands in the
-    // state dir so a daemon that dies on startup (no /dev/fuse access, missing fusermount3,
+    // Detach the daemon and wait for its control socket to answer. Its stderr — where the
+    // tracing subscriber writes — lands in the state dir's daemon.log (`tl fs status` prints
+    // the path), so a daemon that dies on startup (no /dev/fuse access, missing fusermount3,
     // FSKit extension disabled) explains itself instead of just never answering.
     let exe = std::env::current_exe()?;
     let daemon_log = state_dir.join("daemon.log");
     std::process::Command::new(exe)
         .args(["fs", "daemon", "--state-dir"])
         .arg(&state_dir)
+        .args(["--log-level", log_level])
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::fs::File::create(&daemon_log)?)
@@ -2462,6 +2465,7 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
                 "workspace": ws,
                 "mounted": daemon_commit.is_some(),
                 "lower_commit": daemon_commit,
+                "log": state_dir.join("daemon.log"),
                 "dirty": upserts.iter().map(|(p, _, _)| p.clone())
                     .chain(deletes.iter().cloned()).collect::<Vec<_>>(),
             }))?
@@ -2497,6 +2501,11 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
             style("daemon:").dim()
         ),
     }
+    println!(
+        "{} {}",
+        style("log:").dim(),
+        state_dir.join("daemon.log").display()
+    );
     let dirty = upserts.len() + deletes.len();
     if dirty == 0 {
         println!("{} clean", style("local:").dim());
