@@ -2109,6 +2109,57 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
     Ok((upserts, deletes))
 }
 
+/// Pending committed-directory renames recorded by the mount daemon (`redirects.json` in the
+/// state dir, destination -> true-lower source), sorted by destination. Empty when the file
+/// is absent or unreadable — the daemon owns the authoritative copy.
+fn pending_renames(state_dir: &Path) -> Vec<(String, String)> {
+    let Ok(raw) = std::fs::read(state_dir.join("redirects.json")) else {
+        return Vec::new();
+    };
+    let Ok(map) = serde_json::from_slice::<HashMap<String, String>>(&raw) else {
+        return Vec::new();
+    };
+    let mut entries: Vec<(String, String)> = map.into_iter().collect();
+    entries.sort();
+    entries
+}
+
+/// Expand pending renames through the daemon into by-oid push files, merged behind the
+/// regular dirty set (an upper copy-up under a renamed tree shadows its lower file). The
+/// daemon must be running: publishing the rename's source delete without its destination
+/// upserts would lose the subtree, so a failed expansion fails the seal.
+async fn redirect_push_files(
+    state_dir: &Path,
+    pending: usize,
+    files: &mut Vec<PushFile>,
+) -> Result<()> {
+    let resp = daemon::control(state_dir, "expand_redirects")
+        .await
+        .map_err(|e| {
+            CliError::usage(format!(
+                "this workspace has {pending} pending directory rename(s); the mount daemon \
+                 must be running to snapshot them: {e}"
+            ))
+        })?;
+    let seals: Vec<overlay::RedirectSeal> =
+        serde_json::from_value(resp.get("seals").cloned().unwrap_or_default())?;
+    let have: std::collections::HashSet<String> =
+        files.iter().map(|f| f.repo_path.clone()).collect();
+    for seal in &seals {
+        for file in &seal.files {
+            if !have.contains(&file.path) {
+                files.push(PushFile {
+                    repo_path: file.path.clone(),
+                    source: PushSource::KnownOid(file.oid.clone()),
+                    mode: Some(file.mode),
+                    delete: false,
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
 /// An enumerated dirty set as push files. Shared by `snapshot` and the daemon's auto-commit.
 fn overlay_push_files(upserts: &OverlayUpserts, deletes: &[String]) -> Result<Vec<PushFile>> {
     let mut files = Vec::with_capacity(upserts.len() + deletes.len());
@@ -2157,11 +2208,16 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
     heartbeat(&session, &state).await?;
 
     let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-    if upserts.is_empty() && deletes.is_empty() {
+    let renames = pending_renames(&state_dir);
+    if upserts.is_empty() && deletes.is_empty() && renames.is_empty() {
         println!("Nothing to snapshot: workspace is clean.");
         return Ok(());
     }
-    let files = overlay_push_files(&upserts, &deletes)?;
+    let mut files = overlay_push_files(&upserts, &deletes)?;
+    if !renames.is_empty() {
+        redirect_push_files(&state_dir, renames.len(), &mut files).await?;
+    }
+    let files = files;
 
     let (user, token) = session.creds();
     let progress: Arc<dyn Fn(PushEvent) + Send + Sync> = Arc::new(|ev| {
@@ -2230,11 +2286,12 @@ pub async fn promote(
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
     let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-    if !upserts.is_empty() || !deletes.is_empty() {
+    let renames = pending_renames(&state_dir);
+    if !upserts.is_empty() || !deletes.is_empty() || !renames.is_empty() {
         eprintln!(
             "{} {} local change(s) not in any snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to include them.",
             style("note:").yellow(),
-            upserts.len() + deletes.len()
+            upserts.len() + deletes.len() + renames.len()
         );
     }
     let (user, token) = session.creds();
@@ -2334,10 +2391,11 @@ pub async fn sync(
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
     let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-    if !upserts.is_empty() || !deletes.is_empty() {
+    let renames = pending_renames(&state_dir);
+    if !upserts.is_empty() || !deletes.is_empty() || !renames.is_empty() {
         return Err(CliError::usage(format!(
             "{} local change(s) not in any snapshot would shadow synced content. Run `tl fs snapshot {}` first.",
-            upserts.len() + deletes.len(),
+            upserts.len() + deletes.len() + renames.len(),
             path.display(),
         )));
     }
@@ -2468,6 +2526,10 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
                 "log": state_dir.join("daemon.log"),
                 "dirty": upserts.iter().map(|(p, _, _)| p.clone())
                     .chain(deletes.iter().cloned()).collect::<Vec<_>>(),
+                "pending_renames": pending_renames(&state_dir)
+                    .into_iter()
+                    .map(|(to, from)| serde_json::json!({ "from": from, "to": to }))
+                    .collect::<Vec<_>>(),
             }))?
         );
         return Ok(());
@@ -2506,18 +2568,28 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         style("log:").dim(),
         state_dir.join("daemon.log").display()
     );
-    let dirty = upserts.len() + deletes.len();
+    let renames = pending_renames(&state_dir);
+    // A pending rename's source whiteout is a real delete, but showing it next to the R line
+    // would read as two changes; the R line carries both sides.
+    let deletes: Vec<String> = deletes
+        .into_iter()
+        .filter(|p| !renames.iter().any(|(_, from)| from == p))
+        .collect();
+    let dirty = upserts.len() + deletes.len() + renames.len();
     if dirty == 0 {
         println!("{} clean", style("local:").dim());
     } else {
         println!("{} {} change(s):", style("local:").dim(), dirty);
+        for (to, from) in renames.iter().take(20) {
+            println!("  {} {from} -> {to}", style("R").cyan());
+        }
         for (p, _, _) in upserts.iter().take(20) {
             println!("  {} {p}", style("M").yellow());
         }
         for p in deletes.iter().take(20) {
             println!("  {} {p}", style("D").red());
         }
-        if dirty > 40 {
+        if dirty > 60 {
             println!("  … and more");
         }
     }

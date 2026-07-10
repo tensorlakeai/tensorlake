@@ -418,9 +418,24 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 {
                     recent_seals.drain(..=i);
                 }
+                // Renames a previous seal published but never consumed (crash, or the lower
+                // lagged past our post-seal check) dangle once the lower advances; reap them
+                // before anything resolves through the table.
+                if overlay.has_redirects() {
+                    match overlay.reap_sealed_redirects().await {
+                        Ok(consumed) if !consumed.is_empty() => {
+                            eprintln!("auto-commit: reaped {} sealed rename(s)", consumed.len());
+                        }
+                        Ok(_) => {}
+                        Err(e) => {
+                            eprintln!("auto-commit: reaping sealed renames failed: {e}");
+                            continue;
+                        }
+                    }
+                }
                 let delta = overlay.dirty_since(sealed_gen);
                 let watermark = delta.watermark;
-                if delta.is_empty() {
+                if delta.is_empty() && !overlay.has_redirects() {
                     sealed_gen = watermark;
                     continue;
                 }
@@ -479,12 +494,50 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                     // through the plain-deletes arm and never re-lists these).
                     invalidate(overlay.invals_for(&resolved.tombstoned));
                 }
-                if resolved.files.is_empty() {
+                // Pending directory renames seal as by-oid references: every file the
+                // destination serves from the lower commits by blob oid (nothing uploads),
+                // alongside the source delete the whiteout already produced. Expansion
+                // failing leaves the whole delta pending — publishing the source delete
+                // without the destination would lose the subtree.
+                let redirect_seals = if overlay.has_redirects() {
+                    match overlay.expand_redirects().await {
+                        Ok(seals) => seals,
+                        Err(e) => {
+                            eprintln!(
+                                "auto-commit: expanding pending renames failed (will retry): {e}"
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    Vec::new()
+                };
+                if resolved.files.is_empty() && redirect_seals.is_empty() {
                     // The whole delta was ignored paths, bare directories, or files that were
                     // born and died between seals: sealed through, nothing to publish.
                     sealed_gen = watermark;
                     overlay.prune_dirty(watermark);
                     continue;
+                }
+                {
+                    // An upper copy-up under a renamed tree shadows the lower file; the
+                    // resolved walk already carries it.
+                    let have: std::collections::HashSet<String> =
+                        resolved.files.iter().map(|f| f.repo_path.clone()).collect();
+                    for seal in &redirect_seals {
+                        for file in &seal.files {
+                            if !have.contains(&file.path) {
+                                resolved.files.push(
+                                    tensorlake::artifact_storage::ingest::PushFile {
+                                        repo_path: file.path.clone(),
+                                        source: PushSource::KnownOid(file.oid.clone()),
+                                        mode: Some(file.mode),
+                                        delete: false,
+                                    },
+                                );
+                            }
+                        }
+                    }
                 }
                 // Final validity check on every stable prefix: a write below the boundary
                 // that landed after the delta snapshot voids the stability claim — sealing
@@ -554,6 +607,29 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                  up): {e}"
                             ),
                         }
+                        // Published renames are consumed only once the lower serves the
+                        // sealed commit: the new tree carries their destinations directly
+                        // and drops their sources, so remapping through the entry would
+                        // dangle from here on — and conversely, consuming against an older
+                        // commit would make the destinations unreachable.
+                        if !redirect_seals.is_empty() {
+                            if core.current_commit() == report.commit {
+                                let dsts: Vec<String> =
+                                    redirect_seals.iter().map(|s| s.dst.clone()).collect();
+                                if let Err(e) = overlay.consume_redirects(&dsts) {
+                                    eprintln!(
+                                        "auto-commit: consuming sealed renames failed: {e}"
+                                    );
+                                }
+                            } else {
+                                eprintln!(
+                                    "auto-commit: lower has not reached sealed snapshot {}; \
+                                     pending renames stay recorded (next seal republishes \
+                                     them idempotently)",
+                                    report.commit
+                                );
+                            }
+                        }
                         eprintln!("auto-commit sealed snapshot {}", report.commit);
                     }
                     Err(e) => eprintln!("auto-commit push failed (will retry): {e}"),
@@ -600,6 +676,14 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 if let Some(delta) = delta {
                                     invalidate(overlay.translate_delta(&delta));
                                 }
+                                // The advance may be the seal that published pending renames
+                                // (`tl fs snapshot` refreshes before clearing the overlay);
+                                // reap so nothing remaps through consumed entries.
+                                if overlay.has_redirects()
+                                    && let Err(e) = overlay.reap_sealed_redirects().await
+                                {
+                                    eprintln!("refresh: reaping sealed renames failed: {e}");
+                                }
                                 serde_json::json!({ "ok": true, "commit": core.current_commit() })
                             }
                             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
@@ -618,6 +702,12 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                         // auto-commit mount seals the new state.
                         "reindex" => match overlay.rebuild_dirty_index() {
                             Ok(()) => serde_json::json!({ "ok": true }),
+                            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+                        },
+                        // Pending directory renames, expanded to the by-oid upserts a seal
+                        // must publish (`tl fs snapshot` merges these into its push).
+                        "expand_redirects" => match overlay.expand_redirects().await {
+                            Ok(seals) => serde_json::json!({ "ok": true, "seals": seals }),
                             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
                         },
                         "shutdown" => {
