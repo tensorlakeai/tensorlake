@@ -702,7 +702,7 @@ pub async fn push(
     expect_oid: Option<String>,
     output_json: bool,
 ) -> Result<()> {
-    use tensorlake::artifact_storage::ingest::{PushEvent, PushOptions};
+    use tensorlake::artifact_storage::ingest::PushOptions;
 
     let root = current_git_worktree_root()?;
     let project_id = project_id(ctx)?;
@@ -715,68 +715,12 @@ pub async fn push(
     let bar = indicatif::ProgressBar::new_spinner();
     bar.enable_steady_tick(std::time::Duration::from_millis(120));
     bar.set_message("hashing worktree files...");
-    let bar_for_events = bar.clone();
     let opts = PushOptions {
         branch: branch.to_string(),
         message: message.to_string(),
         base: None,
         expect_oid,
-        progress: Some(std::sync::Arc::new(move |ev: PushEvent| {
-            use indicatif::HumanBytes;
-            match ev {
-                PushEvent::Chunking {
-                    files_done,
-                    files_total,
-                    bytes_hashed,
-                } => bar_for_events.set_message(format!(
-                    "hashing {files_done}/{files_total} files ({})...",
-                    HumanBytes(bytes_hashed)
-                )),
-                PushEvent::Hashed {
-                    files,
-                    chunks,
-                    bytes,
-                } => bar_for_events.set_message(format!(
-                    "hashed {files} files ({chunks} chunks, {}); asking the server what it already has...",
-                    HumanBytes(bytes)
-                )),
-                PushEvent::Negotiated { missing, total } => bar_for_events.set_message(format!(
-                    "server lacks {missing} of {total} chunks; uploading..."
-                )),
-                PushEvent::UploadedBatch { chunks, bytes } => bar_for_events.set_message(format!(
-                    "uploaded {chunks} chunks ({})...",
-                    HumanBytes(bytes)
-                )),
-                PushEvent::Committing { files } => bar_for_events.set_message(format!(
-                    "all bytes on the server; committing {files} files (server builds the tree)..."
-                )),
-                PushEvent::CommitDetached { job_id } => {
-                    let line = format!(
-                        "commit running as job {job_id} (survives disconnects; check from \
-                         anywhere with: tl git commit-status <repo> {job_id})"
-                    );
-                    // indicatif drops println on hidden draw targets (piped stderr) — and a
-                    // scripted push is exactly where the out-of-band job id matters.
-                    if bar_for_events.is_hidden() {
-                        println!("{line}");
-                    } else {
-                        bar_for_events.println(line);
-                    }
-                }
-                PushEvent::CommitProgress { phase, done, total } => {
-                    if total > 0 {
-                        bar_for_events.set_message(format!(
-                            "committing: {phase} {done}/{total} chunks..."
-                        ))
-                    } else {
-                        bar_for_events.set_message(format!("committing: {phase}..."))
-                    }
-                }
-                PushEvent::Committed { ref_name, .. } => {
-                    bar_for_events.set_message(format!("committed to {ref_name}"))
-                }
-            }
-        })),
+        progress: Some(super::push_progress_spinner(&bar)),
         ..Default::default()
     };
     let report = client
