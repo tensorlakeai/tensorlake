@@ -515,7 +515,10 @@ mod tests {
     fn unsupported_maps_to_enotsup_not_eio() {
         // Renaming a committed directory is unsupported; it must surface ENOTSUP, not the
         // Protocol->EIO catch-all that read as a bewildering "Input/output error".
-        assert_eq!(errno(&MountError::Unsupported(String::new())), libc::ENOTSUP);
+        assert_eq!(
+            errno(&MountError::Unsupported(String::new())),
+            libc::ENOTSUP
+        );
         assert_ne!(errno(&MountError::Unsupported(String::new())), libc::EIO);
     }
 }

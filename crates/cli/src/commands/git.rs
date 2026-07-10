@@ -113,16 +113,54 @@ pub async fn create_repo(
         .create_repo(&project_id, repo, default_branch)
         .await
         .map_err(map_sdk_error)?;
+    let remote_url = client.git_repo_url(&project_id, repo);
+    let branch = default_branch.unwrap_or("main");
+
+    // The repo exists once create_repo returns; the credential is a convenience. A mint
+    // failure (env-token dev setups, PATs without token scope, transient errors) must not
+    // turn the command into an error — a retry would just hit "repo already exists".
+    let credential = match client.mint_token_for_repo(&project_id, Some(repo)).await {
+        Ok(credential) => Some(credential.into_inner()),
+        Err(err) => {
+            eprintln!(
+                "warning: minting a push credential failed ({err}); run `tl git token {repo}` to mint one"
+            );
+            None
+        }
+    };
+
     if output_json {
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "repo": repo,
-                "url": client.git_repo_url(&project_id, repo),
+                "url": remote_url,
+                "credential": credential,
             }))?
         );
-    } else {
-        println!("created {}", client.git_repo_url(&project_id, repo));
+        return Ok(());
+    }
+
+    println!("created {remote_url}");
+    println!();
+    println!("{}", style("Push to this repo").bold().green());
+    println!("  {}", style(format!("tl git push {repo} {branch}")).cyan());
+    println!("  (mints a fresh short-lived credential automatically on every push)");
+    if let Some(credential) = credential {
+        println!();
+        println!(
+            "{}",
+            style("Credential for CI or direct HTTP access")
+                .bold()
+                .green()
+        );
+        println!("  {} {}", style("username:").dim(), credential.git_username);
+        println!(
+            "  {} {}",
+            style("password:").dim(),
+            style(&credential.token).yellow()
+        );
+        println!("  {} {}", style("expires:").dim(), credential.expires_at);
     }
     Ok(())
 }

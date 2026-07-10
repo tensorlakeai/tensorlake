@@ -1282,6 +1282,107 @@ fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
     Ok((mountpoint, PathBuf::from(state_dir)))
 }
 
+/// Whether `path` is a registered mountpoint. Used to disambiguate optional positional args
+/// (`tl fs diff <a> <b>` vs `tl fs diff <path> <a>`).
+pub fn is_registered_mount(path: &Path) -> bool {
+    state_dir_for(path).is_ok()
+}
+
+/// The registered mountpoint containing the current directory (the deepest one, for nested
+/// mounts). This is what path-addressed commands operate on when no path argument is given.
+pub fn mount_containing_cwd() -> Result<PathBuf> {
+    let cwd = std::env::current_dir()?;
+    let cwd = cwd.canonicalize().unwrap_or(cwd);
+    registry_load()
+        .keys()
+        .map(PathBuf::from)
+        .filter(|mountpoint| {
+            // Registry keys keep the leaf component un-canonicalized (it may be a live FUSE
+            // fs); compare against both spellings so a symlinked leaf still matches the
+            // canonicalized CWD.
+            cwd.starts_with(mountpoint)
+                || mountpoint
+                    .canonicalize()
+                    .is_ok_and(|canonical| cwd.starts_with(canonical))
+        })
+        .max_by_key(|mountpoint| mountpoint.components().count())
+        .ok_or_else(|| {
+            CliError::usage(format!(
+                "{} is not inside a tl fs mount; pass the mounted directory explicitly",
+                cwd.display()
+            ))
+        })
+}
+
+/// Resolve the optional mounted-directory argument of path-addressed commands: an explicit
+/// path wins; otherwise default to the mount containing the current directory.
+pub fn resolve_mount_path(path: Option<PathBuf>) -> Result<PathBuf> {
+    match path {
+        Some(path) => Ok(path),
+        None => mount_containing_cwd(),
+    }
+}
+
+/// Whether a positional argument is unmistakably a filesystem path rather than a snapshot,
+/// ref, or branch name: absolute, explicitly relative (`./`, `../`), or naming an existing
+/// directory. Branch names like `feature/x` contain separators too, so a bare separator is
+/// not enough. Used to keep the explicit "not a tl fs mount" error for typo'd or stale mount
+/// paths instead of silently reinterpreting them.
+fn is_path_shaped(value: &Path) -> bool {
+    use std::path::Component;
+    value.is_absolute()
+        || matches!(
+            value.components().next(),
+            Some(Component::CurDir | Component::ParentDir)
+        )
+        || value.is_dir()
+}
+
+/// `tl fs diff` positionals are ambiguous once the mount path is optional: one leading arg can
+/// be either the mounted directory or the older snapshot. Treat it as the mount when it's a
+/// registered mountpoint; reject it when it's path-shaped but unregistered (a typo or stale
+/// mount, not a snapshot ref); otherwise shift everything right and infer the mount from the
+/// current directory.
+pub fn resolve_diff_args(
+    path: Option<PathBuf>,
+    a: Option<String>,
+    b: Option<String>,
+) -> Result<(PathBuf, Option<String>, Option<String>)> {
+    match path {
+        Some(path) if is_registered_mount(&path) => Ok((path, a, b)),
+        Some(not_a_mount) => {
+            if b.is_some() || is_path_shaped(&not_a_mount) {
+                // Three args, or a path-shaped first arg that isn't registered: surface the
+                // real problem instead of treating the path as a snapshot ref.
+                return Err(CliError::usage(format!(
+                    "{} is not a tl fs mount; run `tl fs mount` first",
+                    not_a_mount.display()
+                )));
+            }
+            Ok((
+                mount_containing_cwd()?,
+                Some(not_a_mount.to_string_lossy().into_owned()),
+                a,
+            ))
+        }
+        None => Ok((mount_containing_cwd()?, a, b)),
+    }
+}
+
+/// Guard for `tl fs promote <branch>` / `tl fs restore <version>` with the mount path omitted:
+/// when the sole positional is itself a mounted directory (or an explicit path), the user
+/// almost certainly forgot the branch/version — without this, promote would publish the CWD
+/// mount onto a branch literally named after the directory.
+pub fn reject_mount_like_positional(value: &str, what: &str, usage: &str) -> Result<()> {
+    let as_path = Path::new(value);
+    if is_registered_mount(as_path) || is_path_shaped(as_path) {
+        return Err(CliError::usage(format!(
+            "{value} looks like a mounted directory, not a {what}; usage: {usage}"
+        )));
+    }
+    Ok(())
+}
+
 /// Path-addressed commands (snapshot/promote/status/restore/diff/unmount) know their scope
 /// from the mount they operate on; seed the auth context from the mount state so they work
 /// from any working directory. Without this, running `tl fs snapshot` from a CWD with no
