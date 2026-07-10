@@ -2,10 +2,16 @@ use rand::Rng;
 use std::env;
 use tensorlake::{Sdk, images::models::*};
 
+// Shared HTTP/1.1 mock-server framing helpers, single-sourced with the in-crate
+// `crate::test_support` module used by unit tests.
+#[path = "../src/test_support.rs"]
+pub mod http_mock;
+
 fn env_var(name: &str) -> Result<String, String> {
     env::var(name).map_err(|_| format!("{name} must be set"))
 }
 
+#[allow(dead_code)]
 pub fn create_sdk() -> Result<Sdk, String> {
     let url = env_var("TENSORLAKE_API_URL")?;
     let api_key = env_var("TENSORLAKE_API_KEY")?;
@@ -63,6 +69,7 @@ pub fn get_org_and_project_ids() -> Result<(String, String), String> {
     Ok((org_id, project_id))
 }
 
+#[allow(dead_code)]
 pub fn random_string() -> String {
     const CHARSET: &[u8] = b"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_";
     let mut rng = rand::rng();

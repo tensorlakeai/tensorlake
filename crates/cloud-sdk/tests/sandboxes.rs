@@ -2,8 +2,11 @@ use tensorlake::{
     ClientBuilder,
     sandboxes::{SandboxProxyClient, SandboxesClient},
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream};
+use tokio::net::TcpListener;
+
+mod common;
+
+use common::http_mock::{read_http_request, write_empty_response, write_json_response};
 
 #[tokio::test]
 async fn sandbox_proxy_raw_and_empty_posts_send_content_length_and_routing_headers() {
@@ -15,16 +18,22 @@ async fn sandbox_proxy_raw_and_empty_posts_send_content_length_and_routing_heade
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("accept write_stdin");
         let write_stdin = read_http_request(&mut socket).await;
-        write_empty_response(&mut socket).await;
+        write_empty_response(&mut socket)
+            .await
+            .expect("write response");
 
         let (mut socket, _) = listener.accept().await.expect("accept close_stdin");
         let close_stdin = read_http_request(&mut socket).await;
-        write_empty_response(&mut socket).await;
+        write_empty_response(&mut socket)
+            .await
+            .expect("write response");
 
         let (mut socket, _) = listener.accept().await.expect("accept restart");
         let restart = read_http_request(&mut socket).await;
         let body = r#"{"pid":101,"status":"running","command":"bash","args":[],"started_at":0}"#;
-        write_json_response(&mut socket, body).await;
+        write_json_response(&mut socket, body)
+            .await
+            .expect("write response");
 
         (write_stdin, close_stdin, restart)
     });
@@ -78,7 +87,9 @@ async fn direct_empty_post_helper_sends_content_length_zero() {
         let (mut socket, _) = listener.accept().await.expect("accept request");
         let request = read_http_request(&mut socket).await;
         let body = r#"{"sandbox_id":"sbx-1","status":"running"}"#;
-        write_json_response(&mut socket, body).await;
+        write_json_response(&mut socket, body)
+            .await
+            .expect("write response");
         request
     });
 
@@ -93,57 +104,4 @@ async fn direct_empty_post_helper_sends_content_length_zero() {
     let request_text = String::from_utf8_lossy(&request);
     assert!(request_text.starts_with("POST /sandbox-pools/pool-1/sandboxes HTTP/1.1\r\n"));
     assert!(request_text.contains("\r\ncontent-length: 0\r\n"));
-}
-
-async fn read_http_request(socket: &mut TcpStream) -> Vec<u8> {
-    let mut request = Vec::new();
-    let mut buf = [0_u8; 4096];
-
-    loop {
-        let read = socket.read(&mut buf).await.expect("read request");
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&buf[..read]);
-
-        if let Some(headers_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-            let headers = String::from_utf8_lossy(&request[..headers_end + 4]);
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    if name.eq_ignore_ascii_case("content-length") {
-                        value.trim().parse::<usize>().ok()
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-
-            if request.len() >= headers_end + 4 + content_length {
-                break;
-            }
-        }
-    }
-
-    request
-}
-
-async fn write_empty_response(socket: &mut TcpStream) {
-    socket
-        .write_all(b"HTTP/1.1 204 No Content\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
-        .await
-        .expect("write response");
-}
-
-async fn write_json_response(socket: &mut TcpStream, body: &str) {
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    socket
-        .write_all(response.as_bytes())
-        .await
-        .expect("write response");
 }

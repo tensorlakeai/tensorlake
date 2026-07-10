@@ -1,8 +1,8 @@
 use tensorlake::images::models::*;
 use tensorlake::{ClientBuilder, images::ImagesClient};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
+use crate::common::http_mock::{read_http_request, write_json_response};
 use crate::common::random_string;
 
 mod common;
@@ -19,13 +19,7 @@ async fn test_create_application_build_sends_application_json_and_context_parts(
         let request_bytes = read_http_request(&mut socket).await;
 
         let response_body = r#"{"id":"app-build-1","organization_id":"org-1","project_id":"proj-1","name":"app_fn","version":"v1","status":"building","image_builds":[{"id":"img-build-1","app_version_id":"app-version-1","key":"img-1","name":"image-a","status":"pending","function_names":["fn-1","fn-2"],"created_at":"2026-03-07T10:00:00Z","updated_at":"2026-03-07T10:01:00Z"}]}"#;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-            response_body.len(),
-            response_body
-        );
-        socket
-            .write_all(response.as_bytes())
+        write_json_response(&mut socket, response_body)
             .await
             .expect("write response");
 
@@ -97,40 +91,6 @@ async fn test_create_application_build_sends_application_json_and_context_parts(
     assert_eq!(response.status.as_deref(), Some("building"));
     assert_eq!(response.image_builds.len(), 1);
     assert_eq!(response.image_builds[0].status, "pending");
-}
-
-async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
-    let mut request = Vec::new();
-    let mut buf = [0_u8; 4096];
-
-    loop {
-        let read = socket.read(&mut buf).await.expect("read request");
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&buf[..read]);
-
-        if let Some(headers_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
-            let headers = String::from_utf8_lossy(&request[..headers_end + 4]);
-            let content_length = headers
-                .lines()
-                .find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    if name.eq_ignore_ascii_case("content-length") {
-                        value.trim().parse::<usize>().ok()
-                    } else {
-                        None
-                    }
-                })
-                .unwrap_or(0);
-
-            if request.len() >= headers_end + 4 + content_length {
-                break;
-            }
-        }
-    }
-
-    request
 }
 
 #[tokio::test]

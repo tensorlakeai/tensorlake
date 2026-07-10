@@ -1,8 +1,9 @@
 use tensorlake::{ClientBuilder, sandbox_templates::SandboxTemplatesClient};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
 
 mod common;
+
+use common::http_mock::{read_http_request, write_empty_response, write_json_response};
 
 #[tokio::test]
 async fn delete_sandbox_template_sends_encoded_delete_request() {
@@ -14,9 +15,7 @@ async fn delete_sandbox_template_sends_encoded_delete_request() {
     let server = tokio::spawn(async move {
         let (mut socket, _) = listener.accept().await.expect("accept request");
         let request_bytes = read_http_request(&mut socket).await;
-        let response = "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n";
-        socket
-            .write_all(response.as_bytes())
+        write_empty_response(&mut socket)
             .await
             .expect("write response");
         request_bytes
@@ -62,7 +61,9 @@ async fn list_sandbox_templates_follows_pagination() {
             }
         })
         .to_string();
-        write_json_response(&mut socket, &page_1).await;
+        write_json_response(&mut socket, &page_1)
+            .await
+            .expect("write response");
 
         // Page 2: one template and no further pages.
         let (mut socket, _) = listener.accept().await.expect("accept page 2");
@@ -74,7 +75,9 @@ async fn list_sandbox_templates_follows_pagination() {
             "pagination": { "next": serde_json::Value::Null }
         })
         .to_string();
-        write_json_response(&mut socket, &page_2).await;
+        write_json_response(&mut socket, &page_2)
+            .await
+            .expect("write response");
 
         (request_1, request_2)
     });
@@ -189,35 +192,4 @@ async fn test_create_then_delete_sandbox_image() {
     if let Err(err) = result {
         panic!("{err}");
     }
-}
-
-async fn write_json_response(socket: &mut tokio::net::TcpStream, body: &str) {
-    let response = format!(
-        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
-        body.len(),
-        body
-    );
-    socket
-        .write_all(response.as_bytes())
-        .await
-        .expect("write response");
-}
-
-async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
-    let mut request = Vec::new();
-    let mut buf = [0_u8; 4096];
-
-    loop {
-        let read = socket.read(&mut buf).await.expect("read request");
-        if read == 0 {
-            break;
-        }
-        request.extend_from_slice(&buf[..read]);
-
-        if request.windows(4).any(|window| window == b"\r\n\r\n") {
-            break;
-        }
-    }
-
-    request
 }

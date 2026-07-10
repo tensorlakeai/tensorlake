@@ -1688,7 +1688,9 @@ impl ArtifactStorageClient {
         // push can fail against a job that is succeeding.
         let (suffix, timeout) = match wait_generation {
             Some(g) => (
-                format!("commits/jobs/{id}?wait_generation={g}&timeout_ms={JOB_LONG_POLL_TIMEOUT_MS}"),
+                format!(
+                    "commits/jobs/{id}?wait_generation={g}&timeout_ms={JOB_LONG_POLL_TIMEOUT_MS}"
+                ),
                 std::time::Duration::from_millis(JOB_LONG_POLL_TIMEOUT_MS + 10_000),
             ),
             None => (
@@ -2155,8 +2157,8 @@ mod tests {
     /// against a local canned-response HTTP server and asserts the URL of every request.
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn detached_snapshot_push_polls_commit_job_route() {
+        use crate::test_support::{read_http_request_keep_alive, write_json_response_keep_alive};
         use std::sync::{Arc, Mutex};
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
         // Canned responses keyed by path: session (oid_files so a known-oid push uploads
         // nothing), a 202 detach from the snapshot submit, and a terminal job status.
@@ -2236,37 +2238,12 @@ mod tests {
                 };
                 let seen = seen_srv.clone();
                 tokio::spawn(async move {
-                    let mut buf: Vec<u8> = Vec::new();
-                    loop {
-                        // One request: headers to CRLFCRLF, then a content-length body.
-                        let head_end = loop {
-                            if let Some(pos) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
-                                break pos + 4;
-                            }
-                            let mut tmp = [0u8; 4096];
-                            match sock.read(&mut tmp).await {
-                                Ok(0) | Err(_) => return,
-                                Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                            }
-                        };
-                        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+                    let mut carry: Vec<u8> = Vec::new();
+                    while let Some(request) =
+                        read_http_request_keep_alive(&mut sock, &mut carry).await
+                    {
+                        let head = String::from_utf8_lossy(&request);
                         let request_line = head.lines().next().unwrap_or_default().to_string();
-                        let content_length: usize = head
-                            .lines()
-                            .find_map(|l| {
-                                l.to_ascii_lowercase()
-                                    .strip_prefix("content-length:")
-                                    .map(|v| v.trim().parse().unwrap_or(0))
-                            })
-                            .unwrap_or(0);
-                        while buf.len() < head_end + content_length {
-                            let mut tmp = [0u8; 4096];
-                            match sock.read(&mut tmp).await {
-                                Ok(0) | Err(_) => return,
-                                Ok(n) => buf.extend_from_slice(&tmp[..n]),
-                            }
-                        }
-                        buf.drain(..head_end + content_length);
                         seen.lock().unwrap().push(request_line.clone());
                         let path = request_line
                             .split_whitespace()
@@ -2274,11 +2251,10 @@ mod tests {
                             .unwrap_or_default()
                             .to_string();
                         let (status, body) = respond(&path);
-                        let resp = format!(
-                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{body}",
-                            body.len()
-                        );
-                        if sock.write_all(resp.as_bytes()).await.is_err() {
+                        if write_json_response_keep_alive(&mut sock, status, &body)
+                            .await
+                            .is_err()
+                        {
                             return;
                         }
                     }

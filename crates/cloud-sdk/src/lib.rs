@@ -88,6 +88,8 @@ use sandboxes::*;
 use secrets::*;
 
 mod client;
+#[cfg(test)]
+pub(crate) mod test_support;
 pub use client::{Client, ClientBuilder, Traced};
 
 /// Derive the sandbox lifecycle base URL from the API URL.
