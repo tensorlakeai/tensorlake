@@ -18,10 +18,11 @@ use super::overlay::{OverlayAttr, OverlayFs};
 /// Kernel entry/attr TTL. Effectively infinite (the EdenFS posture): nothing a mount serves can
 /// change between refresh deltas, and the daemon pushes exact invalidations for those
 /// (`Notifier::inval_entry`/`inval_inode`, handed out by [`WorkspaceFuse::run`]) — so repeat
-/// stats are kernel-cache hits instead of daemon round trips. Negative lookups are never
-/// kernel-cached (`reply.error(ENOENT)` carries no TTL), so newly created names are always
-/// discoverable. Bounded rather than literally infinite as a backstop for a missed
-/// invalidation edge.
+/// stats are kernel-cache hits instead of daemon round trips. Negative lookups get no TTL from
+/// us (`reply.error(ENOENT)`), but the kernel can still pin ENOENT for a name past any lookup
+/// we drive (see `probe_negative_dentry` in `fs.rs`), so refresh deltas additionally push
+/// `inval_entry` for names that newly appeared at a commit (`RefreshDelta::appeared`). Bounded
+/// rather than literally infinite as a backstop for a missed invalidation edge.
 const TTL: Duration = Duration::from_secs(3600);
 
 fn errno(e: &MountError) -> i32 {

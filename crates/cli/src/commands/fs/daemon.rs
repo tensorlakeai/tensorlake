@@ -9,6 +9,11 @@
 //! ```text
 //! {"op":"ping"}        -> {"ok":true,"commit":"<hex>"}
 //! {"op":"refresh"}     -> poll the workspace ref now; reply with the (possibly new) commit
+//!                         plus every probe expectation banked since the last drain
+//!                         ("changed": [{path, present, size?}], "complete": bool) so callers
+//!                         without a kernel notify channel (macOS) can converge the kernel
+//!                         view themselves. `complete: false` means some refresh since the
+//!                         last drain could not enumerate first-appearance names.
 //! {"op":"clear_upper"} -> drop all overlay state (post-snapshot / restore)
 //! {"op":"reindex"}     -> rebuild the overlay's dirty index from disk (post-restore)
 //! {"op":"shutdown"}    -> unmount and exit
@@ -32,7 +37,7 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
 #[cfg(unix)]
-use super::overlay::{OverlayFs, OverlayInval};
+use super::overlay::{KernelExpectation, OverlayFs, OverlayInval};
 #[cfg(unix)]
 use std::sync::Arc;
 
@@ -42,6 +47,50 @@ use std::sync::Arc;
 /// its own attribute protocol).
 #[cfg(unix)]
 type InvalSink = Arc<dyn Fn(Vec<OverlayInval>) + Send + Sync>;
+
+/// Probe expectations produced by refreshes but not yet drained to an out-of-process prober.
+/// On macOS there is no kernel notify channel; `tl fs sync` converges the kernel view by
+/// probing paths from outside the mount, fed by the `refresh` control reply. Every poll site
+/// deposits here — the background ref watcher or the auto-commit post-seal poll can consume
+/// the very ref advance a concurrent `tl fs sync` triggered, and the expectations must not be
+/// lost with it — and the control op drains the whole backlog into its reply.
+#[cfg(unix)]
+#[derive(Default)]
+struct PendingProbe {
+    /// Path → latest expectation (last write wins across deltas).
+    expect: std::collections::BTreeMap<String, KernelExpectation>,
+    /// Cleared when any absorbed delta had unknown appearance info (the stat-walk refresh
+    /// fallback cannot see first-appearance names); reset to complete on drain.
+    incomplete: bool,
+}
+
+/// Absorb one refresh delta: push kernel invalidations (Linux notify) and bank the probe
+/// expectations for the next `refresh` control drain (macOS convergence).
+#[cfg(unix)]
+fn absorb_refresh(
+    overlay: &OverlayFs,
+    invalidate: &InvalSink,
+    pending: &std::sync::Mutex<PendingProbe>,
+    delta: &gsvc_mount::RefreshDelta,
+) {
+    let outputs = overlay.refresh_outputs(delta);
+    {
+        let mut p = pending.lock().expect("pending probe lock");
+        if delta.appeared.is_none() {
+            p.incomplete = true;
+        }
+        for e in outputs.expectations {
+            p.expect.insert(e.path.clone(), e);
+        }
+        // A mount nobody syncs must not grow this without bound; dropping the backlog is
+        // honest as long as the drain reports it was incomplete.
+        if p.expect.len() > 65_536 {
+            p.expect.clear();
+            p.incomplete = true;
+        }
+    }
+    invalidate(outputs.invals);
+}
 
 /// Persisted per-mount state (`<state dir>/state.json`). No credentials: the daemon mints its
 /// own from the same CLI auth context.
@@ -347,13 +396,17 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         "mount daemon serving"
     );
 
+    // Expectations banked by every poll site below, drained by the `refresh` control op.
+    let pending = Arc::new(std::sync::Mutex::new(PendingProbe::default()));
+
     // Follow the workspace ref, pushing each refresh's exact delta to the kernel. Spawned after
     // attach because the invalidation sink is born with the kernel session.
     {
         let overlay = overlay.clone();
         let invalidate = invalidate.clone();
+        let pending = pending.clone();
         gsvc_mount::spawn_ref_watcher(&core, move |delta| {
-            invalidate(overlay.translate_delta(&delta));
+            absorb_refresh(&overlay, &invalidate, &pending, &delta);
         });
     }
 
@@ -381,6 +434,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         let overlay = overlay.clone();
         let core = core.clone();
         let invalidate = invalidate.clone();
+        let pending = pending.clone();
         tokio::spawn(async move {
             let mut sealed_gen = 0u64;
             // The overlay epoch this sealer's caches describe. clear_upper (manual snapshot,
@@ -600,7 +654,9 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                         // lower presence and whiteouts normally. Best-effort — the guard
                         // above holds every unconfirmed seal, however long the lower lags.
                         match core.poll_ref().await {
-                            Ok(Some(refresh)) => invalidate(overlay.translate_delta(&refresh)),
+                            Ok(Some(refresh)) => {
+                                absorb_refresh(&overlay, &invalidate, &pending, &refresh)
+                            }
                             Ok(None) => {}
                             Err(e) => eprintln!(
                                 "auto-commit: post-seal refresh failed (follow poll catches \
@@ -646,6 +702,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         let core = core.clone();
         let mountpoint = mountpoint.clone();
         let invalidate = invalidate.clone();
+        let pending = pending.clone();
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -655,6 +712,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 let core = core.clone();
                 let mountpoint = mountpoint.clone();
                 let invalidate = invalidate.clone();
+                let pending = pending.clone();
                 tokio::spawn(async move {
                     let mut reader = tokio::io::BufReader::new(stream);
                     let mut line = String::new();
@@ -672,7 +730,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                         "refresh" => match core.poll_ref().await {
                             Ok(delta) => {
                                 if let Some(delta) = delta {
-                                    invalidate(overlay.translate_delta(&delta));
+                                    absorb_refresh(&overlay, &invalidate, &pending, &delta);
                                 }
                                 // The advance may be the seal that published pending renames
                                 // (`tl fs snapshot` refreshes before clearing the overlay);
@@ -682,7 +740,22 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 {
                                     eprintln!("refresh: reaping sealed renames failed: {e}");
                                 }
-                                serde_json::json!({ "ok": true, "commit": core.current_commit() })
+                                // Drain every expectation banked since the last drain — not
+                                // just this poll's. A background poll may have consumed the
+                                // very ref advance this caller triggered; its probe list must
+                                // ride out on this reply or macOS never converges it.
+                                let (changed, complete) = {
+                                    let mut p = pending.lock().expect("pending probe lock");
+                                    let changed: Vec<KernelExpectation> =
+                                        std::mem::take(&mut p.expect).into_values().collect();
+                                    (changed, !std::mem::replace(&mut p.incomplete, false))
+                                };
+                                serde_json::json!({
+                                    "ok": true,
+                                    "commit": core.current_commit(),
+                                    "changed": changed,
+                                    "complete": complete,
+                                })
                             }
                             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
                         },
