@@ -297,7 +297,7 @@ enum FsCommands {
         log_level: String,
     },
 
-    /// Seal local changes into a snapshot on the workspace ref
+    /// Seal local changes into a snapshot on the workspace ref (the local overlay is kept)
     Snapshot {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
@@ -305,6 +305,13 @@ enum FsCommands {
         /// Snapshot message
         #[arg(short, long)]
         message: Option<String>,
+
+        /// After sealing, drop the local overlay so the mount serves the snapshot commit
+        /// directly (required before `tl fs sync`). Destructive: also deletes ignored files
+        /// under the mount and any writes made while the snapshot was uploading — pause
+        /// writers first.
+        #[arg(long)]
+        clear: bool,
     },
 
     /// Publish the workspace's snapshot onto a real branch (squash by default)
@@ -2361,8 +2368,8 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             state_dir,
             log_level,
         } => commands::fs::daemon::run(ctx, &state_dir, &log_level).await,
-        FsCommands::Snapshot { message, .. } => {
-            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref()).await
+        FsCommands::Snapshot { message, clear, .. } => {
+            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), clear).await
         }
         FsCommands::Promote {
             branch,
@@ -2998,16 +3005,28 @@ mod tests {
             Commands::Fs(FsCommands::Snapshot {
                 path: None,
                 message: None,
+                clear: false,
             }) => {}
             _ => panic!("expected fs snapshot command"),
         }
 
         match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip"]) {
-            Commands::Fs(FsCommands::Snapshot { path, message }) => {
+            Commands::Fs(FsCommands::Snapshot {
+                path,
+                message,
+                clear,
+            }) => {
                 assert_eq!(path, Some(PathBuf::from("./w")));
                 assert_eq!(message.as_deref(), Some("wip"));
+                assert!(!clear, "clear is opt-in");
             }
             _ => panic!("expected fs snapshot command"),
+        }
+
+        // The destructive seal-and-clear is an explicit flag.
+        match parse_command(["tl", "fs", "snapshot", "--clear"]) {
+            Commands::Fs(FsCommands::Snapshot { clear: true, .. }) => {}
+            _ => panic!("expected fs snapshot --clear command"),
         }
 
         // Promote/restore have a required positional after the optional path; with a single

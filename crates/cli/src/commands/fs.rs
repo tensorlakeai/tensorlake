@@ -7,8 +7,11 @@
 //! vendored `gsvc-mount` core's immutable caches, writes land in a local overlay.
 //! **The overlay is the dirty set**: `snapshot` enumerates it (nothing is
 //! scanned), seals it into a commit on the workspace ref, and the mount's lower layer follows
-//! the ref to the new snapshot; `promote` CAS-advances a real branch (squash by default);
-//! `restore` refills the overlay from any snapshot. FUSE is the only mount path — Linux builds
+//! the ref to the new snapshot. The overlay is **kept** after sealing (auto-commit parity) —
+//! the upper keeps serving the byte-identical sealed content; `snapshot --clear` is the
+//! explicit, destructive opt-in that drops it (required before `sync`). `promote`
+//! CAS-advances a real branch (squash by default); `restore` refills the overlay from any
+//! snapshot. FUSE is the only mount path — Linux builds
 //! carry it unconditionally, macOS requires macFUSE and the `macfuse` build feature.
 
 use std::collections::HashMap;
@@ -2294,7 +2297,12 @@ fn overlay_push_files(upserts: &OverlayUpserts, deletes: &[String]) -> Result<Ve
     Ok(files)
 }
 
-pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> Result<()> {
+pub async fn snapshot(
+    ctx: &CliContext,
+    path: &Path,
+    message: Option<&str>,
+    clear: bool,
+) -> Result<()> {
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
@@ -2356,30 +2364,12 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
     let t_push = started.elapsed() - t_prepare - t_enumerate;
 
     bar.set_message("refreshing mount view...");
-    // Swap the mount's lower layer to the new snapshot, then drop the overlay: the content the
-    // upper layer held is now served (identically) by the lower commit.
-    let refresh = daemon::control(&state_dir, "refresh").await?;
-    daemon::control(&state_dir, "clear_upper").await?;
-    // The refresh may also have adopted foreign ref movement (a concurrent writer advanced the
-    // workspace ref past our snapshot commit), and the drained probe list can carry a backlog
-    // from background polls. Converge those the same way sync does — macOS only; the FUSE
-    // notifier already handled them on Linux. Our own sealed paths were upper-shadowed at
-    // refresh time and filter out of the probe list; the revalidate below covers them.
-    if cfg!(target_os = "macos") {
-        let (expect, _complete, _new_daemon) = parse_refresh_probes(&refresh);
-        if !expect.is_empty() {
-            let changed: std::collections::BTreeSet<String> = expect.keys().cloned().collect();
-            converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
-        }
-    }
-    // Content is byte-identical across the swap, but the previously-dirty paths' attributes
-    // changed backing (upper mtimes -> lower commit time); refresh the kernel's view.
     let sealed: Vec<String> = upserts
         .iter()
         .map(|(p, _, _)| p.clone())
         .chain(deletes.iter().cloned())
         .collect();
-    revalidate_paths(Path::new(&mountpoint), &sealed);
+    let refresh_timings = seal_refresh(&state_dir, &mountpoint, &sealed, clear).await?;
     let total = started.elapsed();
     let t_refresh = total - t_push - t_prepare - t_enumerate;
     bar.finish_and_clear();
@@ -2394,13 +2384,73 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
         fmt_dur(total),
     );
     println!(
-        "  enumerate {}  prepare {}  push {}  refresh {}",
+        "  enumerate {}  prepare {}  push {}  refresh {}{}",
         fmt_dur(t_enumerate),
         fmt_dur(t_prepare),
         fmt_dur(t_push),
         fmt_dur(t_refresh),
+        match refresh_timings.clear {
+            Some(clear) => format!(
+                " (poll {}, clear+revalidate {})",
+                fmt_dur(refresh_timings.poll),
+                fmt_dur(clear)
+            ),
+            None => String::new(),
+        },
     );
     Ok(())
+}
+
+/// Post-push mount convergence for `snapshot`. Swaps the mount's lower layer to the new
+/// snapshot commit; the overlay is **kept** by default, exactly like the daemon auto-commit
+/// path — the upper goes on serving the sealed paths, whose bytes the lower now holds
+/// identically, so nothing kernel-visible changes and no revalidation is needed.
+///
+/// Clearing here used to be unconditional and destroyed data two ways: enumeration skips
+/// ignored and unreadable paths but `clear_upper` removed the *whole* upper tree (a Rust
+/// project lost `target/` on every snapshot), and any write landing between enumeration and
+/// the clear was deleted without ever entering a snapshot. `clear: true` (the `--clear` flag)
+/// keeps that behavior available as an explicit, documented-destructive opt-in — it is what
+/// empties the local dirty set so `tl fs sync` can run.
+async fn seal_refresh(
+    state_dir: &Path,
+    mountpoint: &str,
+    sealed: &[String],
+    clear: bool,
+) -> Result<SealRefreshTimings> {
+    let started = std::time::Instant::now();
+    let refresh = daemon::control(state_dir, "refresh").await?;
+    // The refresh may also have adopted foreign ref movement (a concurrent writer advanced the
+    // workspace ref past our snapshot commit), and the drained probe list can carry a backlog
+    // from background polls. Converge those the same way sync does — macOS only; the FUSE
+    // notifier already handled them on Linux. Our own sealed paths were upper-shadowed at
+    // refresh time and filter out of the probe list.
+    if cfg!(target_os = "macos") {
+        let (expect, _complete, _new_daemon) = parse_refresh_probes(&refresh);
+        if !expect.is_empty() {
+            let changed: std::collections::BTreeSet<String> = expect.keys().cloned().collect();
+            converge_kernel_view(Path::new(mountpoint), &changed, &expect);
+        }
+    }
+    let poll = started.elapsed();
+    if clear {
+        daemon::control(state_dir, "clear_upper").await?;
+        // Content is byte-identical across the swap, but the cleared paths' attributes changed
+        // backing (upper mtimes -> lower serve time); refresh the kernel's view.
+        revalidate_paths(Path::new(mountpoint), sealed);
+    }
+    Ok(SealRefreshTimings {
+        poll,
+        clear: clear.then(|| started.elapsed() - poll),
+    })
+}
+
+/// Where the post-push `refresh` phase spent its time: the ref poll/adopt, and — only under
+/// `--clear` — the upper drop plus the per-path kernel revalidation, which scales with file
+/// count and network RTT and historically dominated large snapshots.
+struct SealRefreshTimings {
+    poll: std::time::Duration,
+    clear: Option<std::time::Duration>,
 }
 
 /// Render a phase duration compactly: sub-second phases as whole milliseconds (`42ms`), longer
@@ -2435,7 +2485,7 @@ pub async fn promote(
     let renames = pending_renames(&state_dir);
     if !upserts.is_empty() || !deletes.is_empty() || !renames.is_empty() {
         eprintln!(
-            "{} {} local change(s) not in any snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to include them.",
+            "{} {} local change(s) that may not be in a snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to be sure they are included.",
             style("note:").yellow(),
             upserts.len() + deletes.len() + renames.len()
         );
@@ -2518,7 +2568,8 @@ pub async fn promote(
 /// commit on the target head; the mount's lower layer then advances to it. Under the default
 /// materialize policy conflicts land as diff3 markers in the workspace files; resolve them and
 /// snapshot. Local overlay changes would shadow synced content (markers included), so a dirty
-/// mount must snapshot first.
+/// mount must seal-and-clear (`tl fs snapshot --clear`) first — a plain snapshot keeps the
+/// overlay, which still shadows.
 pub async fn sync(
     ctx: &CliContext,
     path: &Path,
@@ -2540,7 +2591,7 @@ pub async fn sync(
     let renames = pending_renames(&state_dir);
     if !upserts.is_empty() || !deletes.is_empty() || !renames.is_empty() {
         return Err(CliError::usage(format!(
-            "{} local change(s) not in any snapshot would shadow synced content. Run `tl fs snapshot {}` first.",
+            "{} local change(s) would shadow synced content. Seal and drop them first: `tl fs snapshot --clear {}` (pause writers first — the clear also drops ignored files and any writes made while the snapshot uploads).",
             upserts.len() + deletes.len() + renames.len(),
             path.display(),
         )));
@@ -3358,5 +3409,102 @@ mod tests {
         let upsert_paths: Vec<_> = upserts.iter().map(|(path, _, _)| path.as_str()).collect();
         assert_eq!(upsert_paths, vec!["keep.txt"]);
         assert!(deletes.is_empty());
+    }
+
+    /// A fake daemon control endpoint: replies `{"ok":true}` to every op and records the op
+    /// sequence, so the seal path can be exercised without a mount.
+    #[cfg(unix)]
+    fn fake_daemon(state_dir: &Path) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = std::os::unix::net::UnixListener::bind(daemon::control_socket(state_dir))
+            .expect("bind control socket");
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+        let recorded = ops.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let recorded = recorded.clone();
+                tokio::spawn(async move {
+                    let mut reader = tokio::io::BufReader::new(stream);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                    recorded
+                        .lock()
+                        .unwrap()
+                        .push(v["op"].as_str().unwrap_or_default().to_string());
+                    let mut stream = reader.into_inner();
+                    let _ = stream.write_all(b"{\"ok\":true}\n").await;
+                });
+            }
+        });
+        ops
+    }
+
+    /// Regression for the snapshot data-loss bug: sealing must KEEP the overlay. The old flow
+    /// cleared the whole upper after the push, which (a) deleted ignored paths the enumeration
+    /// never pushed (a Rust project lost `target/` on every snapshot) and (b) deleted writes
+    /// that raced the push window (landed after enumeration) without them entering any
+    /// snapshot.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_seal_keeps_overlay_by_default() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let ops = fake_daemon(state.path());
+
+        let upper = state.path().join("upper");
+        std::fs::create_dir_all(upper.join("target")).unwrap();
+        std::fs::create_dir_all(state.path().join("wh")).unwrap();
+        std::fs::write(mount.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(upper.join("keep.txt"), "sealed").unwrap();
+        std::fs::write(upper.join("target/build.o"), "ignored, never pushed").unwrap();
+
+        let (upserts, _) = enumerate_overlay(state.path(), mount.path()).unwrap();
+        assert_eq!(upserts.len(), 1, "ignored path must not be pushed");
+        // A write landing after enumeration, i.e. racing the push window.
+        std::fs::write(upper.join("raced.txt"), "written mid-push").unwrap();
+
+        let sealed = vec!["keep.txt".to_string()];
+        let timings = seal_refresh(state.path(), mount.path().to_str().unwrap(), &sealed, false)
+            .await
+            .unwrap();
+
+        assert_eq!(*ops.lock().unwrap(), vec!["refresh"], "no clear by default");
+        assert!(timings.clear.is_none());
+        assert!(upper.join("keep.txt").exists(), "sealed file kept locally");
+        assert!(
+            upper.join("target/build.o").exists(),
+            "ignored path survives the seal"
+        );
+        assert!(upper.join("raced.txt").exists(), "raced write survives");
+        // ...and the raced write is picked up by the next snapshot's walk.
+        let (upserts, _) = enumerate_overlay(state.path(), mount.path()).unwrap();
+        assert!(
+            upserts.iter().any(|(p, _, _)| p == "raced.txt"),
+            "raced write enumerates next time"
+        );
+    }
+
+    /// `--clear` keeps the old seal-and-clear behavior as an explicit opt-in (it is what
+    /// empties the dirty set so `sync` can run); the clear goes through the daemon so kernel
+    /// invalidation still happens.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_seal_clear_opt_in_sends_clear_upper() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let ops = fake_daemon(state.path());
+
+        let sealed = vec!["keep.txt".to_string()];
+        let timings = seal_refresh(state.path(), mount.path().to_str().unwrap(), &sealed, true)
+            .await
+            .unwrap();
+
+        assert_eq!(*ops.lock().unwrap(), vec!["refresh", "clear_upper"]);
+        assert!(timings.clear.is_some());
     }
 }
