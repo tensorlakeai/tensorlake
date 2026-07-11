@@ -31,54 +31,63 @@ pub(crate) fn push_progress_spinner(
 ) -> Arc<dyn Fn(PushEvent) + Send + Sync> {
     let bar = bar.clone();
     Arc::new(move |ev| {
-        use indicatif::HumanBytes;
-        match ev {
-            PushEvent::Chunking {
-                files_done,
-                files_total,
-                bytes_hashed,
-            } => bar.set_message(format!(
-                "hashing {files_done}/{files_total} files ({})...",
-                HumanBytes(bytes_hashed)
-            )),
-            PushEvent::Hashed {
-                files,
-                chunks,
-                bytes,
-            } => bar.set_message(format!(
-                "hashed {files} files ({chunks} chunks, {}); asking the server what it already has...",
-                HumanBytes(bytes)
-            )),
-            PushEvent::Negotiated { missing, total } => bar.set_message(format!(
-                "uploading {missing} of {total} chunks (rest already stored)..."
-            )),
-            PushEvent::UploadedBatch { chunks, bytes } => {
-                bar.set_message(format!("uploaded {chunks} chunks ({})...", HumanBytes(bytes)))
+        if let PushEvent::CommitDetached { job_id } = &ev {
+            let line = format!(
+                "commit running as job {job_id} (survives disconnects; check from anywhere \
+                 with: tl git commit-status <repo> {job_id})"
+            );
+            if bar.is_hidden() {
+                println!("{line}");
+            } else {
+                bar.println(line);
             }
-            PushEvent::Committing { files } => bar.set_message(format!(
-                "all bytes on the server; committing {files} files (server builds the tree)..."
-            )),
-            PushEvent::CommitDetached { job_id } => {
-                let line = format!(
-                    "commit running as job {job_id} (survives disconnects; check from anywhere \
-                     with: tl git commit-status <repo> {job_id})"
-                );
-                if bar.is_hidden() {
-                    println!("{line}");
-                } else {
-                    bar.println(line);
-                }
-            }
-            PushEvent::CommitProgress { phase, done, total } => {
-                if total > 0 {
-                    bar.set_message(format!("committing: {phase} {done}/{total} chunks..."))
-                } else {
-                    bar.set_message(format!("committing: {phase}..."))
-                }
-            }
-            PushEvent::Committed { ref_name, .. } => {
-                bar.set_message(format!("committed to {ref_name}"))
+            return;
+        }
+        bar.set_message(push_event_message(&ev));
+    })
+}
+
+/// One `PushEvent` as a short human-readable phase string — the single source of push-progress
+/// wording. `push_progress_spinner` renders these onto a local spinner; the `tl fs` mount
+/// daemon streams the same strings over its control socket as `{"event": ...}` lines so a
+/// remote `tl fs snapshot` spinner narrates the daemon-side seal in the same words.
+#[cfg_attr(not(feature = "mount"), allow(dead_code))]
+pub(crate) fn push_event_message(ev: &PushEvent) -> String {
+    use indicatif::HumanBytes;
+    match ev {
+        PushEvent::Chunking {
+            files_done,
+            files_total,
+            bytes_hashed,
+        } => format!(
+            "hashing {files_done}/{files_total} files ({})...",
+            HumanBytes(*bytes_hashed)
+        ),
+        PushEvent::Hashed {
+            files,
+            chunks,
+            bytes,
+        } => format!(
+            "hashed {files} files ({chunks} chunks, {}); asking the server what it already has...",
+            HumanBytes(*bytes)
+        ),
+        PushEvent::Negotiated { missing, total } => {
+            format!("uploading {missing} of {total} chunks (rest already stored)...")
+        }
+        PushEvent::UploadedBatch { chunks, bytes } => {
+            format!("uploaded {chunks} chunks ({})...", HumanBytes(*bytes))
+        }
+        PushEvent::Committing { files } => {
+            format!("all bytes on the server; committing {files} files (server builds the tree)...")
+        }
+        PushEvent::CommitDetached { job_id } => format!("commit running as job {job_id}..."),
+        PushEvent::CommitProgress { phase, done, total } => {
+            if *total > 0 {
+                format!("committing: {phase} {done}/{total} chunks...")
+            } else {
+                format!("committing: {phase}...")
             }
         }
-    })
+        PushEvent::Committed { ref_name, .. } => format!("committed to {ref_name}"),
+    }
 }

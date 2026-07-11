@@ -14,15 +14,24 @@
 //!                         without a kernel notify channel (macOS) can converge the kernel
 //!                         view themselves. `complete: false` means some refresh since the
 //!                         last drain could not enumerate first-appearance names.
-//! {"op":"seal","message":?} -> run ONE cycle of the sealer (the same machinery as
+//! {"op":"seal","message":?,"clear":?} -> run ONE cycle of the sealer (the same machinery as
 //!                         auto-commit): resolve the dirty delta, push it as a snapshot
-//!                         commit with the given message, advance the lower. Replies
-//!                         {ok, clean} when nothing was dirty, else {ok, commit, files,
-//!                         chunks_uploaded, chunks_total, sealed, push_ms} plus the same
-//!                         drained "changed"/"complete" probe list as `refresh`. This is
+//!                         commit with the given message, advance the lower. Streaming op:
+//!                         the daemon writes zero or more `{"event":"<phase>"}` progress
+//!                         lines (throttled push progress plus a keepalive during long
+//!                         server-side commit phases) before the single final reply line.
+//!                         The reply is a [`SealReply`] (+`ok`) — {ok, clean, commit} when
+//!                         nothing was dirty, else {ok, clean, commit, files,
+//!                         chunks_uploaded, chunks_total, sealed, push_ms} — plus the same
+//!                         drained "changed"/"complete" probe list as `refresh`. With
+//!                         `clear:true` the daemon drops the whole overlay itself right
+//!                         after the seal (under the sealer lock, so no write can land
+//!                         between seal and clear unobserved) and the reply carries
+//!                         `cleared`: every repo path the drop actually removed. This is
 //!                         what `tl fs snapshot` calls — manual snapshots and auto-commits
 //!                         share one dirty watermark, resurrection guard, and chunk cache.
-//! {"op":"clear_upper"} -> drop all overlay state (snapshot --clear / restore)
+//! {"op":"clear_upper"} -> drop all overlay state without sealing (restore's reset; `tl fs
+//!                         snapshot --clear` instead rides the seal op for coherence)
 //! {"op":"reindex"}     -> rebuild the overlay's dirty index from disk (post-restore)
 //! {"op":"shutdown"}    -> unmount and exit
 //! ```
@@ -186,6 +195,47 @@ pub fn daemon_pid(state_dir: &Path) -> Option<i32> {
         .ok()
 }
 
+/// Request body of the `seal` control op — shared by the daemon's handler and the CLI's
+/// client path (`fs::seal_via_daemon`) so the wire shape cannot drift between them.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct SealRequest {
+    /// Snapshot commit message; the daemon defaults it when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub message: Option<String>,
+    /// Drop the whole overlay after a successful seal, inside the same sealer cycle. The
+    /// reply then reports the dropped paths in [`SealReply::cleared`].
+    #[serde(default)]
+    pub clear: bool,
+}
+
+/// Final reply of the `seal` control op (the line after any `{"event": ...}` progress lines).
+/// The daemon serializes exactly this (plus the `ok`/`changed`/`complete` envelope fields);
+/// the CLI deserializes it with serde and treats missing or mistyped fields as an error —
+/// never as defaults.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub(crate) struct SealReply {
+    /// Nothing was dirty: no commit was minted (`commit` is the current lower).
+    pub clean: bool,
+    pub commit: String,
+    /// Sealed-only fields (absent on clean replies).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub files: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunks_uploaded: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub chunks_total: Option<u64>,
+    /// Every repo path the seal published (upserts and deletes).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sealed: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub push_ms: Option<u64>,
+    /// Present iff the request set `clear`: the FULL list of repo paths the overlay drop
+    /// removed (including ignored files that never enter a snapshot) — the caller's kernel
+    /// revalidation set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cleared: Option<Vec<String>>,
+}
+
 /// One control round-trip from a CLI command to the daemon. Mounts (and so daemons) exist
 /// only on unix; elsewhere every control call reports the daemon as not running.
 #[cfg(not(unix))]
@@ -201,6 +251,19 @@ pub async fn control_with(
     _state_dir: &Path,
     _op: &str,
     _args: serde_json::Value,
+) -> Result<serde_json::Value> {
+    Err(CliError::usage(
+        "tl fs mounts are supported on Linux (FUSE) and macOS (FSKit) only.",
+    ))
+}
+
+/// [`control_with`] for line-streaming ops (`seal`).
+#[cfg(not(unix))]
+pub async fn control_streaming(
+    _state_dir: &Path,
+    _op: &str,
+    _args: serde_json::Value,
+    _on_event: impl FnMut(&str),
 ) -> Result<serde_json::Value> {
     Err(CliError::usage(
         "tl fs mounts are supported on Linux (FUSE) and macOS (FSKit) only.",
@@ -248,6 +311,66 @@ pub async fn control_with(
         )));
     }
     Ok(resp)
+}
+
+/// How long the streaming client waits without ANY line (event or reply) before declaring the
+/// daemon wedged. The daemon emits push progress at least every ~100ms while hashing/uploading
+/// and a keepalive event every ~15s through the sparse server-side commit phases, so a full
+/// minute of silence means the seal is not making progress.
+#[cfg(unix)]
+const STREAM_IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// One control round-trip for a line-streaming op (`seal`): the daemon writes zero or more
+/// `{"event": "<message>"}` progress lines followed by the single final reply line. Each event
+/// line invokes `on_event`; the final line is returned RAW — including `ok:false` failures —
+/// so the caller can inspect structured fields (`code`) that a flattened error string would
+/// lose. Plain-string ops keep the single-line [`control`]/[`control_with`] path.
+#[cfg(unix)]
+pub async fn control_streaming(
+    state_dir: &Path,
+    op: &str,
+    args: serde_json::Value,
+    mut on_event: impl FnMut(&str),
+) -> Result<serde_json::Value> {
+    let sock = control_socket(state_dir);
+    let mut stream = tokio::net::UnixStream::connect(&sock).await.map_err(|e| {
+        CliError::usage(format!(
+            "mount daemon is not running ({}): {e}",
+            sock.display()
+        ))
+    })?;
+    let mut request = serde_json::json!({ "op": op });
+    if let serde_json::Value::Object(fields) = args {
+        let obj = request.as_object_mut().expect("request is an object");
+        for (k, v) in fields {
+            obj.insert(k, v);
+        }
+    }
+    stream.write_all(format!("{request}\n").as_bytes()).await?;
+    let mut reader = tokio::io::BufReader::new(stream);
+    loop {
+        let mut line = String::new();
+        let read = tokio::time::timeout(STREAM_IDLE_TIMEOUT, reader.read_line(&mut line)).await;
+        let n = match read {
+            Ok(res) => res?,
+            Err(_) => {
+                return Err(CliError::usage(
+                    "mount daemon stopped responding mid-seal; check `tl fs status`",
+                ));
+            }
+        };
+        if n == 0 {
+            return Err(CliError::usage(format!(
+                "mount daemon closed the connection before replying to {op}; check `tl fs status`"
+            )));
+        }
+        let v: serde_json::Value = serde_json::from_str(line.trim())?;
+        if let Some(event) = v.get("event").and_then(|e| e.as_str()) {
+            on_event(event);
+            continue;
+        }
+        return Ok(v);
+    }
 }
 
 /// How long before recorded credential expiry the daemon re-mints. Minted tokens live ~1h.
@@ -494,11 +617,11 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 tokio::time::sleep(Duration::from_secs(secs.max(1))).await;
                 // eprintln, not tracing: the daemon's stderr is the state dir's daemon.log —
                 // the one place a user can see an async flush fail.
-                match sealer.seal_once("tl fs auto-commit").await {
+                match sealer.seal_once("tl fs auto-commit", false, None).await {
                     Ok(SealOutcome::Sealed(report)) => {
                         eprintln!("auto-commit sealed snapshot {}", report.commit);
                     }
-                    Ok(SealOutcome::Clean) => {}
+                    Ok(SealOutcome::Clean { .. }) => {}
                     Err(e) => eprintln!("auto-commit: {e}"),
                 }
             }
@@ -546,59 +669,14 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             serde_json::json!({ "ok": true, "commit": core.current_commit() })
                         }
                         // Seal on demand: `tl fs snapshot` runs exactly one cycle of the same
-                        // sealer auto-commit ticks, with the caller's message. The reply
-                        // carries what the seal knows plus the drained probe backlog (same
-                        // contract as `refresh`) so macOS callers can converge the kernel
-                        // view without a second round-trip.
-                        "seal" => match &sealer {
-                            None => serde_json::json!({
-                                "ok": false,
-                                "error": "this mount is read-only; there is nothing to seal",
-                            }),
-                            Some(sealer) => {
-                                let message = request
-                                    .get("message")
-                                    .and_then(|m| m.as_str())
-                                    .unwrap_or("tl fs snapshot");
-                                match sealer.seal_once(message).await {
-                                    Ok(outcome) => {
-                                        let (changed, complete) = {
-                                            let mut p = pending.lock().expect("pending probe lock");
-                                            let changed: Vec<KernelExpectation> =
-                                                std::mem::take(&mut p.expect)
-                                                    .into_values()
-                                                    .collect();
-                                            (changed, !std::mem::replace(&mut p.incomplete, false))
-                                        };
-                                        match outcome {
-                                            SealOutcome::Clean => serde_json::json!({
-                                                "ok": true,
-                                                "clean": true,
-                                                "commit": core.current_commit(),
-                                                "changed": changed,
-                                                "complete": complete,
-                                            }),
-                                            SealOutcome::Sealed(r) => serde_json::json!({
-                                                "ok": true,
-                                                "clean": false,
-                                                "commit": r.commit,
-                                                "files": r.files,
-                                                "chunks_uploaded": r.chunks_uploaded,
-                                                "chunks_total": r.chunks_total,
-                                                "sealed": r.sealed_paths,
-                                                "push_ms": r.push_ms,
-                                                "changed": changed,
-                                                "complete": complete,
-                                            }),
-                                        }
-                                    }
-                                    Err(e) => serde_json::json!({
-                                        "ok": false,
-                                        "error": e.to_string(),
-                                    }),
-                                }
-                            }
-                        },
+                        // sealer auto-commit ticks, with the caller's message (and optional
+                        // overlay clear). Streaming op — the handler writes its own event
+                        // lines and final reply, so it owns the stream from here.
+                        "seal" => {
+                            handle_seal(reader, request, sealer.clone(), pending.clone(), core)
+                                .await;
+                            return;
+                        }
                         "refresh" => match core.poll_ref().await {
                             Ok(delta) => {
                                 if let Some(delta) = delta {
@@ -679,8 +757,15 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 "error": "the volume is busy (something is still using it)",
                             })
                         }
+                        // "code" is the machine-readable half: the CLI's remount-to-upgrade
+                        // detection keys on it (matching the prose is only a legacy fallback
+                        // for daemons that predate the field).
                         other => {
-                            serde_json::json!({ "ok": false, "error": format!("unknown op {other:?}") })
+                            serde_json::json!({
+                                "ok": false,
+                                "code": "unknown_op",
+                                "error": format!("unknown op {other:?}"),
+                            })
                         }
                     };
                     let mut stream = reader.into_inner();
@@ -743,6 +828,110 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
 #[cfg(target_os = "macos")]
 pub(crate) const MODULE_DISABLED_MARKER: &str = "is disabled";
 
+/// Serve one `seal` control request, streaming progress. Writes zero or more
+/// `{"event":"<message>"}` lines — the sealer's push progress mapped to the shared
+/// [`crate::commands::push_event_message`] strings, throttled to ~2/s, plus a keepalive
+/// whenever the seal goes 15s without an event (server-side commit polling emits sparsely) —
+/// followed by the single final reply line ([`SealReply`] + the ok/changed/complete envelope).
+#[cfg(unix)]
+async fn handle_seal(
+    reader: tokio::io::BufReader<tokio::net::UnixStream>,
+    request: serde_json::Value,
+    sealer: Option<Arc<Sealer>>,
+    pending: Arc<std::sync::Mutex<PendingProbe>>,
+    core: Arc<gsvc_mount::MountCore>,
+) {
+    let mut stream = reader.into_inner();
+    let Some(sealer) = sealer else {
+        let resp = serde_json::json!({
+            "ok": false,
+            "error": "this mount is read-only; there is nothing to seal",
+        });
+        let _ = stream.write_all(format!("{resp}\n").as_bytes()).await;
+        return;
+    };
+    let req: SealRequest = serde_json::from_value(request).unwrap_or_default();
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+    let progress: tensorlake::artifact_storage::ingest::PushProgress =
+        Arc::new(move |ev| drop(tx.send(crate::commands::push_event_message(&ev))));
+    let message = req.message.unwrap_or_else(|| "tl fs snapshot".to_string());
+    let clear = req.clear;
+    let mut seal =
+        tokio::spawn(async move { sealer.seal_once(&message, clear, Some(progress)).await });
+    // Forward events as they come, throttled — a spinner can't render more than ~2/s anyway.
+    // Write failures are ignored: the seal is not cancellable mid-push without stranding the
+    // commit, so a vanished client just stops seeing progress.
+    let min_gap = Duration::from_millis(500);
+    let mut last_sent = std::time::Instant::now() - min_gap;
+    let mut rx_open = true;
+    let outcome = loop {
+        tokio::select! {
+            res = &mut seal => break res,
+            ev = rx.recv(), if rx_open => match ev {
+                Some(message) if last_sent.elapsed() >= min_gap => {
+                    let line = serde_json::json!({ "event": message });
+                    let _ = stream.write_all(format!("{line}\n").as_bytes()).await;
+                    last_sent = std::time::Instant::now();
+                }
+                Some(_) => {}
+                None => rx_open = false,
+            },
+            _ = tokio::time::sleep(Duration::from_secs(15)) => {
+                let line = serde_json::json!({ "event": "still working (waiting on the server)..." });
+                let _ = stream.write_all(format!("{line}\n").as_bytes()).await;
+                last_sent = std::time::Instant::now();
+            }
+        }
+    };
+    let resp = match outcome {
+        Err(join) => serde_json::json!({
+            "ok": false,
+            "error": format!("seal task failed: {join}"),
+        }),
+        Ok(Err(e)) => serde_json::json!({ "ok": false, "error": e.to_string() }),
+        Ok(Ok(outcome)) => {
+            let (changed, complete) = {
+                let mut p = pending.lock().expect("pending probe lock");
+                let changed: Vec<KernelExpectation> =
+                    std::mem::take(&mut p.expect).into_values().collect();
+                (changed, !std::mem::replace(&mut p.incomplete, false))
+            };
+            let reply = match outcome {
+                SealOutcome::Clean { cleared } => SealReply {
+                    clean: true,
+                    commit: core.current_commit(),
+                    files: None,
+                    chunks_uploaded: None,
+                    chunks_total: None,
+                    sealed: None,
+                    push_ms: None,
+                    cleared,
+                },
+                SealOutcome::Sealed(r) => SealReply {
+                    clean: false,
+                    commit: r.commit,
+                    files: Some(r.files as u64),
+                    chunks_uploaded: Some(r.chunks_uploaded as u64),
+                    chunks_total: Some(r.chunks_total as u64),
+                    sealed: Some(r.sealed_paths),
+                    push_ms: Some(r.push_ms),
+                    cleared: r.cleared,
+                },
+            };
+            let mut resp = serde_json::to_value(&reply).expect("seal reply serializes");
+            let obj = resp.as_object_mut().expect("seal reply is an object");
+            obj.insert("ok".to_string(), true.into());
+            obj.insert(
+                "changed".to_string(),
+                serde_json::to_value(&changed).expect("probe list serializes"),
+            );
+            obj.insert("complete".to_string(), complete.into());
+            resp
+        }
+    };
+    let _ = stream.write_all(format!("{resp}\n").as_bytes()).await;
+}
+
 /// A pushed file's CDC chunk list, as returned in `PushReport::file_chunks`.
 #[cfg(unix)]
 type ChunkList = Vec<([u8; 32], u32)>;
@@ -751,7 +940,11 @@ type ChunkList = Vec<([u8; 32], u32)>;
 #[cfg(unix)]
 enum SealOutcome {
     /// Nothing dirty since the watermark and no pending renames: no commit was minted.
-    Clean,
+    /// `cleared` reports a requested overlay clear all the same — a clean seal can still
+    /// drop retained files (earlier kept-overlay seals, ignored files).
+    Clean {
+        cleared: Option<Vec<String>>,
+    },
     Sealed(SealReport),
 }
 
@@ -762,11 +955,14 @@ struct SealReport {
     files: usize,
     chunks_uploaded: usize,
     chunks_total: usize,
-    /// Every repo path the seal published (upserts and deletes): the caller's kernel
-    /// revalidation set after a `--clear`.
+    /// Every repo path the seal published (upserts and deletes).
     sealed_paths: Vec<String>,
     /// Wall time of the push (chunk/hash + upload + server commit), for the CLI timing line.
     push_ms: u64,
+    /// Every repo path a requested overlay clear dropped (`None` when no clear was asked
+    /// for): the caller's kernel revalidation set — broader than `sealed_paths`, since the
+    /// upper also retains ignored files and previously sealed content.
+    cleared: Option<Vec<String>>,
 }
 
 /// The mount's sealer: the mutable state one seal cycle reads and advances, plus everything a
@@ -816,7 +1012,22 @@ impl Sealer {
     /// renames) against the on-disk overlay, push it as a snapshot commit carrying `message`,
     /// and advance the lower to the sealed commit. Errors are retryable — nothing was
     /// published, and the dirty set stays pending for the next cycle.
-    async fn seal_once(&self, message: &str) -> Result<SealOutcome> {
+    ///
+    /// `clear` drops the WHOLE overlay after the seal (and its lower refresh), inside this
+    /// same cycle's state lock — the destructive `tl fs snapshot --clear` opt-in. Running it
+    /// here, not as a separate control op, is what makes the drop coherent: no writer-visible
+    /// window where another seal (or auto-commit tick) interleaves between seal and clear,
+    /// and the outcome reports exactly which paths the clear removed. A clean seal still
+    /// clears — earlier kept-overlay seals leave a populated upper that `tl fs sync` refuses
+    /// to run over.
+    ///
+    /// `progress` receives the push's `PushEvent`s (the `seal` op streams them to the CLI).
+    async fn seal_once(
+        &self,
+        message: &str,
+        clear: bool,
+        progress: Option<tensorlake::artifact_storage::ingest::PushProgress>,
+    ) -> Result<SealOutcome> {
         use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
         let mut st = self.state.lock().await;
         let epoch = self.overlay.epoch();
@@ -853,7 +1064,8 @@ impl Sealer {
         let watermark = delta.watermark;
         if delta.is_empty() && !self.overlay.has_redirects() {
             st.sealed_gen = watermark;
-            return Ok(SealOutcome::Clean);
+            let cleared = clear.then(|| self.clear_overlay(&mut st)).transpose()?;
+            return Ok(SealOutcome::Clean { cleared });
         }
         // Resolution reads ignore files through the mountpoint — FUSE round-trips served by
         // this very process. Run it on the blocking pool so it can never starve the runtime
@@ -927,7 +1139,8 @@ impl Sealer {
             // and died between seals: sealed through, nothing to publish.
             st.sealed_gen = watermark;
             self.overlay.prune_dirty(watermark);
-            return Ok(SealOutcome::Clean);
+            let cleared = clear.then(|| self.clear_overlay(&mut st)).transpose()?;
+            return Ok(SealOutcome::Clean { cleared });
         }
         {
             // An upper copy-up under a renamed tree shadows the lower file; the resolved walk
@@ -986,6 +1199,7 @@ impl Sealer {
                     message: message.to_string(),
                     workspace_snapshot: Some(self.workspace.clone()),
                     collect_file_chunks: true,
+                    progress,
                     ..Default::default()
                 },
             )
@@ -1038,6 +1252,20 @@ impl Sealer {
                 );
             }
         }
+        // The destructive opt-in, last: only after the seal published AND the lower refresh
+        // above ran does dropping the upper leave the mount serving the sealed content. A
+        // failed clear does not un-seal — name the commit so the caller knows it exists.
+        let cleared = clear
+            .then(|| {
+                self.clear_overlay(&mut st).map_err(|e| {
+                    CliError::usage(format!(
+                        "snapshot {} sealed, but clearing the overlay failed: {e}; the \
+                         overlay is kept — retry with `tl fs snapshot --clear`",
+                        report.commit
+                    ))
+                })
+            })
+            .transpose()?;
         Ok(SealOutcome::Sealed(SealReport {
             commit: report.commit,
             files: report.files,
@@ -1045,8 +1273,67 @@ impl Sealer {
             chunks_total: report.chunks_total,
             sealed_paths,
             push_ms,
+            cleared,
         }))
     }
+
+    /// Drop the whole overlay (the `--clear` half of a seal cycle), returning the FULL list
+    /// of repo paths the drop removed. [`OverlayFs::clear_upper`]'s inval list only covers
+    /// paths the kernel ever interned, so the complete answer comes from walking the raw
+    /// upper/wh trees first (ignored files and whiteouts included — exactly the state that
+    /// never enumerates as dirty but dies here), plus any pending rename destinations whose
+    /// resolution flips from remap to direct lower service.
+    ///
+    /// Runs under the sealer state lock; the caches describing the dropped world die with it
+    /// (clear_upper bumps the overlay epoch, which is re-adopted here so the next cycle does
+    /// not double-clear).
+    fn clear_overlay(&self, st: &mut SealerState) -> Result<Vec<String>> {
+        let mut cleared = std::collections::BTreeSet::new();
+        collect_raw_overlay_paths(&self.state_dir.join("upper"), &mut cleared);
+        collect_raw_overlay_paths(&self.state_dir.join("wh"), &mut cleared);
+        for (dst, _) in self.overlay.redirect_entries() {
+            cleared.insert(dst);
+        }
+        let affected = self
+            .overlay
+            .clear_upper()
+            .map_err(|e| CliError::usage(format!("clearing the overlay failed: {e}")))?;
+        (self.invalidate)(affected);
+        st.seen_epoch = self.overlay.epoch();
+        st.chunk_cache.clear();
+        st.recent_seals.clear();
+        Ok(cleared.into_iter().collect())
+    }
+}
+
+/// Collect every file and symlink under an overlay tree as repo-relative paths — raw, no
+/// ignore filtering (whiteout markers in `wh` are plain files, so one walk serves both trees).
+#[cfg(unix)]
+fn collect_raw_overlay_paths(root: &Path, out: &mut std::collections::BTreeSet<String>) {
+    fn walk(root: &Path, dir: &Path, out: &mut std::collections::BTreeSet<String>) {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return;
+        };
+        for entry in read.flatten() {
+            let abs = entry.path();
+            let Ok(meta) = abs.symlink_metadata() else {
+                continue;
+            };
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                walk(root, &abs, out);
+                continue;
+            }
+            let rel = abs
+                .strip_prefix(root)
+                .expect("under root")
+                .components()
+                .map(|c| c.as_os_str().to_string_lossy())
+                .collect::<Vec<_>>()
+                .join("/");
+            out.insert(rel);
+        }
+    }
+    walk(root, root, out)
 }
 
 /// One tick's seal work, resolved from the overlay's event delta against the on-disk overlay
