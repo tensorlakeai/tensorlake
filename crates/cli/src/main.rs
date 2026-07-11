@@ -268,6 +268,24 @@ enum FsCommands {
         log_level: String,
     },
 
+    /// Bind a plain directory (no mount) to a new workspace; `tl fs snapshot` then scans and
+    /// pushes it directly — v1 requires the file system's head to be empty
+    Init {
+        /// Directory to bind (default: the current directory; created if missing)
+        path: Option<PathBuf>,
+
+        /// File system to create the workspace on (default: the project's only file system)
+        #[arg(long)]
+        file_system: Option<String>,
+    },
+
+    /// Remove a plain-directory binding and its local state; the workspace and its snapshots
+    /// survive on the server (delete them with `tl fs rm`)
+    Unbind {
+        /// A bound directory (default: the binding containing the current directory)
+        path: Option<PathBuf>,
+    },
+
     /// List workspaces (all file systems, or one)
     #[command(name = "ls")]
     Ls {
@@ -2285,9 +2303,14 @@ async fn run_applications_command(
 #[cfg(feature = "mount")]
 async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Result<()> {
     // Setup installs a local app bundle; it must work before the user has logged in.
+    // Unbind only removes local binding state (the workspace survives server-side), so it
+    // must work even when auth is unavailable.
     let subcmd = match subcmd {
         FsCommands::Setup { from, check } => {
             return commands::fs::setup(from.as_deref(), check).await;
+        }
+        FsCommands::Unbind { path } => {
+            return commands::fs::plaindir::unbind(path).await;
         }
         other => other,
     };
@@ -2343,7 +2366,12 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
     // Set for exactly the path-addressed commands, whose dispatch arms are the only readers.
     let mount_dir = move || mount_dir.expect("resolved for every path-addressed command above");
     let result = match subcmd {
-        FsCommands::Setup { .. } => unreachable!("handled before the auth guard"),
+        FsCommands::Setup { .. } | FsCommands::Unbind { .. } => {
+            unreachable!("handled before the auth guard")
+        }
+        FsCommands::Init { path, file_system } => {
+            commands::fs::plaindir::init(ctx, path, file_system.as_deref()).await
+        }
         FsCommands::Ls { file_system, json } => {
             commands::fs::ls(ctx, file_system.as_deref(), json).await
         }
