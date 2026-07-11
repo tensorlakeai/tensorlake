@@ -222,28 +222,34 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
     let rows = all_workspaces(&session, &fs_names).await?;
     let mounts = live_mounts();
     let bound = plaindir::bound_workspaces();
-    let mounted_at = |id: &str| {
+    // A workspace's local attachment: the directory plus what kind of attachment it is.
+    // Plain-directory bindings are attachments too; without this they would be invisible
+    // everywhere except path-addressed commands.
+    let attachment = |id: &str| -> Option<(String, &'static str)> {
         mounts
             .iter()
             .find(|(_, s)| s.workspace_id == id)
-            .map(|(m, _)| m.clone())
-            // Plain-directory bindings are attachments too; without this they would be
-            // invisible everywhere except path-addressed commands.
+            .map(|(m, _)| (m.clone(), "mount"))
             .or_else(|| {
                 bound
                     .iter()
                     .find(|(ws, _)| ws == id)
-                    .map(|(_, root)| format!("{root} (bound)"))
+                    .map(|(_, root)| (root.clone(), "binding"))
             })
     };
     if output_json {
         let out: Vec<serde_json::Value> = rows
             .iter()
             .map(|(fs, ws)| {
+                // `mounted_at` is the plain path (machine-consumable); `kind` says whether it
+                // is a kernel mount or a plain-directory binding — decorating the path itself
+                // broke every consumer that fed it back to another command.
+                let attached = attachment(&ws.id);
                 serde_json::json!({
                     "file_system": fs,
                     "workspace": ws,
-                    "mounted_at": mounted_at(&ws.id),
+                    "mounted_at": attached.as_ref().map(|(path, _)| path.clone()),
+                    "kind": attached.as_ref().map(|(_, kind)| *kind),
                 })
             })
             .collect();
@@ -273,7 +279,12 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
                 Some(target) => format!("shared-rw -> {target}"),
                 None => "workspace".to_string(),
             }),
-            Cell::new(mounted_at(&ws.id).unwrap_or_else(|| "-".to_string())),
+            // Human output keeps the annotation; the JSON path/kind split serves machines.
+            Cell::new(match attachment(&ws.id) {
+                Some((path, "binding")) => format!("{path} (bound)"),
+                Some((path, _)) => path,
+                None => "-".to_string(),
+            }),
             Cell::new(age_display(ws.created_at_secs)),
         ]);
     }
@@ -297,6 +308,16 @@ pub async fn rm(ctx: &CliContext, workspace_id: &str) -> Result<()> {
         return Err(CliError::usage(format!(
             "workspace {} is mounted at {mountpoint}; unmount and delete in one step: tl fs \
              unmount {mountpoint} --delete",
+            short_id(&ws.id)
+        )));
+    }
+    // A plain-directory binding references the workspace exactly like a live mount does —
+    // deleting it out from under the binding would strand the local index (and every future
+    // snapshot) against a dead workspace.
+    if let Some(bound_at) = plaindir::binding_using_workspace(&ws.id) {
+        return Err(CliError::usage(format!(
+            "workspace {} is bound to {bound_at}; unbind first (tl fs unbind {bound_at}), \
+             then delete",
             short_id(&ws.id)
         )));
     }
@@ -1303,7 +1324,7 @@ fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
 /// a binding here resolves as the command's path, whose dispatch then answers with the
 /// binding-appropriate behavior (or a clear v1 "not supported").
 pub fn is_registered_mount(path: &Path) -> bool {
-    state_dir_for(path).is_ok() || plaindir::binding_for(path).is_ok_and(|b| b.is_some())
+    state_dir_for(path).is_ok() || plaindir::binding_for_lenient(path).is_some()
 }
 
 /// The registered mountpoint or bound directory containing the current directory (the
@@ -1314,8 +1335,7 @@ pub fn mount_containing_cwd() -> Result<PathBuf> {
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     let mut roots: Vec<PathBuf> = registry_load().keys().map(PathBuf::from).collect();
     roots.extend(
-        plaindir::binding_roots()
-            .unwrap_or_default()
+        plaindir::binding_roots_lenient()
             .into_iter()
             .map(PathBuf::from),
     );
@@ -1419,7 +1439,7 @@ pub fn hydrate_scope_from_mount(ctx: &mut CliContext, path: &Path) {
         return;
     }
     // Plain-directory bindings carry the same scope record as mounts (binding.json).
-    if let Ok(Some((_, binding_state))) = plaindir::binding_for(path)
+    if let Some((_, binding_state)) = plaindir::binding_for_lenient(path)
         && let Ok(binding) = plaindir::load_binding(&binding_state)
     {
         ctx.project_id = Some(binding.project_id);
@@ -1655,22 +1675,26 @@ pub async fn mount(
                      <file-system>:<branch> --shared-rw <path>",
                 ));
             }
-            // Single-writer by default: a workspace live-mounted elsewhere attaches read-only
+            // Single-writer by default: a workspace attached elsewhere — live mount OR
+            // plain-directory binding (a binding is always a writer) — attaches read-only
             // unless the user explicitly takes writes with --mode rw.
-            let mounted_at = live_mount_of(&ws.id);
+            let attached_at = live_mount_of(&ws.id).or_else(|| {
+                plaindir::binding_using_workspace(&ws.id)
+                    .map(|root| format!("{root} (plain-directory binding)"))
+            });
             let read_only = match mode {
                 WritePolicy::Rw => false,
                 WritePolicy::Ro => true,
-                WritePolicy::Auto => mounted_at.is_some(),
+                WritePolicy::Auto => attached_at.is_some(),
             };
-            match (&mounted_at, mode) {
+            match (&attached_at, mode) {
                 (Some(at), WritePolicy::Auto) => eprintln!(
-                    "{} workspace is already mounted at {at}; mounting read-only (pass \
+                    "{} workspace is already attached at {at}; mounting read-only (pass \
                      --mode rw to mount it writable anyway)",
                     style("note:").yellow(),
                 ),
                 (Some(at), WritePolicy::Rw) => eprintln!(
-                    "{} workspace is also mounted writable at {at}; two writers race snapshots",
+                    "{} workspace is also writable at {at}; two writers race snapshots",
                     style("warning:").yellow(),
                 ),
                 _ => {}
@@ -1975,7 +1999,7 @@ pub async fn unmount(
     delete: bool,
     discard_local: bool,
 ) -> Result<()> {
-    if let Some((root, _)) = plaindir::binding_for(path)? {
+    if let Some((root, _)) = plaindir::binding_for_lenient(path) {
         return Err(CliError::usage(format!(
             "{root} is a plain-directory binding, not a mount; detach it with: tl fs unbind \
              {root}"
@@ -2376,7 +2400,7 @@ pub async fn snapshot(
 ) -> Result<()> {
     // A plain-directory binding snapshots by scanning the directory against its stat index;
     // there is no overlay, so the mount-only --clear flag has nothing to drop.
-    if let Some((root, binding_state)) = plaindir::binding_for(path)? {
+    if let Some((root, binding_state)) = plaindir::binding_for_lenient(path) {
         if clear {
             return Err(CliError::usage(
                 "--clear drops a mount's local overlay; a plain-directory binding has no \
@@ -2578,7 +2602,7 @@ pub async fn promote(
     merge: bool,
     message: Option<&str>,
 ) -> Result<()> {
-    if plaindir::binding_for(path)?.is_some() {
+    if plaindir::binding_for_lenient(path).is_some() {
         return Err(CliError::usage(
             "promote is not supported for plain-directory bindings in v1; snapshots land on \
              the workspace ref — publish them from a future release (or mount the workspace)",
@@ -2690,7 +2714,7 @@ pub async fn sync(
     fail_on_conflict: bool,
     message: Option<&str>,
 ) -> Result<()> {
-    if plaindir::binding_for(path)?.is_some() {
+    if plaindir::binding_for_lenient(path).is_some() {
         return Err(CliError::usage(
             "sync is not supported for plain-directory bindings in v1 (there is no mount to \
              materialize pulled content into); v1 bindings are single-writer capture only",
@@ -2835,7 +2859,7 @@ pub async fn sync(
 }
 
 pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<()> {
-    if let Some((root, binding_state)) = plaindir::binding_for(path)? {
+    if let Some((root, binding_state)) = plaindir::binding_for_lenient(path) {
         return plaindir::status(ctx, &root, &binding_state, output_json).await;
     }
     let (mountpoint, state_dir) = state_dir_for(path)?;
@@ -2948,7 +2972,7 @@ pub async fn restore(
     version: &str,
     discard_local: bool,
 ) -> Result<()> {
-    if plaindir::binding_for(path)?.is_some() {
+    if plaindir::binding_for_lenient(path).is_some() {
         return Err(CliError::usage(
             "restore is not supported for plain-directory bindings in v1 (it would overwrite \
              local files the index has not sealed); check out the snapshot elsewhere instead",
@@ -3352,7 +3376,7 @@ fn write_whiteout(wh: &Path, rel: &str) -> Result<()> {
 /// `tl fs diff <path>` — overlay changes vs the last snapshot; `tl fs diff <path> <a> <b>` —
 /// server-side tree diff between two commits/refs.
 pub async fn diff(ctx: &CliContext, path: &Path, a: Option<&str>, b: Option<&str>) -> Result<()> {
-    if plaindir::binding_for(path)?.is_some() {
+    if plaindir::binding_for_lenient(path).is_some() {
         return Err(CliError::usage(
             "diff is not supported for plain-directory bindings in v1; `tl fs status` lists \
              the changed paths",

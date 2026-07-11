@@ -73,8 +73,12 @@ fn state_dir_root() -> PathBuf {
 /// mounted"), an unreadable binding registry must not read as empty — `init` would happily
 /// double-bind and `snapshot` would claim the directory is unbound.
 fn registry_load() -> Result<BindingRegistry> {
-    let path = registry_path();
-    match std::fs::read(&path) {
+    registry_load_at(&registry_path())
+}
+
+/// [`registry_load`] against an explicit path (the unit-testable core).
+fn registry_load_at(path: &Path) -> Result<BindingRegistry> {
+    match std::fs::read(path) {
         Ok(raw) => serde_json::from_slice(&raw).map_err(|e| {
             CliError::usage(format!(
                 "the binding registry {} is corrupt ({e}); refusing to guess. Repair or move \
@@ -91,13 +95,50 @@ fn registry_load() -> Result<BindingRegistry> {
     }
 }
 
+/// The lenient read policy for callers that are NOT binding-owned: warn once (naming the
+/// file, and that binding commands stay fail-closed) and degrade to "nothing bound". A
+/// mount command asks the registry only to route AWAY from bindings; failing all mount
+/// commands because bindings.json is corrupt would brick the whole `tl fs` surface.
+fn registry_lenient<T>(result: Result<T>) -> Option<T> {
+    match result {
+        Ok(value) => Some(value),
+        Err(e) => {
+            use std::sync::Once;
+            static WARNED: Once = Once::new();
+            WARNED.call_once(|| {
+                eprintln!(
+                    "{} {e}\n         (treating no directory as bound so mount commands keep \
+                     working; binding commands fail closed until the registry is repaired)",
+                    style("warning:").yellow(),
+                );
+            });
+            None
+        }
+    }
+}
+
 fn registry_save(registry: &BindingRegistry) -> Result<()> {
-    std::fs::create_dir_all(crate::config::files::config_dir())?;
     write_atomic(&registry_path(), &serde_json::to_vec_pretty(registry)?)
+}
+
+/// Serialize a registry read-modify-write under a dedicated `bindings.lock` flock (blocking:
+/// mutations are tiny). Without it two concurrent `tl fs init`/`unbind` runs interleave
+/// load→save and one binding silently vanishes from the registry.
+fn registry_mutate(mutate: impl FnOnce(&mut BindingRegistry) -> Result<()>) -> Result<()> {
+    let dir = crate::config::files::config_dir();
+    std::fs::create_dir_all(&dir)?;
+    let _lock = flock_exclusive(&dir.join("bindings.lock"), true)?.ok_or_else(|| {
+        CliError::usage("could not lock the binding registry (flock unsupported here)")
+    })?;
+    let mut registry = registry_load()?;
+    mutate(&mut registry)?;
+    registry_save(&registry)
 }
 
 /// The binding registered exactly at `path` (same exact-match semantics as mounts:
 /// path-addressed commands name the root, `*_containing_cwd` handles the inside-of case).
+/// Fail-closed: binding-owned commands (init/unbind and the binding snapshot/status routes
+/// they own) must not mistake a corrupt registry for "unbound".
 pub fn binding_for(path: &Path) -> Result<Option<(String, PathBuf)>> {
     let root = canonical_mountpoint(path)?;
     Ok(registry_load()?
@@ -106,15 +147,46 @@ pub fn binding_for(path: &Path) -> Result<Option<(String, PathBuf)>> {
         .map(|state_dir| (root, state_dir.clone())))
 }
 
-/// Every bound directory, for CWD-containment resolution alongside mount roots.
-pub fn binding_roots() -> Result<Vec<String>> {
-    Ok(registry_load()?.bindings.keys().cloned().collect())
+/// Lenient twin of [`binding_for`] for mount-command dispatch and CWD resolution: on registry
+/// corruption it warns once and answers "not a binding" instead of failing every mount
+/// command (see [`registry_lenient`]).
+pub fn binding_for_lenient(path: &Path) -> Option<(String, PathBuf)> {
+    registry_lenient(binding_for(path)).flatten()
+}
+
+/// Every bound directory, for CWD-containment resolution alongside mount roots. Lenient —
+/// same policy (and warning) as [`binding_for_lenient`].
+pub fn binding_roots_lenient() -> Vec<String> {
+    registry_lenient(registry_load())
+        .map(|registry| registry.bindings.keys().cloned().collect())
+        .unwrap_or_default()
+}
+
+/// The deepest binding whose root contains `path` — how `tl fs unbind` with no argument
+/// walks ancestors, like every other path-addressed command. Fail-closed (binding-owned).
+pub(crate) fn binding_containing(path: &Path) -> Result<Option<(String, PathBuf)>> {
+    let registry = registry_load()?;
+    Ok(
+        deepest_containing(registry.bindings.keys(), path).map(|root| {
+            let state_dir = registry.bindings[&root].clone();
+            (root, state_dir)
+        }),
+    )
+}
+
+/// The deepest of `roots` that contains `path` (roots are canonical absolute paths).
+fn deepest_containing<'a>(roots: impl Iterator<Item = &'a String>, path: &Path) -> Option<String> {
+    roots
+        .filter(|root| path.starts_with(Path::new(root)))
+        .max_by_key(|root| Path::new(root).components().count())
+        .cloned()
 }
 
 /// `(workspace id, bound directory)` for every readable binding — `tl fs ls` visibility.
-/// Listing-only, so individual unreadable state dirs are skipped rather than fatal.
+/// Listing-only, so a corrupt registry degrades (with the one warning) and individual
+/// unreadable state dirs are skipped rather than fatal.
 pub(crate) fn bound_workspaces() -> Vec<(String, String)> {
-    let Ok(registry) = registry_load() else {
+    let Some(registry) = registry_lenient(registry_load()) else {
         return Vec::new();
     };
     registry
@@ -125,6 +197,23 @@ pub(crate) fn bound_workspaces() -> Vec<(String, String)> {
             Some((binding.workspace_id, root.clone()))
         })
         .collect()
+}
+
+/// The bound directory attached to `workspace_id`, if any. Scans the binding state dirs
+/// themselves (not the registry): this guards destructive/attachment decisions (`tl fs rm`,
+/// mount write policy), and a binding missing from a damaged registry still owns its
+/// workspace. Listing-grade leniency per state dir.
+pub(crate) fn binding_using_workspace(workspace_id: &str) -> Option<String> {
+    let read = std::fs::read_dir(state_dir_root()).ok()?;
+    for entry in read.flatten() {
+        let Ok(binding) = load_binding(&entry.path()) else {
+            continue;
+        };
+        if binding.workspace_id == workspace_id {
+            return Some(binding.root.to_string_lossy().into_owned());
+        }
+    }
+    None
 }
 
 /// Refuse path overlap between a candidate root and every registered mount and binding, in
@@ -201,9 +290,38 @@ pub(crate) fn load_binding(state_dir: &Path) -> Result<Binding> {
 /// Replace `path` atomically: temp file in the same directory, fsync, rename, fsync the
 /// parent directory (the rename itself is not durable until the directory is). Readers see
 /// either the old or the new content, never a torn write — the index and journal both hang
-/// correctness off this.
+/// correctness off this. The temp name is unique per process+call: with a fixed name, two
+/// concurrent writers (e.g. two `tl fs init`s racing on the registry, or the push progress
+/// hook rewriting the journal) could interleave create/write/rename on the same temp inode
+/// and publish a torn file through the "atomic" path.
 fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
+    let parent = path
+        .parent()
+        .ok_or_else(|| CliError::usage(format!("{} has no parent directory", path.display())))?;
+    let tmp = unique_temp_path(path)?;
+    {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+    }
+    if let Err(e) = std::fs::rename(&tmp, path) {
+        let _ = std::fs::remove_file(&tmp);
+        return Err(e.into());
+    }
+    // Durability of the rename itself. Some platforms refuse fsync on a directory handle;
+    // treat that as best-effort there (unix, the only supported target, allows it).
+    if let Ok(dir) = std::fs::File::open(parent) {
+        let _ = dir.sync_all();
+    }
+    Ok(())
+}
+
+/// A collision-free sibling temp name for [`write_atomic`]: pid disambiguates processes, the
+/// counter disambiguates threads/calls within one.
+fn unique_temp_path(path: &Path) -> Result<PathBuf> {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static COUNTER: AtomicU64 = AtomicU64::new(0);
     let parent = path
         .parent()
         .ok_or_else(|| CliError::usage(format!("{} has no parent directory", path.display())))?;
@@ -211,19 +329,11 @@ fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
         .file_name()
         .and_then(|n| n.to_str())
         .ok_or_else(|| CliError::usage(format!("{} has no file name", path.display())))?;
-    let tmp = parent.join(format!("{file_name}.tmp"));
-    {
-        let mut f = std::fs::File::create(&tmp)?;
-        f.write_all(bytes)?;
-        f.sync_all()?;
-    }
-    std::fs::rename(&tmp, path)?;
-    // Durability of the rename itself. Some platforms refuse fsync on a directory handle;
-    // treat that as best-effort there (unix, the only supported target, allows it).
-    if let Ok(dir) = std::fs::File::open(parent) {
-        let _ = dir.sync_all();
-    }
-    Ok(())
+    Ok(parent.join(format!(
+        "{file_name}.{}.{}.tmp",
+        std::process::id(),
+        COUNTER.fetch_add(1, Ordering::Relaxed),
+    )))
 }
 
 fn remove_durably(path: &Path) -> Result<()> {
@@ -248,31 +358,48 @@ struct BindingLock {
     _file: std::fs::File,
 }
 
+/// flock(2) `path` exclusively. `block: false` returns `Ok(None)` when another process holds
+/// it; `block: true` waits. The one flock implementation — the per-binding snapshot lock and
+/// the registry mutation lock both go through here.
 #[cfg(unix)]
-fn acquire_lock(state_dir: &Path) -> Result<BindingLock> {
+fn flock_exclusive(path: &Path, block: bool) -> Result<Option<std::fs::File>> {
     use std::os::unix::io::AsRawFd as _;
-    let path = state_dir.join("lock");
     let file = std::fs::OpenOptions::new()
         .create(true)
         .truncate(false)
         .write(true)
-        .open(&path)?;
-    let rc = unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) };
-    if rc != 0 {
-        return Err(CliError::usage(format!(
-            "another tl fs command holds this binding's snapshot lock ({}); wait for it to \
-             finish and retry",
-            path.display()
-        )));
+        .open(path)?;
+    let flags = libc::LOCK_EX | if block { 0 } else { libc::LOCK_NB };
+    if unsafe { libc::flock(file.as_raw_fd(), flags) } != 0 {
+        if block {
+            return Err(CliError::usage(format!(
+                "could not lock {}: {}",
+                path.display(),
+                std::io::Error::last_os_error()
+            )));
+        }
+        return Ok(None);
     }
-    Ok(BindingLock { _file: file })
+    Ok(Some(file))
 }
 
 #[cfg(not(unix))]
-fn acquire_lock(_state_dir: &Path) -> Result<BindingLock> {
+fn flock_exclusive(_path: &Path, _block: bool) -> Result<Option<std::fs::File>> {
     Err(CliError::usage(
         "plain-directory bindings are supported on unix only in v1",
     ))
+}
+
+fn acquire_lock(state_dir: &Path) -> Result<BindingLock> {
+    let path = state_dir.join("lock");
+    match flock_exclusive(&path, false)? {
+        Some(file) => Ok(BindingLock { _file: file }),
+        None => Err(CliError::usage(format!(
+            "another tl fs command holds this binding's snapshot lock ({}); wait for it to \
+             finish and retry",
+            path.display()
+        ))),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -461,6 +588,14 @@ pub(crate) struct Journal {
     expected_head: String,
     started_at_secs: u64,
     message: String,
+    /// The server commit job the attempt submitted, journaled the moment the 202 names it
+    /// (`PushEvent::CommitDetached` through the progress hook). This is recovery's authorship
+    /// oracle: the id names OUR attempt, so polling the job to terminal proves whether (and
+    /// as what commit) the interrupted attempt published — evidence the head alone can never
+    /// give. Absent when the crash predates submission (or the commit was synchronous), where
+    /// the head-comparison table is sound on its own.
+    #[serde(default)]
+    job_id: Option<String>,
     entries: Vec<JournalEntry>,
 }
 
@@ -506,19 +641,17 @@ fn save_journal(state_dir: &Path, journal: &Journal) -> Result<()> {
 // ---------------------------------------------------------------------------------------------
 
 /// Whether the advanced workspace head has been proven to *be* the journaled attempt.
-/// Today production always passes `Unavailable`: the client has no cheap API for a commit's
-/// parent, and without `parent == expected_head` a tree that merely matches the candidate is
-/// not proof of authorship — so head-advanced recovery fails closed rather than guessing.
-/// The `Verified` arm is the seam a richer commit-info API (phase 1.5) plugs into; the
-/// adopt path it drives is fully implemented and tested.
+/// Without proof, a tree that merely matches the candidate is not proof of authorship — so
+/// head-advanced recovery fails closed rather than guessing. `Verified` is produced in
+/// production by the journaled commit-job id: polling OUR job (the id was journaled the
+/// moment the 202 named it) to a committed terminal state is authorship by construction.
+/// Journals without a job id (crash before submission, synchronous commit) still pass
+/// `Unavailable` and keep the fail-closed table.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum AdoptionEvidence {
     Unavailable,
-    /// The head's parent is the journaled `expected_head` and its tree matches the
-    /// journaled candidate at every journaled path.
-    // Constructed only by tests today (see the enum docs); kept so the adopt path stays
-    // implemented and exercised until a commit-parent API exists to feed it in production.
-    #[allow(dead_code)]
+    /// The observed head is proven to be the journaled attempt's own commit (today: the
+    /// journaled job id reached `committed` with exactly this commit oid).
     Verified,
 }
 
@@ -527,9 +660,10 @@ pub(crate) enum RecoveryDecision {
     /// The crash happened after the index was installed but before the journal was removed:
     /// the index already reflects the published commit. Drop the journal, nothing else.
     AlreadyInstalled,
-    /// The journaled attempt never published (head still equals `expected_head`): drop the
-    /// journal and snapshot fresh. The CAS (`expect_oid = expected_head`) still guards the
-    /// case where the old attempt's detached server job races the fresh one.
+    /// The journaled attempt never published (head still equals `expected_head`, or its
+    /// commit job terminally failed): drop the journal and snapshot fresh. The CAS
+    /// (`expect_oid = expected_head`) still guards the case where the old attempt's detached
+    /// server job races the fresh one.
     Fresh,
     /// The head is the journaled attempt: install the journaled candidate as the baseline
     /// with every `clean_fingerprint = None` (local bytes unverified since the crash).
@@ -564,6 +698,37 @@ pub(crate) fn recovery_decision(
     }
 }
 
+/// A journaled commit job's terminal fate, as observed by recovery.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum JobFate {
+    /// The job reached `committed`, publishing this commit oid.
+    Committed(String),
+    /// The job reached `failed`: nothing published.
+    Failed,
+}
+
+/// Recovery when the journal carries the attempt's commit-job id: the job's terminal state
+/// overrides the head table entirely. A committed job IS `Verified` adoption evidence — its
+/// commit oid plays the observed head, so the decision (and the adopted `indexed_head`) is
+/// the job's commit even if the workspace head has since advanced further (the stale-head
+/// preflight then reports that separately, as it should). A failed job published nothing:
+/// fresh retry, CAS-guarded as ever.
+pub(crate) fn recovery_decision_from_job(
+    fate: &JobFate,
+    journal_expected_head: &str,
+    indexed_head: &str,
+) -> RecoveryDecision {
+    match fate {
+        JobFate::Failed => RecoveryDecision::Fresh,
+        JobFate::Committed(commit) => recovery_decision(
+            journal_expected_head,
+            commit,
+            indexed_head,
+            AdoptionEvidence::Verified,
+        ),
+    }
+}
+
 /// Install the journaled candidate over the current baseline: journaled upserts become
 /// baseline entries at their journaled oids with `clean_fingerprint = None` (the bytes were
 /// last seen before a crash — rehash before trusting), journaled deletes leave the baseline.
@@ -586,6 +751,47 @@ pub(crate) fn apply_adopted_journal(index: &mut Index, journal: &Journal, observ
         );
     }
     index.indexed_head = observed_head.to_string();
+}
+
+/// Poll a journaled commit job to a terminal state through the SDK's out-of-band job API
+/// (`commit_job_status`, the same state machine `push_files` itself polls). Bounded: a job
+/// still executing after the deadline aborts recovery with a retry-later error rather than
+/// deciding anything from a non-terminal state; a job the server no longer knows fails
+/// closed the same way (the error names it).
+async fn poll_job_fate(session: &FsSession, binding: &Binding, job_id: &str) -> Result<JobFate> {
+    let (user, token) = session.creds();
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(120);
+    loop {
+        let job = session
+            .client
+            .commit_job_status(&session.project_id, &binding.repo, user, token, job_id)
+            .await
+            .map_err(|e| {
+                CliError::usage(format!(
+                    "could not poll the interrupted attempt's commit job {job_id}: {e}; \
+                     refusing to guess whether it published — retry when the server answers"
+                ))
+            })?
+            .into_inner();
+        match job.state.as_str() {
+            "committed" => {
+                return job.commit.map(JobFate::Committed).ok_or_else(|| {
+                    CliError::usage(format!(
+                        "commit job {job_id} is committed but reports no commit oid; refusing \
+                         to guess the published head"
+                    ))
+                });
+            }
+            "failed" => return Ok(JobFate::Failed),
+            _ if std::time::Instant::now() >= deadline => {
+                return Err(CliError::usage(format!(
+                    "the interrupted attempt's commit job {job_id} is still running \
+                     server-side; wait for it to finish and re-run the snapshot"
+                )));
+            }
+            _ => tokio::time::sleep(std::time::Duration::from_millis(500)).await,
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -735,6 +941,28 @@ fn compute_delta(
             continue;
         }
         if ignore.is_ignored(path, false)? {
+            continue;
+        }
+        // A scanned file/symlink at an ancestor path occludes everything the baseline had
+        // beneath it (a directory replaced by a symlink or file): the old children are out
+        // of the tree even though the present-stat below — which follows intermediate
+        // symlinks — may still "see" them through the symlink's target. Decide from the
+        // scan, not the stat. (Scanned entries are only ever files/symlinks; directories
+        // never enumerate, so ancestor membership in `seen` is exactly non-directory.)
+        let occluded = {
+            let mut prefix = path.as_str();
+            let mut hit = false;
+            while let Some((parent, _)) = prefix.rsplit_once('/') {
+                if seen.contains(parent) {
+                    hit = true;
+                    break;
+                }
+                prefix = parent;
+            }
+            hit
+        };
+        if occluded {
+            deletes.push(path.clone());
             continue;
         }
         match std::fs::symlink_metadata(root.join(path)) {
@@ -1015,9 +1243,10 @@ pub async fn init(
             entries: BTreeMap::new(),
         },
     )?;
-    let mut registry = registry_load()?;
-    registry.bindings.insert(root.clone(), state_dir);
-    registry_save(&registry)?;
+    registry_mutate(|registry| {
+        registry.bindings.insert(root.clone(), state_dir.clone());
+        Ok(())
+    })?;
     println!(
         "Bound {root} to new workspace {} (file system {repo}).",
         short_id(&ws.id)
@@ -1061,31 +1290,55 @@ pub async fn snapshot(
     // preflight included — is trustworthy until its fate is settled.
     if let Some(journal) = load_journal(state_dir)? {
         bar.set_message("found an interrupted snapshot attempt; recovering...");
-        let head = session
-            .client
-            .get_workspace(
-                &session.project_id,
-                &binding.repo,
-                user,
-                token,
-                &binding.workspace_id,
-            )
-            .await?
-            .into_inner()
-            .head;
         let mut index = load_index(state_dir)?;
-        // Production evidence is always Unavailable today — see `AdoptionEvidence`.
-        match recovery_decision(
-            &journal.expected_head,
-            &head,
-            &index.indexed_head,
-            AdoptionEvidence::Unavailable,
-        ) {
+        let (decision, adopt_head) = match &journal.job_id {
+            // The journaled job id names OUR attempt's server job: poll it to terminal FIRST
+            // and let its fate decide. Without it, the old attempt's detached job could land
+            // *after* the head comparison declared Fresh, CAS-failing the retry and wedging
+            // the binding behind a fail-closed error.
+            Some(job_id) => {
+                bar.set_message("checking the interrupted attempt's commit job...");
+                let fate = poll_job_fate(&session, &binding, job_id).await?;
+                let adopt_head = match &fate {
+                    JobFate::Committed(commit) => commit.clone(),
+                    JobFate::Failed => String::new(),
+                };
+                (
+                    recovery_decision_from_job(&fate, &journal.expected_head, &index.indexed_head),
+                    adopt_head,
+                )
+            }
+            // No job id journaled (crash before submission): the head table is sound.
+            None => {
+                let head = session
+                    .client
+                    .get_workspace(
+                        &session.project_id,
+                        &binding.repo,
+                        user,
+                        token,
+                        &binding.workspace_id,
+                    )
+                    .await?
+                    .into_inner()
+                    .head;
+                (
+                    recovery_decision(
+                        &journal.expected_head,
+                        &head,
+                        &index.indexed_head,
+                        AdoptionEvidence::Unavailable,
+                    ),
+                    head,
+                )
+            }
+        };
+        match decision {
             RecoveryDecision::Fresh | RecoveryDecision::AlreadyInstalled => {
                 remove_durably(&journal_path(state_dir))?;
             }
             RecoveryDecision::Adopt => {
-                apply_adopted_journal(&mut index, &journal, &head);
+                apply_adopted_journal(&mut index, &journal, &adopt_head);
                 save_index(state_dir, &index)?;
                 remove_durably(&journal_path(state_dir))?;
             }
@@ -1136,10 +1389,38 @@ pub async fn snapshot(
         "hashing {} candidate file(s)...",
         delta.upserts.len()
     ));
+    // Hash on the blocking pool, a bounded batch at a time: the pre-hash is CPU+IO bound and
+    // was fully serial. Deterministic output order (and so a deterministic journal) is kept
+    // by indexing the input and sorting the collected results.
+    let hashed_upserts: Vec<HashedUpsert> = {
+        use futures::StreamExt as _;
+        let parallelism = std::thread::available_parallelism()
+            .map(|n| n.get())
+            .unwrap_or(4)
+            .min(8);
+        let results: Vec<Result<(usize, HashedUpsert)>> =
+            futures::stream::iter(delta.upserts.iter().cloned().enumerate().map(
+                |(position, entry)| {
+                    let root = root_path.to_path_buf();
+                    async move {
+                        tokio::task::spawn_blocking(move || {
+                            hash_upsert(&root, &entry).map(|hashed| (position, hashed))
+                        })
+                        .await
+                        .map_err(|e| CliError::usage(format!("hashing task failed: {e}")))?
+                    }
+                },
+            ))
+            .buffer_unordered(parallelism)
+            .collect()
+            .await;
+        let mut indexed = results.into_iter().collect::<Result<Vec<_>>>()?;
+        indexed.sort_by_key(|(position, _)| *position);
+        indexed.into_iter().map(|(_, hashed)| hashed).collect()
+    };
     let mut pushes: Vec<HashedUpsert> = Vec::new();
     let mut reproven: Vec<(String, Fingerprint)> = Vec::new();
-    for entry in &delta.upserts {
-        let hashed = hash_upsert(root_path, entry)?;
+    for hashed in hashed_upserts {
         let unchanged = index.entries.get(&hashed.rel).is_some_and(|indexed| {
             indexed.server_oid == hashed.oid && indexed.server_mode == hashed.mode
         });
@@ -1185,6 +1466,7 @@ pub async fn snapshot(
         expected_head: index.indexed_head.clone(),
         started_at_secs: now_secs(),
         message: message.clone(),
+        job_id: None,
         entries: pushes
             .iter()
             .map(|hashed| JournalEntry {
@@ -1234,7 +1516,32 @@ pub async fn snapshot(
     let raced: Arc<Mutex<BTreeMap<String, String>>> = Arc::new(Mutex::new(BTreeMap::new()));
     let hook_raced = raced.clone();
     let hook_journaled = journaled_oids.clone();
-    let progress = crate::commands::push_progress_spinner(&bar);
+    // Journal the server job id the instant the 202 names it (`CommitDetached` rides the
+    // progress stream): from that moment the commit can publish without this process, and
+    // recovery's job poll is the only oracle that can prove whose commit the head is. The
+    // rewrite is atomic; a failed rewrite costs recovery evidence, never correctness.
+    let progress = {
+        let inner = crate::commands::push_progress_spinner(&bar);
+        let journal_state_dir = state_dir.to_path_buf();
+        let journal_for_job = journal.clone();
+        let hook: Arc<dyn Fn(tensorlake::artifact_storage::ingest::PushEvent) + Send + Sync> =
+            Arc::new(move |ev| {
+                if let tensorlake::artifact_storage::ingest::PushEvent::CommitDetached { job_id } =
+                    &ev
+                {
+                    let mut with_job = journal_for_job.clone();
+                    with_job.job_id = Some(job_id.clone());
+                    if let Err(e) = save_journal(&journal_state_dir, &with_job) {
+                        eprintln!(
+                            "{} could not journal the commit job id: {e}",
+                            style("warning:").yellow()
+                        );
+                    }
+                }
+                inner(ev);
+            });
+        hook
+    };
     let report = session
         .client
         .push_files(
@@ -1283,7 +1590,8 @@ pub async fn snapshot(
     let raced = raced
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let mut entries = index.entries.clone();
+    // `index` is done answering questions; take its entries instead of cloning the map.
+    let mut entries = index.entries;
     for (rel, fp) in reproven {
         if let Some(entry) = entries.get_mut(&rel) {
             entry.clean_fingerprint = Some(fp);
@@ -1484,11 +1792,14 @@ pub async fn unbind(path: Option<PathBuf>) -> Result<()> {
             ))
         })?,
         None => {
+            // Walk ancestors like every other path-addressed command: `tl fs unbind` from
+            // anywhere inside the bound tree names its binding.
             let cwd = std::env::current_dir()?;
-            let root = canonical_mountpoint(&cwd)?;
-            binding_for(Path::new(&root))?.ok_or_else(|| {
+            let cwd = cwd.canonicalize().unwrap_or(cwd);
+            binding_containing(&cwd)?.ok_or_else(|| {
                 CliError::usage(format!(
-                    "{root} is not a bound directory; pass the bound directory explicitly"
+                    "{} is not inside a bound directory; pass the bound directory explicitly",
+                    cwd.display()
                 ))
             })?
         }
@@ -1503,9 +1814,10 @@ pub async fn unbind(path: Option<PathBuf>) -> Result<()> {
             style("warning:").yellow()
         );
     }
-    let mut registry = registry_load()?;
-    registry.bindings.remove(&root);
-    registry_save(&registry)?;
+    registry_mutate(|registry| {
+        registry.bindings.remove(&root);
+        Ok(())
+    })?;
     std::fs::remove_dir_all(&state_dir)?;
     if workspace.is_empty() {
         println!("Unbound {root}.");
@@ -1607,6 +1919,102 @@ mod tests {
         assert!(!err.contains("delete") && !err.contains("remove"), "{err}");
     }
 
+    // -- registry policy: strict for binding owners, lenient for mount dispatch -------------
+
+    #[test]
+    fn registry_load_is_strict_and_lenient_wrapper_degrades() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("bindings.json");
+        std::fs::write(&path, b"{ definitely not json").unwrap();
+        let err = registry_load_at(&path).unwrap_err().to_string();
+        assert!(
+            err.contains("bindings.json") && err.contains("corrupt"),
+            "strict load names the file: {err}"
+        );
+        // The lenient policy turns the same failure into "nothing bound" (mount commands
+        // keep working); a healthy result passes through untouched.
+        assert_eq!(registry_lenient::<u32>(Err(CliError::usage(err))), None);
+        assert_eq!(registry_lenient(Ok(7u32)), Some(7));
+        // Absence is not corruption: strict load treats a missing registry as empty.
+        assert!(
+            registry_load_at(&dir.path().join("missing.json"))
+                .unwrap()
+                .bindings
+                .is_empty()
+        );
+    }
+
+    // -- write_atomic: unique temps --------------------------------------------------------
+
+    #[test]
+    fn write_atomic_temps_are_unique_and_never_linger() {
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("index.json");
+        // Two concurrent (or consecutive) writers must never share a temp inode.
+        let a = unique_temp_path(&target).unwrap();
+        let b = unique_temp_path(&target).unwrap();
+        assert_ne!(a, b, "temp names must be call-unique");
+
+        // Simulated race: two threads replace the same target repeatedly; the final state is
+        // one writer's complete content, and no temp survives.
+        let t1 = {
+            let target = target.clone();
+            std::thread::spawn(move || {
+                for _ in 0..50 {
+                    write_atomic(&target, b"{\"writer\":1}").unwrap();
+                }
+            })
+        };
+        let t2 = {
+            let target = target.clone();
+            std::thread::spawn(move || {
+                for _ in 0..50 {
+                    write_atomic(&target, b"{\"writer\":2}").unwrap();
+                }
+            })
+        };
+        t1.join().unwrap();
+        t2.join().unwrap();
+        let final_bytes = std::fs::read(&target).unwrap();
+        assert!(
+            final_bytes == b"{\"writer\":1}" || final_bytes == b"{\"writer\":2}",
+            "torn write: {final_bytes:?}"
+        );
+        let leftovers: Vec<String> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .filter(|name| name.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "temps must not linger: {leftovers:?}");
+    }
+
+    // -- unbind ancestor walk ----------------------------------------------------------------
+
+    #[test]
+    fn deepest_containing_walks_ancestors() {
+        let roots = vec![
+            "/w/project".to_string(),
+            "/w/project/nested".to_string(),
+            "/elsewhere".to_string(),
+        ];
+        assert_eq!(
+            deepest_containing(roots.iter(), Path::new("/w/project/nested/src/lib.rs")),
+            Some("/w/project/nested".to_string()),
+            "the deepest containing root wins"
+        );
+        assert_eq!(
+            deepest_containing(roots.iter(), Path::new("/w/project/src")),
+            Some("/w/project".to_string())
+        );
+        assert_eq!(
+            deepest_containing(roots.iter(), Path::new("/w/projectile")),
+            None,
+            "prefix matching is component-wise, not string-wise"
+        );
+        assert_eq!(deepest_containing(roots.iter(), Path::new("/tmp")), None);
+    }
+
     // -- fingerprint dirty rules -----------------------------------------------------------
 
     #[test]
@@ -1692,6 +2100,34 @@ mod tests {
         assert_eq!(delta.deletes, vec!["vanished.txt".to_string()]);
         let upserts: Vec<&str> = delta.upserts.iter().map(|e| e.rel.as_str()).collect();
         assert_eq!(upserts, vec![".gitignore", "kept.txt"]);
+    }
+
+    /// A tracked directory replaced by a symlink: the baseline children are gone from the
+    /// tree, but a present-check that stats THROUGH the symlink still finds them at the
+    /// target and used to skip the delete — the scan's upsert set, not the stat, must
+    /// decide. (Same shape for a directory replaced by a regular file, minus the stat trap.)
+    #[cfg(unix)]
+    #[test]
+    fn dir_replaced_by_symlink_deletes_baseline_children() {
+        let outside = tempfile::tempdir().unwrap();
+        std::fs::write(outside.path().join("child.txt"), "still here via symlink").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(outside.path(), dir.path().join("d")).unwrap();
+
+        let index = index_with(&[("d/child.txt", "oid-child", 0o100644, None)]);
+        let mut ignore = strict_ignore(dir.path()).unwrap();
+        let scanned = scan(dir.path(), &mut ignore).unwrap();
+        let rels: Vec<&str> = scanned.iter().map(|e| e.rel.as_str()).collect();
+        assert_eq!(rels, vec!["d"], "the symlink scans; nothing under it does");
+        // The stat trap this guards against: the naive present-check DOES see the old path.
+        assert!(dir.path().join("d/child.txt").metadata().is_ok());
+
+        let delta = compute_delta(dir.path(), &index, &scanned, &mut ignore).unwrap();
+        assert_eq!(
+            delta.deletes,
+            vec!["d/child.txt".to_string()],
+            "occluded baseline children delete"
+        );
     }
 
     /// The strictness contract: an unreadable directory ABORTS — silently skipping it would
@@ -1817,6 +2253,30 @@ mod tests {
         );
     }
 
+    /// With a journaled commit-job id, the job's terminal fate decides — the head comparison
+    /// never runs, so the interrupted attempt's detached job landing *after* a head check can
+    /// no longer produce a wrong Fresh (which CAS-failed the retry and wedged the binding).
+    #[test]
+    fn recovery_decision_from_job_table() {
+        // Job failed terminally: nothing published, retry fresh (CAS still guards).
+        assert_eq!(
+            recovery_decision_from_job(&JobFate::Failed, "h0", "h0"),
+            RecoveryDecision::Fresh
+        );
+        // Job committed and the index already reflects it (crash between index install and
+        // journal removal): drop the journal only.
+        assert_eq!(
+            recovery_decision_from_job(&JobFate::Committed("h1".into()), "h0", "h1"),
+            RecoveryDecision::AlreadyInstalled
+        );
+        // Job committed and the index has not caught up: the commit is proven ours
+        // (Verified evidence by construction) — adopt it as the new baseline head.
+        assert_eq!(
+            recovery_decision_from_job(&JobFate::Committed("h1".into()), "h0", "h0"),
+            RecoveryDecision::Adopt
+        );
+    }
+
     /// Adoption installs the journaled candidate as baseline with untrusted fingerprints:
     /// upserts take their journaled oids with `clean_fingerprint = None` (bytes unseen since
     /// the crash), deletes leave, untouched entries keep their proofs.
@@ -1842,6 +2302,7 @@ mod tests {
             expected_head: "h0".into(),
             started_at_secs: 0,
             message: "m".into(),
+            job_id: None,
             entries: vec![
                 JournalEntry {
                     path: "edited.txt".into(),
@@ -1901,6 +2362,7 @@ mod tests {
             expected_head: "h0".into(),
             started_at_secs: 7,
             message: "m".into(),
+            job_id: None,
             entries: vec![JournalEntry {
                 path: "a".into(),
                 oid: Some("o".into()),
