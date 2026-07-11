@@ -458,7 +458,8 @@ impl ArtifactStorageClient {
         project_id: &str,
         repo: &str,
     ) -> Result<Traced<ListOperationsResponse>, SdkError> {
-        let credential = self.git_credential_for_repo(project_id, repo).await?;
+        // The operation log is `project:admin`-gated, which repo-scoped mints omit.
+        let credential = self.git_credential_for_project(project_id).await?;
         self.list_operations_with_credential(
             project_id,
             repo,
