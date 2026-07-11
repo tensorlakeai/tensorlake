@@ -561,6 +561,23 @@ enum GitCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Configure plain `git` for this worktree: add a remote and register automatic auth
+    Setup {
+        /// Repo name (default: the worktree directory name)
+        repo: Option<String>,
+        /// Name of the git remote to add or update
+        #[arg(long, default_value = "tl")]
+        remote: String,
+        /// Create the repo if it does not exist
+        #[arg(long)]
+        create: bool,
+    },
+    /// Git credential helper (registered by `tl git setup`; speaks git's credential protocol)
+    #[command(name = "credential-helper", hide = true)]
+    CredentialHelper {
+        /// Operation requested by git: get, store, or erase
+        operation: String,
+    },
     /// Print repo information (remote URL, branches, refs)
     #[command(aliases = ["status", "url"])]
     Info {
@@ -1752,7 +1769,12 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             run_ssh_keys_command(ctx, subcmd).await
         }
         Commands::Git(subcmd) => {
-            ensure_auth_and_project(ctx).await?;
+            // The credential helper is invoked by git itself, often non-interactively; it must
+            // never start a login/init flow. It degrades softly (prints nothing, so git falls
+            // through to prompting) when auth or project context is missing.
+            if !matches!(subcmd, GitCommands::CredentialHelper { .. }) {
+                ensure_auth_and_project(ctx).await?;
+            }
             run_git_command(ctx, subcmd).await
         }
         Commands::Applications(app_args) => run_applications_command(ctx, app_args).await,
@@ -2446,6 +2468,14 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
         GitCommands::Token { repo, json } => {
             commands::git::mint_token(ctx, repo.as_deref(), json).await
         }
+        GitCommands::Setup {
+            repo,
+            remote,
+            create,
+        } => commands::git::setup::run(ctx, repo.as_deref(), &remote, create).await,
+        GitCommands::CredentialHelper { operation } => {
+            commands::git::setup::credential_helper(ctx, &operation).await
+        }
         GitCommands::Push {
             repo,
             branch,
@@ -2714,6 +2744,50 @@ mod tests {
             _ => panic!("expected git token command"),
         }
         assert!(Cli::try_parse_from(["tl", "git", "token", "--repo", "demo"]).is_err());
+
+        match parse_command([
+            "tl", "git", "setup", "demo", "--remote", "origin", "--create",
+        ]) {
+            Commands::Git(GitCommands::Setup {
+                repo,
+                remote,
+                create,
+            }) => {
+                assert_eq!(repo.as_deref(), Some("demo"));
+                assert_eq!(remote, "origin");
+                assert!(create);
+            }
+            _ => panic!("expected git setup command"),
+        }
+        // Repo defaults to the worktree directory name; the remote defaults to `tl`.
+        match parse_command(["tl", "git", "setup"]) {
+            Commands::Git(GitCommands::Setup {
+                repo,
+                remote,
+                create,
+            }) => {
+                assert_eq!(repo, None);
+                assert_eq!(remote, "tl");
+                assert!(!create);
+            }
+            _ => panic!("expected git setup command"),
+        }
+
+        // Git invokes the helper with root flags first and the operation appended last:
+        // `tl --organization org_1 git credential-helper get`.
+        match parse_command([
+            "tl",
+            "--organization",
+            "org_1",
+            "git",
+            "credential-helper",
+            "get",
+        ]) {
+            Commands::Git(GitCommands::CredentialHelper { operation }) => {
+                assert_eq!(operation, "get");
+            }
+            _ => panic!("expected git credential-helper command"),
+        }
 
         match parse_command(["tl", "git", "info", "demo", "--json"]) {
             Commands::Git(GitCommands::Info { repo, json }) => {
