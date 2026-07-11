@@ -42,6 +42,9 @@ pub mod fusefs;
 pub mod local;
 #[cfg(unix)]
 pub mod overlay;
+// Plain-directory workspace snapshots: `tl fs init` binds a directory to a workspace with no
+// mount at all; snapshot/status dispatch here when the path is a binding rather than a mount.
+pub mod plaindir;
 // How the kernel reaches the overlay on macOS: the FSKit extension proxies this wire protocol
 // over localhost TCP (Linux talks to the overlay in-process through the FUSE glue). macOS-only —
 // on Linux the whole module would be dead code.
@@ -218,11 +221,20 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
     };
     let rows = all_workspaces(&session, &fs_names).await?;
     let mounts = live_mounts();
+    let bound = plaindir::bound_workspaces();
     let mounted_at = |id: &str| {
         mounts
             .iter()
             .find(|(_, s)| s.workspace_id == id)
             .map(|(m, _)| m.clone())
+            // Plain-directory bindings are attachments too; without this they would be
+            // invisible everywhere except path-addressed commands.
+            .or_else(|| {
+                bound
+                    .iter()
+                    .find(|(ws, _)| ws == id)
+                    .map(|(_, root)| format!("{root} (bound)"))
+            })
     };
     if output_json {
         let out: Vec<serde_json::Value> = rows
@@ -1286,33 +1298,43 @@ fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
     Ok((mountpoint, PathBuf::from(state_dir)))
 }
 
-/// Whether `path` is a registered mountpoint. Used to disambiguate optional positional args
-/// (`tl fs diff <a> <b>` vs `tl fs diff <path> <a>`).
+/// Whether `path` is a registered mountpoint or plain-directory binding root. Used to
+/// disambiguate optional positional args (`tl fs diff <a> <b>` vs `tl fs diff <path> <a>`) —
+/// a binding here resolves as the command's path, whose dispatch then answers with the
+/// binding-appropriate behavior (or a clear v1 "not supported").
 pub fn is_registered_mount(path: &Path) -> bool {
-    state_dir_for(path).is_ok()
+    state_dir_for(path).is_ok() || plaindir::binding_for(path).is_ok_and(|b| b.is_some())
 }
 
-/// The registered mountpoint containing the current directory (the deepest one, for nested
-/// mounts). This is what path-addressed commands operate on when no path argument is given.
+/// The registered mountpoint or bound directory containing the current directory (the
+/// deepest one, for nesting). This is what path-addressed commands operate on when no path
+/// argument is given.
 pub fn mount_containing_cwd() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let cwd = cwd.canonicalize().unwrap_or(cwd);
-    registry_load()
-        .keys()
-        .map(PathBuf::from)
-        .filter(|mountpoint| {
+    let mut roots: Vec<PathBuf> = registry_load().keys().map(PathBuf::from).collect();
+    roots.extend(
+        plaindir::binding_roots()
+            .unwrap_or_default()
+            .into_iter()
+            .map(PathBuf::from),
+    );
+    roots
+        .into_iter()
+        .filter(|root| {
             // Registry keys keep the leaf component un-canonicalized (it may be a live FUSE
             // fs); compare against both spellings so a symlinked leaf still matches the
             // canonicalized CWD.
-            cwd.starts_with(mountpoint)
-                || mountpoint
+            cwd.starts_with(root)
+                || root
                     .canonicalize()
                     .is_ok_and(|canonical| cwd.starts_with(canonical))
         })
-        .max_by_key(|mountpoint| mountpoint.components().count())
+        .max_by_key(|root| root.components().count())
         .ok_or_else(|| {
             CliError::usage(format!(
-                "{} is not inside a tl fs mount; pass the mounted directory explicitly",
+                "{} is not inside a tl fs mount or bound directory; pass the directory \
+                 explicitly",
                 cwd.display()
             ))
         })
@@ -1394,6 +1416,16 @@ pub fn reject_mount_like_positional(value: &str, what: &str, usage: &str) -> Res
 /// inside the mount, wrote its config INTO the workspace and the snapshot sealed it.
 pub fn hydrate_scope_from_mount(ctx: &mut CliContext, path: &Path) {
     if ctx.effective_project_id().is_some() {
+        return;
+    }
+    // Plain-directory bindings carry the same scope record as mounts (binding.json).
+    if let Ok(Some((_, binding_state))) = plaindir::binding_for(path)
+        && let Ok(binding) = plaindir::load_binding(&binding_state)
+    {
+        ctx.project_id = Some(binding.project_id);
+        if ctx.organization_id.is_none() {
+            ctx.organization_id = binding.organization_id;
+        }
         return;
     }
     let Ok((_, state_dir)) = state_dir_for(path) else {
@@ -1567,6 +1599,10 @@ pub async fn mount(
             )));
         }
     }
+    // A mountpoint must not overlap a plain-directory binding in either direction: the
+    // binding's scanner would walk the kernel volume, and the mount would shadow the bound
+    // files. Checked before any server-side workspace is created.
+    plaindir::assert_no_binding_overlap(&canonical_mountpoint(path)?)?;
     std::fs::create_dir_all(path)?;
     if path
         .read_dir()
@@ -1939,6 +1975,12 @@ pub async fn unmount(
     delete: bool,
     discard_local: bool,
 ) -> Result<()> {
+    if let Some((root, _)) = plaindir::binding_for(path)? {
+        return Err(CliError::usage(format!(
+            "{root} is a plain-directory binding, not a mount; detach it with: tl fs unbind \
+             {root}"
+        )));
+    }
     let (mountpoint, state_dir) = match state_dir_for(path) {
         Ok(found) => found,
         Err(e) => {
@@ -2332,6 +2374,17 @@ pub async fn snapshot(
     message: Option<&str>,
     clear: bool,
 ) -> Result<()> {
+    // A plain-directory binding snapshots by scanning the directory against its stat index;
+    // there is no overlay, so the mount-only --clear flag has nothing to drop.
+    if let Some((root, binding_state)) = plaindir::binding_for(path)? {
+        if clear {
+            return Err(CliError::usage(
+                "--clear drops a mount's local overlay; a plain-directory binding has no \
+                 overlay to clear",
+            ));
+        }
+        return plaindir::snapshot(ctx, &root, &binding_state, message).await;
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
@@ -2525,6 +2578,12 @@ pub async fn promote(
     merge: bool,
     message: Option<&str>,
 ) -> Result<()> {
+    if plaindir::binding_for(path)?.is_some() {
+        return Err(CliError::usage(
+            "promote is not supported for plain-directory bindings in v1; snapshots land on \
+             the workspace ref — publish them from a future release (or mount the workspace)",
+        ));
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
@@ -2631,6 +2690,12 @@ pub async fn sync(
     fail_on_conflict: bool,
     message: Option<&str>,
 ) -> Result<()> {
+    if plaindir::binding_for(path)?.is_some() {
+        return Err(CliError::usage(
+            "sync is not supported for plain-directory bindings in v1 (there is no mount to \
+             materialize pulled content into); v1 bindings are single-writer capture only",
+        ));
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
@@ -2770,6 +2835,9 @@ pub async fn sync(
 }
 
 pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<()> {
+    if let Some((root, binding_state)) = plaindir::binding_for(path)? {
+        return plaindir::status(ctx, &root, &binding_state, output_json).await;
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
@@ -2880,6 +2948,12 @@ pub async fn restore(
     version: &str,
     discard_local: bool,
 ) -> Result<()> {
+    if plaindir::binding_for(path)?.is_some() {
+        return Err(CliError::usage(
+            "restore is not supported for plain-directory bindings in v1 (it would overwrite \
+             local files the index has not sealed); check out the snapshot elsewhere instead",
+        ));
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
@@ -3278,6 +3352,12 @@ fn write_whiteout(wh: &Path, rel: &str) -> Result<()> {
 /// `tl fs diff <path>` — overlay changes vs the last snapshot; `tl fs diff <path> <a> <b>` —
 /// server-side tree diff between two commits/refs.
 pub async fn diff(ctx: &CliContext, path: &Path, a: Option<&str>, b: Option<&str>) -> Result<()> {
+    if plaindir::binding_for(path)?.is_some() {
+        return Err(CliError::usage(
+            "diff is not supported for plain-directory bindings in v1; `tl fs status` lists \
+             the changed paths",
+        ));
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     match (a, b) {

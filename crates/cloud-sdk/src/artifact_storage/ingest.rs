@@ -144,6 +144,29 @@ pub struct PushOptions {
     /// hand them back as `PushSource::StablePrefix` prefixes on the next push of the same
     /// content. Off by default: the lists cost memory proportional to the push.
     pub collect_file_chunks: bool,
+    /// Caller-supplied idempotency key for the commit submit. A caller that journals the key
+    /// durably *before* pushing can, after a crash, reattach to the same durable server job
+    /// instead of double-committing. When absent a random per-call key is generated. The
+    /// server binds the first submission's body to the key — recovery must resubmit the same
+    /// prepared attempt verbatim, never a fresh rescan under the old key.
+    pub idempotency_key: Option<String>,
+    /// Called once after local hashing, before any byte upload or commit submission, with what
+    /// the commit will publish per path — the hook a crash-safe caller uses to journal its
+    /// candidate state (paths, oids, modes) alongside the idempotency key.
+    pub on_prepared: Option<PreparedHook>,
+}
+
+pub type PreparedHook = Arc<dyn Fn(&[PreparedPush]) + Send + Sync>;
+
+/// One path the push prepared for commit, surfaced to [`PushOptions::on_prepared`]. `oid` is
+/// the git blob oid the commit will publish; `None` for stable-prefix re-pushes (their
+/// identity resolves server-side from the verified upload) and for deletes.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct PreparedPush {
+    pub path: String,
+    pub oid: Option<String>,
+    pub mode: Option<u32>,
+    pub delete: bool,
 }
 
 impl Default for PushOptions {
@@ -157,6 +180,8 @@ impl Default for PushOptions {
             progress: None,
             workspace_snapshot: None,
             collect_file_chunks: false,
+            idempotency_key: None,
+            on_prepared: None,
         }
     }
 }
@@ -454,22 +479,30 @@ fn io_err(e: std::io::Error) -> SdkError {
 /// Git blob-oid hasher: `sha1("blob <len>\0" || bytes)`. This is the single piece of git's
 /// object model the SDK needs, computed locally so the public crate carries no dependency on
 /// the private `gsvc-codec` packfile codec (which is no longer vendored into this repo).
-struct BlobOidHasher(sha1::Sha1);
+///
+/// Public so callers that need blob identity *before* a push (crash-safe snapshot journals
+/// that must know what a commit will publish before submitting it) compute the same oid this
+/// module computes, instead of duplicating the algorithm.
+pub struct BlobOidHasher(sha1::Sha1);
 
 impl BlobOidHasher {
-    fn new(len: u64) -> BlobOidHasher {
+    /// `len` is the full byte length of the content about to be streamed through [`update`];
+    /// git's header binds the oid to it, so a mismatched length yields a garbage oid.
+    ///
+    /// [`update`]: BlobOidHasher::update
+    pub fn new(len: u64) -> BlobOidHasher {
         use sha1::Digest as _;
         let mut h = sha1::Sha1::new();
         h.update(format!("blob {len}\0").as_bytes());
         BlobOidHasher(h)
     }
 
-    fn update(&mut self, data: &[u8]) {
+    pub fn update(&mut self, data: &[u8]) {
         use sha1::Digest as _;
         self.0.update(data);
     }
 
-    fn finalize_hex(self) -> String {
+    pub fn finalize_hex(self) -> String {
         use sha1::Digest as _;
         hex::encode(self.0.finalize())
     }
@@ -931,6 +964,20 @@ impl ArtifactStorageClient {
                  (`oid_files` capability missing); re-push the content instead"
                     .to_string(),
             ));
+        }
+        // Everything the commit will publish is now locally determined; surface it before any
+        // remote mutation so a crash-safe caller can journal its candidate state.
+        if let Some(hook) = &opts.on_prepared {
+            let prepared: Vec<PreparedPush> = chunked
+                .iter()
+                .map(|f| PreparedPush {
+                    path: f.repo_path.clone(),
+                    oid: (!f.delete && !f.blob_oid.is_empty()).then(|| f.blob_oid.clone()),
+                    mode: f.mode,
+                    delete: f.delete,
+                })
+                .collect();
+            hook(&prepared);
         }
         let total_chunks: usize = chunked.iter().map(|f| f.chunks.len()).sum();
         let total_bytes: u64 = chunked
@@ -1460,10 +1507,10 @@ impl ArtifactStorageClient {
         // connection stays silent long enough for an LB idle timeout to reap it (which used
         // to CANCEL the in-flight commit), and losing a response is recoverable: the
         // idempotency key reattaches to the same job.
-        let idem_key = {
+        let idem_key = opts.idempotency_key.clone().unwrap_or_else(|| {
             let bytes: [u8; 16] = rand::random();
             bytes.iter().map(|b| format!("{b:02x}")).collect::<String>()
-        };
+        });
         // The idempotency key makes the submit replayable: a retry after a lost response
         // reattaches to the same durable job instead of double-committing.
         let (accepted, mut job, trace_id) = with_transient_retries(|| async {
@@ -1688,7 +1735,9 @@ impl ArtifactStorageClient {
         // push can fail against a job that is succeeding.
         let (suffix, timeout) = match wait_generation {
             Some(g) => (
-                format!("commits/jobs/{id}?wait_generation={g}&timeout_ms={JOB_LONG_POLL_TIMEOUT_MS}"),
+                format!(
+                    "commits/jobs/{id}?wait_generation={g}&timeout_ms={JOB_LONG_POLL_TIMEOUT_MS}"
+                ),
                 std::time::Duration::from_millis(JOB_LONG_POLL_TIMEOUT_MS + 10_000),
             ),
             None => (
