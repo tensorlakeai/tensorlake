@@ -373,6 +373,12 @@ enum FsCommands {
 
         /// Snapshot/commit hex, branch, or ref to restore to
         version: String,
+
+        /// Drop the local overlay to apply the restore. Destructive: local changes not yet in
+        /// a snapshot AND ignored files under the mount are deleted — `tl fs snapshot` first
+        /// to keep the changes.
+        #[arg(long)]
+        discard_local: bool,
     },
 
     /// List changed paths: local vs last snapshot, or between two snapshots
@@ -395,6 +401,12 @@ enum FsCommands {
         /// Also delete the server-side workspace
         #[arg(long)]
         delete: bool,
+
+        /// Drop the local overlay with the mount. Destructive: local changes not yet in a
+        /// snapshot AND ignored files under the mount are deleted — `tl fs snapshot` first to
+        /// keep the changes.
+        #[arg(long)]
+        discard_local: bool,
     },
 }
 
@@ -2297,7 +2309,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             }
             mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
         }
-        FsCommands::Restore { path, version } => {
+        FsCommands::Restore { path, version, .. } => {
             if path.is_none() {
                 commands::fs::reject_mount_like_positional(
                     version,
@@ -2404,15 +2416,19 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             .await
         }
         FsCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
-        FsCommands::Restore { version, .. } => {
-            commands::fs::restore(ctx, &mount_dir(), &version).await
-        }
+        FsCommands::Restore {
+            version,
+            discard_local,
+            ..
+        } => commands::fs::restore(ctx, &mount_dir(), &version, discard_local).await,
         FsCommands::Diff { a, b, .. } => {
             commands::fs::diff(ctx, &mount_dir(), a.as_deref(), b.as_deref()).await
         }
-        FsCommands::Unmount { delete, .. } => {
-            commands::fs::unmount(ctx, &mount_dir(), delete).await
-        }
+        FsCommands::Unmount {
+            delete,
+            discard_local,
+            ..
+        } => commands::fs::unmount(ctx, &mount_dir(), delete, discard_local).await,
     };
     // A cached minted git credential can be revoked before its recorded expiry; purge
     // the cache on an auth failure so the next invocation re-mints instead of retrying
@@ -3048,11 +3064,41 @@ mod tests {
         }
 
         match parse_command(["tl", "fs", "restore", "0a1b2c3d"]) {
-            Commands::Fs(FsCommands::Restore { path, version }) => {
+            Commands::Fs(FsCommands::Restore {
+                path,
+                version,
+                discard_local,
+            }) => {
                 assert_eq!(path, None);
                 assert_eq!(version, "0a1b2c3d");
+                assert!(!discard_local, "overlay-dropping restore is opt-in");
             }
             _ => panic!("expected fs restore command"),
+        }
+
+        // The overlay-destroying flags are explicit opt-ins on both destructive commands.
+        match parse_command(["tl", "fs", "restore", "--discard-local", "0a1b2c3d"]) {
+            Commands::Fs(FsCommands::Restore {
+                discard_local: true,
+                ..
+            }) => {}
+            _ => panic!("expected fs restore --discard-local command"),
+        }
+        match parse_command(["tl", "fs", "unmount", "./w"]) {
+            Commands::Fs(FsCommands::Unmount {
+                delete: false,
+                discard_local: false,
+                ..
+            }) => {}
+            _ => panic!("expected fs unmount command"),
+        }
+        match parse_command(["tl", "fs", "unmount", "--discard-local", "--delete", "./w"]) {
+            Commands::Fs(FsCommands::Unmount {
+                delete: true,
+                discard_local: true,
+                ..
+            }) => {}
+            _ => panic!("expected fs unmount --discard-local command"),
         }
 
         assert!(Cli::try_parse_from(["tl", "fs", "promote"]).is_err());

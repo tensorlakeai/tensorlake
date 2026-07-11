@@ -14,7 +14,15 @@
 //!                         without a kernel notify channel (macOS) can converge the kernel
 //!                         view themselves. `complete: false` means some refresh since the
 //!                         last drain could not enumerate first-appearance names.
-//! {"op":"clear_upper"} -> drop all overlay state (post-snapshot / restore)
+//! {"op":"seal","message":?} -> run ONE cycle of the sealer (the same machinery as
+//!                         auto-commit): resolve the dirty delta, push it as a snapshot
+//!                         commit with the given message, advance the lower. Replies
+//!                         {ok, clean} when nothing was dirty, else {ok, commit, files,
+//!                         chunks_uploaded, chunks_total, sealed, push_ms} plus the same
+//!                         drained "changed"/"complete" probe list as `refresh`. This is
+//!                         what `tl fs snapshot` calls — manual snapshots and auto-commits
+//!                         share one dirty watermark, resurrection guard, and chunk cache.
+//! {"op":"clear_upper"} -> drop all overlay state (snapshot --clear / restore)
 //! {"op":"reindex"}     -> rebuild the overlay's dirty index from disk (post-restore)
 //! {"op":"shutdown"}    -> unmount and exit
 //! ```
@@ -124,7 +132,7 @@ pub struct MountState {
     #[serde(default)]
     pub read_only: Option<bool>,
     /// Periodic auto-commit: the daemon seals the overlay's dirty set into a snapshot commit
-    /// every this many seconds. The overlay is kept (only `tl fs snapshot` seals-and-clears),
+    /// every this many seconds. The overlay is kept (only `tl fs snapshot --clear` drops it),
     /// so writes racing an auto-commit are never dropped — they ride the next one. Absent on
     /// mounts that didn't opt in and in state files from before the feature.
     #[serde(default)]
@@ -187,9 +195,33 @@ pub async fn control(_state_dir: &Path, _op: &str) -> Result<serde_json::Value> 
     ))
 }
 
+/// [`control`] with an op payload (extra request fields alongside `"op"`).
+#[cfg(not(unix))]
+pub async fn control_with(
+    _state_dir: &Path,
+    _op: &str,
+    _args: serde_json::Value,
+) -> Result<serde_json::Value> {
+    Err(CliError::usage(
+        "tl fs mounts are supported on Linux (FUSE) and macOS (FSKit) only.",
+    ))
+}
+
 /// One control round-trip from a CLI command to the daemon.
 #[cfg(unix)]
 pub async fn control(state_dir: &Path, op: &str) -> Result<serde_json::Value> {
+    control_with(state_dir, op, serde_json::Value::Null).await
+}
+
+/// One control round-trip carrying an op payload: `args` must be a JSON object (or null); its
+/// fields ride in the request line alongside `"op"`. Plain-string ops (`control`) stay the
+/// common case — older daemons ignore fields they don't know.
+#[cfg(unix)]
+pub async fn control_with(
+    state_dir: &Path,
+    op: &str,
+    args: serde_json::Value,
+) -> Result<serde_json::Value> {
     let sock = control_socket(state_dir);
     let mut stream = tokio::net::UnixStream::connect(&sock).await.map_err(|e| {
         CliError::usage(format!(
@@ -197,9 +229,14 @@ pub async fn control(state_dir: &Path, op: &str) -> Result<serde_json::Value> {
             sock.display()
         ))
     })?;
-    stream
-        .write_all(format!("{}\n", serde_json::json!({ "op": op })).as_bytes())
-        .await?;
+    let mut request = serde_json::json!({ "op": op });
+    if let serde_json::Value::Object(fields) = args {
+        let obj = request.as_object_mut().expect("request is an object");
+        for (k, v) in fields {
+            obj.insert(k, v);
+        }
+    }
+    stream.write_all(format!("{request}\n").as_bytes()).await?;
     let mut reader = tokio::io::BufReader::new(stream);
     let mut line = String::new();
     reader.read_line(&mut line).await?;
@@ -410,283 +447,59 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         });
     }
 
+    // The sealer: one cycle turns the overlay's dirty delta into a snapshot commit. Built for
+    // EVERY writable mount, whether or not auto-commit is on — the `seal` control op (what
+    // `tl fs snapshot` calls) runs a cycle on demand, and the auto-commit task below ticks the
+    // same instance — so every seal, manual or automatic, advances the same dirty watermark,
+    // registers in the same resurrection guard, and shares the same chunk caches. (The
+    // CLI-side snapshot used to enumerate and push the whole upper itself: it never advanced
+    // the daemon's watermark, so auto-commit re-published the same paths next tick, it
+    // re-pushed the entire ever-dirty set on every run, and its deletes bypassed the
+    // recent-seals tombstone guard.)
+    let sealer: Option<Arc<Sealer>> = (!state.read_only()).then(|| {
+        Arc::new(Sealer {
+            sdk: sdk.clone(),
+            creds: api_creds.clone(),
+            project: project.clone(),
+            repo: state.repo.clone(),
+            workspace: state.workspace_id.clone(),
+            state_dir: state_dir.to_path_buf(),
+            mountpoint: mountpoint.clone(),
+            overlay: overlay.clone(),
+            core: core.clone(),
+            invalidate: invalidate.clone(),
+            pending: pending.clone(),
+            state: tokio::sync::Mutex::new(SealerState {
+                sealed_gen: 0,
+                seen_epoch: overlay.epoch(),
+                recent_seals: Vec::new(),
+                chunk_cache: std::collections::HashMap::new(),
+            }),
+        })
+    });
+
     // Auto-commit: seal dirty paths into snapshot commits every interval, event-driven. The
     // overlay records every mutation in its dirty index, so nothing is ever scanned — an idle
     // tick is one atomic load. Each seal pushes only paths touched since the last sealed
     // generation: everything sealed earlier is already served by the lower (the workspace ref
     // advances with each snapshot), so commits are incremental deltas, and unchanged dirty
-    // files are never re-hashed or re-sent. The overlay is deliberately NOT cleared — the
-    // on-demand snapshot's clear-after-push is only safe with writes quiesced; here the upper
-    // keeps shadowing the byte-identical sealed content.
+    // files are never re-hashed or re-sent. The overlay is NOT cleared — the upper keeps
+    // shadowing the byte-identical sealed content (only `tl fs snapshot --clear` drops it,
+    // an explicitly destructive opt-in that requires quiesced writers).
     if let Some(secs) = state.auto_commit_interval_secs
-        && !state.read_only()
+        && let Some(sealer) = sealer.clone()
     {
-        use tensorlake::artifact_storage::ingest::{PushOptions, PushSource};
-        let sdk = sdk.clone();
-        let creds = api_creds.clone();
-        let (project, repo, ws) = (
-            project.clone(),
-            state.repo.clone(),
-            state.workspace_id.clone(),
-        );
-        let state_dir = state_dir.to_path_buf();
-        let mountpoint = mountpoint.clone();
-        let overlay = overlay.clone();
-        let core = core.clone();
-        let invalidate = invalidate.clone();
-        let pending = pending.clone();
         tokio::spawn(async move {
-            let mut sealed_gen = 0u64;
-            // The overlay epoch this sealer's caches describe. clear_upper (manual snapshot,
-            // restore) and rebuild_dirty_index rewrite the overlay's world out-of-band; every
-            // cache below is a claim about the old world and dies with it.
-            let mut seen_epoch = overlay.epoch();
-            // Upserts of not-yet-confirmed seals, in seal order, each tagged with its commit:
-            // the guard set for deletes racing the lower's advance past their seal (see
-            // resolve_seal's tombstone arm). Confirmation-based — a set is only dropped once
-            // the lower is observed at (or past) its seal — because eviction-by-count expires
-            // the guard exactly when index materialization lags behind hot pushes. Memory is
-            // bounded by the unconfirmed window, not a fixed depth.
-            let mut recent_seals: Vec<(String, std::collections::HashSet<String>)> = Vec::new();
-            // Chunk lists from previous seals (path -> the pushed CDC chunk list): the append
-            // fast path's memory. A re-touched file whose writes never went below a cached
-            // boundary seals as a `StablePrefix` — only bytes past that boundary are re-read.
-            // Daemon-local; a restart just means one full-cost seal per file to re-learn.
-            let mut chunk_cache: std::collections::HashMap<String, ChunkList> =
-                std::collections::HashMap::new();
             loop {
                 tokio::time::sleep(Duration::from_secs(secs.max(1))).await;
-                let epoch = overlay.epoch();
-                if epoch != seen_epoch {
-                    seen_epoch = epoch;
-                    chunk_cache.clear();
-                    recent_seals.clear();
-                }
-                // Drop guard sets the lower has caught up with: the followed ref only moves
-                // along this workspace's snapshots, so matching the current lower commit
-                // confirms it and everything sealed before it.
-                let lower = core.current_commit();
-                if let Some(i) = recent_seals
-                    .iter()
-                    .rposition(|(commit, _)| *commit == lower)
-                {
-                    recent_seals.drain(..=i);
-                }
-                // Renames a previous seal published but never consumed (crash, or the lower
-                // lagged past our post-seal check) dangle once the lower advances; reap them
-                // before anything resolves through the table.
-                if overlay.has_redirects() {
-                    match overlay.reap_sealed_redirects().await {
-                        Ok(consumed) if !consumed.is_empty() => {
-                            eprintln!("auto-commit: reaped {} sealed rename(s)", consumed.len());
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("auto-commit: reaping sealed renames failed: {e}");
-                            continue;
-                        }
-                    }
-                }
-                let delta = overlay.dirty_since(sealed_gen);
-                let watermark = delta.watermark;
-                if delta.is_empty() && !overlay.has_redirects() {
-                    sealed_gen = watermark;
-                    continue;
-                }
-                // Resolution reads ignore files through the mountpoint — FUSE round-trips
-                // served by this very process. Run it on the blocking pool so it can never
-                // starve the runtime workers serving it.
-                let recently: std::collections::HashSet<String> = recent_seals
-                    .iter()
-                    .flat_map(|(_, set)| set)
-                    .cloned()
-                    .collect();
-                let cached: std::collections::HashMap<String, ChunkList> = delta
-                    .upserts
-                    .iter()
-                    .filter_map(|(path, _)| {
-                        chunk_cache
-                            .get(path)
-                            .map(|chunks| (path.clone(), chunks.clone()))
-                    })
-                    .collect();
-                let (sd, mp) = (state_dir.clone(), mountpoint.clone());
-                let resolved = tokio::task::spawn_blocking(move || {
-                    resolve_seal(&sd, &mp, &delta, &recently, &cached)
-                })
-                .await;
-                // eprintln, not tracing: the daemon installs no subscriber, and its stderr is
-                // the state dir's daemon.log — the one place a user can see an async flush fail.
-                let mut resolved = match resolved {
-                    Ok(Ok(resolved)) => resolved,
-                    Ok(Err(e)) => {
-                        eprintln!("auto-commit: resolving the dirty delta failed: {e}");
-                        continue;
-                    }
-                    Err(e) => {
-                        eprintln!("auto-commit: resolution task failed: {e}");
-                        continue;
-                    }
-                };
-                if overlay.epoch() != seen_epoch {
-                    // clear_upper/restore raced this tick: the resolution described a world
-                    // that no longer exists — publishing it would delete files a manual
-                    // snapshot just sealed. Undo the whiteouts the tombstone arm wrote and
-                    // start over next tick (the epoch check up top clears the caches).
-                    for path in &resolved.tombstoned {
-                        let _ = std::fs::remove_file(state_dir.join("wh").join(path));
-                    }
-                    if !resolved.tombstoned.is_empty() {
-                        invalidate(overlay.invals_for(&resolved.tombstoned));
-                    }
-                    continue;
-                }
-                if !resolved.tombstoned.is_empty() {
-                    // The on-disk merged view already flipped when resolve wrote the
-                    // whiteouts; tell the kernel now — deferring to push success would leave
-                    // stale positive dentries until TTL if the push fails (the retry routes
-                    // through the plain-deletes arm and never re-lists these).
-                    invalidate(overlay.invals_for(&resolved.tombstoned));
-                }
-                // Pending directory renames seal as by-oid references: every file the
-                // destination serves from the lower commits by blob oid (nothing uploads),
-                // alongside the source delete the whiteout already produced. Expansion
-                // failing leaves the whole delta pending — publishing the source delete
-                // without the destination would lose the subtree.
-                let redirect_seals = if overlay.has_redirects() {
-                    match overlay.expand_redirects().await {
-                        Ok(seals) => seals,
-                        Err(e) => {
-                            eprintln!(
-                                "auto-commit: expanding pending renames failed (will retry): {e}"
-                            );
-                            continue;
-                        }
-                    }
-                } else {
-                    Vec::new()
-                };
-                if resolved.files.is_empty() && redirect_seals.is_empty() {
-                    // The whole delta was ignored paths, bare directories, or files that were
-                    // born and died between seals: sealed through, nothing to publish.
-                    sealed_gen = watermark;
-                    overlay.prune_dirty(watermark);
-                    continue;
-                }
-                {
-                    // An upper copy-up under a renamed tree shadows the lower file; the
-                    // resolved walk already carries it.
-                    let have: std::collections::HashSet<String> =
-                        resolved.files.iter().map(|f| f.repo_path.clone()).collect();
-                    for seal in &redirect_seals {
-                        for file in &seal.files {
-                            if !have.contains(&file.path) {
-                                resolved.files.push(
-                                    tensorlake::artifact_storage::ingest::PushFile {
-                                        repo_path: file.path.clone(),
-                                        source: PushSource::KnownOid(file.oid.clone()),
-                                        mode: Some(file.mode),
-                                        delete: false,
-                                    },
-                                );
-                            }
-                        }
-                    }
-                }
-                // Final validity check on every stable prefix: a write below the boundary
-                // that landed after the delta snapshot voids the stability claim — sealing
-                // it would publish a prefix+tail chimera that never existed on disk. Demote
-                // to a full read; the racing write's entry stays pending for the next tick.
-                for file in &mut resolved.files {
-                    let PushSource::StablePrefix {
-                        path,
-                        stable_chunks,
-                    } = &file.source
-                    else {
-                        continue;
-                    };
-                    let stable_len: u64 = stable_chunks.iter().map(|(_, s)| *s as u64).sum();
-                    if overlay.min_write_offset(&file.repo_path).unwrap_or(0) < stable_len {
-                        file.source = PushSource::Path(path.clone());
-                    }
-                }
-                let (user, token) = creds.lock().expect("creds lock").clone();
-                let delete_paths: Vec<String> = resolved
-                    .files
-                    .iter()
-                    .filter(|f| f.delete)
-                    .map(|f| f.repo_path.clone())
-                    .collect();
-                match sdk
-                    .push_files(
-                        &project,
-                        &repo,
-                        &user,
-                        &token,
-                        resolved.files,
-                        PushOptions {
-                            message: "tl fs auto-commit".to_string(),
-                            workspace_snapshot: Some(ws.clone()),
-                            collect_file_chunks: true,
-                            ..Default::default()
-                        },
-                    )
-                    .await
-                {
-                    Ok(report) => {
-                        sealed_gen = watermark;
-                        overlay.prune_dirty(watermark);
-                        let report = report.into_inner();
-                        recent_seals.push((report.commit.clone(), resolved.sealed_upserts));
-                        // Remember what each file's content chunked to; a blunt cap bounds
-                        // daemon memory (a full re-learn is just one full-cost seal per file).
-                        for (path, chunks) in &report.file_chunks {
-                            chunk_cache.insert(path.clone(), chunks.clone());
-                        }
-                        for path in &delete_paths {
-                            chunk_cache.remove(path);
-                        }
-                        if chunk_cache.len() > 8192 {
-                            chunk_cache.clear();
-                        }
-                        // Advance the lower to the sealed commit now instead of waiting out
-                        // the follow poll: from here on, a delete of a just-sealed path sees
-                        // lower presence and whiteouts normally. Best-effort — the guard
-                        // above holds every unconfirmed seal, however long the lower lags.
-                        match core.poll_ref().await {
-                            Ok(Some(refresh)) => {
-                                absorb_refresh(&overlay, &invalidate, &pending, &refresh)
-                            }
-                            Ok(None) => {}
-                            Err(e) => eprintln!(
-                                "auto-commit: post-seal refresh failed (follow poll catches \
-                                 up): {e}"
-                            ),
-                        }
-                        // Published renames are consumed only once the lower serves the
-                        // sealed commit: the new tree carries their destinations directly
-                        // and drops their sources, so remapping through the entry would
-                        // dangle from here on — and conversely, consuming against an older
-                        // commit would make the destinations unreachable.
-                        if !redirect_seals.is_empty() {
-                            if core.current_commit() == report.commit {
-                                let dsts: Vec<String> =
-                                    redirect_seals.iter().map(|s| s.dst.clone()).collect();
-                                if let Err(e) = overlay.consume_redirects(&dsts) {
-                                    eprintln!("auto-commit: consuming sealed renames failed: {e}");
-                                }
-                            } else {
-                                eprintln!(
-                                    "auto-commit: lower has not reached sealed snapshot {}; \
-                                     pending renames stay recorded (next seal republishes \
-                                     them idempotently)",
-                                    report.commit
-                                );
-                            }
-                        }
+                // eprintln, not tracing: the daemon's stderr is the state dir's daemon.log —
+                // the one place a user can see an async flush fail.
+                match sealer.seal_once("tl fs auto-commit").await {
+                    Ok(SealOutcome::Sealed(report)) => {
                         eprintln!("auto-commit sealed snapshot {}", report.commit);
                     }
-                    Err(e) => eprintln!("auto-commit push failed (will retry): {e}"),
+                    Ok(SealOutcome::Clean) => {}
+                    Err(e) => eprintln!("auto-commit: {e}"),
                 }
             }
         });
@@ -703,6 +516,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         let mountpoint = mountpoint.clone();
         let invalidate = invalidate.clone();
         let pending = pending.clone();
+        let sealer = sealer.clone();
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -713,27 +527,85 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 let mountpoint = mountpoint.clone();
                 let invalidate = invalidate.clone();
                 let pending = pending.clone();
+                let sealer = sealer.clone();
                 tokio::spawn(async move {
                     let mut reader = tokio::io::BufReader::new(stream);
                     let mut line = String::new();
                     if reader.read_line(&mut line).await.is_err() {
                         return;
                     }
-                    let op = serde_json::from_str::<serde_json::Value>(line.trim())
-                        .ok()
-                        .and_then(|v| v.get("op").and_then(|o| o.as_str()).map(str::to_string))
-                        .unwrap_or_default();
+                    let request = serde_json::from_str::<serde_json::Value>(line.trim())
+                        .unwrap_or(serde_json::Value::Null);
+                    let op = request
+                        .get("op")
+                        .and_then(|o| o.as_str())
+                        .unwrap_or_default()
+                        .to_string();
                     let resp = match op.as_str() {
                         "ping" => {
                             serde_json::json!({ "ok": true, "commit": core.current_commit() })
                         }
+                        // Seal on demand: `tl fs snapshot` runs exactly one cycle of the same
+                        // sealer auto-commit ticks, with the caller's message. The reply
+                        // carries what the seal knows plus the drained probe backlog (same
+                        // contract as `refresh`) so macOS callers can converge the kernel
+                        // view without a second round-trip.
+                        "seal" => match &sealer {
+                            None => serde_json::json!({
+                                "ok": false,
+                                "error": "this mount is read-only; there is nothing to seal",
+                            }),
+                            Some(sealer) => {
+                                let message = request
+                                    .get("message")
+                                    .and_then(|m| m.as_str())
+                                    .unwrap_or("tl fs snapshot");
+                                match sealer.seal_once(message).await {
+                                    Ok(outcome) => {
+                                        let (changed, complete) = {
+                                            let mut p = pending.lock().expect("pending probe lock");
+                                            let changed: Vec<KernelExpectation> =
+                                                std::mem::take(&mut p.expect)
+                                                    .into_values()
+                                                    .collect();
+                                            (changed, !std::mem::replace(&mut p.incomplete, false))
+                                        };
+                                        match outcome {
+                                            SealOutcome::Clean => serde_json::json!({
+                                                "ok": true,
+                                                "clean": true,
+                                                "commit": core.current_commit(),
+                                                "changed": changed,
+                                                "complete": complete,
+                                            }),
+                                            SealOutcome::Sealed(r) => serde_json::json!({
+                                                "ok": true,
+                                                "clean": false,
+                                                "commit": r.commit,
+                                                "files": r.files,
+                                                "chunks_uploaded": r.chunks_uploaded,
+                                                "chunks_total": r.chunks_total,
+                                                "sealed": r.sealed_paths,
+                                                "push_ms": r.push_ms,
+                                                "changed": changed,
+                                                "complete": complete,
+                                            }),
+                                        }
+                                    }
+                                    Err(e) => serde_json::json!({
+                                        "ok": false,
+                                        "error": e.to_string(),
+                                    }),
+                                }
+                            }
+                        },
                         "refresh" => match core.poll_ref().await {
                             Ok(delta) => {
                                 if let Some(delta) = delta {
                                     absorb_refresh(&overlay, &invalidate, &pending, &delta);
                                 }
-                                // The advance may be the seal that published pending renames
-                                // (`tl fs snapshot` refreshes before clearing the overlay);
+                                // The advance may be a seal that published pending renames
+                                // (this daemon's own, or a peer writer's on a shared ref);
                                 // reap so nothing remaps through consumed entries.
                                 if overlay.has_redirects()
                                     && let Err(e) = overlay.reap_sealed_redirects().await
@@ -874,6 +746,308 @@ pub(crate) const MODULE_DISABLED_MARKER: &str = "is disabled";
 /// A pushed file's CDC chunk list, as returned in `PushReport::file_chunks`.
 #[cfg(unix)]
 type ChunkList = Vec<([u8; 32], u32)>;
+
+/// One seal cycle's outcome.
+#[cfg(unix)]
+enum SealOutcome {
+    /// Nothing dirty since the watermark and no pending renames: no commit was minted.
+    Clean,
+    Sealed(SealReport),
+}
+
+/// What a completed seal knows — the `seal` control op's reply body.
+#[cfg(unix)]
+struct SealReport {
+    commit: String,
+    files: usize,
+    chunks_uploaded: usize,
+    chunks_total: usize,
+    /// Every repo path the seal published (upserts and deletes): the caller's kernel
+    /// revalidation set after a `--clear`.
+    sealed_paths: Vec<String>,
+    /// Wall time of the push (chunk/hash + upload + server commit), for the CLI timing line.
+    push_ms: u64,
+}
+
+/// The mount's sealer: the mutable state one seal cycle reads and advances, plus everything a
+/// cycle needs to resolve, push, and converge. The auto-commit tick task and the `seal`
+/// control op both run [`Sealer::seal_once`]; the state lock serializes them.
+#[cfg(unix)]
+struct Sealer {
+    sdk: tensorlake::artifact_storage::ArtifactStorageClient,
+    creds: Arc<std::sync::Mutex<(String, String)>>,
+    project: String,
+    repo: String,
+    workspace: String,
+    state_dir: PathBuf,
+    mountpoint: PathBuf,
+    overlay: Arc<OverlayFs>,
+    core: Arc<gsvc_mount::MountCore>,
+    invalidate: InvalSink,
+    pending: Arc<std::sync::Mutex<PendingProbe>>,
+    state: tokio::sync::Mutex<SealerState>,
+}
+
+#[cfg(unix)]
+struct SealerState {
+    /// The dirty-index generation everything at or below which has been sealed.
+    sealed_gen: u64,
+    /// The overlay epoch this sealer's caches describe. clear_upper (snapshot --clear,
+    /// restore) and rebuild_dirty_index rewrite the overlay's world out-of-band; every cache
+    /// below is a claim about the old world and dies with it.
+    seen_epoch: u64,
+    /// Upserts of not-yet-confirmed seals, in seal order, each tagged with its commit: the
+    /// guard set for deletes racing the lower's advance past their seal (see resolve_seal's
+    /// tombstone arm). Confirmation-based — a set is only dropped once the lower is observed
+    /// at (or past) its seal — because eviction-by-count expires the guard exactly when index
+    /// materialization lags behind hot pushes. Memory is bounded by the unconfirmed window,
+    /// not a fixed depth.
+    recent_seals: Vec<(String, std::collections::HashSet<String>)>,
+    /// Chunk lists from previous seals (path -> the pushed CDC chunk list): the append fast
+    /// path's memory. A re-touched file whose writes never went below a cached boundary seals
+    /// as a `StablePrefix` — only bytes past that boundary are re-read. Daemon-local; a
+    /// restart just means one full-cost seal per file to re-learn.
+    chunk_cache: std::collections::HashMap<String, ChunkList>,
+}
+
+#[cfg(unix)]
+impl Sealer {
+    /// Run ONE seal cycle: resolve the dirty delta since the sealed watermark (plus pending
+    /// renames) against the on-disk overlay, push it as a snapshot commit carrying `message`,
+    /// and advance the lower to the sealed commit. Errors are retryable — nothing was
+    /// published, and the dirty set stays pending for the next cycle.
+    async fn seal_once(&self, message: &str) -> Result<SealOutcome> {
+        use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
+        let mut st = self.state.lock().await;
+        let epoch = self.overlay.epoch();
+        if epoch != st.seen_epoch {
+            st.seen_epoch = epoch;
+            st.chunk_cache.clear();
+            st.recent_seals.clear();
+        }
+        // Drop guard sets the lower has caught up with: the followed ref only moves along
+        // this workspace's snapshots, so matching the current lower commit confirms it and
+        // everything sealed before it.
+        let lower = self.core.current_commit();
+        if let Some(i) = st
+            .recent_seals
+            .iter()
+            .rposition(|(commit, _)| *commit == lower)
+        {
+            st.recent_seals.drain(..=i);
+        }
+        // Renames a previous seal published but never consumed (crash, or the lower lagged
+        // past our post-seal check) dangle once the lower advances; reap them before anything
+        // resolves through the table.
+        if self.overlay.has_redirects() {
+            let consumed = self
+                .overlay
+                .reap_sealed_redirects()
+                .await
+                .map_err(|e| CliError::usage(format!("reaping sealed renames failed: {e}")))?;
+            if !consumed.is_empty() {
+                eprintln!("seal: reaped {} sealed rename(s)", consumed.len());
+            }
+        }
+        let delta = self.overlay.dirty_since(st.sealed_gen);
+        let watermark = delta.watermark;
+        if delta.is_empty() && !self.overlay.has_redirects() {
+            st.sealed_gen = watermark;
+            return Ok(SealOutcome::Clean);
+        }
+        // Resolution reads ignore files through the mountpoint — FUSE round-trips served by
+        // this very process. Run it on the blocking pool so it can never starve the runtime
+        // workers serving it.
+        let recently: std::collections::HashSet<String> = st
+            .recent_seals
+            .iter()
+            .flat_map(|(_, set)| set)
+            .cloned()
+            .collect();
+        let cached: std::collections::HashMap<String, ChunkList> = delta
+            .upserts
+            .iter()
+            .filter_map(|(path, _)| {
+                st.chunk_cache
+                    .get(path)
+                    .map(|chunks| (path.clone(), chunks.clone()))
+            })
+            .collect();
+        let (sd, mp) = (self.state_dir.clone(), self.mountpoint.clone());
+        let resolved =
+            tokio::task::spawn_blocking(move || resolve_seal(&sd, &mp, &delta, &recently, &cached))
+                .await;
+        let mut resolved = match resolved {
+            Ok(Ok(resolved)) => resolved,
+            Ok(Err(e)) => {
+                return Err(CliError::usage(format!(
+                    "resolving the dirty delta failed: {e}"
+                )));
+            }
+            Err(e) => return Err(CliError::usage(format!("resolution task failed: {e}"))),
+        };
+        if self.overlay.epoch() != st.seen_epoch {
+            // clear_upper/restore raced this cycle: the resolution described a world that no
+            // longer exists — publishing it would delete files that no longer answer. Undo
+            // the whiteouts the tombstone arm wrote and bail (the next cycle's epoch check
+            // clears the caches).
+            for path in &resolved.tombstoned {
+                let _ = std::fs::remove_file(self.state_dir.join("wh").join(path));
+            }
+            if !resolved.tombstoned.is_empty() {
+                (self.invalidate)(self.overlay.invals_for(&resolved.tombstoned));
+            }
+            return Err(CliError::usage(
+                "the overlay was rewritten while sealing; nothing was published",
+            ));
+        }
+        if !resolved.tombstoned.is_empty() {
+            // The on-disk merged view already flipped when resolve wrote the whiteouts; tell
+            // the kernel now — deferring to push success would leave stale positive dentries
+            // until TTL if the push fails (the retry routes through the plain-deletes arm and
+            // never re-lists these).
+            (self.invalidate)(self.overlay.invals_for(&resolved.tombstoned));
+        }
+        // Pending directory renames seal as by-oid references: every file the destination
+        // serves from the lower commits by blob oid (nothing uploads), alongside the source
+        // delete the whiteout already produced. Expansion failing leaves the whole delta
+        // pending — publishing the source delete without the destination would lose the
+        // subtree.
+        let redirect_seals = if self.overlay.has_redirects() {
+            self.overlay.expand_redirects().await.map_err(|e| {
+                CliError::usage(format!(
+                    "expanding pending renames failed (will retry): {e}"
+                ))
+            })?
+        } else {
+            Vec::new()
+        };
+        if resolved.files.is_empty() && redirect_seals.is_empty() {
+            // The whole delta was ignored paths, bare directories, or files that were born
+            // and died between seals: sealed through, nothing to publish.
+            st.sealed_gen = watermark;
+            self.overlay.prune_dirty(watermark);
+            return Ok(SealOutcome::Clean);
+        }
+        {
+            // An upper copy-up under a renamed tree shadows the lower file; the resolved walk
+            // already carries it.
+            let have: std::collections::HashSet<String> =
+                resolved.files.iter().map(|f| f.repo_path.clone()).collect();
+            for seal in &redirect_seals {
+                for file in &seal.files {
+                    if !have.contains(&file.path) {
+                        resolved.files.push(PushFile {
+                            repo_path: file.path.clone(),
+                            source: PushSource::KnownOid(file.oid.clone()),
+                            mode: Some(file.mode),
+                            delete: false,
+                        });
+                    }
+                }
+            }
+        }
+        // Final validity check on every stable prefix: a write below the boundary that landed
+        // after the delta snapshot voids the stability claim — sealing it would publish a
+        // prefix+tail chimera that never existed on disk. Demote to a full read; the racing
+        // write's entry stays pending for the next cycle.
+        for file in &mut resolved.files {
+            let PushSource::StablePrefix {
+                path,
+                stable_chunks,
+            } = &file.source
+            else {
+                continue;
+            };
+            let stable_len: u64 = stable_chunks.iter().map(|(_, s)| *s as u64).sum();
+            if self.overlay.min_write_offset(&file.repo_path).unwrap_or(0) < stable_len {
+                file.source = PushSource::Path(path.clone());
+            }
+        }
+        let (user, token) = self.creds.lock().expect("creds lock").clone();
+        let delete_paths: Vec<String> = resolved
+            .files
+            .iter()
+            .filter(|f| f.delete)
+            .map(|f| f.repo_path.clone())
+            .collect();
+        let sealed_paths: Vec<String> =
+            resolved.files.iter().map(|f| f.repo_path.clone()).collect();
+        let push_started = std::time::Instant::now();
+        let report = self
+            .sdk
+            .push_files(
+                &self.project,
+                &self.repo,
+                &user,
+                &token,
+                resolved.files,
+                PushOptions {
+                    message: message.to_string(),
+                    workspace_snapshot: Some(self.workspace.clone()),
+                    collect_file_chunks: true,
+                    ..Default::default()
+                },
+            )
+            .await
+            .map_err(|e| CliError::usage(format!("snapshot push failed (will retry): {e}")))?;
+        let push_ms = push_started.elapsed().as_millis() as u64;
+        st.sealed_gen = watermark;
+        self.overlay.prune_dirty(watermark);
+        let report = report.into_inner();
+        st.recent_seals
+            .push((report.commit.clone(), resolved.sealed_upserts));
+        // Remember what each file's content chunked to; a blunt cap bounds daemon memory (a
+        // full re-learn is just one full-cost seal per file).
+        for (path, chunks) in &report.file_chunks {
+            st.chunk_cache.insert(path.clone(), chunks.clone());
+        }
+        for path in &delete_paths {
+            st.chunk_cache.remove(path);
+        }
+        if st.chunk_cache.len() > 8192 {
+            st.chunk_cache.clear();
+        }
+        // Advance the lower to the sealed commit now instead of waiting out the follow poll:
+        // from here on, a delete of a just-sealed path sees lower presence and whiteouts
+        // normally — and the mount serves the new commit before a manual `seal` replies.
+        // Best-effort — the guard above holds every unconfirmed seal, however long the lower
+        // lags.
+        match self.core.poll_ref().await {
+            Ok(Some(refresh)) => {
+                absorb_refresh(&self.overlay, &self.invalidate, &self.pending, &refresh)
+            }
+            Ok(None) => {}
+            Err(e) => eprintln!("seal: post-seal refresh failed (follow poll catches up): {e}"),
+        }
+        // Published renames are consumed only once the lower serves the sealed commit: the
+        // new tree carries their destinations directly and drops their sources, so remapping
+        // through the entry would dangle from here on — and conversely, consuming against an
+        // older commit would make the destinations unreachable.
+        if !redirect_seals.is_empty() {
+            if self.core.current_commit() == report.commit {
+                let dsts: Vec<String> = redirect_seals.iter().map(|s| s.dst.clone()).collect();
+                if let Err(e) = self.overlay.consume_redirects(&dsts) {
+                    eprintln!("seal: consuming sealed renames failed: {e}");
+                }
+            } else {
+                eprintln!(
+                    "seal: lower has not reached sealed snapshot {}; pending renames stay \
+                     recorded (next seal republishes them idempotently)",
+                    report.commit
+                );
+            }
+        }
+        Ok(SealOutcome::Sealed(SealReport {
+            commit: report.commit,
+            files: report.files,
+            chunks_uploaded: report.chunks_uploaded,
+            chunks_total: report.chunks_total,
+            sealed_paths,
+            push_ms,
+        }))
+    }
+}
 
 /// One tick's seal work, resolved from the overlay's event delta against the on-disk overlay
 /// state. Produced by [`resolve_seal`].

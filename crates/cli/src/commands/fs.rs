@@ -5,9 +5,10 @@
 //! artifact-storage repo backing them (managed with `tl git`); a mounted workspace (private
 //! leased ref) is served by a FUSE daemon — reads stream lazily from the server through the
 //! vendored `gsvc-mount` core's immutable caches, writes land in a local overlay.
-//! **The overlay is the dirty set**: `snapshot` enumerates it (nothing is
-//! scanned), seals it into a commit on the workspace ref, and the mount's lower layer follows
-//! the ref to the new snapshot. The overlay is **kept** after sealing (auto-commit parity) —
+//! **The overlay is the dirty set**: the daemon's sealer resolves its dirty index into
+//! incremental snapshot commits on the workspace ref (auto-commit ticks it; `tl fs snapshot`
+//! runs one cycle through the `seal` control op), and the mount's lower layer follows the ref
+//! to the new snapshot. The overlay is **kept** after sealing —
 //! the upper keeps serving the byte-identical sealed content; `snapshot --clear` is the
 //! explicit, destructive opt-in that drops it (required before `sync`). `promote`
 //! CAS-advances a real branch (squash by default); `restore` refills the overlay from any
@@ -1932,7 +1933,12 @@ async fn detach_leftover(mountpoint: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> {
+pub async fn unmount(
+    ctx: &CliContext,
+    path: &Path,
+    delete: bool,
+    discard_local: bool,
+) -> Result<()> {
     let (mountpoint, state_dir) = match state_dir_for(path) {
         Ok(found) => found,
         Err(e) => {
@@ -1957,6 +1963,18 @@ pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> 
         }
     };
     let state = daemon::load_mount_state(&state_dir)?;
+    // Unmount deletes the state dir — the overlay with it. Anything in the upper/wh trees is
+    // local-only state (unsealed writes, whiteouts, and ignored files that never enter a
+    // snapshot); destroying it needs the explicit flag. Checked before the shutdown so a
+    // refusal leaves the mount fully intact.
+    if !discard_local && overlay_has_local_state(&state_dir) {
+        return Err(CliError::usage(format!(
+            "the mount at {mountpoint} has local overlay state that unmounting would destroy. \
+             Seal it first, then re-run with the flag:\n  tl fs snapshot {mountpoint}\n  \
+             tl fs unmount --discard-local {mountpoint}\nNote: --discard-local also drops \
+             ignored files under the mount — they are never part of a snapshot."
+        )));
+    }
     let pid = daemon::daemon_pid(&state_dir);
     // The daemon replies to `shutdown` only once the kernel released the volume, so this call
     // covers the slow phase (FSKit teardown on macOS takes seconds); spin so it doesn't look
@@ -2212,6 +2230,34 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
     Ok((upserts, deletes))
 }
 
+/// Whether the overlay holds ANY local state — deliberately broader than what enumerates as
+/// dirty: ignored files skip enumeration (and every snapshot) but die with the upper all the
+/// same, so the destructive commands (`restore`, `unmount`) gate on the raw upper/wh trees
+/// plus pending renames, not on the dirty walk.
+fn overlay_has_local_state(state_dir: &Path) -> bool {
+    fn any_entry(dir: &Path) -> bool {
+        let Ok(read) = std::fs::read_dir(dir) else {
+            return false;
+        };
+        for entry in read.flatten() {
+            let Ok(meta) = entry.path().symlink_metadata() else {
+                continue;
+            };
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                if any_entry(&entry.path()) {
+                    return true;
+                }
+            } else {
+                return true;
+            }
+        }
+        false
+    }
+    any_entry(&state_dir.join("upper"))
+        || any_entry(&state_dir.join("wh"))
+        || !pending_renames(state_dir).is_empty()
+}
+
 /// Pending committed-directory renames recorded by the mount daemon (`redirects.json` in the
 /// state dir, destination -> true-lower source), sorted by destination. Empty when the file
 /// is absent or unreadable — the daemon owns the authoritative copy.
@@ -2227,43 +2273,8 @@ fn pending_renames(state_dir: &Path) -> Vec<(String, String)> {
     entries
 }
 
-/// Expand pending renames through the daemon into by-oid push files, merged behind the
-/// regular dirty set (an upper copy-up under a renamed tree shadows its lower file). The
-/// daemon must be running: publishing the rename's source delete without its destination
-/// upserts would lose the subtree, so a failed expansion fails the seal.
-async fn redirect_push_files(
-    state_dir: &Path,
-    pending: usize,
-    files: &mut Vec<PushFile>,
-) -> Result<()> {
-    let resp = daemon::control(state_dir, "expand_redirects")
-        .await
-        .map_err(|e| {
-            CliError::usage(format!(
-                "this workspace has {pending} pending directory rename(s); the mount daemon \
-                 must be running to snapshot them: {e}"
-            ))
-        })?;
-    let seals: Vec<overlay::RedirectSeal> =
-        serde_json::from_value(resp.get("seals").cloned().unwrap_or_default())?;
-    let have: std::collections::HashSet<String> =
-        files.iter().map(|f| f.repo_path.clone()).collect();
-    for seal in &seals {
-        for file in &seal.files {
-            if !have.contains(&file.path) {
-                files.push(PushFile {
-                    repo_path: file.path.clone(),
-                    source: PushSource::KnownOid(file.oid.clone()),
-                    mode: Some(file.mode),
-                    delete: false,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// An enumerated dirty set as push files. Shared by `snapshot` and the daemon's auto-commit.
+/// An enumerated dirty set as push files, used by the daemon's sealer (`tl fs snapshot`
+/// seals through the daemon, so nothing pushes from the CLI process).
 fn overlay_push_files(upserts: &OverlayUpserts, deletes: &[String]) -> Result<Vec<PushFile>> {
     let mut files = Vec::with_capacity(upserts.len() + deletes.len());
     for (rel, abs, mode) in upserts {
@@ -2318,139 +2329,121 @@ pub async fn snapshot(
     let started = std::time::Instant::now();
     let bar = indicatif::ProgressBar::new_spinner();
     bar.enable_steady_tick(std::time::Duration::from_millis(120));
-    bar.set_message("enumerating workspace changes...");
-
-    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-    let renames = pending_renames(&state_dir);
-    if upserts.is_empty() && deletes.is_empty() && renames.is_empty() {
-        bar.finish_and_clear();
+    bar.set_message("sealing workspace changes...");
+    let outcome = seal_via_daemon(&state_dir, &mountpoint, message, clear).await?;
+    let total = started.elapsed();
+    bar.finish_and_clear();
+    let Some(sealed) = outcome else {
         println!("Nothing to snapshot: workspace is clean.");
         return Ok(());
-    }
-    let t_enumerate = started.elapsed();
-    bar.set_message(format!(
-        "preparing {} change(s)...",
-        upserts.len() + deletes.len() + renames.len()
-    ));
-    let mut files = overlay_push_files(&upserts, &deletes)?;
-    if !renames.is_empty() {
-        redirect_push_files(&state_dir, renames.len(), &mut files).await?;
-    }
-    let files = files;
-    let t_prepare = started.elapsed() - t_enumerate;
-
-    let (user, token) = session.creds();
-    let progress = super::push_progress_spinner(&bar);
-    let report = session
-        .client
-        .push_files(
-            &session.project_id,
-            &state.repo,
-            user,
-            token,
-            files,
-            PushOptions {
-                message: message.unwrap_or("tl fs snapshot").to_string(),
-                workspace_snapshot: Some(state.workspace_id.clone()),
-                progress: Some(progress),
-                ..Default::default()
-            },
-        )
-        .await?
-        .into_inner();
-    // `push` covers the whole push_files call: local chunk/hash, chunk negotiation, byte upload,
-    // and the server-side commit (tree build + read-back) — for a large snapshot the commit, not
-    // the transfer, can dominate this bucket.
-    let t_push = started.elapsed() - t_prepare - t_enumerate;
-
-    bar.set_message("refreshing mount view...");
-    let sealed: Vec<String> = upserts
-        .iter()
-        .map(|(p, _, _)| p.clone())
-        .chain(deletes.iter().cloned())
-        .collect();
-    let refresh_timings = seal_refresh(&state_dir, &mountpoint, &sealed, clear).await?;
-    let total = started.elapsed();
-    let t_refresh = total - t_push - t_prepare - t_enumerate;
-    bar.finish_and_clear();
+    };
     // Small files skip chunk negotiation (token-only commits), so uploads can exceed the
     // negotiated chunk count — clamp so the summary never reads "3 of 0 chunks".
     println!(
         "Snapshot {} ({} file(s), {} of {} chunks uploaded in {})",
-        report.commit,
-        report.files,
-        report.chunks_uploaded,
-        report.chunks_total.max(report.chunks_uploaded),
+        sealed.commit,
+        sealed.files,
+        sealed.chunks_uploaded,
+        sealed.chunks_total.max(sealed.chunks_uploaded),
         fmt_dur(total),
     );
-    println!(
-        "  enumerate {}  prepare {}  push {}  refresh {}{}",
-        fmt_dur(t_enumerate),
-        fmt_dur(t_prepare),
-        fmt_dur(t_push),
-        fmt_dur(t_refresh),
-        match refresh_timings.clear {
-            Some(clear) => format!(
-                " (poll {}, clear+revalidate {})",
-                fmt_dur(refresh_timings.poll),
-                fmt_dur(clear)
-            ),
-            None => String::new(),
-        },
-    );
+    if let Some(push_ms) = sealed.push_ms {
+        println!(
+            "  push {} (sealed by the mount daemon)",
+            fmt_dur(std::time::Duration::from_millis(push_ms)),
+        );
+    }
     Ok(())
 }
 
-/// Post-push mount convergence for `snapshot`. Swaps the mount's lower layer to the new
-/// snapshot commit; the overlay is **kept** by default, exactly like the daemon auto-commit
-/// path — the upper goes on serving the sealed paths, whose bytes the lower now holds
-/// identically, so nothing kernel-visible changes and no revalidation is needed.
+/// One daemon-sealed snapshot, parsed out of the `seal` control reply.
+struct DaemonSeal {
+    commit: String,
+    files: u64,
+    chunks_uploaded: u64,
+    chunks_total: u64,
+    push_ms: Option<u64>,
+}
+
+/// Seal through the mount daemon's sealer — the SAME machinery (and state) as auto-commit,
+/// which is what makes manual snapshots correct: the shared dirty watermark means an
+/// auto-commit mount never re-publishes manually sealed paths (and vice versa), only paths
+/// touched since the last seal are pushed instead of the whole ever-dirty upper, and deletes
+/// racing a seal go through the sealer's resurrection tombstone guard. Returns `None` when
+/// nothing was dirty.
 ///
-/// Clearing here used to be unconditional and destroyed data two ways: enumeration skips
-/// ignored and unreadable paths but `clear_upper` removed the *whole* upper tree (a Rust
-/// project lost `target/` on every snapshot), and any write landing between enumeration and
-/// the clear was deleted without ever entering a snapshot. `clear: true` (the `--clear` flag)
-/// keeps that behavior available as an explicit, documented-destructive opt-in — it is what
-/// empties the local dirty set so `tl fs sync` can run.
-async fn seal_refresh(
+/// The daemon advances the lower to the sealed commit before replying, so the mount serves
+/// the new snapshot when this returns; the reply also drains the banked probe backlog, which
+/// macOS converges here (Linux rode the FUSE notifier inside the daemon).
+///
+/// `clear` then drops the whole overlay through the daemon — the explicit, destructive opt-in
+/// (it also deletes ignored files and any writes racing the seal; it is what empties the
+/// local dirty set so `tl fs sync` can run). The clear runs even after a clean seal: earlier
+/// kept-overlay seals leave a populated upper that `sync` refuses to run over.
+async fn seal_via_daemon(
     state_dir: &Path,
     mountpoint: &str,
-    sealed: &[String],
+    message: Option<&str>,
     clear: bool,
-) -> Result<SealRefreshTimings> {
-    let started = std::time::Instant::now();
-    let refresh = daemon::control(state_dir, "refresh").await?;
-    // The refresh may also have adopted foreign ref movement (a concurrent writer advanced the
-    // workspace ref past our snapshot commit), and the drained probe list can carry a backlog
-    // from background polls. Converge those the same way sync does — macOS only; the FUSE
-    // notifier already handled them on Linux. Our own sealed paths were upper-shadowed at
-    // refresh time and filter out of the probe list.
+) -> Result<Option<DaemonSeal>> {
+    let mut args = serde_json::Map::new();
+    if let Some(m) = message {
+        args.insert("message".to_string(), m.into());
+    }
+    let resp = daemon::control_with(state_dir, "seal", serde_json::Value::Object(args))
+        .await
+        .map_err(|e| {
+            if e.to_string().contains("unknown op") {
+                CliError::usage(format!(
+                    "the running mount daemon predates seal-through-daemon; remount to \
+                     upgrade it (tl fs unmount {mountpoint} && tl fs mount), then retry: {e}"
+                ))
+            } else {
+                e
+            }
+        })?;
+    // The seal's post-push refresh may also have adopted foreign ref movement (a concurrent
+    // writer advanced the workspace ref past our snapshot commit), and the drained probe list
+    // can carry a backlog from background polls. Converge those the same way sync does —
+    // macOS only; the FUSE notifier already handled them on Linux. Our own sealed paths are
+    // upper-shadowed and filter out of the probe list.
     if cfg!(target_os = "macos") {
-        let (expect, _complete, _new_daemon) = parse_refresh_probes(&refresh);
+        let (expect, _complete, _new_daemon) = parse_refresh_probes(&resp);
         if !expect.is_empty() {
             let changed: std::collections::BTreeSet<String> = expect.keys().cloned().collect();
             converge_kernel_view(Path::new(mountpoint), &changed, &expect);
         }
     }
-    let poll = started.elapsed();
+    let clean = resp.get("clean").and_then(|v| v.as_bool()).unwrap_or(false);
     if clear {
+        let sealed_paths: Vec<String> =
+            serde_json::from_value(resp.get("sealed").cloned().unwrap_or_default())
+                .unwrap_or_default();
         daemon::control(state_dir, "clear_upper").await?;
         // Content is byte-identical across the swap, but the cleared paths' attributes changed
         // backing (upper mtimes -> lower serve time); refresh the kernel's view.
-        revalidate_paths(Path::new(mountpoint), sealed);
+        revalidate_paths(Path::new(mountpoint), &sealed_paths);
     }
-    Ok(SealRefreshTimings {
-        poll,
-        clear: clear.then(|| started.elapsed() - poll),
-    })
-}
-
-/// Where the post-push `refresh` phase spent its time: the ref poll/adopt, and — only under
-/// `--clear` — the upper drop plus the per-path kernel revalidation, which scales with file
-/// count and network RTT and historically dominated large snapshots.
-struct SealRefreshTimings {
-    poll: std::time::Duration,
-    clear: Option<std::time::Duration>,
+    if clean {
+        return Ok(None);
+    }
+    Ok(Some(DaemonSeal {
+        commit: resp
+            .get("commit")
+            .and_then(|c| c.as_str())
+            .unwrap_or("?")
+            .to_string(),
+        files: resp.get("files").and_then(|v| v.as_u64()).unwrap_or(0),
+        chunks_uploaded: resp
+            .get("chunks_uploaded")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        chunks_total: resp
+            .get("chunks_total")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0),
+        push_ms: resp.get("push_ms").and_then(|v| v.as_u64()),
+    }))
 }
 
 /// Render a phase duration compactly: sub-second phases as whole milliseconds (`42ms`), longer
@@ -2773,8 +2766,8 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     }
     if let Some(secs) = state.auto_commit_interval_secs {
         println!(
-            "{} local changes seal into a snapshot every {secs}s (local: below stays dirty \
-             until tl fs snapshot clears it)",
+            "{} local changes seal into a snapshot every {secs}s (local: below is the kept \
+             overlay, sealed content included; `tl fs snapshot --clear` drops it)",
             style("auto-commit:").dim()
         );
     }
@@ -2820,13 +2813,29 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
 
 /// Restore: refill the overlay so the merged view equals `version`. The mount's lower layer is
 /// untouched (history preserved); the next snapshot seals the restored state.
-pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()> {
+pub async fn restore(
+    ctx: &CliContext,
+    path: &Path,
+    version: &str,
+    discard_local: bool,
+) -> Result<()> {
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
         return Err(CliError::usage(format!(
             "this is a read-only mount following {}; there is nothing to restore",
             state.follow_ref.as_deref().unwrap_or("the branch"),
+        )));
+    }
+    // Restore's point of no return drops the ENTIRE overlay — unsealed writes, whiteouts, and
+    // ignored files that never enter any snapshot. Destroying it needs the explicit flag.
+    if !discard_local && overlay_has_local_state(&state_dir) {
+        return Err(CliError::usage(format!(
+            "the workspace has local overlay state that restoring would destroy. Seal it \
+             first, then re-run with the flag:\n  tl fs snapshot {path}\n  tl fs restore \
+             --discard-local {path} {version}\nNote: --discard-local also drops ignored files \
+             under the mount — they are never part of a snapshot.",
+            path = path.display(),
         )));
     }
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
@@ -3411,8 +3420,9 @@ mod tests {
         assert!(deletes.is_empty());
     }
 
-    /// A fake daemon control endpoint: replies `{"ok":true}` to every op and records the op
-    /// sequence, so the seal path can be exercised without a mount.
+    /// A fake daemon control endpoint: records the op sequence and replies `{"ok":true}` to
+    /// every op except `seal`, which replies like a real sealer that minted a commit — so the
+    /// snapshot control flow can be exercised without a mount.
     #[cfg(unix)]
     fn fake_daemon(state_dir: &Path) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
@@ -3432,23 +3442,35 @@ mod tests {
                         return;
                     }
                     let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
-                    recorded
-                        .lock()
-                        .unwrap()
-                        .push(v["op"].as_str().unwrap_or_default().to_string());
+                    let op = v["op"].as_str().unwrap_or_default().to_string();
+                    recorded.lock().unwrap().push(op.clone());
+                    let resp = if op == "seal" {
+                        serde_json::json!({
+                            "ok": true,
+                            "clean": false,
+                            "commit": "cafe0000",
+                            "files": 1,
+                            "chunks_uploaded": 1,
+                            "chunks_total": 1,
+                            "sealed": ["keep.txt"],
+                            "push_ms": 5,
+                        })
+                    } else {
+                        serde_json::json!({ "ok": true })
+                    };
                     let mut stream = reader.into_inner();
-                    let _ = stream.write_all(b"{\"ok\":true}\n").await;
+                    let _ = stream.write_all(format!("{resp}\n").as_bytes()).await;
                 });
             }
         });
         ops
     }
 
-    /// Regression for the snapshot data-loss bug: sealing must KEEP the overlay. The old flow
-    /// cleared the whole upper after the push, which (a) deleted ignored paths the enumeration
-    /// never pushed (a Rust project lost `target/` on every snapshot) and (b) deleted writes
-    /// that raced the push window (landed after enumeration) without them entering any
-    /// snapshot.
+    /// Regression for the snapshot data-loss bug: sealing must KEEP the overlay, and the seal
+    /// itself now runs inside the daemon (one `seal` control op) — the CLI enumerates and
+    /// clears nothing, so ignored paths and writes racing the push window can't be destroyed
+    /// (the old flow cleared the whole upper after its own push: a Rust project lost `target/`
+    /// on every snapshot, and mid-push writes were deleted without entering any snapshot).
     #[cfg(unix)]
     #[tokio::test]
     async fn snapshot_seal_keeps_overlay_by_default() {
@@ -3462,31 +3484,31 @@ mod tests {
         std::fs::write(mount.path().join(".gitignore"), "target/\n").unwrap();
         std::fs::write(upper.join("keep.txt"), "sealed").unwrap();
         std::fs::write(upper.join("target/build.o"), "ignored, never pushed").unwrap();
-
-        let (upserts, _) = enumerate_overlay(state.path(), mount.path()).unwrap();
-        assert_eq!(upserts.len(), 1, "ignored path must not be pushed");
-        // A write landing after enumeration, i.e. racing the push window.
+        // A write landing while the daemon seals, i.e. racing the push window.
         std::fs::write(upper.join("raced.txt"), "written mid-push").unwrap();
 
-        let sealed = vec!["keep.txt".to_string()];
-        let timings = seal_refresh(state.path(), mount.path().to_str().unwrap(), &sealed, false)
-            .await
-            .unwrap();
+        let sealed = seal_via_daemon(
+            state.path(),
+            mount.path().to_str().unwrap(),
+            Some("msg"),
+            false,
+        )
+        .await
+        .unwrap()
+        .expect("daemon sealed a commit");
 
-        assert_eq!(*ops.lock().unwrap(), vec!["refresh"], "no clear by default");
-        assert!(timings.clear.is_none());
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec!["seal"],
+            "one seal op, no clear by default"
+        );
+        assert_eq!(sealed.commit, "cafe0000");
         assert!(upper.join("keep.txt").exists(), "sealed file kept locally");
         assert!(
             upper.join("target/build.o").exists(),
             "ignored path survives the seal"
         );
         assert!(upper.join("raced.txt").exists(), "raced write survives");
-        // ...and the raced write is picked up by the next snapshot's walk.
-        let (upserts, _) = enumerate_overlay(state.path(), mount.path()).unwrap();
-        assert!(
-            upserts.iter().any(|(p, _, _)| p == "raced.txt"),
-            "raced write enumerates next time"
-        );
     }
 
     /// `--clear` keeps the old seal-and-clear behavior as an explicit opt-in (it is what
@@ -3499,12 +3521,39 @@ mod tests {
         let mount = tempfile::tempdir().unwrap();
         let ops = fake_daemon(state.path());
 
-        let sealed = vec!["keep.txt".to_string()];
-        let timings = seal_refresh(state.path(), mount.path().to_str().unwrap(), &sealed, true)
+        let sealed = seal_via_daemon(state.path(), mount.path().to_str().unwrap(), None, true)
             .await
             .unwrap();
 
-        assert_eq!(*ops.lock().unwrap(), vec!["refresh", "clear_upper"]);
-        assert!(timings.clear.is_some());
+        assert_eq!(*ops.lock().unwrap(), vec!["seal", "clear_upper"]);
+        assert!(sealed.is_some());
+    }
+
+    /// The destructive commands gate on the RAW overlay trees (broader than the dirty walk:
+    /// ignored files never enumerate but die with the upper all the same).
+    #[test]
+    fn overlay_local_state_gate_sees_ignored_files_and_whiteouts() {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(state.path().join("upper")).unwrap();
+        std::fs::create_dir_all(state.path().join("wh")).unwrap();
+        assert!(!overlay_has_local_state(state.path()), "empty overlay");
+
+        std::fs::create_dir_all(state.path().join("upper/target")).unwrap();
+        assert!(
+            !overlay_has_local_state(state.path()),
+            "bare directories alone are not local data"
+        );
+        std::fs::write(state.path().join("upper/target/build.o"), "x").unwrap();
+        assert!(
+            overlay_has_local_state(state.path()),
+            "an (ignored-looking) upper file is local state"
+        );
+        std::fs::remove_file(state.path().join("upper/target/build.o")).unwrap();
+
+        std::fs::write(state.path().join("wh/gone.txt"), "").unwrap();
+        assert!(
+            overlay_has_local_state(state.path()),
+            "a whiteout is local state"
+        );
     }
 }
