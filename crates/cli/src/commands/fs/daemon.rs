@@ -129,6 +129,12 @@ pub struct MountState {
     /// mounts that didn't opt in and in state files from before the feature.
     #[serde(default)]
     pub auto_commit_interval_secs: Option<u64>,
+    /// The commit the followed ref resolved to in the create/attach response that produced
+    /// this state file. Lets the daemon adopt the view with zero startup round trips
+    /// (`MountOptions::start_oid`); if it aged (a hand-rerun `tl fs daemon` on an old state
+    /// dir), the first follow poll reconciles. Absent in older state files: resolve at mount.
+    #[serde(default)]
+    pub start_oid: Option<String>,
 }
 
 impl MountState {
@@ -248,9 +254,18 @@ pub async fn run(ctx: &CliContext, state_dir: &Path, log_level: &str) -> Result<
 
 /// Install the daemon's tracing subscriber, writing to stderr — which the detached spawn
 /// redirects to the state dir's `daemon.log` (foreground runs log to the terminal). Without
+/// this every `tracing::warn!` in the daemon is silently discarded. `tl fs mount` installs
+/// the same subscriber in the CLI process, which is what surfaces its phase-timing lines.
+#[cfg(not(unix))]
+pub(crate) fn init_logging(_level: &str) -> Result<()> {
+    Ok(())
+}
+
+/// Install the daemon's tracing subscriber, writing to stderr — which the detached spawn
+/// redirects to the state dir's `daemon.log` (foreground runs log to the terminal). Without
 /// this every `tracing::warn!` in the daemon is silently discarded.
 #[cfg(unix)]
-fn init_logging(level: &str) -> Result<()> {
+pub(crate) fn init_logging(level: &str) -> Result<()> {
     use std::str::FromStr;
     let level = tracing_subscriber::filter::LevelFilter::from_str(level).map_err(|_| {
         CliError::usage(format!(
@@ -272,25 +287,46 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     use crate::commands::git::{artifact_storage_client, project_id};
     use gsvc_mount::{FsClient, MountCore, MountOptions};
 
+    let started = std::time::Instant::now();
     let state = load_mount_state(state_dir)?;
     let sdk = artifact_storage_client(ctx)?;
     let project = project_id(ctx)?;
 
-    // Initial credential: the dev override, or a fresh mint.
-    let (git_username, token, mut expires_at) = match std::env::var("TENSORLAKE_GIT_TOKEN") {
-        Ok(token) => (
-            std::env::var("TENSORLAKE_GIT_USERNAME").unwrap_or_else(|_| "t".to_string()),
-            token,
-            None,
-        ),
-        Err(_) => {
-            let cred = sdk
-                .mint_token_for_repo(&project, Some(&state.repo))
-                .await?
-                .into_inner();
-            (cred.git_username, cred.token, Some(cred.expires_at))
-        }
-    };
+    // Initial credential: the dev override, the cache the mounting CLI just wrote (the mint
+    // round trip through the platform ingress is the slowest single call in daemon startup,
+    // and the CLI paid it moments ago), or a fresh mint. The rotation task below re-mints
+    // before whichever credential this is expires.
+    let (git_username, token, mut expires_at, credential_source) =
+        match std::env::var("TENSORLAKE_GIT_TOKEN") {
+            Ok(token) => (
+                std::env::var("TENSORLAKE_GIT_USERNAME").unwrap_or_else(|_| "t".to_string()),
+                token,
+                None,
+                "env",
+            ),
+            Err(_) => {
+                let cached = [state.repo.as_str(), "*"].iter().find_map(|scope| {
+                    crate::config::files::load_git_credential(&ctx.api_url, &project, scope)
+                });
+                match cached {
+                    Some((username, token, expires_at)) => {
+                        (username, token, Some(expires_at), "cache")
+                    }
+                    None => {
+                        let cred = sdk
+                            .mint_token_for_repo(&project, Some(&state.repo))
+                            .await?
+                            .into_inner();
+                        (cred.git_username, cred.token, Some(cred.expires_at), "mint")
+                    }
+                }
+            }
+        };
+    tracing::info!(
+        source = credential_source,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "mount daemon: credential ready"
+    );
     // The daemon's long-lived `(user, token)` credential: heartbeats and auto-commits read it,
     // and the rotation task below swaps it in place before expiry — a static copy would start
     // failing an hour into the mount's life.
@@ -320,6 +356,9 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
             // Manifest-driven cache prefill in the background: first walks serve warm instead
             // of paying a per-directory crawl. Best-effort — a failed warmup just starts cold.
             warmup: true,
+            // The create/attach response's commit: adopt it with no startup round trips; the
+            // follow poll reconciles a stale one.
+            start_oid: state.start_oid.clone(),
             ..Default::default()
         },
     )
@@ -393,6 +432,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         workspace = %state.workspace_id,
         mountpoint = %mountpoint.display(),
         commit = %core.current_commit(),
+        startup_ms = started.elapsed().as_millis() as u64,
         "mount daemon serving"
     );
 

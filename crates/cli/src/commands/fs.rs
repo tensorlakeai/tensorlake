@@ -1182,6 +1182,32 @@ fn unzip_app(archive: &Path, staging: &Path) -> Result<PathBuf> {
         .ok_or_else(|| CliError::usage(format!("no .app found inside {}", archive.display())))
 }
 
+/// The two workspace-create failures `tl fs mount` can recover from, read off the server's
+/// answer. Mount tries the create outright (its one required round trip) instead of
+/// pre-flighting with list-repos and ref-status calls; these are the answers that pick the
+/// recovery path. Anything else propagates as-is.
+enum CreateRecovery {
+    /// 404: no repo by that name — a bare target may be a workspace id to attach.
+    RepoMissing,
+    /// 400 on base resolution — an unborn default branch is seedable; other branches are not.
+    BaseUnresolved,
+}
+
+fn create_recovery(e: &tensorlake::error::SdkError) -> Option<CreateRecovery> {
+    let tensorlake::error::SdkError::ServerError { status, message } = e else {
+        return None;
+    };
+    match status.as_u16() {
+        404 if message.contains("not found") => Some(CreateRecovery::RepoMissing),
+        400 if message.contains("does not resolve to a commit")
+            || message.contains("has no commits") =>
+        {
+            Some(CreateRecovery::BaseUnresolved)
+        }
+        _ => None,
+    }
+}
+
 /// A workspace needs a base commit, but a file system fresh out of `tl git create` has an
 /// unborn default branch. Seed it with an empty initial commit so the first mount just works.
 async fn ensure_seeded(session: &FsSession, default_branch: &str, repo: &str) -> Result<()> {
@@ -1488,6 +1514,10 @@ pub async fn mount(
             "tl fs mount is supported on Linux (FUSE) and macOS (FSKit) only.",
         ));
     }
+    // The CLI's own phase timings (`phase=… "mount timing"`) surface on stderr through the
+    // same subscriber the daemon uses for daemon.log; --log-level governs both.
+    daemon::init_logging(log_level)?;
+    let started = std::time::Instant::now();
     #[cfg(target_os = "macos")]
     ensure_fskit_ready().await?;
     #[cfg(target_os = "linux")]
@@ -1576,39 +1606,104 @@ pub async fn mount(
     }
     let session = FsSession::open(ctx, None).await?;
     let (user, token) = session.creds();
-    let file_systems = session
-        .client
-        .list_repos_with_credential(&session.project_id, user, token)
-        .await?
-        .into_inner();
-    let known_fs = |n: &str| file_systems.repos.iter().find(|r| r.name == n);
+    tracing::info!(
+        phase = "session",
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "mount timing"
+    );
+    let workspace_started = std::time::Instant::now();
 
     // `<file-system>[:<base>]` creates a workspace; a bare target that names no file system is
     // resolved as a workspace id (unique prefix) and attached. Attach = reconnect: the
     // workspace ref (and everything snapshotted onto it) survived whatever happened to the
     // previous mount — sandbox crash, timeout, unmount.
-    let attach = if base.is_none() && known_fs(name).is_none() {
-        let fs_names: Vec<String> = file_systems.repos.iter().map(|r| r.name.clone()).collect();
-        match resolve_workspace(&session, &fs_names, name).await? {
-            Some(found) => Some(found),
-            None => {
+    //
+    // The create is attempted outright — the common path's one required round trip — and the
+    // server's answer picks the slow path when one applies: 404 means `name` is no file
+    // system (perhaps a workspace id: attach), an unresolvable base may be an unborn default
+    // branch (seed and retry). The old pre-flight (list repos, ref-status the base) re-derived
+    // what the create response already says, at two extra round trips per mount.
+    enum Resolved {
+        Created(WorkspaceInfo),
+        Attached(String, WorkspaceInfo),
+    }
+    let create_req = CreateWorkspaceRequest {
+        base: base.clone(),
+        shared_target: shared_rw.then(|| base.clone().expect("guarded above")),
+        ..Default::default()
+    };
+    let create = session
+        .client
+        .create_workspace(&session.project_id, name, user, token, &create_req)
+        .await;
+    let resolved = match create {
+        Ok(ws) => Resolved::Created(ws.into_inner()),
+        Err(e) => match create_recovery(&e) {
+            // No file system by this name and no branch was named: try it as a workspace id.
+            Some(CreateRecovery::RepoMissing) if base.is_none() => {
+                let fs_names = file_system_names(&session).await?;
+                match resolve_workspace(&session, &fs_names, name).await? {
+                    Some((repo, ws)) => Resolved::Attached(repo, ws),
+                    None => {
+                        return Err(CliError::usage(format!(
+                            "no file system or workspace matches {name:?}. See `tl fs ls`, or \
+                             create the file system first: tl git create {name}"
+                        )));
+                    }
+                }
+            }
+            Some(CreateRecovery::RepoMissing) => {
                 return Err(CliError::usage(format!(
-                    "no file system or workspace matches {name:?}. See `tl fs ls`, or create \
-                     the file system first: tl git create {name}"
+                    "no file system named {name:?}; create it first: tl git create {name}"
                 )));
             }
-        }
-    } else {
-        if base.is_some() && known_fs(name).is_none() {
-            return Err(CliError::usage(format!(
-                "no file system named {name:?}; create it first: tl git create {name}"
-            )));
-        }
-        None
+            // Seed an unborn default branch whether it is implied OR named (either spelling):
+            // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
+            // fail with `base "main" does not resolve to a commit` while plain
+            // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
+            // write to the server (and with read-scoped credentials the seed push would fail
+            // opaquely); ro keeps the clear server error. Other branch names stay strict —
+            // seeding cannot conjure them.
+            Some(CreateRecovery::BaseUnresolved) => {
+                let file_systems = session
+                    .client
+                    .list_repos_with_credential(&session.project_id, user, token)
+                    .await?
+                    .into_inner();
+                let Some(fs) = file_systems.repos.iter().find(|r| r.name == name) else {
+                    return Err(e.into());
+                };
+                let default_branch = fs.default_branch.clone();
+                let names_default = base.as_deref().is_none_or(|b| {
+                    b == default_branch || b.strip_prefix("refs/heads/") == Some(&default_branch)
+                });
+                if !names_default || mode == WritePolicy::Ro {
+                    return Err(e.into());
+                }
+                ensure_seeded(&session, &default_branch, name).await?;
+                let ws = session
+                    .client
+                    .create_workspace(&session.project_id, name, user, token, &create_req)
+                    .await?
+                    .into_inner();
+                Resolved::Created(ws)
+            }
+            None => return Err(e.into()),
+        },
     };
+    tracing::info!(
+        phase = "workspace",
+        attached = matches!(resolved, Resolved::Attached(..)),
+        elapsed_ms = workspace_started.elapsed().as_millis() as u64,
+        "mount timing"
+    );
 
-    let (repo, ws, attached, read_only, follow_ref) = match attach {
-        Some((repo, ws)) => {
+    // `start_oid` hands the daemon the commit this response resolved the view to, so it comes
+    // up with zero round trips of its own. The exception is a writable attach of a shared-rw
+    // workspace: its view follows the target branch — a ref this response says nothing about —
+    // so the daemon resolves that itself.
+    let (repo, ws, attached, read_only, follow_ref, start_oid) = match resolved {
+        Resolved::Attached(repo, ws) => {
             if shared_rw {
                 return Err(CliError::usage(
                     "--shared-rw is chosen when creating a workspace on a branch: tl fs mount \
@@ -1645,42 +1740,14 @@ pub async fn mount(
                     .as_ref()
                     .map(|target| format!("refs/heads/{target}"))
             };
-            (repo, ws, true, read_only, follow_ref)
+            let start_oid = match &follow_ref {
+                Some(f) if *f != ws.ref_name => None,
+                _ => Some(ws.head.clone()),
+            };
+            (repo, ws, true, read_only, follow_ref, start_oid)
         }
-        None => {
+        Resolved::Created(ws) => {
             let read_only = mode == WritePolicy::Ro;
-            // Seed an unborn default branch whether it is implied OR named (either spelling):
-            // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
-            // fail with `base "main" does not resolve to a commit` while plain
-            // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
-            // write to the server (and with read-scoped credentials the seed push would fail
-            // opaquely); ro keeps the clear server error. Other branch names stay strict —
-            // seeding cannot conjure them.
-            let default_branch = known_fs(name)
-                .expect("checked above")
-                .default_branch
-                .clone();
-            let names_default = base.as_deref().is_none_or(|b| {
-                b == default_branch || b.strip_prefix("refs/heads/") == Some(&default_branch)
-            });
-            if names_default && !read_only {
-                ensure_seeded(&session, &default_branch, name).await?;
-            }
-            let ws = session
-                .client
-                .create_workspace(
-                    &session.project_id,
-                    name,
-                    user,
-                    token,
-                    &CreateWorkspaceRequest {
-                        base: base.clone(),
-                        shared_target: shared_rw.then(|| base.clone().expect("guarded above")),
-                        ..Default::default()
-                    },
-                )
-                .await?
-                .into_inner();
             // What the view follows. Writable workspaces follow their own ref; shared-rw
             // follows the branch it publishes to, so every writer's view converges on the
             // reconciled branch rather than staying pinned to its own snapshots. A read-only
@@ -1719,7 +1786,19 @@ pub async fn mount(
             } else {
                 None
             };
-            (name.to_string(), ws, false, read_only, follow_ref)
+            // Everything a fresh workspace can follow was resolved by the create response
+            // itself: the workspace ref sits at `head` (== base), and a followed branch is the
+            // one `base` was just resolved from (a snapshot racing in between is caught by the
+            // daemon's first follow poll).
+            let start_oid = Some(ws.head.clone());
+            (
+                name.to_string(),
+                ws,
+                false,
+                read_only,
+                follow_ref,
+                start_oid,
+            )
         }
     };
 
@@ -1749,6 +1828,7 @@ pub async fn mount(
             follow_ref,
             read_only: Some(read_only),
             auto_commit_interval_secs,
+            start_oid,
         },
     )?;
     registry_add(&mountpoint, &state_dir)?;
@@ -1773,10 +1853,21 @@ pub async fn mount(
         .stdout(std::process::Stdio::null())
         .stderr(std::fs::File::create(&daemon_log)?)
         .spawn()?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(20);
+    let daemon_started = std::time::Instant::now();
+    let deadline = daemon_started + std::time::Duration::from_secs(20);
+    // Ramp the readiness poll: a healthy daemon (cached credential, caller-resolved commit)
+    // answers within tens of milliseconds, so a flat 250ms grid would dominate its startup;
+    // one that needs real work still gets probed only ~4 times a second.
+    let mut backoff = std::time::Duration::from_millis(15);
     loop {
         match daemon::control(&state_dir, "ping").await {
             Ok(resp) => {
+                tracing::info!(
+                    phase = "daemon",
+                    elapsed_ms = daemon_started.elapsed().as_millis() as u64,
+                    total_ms = started.elapsed().as_millis() as u64,
+                    "mount timing"
+                );
                 if attached {
                     println!(
                         "Mounted workspace {} ({}) at {}{}",
@@ -1825,7 +1916,8 @@ pub async fn mount(
                 return Ok(());
             }
             Err(_) if std::time::Instant::now() < deadline => {
-                tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+                tokio::time::sleep(backoff).await;
+                backoff = (backoff * 2).min(std::time::Duration::from_millis(250));
             }
             Err(e) => {
                 registry_remove(&mountpoint)?;
