@@ -313,8 +313,9 @@ pub async fn rm(ctx: &CliContext, workspace_id: &str) -> Result<()> {
     }
     // A plain-directory binding references the workspace exactly like a live mount does —
     // deleting it out from under the binding would strand the local index (and every future
-    // snapshot) against a dead workspace.
-    if let Some(bound_at) = plaindir::binding_using_workspace(&ws.id) {
+    // snapshot) against a dead workspace. Fail-closed lookup: a corrupt binding.json aborts
+    // the delete instead of being skipped as if unbound.
+    if let Some(bound_at) = plaindir::binding_using_workspace(&ws.id)? {
         return Err(CliError::usage(format!(
             "workspace {} is bound to {bound_at}; unbind first (tl fs unbind {bound_at}), \
              then delete",
@@ -1312,11 +1313,22 @@ fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
     let mountpoint = canonical_mountpoint(path)?;
     let table = registry_load();
     let Some(state_dir) = table.get(&mountpoint).and_then(|v| v.as_str()) else {
-        return Err(CliError::usage(format!(
+        return Err(not_a_mount_error(format!(
             "{mountpoint} is not a tl fs mount; run `tl fs mount` first"
         )));
     };
     Ok((mountpoint, PathBuf::from(state_dir)))
+}
+
+/// Build a "not a mount"-shaped usage error, appending the binding-registry corruption note
+/// when the lenient binding dispatch has silently degraded this session — the path may
+/// really be a plain-directory binding the corrupt registry can no longer name, and a
+/// `--json`/CI consumer only sees the error, never the stderr warning.
+fn not_a_mount_error(message: String) -> CliError {
+    match plaindir::registry_corruption_note() {
+        Some(note) => CliError::usage(format!("{message}\n{note}")),
+        None => CliError::usage(message),
+    }
 }
 
 /// Whether `path` is a registered mountpoint or plain-directory binding root. Used to
@@ -1352,7 +1364,7 @@ pub fn mount_containing_cwd() -> Result<PathBuf> {
         })
         .max_by_key(|root| root.components().count())
         .ok_or_else(|| {
-            CliError::usage(format!(
+            not_a_mount_error(format!(
                 "{} is not inside a tl fs mount or bound directory; pass the directory \
                  explicitly",
                 cwd.display()
@@ -1400,7 +1412,7 @@ pub fn resolve_diff_args(
             if b.is_some() || is_path_shaped(&not_a_mount) {
                 // Three args, or a path-shaped first arg that isn't registered: surface the
                 // real problem instead of treating the path as a snapshot ref.
-                return Err(CliError::usage(format!(
+                return Err(not_a_mount_error(format!(
                     "{} is not a tl fs mount; run `tl fs mount` first",
                     not_a_mount.display()
                 )));
@@ -1678,8 +1690,12 @@ pub async fn mount(
             // Single-writer by default: a workspace attached elsewhere — live mount OR
             // plain-directory binding (a binding is always a writer) — attaches read-only
             // unless the user explicitly takes writes with --mode rw.
+            // Advisory only (write-policy default): unreadable binding state degrades to
+            // "not attached" here — the destructive path (`tl fs rm`) stays fail-closed.
             let attached_at = live_mount_of(&ws.id).or_else(|| {
                 plaindir::binding_using_workspace(&ws.id)
+                    .ok()
+                    .flatten()
                     .map(|root| format!("{root} (plain-directory binding)"))
             });
             let read_only = match mode {
