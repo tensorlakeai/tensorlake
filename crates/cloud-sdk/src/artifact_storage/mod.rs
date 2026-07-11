@@ -190,7 +190,9 @@ impl ArtifactStorageClient {
     }
 
     pub async fn delete_repo(&self, project_id: &str, repo: &str) -> Result<Traced<()>, SdkError> {
-        let credential = self.git_credential_for_repo(project_id, repo).await?;
+        // Structural repo management needs the `repo:write` scope, which repo-scoped mints
+        // deliberately omit — mint project-wide, like `create_repo`/`fork_repo`.
+        let credential = self.git_credential_for_project(project_id).await?;
         self.delete_repo_with_credential(
             project_id,
             repo,
@@ -233,7 +235,8 @@ impl ArtifactStorageClient {
         repo: &str,
         status: &str,
     ) -> Result<Traced<()>, SdkError> {
-        let credential = self.git_credential_for_repo(project_id, repo).await?;
+        // Archive/restore is structural (`repo:write`), which repo-scoped mints omit.
+        let credential = self.git_credential_for_project(project_id).await?;
         self.set_repo_status_with_credential(
             project_id,
             repo,
@@ -455,7 +458,8 @@ impl ArtifactStorageClient {
         project_id: &str,
         repo: &str,
     ) -> Result<Traced<ListOperationsResponse>, SdkError> {
-        let credential = self.git_credential_for_repo(project_id, repo).await?;
+        // The operation log is `project:admin`-gated, which repo-scoped mints omit.
+        let credential = self.git_credential_for_project(project_id).await?;
         self.list_operations_with_credential(
             project_id,
             repo,
