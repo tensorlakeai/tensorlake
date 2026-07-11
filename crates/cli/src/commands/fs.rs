@@ -1198,7 +1198,13 @@ fn create_recovery(e: &tensorlake::error::SdkError) -> Option<CreateRecovery> {
         return None;
     };
     match status.as_u16() {
-        404 if message.contains("not found") => Some(CreateRecovery::RepoMissing),
+        // Require the server's actual wording ("repo <id> not found"), not just any 404 body:
+        // a misrouted base URL answered by a generic proxy ("404 page not found") must surface
+        // raw, not masquerade as a missing file system. Pinned server-side by the e2e test
+        // `workspace_create_errors_keep_the_cli_recovery_contract`.
+        404 if message.contains("repo") && message.contains("not found") => {
+            Some(CreateRecovery::RepoMissing)
+        }
         400 if message.contains("does not resolve to a commit")
             || message.contains("has no commits") =>
         {
@@ -1210,16 +1216,12 @@ fn create_recovery(e: &tensorlake::error::SdkError) -> Option<CreateRecovery> {
 
 /// A workspace needs a base commit, but a file system fresh out of `tl git create` has an
 /// unborn default branch. Seed it with an empty initial commit so the first mount just works.
+/// No existence pre-check: the caller just learned from the failed create that the branch has
+/// no commits, and a raced concurrent seed is benign anyway — the commit endpoint defaults its
+/// base to the branch tip, so the push lands a harmless empty commit and the retried create
+/// still succeeds.
 async fn ensure_seeded(session: &FsSession, default_branch: &str, repo: &str) -> Result<()> {
     let (user, token) = session.creds();
-    let status = session
-        .client
-        .ref_status(&session.project_id, repo, user, token, default_branch)
-        .await?
-        .into_inner();
-    if status.oid.is_some() {
-        return Ok(());
-    }
     session
         .client
         .push_files(
@@ -1514,8 +1516,9 @@ pub async fn mount(
             "tl fs mount is supported on Linux (FUSE) and macOS (FSKit) only.",
         ));
     }
-    // The CLI's own phase timings (`phase=… "mount timing"`) surface on stderr through the
-    // same subscriber the daemon uses for daemon.log; --log-level governs both.
+    // The CLI's own phase timings (`phase=… "mount timing"`, debug level) surface on stderr
+    // through the same subscriber the daemon uses for daemon.log — pass `--log-level debug`
+    // to see them; the default "info" keeps mount's stderr clean for scripts.
     daemon::init_logging(log_level)?;
     let started = std::time::Instant::now();
     #[cfg(target_os = "macos")]
@@ -1606,7 +1609,7 @@ pub async fn mount(
     }
     let session = FsSession::open(ctx, None).await?;
     let (user, token) = session.creds();
-    tracing::info!(
+    tracing::debug!(
         phase = "session",
         elapsed_ms = started.elapsed().as_millis() as u64,
         "mount timing"
@@ -1632,11 +1635,14 @@ pub async fn mount(
         shared_target: shared_rw.then(|| base.clone().expect("guarded above")),
         ..Default::default()
     };
-    let create = session
-        .client
-        .create_workspace(&session.project_id, name, user, token, &create_req)
-        .await;
-    let resolved = match create {
+    // One create call site for both the first attempt and the post-seed retry, so the two can
+    // never drift apart.
+    let try_create = || {
+        session
+            .client
+            .create_workspace(&session.project_id, name, user, token, &create_req)
+    };
+    let resolved = match try_create().await {
         Ok(ws) => Resolved::Created(ws.into_inner()),
         Err(e) => match create_recovery(&e) {
             // No file system by this name and no branch was named: try it as a workspace id.
@@ -1681,27 +1687,23 @@ pub async fn mount(
                     return Err(e.into());
                 }
                 ensure_seeded(&session, &default_branch, name).await?;
-                let ws = session
-                    .client
-                    .create_workspace(&session.project_id, name, user, token, &create_req)
-                    .await?
-                    .into_inner();
-                Resolved::Created(ws)
+                Resolved::Created(try_create().await?.into_inner())
             }
             None => return Err(e.into()),
         },
     };
-    tracing::info!(
+    tracing::debug!(
         phase = "workspace",
         attached = matches!(resolved, Resolved::Attached(..)),
         elapsed_ms = workspace_started.elapsed().as_millis() as u64,
         "mount timing"
     );
 
-    // `start_oid` hands the daemon the commit this response resolved the view to, so it comes
-    // up with zero round trips of its own. The exception is a writable attach of a shared-rw
-    // workspace: its view follows the target branch — a ref this response says nothing about —
-    // so the daemon resolves that itself.
+    // `start_oid` hands the daemon the commit this response resolved the view to, letting the
+    // mount core overlap its serve probe with ref resolution (one startup round trip instead
+    // of two chained). The exception is a writable attach of a shared-rw workspace: its view
+    // follows the target branch — a ref this response says nothing about — so the daemon
+    // resolves that one serially.
     let (repo, ws, attached, read_only, follow_ref, start_oid) = match resolved {
         Resolved::Attached(repo, ws) => {
             if shared_rw {
@@ -1732,17 +1734,15 @@ pub async fn mount(
             }
             // A read-only view follows the workspace ref, so it sees each snapshot as the
             // writer seals one; a writable attach of a shared-rw workspace keeps following the
-            // branch its snapshots publish to.
-            let follow_ref = if read_only {
-                Some(ws.ref_name.clone())
+            // branch its snapshots publish to — and only that branch case gets no start hint,
+            // since this response resolved the workspace ref (`head`), not the branch.
+            let (follow_ref, start_oid) = if read_only {
+                (Some(ws.ref_name.clone()), Some(ws.head.clone()))
             } else {
-                ws.shared_target
-                    .as_ref()
-                    .map(|target| format!("refs/heads/{target}"))
-            };
-            let start_oid = match &follow_ref {
-                Some(f) if *f != ws.ref_name => None,
-                _ => Some(ws.head.clone()),
+                match &ws.shared_target {
+                    Some(target) => (Some(format!("refs/heads/{target}")), None),
+                    None => (None, Some(ws.head.clone())),
+                }
             };
             (repo, ws, true, read_only, follow_ref, start_oid)
         }
@@ -1862,7 +1862,7 @@ pub async fn mount(
     loop {
         match daemon::control(&state_dir, "ping").await {
             Ok(resp) => {
-                tracing::info!(
+                tracing::debug!(
                     phase = "daemon",
                     elapsed_ms = daemon_started.elapsed().as_millis() as u64,
                     total_ms = started.elapsed().as_millis() as u64,
