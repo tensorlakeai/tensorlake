@@ -183,6 +183,87 @@ pub struct TreeEntry {
     pub size: Option<u64>,
 }
 
+/// One row of the project-scope workspace fleet listing
+/// (`GET /project/{project}/workspaces`, artifact_storage issue #56).
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceFleetItem {
+    pub id: String,
+    /// Full repo id (`{project}/{repo}`).
+    pub repo: String,
+    /// Derived server-side at read time: `live` | `gap` | `idle` | `detached`.
+    pub status: String,
+    /// `default` | `shared-rw`.
+    pub mode: String,
+    /// Creating principal; absent for unbound (open-mode) workspaces.
+    #[serde(default)]
+    pub created_by: Option<WorkspaceActor>,
+    /// Base commit (hex) the workspace was created from.
+    pub base: String,
+    #[serde(default)]
+    pub base_ref: Option<String>,
+    /// Current snapshot tip (hex); equals `base` until the first snapshot.
+    pub head: String,
+    pub created_at_secs: u64,
+    #[serde(default)]
+    pub shared_target: Option<String>,
+    #[serde(default)]
+    pub snapshot_count: u64,
+    #[serde(default)]
+    pub last_snapshot_ms: Option<u64>,
+    #[serde(default)]
+    pub last_heartbeat_ms: Option<u64>,
+    /// Host reported by the currently-open mount session, if any.
+    #[serde(default)]
+    pub mounted_on: Option<String>,
+}
+
+/// A workspace's creating principal: the authenticated `sub` and its human/agent classification.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct WorkspaceActor {
+    pub name: String,
+    /// `human` | `agent` | `unknown`.
+    pub kind: String,
+}
+
+/// Per-status totals for the fleet page's filter set (status filter excluded).
+#[derive(Clone, Debug, Default, Deserialize)]
+pub struct WorkspaceFleetCounts {
+    pub total: u64,
+    pub live: u64,
+    pub detached: u64,
+    pub gap: u64,
+    pub idle: u64,
+    /// Counts cover only the server's bounded scan prefix when the fleet exceeds its cap.
+    pub truncated: bool,
+}
+
+/// One page of the project-scope workspace fleet.
+#[derive(Clone, Debug, Deserialize)]
+pub struct WorkspaceFleetPage {
+    pub project: String,
+    pub items: Vec<WorkspaceFleetItem>,
+    pub counts: WorkspaceFleetCounts,
+    /// More items exist past this page; resume with `after = next_after`.
+    pub truncated: bool,
+    #[serde(default)]
+    pub next_after: Option<String>,
+}
+
+/// Filters for one fleet page. `repo` accepts the bare repo name (the server also matches the
+/// full `{project}/{repo}` id); `q` is an id substring match.
+#[derive(Clone, Debug, Default)]
+pub struct WorkspaceFleetQuery<'a> {
+    pub repo: Option<&'a str>,
+    pub q: Option<&'a str>,
+    /// Ask the server for the caller's own + unbound workspaces only (`principal=self`).
+    /// Servers that predate the param ignore it — callers relying on the narrowing must also
+    /// filter client-side.
+    pub principal_self: bool,
+    pub after: Option<&'a str>,
+    /// Page size; the server clamps to its own cap (200).
+    pub limit: Option<usize>,
+}
+
 impl ArtifactStorageClient {
     pub async fn create_workspace(
         &self,
@@ -222,6 +303,45 @@ impl ArtifactStorageClient {
         )?;
         let info = expect_json(req.send().await?).await?;
         Ok(Traced::new(trace_id, info))
+    }
+
+    /// One page of the project-scope workspace fleet: every repo in one call, joined with
+    /// liveness (status, `mounted_on`). Requires a project-wide credential — repo-scoped mints
+    /// carry no `project:read` and are refused. Page with `next_after` until `truncated` is
+    /// false.
+    pub async fn workspace_fleet(
+        &self,
+        project_id: &str,
+        git_username: &str,
+        git_token: &str,
+        query: &WorkspaceFleetQuery<'_>,
+    ) -> Result<Traced<WorkspaceFleetPage>, SdkError> {
+        let mut params = url::form_urlencoded::Serializer::new(String::new());
+        if let Some(repo) = query.repo {
+            params.append_pair("repo", repo);
+        }
+        if let Some(q) = query.q {
+            params.append_pair("q", q);
+        }
+        if query.principal_self {
+            params.append_pair("principal", "self");
+        }
+        if let Some(after) = query.after {
+            params.append_pair("after", after);
+        }
+        if let Some(limit) = query.limit {
+            params.append_pair("limit", &limit.to_string());
+        }
+        let params = params.finish();
+        let suffix = if params.is_empty() {
+            "workspaces".to_string()
+        } else {
+            format!("workspaces?{params}")
+        };
+        let (req, trace_id) =
+            self.project_git_request(Method::GET, project_id, &suffix, git_username, git_token);
+        let page = expect_json(req.send().await?).await?;
+        Ok(Traced::new(trace_id, page))
     }
 
     pub async fn list_workspaces(
@@ -478,6 +598,75 @@ mod tests {
         assert!(resp.squashed);
         assert!(!resp.merged);
         assert!(!resp.fast_forwarded);
+    }
+
+    /// The fleet page decodes gsvc-server's exact wire shape (`fleet_item_json` /
+    /// `WorkspaceFleetResponse` in `crates/gsvc-server/src/http.rs`) — every field the CLI
+    /// listing consumes. The server side of this contract is pinned by the fleet e2e test in
+    /// artifact_storage; change either together.
+    #[test]
+    fn fleet_page_decodes_server_shape() {
+        let body = r#"{
+            "project": "p1",
+            "items": [{
+                "id": "aabbccdd", "repo": "p1/demo", "status": "live", "mode": "shared-rw",
+                "created_by": {"name": "user:u1", "kind": "human"},
+                "base": "1111111111111111111111111111111111111111",
+                "base_ref": "refs/heads/main",
+                "head": "2222222222222222222222222222222222222222",
+                "created_at_secs": 1751000000,
+                "shared_target": "main",
+                "snapshot_count": 3,
+                "last_snapshot_ms": 1751000500000,
+                "last_heartbeat_ms": 1751000600000,
+                "mounted_on": "sandbox-42"
+            }],
+            "counts": {"total": 1, "live": 1, "detached": 0, "gap": 0, "idle": 0, "truncated": false},
+            "truncated": true,
+            "next_after": "aabbccdd"
+        }"#;
+        let page: WorkspaceFleetPage = serde_json::from_str(body).unwrap();
+        assert_eq!(page.project, "p1");
+        assert_eq!(page.counts.total, 1);
+        assert!(page.truncated);
+        assert_eq!(page.next_after.as_deref(), Some("aabbccdd"));
+        let item = &page.items[0];
+        assert_eq!(item.id, "aabbccdd");
+        assert_eq!(item.repo, "p1/demo");
+        assert_eq!(item.status, "live");
+        assert_eq!(item.mode, "shared-rw");
+        assert_eq!(item.created_by.as_ref().unwrap().name, "user:u1");
+        assert_eq!(item.created_by.as_ref().unwrap().kind, "human");
+        assert_eq!(item.base_ref.as_deref(), Some("refs/heads/main"));
+        assert_eq!(item.snapshot_count, 3);
+        assert_eq!(item.mounted_on.as_deref(), Some("sandbox-42"));
+    }
+
+    /// Optional fleet fields are `skip_serializing_if` on the server: an unbound, never-mounted,
+    /// never-snapshotted workspace omits them entirely and must still decode.
+    #[test]
+    fn fleet_item_tolerates_omitted_optionals() {
+        let body = r#"{
+            "project": "p1",
+            "items": [{
+                "id": "ee", "repo": "p1/demo", "status": "detached", "mode": "default",
+                "base": "1111111111111111111111111111111111111111",
+                "head": "1111111111111111111111111111111111111111",
+                "created_at_secs": 1751000000,
+                "snapshot_count": 0
+            }],
+            "counts": {"total": 1, "live": 0, "detached": 1, "gap": 0, "idle": 0, "truncated": false},
+            "truncated": false
+        }"#;
+        let page: WorkspaceFleetPage = serde_json::from_str(body).unwrap();
+        let item = &page.items[0];
+        assert!(item.created_by.is_none(), "unbound workspace");
+        assert!(item.base_ref.is_none());
+        assert!(item.shared_target.is_none());
+        assert!(item.last_snapshot_ms.is_none());
+        assert!(item.last_heartbeat_ms.is_none());
+        assert!(item.mounted_on.is_none());
+        assert!(page.next_after.is_none());
     }
 
     /// The sync response decodes the full server shape, conflicts included.

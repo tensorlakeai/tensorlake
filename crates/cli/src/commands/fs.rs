@@ -28,7 +28,7 @@ use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
 use tensorlake::artifact_storage::models::GitCredential;
 use tensorlake::artifact_storage::workspaces::{
     CreateWorkspaceRequest, PromoteOutcome, PromoteWorkspaceRequest, SyncWorkspaceRequest,
-    TreeEntry, WorkspaceInfo,
+    TreeEntry, WorkspaceFleetItem, WorkspaceFleetQuery, WorkspaceInfo,
 };
 
 use crate::auth::context::CliContext;
@@ -143,68 +143,107 @@ pub enum WritePolicy {
     Rw,
 }
 
-async fn file_system_names(session: &FsSession) -> Result<Vec<String>> {
-    let (user, token) = session.creds();
-    Ok(session
-        .client
-        .list_repos_with_credential(&session.project_id, user, token)
-        .await?
-        .into_inner()
-        .repos
-        .into_iter()
-        .map(|r| r.name)
-        .collect())
+/// The authenticated subject inside a minted git credential — an unverified JWT-payload decode,
+/// used only to filter a listing client-side (the server enforces real principal checks). `None`
+/// for opaque tokens (dev/self-hosted `TENSORLAKE_GIT_TOKEN`), which matches open-mode servers
+/// where workspaces are unbound anyway.
+fn token_subject(token: &str) -> Option<String> {
+    use base64::Engine;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    Some(claims.get("sub")?.as_str()?.to_string())
 }
 
-/// Every workspace across the given file systems, newest first: `(file system, workspace)`.
-async fn all_workspaces(
+/// Every workspace visible to this caller across the whole project — one fleet request per page
+/// instead of one listing per file system — newest first, as `(file system, item)`.
+///
+/// The server narrows to the caller's own + unbound workspaces (`principal=self`); the same
+/// filter is applied here too, because servers that predate the parameter ignore it and would
+/// leak other principals' rows into the listing.
+async fn fleet_workspaces(
     session: &FsSession,
-    fs_names: &[String],
-) -> Result<Vec<(String, WorkspaceInfo)>> {
+    file_system: Option<&str>,
+    id_query: Option<&str>,
+) -> Result<Vec<(String, WorkspaceFleetItem)>> {
     let (user, token) = session.creds();
-    let lists: Vec<Result<(String, Vec<WorkspaceInfo>)>> =
-        futures::stream::iter(fs_names.iter().cloned().map(|repo| {
-            let client = session.client.clone();
-            let (project, user, token) = (
-                session.project_id.clone(),
-                user.to_string(),
-                token.to_string(),
-            );
-            async move {
-                let list = client
-                    .list_workspaces(&project, &repo, &user, &token)
-                    .await?
-                    .into_inner();
-                Ok((repo, list))
-            }
-        }))
-        .buffer_unordered(8)
-        .collect()
-        .await;
-    let mut rows = Vec::new();
-    for list in lists {
-        let (repo, workspaces) = list?;
-        rows.extend(workspaces.into_iter().map(|ws| (repo.clone(), ws)));
+    let own_sub = token_subject(token);
+    let repo_prefix = format!("{}/", session.project_id);
+    let mut rows: Vec<(String, WorkspaceFleetItem)> = Vec::new();
+    let mut after: Option<String> = None;
+    loop {
+        let page = session
+            .client
+            .workspace_fleet(
+                &session.project_id,
+                user,
+                token,
+                &WorkspaceFleetQuery {
+                    repo: file_system,
+                    q: id_query,
+                    principal_self: true,
+                    after: after.as_deref(),
+                    limit: Some(200),
+                },
+            )
+            .await?
+            .into_inner();
+        rows.extend(
+            page.items
+                .into_iter()
+                .filter(|item| {
+                    item.created_by
+                        .as_ref()
+                        .is_none_or(|by| own_sub.as_ref().is_none_or(|sub| by.name.as_str() == sub))
+                })
+                .map(|item| {
+                    // The fleet reports full repo ids (`{project}/{repo}`); everything here
+                    // speaks bare file-system names.
+                    let fs = item
+                        .repo
+                        .strip_prefix(&repo_prefix)
+                        .unwrap_or(&item.repo)
+                        .to_string();
+                    (fs, item)
+                }),
+        );
+        after = page.next_after.clone();
+        if !page.truncated || after.is_none() {
+            break;
+        }
     }
-    rows.sort_by_key(|(_, ws)| std::cmp::Reverse(ws.created_at_secs));
+    rows.sort_by_key(|(_, item)| std::cmp::Reverse(item.created_at_secs));
     Ok(rows)
 }
 
-/// Resolve a workspace id (or unique prefix) to its file system + info, scanning every file
-/// system in the project.
+/// Resolve a workspace id (or unique prefix) to its file system + record, project-wide. The
+/// fleet index finds the id (`q` narrows server-side); the authoritative record then comes from
+/// the per-repo, principal-checked API — resolution never widens what the caller may touch.
 async fn resolve_workspace(
     session: &FsSession,
-    fs_names: &[String],
     id: &str,
 ) -> Result<Option<(String, WorkspaceInfo)>> {
-    let mut matches: Vec<(String, WorkspaceInfo)> = all_workspaces(session, fs_names)
+    let mut matches: Vec<(String, String)> = fleet_workspaces(session, None, Some(id))
         .await?
         .into_iter()
-        .filter(|(_, ws)| ws.id.starts_with(id))
+        // The fleet's `q` is a substring match; a prefix is what resolves here.
+        .filter(|(_, item)| item.id.starts_with(id))
+        .map(|(fs, item)| (fs, item.id))
         .collect();
     match matches.len() {
         0 => Ok(None),
-        1 => Ok(Some(matches.remove(0))),
+        1 => {
+            let (fs, full_id) = matches.remove(0);
+            let (user, token) = session.creds();
+            let ws = session
+                .client
+                .get_workspace(&session.project_id, &fs, user, token, &full_id)
+                .await?
+                .into_inner();
+            Ok(Some((fs, ws)))
+        }
         n => Err(CliError::usage(format!(
             "workspace id {id:?} is ambiguous ({n} matches); use more characters"
         ))),
@@ -214,12 +253,11 @@ async fn resolve_workspace(
 /// `tl fs ls [file-system]` — every live workspace (across all file systems by default), with
 /// where each one is currently mounted on this machine.
 pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) -> Result<()> {
-    let session = FsSession::open(ctx, file_system).await?;
-    let fs_names = match file_system {
-        Some(fs) => vec![fs.to_string()],
-        None => file_system_names(&session).await?,
-    };
-    let rows = all_workspaces(&session, &fs_names).await?;
+    // Always a project-wide session, even for a named file system: the fleet listing requires
+    // `project:read`, which repo-scoped credentials deliberately lack — the file system narrows
+    // server-side via `?repo=` instead of via the credential.
+    let session = FsSession::open(ctx, None).await?;
+    let rows = fleet_workspaces(&session, file_system, None).await?;
     let mounts = live_mounts();
     let bound = plaindir::bound_workspaces();
     // A workspace's local attachment: the directory plus what kind of attachment it is.
@@ -240,16 +278,39 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
     if output_json {
         let out: Vec<serde_json::Value> = rows
             .iter()
-            .map(|(fs, ws)| {
+            .map(|(fs, item)| {
                 // `mounted_at` is the plain path (machine-consumable); `kind` says whether it
                 // is a kernel mount or a plain-directory binding — decorating the path itself
                 // broke every consumer that fed it back to another command.
-                let attached = attachment(&ws.id);
+                let attached = attachment(&item.id);
                 serde_json::json!({
                     "file_system": fs,
-                    "workspace": ws,
+                    // The legacy per-workspace object, rebuilt from the fleet row. Workspaces
+                    // are durable (artifact_storage issue #24): no lease exists, so the lease
+                    // fields are constants rather than a fetched row.
+                    "workspace": WorkspaceInfo {
+                        id: item.id.clone(),
+                        ref_name: format!("refs/workspaces/{}", item.id),
+                        principal: item
+                            .created_by
+                            .as_ref()
+                            .map(|by| by.name.clone())
+                            .unwrap_or_default(),
+                        base: item.base.clone(),
+                        base_ref: item.base_ref.clone(),
+                        head: item.head.clone(),
+                        created_at_secs: item.created_at_secs,
+                        lease_secs: 0,
+                        lease_due_ms: None,
+                        pinned: true,
+                        shared_target: item.shared_target.clone(),
+                    },
                     "mounted_at": attached.as_ref().map(|(path, _)| path.clone()),
                     "kind": attached.as_ref().map(|(_, kind)| *kind),
+                    // Fleet-only enrichments (absent before the one-call listing).
+                    "status": item.status,
+                    "snapshot_count": item.snapshot_count,
+                    "mounted_on": item.mounted_on,
                 })
             })
             .collect();
@@ -269,23 +330,27 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
         "Mounted",
         "Age",
     ]);
-    for (fs, ws) in &rows {
+    for (fs, item) in &rows {
         table.add_row(vec![
-            Cell::new(&ws.id),
+            Cell::new(&item.id),
             Cell::new(fs),
-            Cell::new(ws.base_ref.as_deref().unwrap_or(&ws.base[..12])),
-            Cell::new(if ws.head == ws.base { "-" } else { "yes" }),
-            Cell::new(match &ws.shared_target {
+            Cell::new(item.base_ref.as_deref().unwrap_or(&item.base[..12])),
+            Cell::new(if item.head == item.base { "-" } else { "yes" }),
+            Cell::new(match &item.shared_target {
                 Some(target) => format!("shared-rw -> {target}"),
                 None => "workspace".to_string(),
             }),
             // Human output keeps the annotation; the JSON path/kind split serves machines.
-            Cell::new(match attachment(&ws.id) {
+            // A mount session on another machine (fleet liveness) shows as its host.
+            Cell::new(match attachment(&item.id) {
                 Some((path, "binding")) => format!("{path} (bound)"),
                 Some((path, _)) => path,
-                None => "-".to_string(),
+                None => match &item.mounted_on {
+                    Some(host) => format!("{host} (remote)"),
+                    None => "-".to_string(),
+                },
             }),
-            Cell::new(age_display(ws.created_at_secs)),
+            Cell::new(age_display(item.created_at_secs)),
         ]);
     }
     println!("{table}");
@@ -297,9 +362,7 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
 /// (promoted work is unaffected).
 pub async fn rm(ctx: &CliContext, workspace_id: &str) -> Result<()> {
     let session = FsSession::open(ctx, None).await?;
-    let fs_names = file_system_names(&session).await?;
-    let Some((file_system, ws)) = resolve_workspace(&session, &fs_names, workspace_id).await?
-    else {
+    let Some((file_system, ws)) = resolve_workspace(&session, workspace_id).await? else {
         return Err(CliError::usage(format!(
             "no workspace matches {workspace_id:?} (see: tl fs ls)"
         )));
@@ -1719,8 +1782,7 @@ pub async fn mount(
         Err(e) => match create_recovery(&e) {
             // No file system by this name and no branch was named: try it as a workspace id.
             Some(CreateRecovery::RepoMissing) if base.is_none() => {
-                let fs_names = file_system_names(&session).await?;
-                match resolve_workspace(&session, &fs_names, name).await? {
+                match resolve_workspace(&session, name).await? {
                     Some((repo, ws)) => Resolved::Attached(repo, ws),
                     None => {
                         return Err(CliError::usage(format!(
@@ -3657,6 +3719,24 @@ fn age_display(created_at_secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn token_subject_reads_jwt_sub_and_rejects_opaque_tokens() {
+        use base64::Engine;
+        let enc = |v: &serde_json::Value| {
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(v.to_string())
+        };
+        let header = enc(&serde_json::json!({"alg": "ES256", "typ": "JWT"}));
+        let claims = enc(&serde_json::json!({"sub": "user:u1", "proj": "p1"}));
+        let token = format!("{header}.{claims}.not-a-real-signature");
+        assert_eq!(token_subject(&token).as_deref(), Some("user:u1"));
+        // Opaque dev tokens (TENSORLAKE_GIT_TOKEN) and malformed payloads yield None — the
+        // listing then skips client-side principal filtering, matching open-mode servers.
+        assert_eq!(token_subject("just-a-pat"), None);
+        assert_eq!(token_subject("a.b.c"), None);
+        let no_sub = format!("{header}.{}.sig", enc(&serde_json::json!({"proj": "p1"})));
+        assert_eq!(token_subject(&no_sub), None);
+    }
 
     #[test]
     fn registry_document_parses_as_table() {
