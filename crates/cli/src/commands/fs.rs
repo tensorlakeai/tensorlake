@@ -5,10 +5,14 @@
 //! artifact-storage repo backing them (managed with `tl git`); a mounted workspace (private
 //! leased ref) is served by a FUSE daemon — reads stream lazily from the server through the
 //! vendored `gsvc-mount` core's immutable caches, writes land in a local overlay.
-//! **The overlay is the dirty set**: `snapshot` enumerates it (nothing is
-//! scanned), seals it into a commit on the workspace ref, and the mount's lower layer follows
-//! the ref to the new snapshot; `promote` CAS-advances a real branch (squash by default);
-//! `restore` refills the overlay from any snapshot. FUSE is the only mount path — Linux builds
+//! **The overlay is the dirty set**: the daemon's sealer resolves its dirty index into
+//! incremental snapshot commits on the workspace ref (auto-commit ticks it; `tl fs snapshot`
+//! runs one cycle through the `seal` control op), and the mount's lower layer follows the ref
+//! to the new snapshot. The overlay is **kept** after sealing —
+//! the upper keeps serving the byte-identical sealed content; `snapshot --clear` is the
+//! explicit, destructive opt-in that drops it (required before `sync`). `promote`
+//! CAS-advances a real branch (squash by default); `restore` refills the overlay from any
+//! snapshot. FUSE is the only mount path — Linux builds
 //! carry it unconditionally, macOS requires macFUSE and the `macfuse` build feature.
 
 use std::collections::HashMap;
@@ -38,6 +42,9 @@ pub mod fusefs;
 pub mod local;
 #[cfg(unix)]
 pub mod overlay;
+// Plain-directory workspace snapshots: `tl fs init` binds a directory to a workspace with no
+// mount at all; snapshot/status dispatch here when the path is a binding rather than a mount.
+pub mod plaindir;
 // How the kernel reaches the overlay on macOS: the FSKit extension proxies this wire protocol
 // over localhost TCP (Linux talks to the overlay in-process through the FUSE glue). macOS-only —
 // on Linux the whole module would be dead code.
@@ -214,20 +221,35 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
     };
     let rows = all_workspaces(&session, &fs_names).await?;
     let mounts = live_mounts();
-    let mounted_at = |id: &str| {
+    let bound = plaindir::bound_workspaces();
+    // A workspace's local attachment: the directory plus what kind of attachment it is.
+    // Plain-directory bindings are attachments too; without this they would be invisible
+    // everywhere except path-addressed commands.
+    let attachment = |id: &str| -> Option<(String, &'static str)> {
         mounts
             .iter()
             .find(|(_, s)| s.workspace_id == id)
-            .map(|(m, _)| m.clone())
+            .map(|(m, _)| (m.clone(), "mount"))
+            .or_else(|| {
+                bound
+                    .iter()
+                    .find(|(ws, _)| ws == id)
+                    .map(|(_, root)| (root.clone(), "binding"))
+            })
     };
     if output_json {
         let out: Vec<serde_json::Value> = rows
             .iter()
             .map(|(fs, ws)| {
+                // `mounted_at` is the plain path (machine-consumable); `kind` says whether it
+                // is a kernel mount or a plain-directory binding — decorating the path itself
+                // broke every consumer that fed it back to another command.
+                let attached = attachment(&ws.id);
                 serde_json::json!({
                     "file_system": fs,
                     "workspace": ws,
-                    "mounted_at": mounted_at(&ws.id),
+                    "mounted_at": attached.as_ref().map(|(path, _)| path.clone()),
+                    "kind": attached.as_ref().map(|(_, kind)| *kind),
                 })
             })
             .collect();
@@ -257,7 +279,12 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
                 Some(target) => format!("shared-rw -> {target}"),
                 None => "workspace".to_string(),
             }),
-            Cell::new(mounted_at(&ws.id).unwrap_or_else(|| "-".to_string())),
+            // Human output keeps the annotation; the JSON path/kind split serves machines.
+            Cell::new(match attachment(&ws.id) {
+                Some((path, "binding")) => format!("{path} (bound)"),
+                Some((path, _)) => path,
+                None => "-".to_string(),
+            }),
             Cell::new(age_display(ws.created_at_secs)),
         ]);
     }
@@ -281,6 +308,17 @@ pub async fn rm(ctx: &CliContext, workspace_id: &str) -> Result<()> {
         return Err(CliError::usage(format!(
             "workspace {} is mounted at {mountpoint}; unmount and delete in one step: tl fs \
              unmount {mountpoint} --delete",
+            short_id(&ws.id)
+        )));
+    }
+    // A plain-directory binding references the workspace exactly like a live mount does —
+    // deleting it out from under the binding would strand the local index (and every future
+    // snapshot) against a dead workspace. Fail-closed lookup: a corrupt binding.json aborts
+    // the delete instead of being skipped as if unbound.
+    if let Some(bound_at) = plaindir::binding_using_workspace(&ws.id)? {
+        return Err(CliError::usage(format!(
+            "workspace {} is bound to {bound_at}; unbind first (tl fs unbind {bound_at}), \
+             then delete",
             short_id(&ws.id)
         )));
     }
@@ -1303,40 +1341,60 @@ fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
     let mountpoint = canonical_mountpoint(path)?;
     let table = registry_load();
     let Some(state_dir) = table.get(&mountpoint).and_then(|v| v.as_str()) else {
-        return Err(CliError::usage(format!(
+        return Err(not_a_mount_error(format!(
             "{mountpoint} is not a tl fs mount; run `tl fs mount` first"
         )));
     };
     Ok((mountpoint, PathBuf::from(state_dir)))
 }
 
-/// Whether `path` is a registered mountpoint. Used to disambiguate optional positional args
-/// (`tl fs diff <a> <b>` vs `tl fs diff <path> <a>`).
-pub fn is_registered_mount(path: &Path) -> bool {
-    state_dir_for(path).is_ok()
+/// Build a "not a mount"-shaped usage error, appending the binding-registry corruption note
+/// when the lenient binding dispatch has silently degraded this session — the path may
+/// really be a plain-directory binding the corrupt registry can no longer name, and a
+/// `--json`/CI consumer only sees the error, never the stderr warning.
+fn not_a_mount_error(message: String) -> CliError {
+    match plaindir::registry_corruption_note() {
+        Some(note) => CliError::usage(format!("{message}\n{note}")),
+        None => CliError::usage(message),
+    }
 }
 
-/// The registered mountpoint containing the current directory (the deepest one, for nested
-/// mounts). This is what path-addressed commands operate on when no path argument is given.
+/// Whether `path` is a registered mountpoint or plain-directory binding root. Used to
+/// disambiguate optional positional args (`tl fs diff <a> <b>` vs `tl fs diff <path> <a>`) —
+/// a binding here resolves as the command's path, whose dispatch then answers with the
+/// binding-appropriate behavior (or a clear v1 "not supported").
+pub fn is_registered_mount(path: &Path) -> bool {
+    state_dir_for(path).is_ok() || plaindir::binding_for_lenient(path).is_some()
+}
+
+/// The registered mountpoint or bound directory containing the current directory (the
+/// deepest one, for nesting). This is what path-addressed commands operate on when no path
+/// argument is given.
 pub fn mount_containing_cwd() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let cwd = cwd.canonicalize().unwrap_or(cwd);
-    registry_load()
-        .keys()
-        .map(PathBuf::from)
-        .filter(|mountpoint| {
+    let mut roots: Vec<PathBuf> = registry_load().keys().map(PathBuf::from).collect();
+    roots.extend(
+        plaindir::binding_roots_lenient()
+            .into_iter()
+            .map(PathBuf::from),
+    );
+    roots
+        .into_iter()
+        .filter(|root| {
             // Registry keys keep the leaf component un-canonicalized (it may be a live FUSE
             // fs); compare against both spellings so a symlinked leaf still matches the
             // canonicalized CWD.
-            cwd.starts_with(mountpoint)
-                || mountpoint
+            cwd.starts_with(root)
+                || root
                     .canonicalize()
                     .is_ok_and(|canonical| cwd.starts_with(canonical))
         })
-        .max_by_key(|mountpoint| mountpoint.components().count())
+        .max_by_key(|root| root.components().count())
         .ok_or_else(|| {
-            CliError::usage(format!(
-                "{} is not inside a tl fs mount; pass the mounted directory explicitly",
+            not_a_mount_error(format!(
+                "{} is not inside a tl fs mount or bound directory; pass the directory \
+                 explicitly",
                 cwd.display()
             ))
         })
@@ -1382,7 +1440,7 @@ pub fn resolve_diff_args(
             if b.is_some() || is_path_shaped(&not_a_mount) {
                 // Three args, or a path-shaped first arg that isn't registered: surface the
                 // real problem instead of treating the path as a snapshot ref.
-                return Err(CliError::usage(format!(
+                return Err(not_a_mount_error(format!(
                     "{} is not a tl fs mount; run `tl fs mount` first",
                     not_a_mount.display()
                 )));
@@ -1418,6 +1476,16 @@ pub fn reject_mount_like_positional(value: &str, what: &str, usage: &str) -> Res
 /// inside the mount, wrote its config INTO the workspace and the snapshot sealed it.
 pub fn hydrate_scope_from_mount(ctx: &mut CliContext, path: &Path) {
     if ctx.effective_project_id().is_some() {
+        return;
+    }
+    // Plain-directory bindings carry the same scope record as mounts (binding.json).
+    if let Some((_, binding_state)) = plaindir::binding_for_lenient(path)
+        && let Ok(binding) = plaindir::load_binding(&binding_state)
+    {
+        ctx.project_id = Some(binding.project_id);
+        if ctx.organization_id.is_none() {
+            ctx.organization_id = binding.organization_id;
+        }
         return;
     }
     let Ok((_, state_dir)) = state_dir_for(path) else {
@@ -1596,6 +1664,10 @@ pub async fn mount(
             )));
         }
     }
+    // A mountpoint must not overlap a plain-directory binding in either direction: the
+    // binding's scanner would walk the kernel volume, and the mount would shadow the bound
+    // files. Checked before any server-side workspace is created.
+    plaindir::assert_no_binding_overlap(&canonical_mountpoint(path)?)?;
     std::fs::create_dir_all(path)?;
     if path
         .read_dir()
@@ -1712,22 +1784,30 @@ pub async fn mount(
                      <file-system>:<branch> --shared-rw <path>",
                 ));
             }
-            // Single-writer by default: a workspace live-mounted elsewhere attaches read-only
+            // Single-writer by default: a workspace attached elsewhere — live mount OR
+            // plain-directory binding (a binding is always a writer) — attaches read-only
             // unless the user explicitly takes writes with --mode rw.
-            let mounted_at = live_mount_of(&ws.id);
+            // Advisory only (write-policy default): unreadable binding state degrades to
+            // "not attached" here — the destructive path (`tl fs rm`) stays fail-closed.
+            let attached_at = live_mount_of(&ws.id).or_else(|| {
+                plaindir::binding_using_workspace(&ws.id)
+                    .ok()
+                    .flatten()
+                    .map(|root| format!("{root} (plain-directory binding)"))
+            });
             let read_only = match mode {
                 WritePolicy::Rw => false,
                 WritePolicy::Ro => true,
-                WritePolicy::Auto => mounted_at.is_some(),
+                WritePolicy::Auto => attached_at.is_some(),
             };
-            match (&mounted_at, mode) {
+            match (&attached_at, mode) {
                 (Some(at), WritePolicy::Auto) => eprintln!(
-                    "{} workspace is already mounted at {at}; mounting read-only (pass \
+                    "{} workspace is already attached at {at}; mounting read-only (pass \
                      --mode rw to mount it writable anyway)",
                     style("note:").yellow(),
                 ),
                 (Some(at), WritePolicy::Rw) => eprintln!(
-                    "{} workspace is also mounted writable at {at}; two writers race snapshots",
+                    "{} workspace is also writable at {at}; two writers race snapshots",
                     style("warning:").yellow(),
                 ),
                 _ => {}
@@ -2021,7 +2101,18 @@ async fn detach_leftover(mountpoint: &str) -> Result<()> {
     Ok(())
 }
 
-pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> {
+pub async fn unmount(
+    ctx: &CliContext,
+    path: &Path,
+    delete: bool,
+    discard_local: bool,
+) -> Result<()> {
+    if let Some((root, _)) = plaindir::binding_for_lenient(path) {
+        return Err(CliError::usage(format!(
+            "{root} is a plain-directory binding, not a mount; detach it with: tl fs unbind \
+             {root}"
+        )));
+    }
     let (mountpoint, state_dir) = match state_dir_for(path) {
         Ok(found) => found,
         Err(e) => {
@@ -2046,6 +2137,18 @@ pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool) -> Result<()> 
         }
     };
     let state = daemon::load_mount_state(&state_dir)?;
+    // Unmount deletes the state dir — the overlay with it. Anything in the upper/wh trees is
+    // local-only state (unsealed writes, whiteouts, and ignored files that never enter a
+    // snapshot); destroying it needs the explicit flag. Checked before the shutdown so a
+    // refusal leaves the mount fully intact.
+    if !discard_local && overlay_has_local_state(&state_dir)? {
+        return Err(CliError::usage(format!(
+            "the mount at {mountpoint} has local overlay state that unmounting would destroy. \
+             Seal it first, then re-run with the flag:\n  tl fs snapshot {mountpoint}\n  \
+             tl fs unmount --discard-local {mountpoint}\nNote: --discard-local also drops \
+             ignored files under the mount — they are never part of a snapshot."
+        )));
+    }
     let pid = daemon::daemon_pid(&state_dir);
     // The daemon replies to `shutdown` only once the kernel released the volume, so this call
     // covers the slow phase (FSKit teardown on macOS takes seconds); spin so it doesn't look
@@ -2301,6 +2404,52 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
     Ok((upserts, deletes))
 }
 
+/// Whether the overlay holds ANY local state — deliberately broader than what enumerates as
+/// dirty: ignored files skip enumeration (and every snapshot) but die with the upper all the
+/// same, so the destructive commands (`restore`, `unmount`) gate on the raw upper/wh trees
+/// plus pending renames, not on the dirty walk.
+///
+/// Fails CLOSED: this guards data destruction, so an overlay tree that cannot be read is an
+/// error, not "no state" — a permissions hiccup must never wave a destructive command
+/// through. Only a missing tree (never-written overlay side) is honestly empty. The explicit
+/// `--discard-local` flag bypasses the check entirely (callers short-circuit before calling).
+fn overlay_has_local_state(state_dir: &Path) -> Result<bool> {
+    fn unreadable(path: &Path, err: &std::io::Error) -> CliError {
+        CliError::usage(format!(
+            "cannot verify local overlay state: {} is unreadable ({err}); fix permissions \
+             or pass --discard-local to drop the overlay without checking",
+            path.display()
+        ))
+    }
+    fn any_entry(dir: &Path) -> Result<bool> {
+        let read = match std::fs::read_dir(dir) {
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+            Err(e) => return Err(unreadable(dir, &e)),
+        };
+        for entry in read {
+            let entry = entry.map_err(|e| unreadable(dir, &e))?;
+            let meta = match entry.path().symlink_metadata() {
+                Ok(meta) => meta,
+                // Deleted between readdir and stat: honestly not state anymore.
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(unreadable(&entry.path(), &e)),
+            };
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                if any_entry(&entry.path())? {
+                    return Ok(true);
+                }
+            } else {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+    Ok(any_entry(&state_dir.join("upper"))?
+        || any_entry(&state_dir.join("wh"))?
+        || !pending_renames(state_dir).is_empty())
+}
+
 /// Pending committed-directory renames recorded by the mount daemon (`redirects.json` in the
 /// state dir, destination -> true-lower source), sorted by destination. Empty when the file
 /// is absent or unreadable — the daemon owns the authoritative copy.
@@ -2316,43 +2465,8 @@ fn pending_renames(state_dir: &Path) -> Vec<(String, String)> {
     entries
 }
 
-/// Expand pending renames through the daemon into by-oid push files, merged behind the
-/// regular dirty set (an upper copy-up under a renamed tree shadows its lower file). The
-/// daemon must be running: publishing the rename's source delete without its destination
-/// upserts would lose the subtree, so a failed expansion fails the seal.
-async fn redirect_push_files(
-    state_dir: &Path,
-    pending: usize,
-    files: &mut Vec<PushFile>,
-) -> Result<()> {
-    let resp = daemon::control(state_dir, "expand_redirects")
-        .await
-        .map_err(|e| {
-            CliError::usage(format!(
-                "this workspace has {pending} pending directory rename(s); the mount daemon \
-                 must be running to snapshot them: {e}"
-            ))
-        })?;
-    let seals: Vec<overlay::RedirectSeal> =
-        serde_json::from_value(resp.get("seals").cloned().unwrap_or_default())?;
-    let have: std::collections::HashSet<String> =
-        files.iter().map(|f| f.repo_path.clone()).collect();
-    for seal in &seals {
-        for file in &seal.files {
-            if !have.contains(&file.path) {
-                files.push(PushFile {
-                    repo_path: file.path.clone(),
-                    source: PushSource::KnownOid(file.oid.clone()),
-                    mode: Some(file.mode),
-                    delete: false,
-                });
-            }
-        }
-    }
-    Ok(())
-}
-
-/// An enumerated dirty set as push files. Shared by `snapshot` and the daemon's auto-commit.
+/// An enumerated dirty set as push files, used by the daemon's sealer (`tl fs snapshot`
+/// seals through the daemon, so nothing pushes from the CLI process).
 fn overlay_push_files(upserts: &OverlayUpserts, deletes: &[String]) -> Result<Vec<PushFile>> {
     let mut files = Vec::with_capacity(upserts.len() + deletes.len());
     for (rel, abs, mode) in upserts {
@@ -2386,7 +2500,23 @@ fn overlay_push_files(upserts: &OverlayUpserts, deletes: &[String]) -> Result<Ve
     Ok(files)
 }
 
-pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> Result<()> {
+pub async fn snapshot(
+    ctx: &CliContext,
+    path: &Path,
+    message: Option<&str>,
+    clear: bool,
+) -> Result<()> {
+    // A plain-directory binding snapshots by scanning the directory against its stat index;
+    // there is no overlay, so the mount-only --clear flag has nothing to drop.
+    if let Some((root, binding_state)) = plaindir::binding_for_lenient(path) {
+        if clear {
+            return Err(CliError::usage(
+                "--clear drops a mount's local overlay; a plain-directory binding has no \
+                 overlay to clear",
+            ));
+        }
+        return plaindir::snapshot(ctx, &root, &binding_state, message).await;
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
@@ -2402,97 +2532,164 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
     let started = std::time::Instant::now();
     let bar = indicatif::ProgressBar::new_spinner();
     bar.enable_steady_tick(std::time::Duration::from_millis(120));
-    bar.set_message("enumerating workspace changes...");
-
-    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-    let renames = pending_renames(&state_dir);
-    if upserts.is_empty() && deletes.is_empty() && renames.is_empty() {
-        bar.finish_and_clear();
-        println!("Nothing to snapshot: workspace is clean.");
-        return Ok(());
-    }
-    let t_enumerate = started.elapsed();
-    bar.set_message(format!(
-        "preparing {} change(s)...",
-        upserts.len() + deletes.len() + renames.len()
-    ));
-    let mut files = overlay_push_files(&upserts, &deletes)?;
-    if !renames.is_empty() {
-        redirect_push_files(&state_dir, renames.len(), &mut files).await?;
-    }
-    let files = files;
-    let t_prepare = started.elapsed() - t_enumerate;
-
-    let (user, token) = session.creds();
-    let progress = super::push_progress_spinner(&bar);
-    let report = session
-        .client
-        .push_files(
-            &session.project_id,
-            &state.repo,
-            user,
-            token,
-            files,
-            PushOptions {
-                message: message.unwrap_or("tl fs snapshot").to_string(),
-                workspace_snapshot: Some(state.workspace_id.clone()),
-                progress: Some(progress),
-                ..Default::default()
-            },
-        )
-        .await?
-        .into_inner();
-    // `push` covers the whole push_files call: local chunk/hash, chunk negotiation, byte upload,
-    // and the server-side commit (tree build + read-back) — for a large snapshot the commit, not
-    // the transfer, can dominate this bucket.
-    let t_push = started.elapsed() - t_prepare - t_enumerate;
-
-    bar.set_message("refreshing mount view...");
-    // Swap the mount's lower layer to the new snapshot, then drop the overlay: the content the
-    // upper layer held is now served (identically) by the lower commit.
-    let refresh = daemon::control(&state_dir, "refresh").await?;
-    daemon::control(&state_dir, "clear_upper").await?;
-    // The refresh may also have adopted foreign ref movement (a concurrent writer advanced the
-    // workspace ref past our snapshot commit), and the drained probe list can carry a backlog
-    // from background polls. Converge those the same way sync does — macOS only; the FUSE
-    // notifier already handled them on Linux. Our own sealed paths were upper-shadowed at
-    // refresh time and filter out of the probe list; the revalidate below covers them.
-    if cfg!(target_os = "macos") {
-        let (expect, _complete, _new_daemon) = parse_refresh_probes(&refresh);
-        if !expect.is_empty() {
-            let changed: std::collections::BTreeSet<String> = expect.keys().cloned().collect();
-            converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
-        }
-    }
-    // Content is byte-identical across the swap, but the previously-dirty paths' attributes
-    // changed backing (upper mtimes -> lower commit time); refresh the kernel's view.
-    let sealed: Vec<String> = upserts
-        .iter()
-        .map(|(p, _, _)| p.clone())
-        .chain(deletes.iter().cloned())
-        .collect();
-    revalidate_paths(Path::new(&mountpoint), &sealed);
+    bar.set_message("sealing workspace changes...");
+    let (outcome, cleared) = seal_via_daemon(&state_dir, &mountpoint, message, clear, &bar).await?;
     let total = started.elapsed();
-    let t_refresh = total - t_push - t_prepare - t_enumerate;
     bar.finish_and_clear();
+    let Some(sealed) = outcome else {
+        println!("{}", clean_snapshot_message(cleared));
+        return Ok(());
+    };
     // Small files skip chunk negotiation (token-only commits), so uploads can exceed the
     // negotiated chunk count — clamp so the summary never reads "3 of 0 chunks".
     println!(
         "Snapshot {} ({} file(s), {} of {} chunks uploaded in {})",
-        report.commit,
-        report.files,
-        report.chunks_uploaded,
-        report.chunks_total.max(report.chunks_uploaded),
+        sealed.commit,
+        sealed.files,
+        sealed.chunks_uploaded,
+        sealed.chunks_total.max(sealed.chunks_uploaded),
         fmt_dur(total),
     );
-    println!(
-        "  enumerate {}  prepare {}  push {}  refresh {}",
-        fmt_dur(t_enumerate),
-        fmt_dur(t_prepare),
-        fmt_dur(t_push),
-        fmt_dur(t_refresh),
-    );
+    if let Some(push_ms) = sealed.push_ms {
+        println!(
+            "  push {} (sealed by the mount daemon)",
+            fmt_dur(std::time::Duration::from_millis(push_ms)),
+        );
+    }
     Ok(())
+}
+
+/// One daemon-sealed snapshot, parsed out of the `seal` control reply.
+struct DaemonSeal {
+    commit: String,
+    files: u64,
+    chunks_uploaded: u64,
+    chunks_total: u64,
+    push_ms: Option<u64>,
+}
+
+/// What a clean (nothing-to-seal) snapshot prints. Never claims a clean workspace when a
+/// requested clear actually dropped retained files — ignored files and previously sealed
+/// content live in the upper without ever enumerating as dirty.
+fn clean_snapshot_message(cleared: Option<usize>) -> String {
+    match cleared {
+        Some(n) if n > 0 => format!(
+            "Nothing new to snapshot; cleared {n} locally retained file(s) (including \
+             ignored files) from the overlay."
+        ),
+        _ => "Nothing to snapshot: workspace is clean.".to_string(),
+    }
+}
+
+/// Seal through the mount daemon's sealer — the SAME machinery (and state) as auto-commit,
+/// which is what makes manual snapshots correct: the shared dirty watermark means an
+/// auto-commit mount never re-publishes manually sealed paths (and vice versa), only paths
+/// touched since the last seal are pushed instead of the whole ever-dirty upper, and deletes
+/// racing a seal go through the sealer's resurrection tombstone guard. Returns
+/// `(None, cleared)` when nothing was dirty; `cleared` reports how many retained files a
+/// requested clear dropped.
+///
+/// The daemon advances the lower to the sealed commit before replying, so the mount serves
+/// the new snapshot when this returns; the reply also drains the banked probe backlog, which
+/// macOS converges here (Linux rode the FUSE notifier inside the daemon). The `seal` op is
+/// line-streaming: progress events narrate onto `bar` until the final reply line arrives.
+///
+/// `clear` rides the seal request itself — the daemon drops the whole overlay inside the
+/// same sealer cycle (the explicit, destructive opt-in: it also deletes ignored files and
+/// any writes racing the seal; it is what empties the local dirty set so `tl fs sync` can
+/// run) and replies with exactly the paths the drop removed, which is the kernel
+/// revalidation set here. The clear runs even after a clean seal: earlier kept-overlay seals
+/// leave a populated upper that `sync` refuses to run over.
+async fn seal_via_daemon(
+    state_dir: &Path,
+    mountpoint: &str,
+    message: Option<&str>,
+    clear: bool,
+    bar: &indicatif::ProgressBar,
+) -> Result<(Option<DaemonSeal>, Option<usize>)> {
+    let request = daemon::SealRequest {
+        message: message.map(str::to_string),
+        clear,
+    };
+    let resp = daemon::control_streaming(
+        state_dir,
+        "seal",
+        serde_json::to_value(&request)?,
+        |event| bar.set_message(event.to_string()),
+    )
+    .await?;
+    if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
+        let error = resp
+            .get("error")
+            .and_then(|v| v.as_str())
+            .unwrap_or("?")
+            .to_string();
+        // Structured detection first; the prose match is a documented legacy fallback for
+        // daemons that predate the `code` field (they phrase it as `unknown op "seal"`).
+        let unknown_op = resp.get("code").and_then(|c| c.as_str()) == Some("unknown_op")
+            || error.contains("unknown op");
+        if unknown_op {
+            return Err(CliError::usage(format!(
+                "the running mount daemon predates seal-through-daemon; remount to \
+                 upgrade it (tl fs unmount {mountpoint} && tl fs mount), then retry: {error}"
+            )));
+        }
+        return Err(CliError::usage(format!("daemon seal failed: {error}")));
+    }
+    // The reply is a shared serde struct, parsed strictly: a missing or mistyped field is a
+    // protocol error to report, never a value to default (no "Snapshot ?" summaries).
+    let reply: daemon::SealReply = serde_json::from_value(resp.clone()).map_err(|e| {
+        CliError::usage(format!("the mount daemon sent a malformed seal reply: {e}"))
+    })?;
+    // The seal's post-push refresh may also have adopted foreign ref movement (a concurrent
+    // writer advanced the workspace ref past our snapshot commit), and the drained probe list
+    // can carry a backlog from background polls. Converge those the same way sync does —
+    // macOS only; the FUSE notifier already handled them on Linux. Our own sealed paths are
+    // upper-shadowed and filter out of the probe list.
+    if cfg!(target_os = "macos") {
+        let (expect, _complete, _new_daemon) = parse_refresh_probes(&resp);
+        if !expect.is_empty() {
+            let changed: std::collections::BTreeSet<String> = expect.keys().cloned().collect();
+            converge_kernel_view(Path::new(mountpoint), &changed, &expect);
+        }
+    }
+    let cleared = if clear {
+        let cleared = reply.cleared.ok_or_else(|| {
+            CliError::usage(
+                "the mount daemon did not report which paths its clear dropped; \
+                 remount to upgrade it (tl fs unmount && tl fs mount), then retry",
+            )
+        })?;
+        // Content is byte-identical across the swap for sealed paths, but every cleared
+        // path's attributes changed backing (upper mtimes -> lower serve time) — and the
+        // clear also dropped never-sealed state (ignored files); refresh the kernel's view
+        // of exactly what the daemon says it removed.
+        revalidate_paths(Path::new(mountpoint), &cleared);
+        Some(cleared.len())
+    } else {
+        None
+    };
+    if reply.clean {
+        return Ok((None, cleared));
+    }
+    let sealed_field = |name: &str, v: Option<u64>| {
+        v.ok_or_else(|| {
+            CliError::usage(format!(
+                "the mount daemon's seal reply is missing {name:?}; \
+                 remount to upgrade it (tl fs unmount && tl fs mount), then retry"
+            ))
+        })
+    };
+    Ok((
+        Some(DaemonSeal {
+            commit: reply.commit,
+            files: sealed_field("files", reply.files)?,
+            chunks_uploaded: sealed_field("chunks_uploaded", reply.chunks_uploaded)?,
+            chunks_total: sealed_field("chunks_total", reply.chunks_total)?,
+            push_ms: reply.push_ms,
+        }),
+        cleared,
+    ))
 }
 
 /// Render a phase duration compactly: sub-second phases as whole milliseconds (`42ms`), longer
@@ -2513,6 +2710,12 @@ pub async fn promote(
     merge: bool,
     message: Option<&str>,
 ) -> Result<()> {
+    if plaindir::binding_for_lenient(path).is_some() {
+        return Err(CliError::usage(
+            "promote is not supported for plain-directory bindings in v1; snapshots land on \
+             the workspace ref — publish them from a future release (or mount the workspace)",
+        ));
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
@@ -2527,7 +2730,7 @@ pub async fn promote(
     let renames = pending_renames(&state_dir);
     if !upserts.is_empty() || !deletes.is_empty() || !renames.is_empty() {
         eprintln!(
-            "{} {} local change(s) not in any snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to include them.",
+            "{} {} local change(s) that may not be in a snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to be sure they are included.",
             style("note:").yellow(),
             upserts.len() + deletes.len() + renames.len()
         );
@@ -2610,7 +2813,8 @@ pub async fn promote(
 /// commit on the target head; the mount's lower layer then advances to it. Under the default
 /// materialize policy conflicts land as diff3 markers in the workspace files; resolve them and
 /// snapshot. Local overlay changes would shadow synced content (markers included), so a dirty
-/// mount must snapshot first.
+/// mount must seal-and-clear (`tl fs snapshot --clear`) first — a plain snapshot keeps the
+/// overlay, which still shadows.
 pub async fn sync(
     ctx: &CliContext,
     path: &Path,
@@ -2618,6 +2822,12 @@ pub async fn sync(
     fail_on_conflict: bool,
     message: Option<&str>,
 ) -> Result<()> {
+    if plaindir::binding_for_lenient(path).is_some() {
+        return Err(CliError::usage(
+            "sync is not supported for plain-directory bindings in v1 (there is no mount to \
+             materialize pulled content into); v1 bindings are single-writer capture only",
+        ));
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
@@ -2632,7 +2842,7 @@ pub async fn sync(
     let renames = pending_renames(&state_dir);
     if !upserts.is_empty() || !deletes.is_empty() || !renames.is_empty() {
         return Err(CliError::usage(format!(
-            "{} local change(s) not in any snapshot would shadow synced content. Run `tl fs snapshot {}` first.",
+            "{} local change(s) would shadow synced content. Seal and drop them first: `tl fs snapshot --clear {}` (pause writers first — the clear also drops ignored files and any writes made while the snapshot uploads).",
             upserts.len() + deletes.len() + renames.len(),
             path.display(),
         )));
@@ -2757,6 +2967,9 @@ pub async fn sync(
 }
 
 pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<()> {
+    if let Some((root, binding_state)) = plaindir::binding_for_lenient(path) {
+        return plaindir::status(ctx, &root, &binding_state, output_json).await;
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
@@ -2814,8 +3027,8 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     }
     if let Some(secs) = state.auto_commit_interval_secs {
         println!(
-            "{} local changes seal into a snapshot every {secs}s (local: below stays dirty \
-             until tl fs snapshot clears it)",
+            "{} local changes seal into a snapshot every {secs}s (local: below is the kept \
+             overlay, sealed content included; `tl fs snapshot --clear` drops it)",
             style("auto-commit:").dim()
         );
     }
@@ -2861,13 +3074,35 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
 
 /// Restore: refill the overlay so the merged view equals `version`. The mount's lower layer is
 /// untouched (history preserved); the next snapshot seals the restored state.
-pub async fn restore(ctx: &CliContext, path: &Path, version: &str) -> Result<()> {
+pub async fn restore(
+    ctx: &CliContext,
+    path: &Path,
+    version: &str,
+    discard_local: bool,
+) -> Result<()> {
+    if plaindir::binding_for_lenient(path).is_some() {
+        return Err(CliError::usage(
+            "restore is not supported for plain-directory bindings in v1 (it would overwrite \
+             local files the index has not sealed); check out the snapshot elsewhere instead",
+        ));
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
         return Err(CliError::usage(format!(
             "this is a read-only mount following {}; there is nothing to restore",
             state.follow_ref.as_deref().unwrap_or("the branch"),
+        )));
+    }
+    // Restore's point of no return drops the ENTIRE overlay — unsealed writes, whiteouts, and
+    // ignored files that never enter any snapshot. Destroying it needs the explicit flag.
+    if !discard_local && overlay_has_local_state(&state_dir)? {
+        return Err(CliError::usage(format!(
+            "the workspace has local overlay state that restoring would destroy. Seal it \
+             first, then re-run with the flag:\n  tl fs snapshot {path}\n  tl fs restore \
+             --discard-local {path} {version}\nNote: --discard-local also drops ignored files \
+             under the mount — they are never part of a snapshot.",
+            path = path.display(),
         )));
     }
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
@@ -3249,6 +3484,12 @@ fn write_whiteout(wh: &Path, rel: &str) -> Result<()> {
 /// `tl fs diff <path>` — overlay changes vs the last snapshot; `tl fs diff <path> <a> <b>` —
 /// server-side tree diff between two commits/refs.
 pub async fn diff(ctx: &CliContext, path: &Path, a: Option<&str>, b: Option<&str>) -> Result<()> {
+    if plaindir::binding_for_lenient(path).is_some() {
+        return Err(CliError::usage(
+            "diff is not supported for plain-directory bindings in v1; `tl fs status` lists \
+             the changed paths",
+        ));
+    }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     match (a, b) {
@@ -3450,5 +3691,268 @@ mod tests {
         let upsert_paths: Vec<_> = upserts.iter().map(|(path, _, _)| path.as_str()).collect();
         assert_eq!(upsert_paths, vec!["keep.txt"]);
         assert!(deletes.is_empty());
+    }
+
+    /// A fake daemon control endpoint: records the op sequence and replies `{"ok":true}` to
+    /// every op except `seal`, which replies like a real sealer that minted a commit — so the
+    /// snapshot control flow can be exercised without a mount. `seal` honors the new framing:
+    /// each string in `events` is written as an `{"event": ...}` progress line before the
+    /// final reply (pass none for the plain single-line reply older tests exercise), and a
+    /// `clear:true` request gets a `cleared` list back.
+    #[cfg(unix)]
+    fn fake_daemon_with_events(
+        state_dir: &Path,
+        events: Vec<String>,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = std::os::unix::net::UnixListener::bind(daemon::control_socket(state_dir))
+            .expect("bind control socket");
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+        let recorded = ops.clone();
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let recorded = recorded.clone();
+                let events = events.clone();
+                tokio::spawn(async move {
+                    let mut reader = tokio::io::BufReader::new(stream);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                    let op = v["op"].as_str().unwrap_or_default().to_string();
+                    recorded.lock().unwrap().push(op.clone());
+                    let mut stream = reader.into_inner();
+                    let resp = if op == "seal" {
+                        for event in &events {
+                            let line = serde_json::json!({ "event": event });
+                            let _ = stream.write_all(format!("{line}\n").as_bytes()).await;
+                        }
+                        let mut resp = serde_json::json!({
+                            "ok": true,
+                            "clean": false,
+                            "commit": "cafe0000",
+                            "files": 1,
+                            "chunks_uploaded": 1,
+                            "chunks_total": 1,
+                            "sealed": ["keep.txt"],
+                            "push_ms": 5,
+                        });
+                        if v["clear"].as_bool() == Some(true) {
+                            resp["cleared"] =
+                                serde_json::json!(["keep.txt", "target/build.o", "raced.txt"]);
+                        }
+                        resp
+                    } else {
+                        serde_json::json!({ "ok": true })
+                    };
+                    let _ = stream.write_all(format!("{resp}\n").as_bytes()).await;
+                });
+            }
+        });
+        ops
+    }
+
+    #[cfg(unix)]
+    fn fake_daemon(state_dir: &Path) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        fake_daemon_with_events(state_dir, Vec::new())
+    }
+
+    /// Regression for the snapshot data-loss bug: sealing must KEEP the overlay, and the seal
+    /// itself now runs inside the daemon (one `seal` control op) — the CLI enumerates and
+    /// clears nothing, so ignored paths and writes racing the push window can't be destroyed
+    /// (the old flow cleared the whole upper after its own push: a Rust project lost `target/`
+    /// on every snapshot, and mid-push writes were deleted without entering any snapshot).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_seal_keeps_overlay_by_default() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let ops = fake_daemon(state.path());
+
+        let upper = state.path().join("upper");
+        std::fs::create_dir_all(upper.join("target")).unwrap();
+        std::fs::create_dir_all(state.path().join("wh")).unwrap();
+        std::fs::write(mount.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(upper.join("keep.txt"), "sealed").unwrap();
+        std::fs::write(upper.join("target/build.o"), "ignored, never pushed").unwrap();
+        // A write landing while the daemon seals, i.e. racing the push window.
+        std::fs::write(upper.join("raced.txt"), "written mid-push").unwrap();
+
+        let bar = indicatif::ProgressBar::hidden();
+        let (sealed, cleared) = seal_via_daemon(
+            state.path(),
+            mount.path().to_str().unwrap(),
+            Some("msg"),
+            false,
+            &bar,
+        )
+        .await
+        .unwrap();
+        let sealed = sealed.expect("daemon sealed a commit");
+
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec!["seal"],
+            "one seal op, no clear by default"
+        );
+        assert_eq!(sealed.commit, "cafe0000");
+        assert_eq!(cleared, None, "no clear was requested");
+        assert!(upper.join("keep.txt").exists(), "sealed file kept locally");
+        assert!(
+            upper.join("target/build.o").exists(),
+            "ignored path survives the seal"
+        );
+        assert!(upper.join("raced.txt").exists(), "raced write survives");
+    }
+
+    /// `--clear` keeps the old seal-and-clear behavior as an explicit opt-in (it is what
+    /// empties the dirty set so `sync` can run) — but the clear now rides the seal request
+    /// itself (ONE control op, the daemon clears under its sealer lock), and the caller's
+    /// revalidation set is exactly the daemon-reported `cleared` list, which is broader than
+    /// the seal delta (it includes ignored/retained files that never enumerate as dirty).
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_clear_rides_the_seal_op_and_reports_dropped_paths() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let ops = fake_daemon(state.path());
+
+        let bar = indicatif::ProgressBar::hidden();
+        let (sealed, cleared) = seal_via_daemon(
+            state.path(),
+            mount.path().to_str().unwrap(),
+            None,
+            true,
+            &bar,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            *ops.lock().unwrap(),
+            vec!["seal"],
+            "the clear must not be a separate control round-trip"
+        );
+        assert!(sealed.is_some());
+        // The fake daemon cleared 3 paths (one sealed, two never-sealed) — the revalidation
+        // set came from `cleared`, not the seal delta.
+        assert_eq!(cleared, Some(3));
+    }
+
+    /// The `seal` op is line-streaming: `{"event": ...}` progress lines narrate onto the
+    /// spinner until the final reply line lands.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn seal_event_lines_update_progress_and_reply_parses() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let _ops = fake_daemon_with_events(
+            state.path(),
+            vec![
+                "hashing 1/2 files (1 KiB)...".to_string(),
+                "uploaded 3 chunks (2 KiB)...".to_string(),
+            ],
+        );
+
+        let bar = indicatif::ProgressBar::hidden();
+        let (sealed, _cleared) = seal_via_daemon(
+            state.path(),
+            mount.path().to_str().unwrap(),
+            Some("msg"),
+            false,
+            &bar,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(sealed.expect("sealed").commit, "cafe0000");
+        assert_eq!(
+            bar.message(),
+            "uploaded 3 chunks (2 KiB)...",
+            "the spinner followed the streamed event lines"
+        );
+    }
+
+    /// A clean seal that cleared retained files must say so — never "workspace is clean".
+    #[test]
+    fn clean_snapshot_message_is_honest_about_cleared_files() {
+        assert_eq!(
+            clean_snapshot_message(None),
+            "Nothing to snapshot: workspace is clean."
+        );
+        assert_eq!(
+            clean_snapshot_message(Some(0)),
+            "Nothing to snapshot: workspace is clean."
+        );
+        assert_eq!(
+            clean_snapshot_message(Some(4)),
+            "Nothing new to snapshot; cleared 4 locally retained file(s) (including \
+             ignored files) from the overlay."
+        );
+    }
+
+    /// The destructive commands gate on the RAW overlay trees (broader than the dirty walk:
+    /// ignored files never enumerate but die with the upper all the same).
+    #[test]
+    fn overlay_local_state_gate_sees_ignored_files_and_whiteouts() {
+        let state = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(state.path().join("upper")).unwrap();
+        std::fs::create_dir_all(state.path().join("wh")).unwrap();
+        assert!(
+            !overlay_has_local_state(state.path()).unwrap(),
+            "empty overlay"
+        );
+
+        std::fs::create_dir_all(state.path().join("upper/target")).unwrap();
+        assert!(
+            !overlay_has_local_state(state.path()).unwrap(),
+            "bare directories alone are not local data"
+        );
+        std::fs::write(state.path().join("upper/target/build.o"), "x").unwrap();
+        assert!(
+            overlay_has_local_state(state.path()).unwrap(),
+            "an (ignored-looking) upper file is local state"
+        );
+        std::fs::remove_file(state.path().join("upper/target/build.o")).unwrap();
+
+        std::fs::write(state.path().join("wh/gone.txt"), "").unwrap();
+        assert!(
+            overlay_has_local_state(state.path()).unwrap(),
+            "a whiteout is local state"
+        );
+    }
+
+    /// Missing overlay trees are honestly empty, but an UNREADABLE tree must fail closed:
+    /// the guard protects data destruction, so "couldn't look" is never "nothing there".
+    #[cfg(unix)]
+    #[test]
+    fn overlay_local_state_gate_fails_closed_on_unreadable_dirs() {
+        use std::os::unix::fs::PermissionsExt;
+        let state = tempfile::tempdir().unwrap();
+        // Neither tree exists yet: that IS a clean overlay (a mount that never wrote).
+        assert!(!overlay_has_local_state(state.path()).unwrap());
+
+        let upper = state.path().join("upper");
+        std::fs::create_dir_all(upper.join("dir")).unwrap();
+        std::fs::write(upper.join("dir/file.txt"), "x").unwrap();
+        std::fs::set_permissions(&upper, std::fs::Permissions::from_mode(0o000)).unwrap();
+        // Root sees through 0o000 directories; the guard cannot be exercised there.
+        if std::fs::read_dir(&upper).is_err() {
+            let err = overlay_has_local_state(state.path()).unwrap_err();
+            let msg = err.to_string();
+            assert!(
+                msg.contains("cannot verify local overlay state"),
+                "unexpected error: {msg}"
+            );
+            assert!(
+                msg.contains("--discard-local"),
+                "names the escape hatch: {msg}"
+            );
+        }
+        // Restore so the tempdir can be cleaned up.
+        std::fs::set_permissions(&upper, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 }

@@ -270,6 +270,24 @@ enum FsCommands {
         log_level: String,
     },
 
+    /// Bind a plain directory (no mount) to a new workspace; `tl fs snapshot` then scans and
+    /// pushes it directly — v1 requires the file system's head to be empty
+    Init {
+        /// Directory to bind (default: the current directory; created if missing)
+        path: Option<PathBuf>,
+
+        /// File system to create the workspace on (default: the project's only file system)
+        #[arg(long)]
+        file_system: Option<String>,
+    },
+
+    /// Remove a plain-directory binding and its local state; the workspace and its snapshots
+    /// survive on the server (delete them with `tl fs rm`)
+    Unbind {
+        /// A bound directory (default: the binding containing the current directory)
+        path: Option<PathBuf>,
+    },
+
     /// List workspaces (all file systems, or one)
     #[command(name = "ls")]
     Ls {
@@ -299,7 +317,7 @@ enum FsCommands {
         log_level: String,
     },
 
-    /// Seal local changes into a snapshot on the workspace ref
+    /// Seal local changes into a snapshot on the workspace ref (the local overlay is kept)
     Snapshot {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
@@ -307,6 +325,13 @@ enum FsCommands {
         /// Snapshot message
         #[arg(short, long)]
         message: Option<String>,
+
+        /// After sealing, drop the local overlay so the mount serves the snapshot commit
+        /// directly (required before `tl fs sync`). Destructive: also deletes ignored files
+        /// under the mount and any writes made while the snapshot was uploading — pause
+        /// writers first.
+        #[arg(long)]
+        clear: bool,
     },
 
     /// Publish the workspace's snapshot onto a real branch (squash by default)
@@ -368,6 +393,12 @@ enum FsCommands {
 
         /// Snapshot/commit hex, branch, or ref to restore to
         version: String,
+
+        /// Drop the local overlay to apply the restore. Destructive: local changes not yet in
+        /// a snapshot AND ignored files under the mount are deleted — `tl fs snapshot` first
+        /// to keep the changes.
+        #[arg(long)]
+        discard_local: bool,
     },
 
     /// List changed paths: local vs last snapshot, or between two snapshots
@@ -390,6 +421,12 @@ enum FsCommands {
         /// Also delete the server-side workspace
         #[arg(long)]
         delete: bool,
+
+        /// Drop the local overlay with the mount. Destructive: local changes not yet in a
+        /// snapshot AND ignored files under the mount are deleted — `tl fs snapshot` first to
+        /// keep the changes.
+        #[arg(long)]
+        discard_local: bool,
     },
 }
 
@@ -2268,9 +2305,14 @@ async fn run_applications_command(
 #[cfg(feature = "mount")]
 async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Result<()> {
     // Setup installs a local app bundle; it must work before the user has logged in.
+    // Unbind only removes local binding state (the workspace survives server-side), so it
+    // must work even when auth is unavailable.
     let subcmd = match subcmd {
         FsCommands::Setup { from, check } => {
             return commands::fs::setup(from.as_deref(), check).await;
+        }
+        FsCommands::Unbind { path } => {
+            return commands::fs::plaindir::unbind(path).await;
         }
         other => other,
     };
@@ -2292,7 +2334,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             }
             mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
         }
-        FsCommands::Restore { path, version } => {
+        FsCommands::Restore { path, version, .. } => {
             if path.is_none() {
                 commands::fs::reject_mount_like_positional(
                     version,
@@ -2326,7 +2368,12 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
     // Set for exactly the path-addressed commands, whose dispatch arms are the only readers.
     let mount_dir = move || mount_dir.expect("resolved for every path-addressed command above");
     let result = match subcmd {
-        FsCommands::Setup { .. } => unreachable!("handled before the auth guard"),
+        FsCommands::Setup { .. } | FsCommands::Unbind { .. } => {
+            unreachable!("handled before the auth guard")
+        }
+        FsCommands::Init { path, file_system } => {
+            commands::fs::plaindir::init(ctx, path, file_system.as_deref()).await
+        }
         FsCommands::Ls { file_system, json } => {
             commands::fs::ls(ctx, file_system.as_deref(), json).await
         }
@@ -2363,8 +2410,8 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             state_dir,
             log_level,
         } => commands::fs::daemon::run(ctx, &state_dir, &log_level).await,
-        FsCommands::Snapshot { message, .. } => {
-            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref()).await
+        FsCommands::Snapshot { message, clear, .. } => {
+            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), clear).await
         }
         FsCommands::Promote {
             branch,
@@ -2399,15 +2446,19 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             .await
         }
         FsCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
-        FsCommands::Restore { version, .. } => {
-            commands::fs::restore(ctx, &mount_dir(), &version).await
-        }
+        FsCommands::Restore {
+            version,
+            discard_local,
+            ..
+        } => commands::fs::restore(ctx, &mount_dir(), &version, discard_local).await,
         FsCommands::Diff { a, b, .. } => {
             commands::fs::diff(ctx, &mount_dir(), a.as_deref(), b.as_deref()).await
         }
-        FsCommands::Unmount { delete, .. } => {
-            commands::fs::unmount(ctx, &mount_dir(), delete).await
-        }
+        FsCommands::Unmount {
+            delete,
+            discard_local,
+            ..
+        } => commands::fs::unmount(ctx, &mount_dir(), delete, discard_local).await,
     };
     // A cached minted git credential can be revoked before its recorded expiry; purge
     // the cache on an auth failure so the next invocation re-mints instead of retrying
@@ -3000,16 +3051,28 @@ mod tests {
             Commands::Fs(FsCommands::Snapshot {
                 path: None,
                 message: None,
+                clear: false,
             }) => {}
             _ => panic!("expected fs snapshot command"),
         }
 
         match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip"]) {
-            Commands::Fs(FsCommands::Snapshot { path, message }) => {
+            Commands::Fs(FsCommands::Snapshot {
+                path,
+                message,
+                clear,
+            }) => {
                 assert_eq!(path, Some(PathBuf::from("./w")));
                 assert_eq!(message.as_deref(), Some("wip"));
+                assert!(!clear, "clear is opt-in");
             }
             _ => panic!("expected fs snapshot command"),
+        }
+
+        // The destructive seal-and-clear is an explicit flag.
+        match parse_command(["tl", "fs", "snapshot", "--clear"]) {
+            Commands::Fs(FsCommands::Snapshot { clear: true, .. }) => {}
+            _ => panic!("expected fs snapshot --clear command"),
         }
 
         // Promote/restore have a required positional after the optional path; with a single
@@ -3031,11 +3094,41 @@ mod tests {
         }
 
         match parse_command(["tl", "fs", "restore", "0a1b2c3d"]) {
-            Commands::Fs(FsCommands::Restore { path, version }) => {
+            Commands::Fs(FsCommands::Restore {
+                path,
+                version,
+                discard_local,
+            }) => {
                 assert_eq!(path, None);
                 assert_eq!(version, "0a1b2c3d");
+                assert!(!discard_local, "overlay-dropping restore is opt-in");
             }
             _ => panic!("expected fs restore command"),
+        }
+
+        // The overlay-destroying flags are explicit opt-ins on both destructive commands.
+        match parse_command(["tl", "fs", "restore", "--discard-local", "0a1b2c3d"]) {
+            Commands::Fs(FsCommands::Restore {
+                discard_local: true,
+                ..
+            }) => {}
+            _ => panic!("expected fs restore --discard-local command"),
+        }
+        match parse_command(["tl", "fs", "unmount", "./w"]) {
+            Commands::Fs(FsCommands::Unmount {
+                delete: false,
+                discard_local: false,
+                ..
+            }) => {}
+            _ => panic!("expected fs unmount command"),
+        }
+        match parse_command(["tl", "fs", "unmount", "--discard-local", "--delete", "./w"]) {
+            Commands::Fs(FsCommands::Unmount {
+                delete: true,
+                discard_local: true,
+                ..
+            }) => {}
+            _ => panic!("expected fs unmount --discard-local command"),
         }
 
         assert!(Cli::try_parse_from(["tl", "fs", "promote"]).is_err());
