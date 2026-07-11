@@ -129,6 +129,13 @@ pub struct MountState {
     /// mounts that didn't opt in and in state files from before the feature.
     #[serde(default)]
     pub auto_commit_interval_secs: Option<u64>,
+    /// The commit the followed ref resolved to in the create/attach response that produced
+    /// this state file — a latency hint (`MountOptions::start_oid`) that lets the mount core
+    /// overlap its serve probe with ref resolution. The ref answer stays authoritative, so an
+    /// aged value (a hand-rerun `tl fs daemon` on an old state dir) is superseded at mount.
+    /// Absent in older state files: the core resolves serially, one extra round trip.
+    #[serde(default)]
+    pub start_oid: Option<String>,
 }
 
 impl MountState {
@@ -228,6 +235,33 @@ fn expires_in(expires_at: &str) -> Duration {
         .unwrap_or(Duration::from_secs(30 * 60))
 }
 
+/// Mint a repo-scoped git credential and write it through to the CLI's on-disk cache, so a
+/// daemon-side mint (startup fallback, rotation, auth recovery) also warms the cache the next
+/// `tl fs` command reads — the same save `FsSession::open` does for CLI-side mints.
+#[cfg(unix)]
+async fn mint_and_cache(
+    sdk: &tensorlake::artifact_storage::ArtifactStorageClient,
+    api_url: &str,
+    project: &str,
+    repo: &str,
+) -> Result<(String, String, String)> {
+    let cred = sdk
+        .mint_token_for_repo(project, Some(repo))
+        .await?
+        .into_inner();
+    if let Err(e) = crate::config::files::save_git_credential(
+        api_url,
+        project,
+        repo,
+        &cred.git_username,
+        &cred.token,
+        &cred.expires_at,
+    ) {
+        tracing::warn!("could not cache minted git credential: {e}");
+    }
+    Ok((cred.git_username, cred.token, cred.expires_at))
+}
+
 /// Run the daemon in the foreground of the current process. `tl fs mount` spawns this as a
 /// detached child (`tl fs daemon --state-dir ...`) with stderr pointed at the state dir's
 /// `daemon.log`.
@@ -248,9 +282,18 @@ pub async fn run(ctx: &CliContext, state_dir: &Path, log_level: &str) -> Result<
 
 /// Install the daemon's tracing subscriber, writing to stderr — which the detached spawn
 /// redirects to the state dir's `daemon.log` (foreground runs log to the terminal). Without
+/// this every `tracing::warn!` in the daemon is silently discarded. `tl fs mount` installs
+/// the same subscriber in the CLI process, which is what surfaces its phase-timing lines.
+#[cfg(not(unix))]
+pub(crate) fn init_logging(_level: &str) -> Result<()> {
+    Ok(())
+}
+
+/// Install the daemon's tracing subscriber, writing to stderr — which the detached spawn
+/// redirects to the state dir's `daemon.log` (foreground runs log to the terminal). Without
 /// this every `tracing::warn!` in the daemon is silently discarded.
 #[cfg(unix)]
-fn init_logging(level: &str) -> Result<()> {
+pub(crate) fn init_logging(level: &str) -> Result<()> {
     use std::str::FromStr;
     let level = tracing_subscriber::filter::LevelFilter::from_str(level).map_err(|_| {
         CliError::usage(format!(
@@ -272,25 +315,49 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     use crate::commands::git::{artifact_storage_client, project_id};
     use gsvc_mount::{FsClient, MountCore, MountOptions};
 
+    let started = std::time::Instant::now();
     let state = load_mount_state(state_dir)?;
     let sdk = artifact_storage_client(ctx)?;
     let project = project_id(ctx)?;
 
-    // Initial credential: the dev override, or a fresh mint.
-    let (git_username, token, mut expires_at) = match std::env::var("TENSORLAKE_GIT_TOKEN") {
-        Ok(token) => (
-            std::env::var("TENSORLAKE_GIT_USERNAME").unwrap_or_else(|_| "t".to_string()),
-            token,
-            None,
-        ),
-        Err(_) => {
-            let cred = sdk
-                .mint_token_for_repo(&project, Some(&state.repo))
-                .await?
-                .into_inner();
-            (cred.git_username, cred.token, Some(cred.expires_at))
-        }
-    };
+    // Initial credential: the dev override, the cache the mounting CLI just wrote (the mint
+    // round trip through the platform ingress is the slowest single call in daemon startup),
+    // or a fresh mint. A cached credential is adopted only with comfortable runway — anything
+    // the rotation task would replace within minutes is minted fresh instead, so the
+    // rotation schedule never starts inside its own margin. The rotation task re-mints
+    // before whichever credential this is expires.
+    let (git_username, token, mut expires_at, credential_source) =
+        match tensorlake::artifact_storage::ArtifactStorageClient::git_credential_from_env() {
+            Some(cred) => (cred.git_username, cred.token, None, "env"),
+            None => {
+                // Freshest cached entry wins across scopes: a stale repo-scoped token from an
+                // earlier credential-helper use must not shadow the "*" token the mounting
+                // CLI just wrote.
+                let cached = [state.repo.as_str(), "*"]
+                    .iter()
+                    .filter_map(|scope| {
+                        crate::config::files::load_git_credential(&ctx.api_url, &project, scope)
+                    })
+                    .max_by_key(|(_, _, expires_at)| expires_in(expires_at));
+                match cached.filter(|(_, _, expires_at)| {
+                    expires_in(expires_at) > CREDENTIAL_ROTATE_MARGIN + Duration::from_secs(5 * 60)
+                }) {
+                    Some((username, token, expires_at)) => {
+                        (username, token, Some(expires_at), "cache")
+                    }
+                    None => {
+                        let (username, token, expires_at) =
+                            mint_and_cache(&sdk, &ctx.api_url, &project, &state.repo).await?;
+                        (username, token, Some(expires_at), "mint")
+                    }
+                }
+            }
+        };
+    tracing::info!(
+        source = credential_source,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "mount daemon: credential ready"
+    );
     // The daemon's long-lived `(user, token)` credential: heartbeats and auto-commits read it,
     // and the rotation task below swaps it in place before expiry — a static copy would start
     // failing an hour into the mount's life.
@@ -311,51 +378,78 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         .follow_ref
         .clone()
         .unwrap_or_else(|| state.ref_name.clone());
-    let core = MountCore::new(
-        client,
-        MountOptions {
-            reference: followed,
-            follow: true,
-            poll_interval: Duration::from_secs(5),
-            // Manifest-driven cache prefill in the background: first walks serve warm instead
-            // of paying a per-directory crawl. Best-effort — a failed warmup just starts cold.
-            warmup: true,
-            ..Default::default()
-        },
-    )
-    .await
+    let mount_options = MountOptions {
+        reference: followed,
+        follow: true,
+        poll_interval: Duration::from_secs(5),
+        // Manifest-driven cache prefill in the background: first walks serve warm instead
+        // of paying a per-directory crawl. Best-effort — a failed warmup just starts cold.
+        warmup: true,
+        // The create/attach response's commit: lets the core overlap its serve probe with
+        // ref resolution (one startup round trip instead of two chained). The ref answer
+        // stays authoritative, so a stale value is superseded at mount.
+        start_oid: state.start_oid.clone(),
+        ..Default::default()
+    };
+    // MountCore::new is also the adopted credential's first live use: a cached token can be
+    // revoked before its recorded expiry (project auth-epoch rotation), which its expires_at
+    // cannot reveal. On an auth failure, purge the poisoned cache, mint fresh, and retry once.
+    let core = match MountCore::new(client.clone(), mount_options.clone()).await {
+        Err(gsvc_mount::MountError::Status { status: 401, .. }) if credential_source == "cache" => {
+            tracing::warn!("cached git credential rejected (revoked?); re-minting");
+            crate::config::files::purge_git_credentials();
+            let (username, token, fresh_expires) =
+                mint_and_cache(&sdk, &ctx.api_url, &project, &state.repo).await?;
+            rotating_client.set_token(Some(token.clone()));
+            *api_creds.lock().expect("creds lock") = (username, token);
+            expires_at = Some(fresh_expires);
+            MountCore::new(client, mount_options).await
+        }
+        other => other,
+    }
     .map_err(|e| CliError::usage(format!("mount init: {e}")))?;
     let overlay = OverlayFs::new(core.clone(), state_dir, state.read_only())
         .map_err(|e| CliError::usage(format!("overlay init: {e}")))?;
 
-    // Credential rotation: re-mint comfortably before expiry, swap in place.
-    if expires_at.is_some() {
+    // Credential rotation: re-mint comfortably before expiry (or on demand — the heartbeat
+    // task nudges `remint` when the server rejects the current token), swap in place, and
+    // keep the on-disk cache warm for the next CLI command. A failed mint retries on a short
+    // fixed cadence: `expires_at` is left untouched, so `due` collapses toward the 60s floor
+    // instead of the old 30-minute parse-fallback sleep that could strand a near-expiry
+    // token unrotated.
+    let remint = Arc::new(tokio::sync::Notify::new());
+    let rotates = expires_at.is_some();
+    if rotates {
         let sdk = sdk.clone();
-        let (project, repo) = (project.clone(), state.repo.clone());
+        let (api_url, project, repo) = (ctx.api_url.clone(), project.clone(), state.repo.clone());
         let rotate = rotating_client;
         let creds = api_creds.clone();
+        let remint = remint.clone();
         tokio::spawn(async move {
             loop {
                 let due = expires_in(expires_at.as_deref().unwrap_or_default())
                     .saturating_sub(CREDENTIAL_ROTATE_MARGIN);
-                tokio::time::sleep(due.max(Duration::from_secs(60))).await;
-                match sdk.mint_token_for_repo(&project, Some(&repo)).await {
-                    Ok(cred) => {
-                        let cred = cred.into_inner();
-                        rotate.set_token(Some(cred.token.clone()));
-                        *creds.lock().expect("creds lock") = (cred.git_username, cred.token);
-                        expires_at = Some(cred.expires_at);
+                tokio::select! {
+                    _ = tokio::time::sleep(due.max(Duration::from_secs(60))) => {}
+                    _ = remint.notified() => {}
+                }
+                match mint_and_cache(&sdk, &api_url, &project, &repo).await {
+                    Ok((username, token, fresh_expires)) => {
+                        rotate.set_token(Some(token.clone()));
+                        *creds.lock().expect("creds lock") = (username, token);
+                        expires_at = Some(fresh_expires);
                     }
                     Err(e) => {
-                        tracing::warn!("credential rotation failed (will retry): {e}");
-                        expires_at = None; // retry on the fallback cadence
+                        tracing::warn!("credential rotation failed (retrying in ~60s): {e}");
                     }
                 }
             }
         });
     }
 
-    // Lease heartbeat.
+    // Lease heartbeat. An auth failure here is the running daemon's signal that its token
+    // died early (revocation, epoch rotation): nudge the rotation task instead of waiting
+    // out the scheduled re-mint.
     {
         let sdk = sdk.clone();
         let (project, repo, ws) = (
@@ -364,6 +458,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
             state.workspace_id.clone(),
         );
         let creds = api_creds.clone();
+        let remint = rotates.then(|| remint.clone());
         tokio::spawn(async move {
             loop {
                 let (user, token) = creds.lock().expect("creds lock").clone();
@@ -372,6 +467,14 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                     .await
                 {
                     tracing::warn!("workspace heartbeat failed: {e}");
+                    if let (
+                        Some(remint),
+                        tensorlake::error::SdkError::Authentication(_)
+                        | tensorlake::error::SdkError::Authorization(_),
+                    ) = (&remint, &e)
+                    {
+                        remint.notify_one();
+                    }
                 }
                 tokio::time::sleep(HEARTBEAT_INTERVAL).await;
             }
@@ -393,6 +496,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         workspace = %state.workspace_id,
         mountpoint = %mountpoint.display(),
         commit = %core.current_commit(),
+        startup_ms = started.elapsed().as_millis() as u64,
         "mount daemon serving"
     );
 

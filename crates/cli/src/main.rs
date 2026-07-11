@@ -262,8 +262,10 @@ enum FsCommands {
         #[arg(long, requires = "foreground")]
         trace_ops: bool,
 
-        /// Daemon log level (off, error, warn, info, debug, trace). Detached daemons log to
-        /// `daemon.log` in the mount's state directory; foreground runs log to the terminal.
+        /// Log level (off, error, warn, info, debug, trace) for the mount daemon AND this
+        /// command's own stderr diagnostics. Detached daemons log to `daemon.log` in the
+        /// mount's state directory; foreground runs log to the terminal. `debug` also prints
+        /// the CLI's `mount timing` phase lines.
         #[arg(long, default_value = "info")]
         log_level: String,
     },
