@@ -402,8 +402,8 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
             Cell::new(ws.base_ref.as_deref().unwrap_or(&ws.base[..12])),
             Cell::new(if ws.head == ws.base { "-" } else { "yes" }),
             Cell::new(match &ws.shared_target {
-                Some(target) => format!("shared-rw -> {target}"),
-                None => "workspace".to_string(),
+                Some(_) => "publishing".to_string(),
+                None => "private".to_string(),
             }),
             // Human output keeps the annotation; the JSON path/kind split serves machines.
             // A mount session on another machine (fleet liveness) shows as its host.
@@ -2543,7 +2543,7 @@ pub async fn unmount(
 ) -> Result<()> {
     if let Some((root, _)) = plaindir::binding_for_lenient(path) {
         return Err(CliError::usage(format!(
-            "{root} is a plain-directory binding, not a mount; detach it with: tl fs unbind \
+            "{root} is a pushed directory, not a mount; stop tracking it with: tl fs unmount \
              {root}"
         )));
     }

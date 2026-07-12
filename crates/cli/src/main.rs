@@ -286,24 +286,6 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Bind a plain directory (no mount) to a new workspace; `tl fs snapshot` then scans and
-    /// pushes it directly — v1 requires the file system's head to be empty
-    Init {
-        /// Directory to bind (default: the current directory; created if missing)
-        path: Option<PathBuf>,
-
-        /// File system to create the workspace on (default: the project's only file system)
-        #[arg(long)]
-        file_system: Option<String>,
-    },
-
-    /// Remove a plain-directory binding and its local state; the workspace and its snapshots
-    /// survive on the server (delete them with `tl fs rm`)
-    Unbind {
-        /// A bound directory (default: the binding containing the current directory)
-        path: Option<PathBuf>,
-    },
-
     /// List filesystems (with a name: that filesystem's sessions and mounts)
     #[command(name = "ls")]
     Ls {
@@ -318,7 +300,7 @@ enum FsCommands {
     /// Delete a filesystem and everything in it
     #[command(name = "rm")]
     Rm {
-        /// Filesystem name (a session id from `tl fs ls <filesystem>` still works, deprecated)
+        /// Filesystem name
         name: String,
 
         /// Skip the confirmation
@@ -337,22 +319,15 @@ enum FsCommands {
         log_level: String,
     },
 
-    /// Seal local changes into a snapshot on the workspace ref (the local overlay is kept)
+    /// Save the current state of the filesystem (a clean tree is a quiet no-op)
     Snapshot {
-        /// A mounted directory (default: the mount containing the current directory)
+        /// A mounted or pushed directory (default: the attachment containing the current
+        /// directory)
         path: Option<PathBuf>,
 
-        /// Snapshot message
+        /// Save message
         #[arg(short, long)]
         message: Option<String>,
-
-        /// After sealing, drop the WHOLE local overlay so the mount serves the snapshot
-        /// commit directly. Rarely needed — `tl fs sync` trims sealed content by itself;
-        /// this is the disk-reclaim / reset-local-state escape hatch. Destructive: also
-        /// deletes ignored files under the mount and any writes made while the snapshot was
-        /// uploading — pause writers first.
-        #[arg(long)]
-        clear: bool,
     },
 
     /// Show workspace, lease, and local-change status for a mount
@@ -376,11 +351,12 @@ enum FsCommands {
 
         /// Drop the local overlay to apply the restore. Destructive: unsaved changes AND
         /// ignored files under the mount are deleted — `tl fs snapshot` first to keep them
-        #[arg(long, alias = "discard-local")]
+        #[arg(long)]
         discard: bool,
     },
 
-    /// Unmount: detach; the session survives and remounting the filesystem resumes it
+    /// Detach a mounted filesystem (the session survives; remounting resumes it) or stop
+    /// tracking a pushed directory
     Unmount {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
@@ -631,7 +607,7 @@ enum GitCommands {
 
         /// Drop unsealed local changes (and ignored files) with the mount; without it,
         /// unmount refuses when unsealed work would be lost
-        #[arg(long, alias = "discard-local")]
+        #[arg(long)]
         discard: bool,
     },
 
@@ -2384,17 +2360,34 @@ async fn run_applications_command(
 #[cfg(feature = "mount")]
 async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Result<()> {
     // Setup installs a local app bundle; it must work before the user has logged in.
-    // Unbind only removes local binding state (the workspace survives server-side), so it
-    // must work even when auth is unavailable.
     let subcmd = match subcmd {
         FsCommands::Setup { from, check } => {
             return commands::fs::setup(from.as_deref(), check).await;
         }
-        FsCommands::Unbind { path } => {
-            return commands::fs::plaindir::unbind(path).await;
-        }
         other => other,
     };
+    // Unmounting a pushed (bound) directory only removes local tracking state — the directory
+    // and the filesystem are untouched — so, like setup, it works without auth.
+    if let FsCommands::Unmount {
+        path,
+        delete,
+        discard,
+    } = &subcmd
+    {
+        let probe = match path {
+            Some(p) => p.clone(),
+            None => std::env::current_dir()?,
+        };
+        if commands::fs::plaindir::binding_for_lenient(&probe).is_some() {
+            if *delete || *discard {
+                return Err(CliError::usage(
+                    "a pushed directory is your own files; unmount just stops tracking it \
+                     (--discard/--delete do not apply)",
+                ));
+            }
+            return commands::fs::plaindir::unbind(path.clone()).await;
+        }
+    }
     // Path-addressed commands default their mounted-directory argument to the mount containing
     // the CWD; resolve it up front so scope hydration and the command agree on the path.
     let mut subcmd = subcmd;
@@ -2427,12 +2420,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
     // Set for exactly the path-addressed commands, whose dispatch arms are the only readers.
     let mount_dir = move || mount_dir.expect("resolved for every path-addressed command above");
     let result = match subcmd {
-        FsCommands::Setup { .. } | FsCommands::Unbind { .. } => {
-            unreachable!("handled before the auth guard")
-        }
-        FsCommands::Init { path, file_system } => {
-            commands::fs::plaindir::init(ctx, path, file_system.as_deref()).await
-        }
+        FsCommands::Setup { .. } => unreachable!("handled before the auth guard"),
         FsCommands::Create { name, json } => {
             commands::fs::create_filesystem(ctx, &name, json).await
         }
@@ -2466,8 +2454,8 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             state_dir,
             log_level,
         } => commands::fs::daemon::run(ctx, &state_dir, &log_level).await,
-        FsCommands::Snapshot { message, clear, .. } => {
-            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), clear).await
+        FsCommands::Snapshot { message, .. } => {
+            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), false).await
         }
         FsCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
         FsCommands::Restore {
@@ -3168,35 +3156,32 @@ mod tests {
             Commands::Fs(FsCommands::Snapshot {
                 path: None,
                 message: None,
-                clear: false,
             }) => {}
             _ => panic!("expected fs snapshot command"),
         }
 
         match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip"]) {
-            Commands::Fs(FsCommands::Snapshot {
-                path,
-                message,
-                clear,
-            }) => {
+            Commands::Fs(FsCommands::Snapshot { path, message }) => {
                 assert_eq!(path, Some(PathBuf::from("./w")));
                 assert_eq!(message.as_deref(), Some("wip"));
-                assert!(!clear, "clear is opt-in");
             }
             _ => panic!("expected fs snapshot command"),
         }
 
-        // The destructive seal-and-clear is an explicit flag.
-        match parse_command(["tl", "fs", "snapshot", "--clear"]) {
-            Commands::Fs(FsCommands::Snapshot { clear: true, .. }) => {}
-            _ => panic!("expected fs snapshot --clear command"),
-        }
-
-        // Promote, sync, and diff left the fs surface entirely (promote/sync live on
-        // `tl git`; diff was cut).
+        // Promote, sync, diff, init, and the overlay-clearing snapshot left the fs surface
+        // entirely (promote/sync/--clear live on `tl git`; diff and init were cut — push
+        // binds a directory, unmount forgets it).
         assert!(Cli::try_parse_from(["tl", "fs", "promote", "main"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "sync"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "diff"]).is_err());
+        assert!(Cli::try_parse_from(["tl", "fs", "init"]).is_err());
+        assert!(Cli::try_parse_from(["tl", "fs", "unbind"]).is_err());
+        assert!(Cli::try_parse_from(["tl", "fs", "snapshot", "--clear"]).is_err());
+        // `tl git snapshot --clear` keeps the disk-reclaim hatch (hidden).
+        match parse_command(["tl", "git", "snapshot", "--clear"]) {
+            Commands::Git(GitCommands::Snapshot { clear: true, .. }) => {}
+            _ => panic!("expected git snapshot --clear command"),
+        }
 
         match parse_command(["tl", "fs", "restore", "0a1b2c3d"]) {
             Commands::Fs(FsCommands::Restore {

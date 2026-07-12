@@ -367,7 +367,7 @@ fn binding_overlap_error(root: &str, bindings: &BTreeMap<String, PathBuf>) -> Op
     bindings.keys().find_map(|bound| {
         let bound_path = Path::new(bound);
         (candidate.starts_with(bound_path) || bound_path.starts_with(candidate)).then(|| {
-            format!("{root} overlaps the existing binding at {bound} (see `tl fs unbind {bound}`)")
+            format!("{root} overlaps the tracked directory at {bound} (tl fs unmount {bound} stops tracking it)")
         })
     })
 }
@@ -379,8 +379,8 @@ pub fn assert_no_binding_overlap(mountpoint: &str) -> Result<()> {
         let bound_path = Path::new(bound);
         if candidate.starts_with(bound_path) || bound_path.starts_with(candidate) {
             return Err(CliError::usage(format!(
-                "{mountpoint} overlaps the plain-directory binding at {bound}; unbind it \
-                 first (tl fs unbind {bound}) or mount elsewhere"
+                "{mountpoint} overlaps the tracked directory at {bound}; stop tracking it \
+                 first (tl fs unmount {bound}) or mount elsewhere"
             )));
         }
     }
@@ -1363,20 +1363,6 @@ fn symlink_target_bytes(target: &Path) -> Vec<u8> {
 // tl fs init — bind a plain directory to a new (verified empty-base) workspace.
 // ---------------------------------------------------------------------------------------------
 
-pub async fn init(
-    ctx: &CliContext,
-    path: Option<PathBuf>,
-    file_system: Option<&str>,
-) -> Result<()> {
-    let (root, _state_dir, repo, ws_id) = bind(ctx, path, file_system, false).await?;
-    println!(
-        "Bound {root} to new workspace {} (file system {repo}).",
-        short_id(&ws_id)
-    );
-    println!("Work in the directory, then: tl fs snapshot {root}");
-    Ok(())
-}
-
 /// `tl fs push <dir> <filesystem>` — upload a directory into a filesystem as one save, no
 /// mount. First push binds the directory (publish-on-save workspace); later pushes reuse the
 /// binding's stat index, so only changed files upload.
@@ -2158,6 +2144,8 @@ fn orphan_state_dir_for(root: &str, state_root: &Path) -> Option<PathBuf> {
 /// `tl fs unbind` — remove the local binding and its state. Deliberately NOT `rm`: `tl fs rm`
 /// deletes the *workspace*; unbinding only forgets this directory's link to it, and the
 /// workspace (with every snapshot) survives on the server.
+/// `tl fs unmount` on a pushed directory: forget the local tracking state. The
+/// directory's files and the filesystem are untouched.
 pub async fn unbind(path: Option<PathBuf>) -> Result<()> {
     let (root, state_dir) = match path {
         Some(path) => match binding_for(&path)? {
@@ -2180,8 +2168,8 @@ pub async fn unbind(path: Option<PathBuf>) -> Result<()> {
                     return Ok(());
                 }
                 return Err(CliError::usage(format!(
-                    "{} is not a bound directory (see `tl fs status`, or bind one with \
-                     `tl fs init`)",
+                    "{} is not a tracked directory (see `tl fs status`, or start one with \
+                     `tl fs push <dir> <filesystem>`)",
                     path.display()
                 )));
             }
