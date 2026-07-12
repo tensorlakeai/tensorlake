@@ -202,6 +202,124 @@ pub fn daemon_pid(state_dir: &Path) -> Option<i32> {
         .ok()
 }
 
+/// One retained upper file's identity at the moment its content was resolved for a seal.
+/// Capturing the stat at resolve time (not after the push) is what makes the record safe: a
+/// write racing the push changes the file's mtime relative to this, so a mismatch always
+/// classifies the racier state as dirty. The residual exposure is a same-size write inside
+/// the filesystem's timestamp granularity — the classic racy-git window, accepted here for
+/// the same reason git accepts it.
+#[cfg(unix)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct SealedStat {
+    pub size: u64,
+    pub mtime_secs: i64,
+    pub mtime_nanos: u32,
+    /// Git mode (100644/100755/120000) — a chmod flips it without touching size or mtime.
+    pub mode: u32,
+}
+
+#[cfg(unix)]
+impl SealedStat {
+    fn of(meta: &std::fs::Metadata) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        SealedStat {
+            size: meta.size(),
+            mtime_secs: meta.mtime(),
+            mtime_nanos: meta.mtime_nsec() as u32,
+            mode: git_mode(meta),
+        }
+    }
+}
+
+/// The persisted seal record (`<state dir>/sealed.json`): every overlay path whose current
+/// on-disk state a snapshot has published — upserts with the [`SealedStat`] identity of the
+/// sealed content, deletes as inert-whiteout markers — plus the last sealed commit. The
+/// sealer owns it (written after each successful push, under the sealer state lock); daemon
+/// startup and the `reindex` op read it to absolve rebuild-marked dirt whose identity still
+/// matches. Losing or corrupting the file is safe: everything degrades to the rebuild's
+/// pessimistic all-dirty answer, and the next seal re-records (content dedup makes the
+/// re-push free).
+#[cfg(unix)]
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct SealedIndex {
+    #[serde(default)]
+    pub commit: String,
+    #[serde(default)]
+    pub upserts: std::collections::BTreeMap<String, SealedStat>,
+    #[serde(default)]
+    pub deletes: std::collections::BTreeSet<String>,
+}
+
+#[cfg(unix)]
+impl SealedIndex {
+    fn file(state_dir: &Path) -> PathBuf {
+        state_dir.join("sealed.json")
+    }
+
+    pub(crate) fn load(state_dir: &Path) -> SealedIndex {
+        std::fs::read(Self::file(state_dir))
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .unwrap_or_default()
+    }
+
+    fn save(&self, state_dir: &Path) -> std::io::Result<()> {
+        let tmp = state_dir.join("sealed.json.tmp");
+        std::fs::write(&tmp, serde_json::to_vec(self).expect("plain data serializes"))?;
+        std::fs::rename(&tmp, Self::file(state_dir))
+    }
+
+    fn reset(state_dir: &Path) {
+        let _ = std::fs::remove_file(Self::file(state_dir));
+    }
+}
+
+/// Startup/reindex reconciliation. [`OverlayFs::rebuild_dirty_index`] pessimistically marks
+/// every upper file an upsert and every whiteout a delete; absolve the ones whose on-disk
+/// identity still matches their persisted seal record — they are retained sealed content, not
+/// dirt, and without this every daemon restart re-reports (and the next seal re-hashes) the
+/// whole ever-written set. Returns (absolved upserts, absolved deletes) for the startup log.
+#[cfg(unix)]
+fn reconcile_sealed(state_dir: &Path, overlay: &OverlayFs) -> (usize, usize) {
+    let index = SealedIndex::load(state_dir);
+    if index.upserts.is_empty() && index.deletes.is_empty() {
+        return (0, 0);
+    }
+    // Clock snapshot BEFORE the stat pass: anything mutated after this proves nothing.
+    let upto = overlay.current_generation();
+    let (clean_upserts, clean_deletes) = sealed_survivors(state_dir, &index);
+    overlay.absolve_clean(&clean_upserts, &clean_deletes, upto);
+    (clean_upserts.len(), clean_deletes.len())
+}
+
+/// The sealed-index entries whose on-disk overlay state still matches the seal record: upserts
+/// by exact [`SealedStat`] identity, deletes by the whiteout marker still being present.
+#[cfg(unix)]
+fn sealed_survivors(state_dir: &Path, index: &SealedIndex) -> (Vec<String>, Vec<String>) {
+    let upper = state_dir.join("upper");
+    let wh = state_dir.join("wh");
+    let clean_upserts: Vec<String> = index
+        .upserts
+        .iter()
+        .filter(|(path, sealed)| {
+            std::fs::symlink_metadata(upper.join(path))
+                .is_ok_and(|meta| SealedStat::of(&meta) == **sealed)
+        })
+        .map(|(path, _)| path.clone())
+        .collect();
+    let clean_deletes: Vec<String> = index
+        .deletes
+        .iter()
+        .filter(|path| {
+            wh.join(path)
+                .symlink_metadata()
+                .is_ok_and(|meta| meta.is_file())
+        })
+        .cloned()
+        .collect();
+    (clean_upserts, clean_deletes)
+}
+
 /// Request body of the `seal` control op — shared by the daemon's handler and the CLI's
 /// client path (`fs::seal_via_daemon`) so the wire shape cannot drift between them.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -241,6 +359,39 @@ pub(crate) struct SealReply {
     /// revalidation set.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleared: Option<Vec<String>>,
+}
+
+/// Final reply of the `dirty` control op: the sealer's truthful dirty view — exactly what the
+/// next `seal` would publish, resolved by the same dry-run walk (ignore rules applied,
+/// directory events expanded, no side effects). Shared by the daemon's handler and every CLI
+/// consumer (`status`, `promote`, `sync`, `diff`) so there is ONE definition of dirty.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct DirtyReply {
+    /// Paths the next seal would upsert.
+    #[serde(default)]
+    pub upserts: Vec<String>,
+    /// Paths the next seal would delete.
+    #[serde(default)]
+    pub deletes: Vec<String>,
+    /// Pending committed-directory renames, `(from, to)`.
+    #[serde(default)]
+    pub renames: Vec<(String, String)>,
+    /// The lower commit currently served.
+    #[serde(default)]
+    pub commit: String,
+}
+
+/// Final reply of the `trim` control op: retained (sealed-and-kept) overlay state dropped in
+/// place, the non-destructive alternative to `clear_upper` — dirty and ignored files are never
+/// touched. `held_open` lists sealed paths that could not be dropped and still shadow the
+/// lower (a live writer's descriptor, or an unlink failure); the caller decides whether that
+/// blocks (sync does).
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct TrimReply {
+    #[serde(default)]
+    pub trimmed: u64,
+    #[serde(default)]
+    pub held_open: Vec<String>,
 }
 
 /// One control round-trip from a CLI command to the daemon. Mounts (and so daemons) exist
@@ -570,6 +721,18 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     .map_err(|e| CliError::usage(format!("mount init: {e}")))?;
     let overlay = OverlayFs::new(core.clone(), state_dir, state.read_only())
         .map_err(|e| CliError::usage(format!("overlay init: {e}")))?;
+    // Before the kernel attaches (no events can race the absolve): retained sealed content the
+    // rebuild pessimistically marked dirty is reconciled back out against sealed.json.
+    if !state.read_only() {
+        let (upserts, deletes) = reconcile_sealed(state_dir, &overlay);
+        if upserts + deletes > 0 {
+            tracing::info!(
+                retained_files = upserts,
+                inert_whiteouts = deletes,
+                "mount: reconciled retained sealed state; not dirty"
+            );
+        }
+    }
 
     // Credential rotation: re-mint comfortably before expiry (or on demand — the heartbeat
     // task nudges `remint` when the server rejects the current token), swap in place, and
@@ -701,7 +864,10 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 seen_epoch: overlay.epoch(),
                 recent_seals: Vec::new(),
                 chunk_cache: std::collections::HashMap::new(),
+                sealed: SealedIndex::load(state_dir),
+                reindex_pending: false,
             }),
+            mirror: std::sync::Mutex::new(SealerMirror::default()),
         })
     });
 
@@ -744,6 +910,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         let invalidate = invalidate.clone();
         let pending = pending.clone();
         let sealer = sealer.clone();
+        let control_state_dir = state_dir.to_path_buf();
         tokio::spawn(async move {
             loop {
                 let Ok((stream, _)) = listener.accept().await else {
@@ -755,6 +922,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 let invalidate = invalidate.clone();
                 let pending = pending.clone();
                 let sealer = sealer.clone();
+                let control_state_dir = control_state_dir.clone();
                 tokio::spawn(async move {
                     let mut reader = tokio::io::BufReader::new(stream);
                     let mut line = String::new();
@@ -772,6 +940,63 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                         "ping" => {
                             serde_json::json!({ "ok": true, "commit": core.current_commit() })
                         }
+                        // The truthful dirty view: exactly what the next seal would publish
+                        // (`tl fs status`/`promote`/`sync`/`diff` all read this — one
+                        // definition of dirty). A read-only mount has no sealer and can hold
+                        // no dirt.
+                        "dirty" => match sealer.as_ref() {
+                            None => {
+                                let reply = DirtyReply {
+                                    commit: core.current_commit(),
+                                    ..Default::default()
+                                };
+                                match serde_json::to_value(&reply) {
+                                    Ok(mut v) => {
+                                        v["ok"] = serde_json::Value::Bool(true);
+                                        v
+                                    }
+                                    Err(e) => {
+                                        serde_json::json!({ "ok": false, "error": e.to_string() })
+                                    }
+                                }
+                            }
+                            Some(sealer) => match sealer.dirty_view().await {
+                                Ok(reply) => match serde_json::to_value(&reply) {
+                                    Ok(mut v) => {
+                                        v["ok"] = serde_json::Value::Bool(true);
+                                        v
+                                    }
+                                    Err(e) => {
+                                        serde_json::json!({ "ok": false, "error": e.to_string() })
+                                    }
+                                },
+                                Err(e) => {
+                                    serde_json::json!({ "ok": false, "error": e.to_string() })
+                                }
+                            },
+                        },
+                        // Drop retained (sealed-and-kept) overlay state — sync's pre-flight.
+                        // Unlike `clear_upper`, dirty and ignored files survive.
+                        "trim" => match sealer.as_ref() {
+                            None => serde_json::json!({
+                                "ok": false,
+                                "error": "read-only mount: nothing is retained",
+                            }),
+                            Some(sealer) => match sealer.trim_all().await {
+                                Ok(reply) => match serde_json::to_value(&reply) {
+                                    Ok(mut v) => {
+                                        v["ok"] = serde_json::Value::Bool(true);
+                                        v
+                                    }
+                                    Err(e) => {
+                                        serde_json::json!({ "ok": false, "error": e.to_string() })
+                                    }
+                                },
+                                Err(e) => {
+                                    serde_json::json!({ "ok": false, "error": e.to_string() })
+                                }
+                            },
+                        },
                         // Seal on demand: `tl fs snapshot` runs exactly one cycle of the same
                         // sealer auto-commit ticks, with the caller's message (and optional
                         // overlay clear). Streaming op — the handler writes its own event
@@ -814,21 +1039,61 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
                         },
                         // The upper drop flips interned paths to their lower view with no
-                        // kernel-visible operation; push the implied invalidations.
-                        "clear_upper" => match overlay.clear_upper() {
-                            Ok(affected) => {
-                                invalidate(affected);
-                                serde_json::json!({ "ok": true })
+                        // kernel-visible operation; push the implied invalidations. Routed
+                        // through the sealer (state-lock serialized against in-flight seals,
+                        // arms the reindex-pending fail-closed guard) whenever one exists;
+                        // read-only mounts fall back to the bare drop.
+                        "clear_upper" => {
+                            let cleared = match sealer.as_ref() {
+                                Some(sealer) => sealer.clear_upper_control().await,
+                                None => {
+                                    SealedIndex::reset(&control_state_dir);
+                                    overlay.clear_upper().map_err(|e| {
+                                        CliError::usage(format!(
+                                            "clearing the overlay failed: {e}"
+                                        ))
+                                    })
+                                }
+                            };
+                            match cleared {
+                                Ok(affected) => {
+                                    invalidate(affected);
+                                    serde_json::json!({ "ok": true })
+                                }
+                                Err(e) => {
+                                    serde_json::json!({ "ok": false, "error": e.to_string() })
+                                }
                             }
-                            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-                        },
+                        }
                         // The upper was mutated out-of-band (restore writes into the state dir
                         // from the CLI process); rebuild the dirty index from disk so an
-                        // auto-commit mount seals the new state.
-                        "reindex" => match overlay.rebuild_dirty_index() {
-                            Ok(()) => serde_json::json!({ "ok": true }),
-                            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-                        },
+                        // auto-commit mount seals the new state, and disarm the fail-closed
+                        // reindex-pending guard. The reconcile is a correctness backstop, not
+                        // an optimization: in the restore flow it absolves nothing
+                        // (clear_upper reset sealed.json, and refilled files carry fresh
+                        // mtimes), but any future out-of-band flow that preserves seal
+                        // records must not re-dirty retained content.
+                        "reindex" => {
+                            let reindexed = match sealer.as_ref() {
+                                Some(sealer) => sealer.reindex_control().await,
+                                None => overlay
+                                    .rebuild_dirty_index()
+                                    .map_err(|e| {
+                                        CliError::usage(format!(
+                                            "rebuilding the dirty index failed: {e}"
+                                        ))
+                                    })
+                                    .map(|()| {
+                                        reconcile_sealed(&control_state_dir, &overlay);
+                                    }),
+                            };
+                            match reindexed {
+                                Ok(()) => serde_json::json!({ "ok": true }),
+                                Err(e) => {
+                                    serde_json::json!({ "ok": false, "error": e.to_string() })
+                                }
+                            }
+                        }
                         // Pending directory renames, expanded to the by-oid upserts a seal
                         // must publish (`tl fs snapshot` merges these into its push).
                         "expand_redirects" => match overlay.expand_redirects().await {
@@ -1086,6 +1351,20 @@ struct Sealer {
     invalidate: InvalSink,
     pending: Arc<std::sync::Mutex<PendingProbe>>,
     state: tokio::sync::Mutex<SealerState>,
+    /// A lock-cheap copy of the dirty-relevant sealer state (`sealed_gen`, the resurrection
+    /// guard set), republished by [`Sealer::publish_mirror`] whenever the real state changes.
+    /// The `dirty` control op reads THIS: taking the state mutex would park status behind an
+    /// in-flight push for however long the upload takes.
+    mirror: std::sync::Mutex<SealerMirror>,
+}
+
+/// See [`Sealer::mirror`].
+#[cfg(unix)]
+#[derive(Default)]
+struct SealerMirror {
+    sealed_gen: u64,
+    recently: std::collections::HashSet<String>,
+    reindex_pending: bool,
 }
 
 #[cfg(unix)]
@@ -1108,6 +1387,15 @@ struct SealerState {
     /// as a `StablePrefix` — only bytes past that boundary are re-read. Daemon-local; a
     /// restart just means one full-cost seal per file to re-learn.
     chunk_cache: std::collections::HashMap<String, ChunkList>,
+    /// The persisted seal record — see [`SealedIndex`]. Updated and saved after each
+    /// successful push; the durable half of what `recent_seals`/`sealed_gen` know in memory.
+    sealed: SealedIndex,
+    /// Restore has cleared the overlay and is refilling it out-of-band; until its follow-up
+    /// `reindex` rebuilds the dirty index, that index is EMPTY while the upper is in flux —
+    /// an unguarded dirty view would read as false-clean mid-refill (and a sync could pass
+    /// its dirty gate against a half-restored workspace). Seals, trims, and the dirty view
+    /// all fail closed while this is set.
+    reindex_pending: bool,
 }
 
 #[cfg(unix)]
@@ -1134,11 +1422,25 @@ impl Sealer {
     ) -> Result<SealOutcome> {
         use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
         let mut st = self.state.lock().await;
+        if st.reindex_pending {
+            // Restore is refilling the overlay out-of-band; the dirty index is not yet
+            // rebuilt, so a cycle here would seal (or worse, no-op through) a half-restored
+            // world. Retryable — the restore's reindex disarms this.
+            return Err(CliError::usage(
+                "the overlay is being restored (reindex pending); nothing was sealed",
+            ));
+        }
         let epoch = self.overlay.epoch();
         if epoch != st.seen_epoch {
             st.seen_epoch = epoch;
             st.chunk_cache.clear();
             st.recent_seals.clear();
+            // The sealed index describes the pre-rewrite world too. Restore's own reindex
+            // reconciles what genuinely survives; keeping records here would let a
+            // stat-coincident future file absolve against dropped content.
+            st.sealed = SealedIndex::default();
+            SealedIndex::reset(&self.state_dir);
+            self.publish_mirror(&st);
         }
         // Drop guard sets the lower has caught up with: the followed ref only moves along
         // this workspace's snapshots, so matching the current lower commit confirms it and
@@ -1150,6 +1452,7 @@ impl Sealer {
             .rposition(|(commit, _)| *commit == lower)
         {
             st.recent_seals.drain(..=i);
+            self.publish_mirror(&st);
         }
         // Renames a previous seal published but never consumed (crash, or the lower lagged
         // past our post-seal check) dangle once the lower advances; reap them before anything
@@ -1168,6 +1471,7 @@ impl Sealer {
         let watermark = delta.watermark;
         if delta.is_empty() && !self.overlay.has_redirects() {
             st.sealed_gen = watermark;
+            self.publish_mirror(&st);
             let cleared = clear.then(|| self.clear_overlay(&mut st)).transpose()?;
             return Ok(SealOutcome::Clean { cleared });
         }
@@ -1243,6 +1547,7 @@ impl Sealer {
             // and died between seals: sealed through, nothing to publish.
             st.sealed_gen = watermark;
             self.overlay.prune_dirty(watermark);
+            self.publish_mirror(&st);
             let cleared = clear.then(|| self.clear_overlay(&mut st)).transpose()?;
             return Ok(SealOutcome::Clean { cleared });
         }
@@ -1326,6 +1631,32 @@ impl Sealer {
         if st.chunk_cache.len() > 8192 {
             st.chunk_cache.clear();
         }
+        self.publish_mirror(&st);
+        if self.overlay.epoch() != st.seen_epoch {
+            // clear_upper/restore raced the push window: the snapshot itself published fine,
+            // but every resolve-time record describes the dropped world — saving it would
+            // resurrect a sealed.json the clear just reset, and a stat-coincident future file
+            // could absolve against dead content. The next cycle's epoch check retires the
+            // remaining caches.
+            st.sealed = SealedIndex::default();
+            SealedIndex::reset(&self.state_dir);
+        } else {
+            // Record what this seal vouched for: each pushed upper file under its
+            // resolve-time stat, each published delete as an inert whiteout. The save failing
+            // costs nothing but a pessimistic restart.
+            for (path, stat) in &resolved.stats {
+                st.sealed.upserts.insert(path.clone(), *stat);
+                st.sealed.deletes.remove(path);
+            }
+            for path in &delete_paths {
+                st.sealed.upserts.remove(path);
+                st.sealed.deletes.insert(path.clone());
+            }
+            st.sealed.commit = report.commit.clone();
+            if let Err(e) = st.sealed.save(&self.state_dir) {
+                eprintln!("seal: persisting sealed index failed: {e}");
+            }
+        }
         // Advance the lower to the sealed commit now instead of waiting out the follow poll:
         // from here on, a delete of a just-sealed path sees lower presence and whiteouts
         // normally — and the mount serves the new commit before a manual `seal` replies.
@@ -1354,6 +1685,29 @@ impl Sealer {
                      recorded (next seal republishes them idempotently)",
                     report.commit
                 );
+            }
+        }
+        // Tombstone hygiene: once the lower serves the sealed commit, every published
+        // whiteout is inert (the tree it hides the path from no longer carries the path).
+        // Dropping the markers costs nothing kernel-visible and keeps wh/ from accumulating
+        // the workspace's whole deletion history. Retained upper FILES are deliberately NOT
+        // trimmed here: they double as the local byte cache — the next write to a sealed
+        // path copies up from the local file instead of re-reading pushed bytes back off the
+        // server. `tl fs sync` is the flow that needs them gone, and it asks via `trim`.
+        if self.core.current_commit() == report.commit && !st.sealed.deletes.is_empty() {
+            let tombstones: Vec<String> = st.sealed.deletes.iter().cloned().collect();
+            // try, not wait: hygiene must never park the seal (and, transitively, every new
+            // mutating op queued behind the write-preferring fence) behind one slow in-flight
+            // copy-up. A contended fence just leaves the markers for the next seal.
+            if let Some(outcome) = self.overlay.try_trim_retained(&[], &tombstones)
+                && !outcome.tombstones_removed.is_empty()
+            {
+                for path in &outcome.tombstones_removed {
+                    st.sealed.deletes.remove(path);
+                }
+                if let Err(e) = st.sealed.save(&self.state_dir) {
+                    eprintln!("seal: persisting sealed index failed: {e}");
+                }
             }
         }
         // The destructive opt-in, last: only after the seal published AND the lower refresh
@@ -1406,7 +1760,169 @@ impl Sealer {
         st.seen_epoch = self.overlay.epoch();
         st.chunk_cache.clear();
         st.recent_seals.clear();
+        // Nothing is retained anymore; a stale record would absolve a future upper file that
+        // happens to stat-match dropped content.
+        st.sealed = SealedIndex::default();
+        SealedIndex::reset(&self.state_dir);
+        self.publish_mirror(&st);
         Ok(cleared.into_iter().collect())
+    }
+
+    /// Republish the dirty-op mirror from the authoritative state. Call after every mutation
+    /// of `sealed_gen` or `recent_seals`.
+    fn publish_mirror(&self, st: &SealerState) {
+        let mut mirror = self.mirror.lock().expect("mirror lock");
+        mirror.sealed_gen = st.sealed_gen;
+        mirror.reindex_pending = st.reindex_pending;
+        mirror.recently = st
+            .recent_seals
+            .iter()
+            .flat_map(|(_, set)| set)
+            .cloned()
+            .collect();
+    }
+
+    /// `clear_upper` routed through the sealer (adopted from the parallel #840 draft): the
+    /// state lock serializes the drop against in-flight seals — a clear can no longer land
+    /// inside a push window — and `reindex_pending` arms the fail-closed guard for the
+    /// out-of-band refill that follows.
+    async fn clear_upper_control(&self) -> Result<Vec<crate::commands::fs::overlay::OverlayInval>>
+    {
+        let mut st = self.state.lock().await;
+        let affected = self
+            .overlay
+            .clear_upper()
+            .map_err(|e| CliError::usage(format!("clearing the overlay failed: {e}")))?;
+        // The caches (and the sealed index) describe the dropped world; adopt the new epoch
+        // here so the next cycle doesn't double-clear.
+        st.seen_epoch = self.overlay.epoch();
+        st.chunk_cache.clear();
+        st.recent_seals.clear();
+        st.sealed = SealedIndex::default();
+        SealedIndex::reset(&self.state_dir);
+        st.reindex_pending = true;
+        self.publish_mirror(&st);
+        Ok(affected)
+    }
+
+    /// `reindex` routed through the sealer: rebuild the dirty index from the refilled
+    /// overlay, reconcile retained state, and disarm the fail-closed guard — under the same
+    /// lock that serializes seals, so no cycle observes the half-rebuilt index.
+    async fn reindex_control(&self) -> Result<()> {
+        let mut st = self.state.lock().await;
+        self.overlay
+            .rebuild_dirty_index()
+            .map_err(|e| CliError::usage(format!("rebuilding the dirty index failed: {e}")))?;
+        reconcile_sealed(&self.state_dir, &self.overlay);
+        st.seen_epoch = self.overlay.epoch();
+        st.chunk_cache.clear();
+        st.recent_seals.clear();
+        st.reindex_pending = false;
+        self.publish_mirror(&st);
+        Ok(())
+    }
+
+    /// The truthful dirty view — exactly what the next seal would publish, resolved by the
+    /// dry-run twin of the seal walk. Reads the mirror, not the state lock, so it answers
+    /// instantly while a push is in flight.
+    async fn dirty_view(&self) -> Result<DirtyReply> {
+        let (sealed_gen, recently) = {
+            let mirror = self.mirror.lock().expect("mirror lock");
+            if mirror.reindex_pending {
+                // Between restore's clear and its reindex the dirty index is empty while the
+                // upper is being refilled — answering would claim a half-restored workspace
+                // is clean.
+                return Err(CliError::usage(
+                    "the overlay is being restored (reindex pending); retry when the restore \
+                     completes",
+                ));
+            }
+            (mirror.sealed_gen, mirror.recently.clone())
+        };
+        let delta = self.overlay.dirty_since(sealed_gen);
+        let renames: Vec<(String, String)> = self
+            .overlay
+            .redirect_entries()
+            .into_iter()
+            .map(|(dst, src)| (src, dst))
+            .collect();
+        let commit = self.core.current_commit();
+        if delta.is_empty() {
+            return Ok(DirtyReply {
+                upserts: Vec::new(),
+                deletes: Vec::new(),
+                renames,
+                commit,
+            });
+        }
+        let (sd, mp) = (self.state_dir.clone(), self.mountpoint.clone());
+        // Same blocking-pool rule as resolve_seal: the ignore rules read through the
+        // mountpoint this very process serves.
+        let (upserts, deletes) =
+            tokio::task::spawn_blocking(move || resolve_dirty(&sd, &mp, &delta, &recently))
+                .await
+                .map_err(|e| CliError::usage(format!("dirty resolution task failed: {e}")))?
+                .map_err(|e| CliError::usage(format!("resolving the dirty view failed: {e}")))?;
+        Ok(DirtyReply {
+            upserts,
+            deletes,
+            renames,
+            commit,
+        })
+    }
+
+    /// Drop ALL retained overlay state (`trim` control op — `tl fs sync`'s pre-flight).
+    /// Everything dropped is sealed into workspace history, so nothing is lost; the mount just
+    /// stops shadowing the lower, which is exactly what a sync needs before it pulls content
+    /// the retained copies would mask. Dirty and ignored files are untouched.
+    async fn trim_all(&self) -> Result<TrimReply> {
+        let mut st = self.state.lock().await;
+        if st.reindex_pending {
+            return Err(CliError::usage(
+                "the overlay is being restored (reindex pending); retry when the restore \
+                 completes",
+            ));
+        }
+        let epoch = self.overlay.epoch();
+        if epoch != st.seen_epoch {
+            // clear_upper/restore rewrote the world; the sealed index describes the old one.
+            st.seen_epoch = epoch;
+            st.chunk_cache.clear();
+            st.recent_seals.clear();
+            st.sealed = SealedIndex::default();
+            SealedIndex::reset(&self.state_dir);
+            self.publish_mirror(&st);
+            return Ok(TrimReply::default());
+        }
+        let candidates: Vec<String> = st.sealed.upserts.keys().cloned().collect();
+        // Retained UPSERTS may drop regardless of where the lower ref sits — their bytes are
+        // in workspace history and the caller (sync) is about to move the view anyway. A
+        // whiteout is different: until the lower serves the commit that published its delete,
+        // the marker is still actively hiding the path — removing it early resurrects the
+        // deleted file. Leave tombstones for a later seal/trim when the lower lags.
+        let tombstones: Vec<String> = if self.core.current_commit() == st.sealed.commit {
+            st.sealed.deletes.iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
+        if candidates.is_empty() && tombstones.is_empty() {
+            return Ok(TrimReply::default());
+        }
+        let outcome = self.overlay.trim_retained(&candidates, &tombstones).await;
+        (self.invalidate)(outcome.invals);
+        for path in &outcome.trimmed {
+            st.sealed.upserts.remove(path);
+        }
+        for path in &outcome.tombstones_removed {
+            st.sealed.deletes.remove(path);
+        }
+        if let Err(e) = st.sealed.save(&self.state_dir) {
+            eprintln!("trim: persisting sealed index failed: {e}");
+        }
+        Ok(TrimReply {
+            trimmed: (outcome.trimmed.len() + outcome.tombstones_removed.len()) as u64,
+            held_open: outcome.held_open,
+        })
     }
 }
 
@@ -1450,6 +1966,9 @@ struct ResolvedSeal {
     /// Vanished-but-recently-sealed paths that got a whiteout written here; their merged view
     /// flipped without a kernel-visible operation, so the kernel needs invalidations.
     tombstoned: Vec<String>,
+    /// Resolve-time [`SealedStat`] of every upper-backed upsert — what the sealed index
+    /// records for each path once the push succeeds.
+    stats: std::collections::HashMap<String, SealedStat>,
 }
 
 /// Resolve an event delta into upload-ready push files. The dirty index's kinds are routing
@@ -1521,6 +2040,16 @@ fn resolve_seal(
     upserts.dedup_by(|a, b| a.0 == b.0);
     deletes.sort();
     deletes.dedup();
+    // The sealed index's identity capture, stat'd here — before the push reads the bytes —
+    // so any later write mismatches the record (see [`SealedStat`]).
+    let stats: std::collections::HashMap<String, SealedStat> = upserts
+        .iter()
+        .filter_map(|(rel, abs, _)| {
+            std::fs::symlink_metadata(abs)
+                .ok()
+                .map(|meta| (rel.clone(), SealedStat::of(&meta)))
+        })
+        .collect();
     let mut files = super::overlay_push_files(&upserts, &deletes)?;
 
     // Append fast path: a file with a cached chunk list from its previous seal, whose writes
@@ -1569,7 +2098,63 @@ fn resolve_seal(
         sealed_upserts: upserts.iter().map(|(p, _, _)| p.clone()).collect(),
         files,
         tombstoned,
+        stats,
     })
+}
+
+/// The dry-run twin of [`resolve_seal`]: what WOULD the next seal publish. Same delta, same
+/// ignore rules, same directory-event expansion, but NO side effects — the tombstone arm
+/// reports the delete without writing the whiteout, and nothing chunk-related runs. This is
+/// what the `dirty` control op serves, so `tl fs status` and `tl fs snapshot` cannot disagree:
+/// they resolve the same state through the same walk.
+///
+/// Runs on the blocking pool for the same reason as [`resolve_seal`] (ignore files are read
+/// through the mountpoint this daemon serves).
+#[cfg(unix)]
+fn resolve_dirty(
+    state_dir: &Path,
+    mount_root: &Path,
+    delta: &super::overlay::DirtyDelta,
+    recently_sealed: &std::collections::HashSet<String>,
+) -> crate::error::Result<(Vec<String>, Vec<String>)> {
+    let mut ignore = super::SnapshotIgnore::new(mount_root);
+    let upper = state_dir.join("upper");
+    let wh = state_dir.join("wh");
+    let mut upserts: super::OverlayUpserts = Vec::new();
+    let mut deletes: Vec<String> = Vec::new();
+    let mut vanished: Vec<String> = Vec::new();
+    for (path, _) in &delta.upserts {
+        let abs = upper.join(path);
+        let Ok(meta) = std::fs::symlink_metadata(&abs) else {
+            vanished.push(path.clone());
+            continue;
+        };
+        if meta.is_dir() && !meta.file_type().is_symlink() {
+            collect_dir_upserts(&upper, path, &mut ignore, &mut upserts)?;
+            continue;
+        }
+        if ignore.is_ignored(path, false)? {
+            continue;
+        }
+        upserts.push((path.clone(), abs, git_mode(&meta)));
+    }
+    for path in delta.deletes.iter().chain(vanished.iter()) {
+        if upper.join(path).symlink_metadata().is_ok() {
+            continue;
+        }
+        if ignore.is_ignored(path, false)? {
+            continue;
+        }
+        if whited_out_on_disk(&wh, path) || recently_sealed.contains(path) {
+            deletes.push(path.clone());
+        }
+    }
+    let mut upserts: Vec<String> = upserts.into_iter().map(|(rel, _, _)| rel).collect();
+    upserts.sort();
+    upserts.dedup();
+    deletes.sort();
+    deletes.dedup();
+    Ok((upserts, deletes))
 }
 
 /// The git mode a local file publishes as (same policy as `enumerate_overlay`'s walk).
@@ -2105,5 +2690,189 @@ mod stable_prefix_tests {
         let resolved = resolve_with_cache(0);
         assert_eq!(stable_of(&resolved), None);
         assert!(matches!(resolved.files[0].source, PushSource::Path(_)));
+    }
+
+}
+
+/// The dirty view (dry-run resolution) and the sealed index: what `tl fs status` shows must
+/// be what a seal would publish, asking must never mutate overlay state, and seal records
+/// must survive restarts by exact stat identity.
+#[cfg(all(test, unix))]
+mod seal_tracking_tests {
+    use super::super::overlay::DirtyDelta;
+    use super::tests::state_with;
+    use super::*;
+
+    fn delta(upserts: &[&str], deletes: &[&str]) -> DirtyDelta {
+        DirtyDelta {
+            upserts: upserts.iter().map(|s| (s.to_string(), 0)).collect(),
+            deletes: deletes.iter().map(|s| s.to_string()).collect(),
+            watermark: 1,
+        }
+    }
+
+    fn no_cache() -> std::collections::HashMap<String, ChunkList> {
+        std::collections::HashMap::new()
+    }
+
+    #[test]
+    fn resolve_dirty_matches_what_a_seal_would_publish() {
+        let state = state_with(
+            &[("kept.txt", "hi"), ("dir/nested.txt", "deep")],
+            &["gone.txt"],
+        );
+        let mount = tempfile::tempdir().unwrap();
+        std::fs::write(mount.path().join(".gitignore"), "*.tmp\n").unwrap();
+        std::fs::write(state.path().join("upper/junk.tmp"), "x").unwrap();
+
+        let d = delta(&["kept.txt", "dir/nested.txt", "junk.tmp"], &["gone.txt"]);
+        let (upserts, deletes) = resolve_dirty(
+            state.path(),
+            mount.path(),
+            &d,
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        let sealed = resolve_seal(
+            state.path(),
+            mount.path(),
+            &d,
+            &std::collections::HashSet::new(),
+            &no_cache(),
+        )
+        .unwrap();
+
+        let mut published: Vec<String> = sealed
+            .files
+            .iter()
+            .filter(|f| !f.delete)
+            .map(|f| f.repo_path.clone())
+            .collect();
+        published.sort();
+        assert_eq!(upserts, published, "dry run and seal agree on upserts");
+        let mut sealed_deletes: Vec<String> = sealed
+            .files
+            .iter()
+            .filter(|f| f.delete)
+            .map(|f| f.repo_path.clone())
+            .collect();
+        sealed_deletes.sort();
+        assert_eq!(deletes, sealed_deletes, "dry run and seal agree on deletes");
+        assert!(!upserts.contains(&"junk.tmp".to_string()), "ignored paths never show");
+    }
+
+    #[test]
+    fn resolve_dirty_expands_directory_events() {
+        let state = state_with(
+            &[("moved/a.txt", "alpha"), ("moved/sub/b.txt", "beta")],
+            &[],
+        );
+        let mount = tempfile::tempdir().unwrap();
+        let (upserts, deletes) = resolve_dirty(
+            state.path(),
+            mount.path(),
+            &delta(&["moved"], &[]),
+            &std::collections::HashSet::new(),
+        )
+        .unwrap();
+        assert_eq!(upserts, vec!["moved/a.txt", "moved/sub/b.txt"]);
+        assert!(deletes.is_empty());
+    }
+
+    #[test]
+    fn resolve_dirty_reports_recently_sealed_vanished_without_writing_the_whiteout() {
+        // The seal's tombstone arm WRITES a whiteout for a vanished-but-recently-sealed path.
+        // The dry run must report the same delete but leave the overlay untouched — status
+        // runs must be idempotent and side-effect-free.
+        let state = state_with(&[], &[]);
+        let mount = tempfile::tempdir().unwrap();
+        let recently: std::collections::HashSet<String> =
+            [String::from("vanished.txt")].into_iter().collect();
+        let (upserts, deletes) = resolve_dirty(
+            state.path(),
+            mount.path(),
+            &delta(&["vanished.txt"], &[]),
+            &recently,
+        )
+        .unwrap();
+        assert!(upserts.is_empty());
+        assert_eq!(deletes, vec!["vanished.txt"]);
+        assert!(
+            !state.path().join("wh/vanished.txt").exists(),
+            "the dry run must not write the whiteout the real seal would"
+        );
+    }
+
+    // ---------------------------------------------------------------------------------------
+    // The sealed index: per-path seal records that survive daemon restarts.
+    // ---------------------------------------------------------------------------------------
+
+    #[test]
+    fn sealed_index_roundtrips_and_tolerates_corruption() {
+        let state = state_with(&[("a.txt", "alpha")], &[]);
+        let meta = std::fs::symlink_metadata(state.path().join("upper/a.txt")).unwrap();
+        let mut index = SealedIndex {
+            commit: "c1".into(),
+            ..Default::default()
+        };
+        index.upserts.insert("a.txt".into(), SealedStat::of(&meta));
+        index.deletes.insert("gone.txt".into());
+        index.save(state.path()).unwrap();
+
+        let loaded = SealedIndex::load(state.path());
+        assert_eq!(loaded.commit, "c1");
+        assert_eq!(loaded.upserts.get("a.txt"), Some(&SealedStat::of(&meta)));
+        assert!(loaded.deletes.contains("gone.txt"));
+
+        std::fs::write(state.path().join("sealed.json"), b"{not json").unwrap();
+        let corrupt = SealedIndex::load(state.path());
+        assert!(
+            corrupt.upserts.is_empty() && corrupt.deletes.is_empty(),
+            "corruption degrades to the pessimistic empty index, never an error"
+        );
+    }
+
+    #[test]
+    fn sealed_survivors_matches_by_exact_stat_identity() {
+        let state = state_with(&[("same.txt", "stable"), ("changed.txt", "old")], &["dead.txt"]);
+        let stat_of = |p: &str| {
+            SealedStat::of(&std::fs::symlink_metadata(state.path().join("upper").join(p)).unwrap())
+        };
+        let mut index = SealedIndex::default();
+        index.upserts.insert("same.txt".into(), stat_of("same.txt"));
+        index.upserts.insert("changed.txt".into(), stat_of("changed.txt"));
+        index.upserts.insert("missing.txt".into(), stat_of("same.txt"));
+        index.deletes.insert("dead.txt".into());
+        index.deletes.insert("reaped.txt".into());
+
+        // Rewrite one file with different content (size changes → identity breaks even if the
+        // filesystem's mtime granularity is coarse).
+        std::fs::write(state.path().join("upper/changed.txt"), "newer-bytes").unwrap();
+
+        let (upserts, deletes) = sealed_survivors(state.path(), &index);
+        assert_eq!(upserts, vec!["same.txt"], "only the untouched file survives");
+        assert_eq!(deletes, vec!["dead.txt"], "only the still-present whiteout survives");
+    }
+
+    #[test]
+    fn resolve_seal_captures_stats_for_every_upper_upsert() {
+        let state = state_with(&[("a.txt", "alpha"), ("dir/b.txt", "beta")], &[]);
+        let mount = tempfile::tempdir().unwrap();
+        let resolved = resolve_seal(
+            state.path(),
+            mount.path(),
+            &delta(&["a.txt", "dir/b.txt"], &[]),
+            &std::collections::HashSet::new(),
+            &no_cache(),
+        )
+        .unwrap();
+        for path in ["a.txt", "dir/b.txt"] {
+            let meta = std::fs::symlink_metadata(state.path().join("upper").join(path)).unwrap();
+            assert_eq!(
+                resolved.stats.get(path),
+                Some(&SealedStat::of(&meta)),
+                "resolve-time stat recorded for {path}"
+            );
+        }
     }
 }

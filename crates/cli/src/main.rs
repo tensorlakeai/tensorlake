@@ -326,10 +326,11 @@ enum FsCommands {
         #[arg(short, long)]
         message: Option<String>,
 
-        /// After sealing, drop the local overlay so the mount serves the snapshot commit
-        /// directly (required before `tl fs sync`). Destructive: also deletes ignored files
-        /// under the mount and any writes made while the snapshot was uploading — pause
-        /// writers first.
+        /// After sealing, drop the WHOLE local overlay so the mount serves the snapshot
+        /// commit directly. Rarely needed — `tl fs sync` trims sealed content by itself;
+        /// this is the disk-reclaim / reset-local-state escape hatch. Destructive: also
+        /// deletes ignored files under the mount and any writes made while the snapshot was
+        /// uploading — pause writers first.
         #[arg(long)]
         clear: bool,
     },
