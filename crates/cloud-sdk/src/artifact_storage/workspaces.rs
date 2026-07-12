@@ -204,6 +204,14 @@ pub struct WorkspaceFleetItem {
     /// Current snapshot tip (hex); equals `base` until the first snapshot.
     pub head: String,
     pub created_at_secs: u64,
+    /// Lease duration from the identity record; 0 for durable (modern) workspaces. Defaults
+    /// to 0 against servers that predate the field.
+    #[serde(default)]
+    pub lease_secs: u64,
+    /// Epoch-ms lease expiry. `None` means pinned: never expires. Servers that predate the
+    /// field omit it, which decodes as pinned — correct for every durable workspace.
+    #[serde(default)]
+    pub lease_due_ms: Option<u64>,
     #[serde(default)]
     pub shared_target: Option<String>,
     #[serde(default)]
@@ -251,7 +259,7 @@ pub struct WorkspaceFleetPage {
 
 /// Filters for one fleet page. `repo` accepts the bare repo name (the server also matches the
 /// full `{project}/{repo}` id); `q` is an id substring match.
-#[derive(Clone, Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct WorkspaceFleetQuery<'a> {
     pub repo: Option<&'a str>,
     pub q: Option<&'a str>,
@@ -342,6 +350,43 @@ impl ArtifactStorageClient {
             self.project_git_request(Method::GET, project_id, &suffix, git_username, git_token);
         let page = expect_json(req.send().await?).await?;
         Ok(Traced::new(trace_id, page))
+    }
+
+    /// The complete fleet for the given filters: pages internally (like every other list
+    /// helper in this crate) until the server reports no more rows, starting from `query.after`
+    /// if set. Returns the items and the trace id of the final page.
+    pub async fn workspace_fleet_all(
+        &self,
+        project_id: &str,
+        git_username: &str,
+        git_token: &str,
+        query: &WorkspaceFleetQuery<'_>,
+    ) -> Result<Traced<Vec<WorkspaceFleetItem>>, SdkError> {
+        let mut items = Vec::new();
+        let mut after: Option<String> = query.after.map(str::to_string);
+        loop {
+            let page = self
+                .workspace_fleet(
+                    project_id,
+                    git_username,
+                    git_token,
+                    &WorkspaceFleetQuery {
+                        after: after.as_deref(),
+                        ..*query
+                    },
+                )
+                .await?;
+            let trace_id = page.trace_id.clone();
+            let page = page.into_inner();
+            items.extend(page.items);
+            if !page.truncated {
+                return Ok(Traced::new(trace_id, items));
+            }
+            let Some(next) = page.next_after else {
+                return Ok(Traced::new(trace_id, items));
+            };
+            after = Some(next);
+        }
     }
 
     pub async fn list_workspaces(
@@ -615,6 +660,8 @@ mod tests {
                 "base_ref": "refs/heads/main",
                 "head": "2222222222222222222222222222222222222222",
                 "created_at_secs": 1751000000,
+                "lease_secs": 3600,
+                "lease_due_ms": 1751003600000,
                 "shared_target": "main",
                 "snapshot_count": 3,
                 "last_snapshot_ms": 1751000500000,
@@ -638,12 +685,15 @@ mod tests {
         assert_eq!(item.created_by.as_ref().unwrap().name, "user:u1");
         assert_eq!(item.created_by.as_ref().unwrap().kind, "human");
         assert_eq!(item.base_ref.as_deref(), Some("refs/heads/main"));
+        assert_eq!(item.lease_secs, 3600);
+        assert_eq!(item.lease_due_ms, Some(1751003600000));
         assert_eq!(item.snapshot_count, 3);
         assert_eq!(item.mounted_on.as_deref(), Some("sandbox-42"));
     }
 
     /// Optional fleet fields are `skip_serializing_if` on the server: an unbound, never-mounted,
-    /// never-snapshotted workspace omits them entirely and must still decode.
+    /// never-snapshotted workspace omits them entirely and must still decode. Lease fields also
+    /// default (0 / pinned) against servers that predate them.
     #[test]
     fn fleet_item_tolerates_omitted_optionals() {
         let body = r#"{
@@ -662,6 +712,8 @@ mod tests {
         let item = &page.items[0];
         assert!(item.created_by.is_none(), "unbound workspace");
         assert!(item.base_ref.is_none());
+        assert_eq!(item.lease_secs, 0, "old servers omit lease_secs");
+        assert!(item.lease_due_ms.is_none(), "omitted lease row = pinned");
         assert!(item.shared_target.is_none());
         assert!(item.last_snapshot_ms.is_none());
         assert!(item.last_heartbeat_ms.is_none());

@@ -145,8 +145,11 @@ pub enum WritePolicy {
 
 /// The authenticated subject inside a minted git credential — an unverified JWT-payload decode,
 /// used only to filter a listing client-side (the server enforces real principal checks). `None`
-/// for opaque tokens (dev/self-hosted `TENSORLAKE_GIT_TOKEN`), which matches open-mode servers
-/// where workspaces are unbound anyway.
+/// for opaque tokens: dev/self-hosted `TENSORLAKE_GIT_TOKEN` values, which usually mean an
+/// open-mode server where workspaces are unbound. Known gap: a *static-token* server binds
+/// workspaces to token fingerprints, so against one that also predates the server-side
+/// `principal=self` filter, an opaque token skips filtering entirely — deploy order (server
+/// before CLI) is what closes that window.
 fn token_subject(token: &str) -> Option<String> {
     use base64::Engine;
     let payload = token.split('.').nth(1)?;
@@ -157,8 +160,31 @@ fn token_subject(token: &str) -> Option<String> {
     Some(claims.get("sub")?.as_str()?.to_string())
 }
 
-/// Every workspace visible to this caller across the whole project — one fleet request per page
-/// instead of one listing per file system — newest first, as `(file system, item)`.
+/// The legacy per-workspace record, rebuilt from a fleet row. Lease fields come off the wire
+/// (`lease_due_ms` absent = pinned); servers that predate them omit both, which decodes to the
+/// durable-workspace constants.
+fn fleet_item_to_info(item: &WorkspaceFleetItem) -> WorkspaceInfo {
+    WorkspaceInfo {
+        id: item.id.clone(),
+        ref_name: format!("refs/workspaces/{}", item.id),
+        principal: item
+            .created_by
+            .as_ref()
+            .map(|by| by.name.clone())
+            .unwrap_or_default(),
+        base: item.base.clone(),
+        base_ref: item.base_ref.clone(),
+        head: item.head.clone(),
+        created_at_secs: item.created_at_secs,
+        lease_secs: item.lease_secs,
+        lease_due_ms: item.lease_due_ms,
+        pinned: item.lease_due_ms.is_none(),
+        shared_target: item.shared_target.clone(),
+    }
+}
+
+/// Every workspace visible to this caller across the whole project — one paginated fleet
+/// request instead of one listing per file system — newest first, as `(file system, item)`.
 ///
 /// The server narrows to the caller's own + unbound workspaces (`principal=self`); the same
 /// filter is applied here too, because servers that predate the parameter ignore it and would
@@ -171,49 +197,41 @@ async fn fleet_workspaces(
     let (user, token) = session.creds();
     let own_sub = token_subject(token);
     let repo_prefix = format!("{}/", session.project_id);
-    let mut rows: Vec<(String, WorkspaceFleetItem)> = Vec::new();
-    let mut after: Option<String> = None;
-    loop {
-        let page = session
-            .client
-            .workspace_fleet(
-                &session.project_id,
-                user,
-                token,
-                &WorkspaceFleetQuery {
-                    repo: file_system,
-                    q: id_query,
-                    principal_self: true,
-                    after: after.as_deref(),
-                    limit: Some(200),
-                },
-            )
-            .await?
-            .into_inner();
-        rows.extend(
-            page.items
-                .into_iter()
-                .filter(|item| {
-                    item.created_by
-                        .as_ref()
-                        .is_none_or(|by| own_sub.as_ref().is_none_or(|sub| by.name.as_str() == sub))
-                })
-                .map(|item| {
-                    // The fleet reports full repo ids (`{project}/{repo}`); everything here
-                    // speaks bare file-system names.
-                    let fs = item
-                        .repo
-                        .strip_prefix(&repo_prefix)
-                        .unwrap_or(&item.repo)
-                        .to_string();
-                    (fs, item)
-                }),
-        );
-        after = page.next_after.clone();
-        if !page.truncated || after.is_none() {
-            break;
-        }
-    }
+    let items = session
+        .client
+        .workspace_fleet_all(
+            &session.project_id,
+            user,
+            token,
+            &WorkspaceFleetQuery {
+                repo: file_system,
+                q: id_query,
+                principal_self: true,
+                after: None,
+                limit: Some(200),
+            },
+        )
+        .await?
+        .into_inner();
+    let mut rows: Vec<(String, WorkspaceFleetItem)> = items
+        .into_iter()
+        .filter(|item| match (&item.created_by, &own_sub) {
+            // Drop only what is provably someone else's: a bound workspace whose principal
+            // differs from our decoded subject. Unbound rows and undecodable tokens pass.
+            (Some(by), Some(sub)) => by.name == *sub,
+            _ => true,
+        })
+        .map(|item| {
+            // The fleet reports full repo ids (`{project}/{repo}`); everything here speaks
+            // bare file-system names.
+            let fs = item
+                .repo
+                .strip_prefix(&repo_prefix)
+                .unwrap_or(&item.repo)
+                .to_string();
+            (fs, item)
+        })
+        .collect();
     rows.sort_by_key(|(_, item)| std::cmp::Reverse(item.created_at_secs));
     Ok(rows)
 }
@@ -237,12 +255,21 @@ async fn resolve_workspace(
         1 => {
             let (fs, full_id) = matches.remove(0);
             let (user, token) = session.creds();
-            let ws = session
+            match session
                 .client
                 .get_workspace(&session.project_id, &fs, user, token, &full_id)
-                .await?
-                .into_inner();
-            Ok(Some((fs, ws)))
+                .await
+            {
+                Ok(ws) => Ok(Some((fs, ws.into_inner()))),
+                // Deleted between the fleet hit and this fetch: resolve as absent (the caller
+                // prints the friendly "no workspace matches"), not as a raw server error.
+                Err(tensorlake::error::SdkError::ServerError { status, .. })
+                    if status == reqwest::StatusCode::NOT_FOUND =>
+                {
+                    Ok(None)
+                }
+                Err(e) => Err(e.into()),
+            }
         }
         n => Err(CliError::usage(format!(
             "workspace id {id:?} is ambiguous ({n} matches); use more characters"
@@ -250,14 +277,60 @@ async fn resolve_workspace(
     }
 }
 
+/// One `tl fs ls` row: the workspace record plus the fleet's liveness enrichments — absent on
+/// the per-repo fallback path, where the server does no activity join.
+struct LsRow {
+    fs: String,
+    ws: WorkspaceInfo,
+    status: Option<String>,
+    snapshot_count: Option<u64>,
+    mounted_on: Option<String>,
+}
+
 /// `tl fs ls [file-system]` — every live workspace (across all file systems by default), with
 /// where each one is currently mounted on this machine.
 pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) -> Result<()> {
-    // Always a project-wide session, even for a named file system: the fleet listing requires
-    // `project:read`, which repo-scoped credentials deliberately lack — the file system narrows
-    // server-side via `?repo=` instead of via the credential.
+    // Project-wide session first: the fleet listing requires `project:read`, which repo-scoped
+    // credentials deliberately lack — a named file system narrows server-side via `?repo=`.
     let session = FsSession::open(ctx, None).await?;
-    let rows = fleet_workspaces(&session, file_system, None).await?;
+    let rows: Vec<LsRow> = match fleet_workspaces(&session, file_system, None).await {
+        Ok(rows) => rows
+            .into_iter()
+            .map(|(fs, item)| LsRow {
+                fs,
+                ws: fleet_item_to_info(&item),
+                status: Some(item.status),
+                snapshot_count: Some(item.snapshot_count),
+                mounted_on: item.mounted_on,
+            })
+            .collect(),
+        // A caller holding only a repo-scoped credential is refused by the project-scope fleet
+        // but can still list one named file system the pre-fleet way: the per-repo,
+        // principal-bound listing (GitRead). Liveness enrichments are simply absent there.
+        Err(CliError::Sdk(tensorlake::error::SdkError::ServerError { status, .. }))
+            if status == reqwest::StatusCode::FORBIDDEN && file_system.is_some() =>
+        {
+            let fs = file_system.expect("guarded above");
+            let session = FsSession::open(ctx, Some(fs)).await?;
+            let (user, token) = session.creds();
+            let mut list = session
+                .client
+                .list_workspaces(&session.project_id, fs, user, token)
+                .await?
+                .into_inner();
+            list.sort_by_key(|ws| std::cmp::Reverse(ws.created_at_secs));
+            list.into_iter()
+                .map(|ws| LsRow {
+                    fs: fs.to_string(),
+                    ws,
+                    status: None,
+                    snapshot_count: None,
+                    mounted_on: None,
+                })
+                .collect()
+        }
+        Err(e) => return Err(e),
+    };
     let mounts = live_mounts();
     let bound = plaindir::bound_workspaces();
     // A workspace's local attachment: the directory plus what kind of attachment it is.
@@ -278,39 +351,20 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
     if output_json {
         let out: Vec<serde_json::Value> = rows
             .iter()
-            .map(|(fs, item)| {
+            .map(|row| {
                 // `mounted_at` is the plain path (machine-consumable); `kind` says whether it
                 // is a kernel mount or a plain-directory binding — decorating the path itself
                 // broke every consumer that fed it back to another command.
-                let attached = attachment(&item.id);
+                let attached = attachment(&row.ws.id);
                 serde_json::json!({
-                    "file_system": fs,
-                    // The legacy per-workspace object, rebuilt from the fleet row. Workspaces
-                    // are durable (artifact_storage issue #24): no lease exists, so the lease
-                    // fields are constants rather than a fetched row.
-                    "workspace": WorkspaceInfo {
-                        id: item.id.clone(),
-                        ref_name: format!("refs/workspaces/{}", item.id),
-                        principal: item
-                            .created_by
-                            .as_ref()
-                            .map(|by| by.name.clone())
-                            .unwrap_or_default(),
-                        base: item.base.clone(),
-                        base_ref: item.base_ref.clone(),
-                        head: item.head.clone(),
-                        created_at_secs: item.created_at_secs,
-                        lease_secs: 0,
-                        lease_due_ms: None,
-                        pinned: true,
-                        shared_target: item.shared_target.clone(),
-                    },
+                    "file_system": row.fs,
+                    "workspace": row.ws,
                     "mounted_at": attached.as_ref().map(|(path, _)| path.clone()),
                     "kind": attached.as_ref().map(|(_, kind)| *kind),
-                    // Fleet-only enrichments (absent before the one-call listing).
-                    "status": item.status,
-                    "snapshot_count": item.snapshot_count,
-                    "mounted_on": item.mounted_on,
+                    // Fleet liveness enrichments; null on the per-repo fallback path.
+                    "status": row.status,
+                    "snapshot_count": row.snapshot_count,
+                    "mounted_on": row.mounted_on,
                 })
             })
             .collect();
@@ -330,27 +384,28 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
         "Mounted",
         "Age",
     ]);
-    for (fs, item) in &rows {
+    for row in &rows {
+        let ws = &row.ws;
         table.add_row(vec![
-            Cell::new(&item.id),
-            Cell::new(fs),
-            Cell::new(item.base_ref.as_deref().unwrap_or(&item.base[..12])),
-            Cell::new(if item.head == item.base { "-" } else { "yes" }),
-            Cell::new(match &item.shared_target {
+            Cell::new(&ws.id),
+            Cell::new(&row.fs),
+            Cell::new(ws.base_ref.as_deref().unwrap_or(&ws.base[..12])),
+            Cell::new(if ws.head == ws.base { "-" } else { "yes" }),
+            Cell::new(match &ws.shared_target {
                 Some(target) => format!("shared-rw -> {target}"),
                 None => "workspace".to_string(),
             }),
             // Human output keeps the annotation; the JSON path/kind split serves machines.
             // A mount session on another machine (fleet liveness) shows as its host.
-            Cell::new(match attachment(&item.id) {
+            Cell::new(match attachment(&ws.id) {
                 Some((path, "binding")) => format!("{path} (bound)"),
                 Some((path, _)) => path,
-                None => match &item.mounted_on {
+                None => match &row.mounted_on {
                     Some(host) => format!("{host} (remote)"),
                     None => "-".to_string(),
                 },
             }),
-            Cell::new(age_display(item.created_at_secs)),
+            Cell::new(age_display(ws.created_at_secs)),
         ]);
     }
     println!("{table}");
@@ -3719,6 +3774,34 @@ fn age_display(created_at_secs: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fleet_item_to_info_carries_real_lease_state() {
+        let item: WorkspaceFleetItem = serde_json::from_value(serde_json::json!({
+            "id": "aa", "repo": "p1/demo", "status": "detached", "mode": "default",
+            "base": "1111111111111111111111111111111111111111",
+            "head": "1111111111111111111111111111111111111111",
+            "created_at_secs": 1,
+            "snapshot_count": 0,
+        }))
+        .unwrap();
+        // Durable workspace (no lease on the wire, the modern norm): pinned.
+        let info = fleet_item_to_info(&item);
+        assert!(info.pinned);
+        assert_eq!(info.lease_due_ms, None);
+        assert_eq!(info.ref_name, "refs/workspaces/aa");
+        assert_eq!(info.principal, "", "unbound: created_by omitted");
+        // Legacy leased workspace: the wire lease surfaces, not a fabricated constant.
+        let leased = WorkspaceFleetItem {
+            lease_secs: 3600,
+            lease_due_ms: Some(4_102_444_800_000),
+            ..item
+        };
+        let info = fleet_item_to_info(&leased);
+        assert!(!info.pinned);
+        assert_eq!(info.lease_due_ms, Some(4_102_444_800_000));
+        assert_eq!(info.lease_secs, 3600);
+    }
 
     #[test]
     fn token_subject_reads_jwt_sub_and_rejects_opaque_tokens() {
