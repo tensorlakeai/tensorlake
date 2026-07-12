@@ -5,12 +5,13 @@
 //! artifact-storage repo backing them (managed with `tl git`); a mounted workspace (private
 //! leased ref) is served by a FUSE daemon — reads stream lazily from the server through the
 //! vendored `gsvc-mount` core's immutable caches, writes land in a local overlay.
-//! **The overlay is the dirty set**: the daemon's sealer resolves its dirty index into
-//! incremental snapshot commits on the workspace ref (auto-commit ticks it; `tl fs snapshot`
-//! runs one cycle through the `seal` control op), and the mount's lower layer follows the ref
-//! to the new snapshot. The overlay is **kept** after sealing —
-//! the upper keeps serving the byte-identical sealed content; `snapshot --clear` is the
-//! explicit, destructive opt-in that drops it (required before `sync`). `promote`
+//! The daemon's dirty index is the snapshot source of truth: its sealer resolves that index
+//! into incremental snapshot commits on the workspace ref (auto-commit ticks it; `tl fs
+//! snapshot` runs one cycle through the `seal` control op), and the mount's lower layer follows
+//! the ref to the new snapshot. The overlay is **kept** after sealing, so a raw upper walk is
+//! only an approximate fallback when the daemon cannot report the exact next-snapshot set.
+//! `snapshot --clear` is the explicit, destructive opt-in that drops the upper (required before
+//! `sync`). `promote`
 //! CAS-advances a real branch (squash by default); `restore` refills the overlay from any
 //! snapshot. FUSE is the only mount path — Linux builds
 //! carry it unconditionally, macOS requires macFUSE and the `macfuse` build feature.
@@ -2246,7 +2247,7 @@ pub async fn unmount(
 }
 
 // ---------------------------------------------------------------------------------------------
-// Snapshot: the overlay is the dirty set.
+// Snapshot: the daemon sealer's dirty index is the dirty set.
 // ---------------------------------------------------------------------------------------------
 
 /// Walk the overlay state dir: `(upserts, deletes)` as repo paths. Ignored names (built-ins +
@@ -2463,6 +2464,225 @@ fn pending_renames(state_dir: &Path) -> Vec<(String, String)> {
     let mut entries: Vec<(String, String)> = map.into_iter().collect();
     entries.sort();
     entries
+}
+
+/// Where a local-change view came from. Only the daemon can report the exact set the next
+/// snapshot would seal; walking the retained upper is deliberately labelled approximate.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DirtySource {
+    Daemon,
+    OverlayDaemonDown,
+}
+
+impl DirtySource {
+    fn approximate(self) -> bool {
+        self != Self::Daemon
+    }
+
+    fn json_name(self) -> &'static str {
+        match self {
+            Self::Daemon => "daemon",
+            Self::OverlayDaemonDown => "overlay_fallback_daemon_down",
+        }
+    }
+
+    fn warning(self) -> Option<&'static str> {
+        match self {
+            Self::Daemon => None,
+            Self::OverlayDaemonDown => {
+                Some("daemon not running; showing approximate local changes")
+            }
+        }
+    }
+}
+
+#[derive(Debug)]
+struct LocalChanges {
+    dirty: Vec<daemon::DirtyPath>,
+    lower_commit: Option<String>,
+    daemon_running: bool,
+    source: DirtySource,
+}
+
+/// Parse and semantically validate the daemon's exact next-snapshot view. Serde makes every
+/// top-level field required; the checks below also prevent malformed rename rows (or paths) from
+/// being rendered as ordinary changes. A rename source delete is redundant with the R row and is
+/// suppressed even if a transition-version daemon includes both.
+fn parse_dirty_reply(
+    response: serde_json::Value,
+) -> std::result::Result<(Vec<daemon::DirtyPath>, String), String> {
+    fn valid_repo_path(path: &str) -> bool {
+        !path.is_empty()
+            && !path.contains('\0')
+            && path
+                .split('/')
+                .all(|component| !component.is_empty() && component != "." && component != "..")
+    }
+
+    let reply: daemon::DirtyReply =
+        serde_json::from_value(response).map_err(|e| format!("invalid reply shape: {e}"))?;
+    if reply.lower_commit.trim().is_empty() {
+        return Err("lower_commit is empty".to_string());
+    }
+    for entry in &reply.dirty {
+        if !valid_repo_path(&entry.path) {
+            return Err(format!("invalid dirty path {:?}", entry.path));
+        }
+        match (&entry.kind, &entry.from) {
+            (daemon::DirtyPathKind::Renamed, Some(from))
+                if valid_repo_path(from) && from != &entry.path => {}
+            (daemon::DirtyPathKind::Renamed, _) => {
+                return Err(format!(
+                    "rename destination {:?} has no valid, distinct source",
+                    entry.path
+                ));
+            }
+            (daemon::DirtyPathKind::Modified | daemon::DirtyPathKind::Deleted, None) => {}
+            (daemon::DirtyPathKind::Modified | daemon::DirtyPathKind::Deleted, Some(_)) => {
+                return Err(format!(
+                    "non-rename dirty path {:?} unexpectedly has a source",
+                    entry.path
+                ));
+            }
+        }
+    }
+
+    let rename_sources: std::collections::HashSet<String> = reply
+        .dirty
+        .iter()
+        .filter_map(|entry| {
+            (entry.kind == daemon::DirtyPathKind::Renamed)
+                .then_some(entry.from.as_deref())
+                .flatten()
+        })
+        .map(str::to_string)
+        .collect();
+    let dirty = reply
+        .dirty
+        .into_iter()
+        .filter(|entry| {
+            entry.kind != daemon::DirtyPathKind::Deleted
+                || !rename_sources.contains(entry.path.as_str())
+        })
+        .collect();
+    Ok((dirty, reply.lower_commit))
+}
+
+fn approximate_overlay_changes(
+    state_dir: &Path,
+    mount_root: &Path,
+) -> Result<Vec<daemon::DirtyPath>> {
+    let (upserts, deletes) = enumerate_overlay(state_dir, mount_root)?;
+    let renames = pending_renames(state_dir); // (destination, source)
+    let rename_sources: std::collections::HashSet<String> =
+        renames.iter().map(|(_, from)| from.clone()).collect();
+    let mut dirty = Vec::with_capacity(upserts.len() + deletes.len() + renames.len());
+    for (path, from) in renames {
+        dirty.push(daemon::DirtyPath {
+            path,
+            kind: daemon::DirtyPathKind::Renamed,
+            from: Some(from),
+        });
+    }
+    for (path, _, _) in upserts {
+        dirty.push(daemon::DirtyPath {
+            path,
+            kind: daemon::DirtyPathKind::Modified,
+            from: None,
+        });
+    }
+    for path in deletes {
+        if !rename_sources.contains(path.as_str()) {
+            dirty.push(daemon::DirtyPath {
+                path,
+                kind: daemon::DirtyPathKind::Deleted,
+                from: None,
+            });
+        }
+    }
+    Ok(dirty)
+}
+
+/// Ask the running sealer for its exact dirty set. Only an unreachable daemon falls back to the
+/// raw overlay walk, and the caller must surface that approximation. A live daemon that is busy,
+/// old, or malformed fails closed: raw upper state can miss dirty-index-only delete events, so it
+/// is not a safe substitute while the authoritative in-memory index still exists.
+async fn query_local_changes(state_dir: &Path, mount_root: &Path) -> Result<LocalChanges> {
+    fn is_connect_failure(error: &CliError) -> bool {
+        // `daemon::control` uses this prefix only when UnixStream::connect fails. Operation
+        // errors use `daemon <op> failed`, so a live/busy daemon cannot enter the raw fallback.
+        matches!(
+            error,
+            CliError::Usage(message) if message.starts_with("mount daemon is not running (")
+        )
+    }
+
+    fn daemon_down_changes(state_dir: &Path, mount_root: &Path) -> Result<LocalChanges> {
+        Ok(LocalChanges {
+            dirty: approximate_overlay_changes(state_dir, mount_root)?,
+            lower_commit: None,
+            daemon_running: false,
+            source: DirtySource::OverlayDaemonDown,
+        })
+    }
+
+    enum DirtyFailure {
+        Outdated,
+        Unavailable,
+        Malformed,
+    }
+
+    let failure = match daemon::control(state_dir, "dirty").await {
+        Ok(response) => match parse_dirty_reply(response) {
+            Ok((dirty, lower_commit)) => {
+                return Ok(LocalChanges {
+                    dirty,
+                    lower_commit: Some(lower_commit),
+                    daemon_running: true,
+                    source: DirtySource::Daemon,
+                });
+            }
+            Err(_) => DirtyFailure::Malformed,
+        },
+        Err(error) if is_connect_failure(&error) => {
+            return daemon_down_changes(state_dir, mount_root);
+        }
+        Err(error)
+            if error.to_string().contains("unknown op")
+                || error.to_string().contains("unknown_op") =>
+        {
+            DirtyFailure::Outdated
+        }
+        Err(_) => DirtyFailure::Unavailable,
+    };
+
+    match daemon::control(state_dir, "ping").await {
+        Err(error) if is_connect_failure(&error) => daemon_down_changes(state_dir, mount_root),
+        Ok(_) => {
+            let message = match failure {
+                DirtyFailure::Outdated => {
+                    "the mount daemon predates exact local status; remount this workspace with \
+                     the current tl version, then retry"
+                        .to_string()
+                }
+                DirtyFailure::Malformed => {
+                    "the mount daemon returned invalid local status; remount to upgrade it, then \
+                     retry"
+                        .to_string()
+                }
+                DirtyFailure::Unavailable => {
+                    "the mount daemon is busy or could not provide exact local status; retry \
+                     after the current snapshot or restore finishes"
+                        .to_string()
+                }
+            };
+            Err(CliError::usage(message))
+        }
+        Err(_) => Err(CliError::usage(
+            "could not verify exact local status with the mount daemon; retry or inspect the \
+             daemon log",
+        )),
+    }
 }
 
 /// An enumerated dirty set as push files, used by the daemon's sealer (`tl fs snapshot`
@@ -2726,14 +2946,27 @@ pub async fn promote(
     }
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
-    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-    let renames = pending_renames(&state_dir);
-    if !upserts.is_empty() || !deletes.is_empty() || !renames.is_empty() {
-        eprintln!(
-            "{} {} local change(s) that may not be in a snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to be sure they are included.",
-            style("note:").yellow(),
-            upserts.len() + deletes.len() + renames.len()
-        );
+    let local = query_local_changes(&state_dir, Path::new(&mountpoint)).await?;
+    if let Some(warning) = local.source.warning() {
+        eprintln!("{} {warning}", style("note:").yellow());
+    }
+    if !local.dirty.is_empty() {
+        if local.source.approximate() {
+            eprintln!(
+                "{} approximate overlay scan found {} local change(s) that may not be in a \
+                 snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to be \
+                 sure they are included.",
+                style("note:").yellow(),
+                local.dirty.len(),
+            );
+        } else {
+            eprintln!(
+                "{} {} unsealed local change(s); promoting the last snapshot only. Run `tl fs \
+                 snapshot` first to include them.",
+                style("note:").yellow(),
+                local.dirty.len(),
+            );
+        }
     }
     let (user, token) = session.creds();
     let request = PromoteWorkspaceRequest {
@@ -2986,26 +3219,36 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         .await?
         .into_inner();
     let _ = heartbeat(&session, &state).await;
-    let daemon_commit = daemon::control(&state_dir, "ping")
-        .await
-        .ok()
-        .and_then(|r| r.get("commit").and_then(|c| c.as_str().map(str::to_string)));
-    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
+    let local = query_local_changes(&state_dir, Path::new(&mountpoint)).await?;
 
     if output_json {
+        let pending_renames = local
+            .dirty
+            .iter()
+            .filter(|entry| entry.kind == daemon::DirtyPathKind::Renamed)
+            .map(|entry| {
+                serde_json::json!({
+                    "from": entry.from.as_deref().expect("validated rename source"),
+                    "to": entry.path,
+                })
+            })
+            .collect::<Vec<_>>();
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
                 "workspace": ws,
-                "mounted": daemon_commit.is_some(),
-                "lower_commit": daemon_commit,
+                "mounted": local.daemon_running,
+                "lower_commit": local.lower_commit,
                 "log": state_dir.join("daemon.log"),
-                "dirty": upserts.iter().map(|(p, _, _)| p.clone())
-                    .chain(deletes.iter().cloned()).collect::<Vec<_>>(),
-                "pending_renames": pending_renames(&state_dir)
-                    .into_iter()
-                    .map(|(to, from)| serde_json::json!({ "from": from, "to": to }))
+                // Preserve the legacy JSON split: M/D paths live in `dirty`; renames live in
+                // `pending_renames` and are not duplicated here.
+                "dirty": local.dirty.iter()
+                    .filter(|entry| entry.kind != daemon::DirtyPathKind::Renamed)
+                    .map(|entry| entry.path.clone())
                     .collect::<Vec<_>>(),
+                "pending_renames": pending_renames,
+                "dirty_approximate": local.source.approximate(),
+                "dirty_source": local.source.json_name(),
             }))?
         );
         return Ok(());
@@ -3027,14 +3270,18 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     }
     if let Some(secs) = state.auto_commit_interval_secs {
         println!(
-            "{} local changes seal into a snapshot every {secs}s (local: below is the kept \
-             overlay, sealed content included; `tl fs snapshot --clear` drops it)",
+            "{} local changes seal into a snapshot every {secs}s (local status shows only \
+             changes pending for the next snapshot)",
             style("auto-commit:").dim()
         );
     }
-    match &daemon_commit {
-        Some(commit) => println!("{} mounted at {commit}", style("daemon:").dim()),
-        None => println!(
+    match (&local.lower_commit, local.daemon_running) {
+        (Some(commit), true) => println!("{} mounted at {commit}", style("daemon:").dim()),
+        (None, true) => println!(
+            "{} running (lower commit unavailable)",
+            style("daemon:").dim()
+        ),
+        (_, false) => println!(
             "{} not running (remount with tl fs mount)",
             style("daemon:").dim()
         ),
@@ -3044,26 +3291,46 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         style("log:").dim(),
         state_dir.join("daemon.log").display()
     );
-    let renames = pending_renames(&state_dir);
-    // A pending rename's source whiteout is a real delete, but showing it next to the R line
-    // would read as two changes; the R line carries both sides.
-    let deletes: Vec<String> = deletes
-        .into_iter()
-        .filter(|p| !renames.iter().any(|(_, from)| from == p))
-        .collect();
-    let dirty = upserts.len() + deletes.len() + renames.len();
+    if let Some(warning) = local.source.warning() {
+        println!("{} {warning}", style("note:").yellow());
+    }
+    let dirty = local.dirty.len();
     if dirty == 0 {
-        println!("{} clean", style("local:").dim());
+        if local.source.approximate() {
+            println!("{} no changes found (approximate)", style("local:").dim());
+        } else {
+            println!("{} clean", style("local:").dim());
+        }
     } else {
         println!("{} {} change(s):", style("local:").dim(), dirty);
-        for (to, from) in renames.iter().take(20) {
-            println!("  {} {from} -> {to}", style("R").cyan());
+        for entry in local
+            .dirty
+            .iter()
+            .filter(|entry| entry.kind == daemon::DirtyPathKind::Renamed)
+            .take(20)
+        {
+            println!(
+                "  {} {} -> {}",
+                style("R").cyan(),
+                entry.from.as_deref().expect("validated rename source"),
+                entry.path,
+            );
         }
-        for (p, _, _) in upserts.iter().take(20) {
-            println!("  {} {p}", style("M").yellow());
+        for entry in local
+            .dirty
+            .iter()
+            .filter(|entry| entry.kind == daemon::DirtyPathKind::Modified)
+            .take(20)
+        {
+            println!("  {} {}", style("M").yellow(), entry.path);
         }
-        for p in deletes.iter().take(20) {
-            println!("  {} {p}", style("D").red());
+        for entry in local
+            .dirty
+            .iter()
+            .filter(|entry| entry.kind == daemon::DirtyPathKind::Deleted)
+            .take(20)
+        {
+            println!("  {} {}", style("D").red(), entry.path);
         }
         if dirty > 60 {
             println!("  … and more");
@@ -3693,16 +3960,27 @@ mod tests {
         assert!(deletes.is_empty());
     }
 
-    /// A fake daemon control endpoint: records the op sequence and replies `{"ok":true}` to
-    /// every op except `seal`, which replies like a real sealer that minted a commit — so the
-    /// snapshot control flow can be exercised without a mount. `seal` honors the new framing:
+    /// A fake daemon control endpoint: records the op sequence, returns the supplied `dirty`
+    /// reply, and makes `seal` reply like a real sealer that minted a commit — so the snapshot
+    /// and local-status control flows can be exercised without a mount. `seal` honors framing:
     /// each string in `events` is written as an `{"event": ...}` progress line before the
     /// final reply (pass none for the plain single-line reply older tests exercise), and a
     /// `clear:true` request gets a `cleared` list back.
     #[cfg(unix)]
+    fn clean_dirty_reply() -> serde_json::Value {
+        serde_json::json!({
+            "ok": true,
+            "dirty": [],
+            "lower_commit": "cafe0000",
+            "watermark": 7,
+        })
+    }
+
+    #[cfg(unix)]
     fn fake_daemon_with_events(
         state_dir: &Path,
         events: Vec<String>,
+        dirty_reply: serde_json::Value,
     ) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
         let ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -3715,6 +3993,7 @@ mod tests {
             while let Ok((stream, _)) = listener.accept().await {
                 let recorded = recorded.clone();
                 let events = events.clone();
+                let dirty_reply = dirty_reply.clone();
                 tokio::spawn(async move {
                     let mut reader = tokio::io::BufReader::new(stream);
                     let mut line = String::new();
@@ -3745,6 +4024,8 @@ mod tests {
                                 serde_json::json!(["keep.txt", "target/build.o", "raced.txt"]);
                         }
                         resp
+                    } else if op == "dirty" {
+                        dirty_reply
                     } else {
                         serde_json::json!({ "ok": true })
                     };
@@ -3757,7 +4038,117 @@ mod tests {
 
     #[cfg(unix)]
     fn fake_daemon(state_dir: &Path) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
-        fake_daemon_with_events(state_dir, Vec::new())
+        fake_daemon_with_events(state_dir, Vec::new(), clean_dirty_reply())
+    }
+
+    /// Retained upper files are not dirty after a seal. The exact daemon reply must therefore
+    /// win over the raw overlay walk, and the fast path must not pay a second ping round-trip.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_changes_use_daemon_view_instead_of_retained_upper() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(state.path().join("upper")).unwrap();
+        std::fs::write(state.path().join("upper/already-sealed.txt"), "sealed").unwrap();
+        let ops = fake_daemon(state.path());
+
+        let changes = query_local_changes(state.path(), mount.path())
+            .await
+            .unwrap();
+
+        assert_eq!(changes.source, DirtySource::Daemon);
+        assert!(!changes.source.approximate());
+        assert_eq!(changes.lower_commit.as_deref(), Some("cafe0000"));
+        assert!(changes.dirty.is_empty(), "retained upper is not dirty");
+        assert_eq!(*ops.lock().unwrap(), vec!["dirty"], "no ping on success");
+    }
+
+    /// A live old daemon still owns dirty-index-only events that a raw upper walk cannot see.
+    /// Fail closed and require a remount instead of presenting that walk as approximate truth.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_changes_do_not_raw_fallback_for_live_old_daemon() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(state.path().join("upper")).unwrap();
+        std::fs::write(state.path().join("upper/retained.txt"), "sealed").unwrap();
+        let ops = fake_daemon_with_events(
+            state.path(),
+            Vec::new(),
+            serde_json::json!({
+                "ok": false,
+                "code": "unknown_op",
+                "error": "unknown op \"dirty\"",
+            }),
+        );
+
+        let error = query_local_changes(state.path(), mount.path())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("predates exact local status"));
+        assert_eq!(*ops.lock().unwrap(), vec!["dirty", "ping"]);
+    }
+
+    /// With no daemon, compatibility falls back to the overlay and says so explicitly. A
+    /// pending rename is rendered source -> destination, without a duplicate source delete.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_changes_label_daemon_down_fallback_and_dedupe_rename_delete() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(state.path().join("upper")).unwrap();
+        std::fs::create_dir_all(state.path().join("wh/old-dir")).unwrap();
+        std::fs::write(state.path().join("upper/changed.txt"), "changed").unwrap();
+        std::fs::write(state.path().join("wh/old-dir/file.txt"), "").unwrap();
+        std::fs::write(
+            state.path().join("redirects.json"),
+            serde_json::to_vec(&serde_json::json!({ "new-dir": "old-dir/file.txt" })).unwrap(),
+        )
+        .unwrap();
+
+        let changes = query_local_changes(state.path(), mount.path())
+            .await
+            .unwrap();
+
+        assert_eq!(changes.source, DirtySource::OverlayDaemonDown);
+        assert!(changes.source.approximate());
+        assert_eq!(
+            changes.source.warning(),
+            Some("daemon not running; showing approximate local changes")
+        );
+        assert!(!changes.daemon_running);
+        assert_eq!(changes.dirty.len(), 2);
+        assert_eq!(changes.dirty[0].kind, daemon::DirtyPathKind::Renamed);
+        assert_eq!(changes.dirty[0].from.as_deref(), Some("old-dir/file.txt"));
+        assert_eq!(changes.dirty[0].path, "new-dir");
+        assert_eq!(changes.dirty[1].kind, daemon::DirtyPathKind::Modified);
+        assert_eq!(changes.dirty[1].path, "changed.txt");
+    }
+
+    #[test]
+    fn dirty_reply_requires_semantically_valid_renames() {
+        let malformed = serde_json::json!({
+            "ok": true,
+            "dirty": [{ "path": "new-dir", "kind": "R" }],
+            "lower_commit": "cafe0000",
+            "watermark": 7,
+        });
+        assert!(parse_dirty_reply(malformed).is_err());
+
+        let transitional = serde_json::json!({
+            "ok": true,
+            "dirty": [
+                { "path": "new-dir", "kind": "R", "from": "old-dir" },
+                { "path": "old-dir", "kind": "D" }
+            ],
+            "lower_commit": "cafe0000",
+            "watermark": 7,
+        });
+        let (dirty, commit) = parse_dirty_reply(transitional).unwrap();
+        assert_eq!(commit, "cafe0000");
+        assert_eq!(dirty.len(), 1, "rename source delete is redundant");
+        assert_eq!(dirty[0].kind, daemon::DirtyPathKind::Renamed);
     }
 
     /// Regression for the snapshot data-loss bug: sealing must KEEP the overlay, and the seal
@@ -3855,6 +4246,7 @@ mod tests {
                 "hashing 1/2 files (1 KiB)...".to_string(),
                 "uploaded 3 chunks (2 KiB)...".to_string(),
             ],
+            clean_dirty_reply(),
         );
 
         let bar = indicatif::ProgressBar::hidden();

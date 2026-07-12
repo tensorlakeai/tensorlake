@@ -8,6 +8,12 @@
 //!
 //! ```text
 //! {"op":"ping"}        -> {"ok":true,"commit":"<hex>"}
+//! {"op":"dirty"}       -> the sealer's exact next-snapshot view:
+//!                         {ok, dirty: [{path, kind: M|D|R, from?}], lower_commit,
+//!                         watermark}. `R.path` is the destination and `R.from` its source.
+//!                         Inspection applies the same ignore/directory/delete resolution as
+//!                         `seal` without materializing whiteouts; it may reconcile rename
+//!                         bookkeeping already made obsolete by the served lower commit.
 //! {"op":"refresh"}     -> poll the workspace ref now; reply with the (possibly new) commit
 //!                         plus every probe expectation banked since the last drain
 //!                         ("changed": [{path, present, size?}], "complete": bool) so callers
@@ -188,6 +194,22 @@ pub fn control_socket(state_dir: &Path) -> PathBuf {
     state_dir.join("control.sock")
 }
 
+#[cfg(unix)]
+fn control_connect_error(sock: &Path, error: std::io::Error) -> CliError {
+    let message = match error.kind() {
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused => {
+            format!("mount daemon is not running ({}): {error}", sock.display())
+        }
+        // Permission/resource failures do not prove the daemon is down. Keep a distinct
+        // prefix so callers that contemplate a raw fallback can fail closed.
+        _ => format!(
+            "could not connect to mount daemon ({}): {error}",
+            sock.display()
+        ),
+    };
+    CliError::usage(message)
+}
+
 /// The daemon's pid, written at startup so `unmount` can wait for the process to actually die
 /// before tearing down the state dir (a shutdown fired into the socket alone races the exit).
 pub fn pid_file(state_dir: &Path) -> PathBuf {
@@ -243,6 +265,39 @@ pub(crate) struct SealReply {
     pub cleared: Option<Vec<String>>,
 }
 
+/// One path in the sealer's exact next-snapshot view.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DirtyPath {
+    pub path: String,
+    pub kind: DirtyPathKind,
+    /// Required for renames (source path); absent for modifications and deletions.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+}
+
+/// Compact status kind used by the daemon control protocol.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) enum DirtyPathKind {
+    #[serde(rename = "M")]
+    Modified,
+    #[serde(rename = "D")]
+    Deleted,
+    #[serde(rename = "R")]
+    Renamed,
+}
+
+/// Final reply of the `dirty` control op. Every field is required intentionally: an older or
+/// malformed daemon reply must never deserialize as a false-clean workspace.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub(crate) struct DirtyReply {
+    pub dirty: Vec<DirtyPath>,
+    /// The commit the lower layer currently serves. This is not necessarily a locally sealed
+    /// commit (shared mounts can advance for other reasons), hence the deliberately precise name.
+    pub lower_commit: String,
+    /// Dirty-index generation captured for this view.
+    pub watermark: u64,
+}
+
 /// One control round-trip from a CLI command to the daemon. Mounts (and so daemons) exist
 /// only on unix; elsewhere every control call reports the daemon as not running.
 #[cfg(not(unix))]
@@ -293,12 +348,9 @@ pub async fn control_with(
     args: serde_json::Value,
 ) -> Result<serde_json::Value> {
     let sock = control_socket(state_dir);
-    let mut stream = tokio::net::UnixStream::connect(&sock).await.map_err(|e| {
-        CliError::usage(format!(
-            "mount daemon is not running ({}): {e}",
-            sock.display()
-        ))
-    })?;
+    let mut stream = tokio::net::UnixStream::connect(&sock)
+        .await
+        .map_err(|e| control_connect_error(&sock, e))?;
     let mut request = serde_json::json!({ "op": op });
     if let serde_json::Value::Object(fields) = args {
         let obj = request.as_object_mut().expect("request is an object");
@@ -340,12 +392,9 @@ pub async fn control_streaming(
     mut on_event: impl FnMut(&str),
 ) -> Result<serde_json::Value> {
     let sock = control_socket(state_dir);
-    let mut stream = tokio::net::UnixStream::connect(&sock).await.map_err(|e| {
-        CliError::usage(format!(
-            "mount daemon is not running ({}): {e}",
-            sock.display()
-        ))
-    })?;
+    let mut stream = tokio::net::UnixStream::connect(&sock)
+        .await
+        .map_err(|e| control_connect_error(&sock, e))?;
     let mut request = serde_json::json!({ "op": op });
     if let serde_json::Value::Object(fields) = args {
         let obj = request.as_object_mut().expect("request is an object");
@@ -699,6 +748,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
             state: tokio::sync::Mutex::new(SealerState {
                 sealed_gen: 0,
                 seen_epoch: overlay.epoch(),
+                overlay_reindex_pending: false,
                 recent_seals: Vec::new(),
                 chunk_cache: std::collections::HashMap::new(),
             }),
@@ -772,6 +822,48 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                         "ping" => {
                             serde_json::json!({ "ok": true, "commit": core.current_commit() })
                         }
+                        // One authoritative definition of local dirt: ask the same sealer
+                        // state and path resolver that the next `seal` cycle will use. A
+                        // read-only mount has no sealer and cannot accept local mutations.
+                        "dirty" => {
+                            let reply = match sealer.as_ref() {
+                                Some(sealer) => sealer.dirty_view().await,
+                                None => {
+                                    let delta = overlay.dirty_since(0);
+                                    if delta.is_empty() && !overlay.has_redirects() {
+                                        Ok(DirtyReply {
+                                            dirty: Vec::new(),
+                                            lower_commit: core.current_commit(),
+                                            watermark: delta.watermark,
+                                        })
+                                    } else {
+                                        // A read-only mount normally has no upper state. If
+                                        // stale/local state does exist, there is no sealer
+                                        // watermark capable of classifying it exactly; force
+                                        // the CLI to fail closed rather than claim it is clean.
+                                        Err(CliError::usage(
+                                            "read-only mount has local overlay state but no sealer",
+                                        ))
+                                    }
+                                }
+                            };
+                            match reply {
+                                Ok(reply) => match serde_json::to_value(reply) {
+                                    Ok(mut reply) => {
+                                        reply["ok"] = serde_json::Value::Bool(true);
+                                        reply
+                                    }
+                                    Err(e) => serde_json::json!({
+                                        "ok": false,
+                                        "error": e.to_string(),
+                                    }),
+                                },
+                                Err(e) => serde_json::json!({
+                                    "ok": false,
+                                    "error": e.to_string(),
+                                }),
+                            }
+                        }
                         // Seal on demand: `tl fs snapshot` runs exactly one cycle of the same
                         // sealer auto-commit ticks, with the caller's message (and optional
                         // overlay clear). Streaming op — the handler writes its own event
@@ -815,20 +907,38 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                         },
                         // The upper drop flips interned paths to their lower view with no
                         // kernel-visible operation; push the implied invalidations.
-                        "clear_upper" => match overlay.clear_upper() {
-                            Ok(affected) => {
-                                invalidate(affected);
-                                serde_json::json!({ "ok": true })
+                        "clear_upper" => {
+                            let result = match sealer.as_ref() {
+                                Some(sealer) => sealer.clear_upper_control().await,
+                                None => overlay
+                                    .clear_upper()
+                                    .map(|affected| invalidate(affected))
+                                    .map_err(|e| CliError::usage(e.to_string())),
+                            };
+                            match result {
+                                Ok(()) => serde_json::json!({ "ok": true }),
+                                Err(e) => {
+                                    serde_json::json!({ "ok": false, "error": e.to_string() })
+                                }
                             }
-                            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-                        },
+                        }
                         // The upper was mutated out-of-band (restore writes into the state dir
                         // from the CLI process); rebuild the dirty index from disk so an
                         // auto-commit mount seals the new state.
-                        "reindex" => match overlay.rebuild_dirty_index() {
-                            Ok(()) => serde_json::json!({ "ok": true }),
-                            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-                        },
+                        "reindex" => {
+                            let result = match sealer.as_ref() {
+                                Some(sealer) => sealer.reindex_control().await,
+                                None => overlay
+                                    .rebuild_dirty_index()
+                                    .map_err(|e| CliError::usage(e.to_string())),
+                            };
+                            match result {
+                                Ok(()) => serde_json::json!({ "ok": true }),
+                                Err(e) => {
+                                    serde_json::json!({ "ok": false, "error": e.to_string() })
+                                }
+                            }
+                        }
                         // Pending directory renames, expanded to the by-oid upserts a seal
                         // must publish (`tl fs snapshot` merges these into its push).
                         "expand_redirects" => match overlay.expand_redirects().await {
@@ -1096,12 +1206,15 @@ struct SealerState {
     /// restore) and rebuild_dirty_index rewrite the overlay's world out-of-band; every cache
     /// below is a claim about the old world and dies with it.
     seen_epoch: u64,
+    /// Restore has cleared the overlay and may be refilling it out-of-band; until its reindex
+    /// completes, neither dirty inspection nor sealing may claim the event index is complete.
+    overlay_reindex_pending: bool,
     /// Upserts of not-yet-confirmed seals, in seal order, each tagged with its commit: the
     /// guard set for deletes racing the lower's advance past their seal (see resolve_seal's
     /// tombstone arm). Confirmation-based — a set is only dropped once the lower is observed
-    /// at (or past) its seal — because eviction-by-count expires the guard exactly when index
-    /// materialization lags behind hot pushes. Memory is bounded by the unconfirmed window,
-    /// not a fixed depth.
+    /// at (or past) its seal and the pending delta has resolved against the guard — because
+    /// eviction-by-count expires it exactly when index materialization lags behind hot pushes.
+    /// Memory is bounded by the unconfirmed window, not a fixed depth.
     recent_seals: Vec<(String, std::collections::HashSet<String>)>,
     /// Chunk lists from previous seals (path -> the pushed CDC chunk list): the append fast
     /// path's memory. A re-touched file whose writes never went below a cached boundary seals
@@ -1112,6 +1225,126 @@ struct SealerState {
 
 #[cfg(unix)]
 impl Sealer {
+    /// Inspect exactly what the next seal would publish without materializing whiteouts or
+    /// other dirty filesystem changes. The sealer-state lock gives this query one linearization
+    /// point with manual/automatic seal cycles; writes after the captured watermark remain
+    /// visible to the following query.
+    async fn dirty_view(&self) -> Result<DirtyReply> {
+        let mut st = self.state.try_lock().map_err(|_| {
+            CliError::usage("the sealer is busy; exact local changes are temporarily unavailable")
+        })?;
+        if st.overlay_reindex_pending {
+            return Err(CliError::usage(
+                "the overlay is awaiting reindex after an out-of-band rewrite",
+            ));
+        }
+        let epoch = self.overlay.epoch();
+        if epoch != st.seen_epoch {
+            // restore/reindex/clear replaced the overlay world. Match seal_once's cache reset
+            // before interpreting the rebuilt dirty index.
+            st.seen_epoch = epoch;
+            st.chunk_cache.clear();
+            st.recent_seals.clear();
+        }
+        // Match seal_once's prelude: a rename already present in lower was published by an
+        // earlier seal and is no longer dirty. Reaping only removes consumed redirect
+        // bookkeeping; it never drops upper/local-only content.
+        if self.overlay.has_redirects() {
+            self.overlay
+                .reap_sealed_redirects()
+                .await
+                .map_err(|e| CliError::usage(format!("reaping sealed renames failed: {e}")))?;
+        }
+        let delta = self.overlay.dirty_since(st.sealed_gen);
+        let watermark = delta.watermark;
+        let recently: std::collections::HashSet<String> = st
+            .recent_seals
+            .iter()
+            .flat_map(|(_, set)| set)
+            .cloned()
+            .collect();
+        let (sd, mp) = (self.state_dir.clone(), self.mountpoint.clone());
+        let resolved =
+            tokio::task::spawn_blocking(move || resolve_dirty_paths(&sd, &mp, &delta, &recently))
+                .await
+                .map_err(|e| CliError::usage(format!("dirty resolution task failed: {e}")))?
+                .map_err(|e| CliError::usage(format!("resolving local changes failed: {e}")))?;
+        if self.overlay.epoch() != epoch {
+            // Never present a mixed-world answer as exact; a live-daemon client fails closed.
+            return Err(CliError::usage(
+                "the overlay was rewritten while inspecting local changes",
+            ));
+        }
+
+        let redirects = self.overlay.redirect_entries(); // (destination, source)
+        let rename_sources: std::collections::HashSet<String> =
+            redirects.iter().map(|(_, source)| source.clone()).collect();
+        let mut dirty =
+            Vec::with_capacity(redirects.len() + resolved.upserts.len() + resolved.deletes.len());
+        for (path, from) in redirects {
+            dirty.push(DirtyPath {
+                path,
+                kind: DirtyPathKind::Renamed,
+                from: Some(from),
+            });
+        }
+        for (path, _, _) in resolved.upserts {
+            dirty.push(DirtyPath {
+                path,
+                kind: DirtyPathKind::Modified,
+                from: None,
+            });
+        }
+        // A pending rename's source whiteout is represented by the R row. Reporting the
+        // matching D as well would count the same operation twice.
+        for path in resolved.deletes {
+            if !rename_sources.contains(path.as_str()) {
+                dirty.push(DirtyPath {
+                    path,
+                    kind: DirtyPathKind::Deleted,
+                    from: None,
+                });
+            }
+        }
+        Ok(DirtyReply {
+            dirty,
+            lower_commit: self.core.current_commit(),
+            watermark,
+        })
+    }
+
+    /// Serialize restore's out-of-band overlay drop with seal/dirty inspection. Without this,
+    /// a concurrent `dirty` query could observe a half-cleared tree before `clear_upper` bumps
+    /// the overlay epoch and incorrectly present it as exact.
+    async fn clear_upper_control(&self) -> Result<()> {
+        let mut st = self.state.lock().await;
+        let affected = self
+            .overlay
+            .clear_upper()
+            .map_err(|e| CliError::usage(format!("clearing the overlay failed: {e}")))?;
+        (self.invalidate)(affected);
+        st.seen_epoch = self.overlay.epoch();
+        st.chunk_cache.clear();
+        st.recent_seals.clear();
+        st.overlay_reindex_pending = true;
+        Ok(())
+    }
+
+    /// Serialize dirty-index rebuild with seal/dirty inspection. `rebuild_dirty_index` bumps
+    /// its epoch before repopulating the map, so an epoch-only before/after check cannot detect
+    /// a query that otherwise lands in the middle of that walk.
+    async fn reindex_control(&self) -> Result<()> {
+        let mut st = self.state.lock().await;
+        self.overlay
+            .rebuild_dirty_index()
+            .map_err(|e| CliError::usage(format!("reindexing the overlay failed: {e}")))?;
+        st.seen_epoch = self.overlay.epoch();
+        st.chunk_cache.clear();
+        st.recent_seals.clear();
+        st.overlay_reindex_pending = false;
+        Ok(())
+    }
+
     /// Run ONE seal cycle: resolve the dirty delta since the sealed watermark (plus pending
     /// renames) against the on-disk overlay, push it as a snapshot commit carrying `message`,
     /// and advance the lower to the sealed commit. Errors are retryable — nothing was
@@ -1134,23 +1367,26 @@ impl Sealer {
     ) -> Result<SealOutcome> {
         use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
         let mut st = self.state.lock().await;
+        if st.overlay_reindex_pending {
+            return Err(CliError::usage(
+                "the overlay is awaiting reindex after an out-of-band rewrite",
+            ));
+        }
         let epoch = self.overlay.epoch();
         if epoch != st.seen_epoch {
             st.seen_epoch = epoch;
             st.chunk_cache.clear();
             st.recent_seals.clear();
         }
-        // Drop guard sets the lower has caught up with: the followed ref only moves along
-        // this workspace's snapshots, so matching the current lower commit confirms it and
-        // everything sealed before it.
+        // Remember which guard sets the lower has confirmed, but do not drop them until this
+        // cycle has resolved its pending delta. An unlink can land while its upsert push is in
+        // flight, before lower serves the new file and therefore without writing a whiteout;
+        // that pending delete still needs the just-confirmed guard to avoid resurrection.
         let lower = self.core.current_commit();
-        if let Some(i) = st
+        let confirmed_through = st
             .recent_seals
             .iter()
-            .rposition(|(commit, _)| *commit == lower)
-        {
-            st.recent_seals.drain(..=i);
-        }
+            .rposition(|(commit, _)| *commit == lower);
         // Renames a previous seal published but never consumed (crash, or the lower lagged
         // past our post-seal check) dangle once the lower advances; reap them before anything
         // resolves through the table.
@@ -1167,6 +1403,9 @@ impl Sealer {
         let delta = self.overlay.dirty_since(st.sealed_gen);
         let watermark = delta.watermark;
         if delta.is_empty() && !self.overlay.has_redirects() {
+            if let Some(i) = confirmed_through {
+                st.recent_seals.drain(..=i);
+            }
             st.sealed_gen = watermark;
             let cleared = clear.then(|| self.clear_overlay(&mut st)).transpose()?;
             return Ok(SealOutcome::Clean { cleared });
@@ -1223,6 +1462,12 @@ impl Sealer {
             // until TTL if the push fails (the retry routes through the plain-deletes arm and
             // never re-lists these).
             (self.invalidate)(self.overlay.invals_for(&resolved.tombstoned));
+        }
+        // The pending delta has now consumed any resurrection guards it needed. Confirmed
+        // sets can be retired without losing a raced delete; materialized tombstones remain
+        // ordinary whiteout-backed deletes even if the subsequent push must retry.
+        if let Some(i) = confirmed_through {
+            st.recent_seals.drain(..=i);
         }
         // Pending directory renames seal as by-oid references: every file the destination
         // serves from the lower commits by blob oid (nothing uploads), alongside the source
@@ -1452,31 +1697,36 @@ struct ResolvedSeal {
     tombstoned: Vec<String>,
 }
 
-/// Resolve an event delta into upload-ready push files. The dirty index's kinds are routing
-/// hints; the on-disk overlay is the authority — a path is an upsert if the upper serves it,
-/// a delete if a whiteout covers it, and skipped when it is a bare directory or ignored.
-///
-/// The subtle arm is the tombstone: a path sealed by a recent commit, then deleted before the
-/// lower advanced to that commit. The unlink saw no lower presence, so no whiteout was written
-/// — once the lower catches up the path would silently resurrect. Recognize it by membership
-/// in the recent seals, write the whiteout the unlink would have, and publish the delete.
-///
-/// Runs on the blocking pool: the ignore rules read `.gitignore` files through the mountpoint,
-/// which this very daemon serves.
+/// Side-effect-free path classification shared by `dirty` inspection and seal materialization.
 #[cfg(unix)]
-fn resolve_seal(
+struct ResolvedDirtyPaths {
+    upserts: super::OverlayUpserts,
+    deletes: Vec<String>,
+    /// Deletes that need a resurrection whiteout when a seal actually runs.
+    tombstones: Vec<String>,
+}
+
+/// Resolve an event delta into the paths a seal would publish. The dirty index's kinds are
+/// routing hints; the on-disk overlay is the authority — a path is an upsert if upper serves
+/// it, a delete if a whiteout covers it, and skipped when it is bare, ignored, or was born and
+/// deleted locally between seals.
+///
+/// This function is deliberately pure. A vanished recently-sealed path is returned in both
+/// `deletes` and `tombstones`; only `resolve_seal` materializes its whiteout. That lets the
+/// `dirty` control op use the exact same classification without changing filesystem state.
+#[cfg(unix)]
+fn resolve_dirty_paths(
     state_dir: &Path,
     mount_root: &Path,
     delta: &super::overlay::DirtyDelta,
     recently_sealed: &std::collections::HashSet<String>,
-    chunk_cache: &std::collections::HashMap<String, ChunkList>,
-) -> crate::error::Result<ResolvedSeal> {
+) -> crate::error::Result<ResolvedDirtyPaths> {
     let mut ignore = super::SnapshotIgnore::new(mount_root);
     let upper = state_dir.join("upper");
     let wh = state_dir.join("wh");
     let mut upserts: super::OverlayUpserts = Vec::new();
     let mut deletes: Vec<String> = Vec::new();
-    let mut tombstoned: Vec<String> = Vec::new();
+    let mut tombstones: Vec<String> = Vec::new();
     let mut vanished: Vec<String> = Vec::new();
 
     for (path, _) in &delta.upserts {
@@ -1488,10 +1738,8 @@ fn resolve_seal(
             continue;
         };
         if meta.is_dir() && !meta.file_type().is_symlink() {
-            // A directory upsert names a subtree (a directory rename lands one alongside its
-            // per-child events; future bulk ops may not): publish its files so nothing under
-            // it can be missed. The sort+dedup below collapses overlap with child events.
-            // Empty directories still publish nothing — git has no empty trees.
+            // A directory event names a subtree. Empty directories still publish nothing —
+            // git has no empty trees — and sort+dedup collapses child-event overlap.
             collect_dir_upserts(&upper, path, &mut ignore, &mut upserts)?;
             continue;
         }
@@ -1511,9 +1759,8 @@ fn resolve_seal(
         if whited_out_on_disk(&wh, path) {
             deletes.push(path.clone());
         } else if recently_sealed.contains(path) {
-            super::write_whiteout(&wh, path)?;
             deletes.push(path.clone());
-            tombstoned.push(path.clone());
+            tombstones.push(path.clone());
         }
         // Neither: born and died locally between seals — nothing was ever published.
     }
@@ -1521,6 +1768,43 @@ fn resolve_seal(
     upserts.dedup_by(|a, b| a.0 == b.0);
     deletes.sort();
     deletes.dedup();
+    tombstones.sort();
+    tombstones.dedup();
+    Ok(ResolvedDirtyPaths {
+        upserts,
+        deletes,
+        tombstones,
+    })
+}
+
+/// Resolve an event delta into upload-ready push files. The dirty index's kinds are routing
+/// hints; the on-disk overlay is the authority — a path is an upsert if the upper serves it,
+/// a delete if a whiteout covers it, and skipped when it is a bare directory or ignored.
+///
+/// The subtle arm is the tombstone: a path sealed by a recent commit, then deleted before the
+/// lower advanced to that commit. The unlink saw no lower presence, so no whiteout was written
+/// — once the lower catches up the path would silently resurrect. Recognize it by membership
+/// in the recent seals, write the whiteout the unlink would have, and publish the delete.
+///
+/// Runs on the blocking pool: the ignore rules read `.gitignore` files through the mountpoint,
+/// which this very daemon serves.
+#[cfg(unix)]
+fn resolve_seal(
+    state_dir: &Path,
+    mount_root: &Path,
+    delta: &super::overlay::DirtyDelta,
+    recently_sealed: &std::collections::HashSet<String>,
+    chunk_cache: &std::collections::HashMap<String, ChunkList>,
+) -> crate::error::Result<ResolvedSeal> {
+    let wh = state_dir.join("wh");
+    let ResolvedDirtyPaths {
+        upserts,
+        deletes,
+        tombstones: tombstoned,
+    } = resolve_dirty_paths(state_dir, mount_root, delta, recently_sealed)?;
+    for path in &tombstoned {
+        super::write_whiteout(&wh, path)?;
+    }
     let mut files = super::overlay_push_files(&upserts, &deletes)?;
 
     // Append fast path: a file with a cached chunk list from its previous seal, whose writes
@@ -2016,6 +2300,79 @@ mod tests {
         assert!(
             state.path().join("wh/sealed-then-deleted.txt").is_file(),
             "the whiteout the unlink would have written"
+        );
+    }
+
+    #[test]
+    fn dirty_inspection_reports_raced_delete_without_materializing_whiteout() {
+        let state = state_with(&[], &[]);
+        let mount = tempfile::tempdir().unwrap();
+        let recently: std::collections::HashSet<String> = ["sealed-then-deleted.txt".to_string()]
+            .into_iter()
+            .collect();
+
+        let resolved = resolve_dirty_paths(
+            state.path(),
+            mount.path(),
+            &delta(&[], &["sealed-then-deleted.txt", "never-sealed.txt"]),
+            &recently,
+        )
+        .unwrap();
+
+        assert_eq!(resolved.deletes, vec!["sealed-then-deleted.txt"]);
+        assert_eq!(resolved.tombstones, vec!["sealed-then-deleted.txt"]);
+        assert!(
+            !state.path().join("wh/sealed-then-deleted.txt").exists(),
+            "status inspection must not mutate the overlay"
+        );
+    }
+
+    #[test]
+    fn dirty_reply_requires_every_wire_field() {
+        let valid = serde_json::json!({
+            "dirty": [{"path": "file.txt", "kind": "M"}],
+            "lower_commit": "cafe",
+            "watermark": 7,
+        });
+        assert!(serde_json::from_value::<DirtyReply>(valid).is_ok());
+        assert!(
+            serde_json::from_value::<DirtyReply>(serde_json::json!({
+                "dirty": [],
+                "lower_commit": "cafe",
+            }))
+            .is_err(),
+            "a missing watermark must not decode as a clean workspace"
+        );
+        assert!(
+            serde_json::from_value::<DirtyReply>(serde_json::json!({
+                "dirty": [],
+                "watermark": 7,
+            }))
+            .is_err(),
+            "a missing lower commit must not decode as a clean workspace"
+        );
+    }
+
+    #[test]
+    fn control_connect_errors_only_call_absence_not_running() {
+        let sock = Path::new("/tmp/control.sock");
+        for kind in [
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::ConnectionRefused,
+        ] {
+            assert!(
+                control_connect_error(sock, std::io::Error::from(kind))
+                    .to_string()
+                    .starts_with("mount daemon is not running (")
+            );
+        }
+        assert!(
+            control_connect_error(
+                sock,
+                std::io::Error::from(std::io::ErrorKind::PermissionDenied),
+            )
+            .to_string()
+            .starts_with("could not connect to mount daemon (")
         );
     }
 
