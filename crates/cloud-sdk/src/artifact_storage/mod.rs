@@ -117,11 +117,25 @@ impl ArtifactStorageClient {
         repo: &str,
         default_branch: Option<&str>,
     ) -> Result<Traced<()>, SdkError> {
+        self.create_repo_of_kind(project_id, repo, default_branch, None)
+            .await
+    }
+
+    /// Create a repo of an explicit kind ("repository" | "filesystem"). `None` omits the field
+    /// entirely, which pre-kind servers require.
+    pub async fn create_repo_of_kind(
+        &self,
+        project_id: &str,
+        repo: &str,
+        default_branch: Option<&str>,
+        kind: Option<&str>,
+    ) -> Result<Traced<()>, SdkError> {
         let credential = self.git_credential_for_project(project_id).await?;
         self.create_repo_with_credential(
             project_id,
             repo,
             default_branch,
+            kind,
             &credential.git_username,
             &credential.token,
         )
@@ -133,11 +147,13 @@ impl ArtifactStorageClient {
         project_id: &str,
         repo: &str,
         default_branch: Option<&str>,
+        kind: Option<&str>,
         git_username: &str,
         git_token: &str,
     ) -> Result<Traced<()>, SdkError> {
         let request = CreateRepoRequest {
             default_branch: default_branch.unwrap_or("main").to_string(),
+            kind: kind.map(str::to_string),
         };
         let (request_builder, trace_id) = self.git_request(
             Method::POST,
@@ -272,22 +288,41 @@ impl ArtifactStorageClient {
         &self,
         project_id: &str,
     ) -> Result<Traced<ListReposResponse>, SdkError> {
+        self.list_repos_of_kind(project_id, None).await
+    }
+
+    /// List repos restricted to one kind ("repository" | "filesystem"). `None` lists all kinds
+    /// and sends no filter, which pre-kind servers require.
+    pub async fn list_repos_of_kind(
+        &self,
+        project_id: &str,
+        kind: Option<&str>,
+    ) -> Result<Traced<ListReposResponse>, SdkError> {
         let credential = self.git_credential_for_project(project_id).await?;
-        self.list_repos_with_credential(project_id, &credential.git_username, &credential.token)
-            .await
+        self.list_repos_with_credential(
+            project_id,
+            kind,
+            &credential.git_username,
+            &credential.token,
+        )
+        .await
     }
 
     pub async fn list_repos_with_credential(
         &self,
         project_id: &str,
+        kind: Option<&str>,
         git_username: &str,
         git_token: &str,
     ) -> Result<Traced<ListReposResponse>, SdkError> {
-        let url = format!(
+        let mut url = format!(
             "{}/project/{}/repos",
             self.git_base_url,
             encode_path_segment(project_id)
         );
+        if let Some(kind) = kind {
+            url.push_str(&format!("?kind={}", urlencoding::encode(kind)));
+        }
         let (request, trace_id) = self.git_request_url(Method::GET, url, git_username, git_token);
         let response = request.send().await?;
         decode_json(response, trace_id).await

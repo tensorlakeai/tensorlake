@@ -708,7 +708,7 @@ fn print_json<T: serde::Serialize>(value: &T) -> Result<()> {
     Ok(())
 }
 
-fn map_sdk_error(error: tensorlake::error::SdkError) -> CliError {
+pub(crate) fn map_sdk_error(error: tensorlake::error::SdkError) -> CliError {
     match error {
         tensorlake::error::SdkError::Authentication(_) => {
             CliError::auth("authentication failed. set TENSORLAKE_API_KEY or run 'tl login'.")

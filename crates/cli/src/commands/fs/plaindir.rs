@@ -253,6 +253,26 @@ pub(crate) fn bound_workspaces() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The backing repo of one binding state dir (for path-addressed reads like history).
+pub(crate) fn binding_repo(state_dir: &Path) -> Result<String> {
+    Ok(load_binding(state_dir)?.repo)
+}
+
+/// Every binding as (backing repo, bound root) — the filesystem listing's attachment column.
+pub(crate) fn bound_binding_repos() -> Vec<(String, String)> {
+    let Some(registry) = registry_lenient(registry_load()) else {
+        return Vec::new();
+    };
+    registry
+        .bindings
+        .iter()
+        .filter_map(|(root, state_dir)| {
+            let binding = load_binding(state_dir).ok()?;
+            Some((binding.repo, root.clone()))
+        })
+        .collect()
+}
+
 /// The bound directory attached to `workspace_id`, if any. Scans the binding state dirs
 /// themselves (not the registry): this guards destructive/attachment decisions (`tl fs rm`,
 /// mount write policy), and a binding missing from a damaged registry still owns its
@@ -352,7 +372,7 @@ fn binding_overlap_error(root: &str, bindings: &BTreeMap<String, PathBuf>) -> Op
     bindings.keys().find_map(|bound| {
         let bound_path = Path::new(bound);
         (candidate.starts_with(bound_path) || bound_path.starts_with(candidate)).then(|| {
-            format!("{root} overlaps the existing binding at {bound} (see `tl fs unbind {bound}`)")
+            format!("{root} overlaps the tracked directory at {bound} (tl fs unmount {bound} stops tracking it)")
         })
     })
 }
@@ -364,8 +384,8 @@ pub fn assert_no_binding_overlap(mountpoint: &str) -> Result<()> {
         let bound_path = Path::new(bound);
         if candidate.starts_with(bound_path) || bound_path.starts_with(candidate) {
             return Err(CliError::usage(format!(
-                "{mountpoint} overlaps the plain-directory binding at {bound}; unbind it \
-                 first (tl fs unbind {bound}) or mount elsewhere"
+                "{mountpoint} overlaps the tracked directory at {bound}; stop tracking it \
+                 first (tl fs unmount {bound}) or mount elsewhere"
             )));
         }
     }
@@ -385,6 +405,12 @@ pub(crate) struct Binding {
     /// Canonical bound directory.
     pub root: PathBuf,
     pub created_at_secs: u64,
+    /// Whether the binding's workspace publishes every save to the filesystem (shared-rw,
+    /// the `tl fs push` contract). `false` = a pre-split `tl fs init` binding whose saves
+    /// land on a private workspace only; push refuses those rather than reporting a save
+    /// nobody can see. Serde-defaulted so legacy binding.json reads as non-publishing.
+    #[serde(default)]
+    pub publish: bool,
 }
 
 pub(crate) fn load_binding(state_dir: &Path) -> Result<Binding> {
@@ -1348,11 +1374,55 @@ fn symlink_target_bytes(target: &Path) -> Vec<u8> {
 // tl fs init — bind a plain directory to a new (verified empty-base) workspace.
 // ---------------------------------------------------------------------------------------------
 
-pub async fn init(
+/// `tl fs push <dir> <filesystem>` — upload a directory into a filesystem as one save, no
+/// mount. First push binds the directory (publish-on-save workspace); later pushes reuse the
+/// binding's stat index, so only changed files upload.
+pub async fn push(
+    ctx: &CliContext,
+    dir: &Path,
+    file_system: &str,
+    message: Option<&str>,
+) -> Result<()> {
+    let (root, state_dir) = match binding_for_lenient(dir) {
+        Some((root, state_dir)) => {
+            let binding = load_binding(&state_dir)?;
+            if binding.repo != file_system {
+                return Err(CliError::usage(format!(
+                    "{root} is already bound to filesystem {} — push there, or pick another \
+                     directory for {file_system}",
+                    binding.repo
+                )));
+            }
+            // A pre-split binding saves to a private workspace the filesystem never sees;
+            // "pushed" would be a lie. Re-binding fixes it (the private session's saves are
+            // superseded by the fresh upload).
+            if !binding.publish {
+                return Err(CliError::usage(format!(
+                    "{root} was bound without publish-on-save (created before `tl fs push` \
+                     existed); stop tracking it (tl fs unmount {root}) and push again to \
+                     re-bind"
+                )));
+            }
+            (root, state_dir)
+        }
+        None => {
+            let (root, state_dir, _, _) =
+                bind(ctx, Some(dir.to_path_buf()), Some(file_system), true).await?;
+            (root, state_dir)
+        }
+    };
+    snapshot(ctx, &root, &state_dir, message).await
+}
+
+/// Bind a directory to a fresh workspace on a filesystem. `publish` arms shared-rw: every
+/// snapshot of the binding lands on the filesystem's default branch (the `tl fs push`
+/// contract). Returns (root, state dir, repo, workspace id).
+async fn bind(
     ctx: &CliContext,
     path: Option<PathBuf>,
     file_system: Option<&str>,
-) -> Result<()> {
+    publish: bool,
+) -> Result<(String, PathBuf, String, String)> {
     if cfg!(not(unix)) {
         return Err(CliError::usage(
             "plain-directory bindings are supported on unix only in v1",
@@ -1381,14 +1451,14 @@ pub async fn init(
     let (user, token) = session.creds();
     let file_systems = session
         .client
-        .list_repos_with_credential(&session.project_id, user, token)
+        .list_repos_with_credential(&session.project_id, None, user, token)
         .await?
         .into_inner();
     let repo = match file_system {
         Some(name) => {
             if !file_systems.repos.iter().any(|r| r.name == name) {
                 return Err(CliError::usage(format!(
-                    "no file system named {name:?}; create it first: tl git create {name}"
+                    "no filesystem named {name:?}; create it first: tl fs create {name}"
                 )));
             }
             name.to_string()
@@ -1398,7 +1468,7 @@ pub async fn init(
             [only] => only.name.clone(),
             [] => {
                 return Err(CliError::usage(
-                    "this project has no file systems; create one first: tl git create <name>",
+                    "this project has no filesystems; create one first: tl fs create <name>",
                 ));
             }
             many => {
@@ -1430,7 +1500,10 @@ pub async fn init(
             &repo,
             user,
             token,
-            &CreateWorkspaceRequest::default(),
+            &CreateWorkspaceRequest {
+                shared_target: publish.then(|| default_branch.clone()),
+                ..Default::default()
+            },
         )
         .await?
         .into_inner();
@@ -1491,6 +1564,7 @@ pub async fn init(
         ref_name: ws.ref_name.clone(),
         root: PathBuf::from(&root),
         created_at_secs: now_secs(),
+        publish,
     };
     write_atomic(
         &state_dir.join("binding.json"),
@@ -1528,12 +1602,7 @@ pub async fn init(
             .await;
         return Err(e);
     }
-    println!(
-        "Bound {root} to new workspace {} (file system {repo}).",
-        short_id(&ws.id)
-    );
-    println!("Work in the directory, then: tl fs snapshot {root}");
-    Ok(())
+    Ok((root, state_dir, repo, ws.id))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2097,6 +2166,8 @@ fn orphan_state_dir_for(root: &str, state_root: &Path) -> Option<PathBuf> {
 /// `tl fs unbind` — remove the local binding and its state. Deliberately NOT `rm`: `tl fs rm`
 /// deletes the *workspace*; unbinding only forgets this directory's link to it, and the
 /// workspace (with every snapshot) survives on the server.
+/// `tl fs unmount` on a pushed directory: forget the local tracking state. The
+/// directory's files and the filesystem are untouched.
 pub async fn unbind(path: Option<PathBuf>) -> Result<()> {
     let (root, state_dir) = match path {
         Some(path) => match binding_for(&path)? {
@@ -2119,8 +2190,8 @@ pub async fn unbind(path: Option<PathBuf>) -> Result<()> {
                     return Ok(());
                 }
                 return Err(CliError::usage(format!(
-                    "{} is not a bound directory (see `tl fs status`, or bind one with \
-                     `tl fs init`)",
+                    "{} is not a tracked directory (see `tl fs status`, or start one with \
+                     `tl fs push <dir> <filesystem>`)",
                     path.display()
                 )));
             }
@@ -2830,6 +2901,7 @@ mod tests {
             ref_name: format!("workspaces/{workspace_id}"),
             root: root.to_path_buf(),
             created_at_secs: 0,
+            publish: true,
         };
         std::fs::write(
             state_dir.join("binding.json"),

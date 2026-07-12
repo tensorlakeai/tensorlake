@@ -1349,7 +1349,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        sdk.create_repo_with_credential("fastclonetest", &repo, None, "t", "devtoken")
+        sdk.create_repo_with_credential("fastclonetest", &repo, None, None, "t", "devtoken")
             .await
             .unwrap();
         let salt = repo.as_bytes().to_vec();
