@@ -2275,6 +2275,13 @@ pub async fn unmount(
              {mountpoint}"
         )));
     }
+    // The gate's answer ages while the volume stays writable through teardown; fingerprint
+    // now, re-check at the point of no return (state-dir deletion below).
+    let local_baseline = if discard_local {
+        None
+    } else {
+        Some(overlay_fingerprint(&state_dir)?)
+    };
     let pid = daemon::daemon_pid(&state_dir);
     // The daemon replies to `shutdown` only once the kernel released the volume, so this call
     // covers the slow phase (FSKit teardown on macOS takes seconds); spin so it doesn't look
@@ -2352,6 +2359,20 @@ pub async fn unmount(
                 &state.workspace_id,
             )
             .await?;
+    }
+    // Point of no return. Writes that landed after the gate's answer (through the mount
+    // while it was still attached) would be silently destroyed here — the daemon is gone,
+    // but the fingerprint needs no daemon.
+    if let Some(baseline) = local_baseline
+        && overlay_fingerprint(&state_dir)? != baseline
+    {
+        return Err(CliError::usage(format!(
+            "local changes landed while unmounting; the volume is detached but the local \
+             state is kept at {}. Remount to recover and seal them (`tl fs mount \
+             {mountpoint}`, then `tl fs snapshot {mountpoint}`), or re-run \
+             `tl fs unmount --discard-local {mountpoint}` to drop them.",
+            state_dir.display()
+        )));
     }
     std::fs::remove_dir_all(&state_dir)?;
     registry_remove(&mountpoint)?;
@@ -2481,13 +2502,7 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
         for entry in read.flatten() {
             let abs = entry.path();
             let meta = std::fs::symlink_metadata(&abs)?;
-            let rel = abs
-                .strip_prefix(root)
-                .expect("under root")
-                .components()
-                .map(|c| c.as_os_str().to_string_lossy())
-                .collect::<Vec<_>>()
-                .join("/");
+            let rel = overlay_rel_path(root, &abs);
             if ignored.is_ignored(&rel, meta.is_dir())? {
                 continue;
             }
@@ -2530,36 +2545,30 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
     Ok((upserts, deletes))
 }
 
-/// Whether the overlay holds ANY local state — deliberately broader than what enumerates as
-/// dirty: ignored files skip enumeration (and every snapshot) but die with the upper all the
-/// same, so the destructive commands (`restore`, `unmount`) gate on the raw upper/wh trees
-/// plus pending renames, not on the dirty walk.
+/// Whether the overlay holds ANY local state — raw upper/wh trees plus pending renames, no
+/// classification. This is [`overlay_losable_state`]'s empty fast path (and its daemon-less
+/// escape hatch), NOT the destructive-command gate itself: retained sealed content counts as
+/// "state" here, so gating a destructive command on this alone recreates the
+/// permanently-unsatisfiable refusal the losable gate exists to fix.
 ///
 /// Fails CLOSED: this guards data destruction, so an overlay tree that cannot be read is an
 /// error, not "no state" — a permissions hiccup must never wave a destructive command
 /// through. Only a missing tree (never-written overlay side) is honestly empty. The explicit
 /// `--discard-local` flag bypasses the check entirely (callers short-circuit before calling).
 fn overlay_has_local_state(state_dir: &Path) -> Result<bool> {
-    fn unreadable(path: &Path, err: &std::io::Error) -> CliError {
-        CliError::usage(format!(
-            "cannot verify local overlay state: {} is unreadable ({err}); fix permissions \
-             or pass --discard-local to drop the overlay without checking",
-            path.display()
-        ))
-    }
     fn any_entry(dir: &Path) -> Result<bool> {
         let read = match std::fs::read_dir(dir) {
             Ok(read) => read,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-            Err(e) => return Err(unreadable(dir, &e)),
+            Err(e) => return Err(overlay_unreadable(dir, &e)),
         };
         for entry in read {
-            let entry = entry.map_err(|e| unreadable(dir, &e))?;
+            let entry = entry.map_err(|e| overlay_unreadable(dir, &e))?;
             let meta = match entry.path().symlink_metadata() {
                 Ok(meta) => meta,
                 // Deleted between readdir and stat: honestly not state anymore.
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(unreadable(&entry.path(), &e)),
+                Err(e) => return Err(overlay_unreadable(&entry.path(), &e)),
             };
             if meta.is_dir() && !meta.file_type().is_symlink() {
                 if any_entry(&entry.path())? {
@@ -2576,21 +2585,50 @@ fn overlay_has_local_state(state_dir: &Path) -> Result<bool> {
         || !pending_renames(state_dir).is_empty())
 }
 
+/// The shared fail-closed error for gate walks: this feeds data-destruction decisions, so an
+/// unreadable tree is an error naming the bypass flag, never a guess.
+fn overlay_unreadable(path: &Path, err: &std::io::Error) -> CliError {
+    CliError::usage(format!(
+        "cannot verify local overlay state: {} is unreadable ({err}); fix permissions \
+         or pass --discard-local to drop the overlay without checking",
+        path.display()
+    ))
+}
+
+/// One rel-path normalization for every overlay walker. These strings are the join keys
+/// against the sealed index and the daemon's dirty view — a walker normalizing differently
+/// would classify every retained file "uncovered" and revert the losable gate to the
+/// permanently-unsatisfiable behavior it exists to fix.
+fn overlay_rel_path(root: &Path, abs: &Path) -> String {
+    abs.strip_prefix(root)
+        .expect("under root")
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/")
+}
+
 /// What dropping the overlay would actually destroy — the gate `unmount` and `restore` check
 /// before requiring `--discard-local`. `None` means everything the overlay holds is retained
-/// sealed content (byte-identical to workspace history — sealing keeps the overlay as the
-/// local byte cache, so this is the DEFAULT state after every snapshot), which drops
-/// loss-free. `Some(reason)` names the truly-losable state: unsealed dirt (pending renames
-/// included), ignored local-only files, or overlay entries that neither the dirty view nor
-/// the sealed index vouches for.
+/// sealed content (stat-verified against the sealed index, so byte-identical to workspace
+/// history — sealing keeps the overlay as the local byte cache, making this the DEFAULT
+/// state after every snapshot), which drops loss-free. `Some(reason)` names the truly-losable
+/// state: unsealed changes (pending renames included), ignored local-only files and
+/// deletions, or overlay entries no seal record vouches for.
+///
+/// The classification is OFFLINE-capable: sealed.json + per-path stat identity is the same
+/// mechanism daemon startup reconciliation trusts, so a dead daemon does not force a remount
+/// just to unmount — any file modified through the mount stat-mismatches its seal record and
+/// refuses. When the daemon answers the `dirty` op, its view is used as an ADDITIONAL
+/// refusal source (it catches same-stat modifications the stat check cannot see) and for
+/// friendlier counts.
 ///
 /// Bare directories never block: git cannot represent an empty tree, so no snapshot can ever
 /// cover one — gating on them would make the gate permanently unsatisfiable, which is
 /// exactly the bug this classification exists to fix.
 ///
-/// Fail-closed like [`overlay_has_local_state`]: a populated overlay that cannot be
-/// classified — the daemon won't answer the dirty query, an ignore rule can't be evaluated,
-/// or a tree is unreadable — is an error naming the bypass flag, never a pass.
+/// Fail-closed: an unreadable tree or an unevaluable ignore rule is an error naming the
+/// bypass flag, never a pass.
 #[cfg(unix)]
 async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Option<String>> {
     if !overlay_has_local_state(state_dir)? {
@@ -2598,108 +2636,290 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
         // unmounting that must not demand a remount first.
         return Ok(None);
     }
-    let changes = local_changes(state_dir, mountpoint).await?;
-    if !changes.exact {
-        return Err(CliError::usage(
-            "cannot verify local overlay state: the mount daemon did not answer the dirty \
-             query (not running, or it predates this CLI); remount with `tl fs mount` and \
-             retry, or pass --discard-local to drop the overlay without checking",
-        ));
+    let dirty: Option<daemon::DirtyReply> = match daemon::control(state_dir, "dirty").await {
+        Ok(reply) if reply.get("upserts").is_some() => serde_json::from_value(reply).ok(),
+        _ => None,
+    };
+    let sealed = daemon::SealedIndex::load(state_dir);
+    let mut ignore = SnapshotIgnore::new(Path::new(mountpoint));
+    let renames = match &dirty {
+        Some(d) => d.renames.clone(),
+        None => pending_renames(state_dir)
+            .into_iter()
+            .map(|(to, from)| (from, to))
+            .collect(),
+    };
+    let (dirty_upserts, dirty_deletes): (
+        std::collections::HashSet<String>,
+        std::collections::HashSet<String>,
+    ) = match &dirty {
+        Some(d) => (
+            d.upserts.iter().cloned().collect(),
+            d.deletes.iter().cloned().collect(),
+        ),
+        None => Default::default(),
+    };
+    let rename_sources: std::collections::HashSet<&str> =
+        renames.iter().map(|(from, _)| from.as_str()).collect();
+    // Dirty paths count once, from the authoritative view (not per on-disk entry): the next
+    // seal owns them.
+    let mut unsealed = dirty_upserts.len() + dirty_deletes.len() + renames.len();
+    let (mut ignored, mut uncovered) = (0usize, 0usize);
+
+    fn check_ignored(ignore: &mut SnapshotIgnore, rel: &str, is_dir: bool) -> Result<bool> {
+        ignore.is_ignored(rel, is_dir).map_err(|e| {
+            CliError::usage(format!(
+                "cannot verify local overlay state: evaluating ignore rules failed ({e}); \
+                 fix the ignore file or pass --discard-local to drop the overlay without \
+                 checking"
+            ))
+        })
     }
-    fn unreadable(path: &Path, err: &std::io::Error) -> CliError {
-        CliError::usage(format!(
-            "cannot verify local overlay state: {} is unreadable ({err}); fix permissions \
-             or pass --discard-local to drop the overlay without checking",
-            path.display()
-        ))
+    fn strict_count_files(dir: &Path) -> Result<usize> {
+        let mut n = 0;
+        let read = match std::fs::read_dir(dir) {
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+            Err(e) => return Err(overlay_unreadable(dir, &e)),
+        };
+        for entry in read {
+            let entry = entry.map_err(|e| overlay_unreadable(dir, &e))?;
+            let meta = match entry.path().symlink_metadata() {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(overlay_unreadable(&entry.path(), &e)),
+            };
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                n += strict_count_files(&entry.path())?;
+            } else {
+                n += 1;
+            }
+        }
+        Ok(n)
     }
-    fn strict_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<()> {
+    // One strict pass per tree, classified inline. Upper files: dirty (already counted) →
+    // stat-verified sealed (retained; path membership alone would vouch for bytes modified
+    // out-of-band or racing the dirty reply) → ignored → uncovered. Ignored directories
+    // prune the descent: the whole subtree is ignored, count it without per-file rule
+    // evaluation.
+    #[allow(clippy::too_many_arguments)]
+    fn classify_upper(
+        root: &Path,
+        dir: &Path,
+        ignore: &mut SnapshotIgnore,
+        sealed: &daemon::SealedIndex,
+        dirty_upserts: &std::collections::HashSet<String>,
+        ignored: &mut usize,
+        uncovered: &mut usize,
+    ) -> Result<()> {
         let read = match std::fs::read_dir(dir) {
             Ok(read) => read,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
-            Err(e) => return Err(unreadable(dir, &e)),
+            Err(e) => return Err(overlay_unreadable(dir, &e)),
         };
         for entry in read {
-            let entry = entry.map_err(|e| unreadable(dir, &e))?;
+            let entry = entry.map_err(|e| overlay_unreadable(dir, &e))?;
             let abs = entry.path();
             let meta = match abs.symlink_metadata() {
                 Ok(meta) => meta,
                 Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(unreadable(&abs, &e)),
+                Err(e) => return Err(overlay_unreadable(&abs, &e)),
             };
-            let is_dir = meta.is_dir() && !meta.file_type().is_symlink();
-            if is_dir {
-                strict_files(root, &abs, out)?;
-            } else {
-                let rel = abs
-                    .strip_prefix(root)
-                    .expect("under root")
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/");
-                out.push(rel);
+            let rel = overlay_rel_path(root, &abs);
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                if check_ignored(ignore, &rel, true)? {
+                    *ignored += strict_count_files(&abs)?;
+                } else {
+                    classify_upper(root, &abs, ignore, sealed, dirty_upserts, ignored, uncovered)?;
+                }
+                continue;
             }
+            if dirty_upserts.contains(&rel) {
+                continue; // counted via the dirty view
+            }
+            if sealed
+                .upserts
+                .get(&rel)
+                .is_some_and(|s| daemon::SealedStat::of(&meta) == *s)
+            {
+                continue; // retained: stat-verified sealed content
+            }
+            if check_ignored(ignore, &rel, false)? {
+                *ignored += 1;
+                continue;
+            }
+            *uncovered += 1;
         }
         Ok(())
     }
-    // The exact walk, fail-closed: unlike `local_changes`' display counting, an ignore rule
-    // that can't be evaluated aborts here (`?`) instead of guessing.
-    let sealed = daemon::SealedIndex::load(state_dir);
-    let dirty_upserts: std::collections::HashSet<&str> =
-        changes.upserts.iter().map(String::as_str).collect();
-    let dirty_deletes: std::collections::HashSet<&str> =
-        changes.deletes.iter().map(String::as_str).collect();
-    let mut ignore = SnapshotIgnore::new(Path::new(mountpoint));
-    let mut upper_files = Vec::new();
-    strict_files(
-        &state_dir.join("upper"),
-        &state_dir.join("upper"),
-        &mut upper_files,
+    let upper = state_dir.join("upper");
+    classify_upper(
+        &upper,
+        &upper,
+        &mut ignore,
+        &sealed,
+        &dirty_upserts,
+        &mut ignored,
+        &mut uncovered,
     )?;
-    let (mut ignored, mut uncovered) = (0usize, 0usize);
-    for rel in &upper_files {
-        if ignore.is_ignored(rel, false)? {
-            ignored += 1;
-        } else if !dirty_upserts.contains(rel.as_str()) && !sealed.upserts.contains_key(rel) {
-            uncovered += 1;
+    // Whiteouts: dirty delete (counted) → pending-rename source (the rename counts) →
+    // sealed tombstone (retained) → ignored (a local-only deletion of a committed file: it
+    // can never seal, exactly like an ignored file, so it takes the flag) → uncovered.
+    fn classify_wh(
+        root: &Path,
+        dir: &Path,
+        ignore: &mut SnapshotIgnore,
+        sealed: &daemon::SealedIndex,
+        dirty_deletes: &std::collections::HashSet<String>,
+        rename_sources: &std::collections::HashSet<&str>,
+        ignored: &mut usize,
+        uncovered: &mut usize,
+    ) -> Result<()> {
+        let read = match std::fs::read_dir(dir) {
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(overlay_unreadable(dir, &e)),
+        };
+        for entry in read {
+            let entry = entry.map_err(|e| overlay_unreadable(dir, &e))?;
+            let abs = entry.path();
+            let meta = match abs.symlink_metadata() {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(overlay_unreadable(&abs, &e)),
+            };
+            let rel = overlay_rel_path(root, &abs);
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                classify_wh(
+                    root,
+                    &abs,
+                    ignore,
+                    sealed,
+                    dirty_deletes,
+                    rename_sources,
+                    ignored,
+                    uncovered,
+                )?;
+                continue;
+            }
+            if dirty_deletes.contains(&rel) || rename_sources.contains(rel.as_str()) {
+                continue;
+            }
+            if sealed.deletes.contains(&rel) {
+                continue; // retained tombstone
+            }
+            if check_ignored(ignore, &rel, false)? {
+                *ignored += 1;
+                continue;
+            }
+            *uncovered += 1;
         }
+        Ok(())
     }
-    let mut wh_files = Vec::new();
-    strict_files(&state_dir.join("wh"), &state_dir.join("wh"), &mut wh_files)?;
-    for rel in &wh_files {
-        // A whiteout is covered when the dirty view will seal it, the sealed index already
-        // did, or it belongs to a pending rename's source (the rename itself counts as dirt).
-        if !dirty_deletes.contains(rel.as_str())
-            && !sealed.deletes.contains(rel)
-            && !changes.renames.iter().any(|(from, _)| from == rel)
-            && !ignore.is_ignored(rel, false)?
-        {
-            uncovered += 1;
-        }
+    let wh = state_dir.join("wh");
+    classify_wh(
+        &wh,
+        &wh,
+        &mut ignore,
+        &sealed,
+        &dirty_deletes,
+        &rename_sources,
+        &mut ignored,
+        &mut uncovered,
+    )?;
+    // Offline, FUSE-written dirt has no dirty view to land in — it shows up here as a stat
+    // mismatch instead.
+    if dirty.is_none() {
+        unsealed = 0;
     }
     let mut reasons = Vec::new();
-    if changes.dirty() > 0 {
-        reasons.push(format!("{} unsealed local change(s)", changes.dirty()));
+    if unsealed > 0 {
+        reasons.push(format!("{unsealed} unsealed local change(s)"));
     }
     if ignored > 0 {
         reasons.push(format!(
-            "{ignored} ignored local-only file(s) (never part of any snapshot)"
+            "{ignored} ignored local-only change(s) (never part of any snapshot)"
         ));
     }
     if uncovered > 0 {
         reasons.push(format!(
-            "{uncovered} overlay entrie(s) not covered by any snapshot"
+            "{uncovered} overlay {} not covered by any snapshot{}",
+            if uncovered == 1 { "entry" } else { "entries" },
+            if dirty.is_none() {
+                " (the mount daemon is not running; unsealed changes appear here)"
+            } else {
+                ""
+            },
         ));
     }
     Ok((!reasons.is_empty()).then(|| reasons.join(", ")))
 }
 
-/// Mounts don't exist off unix; the raw any-state answer keeps the gate honest for
-/// cross-compiled builds.
+/// Mounts don't exist off unix; nothing can reach this gate with real state, and pretending
+/// to classify would fork the semantics of a data-destruction check.
 #[cfg(not(unix))]
-async fn overlay_losable_state(state_dir: &Path, _mountpoint: &str) -> Result<Option<String>> {
-    Ok(overlay_has_local_state(state_dir)?.then(|| "local overlay state".to_string()))
+async fn overlay_losable_state(_state_dir: &Path, _mountpoint: &str) -> Result<Option<String>> {
+    Err(CliError::usage(
+        "tl fs mounts are supported on Linux (FUSE) and macOS (FSKit) only.",
+    ))
+}
+
+/// A cheap change detector over the raw overlay (upper + wh + pending renames): the
+/// unmount/restore gates capture it when they pass, and both commands re-check it at their
+/// point of no return — the gate's answer is only as good as the moment it was computed, and
+/// seconds (unmount teardown) to minutes (restore's fetch phase) of live writable mount sit
+/// between the two. Ignore rules deliberately play no part: ANY change is grounds to abort,
+/// new ignored files included — and needing no rule evaluation also makes it usable after
+/// the daemon is gone. Fail-closed on unreadable state.
+fn overlay_fingerprint(state_dir: &Path) -> Result<u64> {
+    use std::hash::{Hash, Hasher};
+    fn collect(
+        root: &Path,
+        dir: &Path,
+        prefix: &str,
+        out: &mut Vec<(String, u64, Option<std::time::SystemTime>)>,
+    ) -> Result<()> {
+        let read = match std::fs::read_dir(dir) {
+            Ok(read) => read,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => return Err(overlay_unreadable(dir, &e)),
+        };
+        for entry in read {
+            let entry = entry.map_err(|e| overlay_unreadable(dir, &e))?;
+            let abs = entry.path();
+            let meta = match abs.symlink_metadata() {
+                Ok(meta) => meta,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(e) => return Err(overlay_unreadable(&abs, &e)),
+            };
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                collect(root, &abs, prefix, out)?;
+            } else {
+                out.push((
+                    format!("{prefix}{}", overlay_rel_path(root, &abs)),
+                    meta.len(),
+                    meta.modified().ok(),
+                ));
+            }
+        }
+        Ok(())
+    }
+    let mut entries = Vec::new();
+    collect(&state_dir.join("upper"), &state_dir.join("upper"), "u/", &mut entries)?;
+    collect(&state_dir.join("wh"), &state_dir.join("wh"), "w/", &mut entries)?;
+    entries.sort();
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for (rel, len, mtime) in &entries {
+        rel.hash(&mut hasher);
+        len.hash(&mut hasher);
+        if let Some(mtime) = mtime
+            && let Ok(since_epoch) = mtime.duration_since(std::time::UNIX_EPOCH)
+        {
+            since_epoch.hash(&mut hasher);
+        }
+    }
+    pending_renames(state_dir).hash(&mut hasher);
+    Ok(hasher.finish())
 }
 
 /// Pending committed-directory renames recorded by the mount daemon (`redirects.json` in the
@@ -2772,13 +2992,7 @@ async fn local_changes(state_dir: &Path, mountpoint: &str) -> Result<LocalChange
                 let Ok(meta) = abs.symlink_metadata() else {
                     continue;
                 };
-                let rel = abs
-                    .strip_prefix(&upper)
-                    .expect("under upper")
-                    .components()
-                    .map(|c| c.as_os_str().to_string_lossy())
-                    .collect::<Vec<_>>()
-                    .join("/");
+                let rel = overlay_rel_path(&upper, &abs);
                 let is_dir = meta.is_dir() && !meta.file_type().is_symlink();
                 if ignore.is_ignored(&rel, is_dir).unwrap_or(false) {
                     // An ignored directory's whole subtree is ignored — count its files.
@@ -3537,6 +3751,14 @@ pub async fn restore(
             path = path.display(),
         )));
     }
+    // The gate's answer ages badly here: minutes of remote tree walks and content download
+    // sit between it and the destructive clear below, on a live writable mount. Fingerprint
+    // now, re-check at the point of no return.
+    let local_baseline = if discard_local {
+        None
+    } else {
+        Some(overlay_fingerprint(&state_dir)?)
+    };
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
 
@@ -3600,6 +3822,20 @@ pub async fn restore(
     // The overlay's dirty set is about to be dropped — those paths' kernel views flip to the
     // target too (even when the target equals the lower and the tree diff below is empty).
     let (pre_upserts, pre_deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
+    // Last check before the destructive clear: anything written through the mount during
+    // the fetch phase above is unsealed state the gate never saw. Aborting here loses
+    // nothing — everything fetched is local, nothing was changed yet.
+    if let Some(baseline) = local_baseline
+        && overlay_fingerprint(&state_dir)? != baseline
+    {
+        return Err(CliError::usage(format!(
+            "local changes landed while the restore was preparing; nothing was changed. \
+             Seal them first (`tl fs snapshot {path}`) and re-run — or re-run with \
+             --discard-local to drop them. (Background seal housekeeping can also move the \
+             overlay; if you made no local writes, simply retry.)",
+            path = path.display(),
+        )));
+    }
     daemon::control(&state_dir, "clear_upper").await?;
     let mut changed: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     let mut expect: std::collections::BTreeMap<String, PathExpect> =
@@ -4471,12 +4707,12 @@ mod tests {
         assert!(losable.contains("not covered"), "{losable}");
     }
 
-    /// A populated overlay with no daemon to classify it fails closed — but an EMPTY overlay
-    /// passes without needing a daemon at all (unmounting a never-written dead mount must
-    /// not demand a remount first).
+    /// No daemon needed: an EMPTY overlay passes outright, and a populated one classifies
+    /// OFFLINE — an entry no seal record vouches for refuses (labeled with the daemon-down
+    /// caveat), it does not error demanding a remount just to unmount.
     #[cfg(unix)]
     #[tokio::test]
-    async fn losable_gate_fails_closed_without_a_daemon_unless_empty() {
+    async fn losable_gate_classifies_offline_without_a_daemon() {
         let state = tempfile::tempdir().unwrap();
         let mount = tempfile::tempdir().unwrap();
         assert_eq!(
@@ -4487,12 +4723,152 @@ mod tests {
             "empty overlay needs no daemon"
         );
         upper_file(state.path(), "something.txt", "content");
-        let err = overlay_losable_state(state.path(), &mount.path().to_string_lossy())
+        let losable = overlay_losable_state(state.path(), &mount.path().to_string_lossy())
             .await
-            .unwrap_err();
+            .unwrap()
+            .expect("an unvouched entry is losable offline");
+        assert!(losable.contains("not covered"), "{losable}");
         assert!(
-            err.to_string().contains("--discard-local"),
-            "fail-closed error names the bypass flag: {err}"
+            losable.contains("daemon is not running"),
+            "offline answer carries the caveat: {losable}"
+        );
+    }
+
+    /// The headline case offline: retained-only overlays (stat-verified against sealed.json,
+    /// the same identity daemon startup reconciliation trusts) pass with a DEAD daemon — a
+    /// reboot no longer forces a remount just to unmount.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn losable_gate_passes_retained_only_without_a_daemon() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let meta = upper_file(state.path(), "kept.txt", "sealed bytes");
+        let mut index = daemon::SealedIndex {
+            commit: "cafe0000".into(),
+            ..Default::default()
+        };
+        index
+            .upserts
+            .insert("kept.txt".into(), daemon::SealedStat::of(&meta));
+        index.save(state.path()).unwrap();
+        assert_eq!(
+            overlay_losable_state(state.path(), &mount.path().to_string_lossy())
+                .await
+                .unwrap(),
+            None,
+            "stat-verified retained content is loss-free, daemon or not"
+        );
+    }
+
+    /// Path membership alone must not vouch: a sealed path whose CONTENT no longer matches
+    /// its seal record (out-of-band write, or a write racing the dirty reply) is losable.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn losable_gate_refuses_modified_sealed_path() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let meta = upper_file(state.path(), "kept.txt", "sealed bytes");
+        let mut index = daemon::SealedIndex {
+            commit: "cafe0000".into(),
+            ..Default::default()
+        };
+        index
+            .upserts
+            .insert("kept.txt".into(), daemon::SealedStat::of(&meta));
+        index.save(state.path()).unwrap();
+        // Rewrite with different content (size changes, so identity breaks even on coarse
+        // mtime granularity) — and let the daemon answer CLEAN, simulating the race where
+        // the write landed after the dirty reply.
+        std::fs::write(state.path().join("upper/kept.txt"), "newer, unsealed bytes").unwrap();
+        let _ops = fake_daemon_with_replies(
+            state.path(),
+            [("dirty".to_string(), clean_dirty_reply())].into_iter().collect(),
+        );
+        let losable = overlay_losable_state(state.path(), &mount.path().to_string_lossy())
+            .await
+            .unwrap()
+            .expect("a stat-mismatched sealed path is losable");
+        assert!(losable.contains("not covered"), "{losable}");
+    }
+
+    /// Coverage outranks ignore rules: a file sealed into a snapshot and LATER matched by a
+    /// new ignore rule is retained (loss-free), not "ignored local-only" — the old ordering
+    /// refused it with a remedy (`tl fs snapshot`) that could never satisfy the gate.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn losable_gate_passes_sealed_then_ignored_file() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let meta = upper_file(state.path(), "build.log", "sealed before the rule");
+        let mut index = daemon::SealedIndex {
+            commit: "cafe0000".into(),
+            ..Default::default()
+        };
+        index
+            .upserts
+            .insert("build.log".into(), daemon::SealedStat::of(&meta));
+        index.save(state.path()).unwrap();
+        std::fs::write(mount.path().join(".gitignore"), "*.log\n").unwrap();
+        let _ops = fake_daemon_with_replies(
+            state.path(),
+            [("dirty".to_string(), clean_dirty_reply())].into_iter().collect(),
+        );
+        assert_eq!(
+            overlay_losable_state(state.path(), &mount.path().to_string_lossy())
+                .await
+                .unwrap(),
+            None,
+            "sealed-then-ignored content is retained, not local-only"
+        );
+    }
+
+    /// An ignored whiteout is a local-only deletion of a committed file: it can never seal
+    /// (the sealer's ignore filter skips it), so like an ignored file it refuses and only
+    /// --discard-local clears it. Silently passing it would resurrect the deleted file.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn losable_gate_refuses_ignored_whiteout() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        std::fs::write(mount.path().join(".gitignore"), "*.tmp\n").unwrap();
+        let wh = state.path().join("wh/junk.tmp");
+        std::fs::create_dir_all(wh.parent().unwrap()).unwrap();
+        std::fs::write(&wh, b"").unwrap();
+        let _ops = fake_daemon_with_replies(
+            state.path(),
+            [("dirty".to_string(), clean_dirty_reply())].into_iter().collect(),
+        );
+        let losable = overlay_losable_state(state.path(), &mount.path().to_string_lossy())
+            .await
+            .unwrap()
+            .expect("an ignored whiteout is losable");
+        assert!(losable.contains("ignored"), "{losable}");
+    }
+
+    /// The point-of-no-return re-check: the fingerprint is stable over unchanged state and
+    /// moves on any write, new file, or whiteout — including ignored files (rule evaluation
+    /// deliberately plays no part, so it also works with the daemon dead).
+    #[cfg(unix)]
+    #[test]
+    fn overlay_fingerprint_tracks_any_overlay_change() {
+        let state = tempfile::tempdir().unwrap();
+        upper_file(state.path(), "a.txt", "one");
+        let base = overlay_fingerprint(state.path()).unwrap();
+        assert_eq!(
+            base,
+            overlay_fingerprint(state.path()).unwrap(),
+            "stable across identical state"
+        );
+        upper_file(state.path(), "junk.tmp", "ignored files count too");
+        let with_new_file = overlay_fingerprint(state.path()).unwrap();
+        assert_ne!(base, with_new_file, "a new file moves the fingerprint");
+        let wh = state.path().join("wh/gone.txt");
+        std::fs::create_dir_all(wh.parent().unwrap()).unwrap();
+        std::fs::write(&wh, b"").unwrap();
+        assert_ne!(
+            with_new_file,
+            overlay_fingerprint(state.path()).unwrap(),
+            "a new whiteout moves the fingerprint"
         );
     }
 

@@ -239,6 +239,12 @@ impl SealedStat {
 /// matches. Losing or corrupting the file is safe: everything degrades to the rebuild's
 /// pessimistic all-dirty answer, and the next seal re-records (content dedup makes the
 /// re-push free).
+///
+/// The save-after-every-seal timing is a CROSS-PROCESS CONTRACT, not an implementation
+/// detail: the CLI's unmount/restore gate (`fs::overlay_losable_state`) stat-verifies the
+/// overlay against this file — possibly with the daemon dead — to decide what is loss-free
+/// to destroy. Batching or deferring saves would make retained content classify as
+/// "uncovered" (spurious refusals at best, and it weakens a data-destruction gate).
 #[cfg(unix)]
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SealedIndex {
