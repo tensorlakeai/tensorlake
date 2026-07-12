@@ -2445,7 +2445,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        sdk.create_repo_with_credential("ingesttest", &repo, None, "t", "devtoken")
+        sdk.create_repo_with_credential("ingesttest", &repo, None, None, "t", "devtoken")
             .await
             .unwrap();
 

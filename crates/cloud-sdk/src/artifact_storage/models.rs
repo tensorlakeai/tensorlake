@@ -49,7 +49,18 @@ pub struct Repo {
 }
 
 fn default_repo_kind() -> String {
-    "repository".to_string()
+    REPO_KIND_REPOSITORY.to_string()
+}
+
+/// The wire names for repo kinds — defined once; every construction and comparison goes
+/// through these (a typo'd bare literal would compile and silently misroute).
+pub const REPO_KIND_REPOSITORY: &str = "repository";
+pub const REPO_KIND_FILESYSTEM: &str = "filesystem";
+
+impl Repo {
+    pub fn is_filesystem(&self) -> bool {
+        self.kind == REPO_KIND_FILESYSTEM
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

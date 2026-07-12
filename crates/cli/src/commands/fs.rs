@@ -437,12 +437,21 @@ const FS_AUTOSAVE_DEFAULT_SECS: u64 = 30;
 /// `tl fs create <name>` — a new empty filesystem. Born with a genesis "empty" save
 /// server-side, so it mounts immediately.
 pub async fn create_filesystem(ctx: &CliContext, name: &str, output_json: bool) -> Result<()> {
-    let project_id = crate::commands::git::project_id(ctx)?;
-    let client = crate::commands::git::artifact_storage_client(ctx)?;
-    client
-        .create_repo_of_kind(&project_id, name, None, Some("filesystem"))
-        .await
-        .map_err(crate::commands::git::map_sdk_error)?;
+    // FsSession caches the minted credential across invocations; the raw client would mint a
+    // fresh platform token on every call.
+    let session = FsSession::open(ctx, None).await?;
+    let (user, token) = session.creds();
+    session
+        .client
+        .create_repo_with_credential(
+            &session.project_id,
+            name,
+            None,
+            Some(tensorlake::artifact_storage::models::REPO_KIND_FILESYSTEM),
+            user,
+            token,
+        )
+        .await?;
     if output_json {
         println!(
             "{}",
@@ -456,14 +465,40 @@ pub async fn create_filesystem(ctx: &CliContext, name: &str, output_json: bool) 
     Ok(())
 }
 
+/// One kind-stamped listing, resolved to a filesystem by name. `replacement` names the
+/// `tl git` command shown when the name is actually a repository — the one line the two call
+/// sites differ in.
+fn resolve_filesystem<'a>(
+    listing: &'a tensorlake::artifact_storage::models::ListReposResponse,
+    name: &str,
+    replacement: &str,
+) -> Result<&'a tensorlake::artifact_storage::models::Repo> {
+    let Some(repo) = listing.repos.iter().find(|r| r.name == name) else {
+        return Err(CliError::usage(format!(
+            "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create {name})"
+        )));
+    };
+    if !repo.is_filesystem() {
+        return Err(CliError::usage(format!(
+            "{name} is a repository, not a filesystem — use: {replacement}"
+        )));
+    }
+    Ok(repo)
+}
+
 /// `tl fs ls` — the filesystems of this project, with where each is attached on this machine.
 pub async fn ls_filesystems(ctx: &CliContext, output_json: bool) -> Result<()> {
-    let project_id = crate::commands::git::project_id(ctx)?;
-    let client = crate::commands::git::artifact_storage_client(ctx)?;
-    let listing = client
-        .list_repos_of_kind(&project_id, Some("filesystem"))
-        .await
-        .map_err(crate::commands::git::map_sdk_error)?
+    let session = FsSession::open(ctx, None).await?;
+    let (user, token) = session.creds();
+    let listing = session
+        .client
+        .list_repos_with_credential(
+            &session.project_id,
+            Some(tensorlake::artifact_storage::models::REPO_KIND_FILESYSTEM),
+            user,
+            token,
+        )
+        .await?
         .into_inner();
     // Local attachments: kernel mounts and plain-directory bindings, keyed by backing repo.
     let mounts = live_mounts();
@@ -519,52 +554,61 @@ pub async fn ls_filesystems(ctx: &CliContext, output_json: bool) -> Result<()> {
     Ok(())
 }
 
-/// `tl fs rm <name>` — delete a filesystem and everything in it. A workspace/session id still
-/// works (deprecated) so existing scripts survive one release.
+/// `tl fs rm <name>` — delete a filesystem and everything in it. Fail-closed against local
+/// attachments: a live mount or tracked directory of this filesystem on this machine must be
+/// detached first, or the delete would strand a running daemon (or a binding's future saves)
+/// against a dead repo.
 pub async fn rm_filesystem(ctx: &CliContext, name: &str, force: bool) -> Result<()> {
-    let project_id = crate::commands::git::project_id(ctx)?;
-    let client = crate::commands::git::artifact_storage_client(ctx)?;
-    let listing = client
-        .list_repos(&project_id)
-        .await
-        .map_err(crate::commands::git::map_sdk_error)?
+    let session = FsSession::open(ctx, None).await?;
+    let (user, token) = session.creds();
+    let listing = session
+        .client
+        .list_repos_with_credential(&session.project_id, None, user, token)
+        .await?
         .into_inner();
-    let Some(repo) = listing.repos.iter().find(|r| r.name == name) else {
+    resolve_filesystem(&listing, name, &format!("tl git rm {name}"))?;
+    if let Some((mountpoint, _)) = live_mounts().into_iter().find(|(_, s)| s.repo == name) {
         return Err(CliError::usage(format!(
-            "no filesystem named {name:?} (see: tl fs ls)"
-        )));
-    };
-    if repo.kind != "filesystem" {
-        return Err(CliError::usage(format!(
-            "{name} is a repository, not a filesystem — delete it with: tl git rm {name}"
+            "{name} is mounted at {mountpoint}; unmount first: tl fs unmount {mountpoint}"
         )));
     }
-    let session = FsSession::open(ctx, None).await?;
-    let sessions = fleet_workspaces(&session, Some(name), None)
-        .await
-        .map(|rows| rows.len())
-        .unwrap_or(0);
+    if let Some((_, root)) = plaindir::bound_binding_repos()
+        .into_iter()
+        .find(|(repo, _)| repo == name)
+    {
+        return Err(CliError::usage(format!(
+            "{name} is tracking {root}; stop first: tl fs unmount {root}"
+        )));
+    }
     if !force {
-        eprint!(
-            "Delete filesystem {name} and all its saves{}? [y/N] ",
+        // The session count is prompt garnish — skip the round trip entirely under --force
+        // and tolerate its absence.
+        let sessions = fleet_workspaces(&session, Some(name), None)
+            .await
+            .map(|rows| rows.len())
+            .unwrap_or(0);
+        let prompt = format!(
+            "Delete filesystem {name} and all its saves{}?",
             if sessions > 0 {
                 format!(" ({sessions} session(s) die with it)")
             } else {
                 String::new()
             }
         );
-        use std::io::BufRead;
-        let mut line = String::new();
-        std::io::stdin().lock().read_line(&mut line)?;
-        if !matches!(line.trim(), "y" | "Y" | "yes") {
+        let confirmed = dialoguer::Confirm::new()
+            .with_prompt(prompt)
+            .default(false)
+            .interact()
+            .unwrap_or(false);
+        if !confirmed {
             println!("Aborted.");
             return Ok(());
         }
     }
-    client
-        .delete_repo(&project_id, name)
-        .await
-        .map_err(crate::commands::git::map_sdk_error)?;
+    session
+        .client
+        .delete_repo_with_credential(&session.project_id, name, user, token)
+        .await?;
     println!("Deleted filesystem {name}.");
     Ok(())
 }
@@ -580,7 +624,7 @@ pub async fn push_dir(
 }
 
 /// `tl fs history` — the save timeline of a filesystem (target: a filesystem name or a
-/// mounted/bound directory; default: the attachment containing the CWD).
+/// mounted/tracked directory; default: the attachment containing the CWD).
 pub async fn history(
     ctx: &CliContext,
     target: Option<&str>,
@@ -588,13 +632,19 @@ pub async fn history(
     output_json: bool,
 ) -> Result<()> {
     // A target that is a known local attachment (or none, meaning the CWD's) names its backing
-    // filesystem; anything else is a filesystem name.
+    // filesystem; anything else is a filesystem name. Attachments are mounts OR tracked
+    // (pushed) directories — the latter have binding state, not daemon mount state.
     let fs_name = match target {
         Some(t) if !is_registered_mount(Path::new(t)) => t.to_string(),
         other => {
-            let path = other.map(PathBuf::from);
-            let (_, state_dir) = state_dir_for(&resolve_mount_path(path)?)?;
-            daemon::load_mount_state(&state_dir)?.repo
+            let path = resolve_mount_path(other.map(PathBuf::from))?;
+            match plaindir::binding_for_lenient(&path) {
+                Some((_, state_dir)) => plaindir::binding_repo(&state_dir)?,
+                None => {
+                    let (_, state_dir) = state_dir_for(&path)?;
+                    daemon::load_mount_state(&state_dir)?.repo
+                }
+            }
         }
     };
     let session = FsSession::open(ctx, Some(&fs_name)).await?;
@@ -614,14 +664,20 @@ pub async fn history(
             e => e.into(),
         })?
         .into_inner();
-    // Saves are the operations that landed content: pushes, publishes (shared-rw
-    // applications), and promotes. Lifecycle noise (create/fork/GC) is not history.
-    let saves: Vec<_> = ops
+    // Saves are the operations that LANDED content: committed pushes, publishes (shared-rw
+    // applications, kind "reconcile"), promotes, and merges. Failed/rejected operations are
+    // not saves, and lifecycle noise (create/fork/GC) is not history. Newest first regardless
+    // of the server's return order.
+    let mut saves: Vec<_> = ops
         .operations
         .iter()
-        .filter(|op| matches!(op.kind.as_str(), "push" | "reconcile" | "promote" | "merge"))
-        .take(limit)
+        .filter(|op| {
+            matches!(op.kind.as_str(), "push" | "reconcile" | "promote" | "merge")
+                && op.result == "committed"
+        })
         .collect();
+    saves.sort_by_key(|op| std::cmp::Reverse(op.at_secs));
+    saves.truncate(limit);
     if output_json {
         println!("{}", serde_json::to_string_pretty(&saves)?);
         return Ok(());
@@ -667,9 +723,35 @@ pub async fn mount_filesystem(
              <repo>:<ref> <path>`",
         ));
     }
-    let mode = if ro { WritePolicy::Ro } else { WritePolicy::Rw };
-    // One listing answers everything the fs surface needs before mounting: does the target
-    // exist, what kind is it, and what is its default branch (the publish target).
+    // A drive doesn't lose your work: writable filesystem mounts always autosave.
+    let autosave = (!ro).then_some(FS_AUTOSAVE_DEFAULT_SECS);
+    // Auto-resume first — it needs no server round trip. A detached local session of this
+    // filesystem (mount state present, daemon dead) picks up where it left off: "run the same
+    // command again" is the crash recovery. WritePolicy::Auto keeps the single-writer
+    // downgrade: a session attached writable elsewhere resumes read-only, never as a silent
+    // second writer.
+    if !ro && let Some(workspace_id) = detached_local_session(target) {
+        println!(
+            "Resuming detached session {} of filesystem {target}.",
+            short_id(&workspace_id)
+        );
+        return mount(
+            ctx,
+            &workspace_id,
+            path,
+            WritePolicy::Auto,
+            None,
+            autosave,
+            true,
+            foreground,
+            trace_ops,
+            log_level,
+        )
+        .await;
+    }
+    // Fresh session: one listing answers what the create needs — does the target exist, what
+    // kind is it, and what is its default branch (the publish target, which the genesis commit
+    // guarantees exists).
     let session = FsSession::open(ctx, None).await?;
     let (user, token) = session.creds();
     let listing = session
@@ -677,78 +759,42 @@ pub async fn mount_filesystem(
         .list_repos_with_credential(&session.project_id, None, user, token)
         .await?
         .into_inner();
-    let Some(repo) = listing.repos.iter().find(|r| r.name == target) else {
-        return Err(CliError::usage(format!(
-            "no filesystem named {target:?} (see: tl fs ls; create one: tl fs create {target})"
-        )));
+    let repo = resolve_filesystem(&listing, target, &format!("tl git mount {target} <path>"))?;
+    // A fresh session publishes every save to the filesystem's current state; read-only mounts
+    // follow it instead.
+    let (target_spec, shared_target) = if ro {
+        (format!("{target}:{}", repo.default_branch), None)
+    } else {
+        (target.to_string(), Some(repo.default_branch.clone()))
     };
-    if repo.kind != "filesystem" {
-        return Err(CliError::usage(format!(
-            "{target} is a repository, not a filesystem — mount it with: tl git mount {target} \
-             <path>"
-        )));
-    }
-    // Auto-resume: a detached local session of this filesystem (mount state present, daemon
-    // dead) picks up where it left off — "run the same command again" is the crash recovery.
-    let resume = (!ro).then(|| detached_local_session(&repo.name)).flatten();
-    // A drive doesn't lose your work: writable filesystem mounts always autosave.
-    let autosave = (!ro).then_some(FS_AUTOSAVE_DEFAULT_SECS);
-    match resume {
-        Some(workspace_id) => {
-            println!(
-                "Resuming detached session {} of filesystem {target}.",
-                short_id(&workspace_id)
-            );
-            mount(
-                ctx,
-                &workspace_id,
-                path,
-                mode,
-                None,
-                autosave,
-                foreground,
-                trace_ops,
-                log_level,
-            )
-            .await
-        }
-        None => {
-            // A fresh session publishes every save to the filesystem's current state. The
-            // shared-rw target is the default branch, which the genesis commit guarantees
-            // exists. Read-only mounts follow the branch instead.
-            let (target_spec, shared_target) = if ro {
-                (format!("{target}:{}", repo.default_branch), None)
-            } else {
-                (target.to_string(), Some(repo.default_branch.clone()))
-            };
-            mount(
-                ctx,
-                &target_spec,
-                path,
-                mode,
-                shared_target,
-                autosave,
-                foreground,
-                trace_ops,
-                log_level,
-            )
-            .await
-        }
-    }
+    mount(
+        ctx,
+        &target_spec,
+        path,
+        if ro {
+            WritePolicy::Ro
+        } else {
+            WritePolicy::Auto
+        },
+        shared_target,
+        autosave,
+        true,
+        foreground,
+        trace_ops,
+        log_level,
+    )
+    .await
 }
 
 /// A detached local session of `repo`: registered mount state on this machine whose daemon is
-/// no longer alive. Newest state wins when several are detached.
+/// no longer alive. Newest state-dir mtime wins when several are detached — a heuristic proxy
+/// for "the one you used last" (all fs sessions publish to the same target, so resuming an
+/// older sibling loses nothing published; only its local overlay differs).
 fn detached_local_session(repo: &str) -> Option<String> {
-    let mut candidates: Vec<(std::time::SystemTime, String)> = registry_load()
-        .iter()
-        .filter_map(|(_, v)| {
-            let state_dir = PathBuf::from(v.as_str()?);
-            let state = daemon::load_mount_state(&state_dir).ok()?;
-            if state.repo != repo || state.read_only() {
-                return None;
-            }
-            if daemon::daemon_pid(&state_dir).is_some_and(daemon_alive) {
+    let mut candidates: Vec<(std::time::SystemTime, String)> = local_mount_states()
+        .into_iter()
+        .filter_map(|(_, state_dir, state, alive)| {
+            if alive || state.repo != repo || state.read_only() {
                 return None;
             }
             let modified = std::fs::metadata(&state_dir)
@@ -802,6 +848,7 @@ pub async fn mount_repo(
         mode,
         shared_target,
         None,
+        false,
         foreground,
         trace_ops,
         log_level,
@@ -1955,16 +2002,26 @@ fn daemon_alive(_pid: i32) -> bool {
     false
 }
 
-/// Local mounts whose daemon is still running: `(mountpoint, state)`.
-fn live_mounts() -> Vec<(String, MountState)> {
+/// Every locally registered mount: `(mountpoint, state dir, state, daemon alive)`. The single
+/// scan behind both the live view (attachment columns, single-writer checks) and the detached
+/// view (auto-resume), so the two can never disagree on what "alive" means.
+fn local_mount_states() -> Vec<(String, PathBuf, MountState, bool)> {
     registry_load()
         .iter()
         .filter_map(|(mountpoint, state_dir)| {
             let state_dir = PathBuf::from(state_dir.as_str()?);
             let state = daemon::load_mount_state(&state_dir).ok()?;
             let alive = daemon::daemon_pid(&state_dir).is_some_and(daemon_alive);
-            alive.then(|| (mountpoint.clone(), state))
+            Some((mountpoint.clone(), state_dir, state, alive))
         })
+        .collect()
+}
+
+/// Local mounts whose daemon is still running: `(mountpoint, state)`.
+fn live_mounts() -> Vec<(String, MountState)> {
+    local_mount_states()
+        .into_iter()
+        .filter_map(|(mountpoint, _, state, alive)| alive.then_some((mountpoint, state)))
         .collect()
 }
 
@@ -2009,6 +2066,7 @@ fn alloc_state_dir(workspace_id: &str) -> PathBuf {
 /// `<workspace-id>` (or a unique prefix; see `tl fs ls`) mounts an existing one, resuming at
 /// its last snapshot. Reads stream lazily; nothing is copied to disk up front.
 #[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments)]
 pub async fn mount(
     ctx: &CliContext,
     target: &str,
@@ -2016,6 +2074,10 @@ pub async fn mount(
     mode: WritePolicy,
     shared_target: Option<String>,
     auto_commit_interval_secs: Option<u64>,
+    // The surface speaking: true = `tl fs` (drives, sessions, saves), false = `tl git`
+    // (workspaces, snapshots, branches). One engine, two vocabularies — the fs surface
+    // promises the words workspace/snapshot/branch never appear in its output.
+    fs_surface: bool,
     foreground: bool,
     trace_ops: bool,
     log_level: &str,
@@ -2032,6 +2094,13 @@ pub async fn mount(
     // through the same subscriber the daemon uses for daemon.log — pass `--log-level debug`
     // to see them; the default "info" keeps mount's stderr clean for scripts.
     daemon::init_logging(log_level)?;
+    // The two surfaces' words for the same machinery; every user-facing line below must use
+    // these (or branch on fs_surface) so `tl fs` never says workspace/snapshot/branch.
+    let (unit, saves) = if fs_surface {
+        ("session", "saves")
+    } else {
+        ("workspace", "snapshots")
+    };
     let started = std::time::Instant::now();
     #[cfg(target_os = "macos")]
     ensure_fskit_ready().await?;
@@ -2240,12 +2309,12 @@ pub async fn mount(
             };
             match (&attached_at, mode) {
                 (Some(at), WritePolicy::Auto) => eprintln!(
-                    "{} workspace is already attached at {at}; mounting read-only (unmount \
-                     it there to take writes)",
+                    "{} {unit} is already attached at {at}; mounting read-only (unmount it \
+                     there to take writes)",
                     style("note:").yellow(),
                 ),
                 (Some(at), WritePolicy::Rw) => eprintln!(
-                    "{} workspace is also writable at {at}; two writers race snapshots",
+                    "{} {unit} is also writable at {at}; two writers race {saves}",
                     style("warning:").yellow(),
                 ),
                 _ => {}
@@ -2384,14 +2453,28 @@ pub async fn mount(
                 );
                 if attached {
                     println!(
-                        "Mounted workspace {} ({}) at {}{}",
+                        "Mounted {unit} {} ({}) at {}{}",
                         short_id(&ws.id),
                         repo,
                         mountpoint,
-                        if read_only {
-                            ", read-only, follows its snapshots"
+                        match (read_only, fs_surface) {
+                            (true, _) => ", read-only",
+                            (false, true) => ", resumed at its last save",
+                            (false, false) => ", resumed at its last snapshot",
+                        },
+                    );
+                } else if fs_surface {
+                    println!(
+                        "Mounted filesystem {} at {} (session {}{})",
+                        repo,
+                        mountpoint,
+                        short_id(&ws.id),
+                        if shared_target.is_some() {
+                            ", saves publish automatically"
+                        } else if read_only {
+                            ", read-only, follows the filesystem"
                         } else {
-                            ", resumed at its last snapshot"
+                            ""
                         },
                     );
                 } else {
@@ -2411,21 +2494,40 @@ pub async fn mount(
                     );
                 }
                 if read_only {
+                    if fs_surface {
+                        println!(
+                            "Reading save {}; new saves appear as the filesystem advances.",
+                            resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
+                        );
+                    } else {
+                        println!(
+                            "Reading commit {}; new commits appear as the followed ref advances.",
+                            resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
+                        );
+                    }
+                } else if fs_surface {
                     println!(
-                        "Reading commit {}; new commits appear as the followed ref advances.",
+                        "At save {}. Changes save automatically; tl fs snapshot {} makes a \
+                         named save.",
                         resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
+                        mountpoint,
                     );
                 } else {
                     println!(
-                        "Lower commit {}. Work in the mount, then: tl fs snapshot {}",
+                        "Lower commit {}. Work in the mount, then: tl git snapshot {}",
                         resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
                         path.display()
                     );
                 }
                 if let Some(secs) = auto_commit_interval_secs {
-                    println!(
-                        "Auto-commit: local changes seal into a snapshot every {secs}s (async)."
-                    );
+                    if fs_surface {
+                        println!("Autosave: changes save every {secs}s (async).");
+                    } else {
+                        println!(
+                            "Auto-commit: local changes seal into a snapshot every {secs}s \
+                             (async)."
+                        );
+                    }
                 }
                 return Ok(());
             }
@@ -2581,7 +2683,7 @@ pub async fn unmount(
             "the mount at {mountpoint} holds {losable}; unmounting would destroy that. Seal \
              unsealed changes first, then re-run:\n  tl fs snapshot {mountpoint}\n  tl fs \
              unmount {mountpoint}\nIgnored files never enter a snapshot — dropping them (and \
-             everything else local) takes the flag:\n  tl fs unmount --discard-local \
+             everything else local) takes the flag:\n  tl fs unmount --discard \
              {mountpoint}"
         )));
     }
@@ -2680,7 +2782,7 @@ pub async fn unmount(
             "local changes landed while unmounting; the volume is detached but the local \
              state is kept at {}. Remount to recover and seal them (`tl fs mount \
              {mountpoint}`, then `tl fs snapshot {mountpoint}`), or re-run \
-             `tl fs unmount --discard-local {mountpoint}` to drop them.",
+             `tl fs unmount --discard {mountpoint}` to drop them.",
             state_dir.display()
         )));
     }
@@ -2864,7 +2966,7 @@ fn enumerate_overlay(state_dir: &Path, mount_root: &Path) -> Result<(OverlayUpse
 /// Fails CLOSED: this guards data destruction, so an overlay tree that cannot be read is an
 /// error, not "no state" — a permissions hiccup must never wave a destructive command
 /// through. Only a missing tree (never-written overlay side) is honestly empty. The explicit
-/// `--discard-local` flag bypasses the check entirely (callers short-circuit before calling).
+/// `--discard` flag bypasses the check entirely (callers short-circuit before calling).
 fn overlay_has_local_state(state_dir: &Path) -> Result<bool> {
     fn any_entry(dir: &Path) -> Result<bool> {
         let read = match std::fs::read_dir(dir) {
@@ -2900,7 +3002,7 @@ fn overlay_has_local_state(state_dir: &Path) -> Result<bool> {
 fn overlay_unreadable(path: &Path, err: &std::io::Error) -> CliError {
     CliError::usage(format!(
         "cannot verify local overlay state: {} is unreadable ({err}); fix permissions \
-         or pass --discard-local to drop the overlay without checking",
+         or pass --discard to drop the overlay without checking",
         path.display()
     ))
 }
@@ -2919,7 +3021,7 @@ fn overlay_rel_path(root: &Path, abs: &Path) -> String {
 }
 
 /// What dropping the overlay would actually destroy — the gate `unmount` and `restore` check
-/// before requiring `--discard-local`. `None` means everything the overlay holds is retained
+/// before requiring `--discard`. `None` means everything the overlay holds is retained
 /// sealed content (stat-verified against the sealed index, so byte-identical to workspace
 /// history — sealing keeps the overlay as the local byte cache, making this the DEFAULT
 /// state after every snapshot), which drops loss-free. `Some(reason)` names the truly-losable
@@ -2980,7 +3082,7 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
         ignore.is_ignored(rel, is_dir).map_err(|e| {
             CliError::usage(format!(
                 "cannot verify local overlay state: evaluating ignore rules failed ({e}); \
-                 fix the ignore file or pass --discard-local to drop the overlay without \
+                 fix the ignore file or pass --discard to drop the overlay without \
                  checking"
             ))
         })
@@ -3693,7 +3795,7 @@ pub async fn promote(
                             eprintln!("  {:<14} {}", style(&c.kind).yellow(), c.path);
                         }
                         return Err(CliError::usage(format!(
-                            "pull {branch} into the workspace, resolve, and promote again:\n  tl fs sync {}\n  # fix the conflict markers, then\n  tl fs snapshot {} && tl fs promote {} {branch} --merge",
+                            "pull {branch} into the working tree, resolve, and promote again:\n  tl git sync {}\n  # fix the conflict markers, then\n  tl git snapshot {} && tl git promote {} {branch} --merge",
                             path.display(),
                             path.display(),
                             path.display(),
@@ -4072,7 +4174,7 @@ pub async fn restore(
         return Err(CliError::usage(format!(
             "the workspace holds {losable}; restoring would destroy that. Seal unsealed \
              changes first (`tl fs snapshot {path}`), or drop everything local (ignored \
-             files included) with the flag:\n  tl fs restore --discard-local {path} \
+             files included) with the flag:\n  tl fs restore --discard {path} \
              {version}",
             path = path.display(),
         )));
@@ -4157,7 +4259,7 @@ pub async fn restore(
         return Err(CliError::usage(format!(
             "local changes landed while the restore was preparing; nothing was changed. \
              Seal them first (`tl fs snapshot {path}`) and re-run — or re-run with \
-             --discard-local to drop them. (Background seal housekeeping can also move the \
+             --discard to drop them. (Background seal housekeeping can also move the \
              overlay; if you made no local writes, simply retry.)",
             path = path.display(),
         )));
@@ -4877,7 +4979,7 @@ mod tests {
 
     /// The unmount/restore gate: a retained-only overlay — the DEFAULT state after every
     /// snapshot, since sealing keeps the overlay — is loss-free to drop and must not demand
-    /// --discard-local (the old raw-state gate did, and its own suggested remedy could never
+    /// --discard (the old raw-state gate did, and its own suggested remedy could never
     /// satisfy it). Sealed tombstones and bare directories don't block either: git cannot
     /// represent an empty tree, so no snapshot could ever cover one.
     #[cfg(unix)]
@@ -5101,7 +5203,7 @@ mod tests {
 
     /// An ignored whiteout is a local-only deletion of a committed file: it can never seal
     /// (the sealer's ignore filter skips it), so like an ignored file it refuses and only
-    /// --discard-local clears it. Silently passing it would resurrect the deleted file.
+    /// --discard clears it. Silently passing it would resurrect the deleted file.
     #[cfg(unix)]
     #[tokio::test]
     async fn losable_gate_refuses_ignored_whiteout() {
@@ -5338,10 +5440,7 @@ mod tests {
                 msg.contains("cannot verify local overlay state"),
                 "unexpected error: {msg}"
             );
-            assert!(
-                msg.contains("--discard-local"),
-                "names the escape hatch: {msg}"
-            );
+            assert!(msg.contains("--discard"), "names the escape hatch: {msg}");
         }
         // Restore so the tempdir can be cleaned up.
         std::fs::set_permissions(&upper, std::fs::Permissions::from_mode(0o755)).unwrap();

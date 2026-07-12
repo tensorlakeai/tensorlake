@@ -253,6 +253,11 @@ pub(crate) fn bound_workspaces() -> Vec<(String, String)> {
         .collect()
 }
 
+/// The backing repo of one binding state dir (for path-addressed reads like history).
+pub(crate) fn binding_repo(state_dir: &Path) -> Result<String> {
+    Ok(load_binding(state_dir)?.repo)
+}
+
 /// Every binding as (backing repo, bound root) — the filesystem listing's attachment column.
 pub(crate) fn bound_binding_repos() -> Vec<(String, String)> {
     let Some(registry) = registry_lenient(registry_load()) else {
@@ -400,6 +405,12 @@ pub(crate) struct Binding {
     /// Canonical bound directory.
     pub root: PathBuf,
     pub created_at_secs: u64,
+    /// Whether the binding's workspace publishes every save to the filesystem (shared-rw,
+    /// the `tl fs push` contract). `false` = a pre-split `tl fs init` binding whose saves
+    /// land on a private workspace only; push refuses those rather than reporting a save
+    /// nobody can see. Serde-defaulted so legacy binding.json reads as non-publishing.
+    #[serde(default)]
+    pub publish: bool,
 }
 
 pub(crate) fn load_binding(state_dir: &Path) -> Result<Binding> {
@@ -1382,6 +1393,16 @@ pub async fn push(
                     binding.repo
                 )));
             }
+            // A pre-split binding saves to a private workspace the filesystem never sees;
+            // "pushed" would be a lie. Re-binding fixes it (the private session's saves are
+            // superseded by the fresh upload).
+            if !binding.publish {
+                return Err(CliError::usage(format!(
+                    "{root} was bound without publish-on-save (created before `tl fs push` \
+                     existed); stop tracking it (tl fs unmount {root}) and push again to \
+                     re-bind"
+                )));
+            }
             (root, state_dir)
         }
         None => {
@@ -1543,6 +1564,7 @@ async fn bind(
         ref_name: ws.ref_name.clone(),
         root: PathBuf::from(&root),
         created_at_secs: now_secs(),
+        publish,
     };
     write_atomic(
         &state_dir.join("binding.json"),
@@ -2879,6 +2901,7 @@ mod tests {
             ref_name: format!("workspaces/{workspace_id}"),
             root: root.to_path_buf(),
             created_at_secs: 0,
+            publish: true,
         };
         std::fs::write(
             state_dir.join("binding.json"),

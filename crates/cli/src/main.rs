@@ -2353,6 +2353,24 @@ async fn run_applications_command(
     }
 }
 
+/// A cached minted git credential can be revoked before its recorded expiry; purge the cache
+/// on an auth failure so the next invocation re-mints instead of retrying a dead token.
+/// Shared by both mount surfaces (`tl fs`, `tl git` mount family) so the behavior cannot
+/// drift between them.
+#[cfg(feature = "mount")]
+fn purge_credentials_on_auth_failure(result: &error::Result<()>) {
+    if let Err(
+        CliError::Auth(_)
+        | CliError::Sdk(
+            tensorlake::error::SdkError::Authentication(_)
+            | tensorlake::error::SdkError::Authorization(_),
+        ),
+    ) = result
+    {
+        crate::config::files::purge_git_credentials();
+    }
+}
+
 // `tl fs` drives the local FUSE/overlay mount stack, which is backed by the private gsvc-mount
 // core and therefore only compiled into `--features mount` release builds. The command surface
 // (FsCommands) is always parsed so `tl fs --help` documents it, but a build without the feature
@@ -2468,16 +2486,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
     // A cached minted git credential can be revoked before its recorded expiry; purge
     // the cache on an auth failure so the next invocation re-mints instead of retrying
     // a dead token.
-    if let Err(
-        CliError::Auth(_)
-        | CliError::Sdk(
-            tensorlake::error::SdkError::Authentication(_)
-            | tensorlake::error::SdkError::Authorization(_),
-        ),
-    ) = &result
-    {
-        crate::config::files::purge_git_credentials();
-    }
+    purge_credentials_on_auth_failure(&result);
     result
 }
 
@@ -2558,16 +2567,7 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
         } => commands::fs::unmount(ctx, &mount_dir(), delete, discard).await,
         _ => unreachable!("routed only for the mount family"),
     };
-    if let Err(
-        CliError::Auth(_)
-        | CliError::Sdk(
-            tensorlake::error::SdkError::Authentication(_)
-            | tensorlake::error::SdkError::Authorization(_),
-        ),
-    ) = &result
-    {
-        crate::config::files::purge_git_credentials();
-    }
+    purge_credentials_on_auth_failure(&result);
     result
 }
 

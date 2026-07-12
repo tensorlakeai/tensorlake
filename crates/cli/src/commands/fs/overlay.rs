@@ -2654,6 +2654,26 @@ mod tests {
             .into_inner();
         assert_eq!(ws.base_ref.as_deref(), Some("refs/heads/main"));
         assert_eq!(ws.shared_target.as_deref(), Some("main"));
+        // Pin `tl fs history`'s save definition to the server's operation vocabulary: the
+        // genesis is a committed "push" op, i.e. exactly what the history filter
+        // (kind in {push, reconcile, promote, merge} AND result == "committed") must match.
+        // If the server ever renames these strings, this fails instead of history silently
+        // showing "No saves yet" for a live filesystem.
+        let ops = sdk
+            .list_operations_with_credential(PROJECT, &fs_name, "t", TOKEN)
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            ops.operations
+                .iter()
+                .any(|op| op.kind == "push" && op.result == "committed"),
+            "genesis must appear as a committed push op; got kinds/results: {:?}",
+            ops.operations
+                .iter()
+                .map(|op| (op.kind.clone(), op.result.clone()))
+                .collect::<Vec<_>>()
+        );
         sdk.delete_workspace(PROJECT, &fs_name, "t", TOKEN, &ws.id)
             .await
             .unwrap();
