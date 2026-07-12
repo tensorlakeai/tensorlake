@@ -220,7 +220,7 @@ pub(crate) struct SealedStat {
 
 #[cfg(unix)]
 impl SealedStat {
-    fn of(meta: &std::fs::Metadata) -> Self {
+    pub(crate) fn of(meta: &std::fs::Metadata) -> Self {
         use std::os::unix::fs::MetadataExt;
         SealedStat {
             size: meta.size(),
@@ -263,7 +263,7 @@ impl SealedIndex {
             .unwrap_or_default()
     }
 
-    fn save(&self, state_dir: &Path) -> std::io::Result<()> {
+    pub(crate) fn save(&self, state_dir: &Path) -> std::io::Result<()> {
         let tmp = state_dir.join("sealed.json.tmp");
         std::fs::write(&tmp, serde_json::to_vec(self).expect("plain data serializes"))?;
         std::fs::rename(&tmp, Self::file(state_dir))
