@@ -647,7 +647,9 @@ pub async fn history(
             }
         }
     };
-    let session = FsSession::open(ctx, Some(&fs_name)).await?;
+    // Project-wide session: the operation log is project-scoped, and repo-scoped mints
+    // deliberately omit that scope (a repo credential would 403 here).
+    let session = FsSession::open(ctx, None).await?;
     let (user, token) = session.creds();
     let ops = session
         .client
@@ -1782,6 +1784,18 @@ fn create_recovery(e: &tensorlake::error::SdkError) -> Option<CreateRecovery> {
 /// still succeeds.
 async fn ensure_seeded(session: &FsSession, default_branch: &str, repo: &str) -> Result<()> {
     let (user, token) = session.creds();
+    // Filesystems are born with a genesis save (server-minted, kind=filesystem) and legacy
+    // repos may have real history — seeding those would stack a pointless empty commit on
+    // every first bind. Only a genuinely unborn default branch needs the seed.
+    let refs = session
+        .client
+        .list_refs_with_credential(&session.project_id, repo, user, token)
+        .await?
+        .into_inner();
+    let full_ref = format!("refs/heads/{default_branch}");
+    if refs.refs.iter().any(|r| r.name == full_ref) {
+        return Ok(());
+    }
     session
         .client
         .push_files(
@@ -2790,14 +2804,16 @@ pub async fn unmount(
     registry_remove(&mountpoint)?;
     if delete {
         println!(
-            "Unmounted {mountpoint} (workspace {} deleted).",
+            "Unmounted {mountpoint} (session {} deleted).",
             short_id(&state.workspace_id)
         );
     } else {
         println!(
-            "Unmounted {mountpoint}. Workspace {} kept — mount it again with: tl fs mount {} \
-             <path>",
+            "Unmounted {mountpoint}. Session {} kept — `tl fs mount {} <path>` resumes it \
+             (repositories: tl git mount {} <path> --workspace {}).",
             short_id(&state.workspace_id),
+            state.repo,
+            state.repo,
             short_id(&state.workspace_id),
         );
     }
@@ -3087,6 +3103,20 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
             ))
         })
     }
+    // Files the OS strews into every volume it touches (AppleDouble resource forks,
+    // Finder/Spotlight/Trash state). They are ignored-by-rule and mechanically recreated, so
+    // they are not user work and must not make a clean unmount demand --discard — on macOS
+    // every mount acquires them within seconds of being browsed.
+    fn is_os_junk(rel: &str) -> bool {
+        let base = rel.rsplit('/').next().unwrap_or(rel);
+        base == ".DS_Store"
+            || base == ".Spotlight-V100"
+            || base == ".fseventsd"
+            || base == ".Trashes"
+            || base == ".TemporaryItems"
+            || base == ".apdisk"
+            || base.starts_with("._")
+    }
     fn strict_count_files(dir: &Path) -> Result<usize> {
         let mut n = 0;
         let read = match std::fs::read_dir(dir) {
@@ -3140,7 +3170,9 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
             let rel = overlay_rel_path(root, &abs);
             if meta.is_dir() && !meta.file_type().is_symlink() {
                 if check_ignored(ignore, &rel, true)? {
-                    *ignored += strict_count_files(&abs)?;
+                    if !is_os_junk(&rel) {
+                        *ignored += strict_count_files(&abs)?;
+                    }
                 } else {
                     classify_upper(
                         root,
@@ -3165,7 +3197,9 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
                 continue; // retained: stat-verified sealed content
             }
             if check_ignored(ignore, &rel, false)? {
-                *ignored += 1;
+                if !is_os_junk(&rel) {
+                    *ignored += 1;
+                }
                 continue;
             }
             *uncovered += 1;
@@ -4061,26 +4095,31 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         );
         return Ok(());
     }
-    println!("{} {}", style("file system:").dim(), state.repo);
+    println!("{} {}", style("filesystem:").dim(), state.repo);
     println!(
         "{} {} (created {} ago)",
-        style("workspace:").dim(),
+        style("session:").dim(),
         short_id(&ws.id),
         age_display(ws.created_at_secs)
     );
-    if let Some(followed) = &state.follow_ref {
+    // A publish-on-save mount follows its target branch for convergence but is writable —
+    // read_only() (not follow_ref presence) decides which mode the user is in.
+    if state.read_only() {
+        let followed = state.follow_ref.as_deref().unwrap_or("the current state");
         println!("{} read-only, follows {followed}", style("mode:").dim());
     } else if let Some(target) = &ws.shared_target {
         println!(
-            "{} shared-rw, snapshots auto-publish to {target}",
+            "{} publishing — every save lands on {target} (view follows it)",
             style("mode:").dim()
         );
+    } else {
+        println!("{} private (publish with promote)", style("mode:").dim());
     }
     if let Some(secs) = state.auto_commit_interval_secs {
         println!(
-            "{} local changes seal into a snapshot every {secs}s (local: below is the kept \
-             overlay, sealed content included; `tl fs snapshot --clear` drops it)",
-            style("auto-commit:").dim()
+            "{} local changes seal into a save every {secs}s (sealed content below is kept \
+             locally as the byte cache)",
+            style("autosave:").dim()
         );
     }
     match &daemon_commit {

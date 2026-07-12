@@ -171,8 +171,13 @@ pub async fn create_repo(
 
 pub async fn list_repos(ctx: &CliContext, output_json: bool) -> Result<()> {
     let project_id = project_id(ctx)?;
+    // Repositories only: filesystems are `tl fs ls`'s surface. Pre-kind servers ignore the
+    // filter and keep returning everything.
     let response = artifact_storage_client(ctx)?
-        .list_repos(&project_id)
+        .list_repos_of_kind(
+            &project_id,
+            Some(tensorlake::artifact_storage::models::REPO_KIND_REPOSITORY),
+        )
         .await
         .map_err(map_sdk_error)?
         .into_inner();

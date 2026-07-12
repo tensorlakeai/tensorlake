@@ -1447,7 +1447,10 @@ async fn bind(
         )));
     }
 
-    let session = FsSession::open(ctx, file_system).await?;
+    // Project-wide session: the repo listing is project-scoped, and a repo-scoped mint
+    // (which FsSession would use for a named file system) deliberately lacks that scope —
+    // binding with one 403s before the workspace is ever created.
+    let session = FsSession::open(ctx, None).await?;
     let (user, token) = session.creds();
     let file_systems = session
         .client
@@ -2232,11 +2235,10 @@ pub async fn unbind(path: Option<PathBuf>) -> Result<()> {
         println!("Unbound {root}.");
     } else {
         println!(
-            "Unbound {root}. Workspace {} and its snapshots survive on the server (delete \
-             with: tl fs rm {}).",
-            short_id(&workspace),
-            short_id(&workspace),
+            "Stopped tracking {root}. Its saves survive on the filesystem — push again to \
+             re-bind."
         );
+        let _ = workspace;
     }
     Ok(())
 }
