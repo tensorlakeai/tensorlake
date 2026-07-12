@@ -1053,9 +1053,11 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                         },
                         // The upper was mutated out-of-band (restore writes into the state dir
                         // from the CLI process); rebuild the dirty index from disk so an
-                        // auto-commit mount seals the new state. Then reconcile: whatever the
-                        // refill left byte-identical to sealed content (restore back to the
-                        // sealed snapshot) is retained, not dirt.
+                        // auto-commit mount seals the new state. The reconcile afterwards is a
+                        // correctness backstop, not an optimization: in the restore flow it
+                        // absolves nothing (clear_upper reset sealed.json, and refilled files
+                        // carry fresh mtimes), but any future out-of-band flow that preserves
+                        // seal records must not re-dirty retained content.
                         "reindex" => match overlay.rebuild_dirty_index() {
                             Ok(()) => {
                                 reconcile_sealed(&control_state_dir, &overlay);
