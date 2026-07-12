@@ -356,6 +356,14 @@ pub struct OverlayFs {
     dirty: Mutex<HashMap<String, DirtyEntry>>,
     /// Out-of-band mutation epoch: see [`OverlayFs::epoch`].
     epoch: AtomicU64,
+    /// The trim fence. Mutating entry points hold it shared for their whole span (copy-up
+    /// through dirty-index record); [`OverlayFs::trim_retained`] holds it exclusively while it
+    /// drops sealed upper files. Without it, a trim could unlink an upper file between a
+    /// writer's copy-up and its open — the writer would then feed an unlinked inode whose
+    /// bytes no seal can ever read. Entry points take it exactly once and no private helper
+    /// re-acquires it (tokio's RwLock is write-preferring: a nested read behind a queued
+    /// writer deadlocks).
+    mutate: tokio::sync::RwLock<()>,
     /// Pending committed-directory renames: merged-namespace destination path -> lower source
     /// path in **true lower coordinates** (composed through existing entries at insert, so
     /// resolution is always one hop). A `rename(2)` of a lower-backed directory records here
@@ -463,6 +471,7 @@ impl OverlayFs {
             write_gen: AtomicU64::new(0),
             dirty: Mutex::new(HashMap::new()),
             epoch: AtomicU64::new(0),
+            mutate: tokio::sync::RwLock::new(()),
             redirects: Mutex::new(redirects),
             redirects_path,
             redirect_gen: AtomicU64::new(0),
@@ -561,6 +570,42 @@ impl OverlayFs {
             .lock()
             .expect("dirty lock")
             .retain(|_, entry| entry.generation > upto);
+    }
+
+    /// The mutation clock's current value — the generation ceiling for
+    /// [`OverlayFs::absolve_clean`].
+    pub fn current_generation(&self) -> u64 {
+        self.write_gen.load(Ordering::SeqCst)
+    }
+
+    /// Drop dirty entries whose on-disk state a persisted seal record has vouched for —
+    /// startup/reindex reconciliation, after [`OverlayFs::rebuild_dirty_index`] pessimistically
+    /// marked every upper file an upsert and every whiteout a delete. Only entries whose kind
+    /// matches are absolved: a path the sealed index calls an upsert but the rebuild calls a
+    /// delete (or vice versa) changed shape while the daemon was down and stays dirty.
+    ///
+    /// `upto` is the caller's clock snapshot from BEFORE it stat-matched the paths: an entry
+    /// with a newer generation was mutated by live kernel traffic after that snapshot, so the
+    /// stat match proves nothing about it and it stays dirty (reindex reconciliation runs on a
+    /// live mount).
+    pub fn absolve_clean(&self, upserts: &[String], deletes: &[String], upto: u64) {
+        let mut dirty = self.dirty.lock().expect("dirty lock");
+        for path in upserts {
+            if dirty
+                .get(path)
+                .is_some_and(|e| e.kind == DirtyKind::Upsert && e.generation <= upto)
+            {
+                dirty.remove(path);
+            }
+        }
+        for path in deletes {
+            if dirty
+                .get(path)
+                .is_some_and(|e| e.kind == DirtyKind::Delete && e.generation <= upto)
+            {
+                dirty.remove(path);
+            }
+        }
     }
 
     /// The path's current lowest written offset, if it is dirty. A sealer that built a stable
@@ -1126,9 +1171,15 @@ impl OverlayFs {
     /// never touched the path. Upper-backed opens always report false: local writes own the
     /// path from then on and the identity chain restarts.
     pub async fn open(&self, ino: u64, write: bool) -> Result<(u64, bool), MountError> {
-        if write {
+        let _fence = if write {
             self.write_guard()?;
-        }
+            // Held through handle registration: once the handle is in the table, trim skips
+            // the path; before that, the fence is what keeps trim from unlinking the upper
+            // file between copy-up and this open.
+            Some(self.mutate.read().await)
+        } else {
+            None
+        };
         let node = self.node(ino)?;
         // The kernel can open by cached inode without a fresh lookup; a node under a whiteout
         // (restore deleted it out-of-band) must not hand out its stale lower backing.
@@ -1365,6 +1416,7 @@ impl OverlayFs {
         exec: bool,
     ) -> Result<(OverlayAttr, u64), MountError> {
         self.write_guard()?;
+        let _fence = self.mutate.read().await;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         if self
@@ -1408,6 +1460,7 @@ impl OverlayFs {
 
     pub async fn mkdir(&self, parent: u64, name: &str) -> Result<OverlayAttr, MountError> {
         self.write_guard()?;
+        let _fence = self.mutate.read().await;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         if self
@@ -1432,6 +1485,7 @@ impl OverlayFs {
         target: &str,
     ) -> Result<OverlayAttr, MountError> {
         self.write_guard()?;
+        let _fence = self.mutate.read().await;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         if self
@@ -1455,6 +1509,7 @@ impl OverlayFs {
 
     pub async fn unlink(&self, parent: u64, name: &str) -> Result<(), MountError> {
         self.write_guard()?;
+        let _fence = self.mutate.read().await;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         let dest = self.upper_path(&path);
@@ -1473,6 +1528,7 @@ impl OverlayFs {
 
     pub async fn rmdir(&self, parent: u64, name: &str) -> Result<(), MountError> {
         self.write_guard()?;
+        let _fence = self.mutate.read().await;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         // Merged-empty check: opendir the directory and require zero entries.
@@ -1585,6 +1641,7 @@ impl OverlayFs {
         new_name: &str,
     ) -> Result<(), MountError> {
         self.write_guard()?;
+        let _fence = self.mutate.read().await;
         let parent_node = self.node(parent)?;
         let new_parent_node = self.node(new_parent)?;
         let src = Self::child_path(&parent_node.path, name);
@@ -1698,6 +1755,7 @@ impl OverlayFs {
         mode: Option<u32>,
     ) -> Result<OverlayAttr, MountError> {
         self.write_guard()?;
+        let _fence = self.mutate.read().await;
         let node = self.node(ino)?;
         if size.is_some() || mode.is_some() {
             self.copy_up(&node).await?;
@@ -1922,6 +1980,84 @@ impl OverlayFs {
         Ok(affected)
     }
 
+    /// Drop retained upper files (and inert whiteouts) whose content a seal has published and
+    /// the lower now serves byte-identically — the incremental, non-destructive counterpart of
+    /// [`OverlayFs::clear_upper`]. The caller nominates candidates from its sealed index; this
+    /// method owns the liveness checks and skips, never deletes, anything it cannot prove
+    /// quiescent:
+    ///
+    /// - a path with an open upper handle is reported in `held_open` (a live writer's
+    ///   descriptor must keep resolving to the linked file);
+    /// - a path with a dirty-index entry was mutated after its seal and is silently skipped
+    ///   (it is not retained — the next seal owns it);
+    /// - a path under a pending rename is skipped (the redirect table is the authority there).
+    ///
+    /// Runs under the exclusive side of the trim fence, so no copy-up or open can interleave
+    /// with the unlinks. Empty parent directories are deliberately left in place: git has no
+    /// empty trees, so a directory emptied by trim may exist nowhere in the lower — removing
+    /// it would change the merged view.
+    ///
+    /// Dirty entries, sealer caches, and the epoch are untouched: logically nothing changed
+    /// (the lower serves the same bytes), the kernel just needs fresh lookups where an upper
+    /// inode was presenting (`invals`).
+    pub async fn trim_retained(&self, candidates: &[String], tombstones: &[String]) -> TrimOutcome {
+        let _fence = self.mutate.write().await;
+        let open_upper: std::collections::HashSet<String> = {
+            let handles = self.handles.lock().expect("handle lock");
+            handles
+                .values()
+                .filter_map(|h| match h {
+                    OHandle::Upper { path, .. } => Some(path.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        let dirty: std::collections::HashSet<String> = {
+            let dirty = self.dirty.lock().expect("dirty lock");
+            dirty.keys().cloned().collect()
+        };
+        let mut out = TrimOutcome::default();
+        for path in candidates {
+            if dirty.contains(path) || self.redirect_covers(path) {
+                continue;
+            }
+            if open_upper.contains(path) {
+                out.held_open.push(path.clone());
+                continue;
+            }
+            let abs = self.upper_path(path);
+            if abs.symlink_metadata().is_err() {
+                // Already gone (an earlier trim, or a stale seal record) — report it trimmed
+                // so the caller drops the record.
+                out.trimmed.push(path.clone());
+                continue;
+            }
+            match std::fs::remove_file(&abs) {
+                Ok(()) => out.trimmed.push(path.clone()),
+                Err(e) => {
+                    eprintln!("trim: dropping retained {path} failed: {e}");
+                }
+            }
+        }
+        for path in tombstones {
+            if dirty.contains(path) {
+                continue;
+            }
+            // An inert whiteout: the sealed delete is in the lower's history, so the marker
+            // no longer hides anything — removing it does not change the merged view and
+            // needs no invalidation.
+            match std::fs::remove_file(self.wh_path(path)) {
+                Ok(()) => out.tombstones_removed.push(path.clone()),
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                    out.tombstones_removed.push(path.clone());
+                }
+                Err(e) => eprintln!("trim: dropping whiteout {path} failed: {e}"),
+            }
+        }
+        out.invals = self.invals_for(&out.trimmed);
+        out
+    }
+
     /// Whether any pending directory renames await the next seal.
     pub fn has_redirects(&self) -> bool {
         !self.redirects.lock().expect("redirect lock").is_empty()
@@ -2140,6 +2276,17 @@ pub struct OverlayInval {
     pub parent_ino: Option<u64>,
     pub name: String,
     pub staled: bool,
+}
+
+/// What one [`OverlayFs::trim_retained`] pass did. `trimmed` includes candidates that were
+/// already gone from the upper (the caller drops their seal records either way); `held_open`
+/// names candidates a live upper handle pinned in place — retryable once the writer closes.
+#[derive(Default)]
+pub struct TrimOutcome {
+    pub trimmed: Vec<String>,
+    pub tombstones_removed: Vec<String>,
+    pub held_open: Vec<String>,
+    pub invals: Vec<OverlayInval>,
 }
 
 #[cfg(test)]
@@ -2849,6 +2996,149 @@ mod tests {
         assert_eq!(read_all(&fs, sub2.ino, "deep.txt").await, b"deep\n");
         let tool2 = fs.lookup(moved2.ino, "tool.sh").await.unwrap();
         assert_eq!(tool2.perm & 0o111, 0o111);
+
+        sdk.delete_workspace(PROJECT, &repo, "t", TOKEN, &ws.id)
+            .await
+            .unwrap();
+    }
+
+    /// Trim end to end: sealed-and-kept upper content drops in place — the merged view is
+    /// unchanged, now lower-served — while a dirty path is silently skipped and a path with a
+    /// live write handle is pinned and reported. This is `tl fs sync`'s pre-flight, so the
+    /// liveness checks are the whole point: trim must never delete bytes no snapshot holds.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires a local artifact-storage server on 127.0.0.1:8080"]
+    async fn trim_drops_retained_keeps_dirty_and_pins_open_files() {
+        if !server_up() {
+            eprintln!("skipping: no local artifact-storage server");
+            return;
+        }
+        let sdk = sdk();
+        let repo = format!(
+            "ofs-trim-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sdk.create_repo_with_credential(PROJECT, &repo, None, "t", TOKEN)
+            .await
+            .unwrap();
+        sdk.push_files(
+            PROJECT,
+            &repo,
+            "t",
+            TOKEN,
+            vec![push_file("README.md", b"# seed\n", 0o100644)],
+            PushOptions {
+                message: "seed".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let ws = sdk
+            .create_workspace(
+                PROJECT,
+                &repo,
+                "t",
+                TOKEN,
+                &CreateWorkspaceRequest::default(),
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        let client = FsClient::new(BASE, PROJECT, &repo, Some(TOKEN.to_string())).unwrap();
+        let core = MountCore::new(
+            client,
+            MountOptions {
+                reference: ws.ref_name.clone(),
+                follow: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let fs: Arc<OverlayFs> = OverlayFs::new(core.clone(), state.path(), false).unwrap();
+
+        // Three local files through the overlay.
+        for (name, content) in [
+            ("sealed.txt", &b"sealed\n"[..]),
+            ("held.txt", b"held\n"),
+            ("dirty.txt", b"dirty v1\n"),
+        ] {
+            let (attr, fh) = fs.create(ROOT_INO, name, false).await.unwrap();
+            fs.write(fh, 0, content).unwrap();
+            fs.release(fh);
+            fs.forget(attr.ino, 1);
+        }
+
+        // "Seal" all three the way the daemon's sealer does: push to the workspace ref,
+        // advance the lower, prune the dirty index to the watermark.
+        sdk.push_files(
+            PROJECT,
+            &repo,
+            "t",
+            TOKEN,
+            vec![
+                push_file("sealed.txt", b"sealed\n", 0o100644),
+                push_file("held.txt", b"held\n", 0o100644),
+                push_file("dirty.txt", b"dirty v1\n", 0o100644),
+            ],
+            PushOptions {
+                message: "seal".into(),
+                workspace_snapshot: Some(ws.id.clone()),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        assert!(core.poll_ref().await.unwrap().is_some());
+        fs.prune_dirty(fs.current_generation());
+
+        // Re-dirty one file and hold another open for write.
+        let dirty = fs.lookup(ROOT_INO, "dirty.txt").await.unwrap();
+        let (dfh, _) = fs.open(dirty.ino, true).await.unwrap();
+        fs.write(dfh, 0, b"dirty v2\n").unwrap();
+        fs.release(dfh);
+        fs.forget(dirty.ino, 1);
+        let held = fs.lookup(ROOT_INO, "held.txt").await.unwrap();
+        let (held_fh, _) = fs.open(held.ino, true).await.unwrap();
+
+        let candidates: Vec<String> = ["sealed.txt", "held.txt", "dirty.txt"]
+            .iter()
+            .map(|s| s.to_string())
+            .collect();
+        let outcome = fs.trim_retained(&candidates, &[]).await;
+        assert_eq!(outcome.trimmed, vec!["sealed.txt"]);
+        assert_eq!(outcome.held_open, vec!["held.txt"]);
+        assert!(
+            !state.path().join("upper/sealed.txt").exists(),
+            "retained file dropped from the upper"
+        );
+        assert!(
+            state.path().join("upper/dirty.txt").exists(),
+            "dirty file untouched"
+        );
+        assert!(
+            state.path().join("upper/held.txt").exists(),
+            "open file untouched"
+        );
+
+        // The merged view is unchanged: the trimmed path now serves from the lower,
+        // byte-identical; the dirty path still serves its unsealed content.
+        assert_eq!(read_all(&fs, ROOT_INO, "sealed.txt").await, b"sealed\n");
+        let sealed = fs.lookup(ROOT_INO, "sealed.txt").await.unwrap();
+        assert!(!sealed.upper, "trimmed content is lower-backed");
+        fs.forget(sealed.ino, 1);
+        assert_eq!(read_all(&fs, ROOT_INO, "dirty.txt").await, b"dirty v2\n");
+
+        // The pinned handle still reaches its linked file.
+        fs.write(held_fh, 5, b"more\n").unwrap();
+        fs.release(held_fh);
+        fs.forget(held.ino, 1);
+        assert_eq!(read_all(&fs, ROOT_INO, "held.txt").await, b"held\nmore\n");
 
         sdk.delete_workspace(PROJECT, &repo, "t", TOKEN, &ws.id)
             .await

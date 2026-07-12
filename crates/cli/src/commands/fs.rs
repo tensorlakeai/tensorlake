@@ -5,15 +5,20 @@
 //! artifact-storage repo backing them (managed with `tl git`); a mounted workspace (private
 //! leased ref) is served by a FUSE daemon — reads stream lazily from the server through the
 //! vendored `gsvc-mount` core's immutable caches, writes land in a local overlay.
-//! **The overlay is the dirty set**: the daemon's sealer resolves its dirty index into
-//! incremental snapshot commits on the workspace ref (auto-commit ticks it; `tl fs snapshot`
-//! runs one cycle through the `seal` control op), and the mount's lower layer follows the ref
-//! to the new snapshot. The overlay is **kept** after sealing —
-//! the upper keeps serving the byte-identical sealed content; `snapshot --clear` is the
-//! explicit, destructive opt-in that drops it (required before `sync`). `promote`
-//! CAS-advances a real branch (squash by default); `restore` refills the overlay from any
-//! snapshot. FUSE is the only mount path — Linux builds
-//! carry it unconditionally, macOS requires macFUSE and the `macfuse` build feature.
+//! **The daemon's sealer owns the definition of dirty**: the overlay's dirty index resolves
+//! into incremental snapshot commits on the workspace ref (auto-commit ticks it; `tl fs
+//! snapshot` runs one cycle through the `seal` control op), and the mount's lower layer
+//! follows the ref to the new snapshot. Every dirt-consulting command (`status`, `promote`,
+//! `sync`, `diff`) reads the same view through the `dirty` control op, so none of them can
+//! disagree with what a snapshot would seal. The overlay is **kept** after sealing — the
+//! upper keeps serving the byte-identical sealed content as a local byte cache, accounted
+//! for by the sealed index (`sealed.json`, which also survives daemon restarts) and
+//! reported by `status` as `retained`. `sync` asks the daemon to `trim` retained content
+//! (safe: it is all in workspace history; ignored files survive); `snapshot --clear`
+//! remains the explicit, destructive opt-in that drops the WHOLE overlay, ignored files
+//! included. `promote` CAS-advances a real branch (squash by default); `restore` refills
+//! the overlay from any snapshot. FUSE is the only mount path — Linux builds carry it
+//! unconditionally, macOS requires macFUSE and the `macfuse` build feature.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -2465,6 +2470,121 @@ fn pending_renames(state_dir: &Path) -> Vec<(String, String)> {
     entries
 }
 
+/// A mount's local-change picture. `exact: true` means the daemon's sealer answered — the
+/// dirty set is exactly what the next snapshot would publish (same dirty index, same ignore
+/// rules, same resolution walk), and retained/ignored account for every other upper file.
+/// `exact: false` is the daemon-down fallback: a raw upper walk that cannot distinguish
+/// unsealed dirt from retained sealed content, so it may over-report.
+struct LocalChanges {
+    upserts: Vec<String>,
+    deletes: Vec<String>,
+    /// Pending committed-directory renames, `(from, to)`.
+    renames: Vec<(String, String)>,
+    /// Upper files sealed into a snapshot and kept as the local byte cache.
+    retained: usize,
+    /// Ignored local-only files (never enter a snapshot; only `snapshot --clear` drops them).
+    ignored: usize,
+    exact: bool,
+}
+
+impl LocalChanges {
+    fn dirty(&self) -> usize {
+        self.upserts.len() + self.deletes.len() + self.renames.len()
+    }
+}
+
+/// The one authoritative answer to "what is dirty": ask the daemon's sealer (`dirty` control
+/// op); fall back to the raw overlay walk only when the daemon is not answering. Every
+/// dirt-consulting command (`status`, `promote`, `sync`, `diff`) routes through here so none
+/// of them can disagree with what `tl fs snapshot` would actually seal.
+async fn local_changes(state_dir: &Path, mountpoint: &str) -> Result<LocalChanges> {
+    if let Ok(reply) = daemon::control(state_dir, "dirty").await
+        && reply.get("ok").and_then(|v| v.as_bool()) == Some(true)
+        && let Ok(dirty) = serde_json::from_value::<daemon::DirtyReply>(reply)
+    {
+        // Retained/ignored accounting: everything in the upper that is not dirty is either
+        // sealed-and-kept or ignored. The walk is local disk, and the ignore rules are the
+        // same ones the sealer applies.
+        let dirty_set: std::collections::HashSet<&str> =
+            dirty.upserts.iter().map(String::as_str).collect();
+        let mut ignore = SnapshotIgnore::new(Path::new(mountpoint));
+        let (mut retained, mut ignored) = (0usize, 0usize);
+        let upper = state_dir.join("upper");
+        let mut stack = vec![upper.clone()];
+        while let Some(dir) = stack.pop() {
+            let Ok(read) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            for entry in read.flatten() {
+                let abs = entry.path();
+                let Ok(meta) = abs.symlink_metadata() else {
+                    continue;
+                };
+                let rel = abs
+                    .strip_prefix(&upper)
+                    .expect("under upper")
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                let is_dir = meta.is_dir() && !meta.file_type().is_symlink();
+                if ignore.is_ignored(&rel, is_dir).unwrap_or(false) {
+                    // An ignored directory's whole subtree is ignored — count its files.
+                    ignored += if is_dir { count_files_under(&abs) } else { 1 };
+                    continue;
+                }
+                if is_dir {
+                    stack.push(abs);
+                } else if !dirty_set.contains(rel.as_str()) {
+                    retained += 1;
+                }
+            }
+        }
+        return Ok(LocalChanges {
+            upserts: dirty.upserts,
+            deletes: dirty.deletes,
+            renames: dirty.renames,
+            retained,
+            ignored,
+            exact: true,
+        });
+    }
+    let (upserts, deletes) = enumerate_overlay(state_dir, Path::new(mountpoint))?;
+    Ok(LocalChanges {
+        upserts: upserts.into_iter().map(|(rel, _, _)| rel).collect(),
+        deletes,
+        renames: pending_renames(state_dir)
+            .into_iter()
+            .map(|(to, from)| (from, to))
+            .collect(),
+        retained: 0,
+        ignored: 0,
+        exact: false,
+    })
+}
+
+/// Every file/symlink under `dir`, recursively — [`local_changes`]'s ignored-subtree counter.
+fn count_files_under(dir: &Path) -> usize {
+    let mut n = 0;
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let Ok(read) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in read.flatten() {
+            let Ok(meta) = entry.path().symlink_metadata() else {
+                continue;
+            };
+            if meta.is_dir() && !meta.file_type().is_symlink() {
+                stack.push(entry.path());
+            } else {
+                n += 1;
+            }
+        }
+    }
+    n
+}
+
 /// An enumerated dirty set as push files, used by the daemon's sealer (`tl fs snapshot`
 /// seals through the daemon, so nothing pushes from the CLI process).
 fn overlay_push_files(upserts: &OverlayUpserts, deletes: &[String]) -> Result<Vec<PushFile>> {
@@ -2726,13 +2846,18 @@ pub async fn promote(
     }
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
-    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-    let renames = pending_renames(&state_dir);
-    if !upserts.is_empty() || !deletes.is_empty() || !renames.is_empty() {
+    let changes = local_changes(&state_dir, &mountpoint).await?;
+    if changes.dirty() > 0 {
         eprintln!(
-            "{} {} local change(s) that may not be in a snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to be sure they are included.",
+            "{} {} local change(s) not in any snapshot; promoting the last snapshot only. Run `tl fs snapshot` first to include them.{}",
             style("note:").yellow(),
-            upserts.len() + deletes.len() + renames.len()
+            changes.dirty(),
+            if changes.exact {
+                ""
+            } else {
+                " (The mount daemon did not answer the dirty query; the count may include \
+                 already-sealed files.)"
+            },
         );
     }
     let (user, token) = session.creds();
@@ -2812,9 +2937,11 @@ pub async fn promote(
 /// Sync: pull the target branch into a behind workspace — one server-side rebase-style merge
 /// commit on the target head; the mount's lower layer then advances to it. Under the default
 /// materialize policy conflicts land as diff3 markers in the workspace files; resolve them and
-/// snapshot. Local overlay changes would shadow synced content (markers included), so a dirty
-/// mount must seal-and-clear (`tl fs snapshot --clear`) first — a plain snapshot keeps the
-/// overlay, which still shadows.
+/// snapshot. Local overlay changes would shadow synced content (markers included), so the
+/// pre-flight is: refuse while anything is DIRTY (fix: `tl fs snapshot` — non-destructive),
+/// then ask the daemon to `trim` retained sealed content out of the overlay (safe: those bytes
+/// are in workspace history) so nothing sealed shadows the pull either. Ignored local-only
+/// files survive; a sealed file held open by a live writer blocks the sync by name.
 pub async fn sync(
     ctx: &CliContext,
     path: &Path,
@@ -2838,13 +2965,36 @@ pub async fn sync(
     }
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     heartbeat(&session, &state).await?;
-    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-    let renames = pending_renames(&state_dir);
-    if !upserts.is_empty() || !deletes.is_empty() || !renames.is_empty() {
+    let changes = local_changes(&state_dir, &mountpoint).await?;
+    if !changes.exact {
+        // The trim pre-flight and the post-sync refresh both need a live daemon; without the
+        // exact dirty answer a raw-walk count would also re-introduce the old false refusal
+        // on retained files.
+        return Err(CliError::usage(
+            "the mount daemon is not answering the dirty query (not running, or it predates \
+             this CLI); remount with `tl fs mount` and retry the sync",
+        ));
+    }
+    if changes.dirty() > 0 {
         return Err(CliError::usage(format!(
-            "{} local change(s) would shadow synced content. Seal and drop them first: `tl fs snapshot --clear {}` (pause writers first — the clear also drops ignored files and any writes made while the snapshot uploads).",
-            upserts.len() + deletes.len() + renames.len(),
+            "{} local change(s) would shadow synced content. Seal them first: `tl fs snapshot {}`, then rerun the sync.",
+            changes.dirty(),
             path.display(),
+        )));
+    }
+    // Retained sealed content shadows pulled bytes exactly like dirt would — but it is all in
+    // workspace history, so the daemon can drop it without losing anything. Ignored files
+    // survive the trim (the pull may still be shadowed where an ignored file collides with a
+    // synced path — local wins there, same as before).
+    let trim = daemon::control(&state_dir, "trim").await?;
+    let trim: daemon::TrimReply = serde_json::from_value(trim)
+        .map_err(|e| CliError::usage(format!("the daemon's trim reply did not parse: {e}")))?;
+    if !trim.held_open.is_empty() {
+        return Err(CliError::usage(format!(
+            "{} sealed file(s) are held open by running processes (first: {}); close them and \
+             rerun the sync",
+            trim.held_open.len(),
+            trim.held_open[0],
         )));
     }
     let (user, token) = session.creds();
@@ -2990,7 +3140,7 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         .await
         .ok()
         .and_then(|r| r.get("commit").and_then(|c| c.as_str().map(str::to_string)));
-    let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
+    let changes = local_changes(&state_dir, &mountpoint).await?;
 
     if output_json {
         println!(
@@ -3000,11 +3150,16 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
                 "mounted": daemon_commit.is_some(),
                 "lower_commit": daemon_commit,
                 "log": state_dir.join("daemon.log"),
-                "dirty": upserts.iter().map(|(p, _, _)| p.clone())
-                    .chain(deletes.iter().cloned()).collect::<Vec<_>>(),
-                "pending_renames": pending_renames(&state_dir)
-                    .into_iter()
-                    .map(|(to, from)| serde_json::json!({ "from": from, "to": to }))
+                "dirty": changes.upserts.iter().cloned()
+                    .chain(changes.deletes.iter().cloned()).collect::<Vec<_>>(),
+                // False when the daemon did not answer the dirty query and the counts fell
+                // back to a raw overlay walk (which may include already-sealed files).
+                "dirty_exact": changes.exact,
+                "retained": changes.retained,
+                "ignored": changes.ignored,
+                "pending_renames": changes.renames
+                    .iter()
+                    .map(|(from, to)| serde_json::json!({ "from": from, "to": to }))
                     .collect::<Vec<_>>(),
             }))?
         );
@@ -3044,22 +3199,22 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         style("log:").dim(),
         state_dir.join("daemon.log").display()
     );
-    let renames = pending_renames(&state_dir);
     // A pending rename's source whiteout is a real delete, but showing it next to the R line
     // would read as two changes; the R line carries both sides.
-    let deletes: Vec<String> = deletes
-        .into_iter()
-        .filter(|p| !renames.iter().any(|(_, from)| from == p))
+    let deletes: Vec<&String> = changes
+        .deletes
+        .iter()
+        .filter(|p| !changes.renames.iter().any(|(from, _)| &from == p))
         .collect();
-    let dirty = upserts.len() + deletes.len() + renames.len();
+    let dirty = changes.upserts.len() + deletes.len() + changes.renames.len();
     if dirty == 0 {
         println!("{} clean", style("local:").dim());
     } else {
         println!("{} {} change(s):", style("local:").dim(), dirty);
-        for (to, from) in renames.iter().take(20) {
+        for (from, to) in changes.renames.iter().take(20) {
             println!("  {} {from} -> {to}", style("R").cyan());
         }
-        for (p, _, _) in upserts.iter().take(20) {
+        for p in changes.upserts.iter().take(20) {
             println!("  {} {p}", style("M").yellow());
         }
         for p in deletes.iter().take(20) {
@@ -3068,6 +3223,28 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         if dirty > 60 {
             println!("  … and more");
         }
+        if !changes.exact {
+            println!(
+                "{} the mount daemon did not answer the dirty query; counts may include \
+                 files already sealed into a snapshot",
+                style("note:").yellow()
+            );
+        }
+    }
+    if changes.retained > 0 {
+        println!(
+            "{} {} file(s) sealed into snapshots and kept locally as the byte cache \
+             (`tl fs snapshot --clear` drops them)",
+            style("retained:").dim(),
+            changes.retained
+        );
+    }
+    if changes.ignored > 0 {
+        println!(
+            "{} {} local-only ignored file(s) (never snapshotted)",
+            style("ignored:").dim(),
+            changes.ignored
+        );
     }
     Ok(())
 }
@@ -3494,12 +3671,25 @@ pub async fn diff(ctx: &CliContext, path: &Path, a: Option<&str>, b: Option<&str
     let state = daemon::load_mount_state(&state_dir)?;
     match (a, b) {
         (None, None) => {
-            let (upserts, deletes) = enumerate_overlay(&state_dir, Path::new(&mountpoint))?;
-            for (p, _, _) in &upserts {
+            let changes = local_changes(&state_dir, &mountpoint).await?;
+            for (from, to) in &changes.renames {
+                println!("R {from} -> {to}");
+            }
+            for p in &changes.upserts {
                 println!("M {p}");
             }
-            for p in &deletes {
+            for p in changes
+                .deletes
+                .iter()
+                .filter(|p| !changes.renames.iter().any(|(from, _)| &from == p))
+            {
                 println!("D {p}");
+            }
+            if !changes.exact {
+                eprintln!(
+                    "note: the mount daemon did not answer the dirty query; this may include \
+                     files already sealed into a snapshot"
+                );
             }
             Ok(())
         }
@@ -3758,6 +3948,114 @@ mod tests {
     #[cfg(unix)]
     fn fake_daemon(state_dir: &Path) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
         fake_daemon_with_events(state_dir, Vec::new())
+    }
+
+    /// A fake daemon that answers each op with a canned reply (`{"ok":true}` for ops not in
+    /// the map) — for exercising the CLI side of non-streaming ops (`dirty`, `trim`).
+    #[cfg(unix)]
+    fn fake_daemon_with_replies(
+        state_dir: &Path,
+        replies: std::collections::HashMap<String, serde_json::Value>,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let ops = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = std::os::unix::net::UnixListener::bind(daemon::control_socket(state_dir))
+            .expect("bind control socket");
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+        let recorded = ops.clone();
+        let replies = std::sync::Arc::new(replies);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let recorded = recorded.clone();
+                let replies = replies.clone();
+                tokio::spawn(async move {
+                    let mut reader = tokio::io::BufReader::new(stream);
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).await.is_err() {
+                        return;
+                    }
+                    let v: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                    let op = v["op"].as_str().unwrap_or_default().to_string();
+                    recorded.lock().unwrap().push(op.clone());
+                    let resp = replies
+                        .get(&op)
+                        .cloned()
+                        .unwrap_or_else(|| serde_json::json!({ "ok": true }));
+                    let mut stream = reader.into_inner();
+                    let _ = stream.write_all(format!("{resp}\n").as_bytes()).await;
+                });
+            }
+        });
+        ops
+    }
+
+    /// The truthful-status contract: when the daemon answers the `dirty` op, its answer IS the
+    /// dirty set — retained (sealed-and-kept) and ignored upper files are accounted
+    /// separately instead of over-reporting as dirt (the #834 regression this replaces).
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn local_changes_prefers_the_daemon_dirty_view() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        std::fs::write(mount.path().join(".gitignore"), "*.tmp\n").unwrap();
+        for (rel, content) in [
+            ("dirty.txt", "unsealed"),
+            ("retained.txt", "sealed-and-kept"),
+            ("junk.tmp", "ignored"),
+        ] {
+            let abs = state.path().join("upper").join(rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, content).unwrap();
+        }
+        let _ops = fake_daemon_with_replies(
+            state.path(),
+            [(
+                "dirty".to_string(),
+                serde_json::json!({
+                    "ok": true,
+                    "upserts": ["dirty.txt"],
+                    "deletes": [],
+                    "renames": [],
+                    "commit": "cafe0000",
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        let changes = local_changes(state.path(), &mount.path().to_string_lossy())
+            .await
+            .unwrap();
+        assert!(changes.exact, "the daemon answered; the view is exact");
+        assert_eq!(changes.upserts, vec!["dirty.txt"]);
+        assert_eq!(changes.dirty(), 1);
+        assert_eq!(
+            changes.retained, 1,
+            "the sealed-and-kept file is retained, not dirt"
+        );
+        assert_eq!(changes.ignored, 1, "the ignored file is counted separately");
+    }
+
+    /// Daemon down: the raw walk still answers (labeled inexact) so status never goes dark —
+    /// it just can't tell retained content from dirt.
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn local_changes_falls_back_to_the_raw_walk_without_a_daemon() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        for rel in ["a.txt", "b.txt"] {
+            let abs = state.path().join("upper").join(rel);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, rel).unwrap();
+        }
+        let changes = local_changes(state.path(), &mount.path().to_string_lossy())
+            .await
+            .unwrap();
+        assert!(!changes.exact, "no daemon: the view is the raw walk");
+        assert_eq!(changes.upserts, vec!["a.txt", "b.txt"]);
+        assert_eq!(changes.retained, 0);
+        assert_eq!(changes.ignored, 0);
     }
 
     /// Regression for the snapshot data-loss bug: sealing must KEEP the overlay, and the seal
