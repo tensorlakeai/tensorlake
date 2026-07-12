@@ -491,6 +491,25 @@ impl ArtifactStorageClient {
         Ok(self.git_request_url(method, path, git_username, git_token))
     }
 
+    /// A project-scope request (`/project/{project}/{suffix}`) with a git credential —
+    /// the URL shape for endpoints that span repos, like the workspace fleet.
+    fn project_git_request(
+        &self,
+        method: Method,
+        project_id: &str,
+        suffix: &str,
+        git_username: &str,
+        git_token: &str,
+    ) -> (reqwest::RequestBuilder, String) {
+        let url = format!(
+            "{}/project/{}/{}",
+            self.git_base_url,
+            encode_path_segment(project_id),
+            suffix
+        );
+        self.git_request_url(method, url, git_username, git_token)
+    }
+
     fn git_request_url(
         &self,
         method: Method,
