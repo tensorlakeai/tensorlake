@@ -10,12 +10,17 @@ pub struct MintGitTokenRequest {
 pub struct CreateRepoRequest {
     #[serde(rename = "default_branch")]
     pub default_branch: String,
+    /// "repository" (default) or "filesystem". Omitted (not sent) when `None` so the request
+    /// stays valid against servers that predate repo kinds (`deny_unknown_fields`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
 }
 
 impl Default for CreateRepoRequest {
     fn default() -> Self {
         Self {
             default_branch: "main".to_string(),
+            kind: None,
         }
     }
 }
@@ -37,6 +42,14 @@ pub struct Repo {
     pub full_name: String,
     pub default_branch: String,
     pub status: String,
+    /// "repository" or "filesystem". Defaults to "repository" when the server predates repo
+    /// kinds and omits the field.
+    #[serde(default = "default_repo_kind")]
+    pub kind: String,
+}
+
+fn default_repo_kind() -> String {
+    "repository".to_string()
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

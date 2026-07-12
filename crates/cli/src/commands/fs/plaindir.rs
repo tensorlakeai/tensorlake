@@ -253,6 +253,21 @@ pub(crate) fn bound_workspaces() -> Vec<(String, String)> {
         .collect()
 }
 
+/// Every binding as (backing repo, bound root) — the filesystem listing's attachment column.
+pub(crate) fn bound_binding_repos() -> Vec<(String, String)> {
+    let Some(registry) = registry_lenient(registry_load()) else {
+        return Vec::new();
+    };
+    registry
+        .bindings
+        .iter()
+        .filter_map(|(root, state_dir)| {
+            let binding = load_binding(state_dir).ok()?;
+            Some((binding.repo, root.clone()))
+        })
+        .collect()
+}
+
 /// The bound directory attached to `workspace_id`, if any. Scans the binding state dirs
 /// themselves (not the registry): this guards destructive/attachment decisions (`tl fs rm`,
 /// mount write policy), and a binding missing from a damaged registry still owns its
@@ -1353,6 +1368,54 @@ pub async fn init(
     path: Option<PathBuf>,
     file_system: Option<&str>,
 ) -> Result<()> {
+    let (root, _state_dir, repo, ws_id) = bind(ctx, path, file_system, false).await?;
+    println!(
+        "Bound {root} to new workspace {} (file system {repo}).",
+        short_id(&ws_id)
+    );
+    println!("Work in the directory, then: tl fs snapshot {root}");
+    Ok(())
+}
+
+/// `tl fs push <dir> <filesystem>` — upload a directory into a filesystem as one save, no
+/// mount. First push binds the directory (publish-on-save workspace); later pushes reuse the
+/// binding's stat index, so only changed files upload.
+pub async fn push(
+    ctx: &CliContext,
+    dir: &Path,
+    file_system: &str,
+    message: Option<&str>,
+) -> Result<()> {
+    let (root, state_dir) = match binding_for_lenient(dir) {
+        Some((root, state_dir)) => {
+            let binding = load_binding(&state_dir)?;
+            if binding.repo != file_system {
+                return Err(CliError::usage(format!(
+                    "{root} is already bound to filesystem {} — push there, or pick another \
+                     directory for {file_system}",
+                    binding.repo
+                )));
+            }
+            (root, state_dir)
+        }
+        None => {
+            let (root, state_dir, _, _) =
+                bind(ctx, Some(dir.to_path_buf()), Some(file_system), true).await?;
+            (root, state_dir)
+        }
+    };
+    snapshot(ctx, &root, &state_dir, message).await
+}
+
+/// Bind a directory to a fresh workspace on a filesystem. `publish` arms shared-rw: every
+/// snapshot of the binding lands on the filesystem's default branch (the `tl fs push`
+/// contract). Returns (root, state dir, repo, workspace id).
+async fn bind(
+    ctx: &CliContext,
+    path: Option<PathBuf>,
+    file_system: Option<&str>,
+    publish: bool,
+) -> Result<(String, PathBuf, String, String)> {
     if cfg!(not(unix)) {
         return Err(CliError::usage(
             "plain-directory bindings are supported on unix only in v1",
@@ -1381,7 +1444,7 @@ pub async fn init(
     let (user, token) = session.creds();
     let file_systems = session
         .client
-        .list_repos_with_credential(&session.project_id, user, token)
+        .list_repos_with_credential(&session.project_id, None, user, token)
         .await?
         .into_inner();
     let repo = match file_system {
@@ -1430,7 +1493,10 @@ pub async fn init(
             &repo,
             user,
             token,
-            &CreateWorkspaceRequest::default(),
+            &CreateWorkspaceRequest {
+                shared_target: publish.then(|| default_branch.clone()),
+                ..Default::default()
+            },
         )
         .await?
         .into_inner();
@@ -1528,12 +1594,7 @@ pub async fn init(
             .await;
         return Err(e);
     }
-    println!(
-        "Bound {root} to new workspace {} (file system {repo}).",
-        short_id(&ws.id)
-    );
-    println!("Work in the directory, then: tl fs snapshot {root}");
-    Ok(())
+    Ok((root, state_dir, repo, ws.id))
 }
 
 // ---------------------------------------------------------------------------------------------

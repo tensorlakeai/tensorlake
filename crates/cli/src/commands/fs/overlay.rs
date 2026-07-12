@@ -2595,6 +2595,73 @@ mod tests {
         entries.into_iter().map(|e| e.name).collect()
     }
 
+    /// The `tl fs` product surface's wire contract (server >= repo-kinds): filesystems are
+    /// `kind=filesystem` repos, `?kind=` partitions the listing, and a fresh filesystem's
+    /// genesis commit lets a publish-on-save workspace be created with no push ever made.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires a local artifact-storage server on 127.0.0.1:8080"]
+    async fn filesystem_kind_contract_roundtrips() {
+        if !server_up() {
+            eprintln!("skipping: no local artifact-storage server");
+            return;
+        }
+        let sdk = sdk();
+        let fs_name = format!(
+            "fskind-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sdk.create_repo_with_credential(PROJECT, &fs_name, None, Some("filesystem"), "t", TOKEN)
+            .await
+            .unwrap();
+        let filesystems = sdk
+            .list_repos_with_credential(PROJECT, Some("filesystem"), "t", TOKEN)
+            .await
+            .unwrap()
+            .into_inner();
+        let entry = filesystems
+            .repos
+            .iter()
+            .find(|r| r.name == fs_name)
+            .expect("created filesystem is in the kind=filesystem listing");
+        assert_eq!(entry.kind, "filesystem");
+        let repositories = sdk
+            .list_repos_with_credential(PROJECT, Some("repository"), "t", TOKEN)
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(
+            !repositories.repos.iter().any(|r| r.name == fs_name),
+            "a filesystem must not appear in the repository listing"
+        );
+        // The genesis commit is what makes `tl fs create` + mount work with no client push:
+        // a baseless, publish-on-save workspace resolves its base from the default branch.
+        let ws = sdk
+            .create_workspace(
+                PROJECT,
+                &fs_name,
+                "t",
+                TOKEN,
+                &CreateWorkspaceRequest {
+                    shared_target: Some(entry.default_branch.clone()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(ws.base_ref.as_deref(), Some("refs/heads/main"));
+        assert_eq!(ws.shared_target.as_deref(), Some("main"));
+        sdk.delete_workspace(PROJECT, &fs_name, "t", TOKEN, &ws.id)
+            .await
+            .unwrap();
+        sdk.delete_repo_with_credential(PROJECT, &fs_name, "t", TOKEN)
+            .await
+            .unwrap();
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     #[ignore = "requires a local artifact-storage server on 127.0.0.1:8080"]
     async fn overlay_merges_copies_up_whiteouts_and_snapshots() {
@@ -2612,7 +2679,7 @@ mod tests {
         );
         let project_repo = format!("{PROJECT}/{repo}");
         let _ = project_repo;
-        sdk.create_repo_with_credential(PROJECT, &repo, None, "t", TOKEN)
+        sdk.create_repo_with_credential(PROJECT, &repo, None, None, "t", TOKEN)
             .await
             .unwrap();
         sdk.push_files(
@@ -2842,7 +2909,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        sdk.create_repo_with_credential(PROJECT, &repo, None, "t", TOKEN)
+        sdk.create_repo_with_credential(PROJECT, &repo, None, None, "t", TOKEN)
             .await
             .unwrap();
         sdk.push_files(
@@ -3055,7 +3122,7 @@ mod tests {
                 .unwrap()
                 .as_nanos()
         );
-        sdk.create_repo_with_credential(PROJECT, &repo, None, "t", TOKEN)
+        sdk.create_repo_with_credential(PROJECT, &repo, None, None, "t", TOKEN)
             .await
             .unwrap();
         sdk.push_files(
