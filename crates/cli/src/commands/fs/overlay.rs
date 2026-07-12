@@ -1305,6 +1305,7 @@ impl OverlayFs {
                 }
                 std::os::unix::fs::symlink(String::from_utf8_lossy(&target).as_ref(), &dest)
                     .map_err(io_err)?;
+                self.record(&node.path, DirtyKind::Upsert);
                 return Ok(());
             }
             NodeKind::File => {}
@@ -1342,6 +1343,13 @@ impl OverlayFs {
             }
         }
         std::fs::rename(&tmp, &dest).map_err(io_err)?;
+        // The upper backs this path from here on, so the path is dirty NOW — not at the first
+        // write() through the handle. An open-for-write that never writes (or a `touch`, whose
+        // setattr carries neither size nor mode) would otherwise leave an upper file no dirty
+        // index, seal, or trim ever learns about: invisible to `status`, unpublishable, and
+        // silently shadowing every later sync of the path. Sealing it costs nothing — the
+        // bytes are lower-identical, so content dedup makes the push a by-reference no-op.
+        self.record(&node.path, DirtyKind::Upsert);
         Ok(())
     }
 
@@ -2002,6 +2010,24 @@ impl OverlayFs {
     /// inode was presenting (`invals`).
     pub async fn trim_retained(&self, candidates: &[String], tombstones: &[String]) -> TrimOutcome {
         let _fence = self.mutate.write().await;
+        self.trim_fenced(candidates, tombstones)
+    }
+
+    /// Non-blocking [`OverlayFs::trim_retained`]: `None` when the fence is contended. The
+    /// post-seal hygiene trim uses this — tokio's RwLock is write-preferring, so a BLOCKING
+    /// write acquisition behind one slow in-flight copy-up (a large lower file streaming from
+    /// the server) would stall every new mutating op mount-wide for the duration. Hygiene can
+    /// always wait for the next seal; mount liveness cannot.
+    pub fn try_trim_retained(
+        &self,
+        candidates: &[String],
+        tombstones: &[String],
+    ) -> Option<TrimOutcome> {
+        let _fence = self.mutate.try_write().ok()?;
+        Some(self.trim_fenced(candidates, tombstones))
+    }
+
+    fn trim_fenced(&self, candidates: &[String], tombstones: &[String]) -> TrimOutcome {
         let open_upper: std::collections::HashSet<String> = {
             let handles = self.handles.lock().expect("handle lock");
             handles
@@ -2035,12 +2061,19 @@ impl OverlayFs {
             match std::fs::remove_file(&abs) {
                 Ok(()) => out.trimmed.push(path.clone()),
                 Err(e) => {
+                    // A path that could not be dropped still shadows the lower; report it
+                    // like a pinned file so a sync pre-flight refuses instead of proceeding
+                    // over a silently retained copy.
                     eprintln!("trim: dropping retained {path} failed: {e}");
+                    out.held_open.push(path.clone());
                 }
             }
         }
         for path in tombstones {
-            if dirty.contains(path) {
+            // A whiteout under a pending rename can be load-bearing (it hides remapped lower
+            // content inside the renamed tree); the redirect table, not the sealed delete,
+            // is the authority there.
+            if dirty.contains(path) || self.redirect_covers(path) {
                 continue;
             }
             // An inert whiteout: the sealed delete is in the lower's history, so the marker
@@ -2280,7 +2313,8 @@ pub struct OverlayInval {
 
 /// What one [`OverlayFs::trim_retained`] pass did. `trimmed` includes candidates that were
 /// already gone from the upper (the caller drops their seal records either way); `held_open`
-/// names candidates a live upper handle pinned in place — retryable once the writer closes.
+/// names candidates that could NOT be dropped and still shadow the lower — pinned by a live
+/// upper handle, or an unlink failure — retryable once the pin clears.
 #[derive(Default)]
 pub struct TrimOutcome {
     pub trimmed: Vec<String>,
@@ -3106,7 +3140,19 @@ mod tests {
         let held = fs.lookup(ROOT_INO, "held.txt").await.unwrap();
         let (held_fh, _) = fs.open(held.ino, true).await.unwrap();
 
-        let candidates: Vec<String> = ["sealed.txt", "held.txt", "dirty.txt"]
+        // Open a LOWER-backed file for write and close it without writing: the copy-up alone
+        // must record dirt (an untracked upper copy would be invisible to every dirty view
+        // and silently shadow later syncs of the path) — and being dirty, trim must skip it.
+        let seeded = fs.lookup(ROOT_INO, "README.md").await.unwrap();
+        let (sfh, _) = fs.open(seeded.ino, true).await.unwrap();
+        fs.release(sfh);
+        fs.forget(seeded.ino, 1);
+        assert!(
+            state.path().join("upper/README.md").is_file(),
+            "copy-up materialized the upper copy"
+        );
+
+        let candidates: Vec<String> = ["sealed.txt", "held.txt", "dirty.txt", "README.md"]
             .iter()
             .map(|s| s.to_string())
             .collect();
@@ -3124,6 +3170,10 @@ mod tests {
         assert!(
             state.path().join("upper/held.txt").exists(),
             "open file untouched"
+        );
+        assert!(
+            state.path().join("upper/README.md").exists(),
+            "write-opened-but-never-written copy-up is dirty, not trimmable"
         );
 
         // The merged view is unchanged: the trimmed path now serves from the lower,

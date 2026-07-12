@@ -2500,6 +2500,11 @@ impl LocalChanges {
 async fn local_changes(state_dir: &Path, mountpoint: &str) -> Result<LocalChanges> {
     if let Ok(reply) = daemon::control(state_dir, "dirty").await
         && reply.get("ok").and_then(|v| v.as_bool()) == Some(true)
+        // Every DirtyReply field is serde-defaulted, so a bare `{"ok":true}` ack (a handler
+        // that acknowledges an op it never implemented) would otherwise parse as an EXACT
+        // all-clean answer; requiring the payload field keeps that failure in the labeled
+        // fallback instead.
+        && reply.get("upserts").is_some()
         && let Ok(dirty) = serde_json::from_value::<daemon::DirtyReply>(reply)
     {
         // Retained/ignored accounting: everything in the upper that is not dirty is either
@@ -2991,8 +2996,8 @@ pub async fn sync(
         .map_err(|e| CliError::usage(format!("the daemon's trim reply did not parse: {e}")))?;
     if !trim.held_open.is_empty() {
         return Err(CliError::usage(format!(
-            "{} sealed file(s) are held open by running processes (first: {}); close them and \
-             rerun the sync",
+            "{} sealed file(s) could not be released (held open by a running process, or the \
+             drop failed — first: {}); resolve that and rerun the sync",
             trim.held_open.len(),
             trim.held_open[0],
         )));

@@ -383,8 +383,9 @@ pub(crate) struct DirtyReply {
 
 /// Final reply of the `trim` control op: retained (sealed-and-kept) overlay state dropped in
 /// place, the non-destructive alternative to `clear_upper` — dirty and ignored files are never
-/// touched. `held_open` lists sealed paths a live writer's descriptor pinned; the caller
-/// decides whether that blocks (sync does).
+/// touched. `held_open` lists sealed paths that could not be dropped and still shadow the
+/// lower (a live writer's descriptor, or an unlink failure); the caller decides whether that
+/// blocks (sync does).
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct TrimReply {
     #[serde(default)]
@@ -1585,20 +1586,30 @@ impl Sealer {
             st.chunk_cache.clear();
         }
         self.publish_mirror(&st);
-        // Record what this seal vouched for: each pushed upper file under its resolve-time
-        // stat, each published delete as an inert whiteout. The save failing costs nothing but
-        // a pessimistic restart.
-        for (path, stat) in &resolved.stats {
-            st.sealed.upserts.insert(path.clone(), *stat);
-            st.sealed.deletes.remove(path);
-        }
-        for path in &delete_paths {
-            st.sealed.upserts.remove(path);
-            st.sealed.deletes.insert(path.clone());
-        }
-        st.sealed.commit = report.commit.clone();
-        if let Err(e) = st.sealed.save(&self.state_dir) {
-            eprintln!("seal: persisting sealed index failed: {e}");
+        if self.overlay.epoch() != st.seen_epoch {
+            // clear_upper/restore raced the push window: the snapshot itself published fine,
+            // but every resolve-time record describes the dropped world — saving it would
+            // resurrect a sealed.json the clear just reset, and a stat-coincident future file
+            // could absolve against dead content. The next cycle's epoch check retires the
+            // remaining caches.
+            st.sealed = SealedIndex::default();
+            SealedIndex::reset(&self.state_dir);
+        } else {
+            // Record what this seal vouched for: each pushed upper file under its
+            // resolve-time stat, each published delete as an inert whiteout. The save failing
+            // costs nothing but a pessimistic restart.
+            for (path, stat) in &resolved.stats {
+                st.sealed.upserts.insert(path.clone(), *stat);
+                st.sealed.deletes.remove(path);
+            }
+            for path in &delete_paths {
+                st.sealed.upserts.remove(path);
+                st.sealed.deletes.insert(path.clone());
+            }
+            st.sealed.commit = report.commit.clone();
+            if let Err(e) = st.sealed.save(&self.state_dir) {
+                eprintln!("seal: persisting sealed index failed: {e}");
+            }
         }
         // Advance the lower to the sealed commit now instead of waiting out the follow poll:
         // from here on, a delete of a just-sealed path sees lower presence and whiteouts
@@ -1639,8 +1650,12 @@ impl Sealer {
         // server. `tl fs sync` is the flow that needs them gone, and it asks via `trim`.
         if self.core.current_commit() == report.commit && !st.sealed.deletes.is_empty() {
             let tombstones: Vec<String> = st.sealed.deletes.iter().cloned().collect();
-            let outcome = self.overlay.trim_retained(&[], &tombstones).await;
-            if !outcome.tombstones_removed.is_empty() {
+            // try, not wait: hygiene must never park the seal (and, transitively, every new
+            // mutating op queued behind the write-preferring fence) behind one slow in-flight
+            // copy-up. A contended fence just leaves the markers for the next seal.
+            if let Some(outcome) = self.overlay.try_trim_retained(&[], &tombstones)
+                && !outcome.tombstones_removed.is_empty()
+            {
                 for path in &outcome.tombstones_removed {
                     st.sealed.deletes.remove(path);
                 }
@@ -1778,7 +1793,16 @@ impl Sealer {
             return Ok(TrimReply::default());
         }
         let candidates: Vec<String> = st.sealed.upserts.keys().cloned().collect();
-        let tombstones: Vec<String> = st.sealed.deletes.iter().cloned().collect();
+        // Retained UPSERTS may drop regardless of where the lower ref sits — their bytes are
+        // in workspace history and the caller (sync) is about to move the view anyway. A
+        // whiteout is different: until the lower serves the commit that published its delete,
+        // the marker is still actively hiding the path — removing it early resurrects the
+        // deleted file. Leave tombstones for a later seal/trim when the lower lags.
+        let tombstones: Vec<String> = if self.core.current_commit() == st.sealed.commit {
+            st.sealed.deletes.iter().cloned().collect()
+        } else {
+            Vec::new()
+        };
         if candidates.is_empty() && tombstones.is_empty() {
             return Ok(TrimReply::default());
         }
