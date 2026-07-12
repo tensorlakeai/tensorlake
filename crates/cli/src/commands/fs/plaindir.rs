@@ -1451,7 +1451,7 @@ async fn bind(
         Some(name) => {
             if !file_systems.repos.iter().any(|r| r.name == name) {
                 return Err(CliError::usage(format!(
-                    "no file system named {name:?}; create it first: tl git create {name}"
+                    "no filesystem named {name:?}; create it first: tl fs create {name}"
                 )));
             }
             name.to_string()
@@ -1461,7 +1461,7 @@ async fn bind(
             [only] => only.name.clone(),
             [] => {
                 return Err(CliError::usage(
-                    "this project has no file systems; create one first: tl git create <name>",
+                    "this project has no filesystems; create one first: tl fs create <name>",
                 ));
             }
             many => {

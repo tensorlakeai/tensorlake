@@ -204,14 +204,6 @@ enum Commands {
 
 use std::path::PathBuf;
 
-/// `--mode` for `tl fs mount`. Absent means writable, except a workspace already mounted
-/// elsewhere defaults to read-only.
-#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
-enum MountWriteMode {
-    Ro,
-    Rw,
-}
-
 #[derive(Subcommand)]
 enum FsCommands {
     /// Install, enable, and diagnose the mount prerequisites (macOS FSKit extension; Linux
@@ -247,26 +239,8 @@ enum FsCommands {
         path: PathBuf,
 
         /// Read-only: look, don't touch (follows the filesystem's current state)
-        #[arg(long, conflicts_with = "mode")]
+        #[arg(long)]
         ro: bool,
-
-        /// (deprecated: use `tl git mount --ro/--rw` for repositories) Write policy
-        #[arg(long, value_enum, hide = true)]
-        mode: Option<MountWriteMode>,
-
-        /// (deprecated: publishing is the default for filesystems; use `tl git mount
-        /// --publish` for repositories)
-        #[arg(long, hide = true)]
-        shared_rw: bool,
-
-        /// Save automatically every N seconds (0 disables; on-demand `tl fs snapshot`
-        /// always works)
-        #[arg(long, hide = true, value_parser = clap::value_parser!(u64))]
-        autosave_secs: Option<u64>,
-
-        /// (deprecated: autosave is on by default; see --autosave-secs)
-        #[arg(long, hide = true, value_parser = clap::value_parser!(u64).range(1..))]
-        auto_commit_interval_secs: Option<u64>,
 
         /// Run the mount daemon in the foreground (debugging)
         #[arg(long, hide = true)]
@@ -381,48 +355,6 @@ enum FsCommands {
         clear: bool,
     },
 
-    /// (deprecated: use `tl git promote`) Publish the workspace's snapshot onto a real branch
-    #[command(allow_missing_positional = true, hide = true)]
-    Promote {
-        /// A mounted directory (default: the mount containing the current directory)
-        path: Option<PathBuf>,
-
-        /// Target branch
-        branch: String,
-
-        /// Land the full checkpoint chain instead of a single squashed commit
-        #[arg(long)]
-        full_history: bool,
-
-        /// Merge onto a moved target (two-parent merge commit); conflicts are reported
-        /// and nothing is published
-        #[arg(long, conflicts_with = "full_history")]
-        merge: bool,
-
-        /// Commit message for the squashed promote
-        #[arg(short, long)]
-        message: Option<String>,
-    },
-
-    /// (deprecated: use `tl git sync`) Pull the target branch into the workspace
-    #[command(hide = true)]
-    Sync {
-        /// A mounted directory (default: the mount containing the current directory)
-        path: Option<PathBuf>,
-
-        /// Branch to pull from (default: the branch the workspace was created from)
-        #[arg(long)]
-        target: Option<String>,
-
-        /// Fail on conflicts instead of materializing diff3 markers into the workspace
-        #[arg(long)]
-        fail_on_conflict: bool,
-
-        /// Commit message for the sync merge commit
-        #[arg(short, long)]
-        message: Option<String>,
-    },
-
     /// Show workspace, lease, and local-change status for a mount
     Status {
         /// A mounted directory (default: the mount containing the current directory)
@@ -442,23 +374,10 @@ enum FsCommands {
         /// Snapshot/commit hex, branch, or ref to restore to
         version: String,
 
-        /// Drop the local overlay to apply the restore. Destructive: local changes not yet in
-        /// a snapshot AND ignored files under the mount are deleted — `tl fs snapshot` first
-        /// to keep the changes.
-        #[arg(long)]
-        discard_local: bool,
-    },
-
-    /// List changed paths: local vs last snapshot, or between two snapshots
-    Diff {
-        /// A mounted directory (default: the mount containing the current directory)
-        path: Option<PathBuf>,
-
-        /// Older snapshot/commit (omit both for local vs last snapshot)
-        a: Option<String>,
-
-        /// Newer snapshot/commit
-        b: Option<String>,
+        /// Drop the local overlay to apply the restore. Destructive: unsaved changes AND
+        /// ignored files under the mount are deleted — `tl fs snapshot` first to keep them
+        #[arg(long, alias = "discard-local")]
+        discard: bool,
     },
 
     /// Unmount: detach; the session survives and remounting the filesystem resumes it
@@ -473,7 +392,7 @@ enum FsCommands {
         /// Throw away unsaved changes (and ignored files under the mount) with the mount.
         /// Without it, unmount refuses when unsaved work would be lost — `tl fs snapshot`
         /// first to keep it
-        #[arg(long, alias = "discard-local")]
+        #[arg(long)]
         discard: bool,
     },
 }
@@ -679,10 +598,6 @@ enum GitCommands {
         #[arg(long, conflicts_with = "publish")]
         ro: bool,
 
-        /// Force writable even though this workspace is mounted live elsewhere
-        #[arg(long, conflicts_with = "ro", hide = true)]
-        rw: bool,
-
         /// Every snapshot lands on the mounted branch automatically (server-ordered, merged,
         /// one attributed commit per snapshot). Requires `<repo>:<branch>`
         #[arg(long)]
@@ -691,11 +606,6 @@ enum GitCommands {
         /// Reattach an existing workspace instead of forking a new one
         #[arg(long, conflicts_with = "publish")]
         workspace: Option<String>,
-
-        /// Checkpoint local changes as a snapshot commit every N seconds (async, in the
-        /// mount daemon)
-        #[arg(long, hide = true, value_parser = clap::value_parser!(u64).range(1..))]
-        auto_snapshot_secs: Option<u64>,
 
         /// Run the mount daemon in the foreground (debugging)
         #[arg(long, hide = true)]
@@ -745,18 +655,6 @@ enum GitCommands {
     Sync {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
-
-        /// Branch to pull from (default: the branch the workspace was created from)
-        #[arg(long, hide = true)]
-        target: Option<String>,
-
-        /// Report conflicts and change nothing instead of materializing markers
-        #[arg(long, hide = true)]
-        fail_on_conflict: bool,
-
-        /// Message for the sync commit
-        #[arg(short, long, hide = true)]
-        message: Option<String>,
     },
 
     /// Land the mounted working tree's checkpoint on a branch (squash by default)
@@ -772,14 +670,6 @@ enum GitCommands {
         /// publish nothing
         #[arg(long)]
         merge: bool,
-
-        /// Land the full checkpoint chain instead of one squashed commit
-        #[arg(long, conflicts_with = "merge", hide = true)]
-        full_history: bool,
-
-        /// Message for the squashed/merge commit
-        #[arg(short, long, hide = true)]
-        message: Option<String>,
     },
 
     /// Show workspace and local-change status for a mounted working tree
@@ -2510,19 +2400,6 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
     let mut subcmd = subcmd;
     let mut mount_dir: Option<std::path::PathBuf> = None;
     match &mut subcmd {
-        FsCommands::Promote { path, branch, .. } => {
-            if path.is_none() {
-                // With the path omitted, a sole positional that is itself a mounted
-                // directory is a forgotten branch — reject it before it becomes a publish
-                // onto a branch named after the directory.
-                commands::fs::reject_mount_like_positional(
-                    branch,
-                    "branch",
-                    "tl fs promote [PATH] <BRANCH>",
-                )?;
-            }
-            mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
-        }
         FsCommands::Restore { path, version, .. } => {
             if path.is_none() {
                 commands::fs::reject_mount_like_positional(
@@ -2533,14 +2410,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             }
             mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
         }
-        FsCommands::Diff { path, a, b } => {
-            let (path, ra, rb) = commands::fs::resolve_diff_args(path.take(), a.take(), b.take())?;
-            *a = ra;
-            *b = rb;
-            mount_dir = Some(path);
-        }
         FsCommands::Snapshot { path, .. }
-        | FsCommands::Sync { path, .. }
         | FsCommands::Status { path, .. }
         | FsCommands::Unmount { path, .. } => {
             mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
@@ -2583,35 +2453,12 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             target,
             path,
             ro,
-            mode,
-            shared_rw,
-            autosave_secs,
-            auto_commit_interval_secs,
             foreground,
             trace_ops,
             log_level,
         } => {
-            let mode = if ro {
-                Some(commands::fs::WritePolicy::Ro)
-            } else {
-                mode.map(|m| match m {
-                    MountWriteMode::Ro => commands::fs::WritePolicy::Ro,
-                    MountWriteMode::Rw => commands::fs::WritePolicy::Rw,
-                })
-            };
             commands::fs::mount_filesystem(
-                ctx,
-                &target,
-                &path,
-                commands::fs::FsMountOpts {
-                    mode,
-                    legacy_shared_rw: shared_rw,
-                    autosave_secs,
-                    legacy_auto_commit_interval_secs: auto_commit_interval_secs,
-                    foreground,
-                    trace_ops,
-                    log_level,
-                },
+                ctx, &target, &path, ro, foreground, trace_ops, &log_level,
             )
             .await
         }
@@ -2622,55 +2469,10 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         FsCommands::Snapshot { message, clear, .. } => {
             commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), clear).await
         }
-        FsCommands::Promote {
-            branch,
-            full_history,
-            merge,
-            message,
-            ..
-        } => {
-            eprintln!(
-                "deprecated: `tl fs promote` moved to `tl git promote` (same arguments); \
-                 this alias will be removed in a future release"
-            );
-            commands::fs::promote(
-                ctx,
-                &mount_dir(),
-                &branch,
-                full_history,
-                merge,
-                message.as_deref(),
-            )
-            .await
-        }
-        FsCommands::Sync {
-            target,
-            fail_on_conflict,
-            message,
-            ..
-        } => {
-            eprintln!(
-                "deprecated: `tl fs sync` moved to `tl git sync` (same arguments); this \
-                 alias will be removed in a future release"
-            );
-            commands::fs::sync(
-                ctx,
-                &mount_dir(),
-                target.as_deref(),
-                fail_on_conflict,
-                message.as_deref(),
-            )
-            .await
-        }
         FsCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
         FsCommands::Restore {
-            version,
-            discard_local,
-            ..
-        } => commands::fs::restore(ctx, &mount_dir(), &version, discard_local).await,
-        FsCommands::Diff { a, b, .. } => {
-            commands::fs::diff(ctx, &mount_dir(), a.as_deref(), b.as_deref()).await
-        }
+            version, discard, ..
+        } => commands::fs::restore(ctx, &mount_dir(), &version, discard).await,
         FsCommands::Unmount {
             delete, discard, ..
         } => commands::fs::unmount(ctx, &mount_dir(), delete, discard).await,
@@ -2736,29 +2538,19 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
             target,
             path,
             ro,
-            rw,
             publish,
             workspace,
-            auto_snapshot_secs,
             foreground,
             trace_ops,
             log_level,
         } => {
-            let mode = if ro {
-                commands::fs::WritePolicy::Ro
-            } else if rw {
-                commands::fs::WritePolicy::Rw
-            } else {
-                commands::fs::WritePolicy::Auto
-            };
             commands::fs::mount_repo(
                 ctx,
                 &target,
                 workspace.as_deref(),
                 &path,
-                mode,
+                ro,
                 publish,
-                auto_snapshot_secs,
                 foreground,
                 trace_ops,
                 &log_level,
@@ -2768,37 +2560,9 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
         GitCommands::Snapshot { message, clear, .. } => {
             commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), clear).await
         }
-        GitCommands::Sync {
-            target,
-            fail_on_conflict,
-            message,
-            ..
-        } => {
-            commands::fs::sync(
-                ctx,
-                &mount_dir(),
-                target.as_deref(),
-                fail_on_conflict,
-                message.as_deref(),
-            )
-            .await
-        }
-        GitCommands::Promote {
-            branch,
-            full_history,
-            merge,
-            message,
-            ..
-        } => {
-            commands::fs::promote(
-                ctx,
-                &mount_dir(),
-                &branch,
-                full_history,
-                merge,
-                message.as_deref(),
-            )
-            .await
+        GitCommands::Sync { .. } => commands::fs::sync(ctx, &mount_dir(), None, false, None).await,
+        GitCommands::Promote { branch, merge, .. } => {
+            commands::fs::promote(ctx, &mount_dir(), &branch, false, merge, None).await
         }
         GitCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
         GitCommands::Unmount {
@@ -3303,17 +3067,12 @@ mod tests {
 
     #[test]
     fn fs_commands_are_filesystem_centric() {
-        // The filesystem surface: a bare name plus --ro. The legacy repo:ref form still
-        // parses (deprecation alias, warned at dispatch).
+        // The filesystem surface: a bare name plus --ro. Nothing else.
         match parse_command(["tl", "fs", "mount", "scratch", "./w", "--ro"]) {
             Commands::Fs(FsCommands::Mount {
                 target,
                 path,
                 ro,
-                mode,
-                shared_rw,
-                autosave_secs,
-                auto_commit_interval_secs,
                 foreground,
                 trace_ops,
                 log_level,
@@ -3321,20 +3080,28 @@ mod tests {
                 assert_eq!(target, "scratch");
                 assert_eq!(path, PathBuf::from("./w"));
                 assert!(ro);
-                assert_eq!(mode, None);
-                assert!(!shared_rw);
-                assert_eq!(autosave_secs, None);
-                assert_eq!(auto_commit_interval_secs, None);
                 assert!(!foreground);
                 assert!(!trace_ops);
                 assert_eq!(log_level, "info");
             }
             _ => panic!("expected fs mount command"),
         }
-        // --ro and the deprecated --mode are mutually exclusive.
-        assert!(
-            Cli::try_parse_from(["tl", "fs", "mount", "s", "./w", "--ro", "--mode", "rw"]).is_err()
-        );
+        // The pre-split flags are gone, not hidden.
+        for legacy in [
+            vec!["tl", "fs", "mount", "s", "./w", "--mode", "rw"],
+            vec!["tl", "fs", "mount", "s", "./w", "--shared-rw"],
+            vec![
+                "tl",
+                "fs",
+                "mount",
+                "s",
+                "./w",
+                "--auto-commit-interval-secs",
+                "30",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(legacy).is_err());
+        }
 
         match parse_command(["tl", "fs", "create", "scratch"]) {
             Commands::Fs(FsCommands::Create { name, json: false }) => {
@@ -3363,47 +3130,6 @@ mod tests {
             }
             _ => panic!("expected fs history command"),
         }
-
-        // A bare workspace id mounts an existing workspace; --mode rw forces writes.
-        match parse_command(["tl", "fs", "mount", "0a1b2c3d", "./w", "--mode", "rw"]) {
-            Commands::Fs(FsCommands::Mount { target, mode, .. }) => {
-                assert_eq!(target, "0a1b2c3d");
-                assert_eq!(mode, Some(MountWriteMode::Rw));
-            }
-            _ => panic!("expected fs mount command"),
-        }
-
-        match parse_command([
-            "tl",
-            "fs",
-            "mount",
-            "data",
-            "./w",
-            "--auto-commit-interval-secs",
-            "30",
-        ]) {
-            Commands::Fs(FsCommands::Mount {
-                auto_commit_interval_secs,
-                ..
-            }) => {
-                assert_eq!(auto_commit_interval_secs, Some(30));
-            }
-            _ => panic!("expected fs mount command"),
-        }
-
-        // Zero is rejected at parse time: an interval of 0 is not a debounce, it's a busy loop.
-        assert!(
-            Cli::try_parse_from([
-                "tl",
-                "fs",
-                "mount",
-                "data",
-                "./w",
-                "--auto-commit-interval-secs",
-                "0",
-            ])
-            .is_err()
-        );
 
         match parse_command(["tl", "fs", "ls"]) {
             Commands::Fs(FsCommands::Ls {
@@ -3466,44 +3192,29 @@ mod tests {
             _ => panic!("expected fs snapshot --clear command"),
         }
 
-        // Promote/restore have a required positional after the optional path; with a single
-        // value the path is the one skipped (allow_missing_positional).
-        match parse_command(["tl", "fs", "promote", "main"]) {
-            Commands::Fs(FsCommands::Promote { path, branch, .. }) => {
-                assert_eq!(path, None);
-                assert_eq!(branch, "main");
-            }
-            _ => panic!("expected fs promote command"),
-        }
-
-        match parse_command(["tl", "fs", "promote", "./w", "main"]) {
-            Commands::Fs(FsCommands::Promote { path, branch, .. }) => {
-                assert_eq!(path, Some(PathBuf::from("./w")));
-                assert_eq!(branch, "main");
-            }
-            _ => panic!("expected fs promote command"),
-        }
+        // Promote, sync, and diff left the fs surface entirely (promote/sync live on
+        // `tl git`; diff was cut).
+        assert!(Cli::try_parse_from(["tl", "fs", "promote", "main"]).is_err());
+        assert!(Cli::try_parse_from(["tl", "fs", "sync"]).is_err());
+        assert!(Cli::try_parse_from(["tl", "fs", "diff"]).is_err());
 
         match parse_command(["tl", "fs", "restore", "0a1b2c3d"]) {
             Commands::Fs(FsCommands::Restore {
                 path,
                 version,
-                discard_local,
+                discard,
             }) => {
                 assert_eq!(path, None);
                 assert_eq!(version, "0a1b2c3d");
-                assert!(!discard_local, "overlay-dropping restore is opt-in");
+                assert!(!discard, "overlay-dropping restore is opt-in");
             }
             _ => panic!("expected fs restore command"),
         }
 
-        // The overlay-destroying flags are explicit opt-ins on both destructive commands.
-        match parse_command(["tl", "fs", "restore", "--discard-local", "0a1b2c3d"]) {
-            Commands::Fs(FsCommands::Restore {
-                discard_local: true,
-                ..
-            }) => {}
-            _ => panic!("expected fs restore --discard-local command"),
+        // The overlay-destroying flag is an explicit opt-in.
+        match parse_command(["tl", "fs", "restore", "--discard", "0a1b2c3d"]) {
+            Commands::Fs(FsCommands::Restore { discard: true, .. }) => {}
+            _ => panic!("expected fs restore --discard command"),
         }
         match parse_command(["tl", "fs", "unmount", "./w"]) {
             Commands::Fs(FsCommands::Unmount {
@@ -3513,17 +3224,12 @@ mod tests {
             }) => {}
             _ => panic!("expected fs unmount command"),
         }
-        // --discard is the flag; --discard-local survives as a hidden alias.
-        match parse_command(["tl", "fs", "unmount", "--discard-local", "--delete", "./w"]) {
+        match parse_command(["tl", "fs", "unmount", "--discard", "--delete", "./w"]) {
             Commands::Fs(FsCommands::Unmount {
                 delete: true,
                 discard: true,
                 ..
             }) => {}
-            _ => panic!("expected fs unmount --discard command"),
-        }
-        match parse_command(["tl", "fs", "unmount", "--discard", "./w"]) {
-            Commands::Fs(FsCommands::Unmount { discard: true, .. }) => {}
             _ => panic!("expected fs unmount --discard command"),
         }
 
