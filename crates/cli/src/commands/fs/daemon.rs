@@ -865,6 +865,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 recent_seals: Vec::new(),
                 chunk_cache: std::collections::HashMap::new(),
                 sealed: SealedIndex::load(state_dir),
+                reindex_pending: false,
             }),
             mirror: std::sync::Mutex::new(SealerMirror::default()),
         })
@@ -1038,33 +1039,61 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
                         },
                         // The upper drop flips interned paths to their lower view with no
-                        // kernel-visible operation; push the implied invalidations.
-                        "clear_upper" => match overlay.clear_upper() {
-                            Ok(affected) => {
-                                invalidate(affected);
-                                // Nothing is retained anymore; the sealer's in-memory copy
-                                // dies at its next epoch check. Resetting the file NOW keeps
-                                // restore's follow-up reindex from absolving refilled paths
-                                // against records describing dropped content.
-                                SealedIndex::reset(&control_state_dir);
-                                serde_json::json!({ "ok": true })
+                        // kernel-visible operation; push the implied invalidations. Routed
+                        // through the sealer (state-lock serialized against in-flight seals,
+                        // arms the reindex-pending fail-closed guard) whenever one exists;
+                        // read-only mounts fall back to the bare drop.
+                        "clear_upper" => {
+                            let cleared = match sealer.as_ref() {
+                                Some(sealer) => sealer.clear_upper_control().await,
+                                None => {
+                                    SealedIndex::reset(&control_state_dir);
+                                    overlay.clear_upper().map_err(|e| {
+                                        CliError::usage(format!(
+                                            "clearing the overlay failed: {e}"
+                                        ))
+                                    })
+                                }
+                            };
+                            match cleared {
+                                Ok(affected) => {
+                                    invalidate(affected);
+                                    serde_json::json!({ "ok": true })
+                                }
+                                Err(e) => {
+                                    serde_json::json!({ "ok": false, "error": e.to_string() })
+                                }
                             }
-                            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-                        },
+                        }
                         // The upper was mutated out-of-band (restore writes into the state dir
                         // from the CLI process); rebuild the dirty index from disk so an
-                        // auto-commit mount seals the new state. The reconcile afterwards is a
-                        // correctness backstop, not an optimization: in the restore flow it
-                        // absolves nothing (clear_upper reset sealed.json, and refilled files
-                        // carry fresh mtimes), but any future out-of-band flow that preserves
-                        // seal records must not re-dirty retained content.
-                        "reindex" => match overlay.rebuild_dirty_index() {
-                            Ok(()) => {
-                                reconcile_sealed(&control_state_dir, &overlay);
-                                serde_json::json!({ "ok": true })
+                        // auto-commit mount seals the new state, and disarm the fail-closed
+                        // reindex-pending guard. The reconcile is a correctness backstop, not
+                        // an optimization: in the restore flow it absolves nothing
+                        // (clear_upper reset sealed.json, and refilled files carry fresh
+                        // mtimes), but any future out-of-band flow that preserves seal
+                        // records must not re-dirty retained content.
+                        "reindex" => {
+                            let reindexed = match sealer.as_ref() {
+                                Some(sealer) => sealer.reindex_control().await,
+                                None => overlay
+                                    .rebuild_dirty_index()
+                                    .map_err(|e| {
+                                        CliError::usage(format!(
+                                            "rebuilding the dirty index failed: {e}"
+                                        ))
+                                    })
+                                    .map(|()| {
+                                        reconcile_sealed(&control_state_dir, &overlay);
+                                    }),
+                            };
+                            match reindexed {
+                                Ok(()) => serde_json::json!({ "ok": true }),
+                                Err(e) => {
+                                    serde_json::json!({ "ok": false, "error": e.to_string() })
+                                }
                             }
-                            Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
-                        },
+                        }
                         // Pending directory renames, expanded to the by-oid upserts a seal
                         // must publish (`tl fs snapshot` merges these into its push).
                         "expand_redirects" => match overlay.expand_redirects().await {
@@ -1335,6 +1364,7 @@ struct Sealer {
 struct SealerMirror {
     sealed_gen: u64,
     recently: std::collections::HashSet<String>,
+    reindex_pending: bool,
 }
 
 #[cfg(unix)]
@@ -1360,6 +1390,12 @@ struct SealerState {
     /// The persisted seal record — see [`SealedIndex`]. Updated and saved after each
     /// successful push; the durable half of what `recent_seals`/`sealed_gen` know in memory.
     sealed: SealedIndex,
+    /// Restore has cleared the overlay and is refilling it out-of-band; until its follow-up
+    /// `reindex` rebuilds the dirty index, that index is EMPTY while the upper is in flux —
+    /// an unguarded dirty view would read as false-clean mid-refill (and a sync could pass
+    /// its dirty gate against a half-restored workspace). Seals, trims, and the dirty view
+    /// all fail closed while this is set.
+    reindex_pending: bool,
 }
 
 #[cfg(unix)]
@@ -1386,6 +1422,14 @@ impl Sealer {
     ) -> Result<SealOutcome> {
         use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
         let mut st = self.state.lock().await;
+        if st.reindex_pending {
+            // Restore is refilling the overlay out-of-band; the dirty index is not yet
+            // rebuilt, so a cycle here would seal (or worse, no-op through) a half-restored
+            // world. Retryable — the restore's reindex disarms this.
+            return Err(CliError::usage(
+                "the overlay is being restored (reindex pending); nothing was sealed",
+            ));
+        }
         let epoch = self.overlay.epoch();
         if epoch != st.seen_epoch {
             st.seen_epoch = epoch;
@@ -1729,6 +1773,7 @@ impl Sealer {
     fn publish_mirror(&self, st: &SealerState) {
         let mut mirror = self.mirror.lock().expect("mirror lock");
         mirror.sealed_gen = st.sealed_gen;
+        mirror.reindex_pending = st.reindex_pending;
         mirror.recently = st
             .recent_seals
             .iter()
@@ -1737,12 +1782,61 @@ impl Sealer {
             .collect();
     }
 
+    /// `clear_upper` routed through the sealer (adopted from the parallel #840 draft): the
+    /// state lock serializes the drop against in-flight seals — a clear can no longer land
+    /// inside a push window — and `reindex_pending` arms the fail-closed guard for the
+    /// out-of-band refill that follows.
+    async fn clear_upper_control(&self) -> Result<Vec<crate::commands::fs::overlay::OverlayInval>>
+    {
+        let mut st = self.state.lock().await;
+        let affected = self
+            .overlay
+            .clear_upper()
+            .map_err(|e| CliError::usage(format!("clearing the overlay failed: {e}")))?;
+        // The caches (and the sealed index) describe the dropped world; adopt the new epoch
+        // here so the next cycle doesn't double-clear.
+        st.seen_epoch = self.overlay.epoch();
+        st.chunk_cache.clear();
+        st.recent_seals.clear();
+        st.sealed = SealedIndex::default();
+        SealedIndex::reset(&self.state_dir);
+        st.reindex_pending = true;
+        self.publish_mirror(&st);
+        Ok(affected)
+    }
+
+    /// `reindex` routed through the sealer: rebuild the dirty index from the refilled
+    /// overlay, reconcile retained state, and disarm the fail-closed guard — under the same
+    /// lock that serializes seals, so no cycle observes the half-rebuilt index.
+    async fn reindex_control(&self) -> Result<()> {
+        let mut st = self.state.lock().await;
+        self.overlay
+            .rebuild_dirty_index()
+            .map_err(|e| CliError::usage(format!("rebuilding the dirty index failed: {e}")))?;
+        reconcile_sealed(&self.state_dir, &self.overlay);
+        st.seen_epoch = self.overlay.epoch();
+        st.chunk_cache.clear();
+        st.recent_seals.clear();
+        st.reindex_pending = false;
+        self.publish_mirror(&st);
+        Ok(())
+    }
+
     /// The truthful dirty view — exactly what the next seal would publish, resolved by the
     /// dry-run twin of the seal walk. Reads the mirror, not the state lock, so it answers
     /// instantly while a push is in flight.
     async fn dirty_view(&self) -> Result<DirtyReply> {
         let (sealed_gen, recently) = {
             let mirror = self.mirror.lock().expect("mirror lock");
+            if mirror.reindex_pending {
+                // Between restore's clear and its reindex the dirty index is empty while the
+                // upper is being refilled — answering would claim a half-restored workspace
+                // is clean.
+                return Err(CliError::usage(
+                    "the overlay is being restored (reindex pending); retry when the restore \
+                     completes",
+                ));
+            }
             (mirror.sealed_gen, mirror.recently.clone())
         };
         let delta = self.overlay.dirty_since(sealed_gen);
@@ -1783,6 +1877,12 @@ impl Sealer {
     /// the retained copies would mask. Dirty and ignored files are untouched.
     async fn trim_all(&self) -> Result<TrimReply> {
         let mut st = self.state.lock().await;
+        if st.reindex_pending {
+            return Err(CliError::usage(
+                "the overlay is being restored (reindex pending); retry when the restore \
+                 completes",
+            ));
+        }
         let epoch = self.overlay.epoch();
         if epoch != st.seen_epoch {
             // clear_upper/restore rewrote the world; the sealed index describes the old one.
