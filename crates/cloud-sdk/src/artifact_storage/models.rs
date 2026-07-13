@@ -63,6 +63,25 @@ impl Repo {
     }
 }
 
+/// `GET /project/{p}/repos/{r}/meta` — the authoritative point-read of one repo's product
+/// identity. Never served from the listing cache (read-your-writes after create) and
+/// answerable with a repo-scoped credential.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct RepoMetaInfo {
+    pub name: String,
+    pub full_name: String,
+    pub default_branch: String,
+    pub status: String,
+    #[serde(default = "default_repo_kind")]
+    pub kind: String,
+}
+
+impl RepoMetaInfo {
+    pub fn is_filesystem(&self) -> bool {
+        self.kind == REPO_KIND_FILESYSTEM
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ListReposResponse {
     pub project: String,
@@ -127,6 +146,10 @@ pub struct Operation {
     pub old_pack_count: u32,
     pub object_count: u32,
     pub pack_bytes: u64,
+    /// The operation materialized merge conflicts (its commit carries a conflict record).
+    /// Elided by the server when false; absent from pre-visibility servers.
+    #[serde(default)]
+    pub conflicted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]

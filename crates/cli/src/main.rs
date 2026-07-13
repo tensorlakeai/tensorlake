@@ -258,6 +258,16 @@ enum FsCommands {
         log_level: String,
     },
 
+    /// Mint the scoped credential a sandbox needs to attach one filesystem
+    Token {
+        /// Filesystem name
+        name: String,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// Upload a folder into a filesystem as one save (no mount needed)
     Push {
         /// Local directory to upload
@@ -2442,6 +2452,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         FsCommands::Create { name, json } => {
             commands::fs::create_filesystem(ctx, &name, json).await
         }
+        FsCommands::Token { name, json } => commands::fs::token(ctx, &name, json).await,
         FsCommands::Ls { file_system, json } => match file_system {
             None => commands::fs::ls_filesystems(ctx, json).await,
             Some(fs) => commands::fs::ls(ctx, Some(&fs), json).await,
@@ -3096,6 +3107,13 @@ mod tests {
                 assert_eq!(name, "scratch");
             }
             _ => panic!("expected fs create command"),
+        }
+
+        match parse_command(["tl", "fs", "token", "scratch", "--json"]) {
+            Commands::Fs(FsCommands::Token { name, json: true }) => {
+                assert_eq!(name, "scratch");
+            }
+            _ => panic!("expected fs token command"),
         }
 
         match parse_command(["tl", "fs", "push", "./data", "scratch", "-m", "bulk load"]) {

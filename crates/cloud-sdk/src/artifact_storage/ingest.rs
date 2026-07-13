@@ -138,7 +138,11 @@ pub struct PushOptions {
     pub upload_batch_bytes: usize,
     pub progress: Option<PushProgress>,
     /// When set, the commit publishes as a snapshot on this workspace's ref
-    /// (`workspaces/{id}/snapshots`) instead of advancing `branch`; `branch`/`base` are ignored.
+    /// (`workspaces/{id}/snapshots`) instead of advancing `branch` (which is ignored). `base`
+    /// declares the commit the changes were computed against; it rides the server's
+    /// reconcile queue — the snapshot still chains on the workspace tip — and the shared-rw
+    /// application three-ways against the declared base plus this push's exact change list
+    /// (servers that predate the field ignore it and merge against the chain parent).
     pub workspace_snapshot: Option<String>,
     /// Return every CDC-path file's chunk list in `PushReport::file_chunks`, so the caller can
     /// hand them back as `PushSource::StablePrefix` prefixes on the next push of the same

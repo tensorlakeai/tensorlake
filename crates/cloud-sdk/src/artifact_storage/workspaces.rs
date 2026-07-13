@@ -53,6 +53,16 @@ pub struct CreateWorkspaceRequest {
     /// on conflicts) or `"lww"` (legacy last-writer-wins overwrite).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reconcile_policy: Option<String>,
+    /// Which product surface this session belongs to: `"filesystem"` makes the SERVER apply
+    /// filesystem semantics from the repo's authoritative kind (publish-on-save defaults;
+    /// kind=repository rejected with the right command). Requires a server with repo
+    /// surface support (issue #103); older servers ignore the field.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub surface: Option<String>,
+    /// The session will never write (a read-only mount's anchor): the surface kind check
+    /// still applies, publish defaults are skipped.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
 }
 
 #[derive(Clone, Debug, Deserialize)]

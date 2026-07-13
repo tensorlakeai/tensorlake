@@ -437,7 +437,7 @@ pub(crate) fn load_binding(state_dir: &Path) -> Result<Binding> {
 /// concurrent writers (e.g. two `tl fs init`s racing on the registry, or the push progress
 /// hook rewriting the journal) could interleave create/write/rename on the same temp inode
 /// and publish a torn file through the "atomic" path.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
     let parent = path
         .parent()
@@ -505,7 +505,7 @@ struct BindingLock {
 /// it; `block: true` waits. The one flock implementation — the per-binding snapshot lock and
 /// the registry mutation lock both go through here.
 #[cfg(unix)]
-fn flock_exclusive(path: &Path, block: bool) -> Result<Option<std::fs::File>> {
+pub(crate) fn flock_exclusive(path: &Path, block: bool) -> Result<Option<std::fs::File>> {
     use std::os::unix::io::AsRawFd as _;
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -527,7 +527,7 @@ fn flock_exclusive(path: &Path, block: bool) -> Result<Option<std::fs::File>> {
 }
 
 #[cfg(not(unix))]
-fn flock_exclusive(_path: &Path, _block: bool) -> Result<Option<std::fs::File>> {
+pub(crate) fn flock_exclusive(_path: &Path, _block: bool) -> Result<Option<std::fs::File>> {
     Err(CliError::usage(
         "plain-directory bindings are supported on unix only in v1",
     ))
@@ -1407,7 +1407,7 @@ pub async fn push(
         }
         None => {
             let (root, state_dir, _, _) =
-                bind(ctx, Some(dir.to_path_buf()), Some(file_system), true).await?;
+                bind(ctx, Some(dir.to_path_buf()), file_system, true).await?;
             (root, state_dir)
         }
     };
@@ -1420,7 +1420,7 @@ pub async fn push(
 async fn bind(
     ctx: &CliContext,
     path: Option<PathBuf>,
-    file_system: Option<&str>,
+    file_system: &str,
     publish: bool,
 ) -> Result<(String, PathBuf, String, String)> {
     if cfg!(not(unix)) {
@@ -1447,53 +1447,14 @@ async fn bind(
         )));
     }
 
-    let session = FsSession::open(ctx, file_system).await?;
+    // The session may run on a repo-scoped credential (a sandbox pushing into its one
+    // filesystem): the whole bind path is point-addressed — no listings — and the SERVER
+    // applies filesystem semantics (publish target, kind check) from the repo's
+    // authoritative kind via `surface`. Filesystems are born with a genesis, so no seeding.
+    let repo = file_system.to_string();
+    let session = FsSession::open(ctx, Some(&repo)).await?;
     let (user, token) = session.creds();
-    let file_systems = session
-        .client
-        .list_repos_with_credential(&session.project_id, None, user, token)
-        .await?
-        .into_inner();
-    let repo = match file_system {
-        Some(name) => {
-            if !file_systems.repos.iter().any(|r| r.name == name) {
-                return Err(CliError::usage(format!(
-                    "no filesystem named {name:?}; create it first: tl fs create {name}"
-                )));
-            }
-            name.to_string()
-        }
-        // No --file-system: unambiguous only when the project has exactly one.
-        None => match file_systems.repos.as_slice() {
-            [only] => only.name.clone(),
-            [] => {
-                return Err(CliError::usage(
-                    "this project has no filesystems; create one first: tl fs create <name>",
-                ));
-            }
-            many => {
-                return Err(CliError::usage(format!(
-                    "this project has {} file systems; pick one with --file-system ({})",
-                    many.len(),
-                    many.iter()
-                        .map(|r| r.name.as_str())
-                        .collect::<Vec<_>>()
-                        .join(", "),
-                )));
-            }
-        },
-    };
-    let default_branch = file_systems
-        .repos
-        .iter()
-        .find(|r| r.name == repo)
-        .expect("validated above")
-        .default_branch
-        .clone();
-    // A fresh `tl git create` repo has an unborn default branch; seed it with an empty
-    // initial commit (empty root tree — exactly the base v1 requires) so init just works.
-    super::ensure_seeded(&session, &default_branch, &repo).await?;
-    let ws = session
+    let ws = match session
         .client
         .create_workspace(
             &session.project_id,
@@ -1501,12 +1462,20 @@ async fn bind(
             user,
             token,
             &CreateWorkspaceRequest {
-                shared_target: publish.then(|| default_branch.clone()),
+                surface: publish.then(|| "filesystem".to_string()),
                 ..Default::default()
             },
         )
-        .await?
-        .into_inner();
+        .await
+    {
+        Ok(ws) => ws.into_inner(),
+        Err(tensorlake::error::SdkError::ServerError { status, .. }) if status.as_u16() == 404 => {
+            return Err(CliError::usage(format!(
+                "no filesystem named {repo:?} (see: tl fs ls; create one: tl fs create {repo})"
+            )));
+        }
+        Err(e) => return Err(e.into()),
+    };
     // v1 verifies — not assumes — the empty base: workspace creation defaults to the repo
     // HEAD, which is only empty on a freshly seeded repo. One root-tree page of one entry is
     // the cheapest proof either way. (425: the base commit's index can still be
@@ -2232,11 +2201,10 @@ pub async fn unbind(path: Option<PathBuf>) -> Result<()> {
         println!("Unbound {root}.");
     } else {
         println!(
-            "Unbound {root}. Workspace {} and its snapshots survive on the server (delete \
-             with: tl fs rm {}).",
-            short_id(&workspace),
-            short_id(&workspace),
+            "Stopped tracking {root}. Its saves survive on the filesystem — push again to \
+             re-bind."
         );
+        let _ = workspace;
     }
     Ok(())
 }

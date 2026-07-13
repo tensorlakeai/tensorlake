@@ -171,8 +171,13 @@ pub async fn create_repo(
 
 pub async fn list_repos(ctx: &CliContext, output_json: bool) -> Result<()> {
     let project_id = project_id(ctx)?;
+    // Repositories only: filesystems are `tl fs ls`'s surface. Pre-kind servers ignore the
+    // filter and keep returning everything.
     let response = artifact_storage_client(ctx)?
-        .list_repos(&project_id)
+        .list_repos_of_kind(
+            &project_id,
+            Some(tensorlake::artifact_storage::models::REPO_KIND_REPOSITORY),
+        )
         .await
         .map_err(map_sdk_error)?
         .into_inner();
@@ -622,7 +627,13 @@ pub async fn commit_conflicts(
 }
 
 pub(crate) fn artifact_storage_client(ctx: &CliContext) -> Result<ArtifactStorageClient> {
-    let token = ctx.bearer_token()?;
+    // Sandbox attach path: no platform credential in the guest. Every data-plane call
+    // authenticates per request with the git credential; the bearer only backs the token-mint
+    // path, which the TENSORLAKE_GIT_TOKEN branch never reaches — so the git token stands in.
+    let token = match ctx.bearer_token() {
+        Ok(t) => t,
+        Err(e) => std::env::var("TENSORLAKE_GIT_TOKEN").map_err(|_| e)?,
+    };
     let mut builder = ClientBuilder::new(&ctx.api_url).bearer_token(&token);
     let use_scope_headers = ctx.personal_access_token.is_some() && ctx.api_key.is_none();
     if use_scope_headers

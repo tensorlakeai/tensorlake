@@ -465,27 +465,6 @@ pub async fn create_filesystem(ctx: &CliContext, name: &str, output_json: bool) 
     Ok(())
 }
 
-/// One kind-stamped listing, resolved to a filesystem by name. `replacement` names the
-/// `tl git` command shown when the name is actually a repository — the one line the two call
-/// sites differ in.
-fn resolve_filesystem<'a>(
-    listing: &'a tensorlake::artifact_storage::models::ListReposResponse,
-    name: &str,
-    replacement: &str,
-) -> Result<&'a tensorlake::artifact_storage::models::Repo> {
-    let Some(repo) = listing.repos.iter().find(|r| r.name == name) else {
-        return Err(CliError::usage(format!(
-            "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create {name})"
-        )));
-    };
-    if !repo.is_filesystem() {
-        return Err(CliError::usage(format!(
-            "{name} is a repository, not a filesystem — use: {replacement}"
-        )));
-    }
-    Ok(repo)
-}
-
 /// `tl fs ls` — the filesystems of this project, with where each is attached on this machine.
 pub async fn ls_filesystems(ctx: &CliContext, output_json: bool) -> Result<()> {
     let session = FsSession::open(ctx, None).await?;
@@ -561,12 +540,26 @@ pub async fn ls_filesystems(ctx: &CliContext, output_json: bool) -> Result<()> {
 pub async fn rm_filesystem(ctx: &CliContext, name: &str, force: bool) -> Result<()> {
     let session = FsSession::open(ctx, None).await?;
     let (user, token) = session.creds();
-    let listing = session
+    // Authoritative point-read: read-your-writes for a just-created filesystem, and the
+    // 404/kind answers never come from a stale listing.
+    let meta = match session
         .client
-        .list_repos_with_credential(&session.project_id, None, user, token)
-        .await?
-        .into_inner();
-    resolve_filesystem(&listing, name, &format!("tl git rm {name}"))?;
+        .repo_meta_with_credential(&session.project_id, name, user, token)
+        .await
+    {
+        Ok(meta) => meta.into_inner(),
+        Err(tensorlake::error::SdkError::ServerError { status, .. }) if status.as_u16() == 404 => {
+            return Err(CliError::usage(format!(
+                "no filesystem named {name:?} (see: tl fs ls)"
+            )));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if !meta.is_filesystem() {
+        return Err(CliError::usage(format!(
+            "{name} is a repository, not a filesystem — use: tl git rm {name}"
+        )));
+    }
     if let Some((mountpoint, _)) = live_mounts().into_iter().find(|(_, s)| s.repo == name) {
         return Err(CliError::usage(format!(
             "{name} is mounted at {mountpoint}; unmount first: tl fs unmount {mountpoint}"
@@ -613,6 +606,33 @@ pub async fn rm_filesystem(ctx: &CliContext, name: &str, force: bool) -> Result<
     Ok(())
 }
 
+/// `tl fs token <name>` — mint the narrow credential a sandbox (or any remote environment)
+/// needs to attach this one filesystem. Everything on the attach path — mount, saves,
+/// history-by-follow — works under it; project-scope surfaces (ls, history, rm) do not.
+pub async fn token(ctx: &CliContext, name: &str, output_json: bool) -> Result<()> {
+    let project_id = crate::commands::git::project_id(ctx)?;
+    let client = crate::commands::git::artifact_storage_client(ctx)?;
+    let credential = client
+        .mint_token_for_repo(&project_id, Some(name))
+        .await
+        .map_err(crate::commands::git::map_sdk_error)?
+        .into_inner();
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&credential)?);
+        return Ok(());
+    }
+    println!(
+        "Scoped credential for filesystem {name} (expires {}):",
+        credential.expires_at
+    );
+    println!("  {}", credential.token);
+    println!();
+    println!("Attach from any sandbox with FUSE:");
+    println!("  export TENSORLAKE_GIT_TOKEN={}", credential.token);
+    println!("  tl fs mount {name} <path>");
+    Ok(())
+}
+
 /// `tl fs push <dir> <name>` — upload a folder into a filesystem as one save, no mount.
 pub async fn push_dir(
     ctx: &CliContext,
@@ -647,7 +667,9 @@ pub async fn history(
             }
         }
     };
-    let session = FsSession::open(ctx, Some(&fs_name)).await?;
+    // Project-wide session: the operation log is project-scoped, and repo-scoped mints
+    // deliberately omit that scope (a repo credential would 403 here).
+    let session = FsSession::open(ctx, None).await?;
     let (user, token) = session.creds();
     let ops = session
         .client
@@ -691,7 +713,11 @@ pub async fn history(
         table.add_row(vec![
             Cell::new(age_display(op.at_secs)),
             Cell::new(if op.actor.is_empty() { "-" } else { &op.actor }),
-            Cell::new(&op.kind),
+            Cell::new(if op.conflicted {
+                format!("{} (collision)", op.kind)
+            } else {
+                op.kind.clone()
+            }),
             Cell::new(
                 op.refs
                     .first()
@@ -702,12 +728,20 @@ pub async fn history(
         ]);
     }
     println!("{table}");
+    if saves.iter().any(|op| op.conflicted) {
+        println!(
+            "Collision saves kept both sides; markers are in the affected files (`tl fs \
+             status` lists unresolved ones)."
+        );
+    }
     Ok(())
 }
 
 /// `tl fs mount <name> <path>` — the filesystem-surface mount: publish-on-save, autosave on,
-/// detached local sessions auto-resume. Branch-addressed and repository mounts live on
-/// `tl git mount`.
+/// detached local sessions auto-resume. One server round trip: the create carries
+/// `surface=filesystem` and the SERVER applies the semantics (publish target, kind check)
+/// from the repo's authoritative kind — no listing, so a filesystem created milliseconds ago
+/// mounts, and a repo-scoped credential suffices (the sandbox story).
 pub async fn mount_filesystem(
     ctx: &CliContext,
     target: &str,
@@ -725,60 +759,51 @@ pub async fn mount_filesystem(
     }
     // A drive doesn't lose your work: writable filesystem mounts always autosave.
     let autosave = (!ro).then_some(FS_AUTOSAVE_DEFAULT_SECS);
-    // Auto-resume first — it needs no server round trip. A detached local session of this
-    // filesystem (mount state present, daemon dead) picks up where it left off: "run the same
-    // command again" is the crash recovery. WritePolicy::Auto keeps the single-writer
-    // downgrade: a session attached writable elsewhere resumes read-only, never as a silent
-    // second writer.
-    if !ro && let Some(workspace_id) = detached_local_session(target) {
+    // Auto-resume first — no server round trip. A detached local session of this filesystem
+    // (mount state present, daemon dead) picks up where it left off: "run the same command
+    // again" is the crash recovery. WritePolicy::Auto keeps the single-writer downgrade.
+    if !ro && let Some((workspace_id, state_dir)) = detached_local_session(target) {
         println!(
             "Resuming detached session {} of filesystem {target}.",
             short_id(&workspace_id)
         );
+        // The repo is KNOWN from the local mount state: attach through the per-repo
+        // endpoint so the whole path works under a repo-scoped credential (the sandbox
+        // recipe) — never through name resolution, which would treat the id as a repo.
+        // The SELECTED state dir travels with the id: recomputing it via allocation
+        // could pick a different dead registration of the same workspace (the canonical
+        // dir when the newest overlay lives in a suffixed one) and strand unsealed work.
         return mount(
             ctx,
-            &workspace_id,
+            target,
             path,
             WritePolicy::Auto,
             None,
             autosave,
             true,
+            Some(Resume {
+                workspace_id: &workspace_id,
+                state_dir: Some(state_dir),
+            }),
             foreground,
             trace_ops,
             log_level,
         )
         .await;
     }
-    // Fresh session: one listing answers what the create needs — does the target exist, what
-    // kind is it, and what is its default branch (the publish target, which the genesis commit
-    // guarantees exists).
-    let session = FsSession::open(ctx, None).await?;
-    let (user, token) = session.creds();
-    let listing = session
-        .client
-        .list_repos_with_credential(&session.project_id, None, user, token)
-        .await?
-        .into_inner();
-    let repo = resolve_filesystem(&listing, target, &format!("tl git mount {target} <path>"))?;
-    // A fresh session publishes every save to the filesystem's current state; read-only mounts
-    // follow it instead.
-    let (target_spec, shared_target) = if ro {
-        (format!("{target}:{}", repo.default_branch), None)
-    } else {
-        (target.to_string(), Some(repo.default_branch.clone()))
-    };
     mount(
         ctx,
-        &target_spec,
+        target,
         path,
         if ro {
             WritePolicy::Ro
         } else {
             WritePolicy::Auto
         },
-        shared_target,
+        None,
         autosave,
         true,
+        None,
         foreground,
         trace_ops,
         log_level,
@@ -786,12 +811,19 @@ pub async fn mount_filesystem(
     .await
 }
 
+/// A known-repo workspace attach for [`mount`]: skip name resolution entirely, and — when a
+/// crash-resume selected a specific detached overlay — reopen exactly that state dir.
+pub(crate) struct Resume<'a> {
+    pub(crate) workspace_id: &'a str,
+    pub(crate) state_dir: Option<PathBuf>,
+}
+
 /// A detached local session of `repo`: registered mount state on this machine whose daemon is
 /// no longer alive. Newest state-dir mtime wins when several are detached — a heuristic proxy
 /// for "the one you used last" (all fs sessions publish to the same target, so resuming an
 /// older sibling loses nothing published; only its local overlay differs).
-fn detached_local_session(repo: &str) -> Option<String> {
-    let mut candidates: Vec<(std::time::SystemTime, String)> = local_mount_states()
+fn detached_local_session(repo: &str) -> Option<(String, PathBuf)> {
+    let mut candidates: Vec<(std::time::SystemTime, String, PathBuf)> = local_mount_states()
         .into_iter()
         .filter_map(|(_, state_dir, state, alive)| {
             if alive || state.repo != repo || state.read_only() {
@@ -800,11 +832,11 @@ fn detached_local_session(repo: &str) -> Option<String> {
             let modified = std::fs::metadata(&state_dir)
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            Some((modified, state.workspace_id))
+            Some((modified, state.workspace_id, state_dir))
         })
         .collect();
-    candidates.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-    candidates.into_iter().next().map(|(_, id)| id)
+    candidates.sort_by_key(|(modified, ..)| std::cmp::Reverse(*modified));
+    candidates.into_iter().next().map(|(_, id, dir)| (id, dir))
 }
 
 /// `tl git mount <repo>[:<ref>]` — the repository-surface mount: explicit checkpointing, no
@@ -837,10 +869,6 @@ pub async fn mount_repo(
             .map(|(_, base)| base.to_string())
             .expect("guarded above")
     });
-    let target = match workspace {
-        Some(id) => id,
-        None => target,
-    };
     mount(
         ctx,
         target,
@@ -849,6 +877,11 @@ pub async fn mount_repo(
         shared_target,
         None,
         false,
+        // --workspace names an id inside `target`'s repo: per-repo attach, repo-scoped-safe.
+        workspace.map(|id| Resume {
+            workspace_id: id,
+            state_dir: None,
+        }),
         foreground,
         trace_ops,
         log_level,
@@ -1782,6 +1815,18 @@ fn create_recovery(e: &tensorlake::error::SdkError) -> Option<CreateRecovery> {
 /// still succeeds.
 async fn ensure_seeded(session: &FsSession, default_branch: &str, repo: &str) -> Result<()> {
     let (user, token) = session.creds();
+    // Filesystems are born with a genesis save (server-minted, kind=filesystem) and legacy
+    // repos may have real history — seeding those would stack a pointless empty commit on
+    // every first bind. Only a genuinely unborn default branch needs the seed.
+    let refs = session
+        .client
+        .list_refs_with_credential(&session.project_id, repo, user, token)
+        .await?
+        .into_inner();
+    let full_ref = format!("refs/heads/{default_branch}");
+    if refs.refs.iter().any(|r| r.name == full_ref) {
+        return Ok(());
+    }
     session
         .client
         .push_files(
@@ -1835,25 +1880,43 @@ fn registry_load() -> toml::map::Map<String, toml::Value> {
         .unwrap_or_default()
 }
 
+/// Serialize registry mutations across processes. Every writer is load-modify-save; without
+/// this, two concurrent `tl fs mount`s read the same table and the last save silently drops
+/// the other's entry — stranding a LIVE mount outside ls/status/unmount. Readers stay
+/// lock-free: [`plaindir::write_atomic`]'s rename means they see a complete document or the
+/// previous one, never a torn write (which `registry_load` would misread as an empty
+/// registry). Blocking acquire — the critical section is a small file rewrite.
+fn registry_lock() -> Result<std::fs::File> {
+    std::fs::create_dir_all(crate::config::files::config_dir())?;
+    plaindir::flock_exclusive(
+        &crate::config::files::config_dir().join("mounts.lock"),
+        true,
+    )?
+    .ok_or_else(|| CliError::usage("could not lock the mount registry"))
+}
+
 fn registry_save(table: &toml::map::Map<String, toml::Value>) -> Result<()> {
     std::fs::create_dir_all(crate::config::files::config_dir())?;
-    std::fs::write(
-        mounts_registry_path(),
-        toml::to_string_pretty(&toml::Value::Table(table.clone()))?,
-    )?;
-    Ok(())
+    plaindir::write_atomic(
+        &mounts_registry_path(),
+        toml::to_string_pretty(&toml::Value::Table(table.clone()))?.as_bytes(),
+    )
 }
 
 fn registry_add(mountpoint: &str, state_dir: &Path) -> Result<()> {
+    let _lock = registry_lock()?;
     let mut table = registry_load();
-    table.insert(
-        mountpoint.to_string(),
-        toml::Value::String(state_dir.to_string_lossy().into_owned()),
-    );
+    // One state dir, one mountpoint: resuming a detached session at a NEW path must retire
+    // the old path's binding, or management commands against the stale mountpoint report
+    // the live session twice — and can shut down or delete the new mount's state.
+    let dir = state_dir.to_string_lossy().into_owned();
+    table.retain(|_, v| v.as_str() != Some(dir.as_str()));
+    table.insert(mountpoint.to_string(), toml::Value::String(dir));
     registry_save(&table)
 }
 
 fn registry_remove(mountpoint: &str) -> Result<()> {
+    let _lock = registry_lock()?;
     let mut table = registry_load();
     table.remove(mountpoint);
     registry_save(&table)
@@ -2037,10 +2100,16 @@ fn live_mount_of(workspace_id: &str) -> Option<String> {
 /// free (that's what lets a plain re-mount resume its local cache); when another registered
 /// mount of the same workspace holds it, pick a fresh suffixed dir — concurrent second mounts
 /// (read-only views especially) must never share overlay state with the writer.
-fn alloc_state_dir(workspace_id: &str) -> PathBuf {
+///
+/// A registration only HOLDS its dir while its daemon is alive: a crashed mount's on-disk
+/// registry entry survives the crash, and treating it as a hold pushed the crash-resume onto
+/// a fresh suffixed dir — stranding the unsealed local overlay in the old one, which is the
+/// exact loss "run the same command again" recovery exists to prevent.
+fn alloc_state_dir(workspace_id: &str, skip: &std::collections::HashSet<PathBuf>) -> PathBuf {
     let registered: std::collections::HashSet<PathBuf> = registry_load()
         .values()
         .filter_map(|v| v.as_str().map(PathBuf::from))
+        .filter(|dir| daemon::daemon_pid(dir).is_some_and(daemon_alive))
         .collect();
     let root = daemon::state_dir_root();
     let mut n = 1u32;
@@ -2050,11 +2119,43 @@ fn alloc_state_dir(workspace_id: &str) -> PathBuf {
         } else {
             root.join(format!("{workspace_id}.{n}"))
         };
-        if !registered.contains(&candidate) {
+        if !registered.contains(&candidate) && !skip.contains(&candidate) {
             return candidate;
         }
         n += 1;
     }
+}
+
+/// Stake `dir` for THIS mount, atomically, before any state lands in it. The aliveness
+/// probe alone is racy: a daemon writes its pid only after credentials, server round
+/// trips, and the FUSE attach — a multi-second window in which a second mount of the same
+/// workspace sees the dir as free and two daemons end up sharing one overlay. The claim
+/// is an exclusive flock on `daemon.pid` holding the CLI's OWN pid; the daemon overwrites
+/// it once serving, and the caller keeps the returned guard (and its lock) until then.
+/// `None` = another process holds the claim or a live daemon owns the dir.
+fn claim_state_dir(dir: &Path) -> Result<Option<std::fs::File>> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    std::fs::create_dir_all(dir)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("daemon.pid"))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Ok(None);
+    }
+    // The lock arbitrates concurrent CLAIMS; a running daemon holds no flock, so its
+    // liveness is checked separately (its pid is what the file holds).
+    if daemon::daemon_pid(dir).is_some_and(daemon_alive) {
+        return Ok(None);
+    }
+    let mut file = file;
+    file.set_len(0)?;
+    write!(file, "{}", std::process::id())?;
+    file.sync_all()?;
+    Ok(Some(file))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2078,6 +2179,12 @@ pub async fn mount(
     // (workspaces, snapshots, branches). One engine, two vocabularies — the fs surface
     // promises the words workspace/snapshot/branch never appear in its output.
     fs_surface: bool,
+    // A workspace KNOWN to live in `target`'s repo (auto-resume, `--workspace`): attach
+    // through the per-repo, principal-checked endpoint directly. Never routed through name
+    // resolution — that path treats the id as a repo name and then falls back to a
+    // project-wide fleet search, both of which a repo-scoped credential (the sandbox attach
+    // recipe) rightly 403s.
+    resume: Option<Resume<'_>>,
     foreground: bool,
     trace_ops: bool,
     log_level: &str,
@@ -2105,7 +2212,32 @@ pub async fn mount(
     #[cfg(target_os = "macos")]
     ensure_fskit_ready().await?;
     #[cfg(target_os = "linux")]
-    ensure_fuse_ready()?;
+    {
+        ensure_fuse_ready()?;
+        // A crashed mount leaves its dead FUSE attachment in place; the kernel answers the
+        // mountpoint with ENOTCONN forever. Detach it lazily before mounting — otherwise the
+        // new mount stacks over the corpse, and unmounting later resurfaces it.
+        if std::fs::metadata(path).is_err()
+            && matches!(
+                std::fs::symlink_metadata(path),
+                Err(ref e) if matches!(
+                    e.raw_os_error(),
+                    Some(libc::ENOTCONN) | Some(libc::EIO) | Some(libc::ENXIO)
+                )
+            )
+        {
+            for cmd in ["fusermount3", "fusermount"] {
+                if std::process::Command::new(cmd)
+                    .args(["-uz", &path.to_string_lossy()])
+                    .status()
+                    .is_ok_and(|st| st.success())
+                {
+                    eprintln!("detached a dead previous mount at {}", path.display());
+                    break;
+                }
+            }
+        }
+    }
     let (name, base) = match target.split_once(':') {
         Some((name, base)) => (name, Some(base.to_string())),
         None => (target, None),
@@ -2213,6 +2345,11 @@ pub async fn mount(
     let create_req = CreateWorkspaceRequest {
         base: base.clone(),
         shared_target: shared_target.clone(),
+        // The server applies product semantics from the repo's authoritative kind: an
+        // fs-surface create gets its publish target filled server-side (and a repository is
+        // rejected with the right command). Clients never pre-read listings to decide this.
+        surface: fs_surface.then(|| "filesystem".to_string()),
+        read_only: mode == WritePolicy::Ro,
         ..Default::default()
     };
     // One create call site for both the first attempt and the post-seed retry, so the two can
@@ -2222,54 +2359,86 @@ pub async fn mount(
             .client
             .create_workspace(&session.project_id, name, user, token, &create_req)
     };
-    let resolved = match try_create().await {
-        Ok(ws) => Resolved::Created(ws.into_inner()),
-        Err(e) => match create_recovery(&e) {
-            // No file system by this name and no branch was named: try it as a workspace id.
-            Some(CreateRecovery::RepoMissing) if base.is_none() => {
-                match resolve_workspace(&session, name).await? {
-                    Some((repo, ws)) => Resolved::Attached(repo, ws),
-                    None => {
-                        return Err(CliError::usage(format!(
-                            "no file system or workspace matches {name:?}. See `tl fs ls`, or \
-                             create the file system first: tl git create {name}"
-                        )));
+    let resume_state_dir = resume.as_ref().and_then(|r| r.state_dir.clone());
+    let resolved = if let Some(id) = resume.map(|r| r.workspace_id) {
+        let ws = session
+            .client
+            .get_workspace(&session.project_id, name, user, token, id)
+            .await
+            .map_err(|e| {
+                CliError::usage(format!(
+                    "resuming {} {} of {name} failed: {e} (start fresh: tl fs mount {name} \
+                     <path>)",
+                    unit,
+                    short_id(id),
+                ))
+            })?
+            .into_inner();
+        Resolved::Attached(name.to_string(), ws)
+    } else {
+        match try_create().await {
+            Ok(ws) => Resolved::Created(ws.into_inner()),
+            Err(e) => match create_recovery(&e) {
+                // No file system by this name and no branch was named: try it as a workspace id.
+                Some(CreateRecovery::RepoMissing) if base.is_none() => {
+                    match resolve_workspace(&session, name).await? {
+                        Some((repo, ws)) => Resolved::Attached(repo, ws),
+                        None if fs_surface => {
+                            return Err(CliError::usage(format!(
+                                "no filesystem named {name:?} (see: tl fs ls; create one: tl fs \
+                             create {name})"
+                            )));
+                        }
+                        None => {
+                            return Err(CliError::usage(format!(
+                                "no repo or workspace matches {name:?}. See `tl git ls`, or \
+                             create the repo first: tl git create {name}"
+                            )));
+                        }
                     }
                 }
-            }
-            Some(CreateRecovery::RepoMissing) => {
-                return Err(CliError::usage(format!(
-                    "no file system named {name:?}; create it first: tl git create {name}"
-                )));
-            }
-            // Seed an unborn default branch whether it is implied OR named (either spelling):
-            // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
-            // fail with `base "main" does not resolve to a commit` while plain
-            // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
-            // write to the server (and with read-scoped credentials the seed push would fail
-            // opaquely); ro keeps the clear server error. Other branch names stay strict —
-            // seeding cannot conjure them.
-            Some(CreateRecovery::BaseUnresolved) => {
-                let file_systems = session
-                    .client
-                    .list_repos_with_credential(&session.project_id, None, user, token)
-                    .await?
-                    .into_inner();
-                let Some(fs) = file_systems.repos.iter().find(|r| r.name == name) else {
-                    return Err(e.into());
-                };
-                let default_branch = fs.default_branch.clone();
-                let names_default = base.as_deref().is_none_or(|b| {
-                    b == default_branch || b.strip_prefix("refs/heads/") == Some(&default_branch)
-                });
-                if !names_default || mode == WritePolicy::Ro {
-                    return Err(e.into());
+                Some(CreateRecovery::RepoMissing) if fs_surface => {
+                    return Err(CliError::usage(format!(
+                        "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create \
+                     {name})"
+                    )));
                 }
-                ensure_seeded(&session, &default_branch, name).await?;
-                Resolved::Created(try_create().await?.into_inner())
-            }
-            None => return Err(e.into()),
-        },
+                Some(CreateRecovery::RepoMissing) => {
+                    return Err(CliError::usage(format!(
+                        "no repo named {name:?}; create it first: tl git create {name}"
+                    )));
+                }
+                // Seed an unborn default branch whether it is implied OR named (either spelling):
+                // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
+                // fail with `base "main" does not resolve to a commit` while plain
+                // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
+                // write to the server (and with read-scoped credentials the seed push would fail
+                // opaquely); ro keeps the clear server error. Other branch names stay strict —
+                // seeding cannot conjure them.
+                Some(CreateRecovery::BaseUnresolved) if fs_surface => return Err(e.into()),
+                Some(CreateRecovery::BaseUnresolved) => {
+                    let file_systems = session
+                        .client
+                        .list_repos_with_credential(&session.project_id, None, user, token)
+                        .await?
+                        .into_inner();
+                    let Some(fs) = file_systems.repos.iter().find(|r| r.name == name) else {
+                        return Err(e.into());
+                    };
+                    let default_branch = fs.default_branch.clone();
+                    let names_default = base.as_deref().is_none_or(|b| {
+                        b == default_branch
+                            || b.strip_prefix("refs/heads/") == Some(&default_branch)
+                    });
+                    if !names_default || mode == WritePolicy::Ro {
+                        return Err(e.into());
+                    }
+                    ensure_seeded(&session, &default_branch, name).await?;
+                    Resolved::Created(try_create().await?.into_inner())
+                }
+                None => return Err(e.into()),
+            },
+        }
     };
     tracing::debug!(
         phase = "workspace",
@@ -2337,11 +2506,16 @@ pub async fn mount(
             let read_only = mode == WritePolicy::Ro;
             // What the view follows. Writable workspaces follow their own ref; shared-rw
             // follows the branch it publishes to, so every writer's view converges on the
-            // reconciled branch rather than staying pinned to its own snapshots. A read-only
-            // view follows the named branch (or the repo HEAD's branch) so new commits appear —
-            // except a fixed commit base, which is a pinned view that never advances.
-            let follow_ref = if let Some(target) = &shared_target {
+            // reconciled branch rather than staying pinned to its own snapshots. The publish
+            // target comes from the CREATE RESPONSE — for fs-surface sessions the server
+            // filled it from the repo's stored default branch. A read-only view follows the
+            // named branch (fs surface: HEAD itself, resolved per poll) so new commits
+            // appear — except a fixed commit base, which is a pinned view that never
+            // advances.
+            let follow_ref = if let Some(target) = &ws.shared_target {
                 Some(format!("refs/heads/{target}"))
+            } else if read_only && fs_surface {
+                Some("HEAD".to_string())
             } else if read_only {
                 match &base {
                     Some(b) if b.len() == 40 && b.bytes().all(|c| c.is_ascii_hexdigit()) => {
@@ -2395,7 +2569,34 @@ pub async fn mount(
     }
 
     let mountpoint = canonical_mountpoint(path)?;
-    let state_dir = alloc_state_dir(&ws.id);
+    // A resume reopens EXACTLY the state dir it selected (the newest detached overlay);
+    // re-allocating could land on a different dead registration of the same workspace.
+    // `_state_claim` holds the exclusive claim (see claim_state_dir) until this function
+    // returns — by which point the daemon is serving and its own pid holds the dir.
+    let (state_dir, _state_claim) = match resume_state_dir {
+        Some(dir) => match claim_state_dir(&dir)? {
+            Some(guard) => (dir, guard),
+            None => {
+                return Err(CliError::usage(format!(
+                    "{unit} {} is already being mounted or served by another process",
+                    short_id(&ws.id)
+                )));
+            }
+        },
+        None => {
+            let mut skip: std::collections::HashSet<PathBuf> = Default::default();
+            loop {
+                let candidate = alloc_state_dir(&ws.id, &skip);
+                match claim_state_dir(&candidate)? {
+                    Some(guard) => break (candidate, guard),
+                    // Raced by a concurrent mount mid-claim: take the next dir.
+                    None => {
+                        skip.insert(candidate);
+                    }
+                }
+            }
+        }
+    };
     let (owner_uid, owner_gid) = mount_owner();
     daemon::save_mount_state(
         &state_dir,
@@ -2469,7 +2670,7 @@ pub async fn mount(
                         repo,
                         mountpoint,
                         short_id(&ws.id),
-                        if shared_target.is_some() {
+                        if ws.shared_target.is_some() {
                             ", saves publish automatically"
                         } else if read_only {
                             ", read-only, follows the filesystem"
@@ -2484,7 +2685,7 @@ pub async fn mount(
                         ws.base_ref.as_deref().unwrap_or(&ws.base[..12]),
                         mountpoint,
                         short_id(&ws.id),
-                        if shared_target.is_some() {
+                        if ws.shared_target.is_some() {
                             ", snapshots auto-publish to the branch"
                         } else if read_only {
                             ", read-only, follows the branch"
@@ -2790,14 +2991,16 @@ pub async fn unmount(
     registry_remove(&mountpoint)?;
     if delete {
         println!(
-            "Unmounted {mountpoint} (workspace {} deleted).",
+            "Unmounted {mountpoint} (session {} deleted).",
             short_id(&state.workspace_id)
         );
     } else {
         println!(
-            "Unmounted {mountpoint}. Workspace {} kept — mount it again with: tl fs mount {} \
-             <path>",
+            "Unmounted {mountpoint}. Session {} kept — `tl fs mount {} <path>` resumes it \
+             (repositories: tl git mount {} <path> --workspace {}).",
             short_id(&state.workspace_id),
+            state.repo,
+            state.repo,
             short_id(&state.workspace_id),
         );
     }
@@ -3087,34 +3290,20 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
             ))
         })
     }
-    fn strict_count_files(dir: &Path) -> Result<usize> {
-        let mut n = 0;
-        let read = match std::fs::read_dir(dir) {
-            Ok(read) => read,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(overlay_unreadable(dir, &e)),
-        };
-        for entry in read {
-            let entry = entry.map_err(|e| overlay_unreadable(dir, &e))?;
-            let meta = match entry.path().symlink_metadata() {
-                Ok(meta) => meta,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(overlay_unreadable(&entry.path(), &e)),
-            };
-            if meta.is_dir() && !meta.file_type().is_symlink() {
-                n += strict_count_files(&entry.path())?;
-            } else {
-                n += 1;
-            }
-        }
-        Ok(n)
+    // Files the OS strews into every volume it touches (AppleDouble resource forks,
+    // Finder/Spotlight/Trash state). They are ignored-by-rule and mechanically recreated, so
+    // they are not user work and must not make a clean unmount demand --discard — on macOS
+    // every mount acquires them within seconds of being browsed.
+    fn is_os_junk(rel: &str) -> bool {
+        let base = rel.rsplit('/').next().unwrap_or(rel);
+        base == ".DS_Store"
+            || base == ".Spotlight-V100"
+            || base == ".fseventsd"
+            || base == ".Trashes"
+            || base == ".TemporaryItems"
+            || base == ".apdisk"
+            || base.starts_with("._")
     }
-    // One strict pass per tree, classified inline. Upper files: dirty (already counted) →
-    // stat-verified sealed (retained; path membership alone would vouch for bytes modified
-    // out-of-band or racing the dirty reply) → ignored → uncovered. Ignored directories
-    // prune the descent: the whole subtree is ignored, count it without per-file rule
-    // evaluation.
-    #[allow(clippy::too_many_arguments)]
     fn classify_upper(
         root: &Path,
         dir: &Path,
@@ -3138,9 +3327,21 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
                 Err(e) => return Err(overlay_unreadable(&abs, &e)),
             };
             let rel = overlay_rel_path(root, &abs);
+            // OS junk first, BEFORE gitignore classification: `.Spotlight-V100`,
+            // `.fseventsd` and friends are not inherently gitignored, and letting them fall
+            // through to the recursive walk classified their children as uncovered — which
+            // refused the very unmounts this allowlist exists to permit. Junk never counts
+            // and is never descended into.
+            if is_os_junk(&rel) {
+                continue;
+            }
             if meta.is_dir() && !meta.file_type().is_symlink() {
                 if check_ignored(ignore, &rel, true)? {
-                    *ignored += strict_count_files(&abs)?;
+                    // One ignored SUBTREE, not a recursive file count: walking a large
+                    // node_modules merely to report an exact number could dominate unmount
+                    // latency, and the decision (ignored content never seals, user keeps or
+                    // discards it knowingly) is per-subtree anyway.
+                    *ignored += 1;
                 } else {
                     classify_upper(
                         root,
@@ -4037,6 +4238,25 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         .ok()
         .and_then(|r| r.get("commit").and_then(|c| c.as_str().map(str::to_string)));
     let changes = local_changes(&state_dir, &mountpoint).await?;
+    // Collisions the followed state materialized that no later save has overwritten. Absent
+    // daemon (or a pre-visibility daemon) reads as none — the section only ever adds signal.
+    let collisions: Vec<(String, String, String)> = daemon::control(&state_dir, "conflicts")
+        .await
+        .ok()
+        .and_then(|r| r.get("conflicts").cloned())
+        .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
+        .map(|list| {
+            list.into_iter()
+                .filter_map(|c| {
+                    Some((
+                        c.get("path")?.as_str()?.to_string(),
+                        c.get("kind")?.as_str()?.to_string(),
+                        c.get("commit")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     if output_json {
         println!(
@@ -4057,30 +4277,41 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
                     .iter()
                     .map(|(from, to)| serde_json::json!({ "from": from, "to": to }))
                     .collect::<Vec<_>>(),
+                "unresolved_collisions": collisions
+                    .iter()
+                    .map(|(path, kind, commit)| serde_json::json!({
+                        "path": path, "kind": kind, "commit": commit,
+                    }))
+                    .collect::<Vec<_>>(),
             }))?
         );
         return Ok(());
     }
-    println!("{} {}", style("file system:").dim(), state.repo);
+    println!("{} {}", style("filesystem:").dim(), state.repo);
     println!(
         "{} {} (created {} ago)",
-        style("workspace:").dim(),
+        style("session:").dim(),
         short_id(&ws.id),
         age_display(ws.created_at_secs)
     );
-    if let Some(followed) = &state.follow_ref {
+    // A publish-on-save mount follows its target branch for convergence but is writable —
+    // read_only() (not follow_ref presence) decides which mode the user is in.
+    if state.read_only() {
+        let followed = state.follow_ref.as_deref().unwrap_or("the current state");
         println!("{} read-only, follows {followed}", style("mode:").dim());
     } else if let Some(target) = &ws.shared_target {
         println!(
-            "{} shared-rw, snapshots auto-publish to {target}",
+            "{} publishing — every save lands on {target} (view follows it)",
             style("mode:").dim()
         );
+    } else {
+        println!("{} private (publish with promote)", style("mode:").dim());
     }
     if let Some(secs) = state.auto_commit_interval_secs {
         println!(
-            "{} local changes seal into a snapshot every {secs}s (local: below is the kept \
-             overlay, sealed content included; `tl fs snapshot --clear` drops it)",
-            style("auto-commit:").dim()
+            "{} local changes seal into a save every {secs}s (sealed content below is kept \
+             locally as the byte cache)",
+            style("autosave:").dim()
         );
     }
     match &daemon_commit {
@@ -4095,6 +4326,21 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         style("log:").dim(),
         state_dir.join("daemon.log").display()
     );
+    if !collisions.is_empty() {
+        println!(
+            "{} {} path(s) — both saves were kept; markers are in the files. Edit and save \
+             to resolve:",
+            style("unresolved collisions:").yellow(),
+            collisions.len(),
+        );
+        for (path, kind, commit) in &collisions {
+            println!(
+                "  {:<14} {path} (save {})",
+                style(kind).yellow(),
+                short_id(commit)
+            );
+        }
+    }
     // A pending rename's source whiteout is a real delete, but showing it next to the R line
     // would read as two changes; the R line carries both sides.
     let deletes: Vec<&String> = changes
@@ -4565,7 +4811,7 @@ fn parse_refresh_probes(
 
 /// Write a whiteout marker file, superseding any container of child markers at the same path
 /// (mirrors OverlayFs::set_whiteout).
-fn write_whiteout(wh: &Path, rel: &str) -> Result<()> {
+pub(crate) fn write_whiteout(wh: &Path, rel: &str) -> Result<()> {
     let marker = wh.join(rel);
     if let Some(parent) = marker.parent() {
         std::fs::create_dir_all(parent)?;
