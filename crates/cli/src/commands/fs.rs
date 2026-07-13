@@ -713,7 +713,11 @@ pub async fn history(
         table.add_row(vec![
             Cell::new(age_display(op.at_secs)),
             Cell::new(if op.actor.is_empty() { "-" } else { &op.actor }),
-            Cell::new(&op.kind),
+            Cell::new(if op.conflicted {
+                format!("{} (collision)", op.kind)
+            } else {
+                op.kind.clone()
+            }),
             Cell::new(
                 op.refs
                     .first()
@@ -724,6 +728,12 @@ pub async fn history(
         ]);
     }
     println!("{table}");
+    if saves.iter().any(|op| op.conflicted) {
+        println!(
+            "Collision saves kept both sides; markers are in the affected files (`tl fs \
+             status` lists unresolved ones)."
+        );
+    }
     Ok(())
 }
 
@@ -4096,6 +4106,25 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         .ok()
         .and_then(|r| r.get("commit").and_then(|c| c.as_str().map(str::to_string)));
     let changes = local_changes(&state_dir, &mountpoint).await?;
+    // Collisions the followed state materialized that no later save has overwritten. Absent
+    // daemon (or a pre-visibility daemon) reads as none — the section only ever adds signal.
+    let collisions: Vec<(String, String, String)> = daemon::control(&state_dir, "conflicts")
+        .await
+        .ok()
+        .and_then(|r| r.get("conflicts").cloned())
+        .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
+        .map(|list| {
+            list.into_iter()
+                .filter_map(|c| {
+                    Some((
+                        c.get("path")?.as_str()?.to_string(),
+                        c.get("kind")?.as_str()?.to_string(),
+                        c.get("commit")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     if output_json {
         println!(
@@ -4115,6 +4144,12 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
                 "pending_renames": changes.renames
                     .iter()
                     .map(|(from, to)| serde_json::json!({ "from": from, "to": to }))
+                    .collect::<Vec<_>>(),
+                "unresolved_collisions": collisions
+                    .iter()
+                    .map(|(path, kind, commit)| serde_json::json!({
+                        "path": path, "kind": kind, "commit": commit,
+                    }))
                     .collect::<Vec<_>>(),
             }))?
         );
@@ -4159,6 +4194,21 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         style("log:").dim(),
         state_dir.join("daemon.log").display()
     );
+    if !collisions.is_empty() {
+        println!(
+            "{} {} path(s) — both saves were kept; markers are in the files. Edit and save \
+             to resolve:",
+            style("unresolved collisions:").yellow(),
+            collisions.len(),
+        );
+        for (path, kind, commit) in &collisions {
+            println!(
+                "  {:<14} {path} (save {})",
+                style(kind).yellow(),
+                short_id(commit)
+            );
+        }
+    }
     // A pending rename's source whiteout is a real delete, but showing it next to the R line
     // would read as two changes; the R line carries both sides.
     let deletes: Vec<&String> = changes

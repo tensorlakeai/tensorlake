@@ -271,7 +271,10 @@ impl SealedIndex {
 
     pub(crate) fn save(&self, state_dir: &Path) -> std::io::Result<()> {
         let tmp = state_dir.join("sealed.json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec(self).expect("plain data serializes"))?;
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec(self).expect("plain data serializes"),
+        )?;
         std::fs::rename(&tmp, Self::file(state_dir))
     }
 
@@ -888,17 +891,84 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     if let Some(secs) = state.auto_commit_interval_secs
         && let Some(sealer) = sealer.clone()
     {
+        // Event-driven autosave (issue #103 step 5): seal when the overlay has been dirty AND
+        // quiet for `QUIET_SECS`, or dirty for `secs` regardless — bounded time-to-published
+        // instead of "some tick after". Quiet is measured from the dirty files' real mtimes
+        // in the upper (no write hooks needed); very large dirty sets skip the stat pass and
+        // ride the max-latency bound alone. The old behavior was one blind seal every `secs`,
+        // which let a write land right after a tick and wait the whole interval.
+        const POLL: Duration = Duration::from_secs(2);
+        const QUIET_SECS: u64 = 10;
+        const MTIME_SCAN_CAP: usize = 256;
+        let upper = state_dir.join("upper");
         tokio::spawn(async move {
+            let mut dirty_since: Option<std::time::Instant> = None;
             loop {
-                tokio::time::sleep(Duration::from_secs(secs.max(1))).await;
+                tokio::time::sleep(POLL).await;
+                let view = match sealer.dirty_view().await {
+                    Ok(view) => view,
+                    Err(e) => {
+                        eprintln!("autosave: dirty view failed: {e}");
+                        continue;
+                    }
+                };
+                let dirty_paths: Vec<&String> =
+                    view.upserts.iter().chain(view.deletes.iter()).collect();
+                let renames = view.renames.len();
+                if dirty_paths.is_empty() && renames == 0 {
+                    dirty_since = None;
+                    continue;
+                }
+                let now = std::time::Instant::now();
+                let since = *dirty_since.get_or_insert(now);
+                let dirty_for = now.duration_since(since);
+                // Quiet = no dirty file touched within QUIET_SECS. Deletes/renames have no
+                // mtime to consult; they count as quiet (their "write" was the operation
+                // itself, already at least one poll old by the time we see it twice).
+                let quiet = if view.upserts.len() > MTIME_SCAN_CAP {
+                    false // too many to stat cheaply; the max-latency bound owns this seal
+                } else {
+                    let quiet_floor =
+                        std::time::SystemTime::now() - Duration::from_secs(QUIET_SECS);
+                    view.upserts.iter().all(|rel| {
+                        match upper
+                            .join(rel)
+                            .symlink_metadata()
+                            .and_then(|m| m.modified())
+                        {
+                            Ok(mtime) => mtime <= quiet_floor,
+                            Err(_) => true, // vanished/unstattable: nothing left to wait on
+                        }
+                    })
+                };
+                if !quiet && dirty_for < Duration::from_secs(secs.max(1)) {
+                    continue;
+                }
                 // eprintln, not tracing: the daemon's stderr is the state dir's daemon.log —
-                // the one place a user can see an async flush fail.
+                // the one place a user can see an async flush fail. One structured line per
+                // stage so a slow save localizes to seal vs publish (server landing times
+                // come from the ops log).
+                let reason = if quiet { "quiet" } else { "max-latency" };
+                eprintln!(
+                    "autosave: sealing reason={reason} dirty_for_s={} files={} renames={renames}",
+                    dirty_for.as_secs(),
+                    dirty_paths.len(),
+                );
+                let seal_started = std::time::Instant::now();
                 match sealer.seal_once("tl fs auto-commit", false, None).await {
                     Ok(SealOutcome::Sealed(report)) => {
-                        eprintln!("auto-commit sealed snapshot {}", report.commit);
+                        eprintln!(
+                            "autosave: sealed snapshot {} seal_ms={} push_ms={:?}",
+                            report.commit,
+                            seal_started.elapsed().as_millis(),
+                            report.push_ms,
+                        );
+                        dirty_since = None;
                     }
-                    Ok(SealOutcome::Clean { .. }) => {}
-                    Err(e) => eprintln!("auto-commit: {e}"),
+                    Ok(SealOutcome::Clean { .. }) => {
+                        dirty_since = None;
+                    }
+                    Err(e) => eprintln!("autosave: {e}"),
                 }
             }
         });
@@ -981,6 +1051,23 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 }
                             },
                         },
+                        // The still-unresolved collisions on the followed branch (issue
+                        // #103 step 4b): fed by refresh deltas inside the mount core,
+                        // cleared when a later save changes the path again.
+                        "conflicts" => {
+                            let list: Vec<serde_json::Value> = core
+                                .open_conflicts()
+                                .into_iter()
+                                .map(|(path, c)| {
+                                    serde_json::json!({
+                                        "path": path,
+                                        "commit": c.commit,
+                                        "kind": c.kind,
+                                    })
+                                })
+                                .collect();
+                            serde_json::json!({ "ok": true, "conflicts": list })
+                        }
                         // Drop retained (sealed-and-kept) overlay state — sync's pre-flight.
                         // Unlike `clear_upper`, dirty and ignored files survive.
                         "trim" => match sealer.as_ref() {
@@ -1055,9 +1142,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 None => {
                                     SealedIndex::reset(&control_state_dir);
                                     overlay.clear_upper().map_err(|e| {
-                                        CliError::usage(format!(
-                                            "clearing the overlay failed: {e}"
-                                        ))
+                                        CliError::usage(format!("clearing the overlay failed: {e}"))
                                     })
                                 }
                             };
@@ -1792,8 +1877,7 @@ impl Sealer {
     /// state lock serializes the drop against in-flight seals — a clear can no longer land
     /// inside a push window — and `reindex_pending` arms the fail-closed guard for the
     /// out-of-band refill that follows.
-    async fn clear_upper_control(&self) -> Result<Vec<crate::commands::fs::overlay::OverlayInval>>
-    {
+    async fn clear_upper_control(&self) -> Result<Vec<crate::commands::fs::overlay::OverlayInval>> {
         let mut st = self.state.lock().await;
         let affected = self
             .overlay
@@ -2697,7 +2781,6 @@ mod stable_prefix_tests {
         assert_eq!(stable_of(&resolved), None);
         assert!(matches!(resolved.files[0].source, PushSource::Path(_)));
     }
-
 }
 
 /// The dirty view (dry-run resolution) and the sealed index: what `tl fs status` shows must
@@ -2764,7 +2847,10 @@ mod seal_tracking_tests {
             .collect();
         sealed_deletes.sort();
         assert_eq!(deletes, sealed_deletes, "dry run and seal agree on deletes");
-        assert!(!upserts.contains(&"junk.tmp".to_string()), "ignored paths never show");
+        assert!(
+            !upserts.contains(&"junk.tmp".to_string()),
+            "ignored paths never show"
+        );
     }
 
     #[test]
@@ -2840,14 +2926,21 @@ mod seal_tracking_tests {
 
     #[test]
     fn sealed_survivors_matches_by_exact_stat_identity() {
-        let state = state_with(&[("same.txt", "stable"), ("changed.txt", "old")], &["dead.txt"]);
+        let state = state_with(
+            &[("same.txt", "stable"), ("changed.txt", "old")],
+            &["dead.txt"],
+        );
         let stat_of = |p: &str| {
             SealedStat::of(&std::fs::symlink_metadata(state.path().join("upper").join(p)).unwrap())
         };
         let mut index = SealedIndex::default();
         index.upserts.insert("same.txt".into(), stat_of("same.txt"));
-        index.upserts.insert("changed.txt".into(), stat_of("changed.txt"));
-        index.upserts.insert("missing.txt".into(), stat_of("same.txt"));
+        index
+            .upserts
+            .insert("changed.txt".into(), stat_of("changed.txt"));
+        index
+            .upserts
+            .insert("missing.txt".into(), stat_of("same.txt"));
         index.deletes.insert("dead.txt".into());
         index.deletes.insert("reaped.txt".into());
 
@@ -2856,8 +2949,16 @@ mod seal_tracking_tests {
         std::fs::write(state.path().join("upper/changed.txt"), "newer-bytes").unwrap();
 
         let (upserts, deletes) = sealed_survivors(state.path(), &index);
-        assert_eq!(upserts, vec!["same.txt"], "only the untouched file survives");
-        assert_eq!(deletes, vec!["dead.txt"], "only the still-present whiteout survives");
+        assert_eq!(
+            upserts,
+            vec!["same.txt"],
+            "only the untouched file survives"
+        );
+        assert_eq!(
+            deletes,
+            vec!["dead.txt"],
+            "only the still-present whiteout survives"
+        );
     }
 
     #[test]
