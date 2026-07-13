@@ -231,3 +231,18 @@ impl CliContext {
             .and_then(|r| r.project_id.clone())
     }
 }
+
+/// The project a pre-provisioned git credential is scoped to, read from the JWT `iss` claim
+/// (artifact-storage mints carry `iss: "project_..."`). `None` for opaque dev tokens and
+/// malformed payloads — callers fall back to configured scope.
+pub(crate) fn project_from_git_token() -> Option<String> {
+    use base64::Engine;
+    let token = std::env::var("TENSORLAKE_GIT_TOKEN").ok()?;
+    let payload = token.split('.').nth(1)?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .ok()?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
+    let iss = claims.get("iss")?.as_str()?;
+    iss.starts_with("project_").then(|| iss.to_string())
+}

@@ -146,6 +146,10 @@ pub struct Operation {
     pub old_pack_count: u32,
     pub object_count: u32,
     pub pack_bytes: u64,
+    /// The operation materialized merge conflicts (its commit carries a conflict record).
+    /// Elided by the server when false; absent from pre-visibility servers.
+    #[serde(default)]
+    pub conflicted: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
