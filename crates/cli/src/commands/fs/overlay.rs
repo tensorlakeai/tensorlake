@@ -928,7 +928,7 @@ impl OverlayFs {
         if self.whited_out(&path) {
             return Err(not_found());
         }
-        let Ok(parent_core) = self.lower_binding(&parent_node).await else {
+        let Ok(parent_core) = self.lower_dir_binding(&parent_node).await else {
             return Err(not_found());
         };
         // Always a fresh core lookup: after a snapshot the workspace ref moved, and the node's
@@ -982,6 +982,27 @@ impl OverlayFs {
         Ok(leaf)
     }
 
+    /// A node's lower binding FOR CHILD RESOLUTION: only a lower directory can have lower
+    /// children. An upper directory shadowing a lower non-directory — a concurrent
+    /// dir-vs-file collision (mkdir raced another session's file landing), or the window
+    /// between `rm file; mkdir file` and its seal — resolves as "no lower children"
+    /// instead of probing a file as a tree, which reads as `IndexNotReady` in the core and
+    /// spins the settle loop for its full deadline (the silently-stalled seals).
+    async fn lower_dir_binding(&self, node: &ONode) -> Result<u64, MountError> {
+        // The reverse shadow: an upper NON-directory at this name hides the lower entirely,
+        // so a lower directory gained by refresh underneath it must not leak children.
+        if let Some(meta) = self.upper_meta(&node.path)
+            && !(meta.is_dir() && !meta.file_type().is_symlink())
+        {
+            return Err(not_found());
+        }
+        let ino = self.lower_binding(node).await?;
+        match self.core.getattr(ino) {
+            Ok(attr) if attr.kind == NodeKind::Dir => Ok(ino),
+            _ => Err(not_found()),
+        }
+    }
+
     /// Walk a merged path component-by-component through the core, following any pending
     /// rename remap. Returns the leaf's attributes holding **one counted core reference**
     /// (on `attr.ino`) that the caller must own or repay.
@@ -996,6 +1017,17 @@ impl OverlayFs {
         let mut cur = ROOT_INO;
         let mut chain: Vec<NodeAttr> = Vec::new();
         for component in lower.split('/') {
+            // A non-directory intermediate means the path does not exist as spelled —
+            // answer that directly instead of asking the core to list a file as a tree
+            // (which reads as IndexNotReady and spins the settle loop).
+            if let Some(parent) = chain.last()
+                && parent.kind != NodeKind::Dir
+            {
+                for attr in chain {
+                    self.core.forget(attr.ino, 1);
+                }
+                return Err(not_found());
+            }
             match settle_lower!(self.core.lookup(cur, component).await) {
                 Ok(attr) => {
                     cur = attr.ino;
@@ -1102,7 +1134,7 @@ impl OverlayFs {
         }
 
         let lower = if !self.whited_out(&node.path) || node.path.is_empty() {
-            self.lower_binding(&node).await.ok()
+            self.lower_dir_binding(&node).await.ok()
         } else {
             None
         };
@@ -1462,6 +1494,11 @@ impl OverlayFs {
         let Some(core_parent) = parent_core else {
             return false;
         };
+        // A cached parent binding can point at a lower non-directory (the upper dir shadows
+        // it): no lower children exist, and probing would spin the settle loop.
+        if !matches!(self.core.getattr(core_parent), Ok(attr) if attr.kind == NodeKind::Dir) {
+            return false;
+        }
         match self.core.lookup(core_parent, name).await {
             Ok(attr) => {
                 self.core.forget(attr.ino, 1);
@@ -2117,6 +2154,54 @@ impl OverlayFs {
                 self.last_mutation_ms.store(0, Ordering::SeqCst);
             }
         }
+    }
+
+    /// Self-heal dir-over-file states before a seal: for every dirty upsert whose UPPER is
+    /// a directory while the LOWER holds a non-directory at the same path, write the
+    /// missing whiteout. `rm file; mkdir file` writes it naturally, but a mkdir that raced
+    /// another session's file LANDING never saw the file (merged_exists answered before
+    /// delivery) — the marker converts that state into the coherent replaced-file shape,
+    /// and the seal's directory-upsert arm then publishes the delete half of the
+    /// replacement. Returns the healed paths (for the daemon log).
+    pub(crate) async fn heal_replaced_files<'a>(
+        &self,
+        upserts: impl Iterator<Item = &'a str>,
+    ) -> Vec<String> {
+        // Each upsert's ANCESTOR directories are candidates too: after the race, the mkdir's
+        // own dirty record can be pruned by an earlier (empty) seal, leaving only child
+        // upserts in this delta while the dir still shadows the lower file.
+        let mut candidates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+        for path in upserts {
+            let mut prefix = String::with_capacity(path.len());
+            for component in path.split('/') {
+                if !prefix.is_empty() {
+                    prefix.push('/');
+                }
+                prefix.push_str(component);
+                candidates.insert(prefix.clone());
+            }
+        }
+        let mut healed = Vec::new();
+        for path in candidates {
+            let is_upper_dir = self
+                .upper_path(&path)
+                .symlink_metadata()
+                .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
+            if !is_upper_dir || self.whited_out(&path) {
+                continue;
+            }
+            match self.walk_lower(&path).await {
+                Ok(attr) => {
+                    let non_dir = attr.kind != NodeKind::Dir;
+                    self.core.forget(attr.ino, 1);
+                    if non_dir && super::write_whiteout(&self.wh, &path).is_ok() {
+                        healed.push(path);
+                    }
+                }
+                Err(_) => {}
+            }
+        }
+        healed
     }
 
     /// Record the published blob oid for each sealed path (from the push report). Empty oids
@@ -3617,5 +3702,169 @@ mod tests {
         sdk.delete_workspace(PROJECT, &repo, "t", TOKEN, &ws.id)
             .await
             .unwrap();
+    }
+
+    /// The concurrent dir-vs-file collision: a `mkdir` lands while another writer's
+    /// same-named FILE is being delivered to the followed ref (`merged_exists` answered
+    /// before delivery, so no whiteout exists). The upper directory must consistently
+    /// shadow the lower file — getattr, child create, child lookup, and readdir all answer
+    /// upper-side, in bounded time (the old behavior probed the lower FILE as a tree,
+    /// which reads as IndexNotReady and spins the settle loop 10s per probe: the silently
+    /// stalled seals). The pre-seal heal then writes the missing whiteout, turning the
+    /// state into a plain file→directory replacement. The reverse shape (upper FILE at a
+    /// name where the lower gains a directory) stays upper-shadowed too.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[ignore = "requires a local artifact-storage server on 127.0.0.1:8080"]
+    async fn upper_dir_shadows_lower_file_gained_by_refresh() {
+        if !server_up() {
+            eprintln!("skipping: no local artifact-storage server");
+            return;
+        }
+        let sdk = sdk();
+        let repo = format!(
+            "dirfile-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sdk.create_repo_with_credential(PROJECT, &repo, None, None, "t", TOKEN)
+            .await
+            .unwrap();
+        sdk.push_files(
+            PROJECT,
+            &repo,
+            "t",
+            TOKEN,
+            vec![push_file("README.md", b"# seed\n", 0o100644)],
+            PushOptions {
+                message: "seed".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let client = FsClient::new(BASE, PROJECT, &repo, Some(TOKEN.to_string())).unwrap();
+        let core = MountCore::new(
+            client,
+            MountOptions {
+                reference: "main".to_string(),
+                follow: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let fs: Arc<OverlayFs> = OverlayFs::new(core.clone(), state.path(), false).unwrap();
+
+        // The race: the local mkdir wins the local view before the remote file exists.
+        let dir_attr = fs.mkdir(ROOT_INO, "swap").await.unwrap();
+        assert_eq!(dir_attr.kind, NodeKind::Dir);
+
+        // Another writer lands FILE `swap` on the followed branch; deliver it.
+        sdk.push_files(
+            PROJECT,
+            &repo,
+            "t",
+            TOKEN,
+            vec![push_file("swap", b"remote file\n", 0o100644)],
+            PushOptions {
+                message: "remote file at the mkdir name".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut delivered = false;
+        for _ in 0..100 {
+            if core.poll_ref().await.unwrap().is_some() {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(delivered, "the remote file's refresh never arrived");
+
+        // Coherence, in bounded time — no settle-loop stalls.
+        let bounded = std::time::Duration::from_secs(3);
+        let attr = fs.getattr(dir_attr.ino).await.unwrap();
+        assert_eq!(attr.kind, NodeKind::Dir, "upper dir keeps shadowing");
+        let (inner, ifh) =
+            tokio::time::timeout(bounded, fs.create(dir_attr.ino, "inner.txt", false))
+                .await
+                .expect("child create must not stall in the settle loop")
+                .unwrap();
+        fs.release(ifh);
+        let looked = tokio::time::timeout(bounded, fs.lookup(dir_attr.ino, "inner.txt"))
+            .await
+            .expect("child lookup must not stall")
+            .unwrap();
+        assert_eq!(looked.kind, NodeKind::File);
+        fs.forget(looked.ino, 1);
+        fs.forget(inner.ino, 1);
+        let names = tokio::time::timeout(bounded, dir_names(&fs, dir_attr.ino))
+            .await
+            .expect("readdir must not stall");
+        assert_eq!(
+            names,
+            vec!["inner.txt".to_string()],
+            "no lower leak-through"
+        );
+        let root_names = dir_names(&fs, ROOT_INO).await;
+        assert_eq!(
+            root_names.iter().filter(|n| n.as_str() == "swap").count(),
+            1,
+            "swap appears exactly once in the parent listing"
+        );
+
+        // The pre-seal heal writes the missing whiteout (once).
+        let healed = fs.heal_replaced_files(["swap"].into_iter()).await;
+        assert_eq!(healed, vec!["swap".to_string()]);
+        let again = fs.heal_replaced_files(["swap"].into_iter()).await;
+        assert!(again.is_empty(), "already healed: the whiteout is in place");
+        let attr = fs.getattr(dir_attr.ino).await.unwrap();
+        assert_eq!(
+            attr.kind,
+            NodeKind::Dir,
+            "the marker never hides the upper dir"
+        );
+
+        // Reverse shape: upper FILE where the lower gains a directory.
+        let (rev, rfh) = fs.create(ROOT_INO, "rev", false).await.unwrap();
+        fs.release(rfh);
+        sdk.push_files(
+            PROJECT,
+            &repo,
+            "t",
+            TOKEN,
+            vec![push_file("rev/child.txt", b"below\n", 0o100644)],
+            PushOptions {
+                message: "remote dir at the file name".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let mut delivered = false;
+        for _ in 0..100 {
+            if core.poll_ref().await.unwrap().is_some() {
+                delivered = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        }
+        assert!(delivered, "the remote dir's refresh never arrived");
+        let attr = fs.getattr(rev.ino).await.unwrap();
+        assert_eq!(attr.kind, NodeKind::File, "upper file keeps shadowing");
+        let child = tokio::time::timeout(bounded, fs.lookup(rev.ino, "child.txt"))
+            .await
+            .expect("shadowed child lookup must not stall");
+        assert!(
+            matches!(child, Err(MountError::NotFound(_))),
+            "the lower directory's children stay hidden under the upper file"
+        );
+        fs.forget(rev.ino, 1);
+        fs.forget(dir_attr.ino, 1);
     }
 }

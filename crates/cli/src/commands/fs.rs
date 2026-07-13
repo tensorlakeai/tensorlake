@@ -4736,7 +4736,7 @@ fn parse_refresh_probes(
 
 /// Write a whiteout marker file, superseding any container of child markers at the same path
 /// (mirrors OverlayFs::set_whiteout).
-fn write_whiteout(wh: &Path, rel: &str) -> Result<()> {
+pub(crate) fn write_whiteout(wh: &Path, rel: &str) -> Result<()> {
     let marker = wh.join(rel);
     if let Some(parent) = marker.parent() {
         std::fs::create_dir_all(parent)?;

@@ -1542,6 +1542,26 @@ impl Sealer {
         }
         let delta = self.overlay.dirty_since(st.sealed_gen);
         let watermark = delta.watermark;
+        // Dir-over-file self-heal: a mkdir that raced another session's same-named FILE
+        // landing has an upper directory shadowing a lower file with no whiteout. Write
+        // the missing marker now so this seal publishes the replacement's delete half and
+        // the merged view stays coherent (upper-first reads already shadow the file).
+        let healed = self
+            .overlay
+            .heal_replaced_files(delta.upserts.iter().map(|(p, _)| p.as_str()))
+            .await;
+        for path in &healed {
+            eprintln!("seal: healed dir-over-file at {path} (whiteout written)");
+        }
+        // The healed path may no longer be in this delta (its mkdir record was pruned by an
+        // earlier empty seal), and the delete arm skips paths with upper presence — force
+        // the replacement's delete half into the change set explicitly.
+        let mut delta = delta;
+        for path in &healed {
+            if !delta.deletes.contains(path) {
+                delta.deletes.push(path.clone());
+            }
+        }
         if delta.is_empty() && !self.overlay.has_redirects() {
             st.sealed_gen = watermark;
             // Nothing to seal: close the mutation clocks (and batch base) so the autosave
@@ -2121,8 +2141,15 @@ fn resolve_seal(
         upserts.push((path.clone(), abs, git_mode(&meta)));
     }
     for path in delta.deletes.iter().chain(vanished.iter()) {
-        if upper.join(path).symlink_metadata().is_ok() {
-            // Re-created since the event; its own upsert event covers it.
+        if upper
+            .join(path)
+            .symlink_metadata()
+            .is_ok_and(|m| !m.is_dir() || m.file_type().is_symlink())
+        {
+            // Re-created as CONTENT since the event; its own upsert event covers it. An
+            // upper DIRECTORY over the deleted name is different — a file→directory
+            // replacement, whose children ride their own upserts while this delete is the
+            // other half — and falls through to publish via its whiteout.
             continue;
         }
         if ignore.is_ignored(path, false)? {
