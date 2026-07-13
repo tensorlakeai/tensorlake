@@ -2170,17 +2170,19 @@ impl OverlayFs {
         }
     }
 
-    /// Self-heal dir-over-file states before a seal: for every dirty upsert whose UPPER is
-    /// a directory while the LOWER holds a non-directory at the same path, write the
-    /// missing whiteout. `rm file; mkdir file` writes it naturally, but a mkdir that raced
-    /// another session's file LANDING never saw the file (merged_exists answered before
-    /// delivery) — the marker converts that state into the coherent replaced-file shape.
+    /// Self-heal dir-over-file states before a seal: for every dirty upsert path (and its
+    /// ancestors) whose UPPER is a directory while the LOWER holds a non-directory, write
+    /// the missing whiteout AND record the path as a dirty upsert. The record is what makes
+    /// the boundary durable: it rides every subsequent delta until a seal SUCCEEDS (a
+    /// failed push prunes nothing), and the seal's directory-upsert arm then publishes the
+    /// whiteout-delete plus the children — so retries re-derive nothing and probe nothing.
+    /// Ancestors still scan (in-memory, cheap) because the mkdir's own record can be
+    /// consumed by an earlier empty seal BEFORE the racing file lands, leaving only child
+    /// upserts to name the boundary.
     ///
-    /// Returns EVERY replacement boundary in scope — freshly healed AND already-marked
-    /// (`newly_healed` distinguishes them for the log): the caller forces all of them into
-    /// the seal's delete set, because a retry after a failed push finds the whiteout
-    /// already on disk, and returning only fresh heals would drop the boundary delete from
-    /// the retry's change set (the branch would keep the replaced file forever).
+    /// Returns the paths healed THIS pass (for the daemon log and the current seal's
+    /// forced delete — the fresh record's generation is past the in-flight delta's
+    /// watermark, so this one seal injects it by hand).
     ///
     /// Errors abort the seal (retryable): a transient index error or a failed marker write
     /// swallowed here would let the seal publish the children WITHOUT the delete half.
@@ -2188,10 +2190,7 @@ impl OverlayFs {
     pub(crate) async fn heal_replaced_files<'a>(
         &self,
         upserts: impl Iterator<Item = &'a str>,
-    ) -> Result<HealedBoundaries, MountError> {
-        // Each upsert's ANCESTOR directories are candidates too: after the race, the mkdir's
-        // own dirty record can be pruned by an earlier (empty) seal, leaving only child
-        // upserts in this delta while the dir still shadows the lower file.
+    ) -> Result<Vec<String>, MountError> {
         let mut candidates: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
         for path in upserts {
             let mut prefix = String::with_capacity(path.len());
@@ -2203,19 +2202,16 @@ impl OverlayFs {
                 candidates.insert(prefix.clone());
             }
         }
-        let mut out = HealedBoundaries::default();
+        let mut healed = Vec::new();
         for path in candidates {
             let is_upper_dir = self
                 .upper_path(&path)
                 .symlink_metadata()
                 .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
-            if !is_upper_dir {
-                continue;
-            }
-            if self.whited_out(&path) {
-                // Already marked (a previous seal healed it, or `rm file; mkdir file` wrote
-                // it): still a boundary this seal must delete.
-                out.boundaries.push(path);
+            if !is_upper_dir || self.whited_out(&path) {
+                // Already marked = already recorded (the heal that wrote the marker also
+                // wrote the dirty record, which only a successful seal prunes): nothing to
+                // probe, nothing to re-derive.
                 continue;
             }
             match self.walk_lower(&path).await {
@@ -2250,8 +2246,10 @@ impl OverlayFs {
                                 )));
                             }
                         }
-                        out.newly_healed.push(path.clone());
-                        out.boundaries.push(path);
+                        // Durable half: the boundary rides every future delta as a dirty
+                        // dir upsert, whose seal arm publishes the delete AND the children.
+                        self.record(&path, DirtyKind::Upsert);
+                        healed.push(path);
                     }
                 }
                 Err(MountError::NotFound(_)) => {}
@@ -2262,7 +2260,7 @@ impl OverlayFs {
                 }
             }
         }
-        Ok(out)
+        Ok(healed)
     }
 
     /// Record the published blob oid for each sealed path (from the push report). Empty oids
@@ -2768,16 +2766,6 @@ pub struct OverlayInval {
     pub parent_ino: Option<u64>,
     pub name: String,
     pub staled: bool,
-}
-
-/// Replacement boundaries found by [`OverlayFs::heal_replaced_files`]: every upper-directory
-/// path whose lower non-directory is (now) whiteouted. `boundaries` is what the seal must
-/// delete — including markers written by EARLIER seals whose push failed; `newly_healed` is
-/// the subset written this pass (for the log).
-#[derive(Debug, Default)]
-pub(crate) struct HealedBoundaries {
-    pub(crate) boundaries: Vec<String>,
-    pub(crate) newly_healed: Vec<String>,
 }
 
 /// What one [`OverlayFs::trim_retained`] pass did. `trimmed` includes candidates that were
@@ -3902,28 +3890,32 @@ mod tests {
             "swap appears exactly once in the parent listing"
         );
 
-        // The pre-seal heal writes the missing whiteout once — and a RETRY (a seal whose
-        // push failed after healing) still reports the boundary, or the retry's change set
-        // would resend only the children while the branch keeps the replaced file.
+        // The pre-seal heal writes the missing whiteout once AND records the boundary as a
+        // dirty dir upsert — the durable half: a retry (a seal whose push failed after
+        // healing) re-derives nothing because the record rides every subsequent delta, and
+        // the seal's dir-upsert arm publishes the whiteout-delete plus the children.
+        let gen_before = fs.dirty_since(0).watermark;
         let healed = fs.heal_replaced_files(["swap"].into_iter()).await.unwrap();
-        assert_eq!(healed.newly_healed, vec!["swap".to_string()]);
-        assert_eq!(healed.boundaries, vec!["swap".to_string()]);
+        assert_eq!(healed, vec!["swap".to_string()]);
+        let delta = fs.dirty_since(gen_before);
+        assert!(
+            delta.upserts.iter().any(|(p, _)| p == "swap"),
+            "the healed boundary is recorded in the dirty index: {:?}",
+            delta.upserts
+        );
         let retry = fs.heal_replaced_files(["swap"].into_iter()).await.unwrap();
         assert!(
-            retry.newly_healed.is_empty(),
-            "the whiteout is already in place"
+            retry.is_empty(),
+            "already marked and recorded: retries probe nothing"
         );
-        assert_eq!(
-            retry.boundaries,
-            vec!["swap".to_string()],
-            "an existing healed boundary must be forced into every retry's delete set"
-        );
-        // Ancestor derivation: a child-only delta still finds the boundary.
+        // Ancestor derivation still discovers a boundary whose own record was consumed
+        // before the racing file landed (child-only delta): clear the record's effect by
+        // asking with only the child — the marker short-circuits, no re-heal needed.
         let via_child = fs
             .heal_replaced_files(["swap/inner.txt"].into_iter())
             .await
             .unwrap();
-        assert_eq!(via_child.boundaries, vec!["swap".to_string()]);
+        assert!(via_child.is_empty(), "marker present: nothing to re-heal");
         let attr = fs.getattr(dir_attr.ino).await.unwrap();
         assert_eq!(
             attr.kind,
