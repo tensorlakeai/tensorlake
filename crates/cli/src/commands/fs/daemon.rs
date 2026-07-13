@@ -160,6 +160,17 @@ pub struct MountState {
     /// Absent in older state files: the core resolves serially, one extra round trip.
     #[serde(default)]
     pub start_oid: Option<String>,
+    /// When the workspace was created, cached from the create/attach response. Immutable for
+    /// the session's lifetime, so `tl fs status` renders it without a server round trip.
+    /// Doubles as the cache marker: absent (older state files) means the workspace facts
+    /// below were never cached and status falls back to fetching the record.
+    #[serde(default)]
+    pub created_at_secs: Option<u64>,
+    /// The branch a publish-on-save workspace lands snapshots on (`None` = private), cached
+    /// from the create/attach response. Immutable for the session's lifetime; only
+    /// meaningful when [`MountState::created_at_secs`] is present.
+    #[serde(default)]
+    pub shared_target: Option<String>,
 }
 
 impl MountState {
@@ -2611,6 +2622,29 @@ pub(crate) fn still_mounted(mountpoint: &Path) -> bool {
 mod tests {
     use super::super::overlay::DirtyDelta;
     use super::*;
+
+    /// A state file written before the workspace-fact cache parses with the cache marker
+    /// absent — `tl fs status` must fall back to fetching the record, never render a zero
+    /// creation time or misreport a publishing mount as private.
+    #[test]
+    fn pre_cache_state_files_read_as_uncached() {
+        let old = serde_json::json!({
+            "project_id": "p", "repo": "p/fs", "workspace_id": "w",
+            "ref_name": "refs/workspaces/w", "mountpoint": "/mnt/x",
+        });
+        let state: MountState = serde_json::from_value(old).unwrap();
+        assert_eq!(state.created_at_secs, None, "no cache marker in old files");
+        assert_eq!(state.shared_target, None);
+        let cached = MountState {
+            created_at_secs: Some(1_700_000_000),
+            shared_target: Some("main".into()),
+            ..state
+        };
+        let roundtrip: MountState =
+            serde_json::from_slice(&serde_json::to_vec(&cached).unwrap()).unwrap();
+        assert_eq!(roundtrip.created_at_secs, Some(1_700_000_000));
+        assert_eq!(roundtrip.shared_target.as_deref(), Some("main"));
+    }
 
     pub(super) fn state_with(upper: &[(&str, &str)], wh: &[&str]) -> tempfile::TempDir {
         let state = tempfile::tempdir().unwrap();

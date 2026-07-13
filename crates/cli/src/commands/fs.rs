@@ -2613,6 +2613,8 @@ pub async fn mount(
             read_only: Some(read_only),
             auto_commit_interval_secs,
             start_oid,
+            created_at_secs: Some(ws.created_at_secs),
+            shared_target: ws.shared_target.clone(),
         },
     )?;
     registry_add(&mountpoint, &state_dir)?;
@@ -4219,20 +4221,36 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
-    let session = FsSession::open(ctx, Some(&state.repo)).await?;
-    let (user, token) = session.creds();
-    let ws = session
-        .client
-        .get_workspace(
-            &session.project_id,
-            &state.repo,
-            user,
-            token,
-            &state.workspace_id,
-        )
-        .await?
-        .into_inner();
-    let _ = heartbeat(&session, &state).await;
+    // Everything the human report needs from the workspace record — id, creation time,
+    // publish target — is immutable for the session's lifetime and cached in the mount
+    // state at attach, so status is a LOCAL command: no token, no server round trips.
+    // Only pre-cache state files (and `--json`, whose contract is the live record) fetch.
+    // Status deliberately does NOT heartbeat: the running daemon owns the lease, and a
+    // status-side stamp for a mount whose daemon is DEAD would read as attached-elsewhere
+    // to every other client.
+    let cached = (!output_json)
+        .then_some(state.created_at_secs)
+        .flatten()
+        .map(|created| (created, state.shared_target.clone()));
+    let (ws_created_at_secs, ws_shared_target, ws_record) = match cached {
+        Some((created, target)) => (created, target, None),
+        None => {
+            let session = FsSession::open(ctx, Some(&state.repo)).await?;
+            let (user, token) = session.creds();
+            let ws = session
+                .client
+                .get_workspace(
+                    &session.project_id,
+                    &state.repo,
+                    user,
+                    token,
+                    &state.workspace_id,
+                )
+                .await?
+                .into_inner();
+            (ws.created_at_secs, ws.shared_target.clone(), Some(ws))
+        }
+    };
     let daemon_commit = daemon::control(&state_dir, "ping")
         .await
         .ok()
@@ -4262,7 +4280,7 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         println!(
             "{}",
             serde_json::to_string_pretty(&serde_json::json!({
-                "workspace": ws,
+                "workspace": ws_record.expect("--json always fetches the live record"),
                 "mounted": daemon_commit.is_some(),
                 "lower_commit": daemon_commit,
                 "log": state_dir.join("daemon.log"),
@@ -4291,15 +4309,15 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     println!(
         "{} {} (created {} ago)",
         style("session:").dim(),
-        short_id(&ws.id),
-        age_display(ws.created_at_secs)
+        short_id(&state.workspace_id),
+        age_display(ws_created_at_secs)
     );
     // A publish-on-save mount follows its target branch for convergence but is writable —
     // read_only() (not follow_ref presence) decides which mode the user is in.
     if state.read_only() {
         let followed = state.follow_ref.as_deref().unwrap_or("the current state");
         println!("{} read-only, follows {followed}", style("mode:").dim());
-    } else if let Some(target) = &ws.shared_target {
+    } else if let Some(target) = &ws_shared_target {
         println!(
             "{} publishing — every save lands on {target} (view follows it)",
             style("mode:").dim()
