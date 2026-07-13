@@ -2103,6 +2103,15 @@ fn resolve_seal(
             // per-child events; future bulk ops may not): publish its files so nothing under
             // it can be missed. The sort+dedup below collapses overlap with child events.
             // Empty directories still publish nothing — git has no empty trees.
+            //
+            // A whiteout at the same name is the other half of a file→directory replacement
+            // (`rm file; mkdir file`): the mkdir's dirty record overwrote the rm's, but the
+            // marker survives. Publish the delete alongside the children — without it the
+            // application reads the adds as a kind conflict against the still-present file
+            // and keeps the file.
+            if whited_out_on_disk(&wh, path) {
+                deletes.push(path.clone());
+            }
             collect_dir_upserts(&upper, path, &mut ignore, &mut upserts)?;
             continue;
         }

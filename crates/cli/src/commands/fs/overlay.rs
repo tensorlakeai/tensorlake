@@ -1533,7 +1533,29 @@ impl OverlayFs {
         }
         let dest = self.upper_path(&path);
         std::fs::create_dir_all(&dest).map_err(io_err)?;
-        self.clear_whiteout(&path);
+        // A whiteout here can be load-bearing: `rm file; mkdir file` replaces a lower FILE
+        // with a directory, and clearing the marker would resurface the file underneath the
+        // new dir — child lookups then resolve against the file and fail, and the merged
+        // view flip-flops. Every read path is upper-first ("a whiteout without upper
+        // presence is a hard miss"), so the kept marker never hides the new directory; it
+        // only keeps hiding what the delete deleted, and the seal reads the pair as exactly
+        // the right change set (delete the file, add the dir's children). Clear it only
+        // when the lower holds nothing or a directory (the recreate case, where the child
+        // markers own the hiding).
+        let lower_non_dir = match parent_node.core_ino() {
+            Some(core_parent) => match self.core.lookup(core_parent, name).await {
+                Ok(attr) => {
+                    let non_dir = attr.kind != gsvc_mount::NodeKind::Dir;
+                    self.core.forget(attr.ino, 1);
+                    non_dir
+                }
+                Err(_) => false,
+            },
+            None => false,
+        };
+        if !lower_non_dir {
+            self.clear_whiteout(&path);
+        }
         self.record(&path, DirtyKind::Upsert);
         let meta = dest.symlink_metadata().map_err(io_err)?;
         let (ino, _, _) = self.inodes.lock().expect("inode lock").intern(path, None);
