@@ -2636,8 +2636,9 @@ mod tests {
             !repositories.repos.iter().any(|r| r.name == fs_name),
             "a filesystem must not appear in the repository listing"
         );
-        // The genesis commit is what makes `tl fs create` + mount work with no client push:
-        // a baseless, publish-on-save workspace resolves its base from the default branch.
+        // The genesis commit is what makes `tl fs create` + mount work with no client push,
+        // and `surface` is what makes it ONE round trip: the SERVER fills the publish target
+        // from the repo's stored default branch — the client never reads a listing.
         let ws = sdk
             .create_workspace(
                 PROJECT,
@@ -2645,7 +2646,7 @@ mod tests {
                 "t",
                 TOKEN,
                 &CreateWorkspaceRequest {
-                    shared_target: Some(entry.default_branch.clone()),
+                    surface: Some("filesystem".to_string()),
                     ..Default::default()
                 },
             )
@@ -2654,6 +2655,42 @@ mod tests {
             .into_inner();
         assert_eq!(ws.base_ref.as_deref(), Some("refs/heads/main"));
         assert_eq!(ws.shared_target.as_deref(), Some("main"));
+
+        // The authoritative meta point-read answers immediately after create — this is the
+        // rm/validation path's read-your-writes guarantee.
+        let meta = sdk
+            .repo_meta_with_credential(PROJECT, &fs_name, "t", TOKEN)
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(meta.is_filesystem());
+        assert_eq!(meta.default_branch, "main");
+
+        // An fs-surface session on a repository fails closed with the right command.
+        let repo_name = format!("{fs_name}-repo");
+        sdk.create_repo_with_credential(PROJECT, &repo_name, None, None, "t", TOKEN)
+            .await
+            .unwrap();
+        let err = sdk
+            .create_workspace(
+                PROJECT,
+                &repo_name,
+                "t",
+                TOKEN,
+                &CreateWorkspaceRequest {
+                    surface: Some("filesystem".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("tl git mount"),
+            "kind mismatch must name the replacement, got: {err}"
+        );
+        sdk.delete_repo_with_credential(PROJECT, &repo_name, "t", TOKEN)
+            .await
+            .unwrap();
         // Pin `tl fs history`'s save definition to the server's operation vocabulary: the
         // genesis is a committed "push" op, i.e. exactly what the history filter
         // (kind in {push, reconcile, promote, merge} AND result == "committed") must match.

@@ -13,7 +13,7 @@ pub mod workspaces;
 
 use models::{
     CreateRepoRequest, GitCredential, ListBranchesResponse, ListOperationsResponse,
-    ListRefsResponse, ListReposResponse, MintGitTokenRequest, RepoInfo,
+    ListRefsResponse, ListReposResponse, MintGitTokenRequest, RepoInfo, RepoMetaInfo,
 };
 
 #[derive(Clone)]
@@ -324,6 +324,27 @@ impl ArtifactStorageClient {
             url.push_str(&format!("?kind={}", urlencoding::encode(kind)));
         }
         let (request, trace_id) = self.git_request_url(Method::GET, url, git_username, git_token);
+        let response = request.send().await?;
+        decode_json(response, trace_id).await
+    }
+
+    /// Authoritative point-read of one repo's meta (kind, default branch, status). 404 =>
+    /// SdkError::ServerError with status 404.
+    pub async fn repo_meta_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+    ) -> Result<Traced<RepoMetaInfo>, SdkError> {
+        let (request, trace_id) = self.git_request(
+            Method::GET,
+            project_id,
+            repo,
+            Some("meta"),
+            git_username,
+            git_token,
+        )?;
         let response = request.send().await?;
         decode_json(response, trace_id).await
     }
