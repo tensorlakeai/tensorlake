@@ -362,9 +362,12 @@ pub struct OverlayFs {
     /// byte cache), different means another session moved the path and the retained copy
     /// must stop shadowing the lower. Unknown (never recorded, or the push skipped hashing
     /// on the stable-prefix fast path) reads as divergent — dropping costs a refetch,
-    /// keeping costs serving stale bytes. In-memory only: after a restart every retained
-    /// path re-arms as unknown and the first branch change to touch it refetches.
-    sealed_oids: Mutex<HashMap<String, String>>,
+    /// keeping costs serving stale bytes. `None` values mark retained paths whose oid is
+    /// unknown (seeded from the persisted seal index after a restart, or stable-prefix
+    /// fast-path files that never hashed) — divergent by default. Only paths in this map
+    /// are ever nominated for eviction: an upper file without a seal record is dirty or
+    /// ignored content the trim must never touch.
+    sealed_oids: Mutex<HashMap<String, Option<String>>>,
     /// Divergent retained paths a trim could not drop yet (open handle, contended fence).
     /// Retried on every subsequent refresh absorption.
     divergent_pending: Mutex<std::collections::HashSet<String>>,
@@ -2051,40 +2054,76 @@ impl OverlayFs {
     pub fn record_sealed_oids(&self, oids: impl IntoIterator<Item = (String, String)>) {
         let mut map = self.sealed_oids.lock().expect("sealed oid lock");
         for (path, oid) in oids {
-            if !oid.is_empty() {
-                map.insert(path, oid);
-            }
+            map.insert(path, (!oid.is_empty()).then_some(oid));
+        }
+    }
+
+    /// Seed retained paths whose seal oids are unknown (the persisted seal index after a
+    /// daemon restart): they stay eligible for divergence eviction — treated as divergent
+    /// whenever the branch touches them, and on a divergence-unknown fallback — without
+    /// exposing dirty or ignored upper content to the trim.
+    pub fn seed_retained(&self, paths: impl IntoIterator<Item = String>) {
+        let mut map = self.sealed_oids.lock().expect("sealed oid lock");
+        for path in paths {
+            map.entry(path).or_insert(None);
         }
     }
 
     /// Drop retained upper copies the branch has moved past, so the merged view converges to
     /// what the branch actually says instead of serving this mount's stale byte cache. For
-    /// every delta path shadowed by the upper: a dirty path is the user's in-flight edit and
+    /// every delta row shadowed by the upper: a dirty path is the user's in-flight edit and
     /// keeps shadowing (the next seal owns it); a retained path whose recorded seal oid
-    /// equals the delta's new oid is this mount's own save echoing back and stays (byte
-    /// cache); anything else — different oid, unknown oid, or branch-side deletion — stops
-    /// shadowing via the trim fence (which pins open handles and skips redirects). Paths a
-    /// trim could not drop are retried on the next absorption. Returns the kernel
-    /// invalidations for everything dropped.
+    /// equals the row's new oid is this mount's own save echoing back and stays (byte
+    /// cache); anything else — different oid, unknown oid, branch-side deletion — stops
+    /// shadowing via the trim fence (which pins open handles and skips redirects). Rows sit
+    /// at the server's change boundary, so a removed directory (or a directory that became a
+    /// file) expands against every retained path under it. A `None` delta (stat-walk
+    /// fallback: older server, pruned base, transient diff failure) means divergence is
+    /// UNKNOWN — every retained shadow is dropped rather than risk serving stale bytes; the
+    /// cost is refetching content that usually matches. Paths a trim could not drop are
+    /// retried on the next absorption. Returns kernel invalidations and probe expectations
+    /// for everything dropped.
     pub fn absorb_divergence(&self, delta: &gsvc_mount::RefreshDelta) -> RefreshOutputs {
         let mut candidates: std::collections::HashSet<String> =
             std::mem::take(&mut *self.divergent_pending.lock().expect("divergence lock"));
-        {
-            let sealed = self.sealed_oids.lock().expect("sealed oid lock");
-            // The raw diff rows, not rebound/staled: a retained upper shadow means the
-            // kernel never looked the path up through the core, so no live inode exists
-            // and the inval lists skip it — but the branch change is exactly what must
-            // evict the shadow.
-            for row in &delta.changed {
-                let path = row.path.as_str();
-                if self.upper_meta(path).is_none() || self.whited_out(path) {
-                    continue;
+        match &delta.changed {
+            Some(rows) => {
+                let sealed = self.sealed_oids.lock().expect("sealed oid lock");
+                // Prefixes under which every retained path is implicitly changed — the same
+                // rule the core applies to its own inodes: a removed directory row implies
+                // its subtree, and a modified non-directory row means whatever was under
+                // that name as a directory is gone.
+                for row in rows {
+                    let erases_subtree = match row.change {
+                        gsvc_mount::ChangeKind::Removed => row.is_dir,
+                        gsvc_mount::ChangeKind::Modified => !row.is_dir,
+                        gsvc_mount::ChangeKind::Added => false,
+                    };
+                    if erases_subtree {
+                        let prefix = format!("{}/", row.path);
+                        for path in sealed.keys().filter(|p| p.starts_with(&prefix)) {
+                            candidates.insert(path.clone());
+                        }
+                    }
+                    let path = row.path.as_str();
+                    if self.upper_meta(path).is_none() || self.whited_out(path) {
+                        continue;
+                    }
+                    let own_echo = matches!((sealed.get(path), row.oid.as_deref()),
+                        (Some(Some(sealed_oid)), Some(new)) if sealed_oid == new);
+                    if !own_echo {
+                        candidates.insert(path.to_string());
+                    }
                 }
-                let own_echo = matches!((sealed.get(path), row.oid.as_deref()),
-                    (Some(sealed_oid), Some(new)) if sealed_oid == new);
-                if !own_echo {
-                    candidates.insert(path.to_string());
-                }
+            }
+            None => {
+                // Divergence unknown: nominate every recorded retained shadow (trim skips
+                // dirty and pinned ones). Restart-lost records are re-seeded from the
+                // persisted seal index at daemon startup, so the map is the complete set —
+                // and an upper file OUTSIDE it is dirty or ignored content that must never
+                // be nominated.
+                let sealed = self.sealed_oids.lock().expect("sealed oid lock");
+                candidates.extend(sealed.keys().cloned());
             }
         }
         if candidates.is_empty() {
@@ -2106,20 +2145,35 @@ impl OverlayFs {
                         .extend(outcome.held_open.iter().cloned());
                 }
                 // Bindings without a notify channel (FSKit) converge via probe
-                // expectations; a dropped shadow must purge cached pages and attrs, so
-                // carry the lower's new size (or absence) for every trimmed path.
+                // expectations; a dropped shadow must purge cached pages and attrs. Rows
+                // supply the lower's new size when known; boundary-expanded and
+                // fallback-dropped paths get bare present-probes (the prober re-opens,
+                // which revalidates content through the overlay).
                 let trimmed: std::collections::HashSet<&str> =
                     outcome.trimmed.iter().map(String::as_str).collect();
-                let expectations = delta
-                    .changed
-                    .iter()
-                    .filter(|row| trimmed.contains(row.path.as_str()))
-                    .map(|row| KernelExpectation {
-                        path: row.path.clone(),
-                        present: row.oid.is_some(),
-                        size: row.size,
-                    })
-                    .collect();
+                let mut expectations: Vec<KernelExpectation> = Vec::new();
+                let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
+                if let Some(rows) = &delta.changed {
+                    for row in rows {
+                        if trimmed.contains(row.path.as_str()) {
+                            covered.insert(row.path.as_str());
+                            expectations.push(KernelExpectation {
+                                path: row.path.clone(),
+                                present: row.oid.is_some(),
+                                size: row.size,
+                            });
+                        }
+                    }
+                }
+                for path in &outcome.trimmed {
+                    if !covered.contains(path.as_str()) {
+                        expectations.push(KernelExpectation {
+                            path: path.clone(),
+                            present: true,
+                            size: None,
+                        });
+                    }
+                }
                 RefreshOutputs {
                     invals: outcome.invals,
                     expectations,

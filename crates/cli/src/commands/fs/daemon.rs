@@ -880,7 +880,14 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 seen_epoch: overlay.epoch(),
                 recent_seals: Vec::new(),
                 chunk_cache: std::collections::HashMap::new(),
-                sealed: SealedIndex::load(state_dir),
+                sealed: {
+                    let index = SealedIndex::load(state_dir);
+                    // Retained upper files from before this restart have seal records but
+                    // no recorded oids: seed them so divergence eviction still covers them
+                    // (unknown oid = divergent whenever the branch touches the path).
+                    overlay.seed_retained(index.upserts.keys().cloned());
+                    index
+                },
                 reindex_pending: false,
             }),
             mirror: std::sync::Mutex::new(SealerMirror::default()),
