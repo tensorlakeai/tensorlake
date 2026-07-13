@@ -762,7 +762,7 @@ pub async fn mount_filesystem(
     // Auto-resume first — no server round trip. A detached local session of this filesystem
     // (mount state present, daemon dead) picks up where it left off: "run the same command
     // again" is the crash recovery. WritePolicy::Auto keeps the single-writer downgrade.
-    if !ro && let Some(workspace_id) = detached_local_session(target) {
+    if !ro && let Some((workspace_id, state_dir)) = detached_local_session(target) {
         println!(
             "Resuming detached session {} of filesystem {target}.",
             short_id(&workspace_id)
@@ -770,6 +770,9 @@ pub async fn mount_filesystem(
         // The repo is KNOWN from the local mount state: attach through the per-repo
         // endpoint so the whole path works under a repo-scoped credential (the sandbox
         // recipe) — never through name resolution, which would treat the id as a repo.
+        // The SELECTED state dir travels with the id: recomputing it via allocation
+        // could pick a different dead registration of the same workspace (the canonical
+        // dir when the newest overlay lives in a suffixed one) and strand unsealed work.
         return mount(
             ctx,
             target,
@@ -778,7 +781,10 @@ pub async fn mount_filesystem(
             None,
             autosave,
             true,
-            Some(&workspace_id),
+            Some(Resume {
+                workspace_id: &workspace_id,
+                state_dir: Some(state_dir),
+            }),
             foreground,
             trace_ops,
             log_level,
@@ -805,12 +811,19 @@ pub async fn mount_filesystem(
     .await
 }
 
+/// A known-repo workspace attach for [`mount`]: skip name resolution entirely, and — when a
+/// crash-resume selected a specific detached overlay — reopen exactly that state dir.
+pub(crate) struct Resume<'a> {
+    pub(crate) workspace_id: &'a str,
+    pub(crate) state_dir: Option<PathBuf>,
+}
+
 /// A detached local session of `repo`: registered mount state on this machine whose daemon is
 /// no longer alive. Newest state-dir mtime wins when several are detached — a heuristic proxy
 /// for "the one you used last" (all fs sessions publish to the same target, so resuming an
 /// older sibling loses nothing published; only its local overlay differs).
-fn detached_local_session(repo: &str) -> Option<String> {
-    let mut candidates: Vec<(std::time::SystemTime, String)> = local_mount_states()
+fn detached_local_session(repo: &str) -> Option<(String, PathBuf)> {
+    let mut candidates: Vec<(std::time::SystemTime, String, PathBuf)> = local_mount_states()
         .into_iter()
         .filter_map(|(_, state_dir, state, alive)| {
             if alive || state.repo != repo || state.read_only() {
@@ -819,11 +832,11 @@ fn detached_local_session(repo: &str) -> Option<String> {
             let modified = std::fs::metadata(&state_dir)
                 .and_then(|m| m.modified())
                 .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-            Some((modified, state.workspace_id))
+            Some((modified, state.workspace_id, state_dir))
         })
         .collect();
-    candidates.sort_by_key(|(modified, _)| std::cmp::Reverse(*modified));
-    candidates.into_iter().next().map(|(_, id)| id)
+    candidates.sort_by_key(|(modified, ..)| std::cmp::Reverse(*modified));
+    candidates.into_iter().next().map(|(_, id, dir)| (id, dir))
 }
 
 /// `tl git mount <repo>[:<ref>]` — the repository-surface mount: explicit checkpointing, no
@@ -865,7 +878,10 @@ pub async fn mount_repo(
         None,
         false,
         // --workspace names an id inside `target`'s repo: per-repo attach, repo-scoped-safe.
-        workspace,
+        workspace.map(|id| Resume {
+            workspace_id: id,
+            state_dir: None,
+        }),
         foreground,
         trace_ops,
         log_level,
@@ -2113,12 +2129,12 @@ pub async fn mount(
     // (workspaces, snapshots, branches). One engine, two vocabularies — the fs surface
     // promises the words workspace/snapshot/branch never appear in its output.
     fs_surface: bool,
-    // A workspace id KNOWN to live in `target`'s repo (auto-resume, `--workspace`): attach
+    // A workspace KNOWN to live in `target`'s repo (auto-resume, `--workspace`): attach
     // through the per-repo, principal-checked endpoint directly. Never routed through name
     // resolution — that path treats the id as a repo name and then falls back to a
     // project-wide fleet search, both of which a repo-scoped credential (the sandbox attach
     // recipe) rightly 403s.
-    resume: Option<&str>,
+    resume: Option<Resume<'_>>,
     foreground: bool,
     trace_ops: bool,
     log_level: &str,
@@ -2293,7 +2309,8 @@ pub async fn mount(
             .client
             .create_workspace(&session.project_id, name, user, token, &create_req)
     };
-    let resolved = if let Some(id) = resume {
+    let resume_state_dir = resume.as_ref().and_then(|r| r.state_dir.clone());
+    let resolved = if let Some(id) = resume.map(|r| r.workspace_id) {
         let ws = session
             .client
             .get_workspace(&session.project_id, name, user, token, id)
@@ -2502,7 +2519,9 @@ pub async fn mount(
     }
 
     let mountpoint = canonical_mountpoint(path)?;
-    let state_dir = alloc_state_dir(&ws.id);
+    // A resume reopens EXACTLY the state dir it selected (the newest detached overlay);
+    // re-allocating could land on a different dead registration of the same workspace.
+    let state_dir = resume_state_dir.unwrap_or_else(|| alloc_state_dir(&ws.id));
     let (owner_uid, owner_gid) = mount_owner();
     daemon::save_mount_state(
         &state_dir,

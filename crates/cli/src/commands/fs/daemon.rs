@@ -882,10 +882,13 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 chunk_cache: std::collections::HashMap::new(),
                 sealed: {
                     let index = SealedIndex::load(state_dir);
-                    // Retained upper files from before this restart have seal records but
-                    // no recorded oids: seed them so divergence eviction still covers them
-                    // (unknown oid = divergent whenever the branch touches the path).
-                    overlay.seed_retained(index.upserts.keys().cloned());
+                    // Retained upper files AND sealed-delete whiteouts from before this
+                    // restart have seal records but no recorded oids: seed both so
+                    // divergence eviction still covers them (unknown oid = divergent
+                    // whenever the branch touches the path — for a whiteout, that is what
+                    // lets a remote re-add surface instead of staying hidden forever).
+                    overlay
+                        .seed_retained(index.upserts.keys().chain(index.deletes.iter()).cloned());
                     index
                 },
                 reindex_pending: false,
