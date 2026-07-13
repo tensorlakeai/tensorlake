@@ -90,7 +90,14 @@ fn absorb_refresh(
     pending: &std::sync::Mutex<PendingProbe>,
     delta: &gsvc_mount::RefreshDelta,
 ) {
-    let outputs = overlay.refresh_outputs(delta);
+    // Divergence first: retained upper copies the branch moved past stop shadowing, so the
+    // shadow filter inside refresh_outputs sees them gone and their invalidations flow.
+    let divergence = overlay.absorb_divergence(delta);
+    if !divergence.invals.is_empty() {
+        invalidate(divergence.invals);
+    }
+    let mut outputs = overlay.refresh_outputs(delta);
+    outputs.expectations.extend(divergence.expectations);
     {
         let mut p = pending.lock().expect("pending probe lock");
         if delta.appeared.is_none() {
@@ -1698,6 +1705,20 @@ impl Sealer {
                 PushOptions {
                     message: message.to_string(),
                     workspace_snapshot: Some(self.workspace.clone()),
+                    // The view this delta's edits were made against: the lower at the
+                    // batch's FIRST write (not at seal time — the branch can move during
+                    // the quiet window, and claiming the later view would turn a genuine
+                    // concurrent write into a silent overwrite). The server parents the
+                    // snapshot here, so the shared-rw application three-ways against what
+                    // the writer saw: overwriting another session's file is a clean write,
+                    // concurrent writes collide visibly, and resolving a collision
+                    // converges instead of nesting markers. Servers that predate the field
+                    // ignore it (old behavior).
+                    base: Some(
+                        self.overlay
+                            .dirty_base()
+                            .unwrap_or_else(|| lower.to_string()),
+                    ),
                     collect_file_chunks: true,
                     progress,
                     ..Default::default()
@@ -1709,6 +1730,9 @@ impl Sealer {
         st.sealed_gen = watermark;
         self.overlay.prune_dirty(watermark);
         let report = report.into_inner();
+        self.overlay
+            .record_sealed_oids(report.file_blob_oids.iter().cloned());
+        self.overlay.close_dirty_base_if_clean();
         st.recent_seals
             .push((report.commit.clone(), resolved.sealed_upserts));
         // Remember what each file's content chunked to; a blunt cap bounds daemon memory (a
