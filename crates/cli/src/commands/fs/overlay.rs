@@ -356,6 +356,16 @@ pub struct OverlayFs {
     dirty: Mutex<HashMap<String, DirtyEntry>>,
     /// Out-of-band mutation epoch: see [`OverlayFs::epoch`].
     epoch: AtomicU64,
+    /// Monotonic clock origin for the mutation timestamps below (process-local millis).
+    started: std::time::Instant,
+    /// When the current dirty batch began / when the overlay was last mutated, in
+    /// [`OverlayFs::clock_ms`] millis; `0` = clean. Stamped by every write hook (content,
+    /// namespace, committed-dir renames), which makes the autosave quiet test a pair of
+    /// atomic loads instead of resolving the dirty set and statting files every tick — and
+    /// strictly more accurate: deletes and renames have no mtime to consult, and same-second
+    /// writes hide inside filesystem timestamp granularity.
+    first_dirty_ms: AtomicU64,
+    last_mutation_ms: AtomicU64,
     /// Published blob oid per retained upper path, recorded after each seal from the push
     /// report. A branch refresh compares these against the delta's new oids: equal means the
     /// change is this mount's own save echoing back (the retained copy stays — it IS the
@@ -498,6 +508,9 @@ impl OverlayFs {
             divergent_pending: Mutex::new(std::collections::HashSet::new()),
             dirty_base: Mutex::new(None),
             epoch: AtomicU64::new(0),
+            started: std::time::Instant::now(),
+            first_dirty_ms: AtomicU64::new(0),
+            last_mutation_ms: AtomicU64::new(0),
             mutate: tokio::sync::RwLock::new(()),
             redirects: Mutex::new(redirects),
             redirects_path,
@@ -538,6 +551,7 @@ impl OverlayFs {
         // both covered by a watermark and invisible to that watermark's delta, which is what
         // made a racing write silently unsealable forever.
         let generation = self.write_gen.fetch_add(1, Ordering::SeqCst) + 1;
+        self.stamp_mutation();
         match dirty.get_mut(path) {
             Some(entry) => {
                 entry.generation = generation;
@@ -666,6 +680,8 @@ impl OverlayFs {
     /// straight into the state dir and then asks for a reindex).
     pub fn rebuild_dirty_index(&self) -> Result<(), MountError> {
         self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.first_dirty_ms.store(0, Ordering::SeqCst);
+        self.last_mutation_ms.store(0, Ordering::SeqCst);
         self.sealed_oids.lock().expect("sealed oid lock").clear();
         self.divergent_pending
             .lock()
@@ -1617,6 +1633,7 @@ impl OverlayFs {
             self.persist_redirects(&redirects)?;
         }
         self.redirect_gen.fetch_add(1, Ordering::SeqCst);
+        self.stamp_mutation();
         // Stale deletion markers at the destination belong to whatever the replace displaced.
         let dst_wh = self.wh_path(dst);
         if dst_wh
@@ -2023,12 +2040,37 @@ impl OverlayFs {
         // resolutions) describe a dead world too.
         self.dirty.lock().expect("dirty lock").clear();
         self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.first_dirty_ms.store(0, Ordering::SeqCst);
+        self.last_mutation_ms.store(0, Ordering::SeqCst);
         self.sealed_oids.lock().expect("sealed oid lock").clear();
         self.divergent_pending
             .lock()
             .expect("divergence lock")
             .clear();
         Ok(affected)
+    }
+
+    /// Millis on this overlay's private monotonic clock (never 0 — 0 is the clean sentinel
+    /// in the mutation stamps).
+    pub fn clock_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64 + 1
+    }
+
+    fn stamp_mutation(&self) {
+        let now = self.clock_ms();
+        self.last_mutation_ms.store(now, Ordering::SeqCst);
+        // First write of the batch; racing writers can both lose to an earlier stamp,
+        // which is exactly right.
+        let _ = self
+            .first_dirty_ms
+            .compare_exchange(0, now, Ordering::SeqCst, Ordering::SeqCst);
+    }
+
+    /// `(first dirty, last mutation)` clock stamps of the current dirty batch, or `None`
+    /// when the overlay is clean — the autosave tick's entire cost on the idle path.
+    pub fn dirty_clock(&self) -> Option<(u64, u64)> {
+        let first = self.first_dirty_ms.load(Ordering::SeqCst);
+        (first != 0).then(|| (first, self.last_mutation_ms.load(Ordering::SeqCst)))
     }
 
     /// The lower commit the current dirty batch was started against — the merge base a seal
@@ -2045,6 +2087,13 @@ impl OverlayFs {
         let dirty = self.dirty.lock().expect("dirty lock");
         if dirty.is_empty() {
             *self.dirty_base.lock().expect("dirty base lock") = None;
+            if !self.has_redirects() {
+                // Batch fully sealed: the clocks re-arm on the next write. Pending
+                // redirects keep them running — they are unsealed work the dirty map
+                // never sees.
+                self.first_dirty_ms.store(0, Ordering::SeqCst);
+                self.last_mutation_ms.store(0, Ordering::SeqCst);
+            }
         }
     }
 
@@ -2086,14 +2135,18 @@ impl OverlayFs {
     pub fn absorb_divergence(&self, delta: &gsvc_mount::RefreshDelta) -> RefreshOutputs {
         let mut candidates: std::collections::HashSet<String> =
             std::mem::take(&mut *self.divergent_pending.lock().expect("divergence lock"));
+        // Everything intersects the sealed-record map IN MEMORY first: rows that no seal of
+        // ours ever touched (the overwhelming majority of a branch-jump delta) cost zero
+        // syscalls — dirty and ignored upper content is never even considered, and the only
+        // per-row filesystem work left is the whiteout probe for map hits.
         match &delta.changed {
             Some(rows) => {
                 let sealed = self.sealed_oids.lock().expect("sealed oid lock");
-                // Prefixes under which every retained path is implicitly changed — the same
-                // rule the core applies to its own inodes: a removed directory row implies
-                // its subtree, and a modified non-directory row means whatever was under
-                // that name as a directory is gone.
                 for row in rows {
+                    // Boundary rows expand — the same rule the core applies to its own
+                    // inodes: a removed directory row implies its subtree, and a modified
+                    // non-directory row means whatever was under that name as a directory
+                    // is gone.
                     let erases_subtree = match row.change {
                         gsvc_mount::ChangeKind::Removed => row.is_dir,
                         gsvc_mount::ChangeKind::Modified => !row.is_dir,
@@ -2106,22 +2159,23 @@ impl OverlayFs {
                         }
                     }
                     let path = row.path.as_str();
-                    if self.upper_meta(path).is_none() || self.whited_out(path) {
+                    let Some(sealed_oid) = sealed.get(path) else {
+                        continue; // not sealed by this mount: never ours to evict
+                    };
+                    let own_echo = matches!((sealed_oid, row.oid.as_deref()),
+                        (Some(sealed_oid), Some(new)) if sealed_oid == new);
+                    if own_echo {
                         continue;
                     }
-                    let own_echo = matches!((sealed.get(path), row.oid.as_deref()),
-                        (Some(Some(sealed_oid)), Some(new)) if sealed_oid == new);
-                    if !own_echo {
-                        candidates.insert(path.to_string());
-                    }
+                    candidates.insert(path.to_string());
                 }
             }
             None => {
-                // Divergence unknown: nominate every recorded retained shadow (trim skips
-                // dirty and pinned ones). Restart-lost records are re-seeded from the
-                // persisted seal index at daemon startup, so the map is the complete set —
-                // and an upper file OUTSIDE it is dirty or ignored content that must never
-                // be nominated.
+                // Divergence unknown (stat-walk fallback): nominate every recorded retained
+                // shadow AND sealed whiteout (trim skips dirty, pinned, and redirect-covered
+                // ones). Restart-lost records are re-seeded from the persisted seal index at
+                // daemon startup, so the map is the complete set — and an upper file OUTSIDE
+                // it is dirty or ignored content that must never be nominated.
                 let sealed = self.sealed_oids.lock().expect("sealed oid lock");
                 candidates.extend(sealed.keys().cloned());
             }
@@ -2129,12 +2183,24 @@ impl OverlayFs {
         if candidates.is_empty() {
             return RefreshOutputs::default();
         }
+        // A divergent candidate that carries a whiteout is a sealed DELETE the branch moved
+        // past — usually a remote (re-)add over it. The whiteout was masking lower content
+        // the branch now carries; keeping it would hide the other session's file
+        // indefinitely (the delivering application commit differs from the snapshot commit,
+        // so the seal-echo hygiene never matched). Derived from the final candidate set so
+        // pending retries re-probe too; retiring an actually-inert whiteout (branch also
+        // deleted) is the trim's original no-op.
         let candidates: Vec<String> = candidates.into_iter().collect();
-        match self.try_trim_retained(&candidates, &[]) {
+        let tombstones: Vec<String> = candidates
+            .iter()
+            .filter(|p| self.whited_out(p))
+            .cloned()
+            .collect();
+        match self.try_trim_retained(&candidates, &tombstones) {
             Some(outcome) => {
                 {
                     let mut sealed = self.sealed_oids.lock().expect("sealed oid lock");
-                    for path in &outcome.trimmed {
+                    for path in outcome.trimmed.iter().chain(&outcome.tombstones_removed) {
                         sealed.remove(path);
                     }
                 }
@@ -2149,8 +2215,17 @@ impl OverlayFs {
                 // supply the lower's new size when known; boundary-expanded and
                 // fallback-dropped paths get bare present-probes (the prober re-opens,
                 // which revalidates content through the overlay).
-                let trimmed: std::collections::HashSet<&str> =
-                    outcome.trimmed.iter().map(String::as_str).collect();
+                // A retired whiteout here is NOT inert — it was hiding content the branch
+                // re-added — so the merged path needs the same kernel convergence as a
+                // dropped shadow.
+                let mut invals = outcome.invals;
+                invals.extend(self.invals_for(&outcome.tombstones_removed));
+                let trimmed: std::collections::HashSet<&str> = outcome
+                    .trimmed
+                    .iter()
+                    .chain(&outcome.tombstones_removed)
+                    .map(String::as_str)
+                    .collect();
                 let mut expectations: Vec<KernelExpectation> = Vec::new();
                 let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
                 if let Some(rows) = &delta.changed {
@@ -2175,16 +2250,17 @@ impl OverlayFs {
                     }
                 }
                 RefreshOutputs {
-                    invals: outcome.invals,
+                    invals,
                     expectations,
                 }
             }
-            // Fence contended (a copy-up mid-flight): retry the whole set next time.
+            // Fence contended (a copy-up mid-flight): retry the whole set next time (the
+            // whiteout probe re-derives tombstones from these same paths).
             None => {
                 self.divergent_pending
                     .lock()
                     .expect("divergence lock")
-                    .extend(candidates);
+                    .extend(candidates.into_iter().chain(tombstones));
                 RefreshOutputs::default()
             }
         }

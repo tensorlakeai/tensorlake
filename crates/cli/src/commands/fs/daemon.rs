@@ -913,49 +913,21 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         // which let a write land right after a tick and wait the whole interval.
         const POLL: Duration = Duration::from_secs(2);
         const QUIET_SECS: u64 = 10;
-        const MTIME_SCAN_CAP: usize = 256;
-        let upper = state_dir.join("upper");
+        let overlay_clock = sealer.overlay.clone();
         tokio::spawn(async move {
-            let mut dirty_since: Option<std::time::Instant> = None;
             loop {
                 tokio::time::sleep(POLL).await;
-                let view = match sealer.dirty_view().await {
-                    Ok(view) => view,
-                    Err(e) => {
-                        eprintln!("autosave: dirty view failed: {e}");
-                        continue;
-                    }
-                };
-                let dirty_paths: Vec<&String> =
-                    view.upserts.iter().chain(view.deletes.iter()).collect();
-                let renames = view.renames.len();
-                if dirty_paths.is_empty() && renames == 0 {
-                    dirty_since = None;
+                // The idle tick is a pair of atomic loads — no dirty-set resolution, no
+                // file stats. The write hooks stamp the clock at mutation time, which is
+                // strictly more accurate than statting: deletes and renames have no mtime,
+                // and same-second writes hide inside filesystem timestamp granularity.
+                let Some((first, last)) = overlay_clock.dirty_clock() else {
                     continue;
-                }
-                let now = std::time::Instant::now();
-                let since = *dirty_since.get_or_insert(now);
-                let dirty_for = now.duration_since(since);
-                // Quiet = no dirty file touched within QUIET_SECS. Deletes/renames have no
-                // mtime to consult; they count as quiet (their "write" was the operation
-                // itself, already at least one poll old by the time we see it twice).
-                let quiet = if view.upserts.len() > MTIME_SCAN_CAP {
-                    false // too many to stat cheaply; the max-latency bound owns this seal
-                } else {
-                    let quiet_floor =
-                        std::time::SystemTime::now() - Duration::from_secs(QUIET_SECS);
-                    view.upserts.iter().all(|rel| {
-                        match upper
-                            .join(rel)
-                            .symlink_metadata()
-                            .and_then(|m| m.modified())
-                        {
-                            Ok(mtime) => mtime <= quiet_floor,
-                            Err(_) => true, // vanished/unstattable: nothing left to wait on
-                        }
-                    })
                 };
-                if !quiet && dirty_for < Duration::from_secs(secs.max(1)) {
+                let now = overlay_clock.clock_ms();
+                let quiet = now.saturating_sub(last) >= QUIET_SECS * 1000;
+                let dirty_for_s = now.saturating_sub(first) / 1000;
+                if !quiet && dirty_for_s < secs.max(1) {
                     continue;
                 }
                 // eprintln, not tracing: the daemon's stderr is the state dir's daemon.log —
@@ -963,11 +935,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 // stage so a slow save localizes to seal vs publish (server landing times
                 // come from the ops log).
                 let reason = if quiet { "quiet" } else { "max-latency" };
-                eprintln!(
-                    "autosave: sealing reason={reason} dirty_for_s={} files={} renames={renames}",
-                    dirty_for.as_secs(),
-                    dirty_paths.len(),
-                );
+                eprintln!("autosave: sealing reason={reason} dirty_for_s={dirty_for_s}");
                 let seal_started = std::time::Instant::now();
                 match sealer.seal_once("tl fs auto-commit", false, None).await {
                     Ok(SealOutcome::Sealed(report)) => {
@@ -977,11 +945,8 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             seal_started.elapsed().as_millis(),
                             report.push_ms,
                         );
-                        dirty_since = None;
                     }
-                    Ok(SealOutcome::Clean { .. }) => {
-                        dirty_since = None;
-                    }
+                    Ok(SealOutcome::Clean { .. }) => {}
                     Err(e) => eprintln!("autosave: {e}"),
                 }
             }
@@ -1576,6 +1541,9 @@ impl Sealer {
         let watermark = delta.watermark;
         if delta.is_empty() && !self.overlay.has_redirects() {
             st.sealed_gen = watermark;
+            // Nothing to seal: close the mutation clocks (and batch base) so the autosave
+            // tick goes back to its idle path instead of re-entering every poll.
+            self.overlay.close_dirty_base_if_clean();
             self.publish_mirror(&st);
             let cleared = clear.then(|| self.clear_overlay(&mut st)).transpose()?;
             return Ok(SealOutcome::Clean { cleared });

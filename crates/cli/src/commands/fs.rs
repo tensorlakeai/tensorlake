@@ -767,14 +767,18 @@ pub async fn mount_filesystem(
             "Resuming detached session {} of filesystem {target}.",
             short_id(&workspace_id)
         );
+        // The repo is KNOWN from the local mount state: attach through the per-repo
+        // endpoint so the whole path works under a repo-scoped credential (the sandbox
+        // recipe) — never through name resolution, which would treat the id as a repo.
         return mount(
             ctx,
-            &workspace_id,
+            target,
             path,
             WritePolicy::Auto,
             None,
             autosave,
             true,
+            Some(&workspace_id),
             foreground,
             trace_ops,
             log_level,
@@ -793,6 +797,7 @@ pub async fn mount_filesystem(
         None,
         autosave,
         true,
+        None,
         foreground,
         trace_ops,
         log_level,
@@ -851,10 +856,6 @@ pub async fn mount_repo(
             .map(|(_, base)| base.to_string())
             .expect("guarded above")
     });
-    let target = match workspace {
-        Some(id) => id,
-        None => target,
-    };
     mount(
         ctx,
         target,
@@ -863,6 +864,8 @@ pub async fn mount_repo(
         shared_target,
         None,
         false,
+        // --workspace names an id inside `target`'s repo: per-repo attach, repo-scoped-safe.
+        workspace,
         foreground,
         trace_ops,
         log_level,
@@ -2063,10 +2066,16 @@ fn live_mount_of(workspace_id: &str) -> Option<String> {
 /// free (that's what lets a plain re-mount resume its local cache); when another registered
 /// mount of the same workspace holds it, pick a fresh suffixed dir — concurrent second mounts
 /// (read-only views especially) must never share overlay state with the writer.
+///
+/// A registration only HOLDS its dir while its daemon is alive: a crashed mount's on-disk
+/// registry entry survives the crash, and treating it as a hold pushed the crash-resume onto
+/// a fresh suffixed dir — stranding the unsealed local overlay in the old one, which is the
+/// exact loss "run the same command again" recovery exists to prevent.
 fn alloc_state_dir(workspace_id: &str) -> PathBuf {
     let registered: std::collections::HashSet<PathBuf> = registry_load()
         .values()
         .filter_map(|v| v.as_str().map(PathBuf::from))
+        .filter(|dir| daemon::daemon_pid(dir).is_some_and(daemon_alive))
         .collect();
     let root = daemon::state_dir_root();
     let mut n = 1u32;
@@ -2104,6 +2113,12 @@ pub async fn mount(
     // (workspaces, snapshots, branches). One engine, two vocabularies — the fs surface
     // promises the words workspace/snapshot/branch never appear in its output.
     fs_surface: bool,
+    // A workspace id KNOWN to live in `target`'s repo (auto-resume, `--workspace`): attach
+    // through the per-repo, principal-checked endpoint directly. Never routed through name
+    // resolution — that path treats the id as a repo name and then falls back to a
+    // project-wide fleet search, both of which a repo-scoped credential (the sandbox attach
+    // recipe) rightly 403s.
+    resume: Option<&str>,
     foreground: bool,
     trace_ops: bool,
     log_level: &str,
@@ -2131,7 +2146,32 @@ pub async fn mount(
     #[cfg(target_os = "macos")]
     ensure_fskit_ready().await?;
     #[cfg(target_os = "linux")]
-    ensure_fuse_ready()?;
+    {
+        ensure_fuse_ready()?;
+        // A crashed mount leaves its dead FUSE attachment in place; the kernel answers the
+        // mountpoint with ENOTCONN forever. Detach it lazily before mounting — otherwise the
+        // new mount stacks over the corpse, and unmounting later resurfaces it.
+        if std::fs::metadata(path).is_err()
+            && matches!(
+                std::fs::symlink_metadata(path),
+                Err(ref e) if matches!(
+                    e.raw_os_error(),
+                    Some(libc::ENOTCONN) | Some(libc::EIO) | Some(libc::ENXIO)
+                )
+            )
+        {
+            for cmd in ["fusermount3", "fusermount"] {
+                if std::process::Command::new(cmd)
+                    .args(["-uz", &path.to_string_lossy()])
+                    .status()
+                    .is_ok_and(|st| st.success())
+                {
+                    eprintln!("detached a dead previous mount at {}", path.display());
+                    break;
+                }
+            }
+        }
+    }
     let (name, base) = match target.split_once(':') {
         Some((name, base)) => (name, Some(base.to_string())),
         None => (target, None),
@@ -2253,67 +2293,85 @@ pub async fn mount(
             .client
             .create_workspace(&session.project_id, name, user, token, &create_req)
     };
-    let resolved = match try_create().await {
-        Ok(ws) => Resolved::Created(ws.into_inner()),
-        Err(e) => match create_recovery(&e) {
-            // No file system by this name and no branch was named: try it as a workspace id.
-            Some(CreateRecovery::RepoMissing) if base.is_none() => {
-                match resolve_workspace(&session, name).await? {
-                    Some((repo, ws)) => Resolved::Attached(repo, ws),
-                    None if fs_surface => {
-                        return Err(CliError::usage(format!(
-                            "no filesystem named {name:?} (see: tl fs ls; create one: tl fs \
+    let resolved = if let Some(id) = resume {
+        let ws = session
+            .client
+            .get_workspace(&session.project_id, name, user, token, id)
+            .await
+            .map_err(|e| {
+                CliError::usage(format!(
+                    "resuming {} {} of {name} failed: {e} (start fresh: tl fs mount {name} \
+                     <path>)",
+                    unit,
+                    short_id(id),
+                ))
+            })?
+            .into_inner();
+        Resolved::Attached(name.to_string(), ws)
+    } else {
+        match try_create().await {
+            Ok(ws) => Resolved::Created(ws.into_inner()),
+            Err(e) => match create_recovery(&e) {
+                // No file system by this name and no branch was named: try it as a workspace id.
+                Some(CreateRecovery::RepoMissing) if base.is_none() => {
+                    match resolve_workspace(&session, name).await? {
+                        Some((repo, ws)) => Resolved::Attached(repo, ws),
+                        None if fs_surface => {
+                            return Err(CliError::usage(format!(
+                                "no filesystem named {name:?} (see: tl fs ls; create one: tl fs \
                              create {name})"
-                        )));
-                    }
-                    None => {
-                        return Err(CliError::usage(format!(
-                            "no repo or workspace matches {name:?}. See `tl git ls`, or \
+                            )));
+                        }
+                        None => {
+                            return Err(CliError::usage(format!(
+                                "no repo or workspace matches {name:?}. See `tl git ls`, or \
                              create the repo first: tl git create {name}"
-                        )));
+                            )));
+                        }
                     }
                 }
-            }
-            Some(CreateRecovery::RepoMissing) if fs_surface => {
-                return Err(CliError::usage(format!(
-                    "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create \
+                Some(CreateRecovery::RepoMissing) if fs_surface => {
+                    return Err(CliError::usage(format!(
+                        "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create \
                      {name})"
-                )));
-            }
-            Some(CreateRecovery::RepoMissing) => {
-                return Err(CliError::usage(format!(
-                    "no repo named {name:?}; create it first: tl git create {name}"
-                )));
-            }
-            // Seed an unborn default branch whether it is implied OR named (either spelling):
-            // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
-            // fail with `base "main" does not resolve to a commit` while plain
-            // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
-            // write to the server (and with read-scoped credentials the seed push would fail
-            // opaquely); ro keeps the clear server error. Other branch names stay strict —
-            // seeding cannot conjure them.
-            Some(CreateRecovery::BaseUnresolved) if fs_surface => return Err(e.into()),
-            Some(CreateRecovery::BaseUnresolved) => {
-                let file_systems = session
-                    .client
-                    .list_repos_with_credential(&session.project_id, None, user, token)
-                    .await?
-                    .into_inner();
-                let Some(fs) = file_systems.repos.iter().find(|r| r.name == name) else {
-                    return Err(e.into());
-                };
-                let default_branch = fs.default_branch.clone();
-                let names_default = base.as_deref().is_none_or(|b| {
-                    b == default_branch || b.strip_prefix("refs/heads/") == Some(&default_branch)
-                });
-                if !names_default || mode == WritePolicy::Ro {
-                    return Err(e.into());
+                    )));
                 }
-                ensure_seeded(&session, &default_branch, name).await?;
-                Resolved::Created(try_create().await?.into_inner())
-            }
-            None => return Err(e.into()),
-        },
+                Some(CreateRecovery::RepoMissing) => {
+                    return Err(CliError::usage(format!(
+                        "no repo named {name:?}; create it first: tl git create {name}"
+                    )));
+                }
+                // Seed an unborn default branch whether it is implied OR named (either spelling):
+                // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
+                // fail with `base "main" does not resolve to a commit` while plain
+                // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
+                // write to the server (and with read-scoped credentials the seed push would fail
+                // opaquely); ro keeps the clear server error. Other branch names stay strict —
+                // seeding cannot conjure them.
+                Some(CreateRecovery::BaseUnresolved) if fs_surface => return Err(e.into()),
+                Some(CreateRecovery::BaseUnresolved) => {
+                    let file_systems = session
+                        .client
+                        .list_repos_with_credential(&session.project_id, None, user, token)
+                        .await?
+                        .into_inner();
+                    let Some(fs) = file_systems.repos.iter().find(|r| r.name == name) else {
+                        return Err(e.into());
+                    };
+                    let default_branch = fs.default_branch.clone();
+                    let names_default = base.as_deref().is_none_or(|b| {
+                        b == default_branch
+                            || b.strip_prefix("refs/heads/") == Some(&default_branch)
+                    });
+                    if !names_default || mode == WritePolicy::Ro {
+                        return Err(e.into());
+                    }
+                    ensure_seeded(&session, &default_branch, name).await?;
+                    Resolved::Created(try_create().await?.into_inner())
+                }
+                None => return Err(e.into()),
+            },
+        }
     };
     tracing::debug!(
         phase = "workspace",
@@ -3152,34 +3210,6 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
             || base == ".apdisk"
             || base.starts_with("._")
     }
-    fn strict_count_files(dir: &Path) -> Result<usize> {
-        let mut n = 0;
-        let read = match std::fs::read_dir(dir) {
-            Ok(read) => read,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(0),
-            Err(e) => return Err(overlay_unreadable(dir, &e)),
-        };
-        for entry in read {
-            let entry = entry.map_err(|e| overlay_unreadable(dir, &e))?;
-            let meta = match entry.path().symlink_metadata() {
-                Ok(meta) => meta,
-                Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-                Err(e) => return Err(overlay_unreadable(&entry.path(), &e)),
-            };
-            if meta.is_dir() && !meta.file_type().is_symlink() {
-                n += strict_count_files(&entry.path())?;
-            } else {
-                n += 1;
-            }
-        }
-        Ok(n)
-    }
-    // One strict pass per tree, classified inline. Upper files: dirty (already counted) →
-    // stat-verified sealed (retained; path membership alone would vouch for bytes modified
-    // out-of-band or racing the dirty reply) → ignored → uncovered. Ignored directories
-    // prune the descent: the whole subtree is ignored, count it without per-file rule
-    // evaluation.
-    #[allow(clippy::too_many_arguments)]
     fn classify_upper(
         root: &Path,
         dir: &Path,
@@ -3203,11 +3233,21 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
                 Err(e) => return Err(overlay_unreadable(&abs, &e)),
             };
             let rel = overlay_rel_path(root, &abs);
+            // OS junk first, BEFORE gitignore classification: `.Spotlight-V100`,
+            // `.fseventsd` and friends are not inherently gitignored, and letting them fall
+            // through to the recursive walk classified their children as uncovered — which
+            // refused the very unmounts this allowlist exists to permit. Junk never counts
+            // and is never descended into.
+            if is_os_junk(&rel) {
+                continue;
+            }
             if meta.is_dir() && !meta.file_type().is_symlink() {
                 if check_ignored(ignore, &rel, true)? {
-                    if !is_os_junk(&rel) {
-                        *ignored += strict_count_files(&abs)?;
-                    }
+                    // One ignored SUBTREE, not a recursive file count: walking a large
+                    // node_modules merely to report an exact number could dominate unmount
+                    // latency, and the decision (ignored content never seals, user keeps or
+                    // discards it knowingly) is per-subtree anyway.
+                    *ignored += 1;
                 } else {
                     classify_upper(
                         root,
@@ -3232,9 +3272,7 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
                 continue; // retained: stat-verified sealed content
             }
             if check_ignored(ignore, &rel, false)? {
-                if !is_os_junk(&rel) {
-                    *ignored += 1;
-                }
+                *ignored += 1;
                 continue;
             }
             *uncovered += 1;
