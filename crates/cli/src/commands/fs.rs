@@ -465,27 +465,6 @@ pub async fn create_filesystem(ctx: &CliContext, name: &str, output_json: bool) 
     Ok(())
 }
 
-/// One kind-stamped listing, resolved to a filesystem by name. `replacement` names the
-/// `tl git` command shown when the name is actually a repository — the one line the two call
-/// sites differ in.
-fn resolve_filesystem<'a>(
-    listing: &'a tensorlake::artifact_storage::models::ListReposResponse,
-    name: &str,
-    replacement: &str,
-) -> Result<&'a tensorlake::artifact_storage::models::Repo> {
-    let Some(repo) = listing.repos.iter().find(|r| r.name == name) else {
-        return Err(CliError::usage(format!(
-            "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create {name})"
-        )));
-    };
-    if !repo.is_filesystem() {
-        return Err(CliError::usage(format!(
-            "{name} is a repository, not a filesystem — use: {replacement}"
-        )));
-    }
-    Ok(repo)
-}
-
 /// `tl fs ls` — the filesystems of this project, with where each is attached on this machine.
 pub async fn ls_filesystems(ctx: &CliContext, output_json: bool) -> Result<()> {
     let session = FsSession::open(ctx, None).await?;
@@ -561,12 +540,26 @@ pub async fn ls_filesystems(ctx: &CliContext, output_json: bool) -> Result<()> {
 pub async fn rm_filesystem(ctx: &CliContext, name: &str, force: bool) -> Result<()> {
     let session = FsSession::open(ctx, None).await?;
     let (user, token) = session.creds();
-    let listing = session
+    // Authoritative point-read: read-your-writes for a just-created filesystem, and the
+    // 404/kind answers never come from a stale listing.
+    let meta = match session
         .client
-        .list_repos_with_credential(&session.project_id, None, user, token)
-        .await?
-        .into_inner();
-    resolve_filesystem(&listing, name, &format!("tl git rm {name}"))?;
+        .repo_meta_with_credential(&session.project_id, name, user, token)
+        .await
+    {
+        Ok(meta) => meta.into_inner(),
+        Err(tensorlake::error::SdkError::ServerError { status, .. }) if status.as_u16() == 404 => {
+            return Err(CliError::usage(format!(
+                "no filesystem named {name:?} (see: tl fs ls)"
+            )));
+        }
+        Err(e) => return Err(e.into()),
+    };
+    if !meta.is_filesystem() {
+        return Err(CliError::usage(format!(
+            "{name} is a repository, not a filesystem — use: tl git rm {name}"
+        )));
+    }
     if let Some((mountpoint, _)) = live_mounts().into_iter().find(|(_, s)| s.repo == name) {
         return Err(CliError::usage(format!(
             "{name} is mounted at {mountpoint}; unmount first: tl fs unmount {mountpoint}"
@@ -610,6 +603,33 @@ pub async fn rm_filesystem(ctx: &CliContext, name: &str, force: bool) -> Result<
         .delete_repo_with_credential(&session.project_id, name, user, token)
         .await?;
     println!("Deleted filesystem {name}.");
+    Ok(())
+}
+
+/// `tl fs token <name>` — mint the narrow credential a sandbox (or any remote environment)
+/// needs to attach this one filesystem. Everything on the attach path — mount, saves,
+/// history-by-follow — works under it; project-scope surfaces (ls, history, rm) do not.
+pub async fn token(ctx: &CliContext, name: &str, output_json: bool) -> Result<()> {
+    let project_id = crate::commands::git::project_id(ctx)?;
+    let client = crate::commands::git::artifact_storage_client(ctx)?;
+    let credential = client
+        .mint_token_for_repo(&project_id, Some(name))
+        .await
+        .map_err(crate::commands::git::map_sdk_error)?
+        .into_inner();
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&credential)?);
+        return Ok(());
+    }
+    println!(
+        "Scoped credential for filesystem {name} (expires {}):",
+        credential.expires_at
+    );
+    println!("  {}", credential.token);
+    println!();
+    println!("Attach from any sandbox with FUSE:");
+    println!("  export TENSORLAKE_GIT_TOKEN={}", credential.token);
+    println!("  tl fs mount {name} <path>");
     Ok(())
 }
 
@@ -693,7 +713,11 @@ pub async fn history(
         table.add_row(vec![
             Cell::new(age_display(op.at_secs)),
             Cell::new(if op.actor.is_empty() { "-" } else { &op.actor }),
-            Cell::new(&op.kind),
+            Cell::new(if op.conflicted {
+                format!("{} (collision)", op.kind)
+            } else {
+                op.kind.clone()
+            }),
             Cell::new(
                 op.refs
                     .first()
@@ -704,12 +728,20 @@ pub async fn history(
         ]);
     }
     println!("{table}");
+    if saves.iter().any(|op| op.conflicted) {
+        println!(
+            "Collision saves kept both sides; markers are in the affected files (`tl fs \
+             status` lists unresolved ones)."
+        );
+    }
     Ok(())
 }
 
 /// `tl fs mount <name> <path>` — the filesystem-surface mount: publish-on-save, autosave on,
-/// detached local sessions auto-resume. Branch-addressed and repository mounts live on
-/// `tl git mount`.
+/// detached local sessions auto-resume. One server round trip: the create carries
+/// `surface=filesystem` and the SERVER applies the semantics (publish target, kind check)
+/// from the repo's authoritative kind — no listing, so a filesystem created milliseconds ago
+/// mounts, and a repo-scoped credential suffices (the sandbox story).
 pub async fn mount_filesystem(
     ctx: &CliContext,
     target: &str,
@@ -727,11 +759,9 @@ pub async fn mount_filesystem(
     }
     // A drive doesn't lose your work: writable filesystem mounts always autosave.
     let autosave = (!ro).then_some(FS_AUTOSAVE_DEFAULT_SECS);
-    // Auto-resume first — it needs no server round trip. A detached local session of this
-    // filesystem (mount state present, daemon dead) picks up where it left off: "run the same
-    // command again" is the crash recovery. WritePolicy::Auto keeps the single-writer
-    // downgrade: a session attached writable elsewhere resumes read-only, never as a silent
-    // second writer.
+    // Auto-resume first — no server round trip. A detached local session of this filesystem
+    // (mount state present, daemon dead) picks up where it left off: "run the same command
+    // again" is the crash recovery. WritePolicy::Auto keeps the single-writer downgrade.
     if !ro && let Some(workspace_id) = detached_local_session(target) {
         println!(
             "Resuming detached session {} of filesystem {target}.",
@@ -751,34 +781,16 @@ pub async fn mount_filesystem(
         )
         .await;
     }
-    // Fresh session: one listing answers what the create needs — does the target exist, what
-    // kind is it, and what is its default branch (the publish target, which the genesis commit
-    // guarantees exists).
-    let session = FsSession::open(ctx, None).await?;
-    let (user, token) = session.creds();
-    let listing = session
-        .client
-        .list_repos_with_credential(&session.project_id, None, user, token)
-        .await?
-        .into_inner();
-    let repo = resolve_filesystem(&listing, target, &format!("tl git mount {target} <path>"))?;
-    // A fresh session publishes every save to the filesystem's current state; read-only mounts
-    // follow it instead.
-    let (target_spec, shared_target) = if ro {
-        (format!("{target}:{}", repo.default_branch), None)
-    } else {
-        (target.to_string(), Some(repo.default_branch.clone()))
-    };
     mount(
         ctx,
-        &target_spec,
+        target,
         path,
         if ro {
             WritePolicy::Ro
         } else {
             WritePolicy::Auto
         },
-        shared_target,
+        None,
         autosave,
         true,
         foreground,
@@ -2227,6 +2239,11 @@ pub async fn mount(
     let create_req = CreateWorkspaceRequest {
         base: base.clone(),
         shared_target: shared_target.clone(),
+        // The server applies product semantics from the repo's authoritative kind: an
+        // fs-surface create gets its publish target filled server-side (and a repository is
+        // rejected with the right command). Clients never pre-read listings to decide this.
+        surface: fs_surface.then(|| "filesystem".to_string()),
+        read_only: mode == WritePolicy::Ro,
         ..Default::default()
     };
     // One create call site for both the first attempt and the post-seed retry, so the two can
@@ -2243,17 +2260,29 @@ pub async fn mount(
             Some(CreateRecovery::RepoMissing) if base.is_none() => {
                 match resolve_workspace(&session, name).await? {
                     Some((repo, ws)) => Resolved::Attached(repo, ws),
+                    None if fs_surface => {
+                        return Err(CliError::usage(format!(
+                            "no filesystem named {name:?} (see: tl fs ls; create one: tl fs \
+                             create {name})"
+                        )));
+                    }
                     None => {
                         return Err(CliError::usage(format!(
-                            "no file system or workspace matches {name:?}. See `tl fs ls`, or \
-                             create the file system first: tl git create {name}"
+                            "no repo or workspace matches {name:?}. See `tl git ls`, or \
+                             create the repo first: tl git create {name}"
                         )));
                     }
                 }
             }
+            Some(CreateRecovery::RepoMissing) if fs_surface => {
+                return Err(CliError::usage(format!(
+                    "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create \
+                     {name})"
+                )));
+            }
             Some(CreateRecovery::RepoMissing) => {
                 return Err(CliError::usage(format!(
-                    "no file system named {name:?}; create it first: tl git create {name}"
+                    "no repo named {name:?}; create it first: tl git create {name}"
                 )));
             }
             // Seed an unborn default branch whether it is implied OR named (either spelling):
@@ -2263,6 +2292,7 @@ pub async fn mount(
             // write to the server (and with read-scoped credentials the seed push would fail
             // opaquely); ro keeps the clear server error. Other branch names stay strict —
             // seeding cannot conjure them.
+            Some(CreateRecovery::BaseUnresolved) if fs_surface => return Err(e.into()),
             Some(CreateRecovery::BaseUnresolved) => {
                 let file_systems = session
                     .client
@@ -2351,11 +2381,16 @@ pub async fn mount(
             let read_only = mode == WritePolicy::Ro;
             // What the view follows. Writable workspaces follow their own ref; shared-rw
             // follows the branch it publishes to, so every writer's view converges on the
-            // reconciled branch rather than staying pinned to its own snapshots. A read-only
-            // view follows the named branch (or the repo HEAD's branch) so new commits appear —
-            // except a fixed commit base, which is a pinned view that never advances.
-            let follow_ref = if let Some(target) = &shared_target {
+            // reconciled branch rather than staying pinned to its own snapshots. The publish
+            // target comes from the CREATE RESPONSE — for fs-surface sessions the server
+            // filled it from the repo's stored default branch. A read-only view follows the
+            // named branch (fs surface: HEAD itself, resolved per poll) so new commits
+            // appear — except a fixed commit base, which is a pinned view that never
+            // advances.
+            let follow_ref = if let Some(target) = &ws.shared_target {
                 Some(format!("refs/heads/{target}"))
+            } else if read_only && fs_surface {
+                Some("HEAD".to_string())
             } else if read_only {
                 match &base {
                     Some(b) if b.len() == 40 && b.bytes().all(|c| c.is_ascii_hexdigit()) => {
@@ -2483,7 +2518,7 @@ pub async fn mount(
                         repo,
                         mountpoint,
                         short_id(&ws.id),
-                        if shared_target.is_some() {
+                        if ws.shared_target.is_some() {
                             ", saves publish automatically"
                         } else if read_only {
                             ", read-only, follows the filesystem"
@@ -2498,7 +2533,7 @@ pub async fn mount(
                         ws.base_ref.as_deref().unwrap_or(&ws.base[..12]),
                         mountpoint,
                         short_id(&ws.id),
-                        if shared_target.is_some() {
+                        if ws.shared_target.is_some() {
                             ", snapshots auto-publish to the branch"
                         } else if read_only {
                             ", read-only, follows the branch"
@@ -4071,6 +4106,25 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         .ok()
         .and_then(|r| r.get("commit").and_then(|c| c.as_str().map(str::to_string)));
     let changes = local_changes(&state_dir, &mountpoint).await?;
+    // Collisions the followed state materialized that no later save has overwritten. Absent
+    // daemon (or a pre-visibility daemon) reads as none — the section only ever adds signal.
+    let collisions: Vec<(String, String, String)> = daemon::control(&state_dir, "conflicts")
+        .await
+        .ok()
+        .and_then(|r| r.get("conflicts").cloned())
+        .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
+        .map(|list| {
+            list.into_iter()
+                .filter_map(|c| {
+                    Some((
+                        c.get("path")?.as_str()?.to_string(),
+                        c.get("kind")?.as_str()?.to_string(),
+                        c.get("commit")?.as_str()?.to_string(),
+                    ))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
 
     if output_json {
         println!(
@@ -4090,6 +4144,12 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
                 "pending_renames": changes.renames
                     .iter()
                     .map(|(from, to)| serde_json::json!({ "from": from, "to": to }))
+                    .collect::<Vec<_>>(),
+                "unresolved_collisions": collisions
+                    .iter()
+                    .map(|(path, kind, commit)| serde_json::json!({
+                        "path": path, "kind": kind, "commit": commit,
+                    }))
                     .collect::<Vec<_>>(),
             }))?
         );
@@ -4134,6 +4194,21 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         style("log:").dim(),
         state_dir.join("daemon.log").display()
     );
+    if !collisions.is_empty() {
+        println!(
+            "{} {} path(s) — both saves were kept; markers are in the files. Edit and save \
+             to resolve:",
+            style("unresolved collisions:").yellow(),
+            collisions.len(),
+        );
+        for (path, kind, commit) in &collisions {
+            println!(
+                "  {:<14} {path} (save {})",
+                style(kind).yellow(),
+                short_id(commit)
+            );
+        }
+    }
     // A pending rename's source whiteout is a real delete, but showing it next to the R line
     // would read as two changes; the R line carries both sides.
     let deletes: Vec<&String> = changes

@@ -44,6 +44,24 @@ pub async fn ensure_auth(ctx: &mut CliContext) -> Result<()> {
 /// Ensure authentication and org/project are available.
 /// Triggers login and/or init flows as needed.
 pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
+    // Sandbox attach path (issue #103): a pre-provisioned repo-scoped git credential IS the
+    // authentication for the fs surface, and its JWT carries the project claim. Never start
+    // an interactive login/init flow here — the guest is headless, and the browser-approval
+    // poll would hang forever.
+    if std::env::var("TENSORLAKE_GIT_TOKEN").is_ok() {
+        if ctx.effective_project_id().is_none()
+            && let Some(project) = crate::auth::context::project_from_git_token()
+        {
+            ctx.project_id = Some(project);
+        }
+        if ctx.effective_project_id().is_some() {
+            return Ok(());
+        }
+        return Err(CliError::auth(
+            "TENSORLAKE_GIT_TOKEN is set but carries no project claim; \
+             re-mint it with `tl fs token <filesystem>` or configure a project",
+        ));
+    }
     if !ctx.has_authentication() {
         eprintln!("It seems like you're not logged in. Let's log you in...\n");
         let login_result = match run_login_flow(ctx, true).await {

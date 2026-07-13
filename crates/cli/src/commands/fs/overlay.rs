@@ -356,6 +356,27 @@ pub struct OverlayFs {
     dirty: Mutex<HashMap<String, DirtyEntry>>,
     /// Out-of-band mutation epoch: see [`OverlayFs::epoch`].
     epoch: AtomicU64,
+    /// Published blob oid per retained upper path, recorded after each seal from the push
+    /// report. A branch refresh compares these against the delta's new oids: equal means the
+    /// change is this mount's own save echoing back (the retained copy stays — it IS the
+    /// byte cache), different means another session moved the path and the retained copy
+    /// must stop shadowing the lower. Unknown (never recorded, or the push skipped hashing
+    /// on the stable-prefix fast path) reads as divergent — dropping costs a refetch,
+    /// keeping costs serving stale bytes. In-memory only: after a restart every retained
+    /// path re-arms as unknown and the first branch change to touch it refetches.
+    sealed_oids: Mutex<HashMap<String, String>>,
+    /// Divergent retained paths a trim could not drop yet (open handle, contended fence).
+    /// Retried on every subsequent refresh absorption.
+    divergent_pending: Mutex<std::collections::HashSet<String>>,
+    /// The lower commit the CURRENT dirty batch's edits were made against: stamped when the
+    /// dirty set goes empty→nonempty (under the dirty lock), cleared only when a seal leaves
+    /// the set empty. This — not the lower at seal time — is the merge base a seal declares:
+    /// the lower can advance during the quiet window between a write and its autosave, and a
+    /// base captured at seal time would claim the writer saw content that landed AFTER their
+    /// edit, turning a genuine concurrent write into a silent overwrite. A too-old base costs
+    /// at worst a spurious conflict (both sides kept, visibly); a too-new base loses a write
+    /// invisibly — always err old.
+    dirty_base: Mutex<Option<String>>,
     /// The trim fence. Mutating entry points hold it shared for their whole span (copy-up
     /// through dirty-index record); [`OverlayFs::trim_retained`] holds it exclusively while it
     /// drops sealed upper files. Without it, a trim could unlink an upper file between a
@@ -470,6 +491,9 @@ impl OverlayFs {
             lower_times: Mutex::new(HashMap::new()),
             write_gen: AtomicU64::new(0),
             dirty: Mutex::new(HashMap::new()),
+            sealed_oids: Mutex::new(HashMap::new()),
+            divergent_pending: Mutex::new(std::collections::HashSet::new()),
+            dirty_base: Mutex::new(None),
             epoch: AtomicU64::new(0),
             mutate: tokio::sync::RwLock::new(()),
             redirects: Mutex::new(redirects),
@@ -499,6 +523,12 @@ impl OverlayFs {
 
     fn record_at(&self, path: &str, kind: DirtyKind, offset: u64) {
         let mut dirty = self.dirty.lock().expect("dirty lock");
+        if dirty.is_empty() {
+            // First write of a new batch: remember which view these edits are against.
+            // Stamped under the dirty lock so a sealer that empties the set and clears the
+            // base can never interleave mid-transition.
+            *self.dirty_base.lock().expect("dirty base lock") = Some(self.core.current_commit());
+        }
         // The clock bump happens UNDER the map lock: a sealer that loaded watermark W is then
         // guaranteed to either see this entry (we inserted before it acquired the lock) or to
         // have loaded W < generation (we bumped after its load) — a generation can never be
@@ -633,6 +663,11 @@ impl OverlayFs {
     /// straight into the state dir and then asks for a reindex).
     pub fn rebuild_dirty_index(&self) -> Result<(), MountError> {
         self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.sealed_oids.lock().expect("sealed oid lock").clear();
+        self.divergent_pending
+            .lock()
+            .expect("divergence lock")
+            .clear();
         fn walk(root: &Path, dir: &Path, out: &mut dyn FnMut(String)) -> std::io::Result<()> {
             let Ok(read) = std::fs::read_dir(dir) else {
                 return Ok(());
@@ -1985,7 +2020,120 @@ impl OverlayFs {
         // resolutions) describe a dead world too.
         self.dirty.lock().expect("dirty lock").clear();
         self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.sealed_oids.lock().expect("sealed oid lock").clear();
+        self.divergent_pending
+            .lock()
+            .expect("divergence lock")
+            .clear();
         Ok(affected)
+    }
+
+    /// The lower commit the current dirty batch was started against — the merge base a seal
+    /// must declare. `None` when nothing has been written since the last clean seal (callers
+    /// fall back to the current lower).
+    pub fn dirty_base(&self) -> Option<String> {
+        self.dirty_base.lock().expect("dirty base lock").clone()
+    }
+
+    /// After a successful seal: if no write raced in during the push (the dirty set is
+    /// empty), the batch is closed — the next write stamps a fresh base. A non-empty set
+    /// keeps the old (older-than-necessary, therefore safe) base for the writes it covers.
+    pub fn close_dirty_base_if_clean(&self) {
+        let dirty = self.dirty.lock().expect("dirty lock");
+        if dirty.is_empty() {
+            *self.dirty_base.lock().expect("dirty base lock") = None;
+        }
+    }
+
+    /// Record the published blob oid for each sealed path (from the push report). Empty oids
+    /// (deletes, stable-prefix fast-path files that never hashed) are dropped — those paths
+    /// read as divergence-unknown and err toward refetching.
+    pub fn record_sealed_oids(&self, oids: impl IntoIterator<Item = (String, String)>) {
+        let mut map = self.sealed_oids.lock().expect("sealed oid lock");
+        for (path, oid) in oids {
+            if !oid.is_empty() {
+                map.insert(path, oid);
+            }
+        }
+    }
+
+    /// Drop retained upper copies the branch has moved past, so the merged view converges to
+    /// what the branch actually says instead of serving this mount's stale byte cache. For
+    /// every delta path shadowed by the upper: a dirty path is the user's in-flight edit and
+    /// keeps shadowing (the next seal owns it); a retained path whose recorded seal oid
+    /// equals the delta's new oid is this mount's own save echoing back and stays (byte
+    /// cache); anything else — different oid, unknown oid, or branch-side deletion — stops
+    /// shadowing via the trim fence (which pins open handles and skips redirects). Paths a
+    /// trim could not drop are retried on the next absorption. Returns the kernel
+    /// invalidations for everything dropped.
+    pub fn absorb_divergence(&self, delta: &gsvc_mount::RefreshDelta) -> RefreshOutputs {
+        let mut candidates: std::collections::HashSet<String> =
+            std::mem::take(&mut *self.divergent_pending.lock().expect("divergence lock"));
+        {
+            let sealed = self.sealed_oids.lock().expect("sealed oid lock");
+            // The raw diff rows, not rebound/staled: a retained upper shadow means the
+            // kernel never looked the path up through the core, so no live inode exists
+            // and the inval lists skip it — but the branch change is exactly what must
+            // evict the shadow.
+            for row in &delta.changed {
+                let path = row.path.as_str();
+                if self.upper_meta(path).is_none() || self.whited_out(path) {
+                    continue;
+                }
+                let own_echo = matches!((sealed.get(path), row.oid.as_deref()),
+                    (Some(sealed_oid), Some(new)) if sealed_oid == new);
+                if !own_echo {
+                    candidates.insert(path.to_string());
+                }
+            }
+        }
+        if candidates.is_empty() {
+            return RefreshOutputs::default();
+        }
+        let candidates: Vec<String> = candidates.into_iter().collect();
+        match self.try_trim_retained(&candidates, &[]) {
+            Some(outcome) => {
+                {
+                    let mut sealed = self.sealed_oids.lock().expect("sealed oid lock");
+                    for path in &outcome.trimmed {
+                        sealed.remove(path);
+                    }
+                }
+                if !outcome.held_open.is_empty() {
+                    self.divergent_pending
+                        .lock()
+                        .expect("divergence lock")
+                        .extend(outcome.held_open.iter().cloned());
+                }
+                // Bindings without a notify channel (FSKit) converge via probe
+                // expectations; a dropped shadow must purge cached pages and attrs, so
+                // carry the lower's new size (or absence) for every trimmed path.
+                let trimmed: std::collections::HashSet<&str> =
+                    outcome.trimmed.iter().map(String::as_str).collect();
+                let expectations = delta
+                    .changed
+                    .iter()
+                    .filter(|row| trimmed.contains(row.path.as_str()))
+                    .map(|row| KernelExpectation {
+                        path: row.path.clone(),
+                        present: row.oid.is_some(),
+                        size: row.size,
+                    })
+                    .collect();
+                RefreshOutputs {
+                    invals: outcome.invals,
+                    expectations,
+                }
+            }
+            // Fence contended (a copy-up mid-flight): retry the whole set next time.
+            None => {
+                self.divergent_pending
+                    .lock()
+                    .expect("divergence lock")
+                    .extend(candidates);
+                RefreshOutputs::default()
+            }
+        }
     }
 
     /// Drop retained upper files (and inert whiteouts) whose content a seal has published and
@@ -2636,8 +2784,9 @@ mod tests {
             !repositories.repos.iter().any(|r| r.name == fs_name),
             "a filesystem must not appear in the repository listing"
         );
-        // The genesis commit is what makes `tl fs create` + mount work with no client push:
-        // a baseless, publish-on-save workspace resolves its base from the default branch.
+        // The genesis commit is what makes `tl fs create` + mount work with no client push,
+        // and `surface` is what makes it ONE round trip: the SERVER fills the publish target
+        // from the repo's stored default branch — the client never reads a listing.
         let ws = sdk
             .create_workspace(
                 PROJECT,
@@ -2645,7 +2794,7 @@ mod tests {
                 "t",
                 TOKEN,
                 &CreateWorkspaceRequest {
-                    shared_target: Some(entry.default_branch.clone()),
+                    surface: Some("filesystem".to_string()),
                     ..Default::default()
                 },
             )
@@ -2654,6 +2803,42 @@ mod tests {
             .into_inner();
         assert_eq!(ws.base_ref.as_deref(), Some("refs/heads/main"));
         assert_eq!(ws.shared_target.as_deref(), Some("main"));
+
+        // The authoritative meta point-read answers immediately after create — this is the
+        // rm/validation path's read-your-writes guarantee.
+        let meta = sdk
+            .repo_meta_with_credential(PROJECT, &fs_name, "t", TOKEN)
+            .await
+            .unwrap()
+            .into_inner();
+        assert!(meta.is_filesystem());
+        assert_eq!(meta.default_branch, "main");
+
+        // An fs-surface session on a repository fails closed with the right command.
+        let repo_name = format!("{fs_name}-repo");
+        sdk.create_repo_with_credential(PROJECT, &repo_name, None, None, "t", TOKEN)
+            .await
+            .unwrap();
+        let err = sdk
+            .create_workspace(
+                PROJECT,
+                &repo_name,
+                "t",
+                TOKEN,
+                &CreateWorkspaceRequest {
+                    surface: Some("filesystem".to_string()),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap_err();
+        assert!(
+            format!("{err}").contains("tl git mount"),
+            "kind mismatch must name the replacement, got: {err}"
+        );
+        sdk.delete_repo_with_credential(PROJECT, &repo_name, "t", TOKEN)
+            .await
+            .unwrap();
         // Pin `tl fs history`'s save definition to the server's operation vocabulary: the
         // genesis is a committed "push" op, i.e. exactly what the history filter
         // (kind in {push, reconcile, promote, merge} AND result == "committed") must match.
