@@ -1549,15 +1549,17 @@ impl Sealer {
         let healed = self
             .overlay
             .heal_replaced_files(delta.upserts.iter().map(|(p, _)| p.as_str()))
-            .await;
-        for path in &healed {
+            .await
+            .map_err(|e| CliError::usage(format!("{e} (nothing was sealed; will retry)")))?;
+        for path in &healed.newly_healed {
             eprintln!("seal: healed dir-over-file at {path} (whiteout written)");
         }
-        // The healed path may no longer be in this delta (its mkdir record was pruned by an
-        // earlier empty seal), and the delete arm skips paths with upper presence — force
-        // the replacement's delete half into the change set explicitly.
+        // EVERY boundary — including markers written by an earlier seal whose push failed —
+        // forces its delete into this change set: the boundary path may no longer be in the
+        // delta (its mkdir record was pruned by an earlier empty seal), and the delete arm
+        // skips paths with upper presence.
         let mut delta = delta;
-        for path in &healed {
+        for path in &healed.boundaries {
             if !delta.deletes.contains(path) {
                 delta.deletes.push(path.clone());
             }

@@ -2160,13 +2160,21 @@ impl OverlayFs {
     /// a directory while the LOWER holds a non-directory at the same path, write the
     /// missing whiteout. `rm file; mkdir file` writes it naturally, but a mkdir that raced
     /// another session's file LANDING never saw the file (merged_exists answered before
-    /// delivery) — the marker converts that state into the coherent replaced-file shape,
-    /// and the seal's directory-upsert arm then publishes the delete half of the
-    /// replacement. Returns the healed paths (for the daemon log).
+    /// delivery) — the marker converts that state into the coherent replaced-file shape.
+    ///
+    /// Returns EVERY replacement boundary in scope — freshly healed AND already-marked
+    /// (`newly_healed` distinguishes them for the log): the caller forces all of them into
+    /// the seal's delete set, because a retry after a failed push finds the whiteout
+    /// already on disk, and returning only fresh heals would drop the boundary delete from
+    /// the retry's change set (the branch would keep the replaced file forever).
+    ///
+    /// Errors abort the seal (retryable): a transient index error or a failed marker write
+    /// swallowed here would let the seal publish the children WITHOUT the delete half.
+    /// Only a genuinely absent lower is "nothing to heal".
     pub(crate) async fn heal_replaced_files<'a>(
         &self,
         upserts: impl Iterator<Item = &'a str>,
-    ) -> Vec<String> {
+    ) -> Result<HealedBoundaries, MountError> {
         // Each upsert's ANCESTOR directories are candidates too: after the race, the mkdir's
         // own dirty record can be pruned by an earlier (empty) seal, leaving only child
         // upserts in this delta while the dir still shadows the lower file.
@@ -2181,27 +2189,44 @@ impl OverlayFs {
                 candidates.insert(prefix.clone());
             }
         }
-        let mut healed = Vec::new();
+        let mut out = HealedBoundaries::default();
         for path in candidates {
             let is_upper_dir = self
                 .upper_path(&path)
                 .symlink_metadata()
                 .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink());
-            if !is_upper_dir || self.whited_out(&path) {
+            if !is_upper_dir {
+                continue;
+            }
+            if self.whited_out(&path) {
+                // Already marked (a previous seal healed it, or `rm file; mkdir file` wrote
+                // it): still a boundary this seal must delete.
+                out.boundaries.push(path);
                 continue;
             }
             match self.walk_lower(&path).await {
                 Ok(attr) => {
                     let non_dir = attr.kind != NodeKind::Dir;
                     self.core.forget(attr.ino, 1);
-                    if non_dir && super::write_whiteout(&self.wh, &path).is_ok() {
-                        healed.push(path);
+                    if non_dir {
+                        super::write_whiteout(&self.wh, &path).map_err(|e| {
+                            MountError::Protocol(format!(
+                                "healing dir-over-file at {path}: whiteout write failed: {e}"
+                            ))
+                        })?;
+                        out.newly_healed.push(path.clone());
+                        out.boundaries.push(path);
                     }
                 }
-                Err(_) => {}
+                Err(MountError::NotFound(_)) => {}
+                Err(e) => {
+                    return Err(MountError::Protocol(format!(
+                        "healing dir-over-file at {path}: lower probe failed: {e}"
+                    )));
+                }
             }
         }
-        healed
+        Ok(out)
     }
 
     /// Record the published blob oid for each sealed path (from the push report). Empty oids
@@ -2694,6 +2719,16 @@ pub struct OverlayInval {
     pub parent_ino: Option<u64>,
     pub name: String,
     pub staled: bool,
+}
+
+/// Replacement boundaries found by [`OverlayFs::heal_replaced_files`]: every upper-directory
+/// path whose lower non-directory is (now) whiteouted. `boundaries` is what the seal must
+/// delete — including markers written by EARLIER seals whose push failed; `newly_healed` is
+/// the subset written this pass (for the log).
+#[derive(Debug, Default)]
+pub(crate) struct HealedBoundaries {
+    pub(crate) boundaries: Vec<String>,
+    pub(crate) newly_healed: Vec<String>,
 }
 
 /// What one [`OverlayFs::trim_retained`] pass did. `trimmed` includes candidates that were
@@ -3818,11 +3853,28 @@ mod tests {
             "swap appears exactly once in the parent listing"
         );
 
-        // The pre-seal heal writes the missing whiteout (once).
-        let healed = fs.heal_replaced_files(["swap"].into_iter()).await;
-        assert_eq!(healed, vec!["swap".to_string()]);
-        let again = fs.heal_replaced_files(["swap"].into_iter()).await;
-        assert!(again.is_empty(), "already healed: the whiteout is in place");
+        // The pre-seal heal writes the missing whiteout once — and a RETRY (a seal whose
+        // push failed after healing) still reports the boundary, or the retry's change set
+        // would resend only the children while the branch keeps the replaced file.
+        let healed = fs.heal_replaced_files(["swap"].into_iter()).await.unwrap();
+        assert_eq!(healed.newly_healed, vec!["swap".to_string()]);
+        assert_eq!(healed.boundaries, vec!["swap".to_string()]);
+        let retry = fs.heal_replaced_files(["swap"].into_iter()).await.unwrap();
+        assert!(
+            retry.newly_healed.is_empty(),
+            "the whiteout is already in place"
+        );
+        assert_eq!(
+            retry.boundaries,
+            vec!["swap".to_string()],
+            "an existing healed boundary must be forced into every retry's delete set"
+        );
+        // Ancestor derivation: a child-only delta still finds the boundary.
+        let via_child = fs
+            .heal_replaced_files(["swap/inner.txt"].into_iter())
+            .await
+            .unwrap();
+        assert_eq!(via_child.boundaries, vec!["swap".to_string()]);
         let attr = fs.getattr(dir_attr.ino).await.unwrap();
         assert_eq!(
             attr.kind,

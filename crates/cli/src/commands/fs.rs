@@ -1891,10 +1891,12 @@ fn registry_save(table: &toml::map::Map<String, toml::Value>) -> Result<()> {
 
 fn registry_add(mountpoint: &str, state_dir: &Path) -> Result<()> {
     let mut table = registry_load();
-    table.insert(
-        mountpoint.to_string(),
-        toml::Value::String(state_dir.to_string_lossy().into_owned()),
-    );
+    // One state dir, one mountpoint: resuming a detached session at a NEW path must retire
+    // the old path's binding, or management commands against the stale mountpoint report
+    // the live session twice — and can shut down or delete the new mount's state.
+    let dir = state_dir.to_string_lossy().into_owned();
+    table.retain(|_, v| v.as_str() != Some(dir.as_str()));
+    table.insert(mountpoint.to_string(), toml::Value::String(dir));
     registry_save(&table)
 }
 
