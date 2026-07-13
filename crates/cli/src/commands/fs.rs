@@ -1888,8 +1888,11 @@ fn registry_load() -> toml::map::Map<String, toml::Value> {
 /// registry). Blocking acquire — the critical section is a small file rewrite.
 fn registry_lock() -> Result<std::fs::File> {
     std::fs::create_dir_all(crate::config::files::config_dir())?;
-    plaindir::flock_exclusive(&crate::config::files::config_dir().join("mounts.lock"), true)?
-        .ok_or_else(|| CliError::usage("could not lock the mount registry"))
+    plaindir::flock_exclusive(
+        &crate::config::files::config_dir().join("mounts.lock"),
+        true,
+    )?
+    .ok_or_else(|| CliError::usage("could not lock the mount registry"))
 }
 
 fn registry_save(table: &toml::map::Map<String, toml::Value>) -> Result<()> {

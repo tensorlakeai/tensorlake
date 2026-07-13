@@ -23,6 +23,29 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use bytes::Bytes;
 use gsvc_mount::{MountCore, MountError, NodeAttr, NodeKind, ROOT_INO};
 
+/// Nominate one retained path plus the upper directories that can become empty after it is
+/// removed. `stop_at` bounds a server-declared subtree erase; without one (the divergence-unknown
+/// fallback), walking to the top-level directory is still safe because trim uses `remove_dir`,
+/// never `remove_dir_all`: dirty or ignored children keep every non-empty ancestor in place.
+fn nominate_retained_path_and_parents(
+    candidates: &mut std::collections::HashSet<String>,
+    path: &str,
+    stop_at: Option<&str>,
+) {
+    candidates.insert(path.to_string());
+    let mut child = path;
+    while let Some((parent, _)) = child.rsplit_once('/') {
+        if parent.is_empty() {
+            break;
+        }
+        candidates.insert(parent.to_string());
+        if stop_at == Some(parent) {
+            break;
+        }
+        child = parent;
+    }
+}
+
 /// One merged-namespace node. Path-keyed: the same repo-relative path keeps the same ino for as
 /// long as the kernel references it, regardless of which layer currently backs it.
 struct ONode {
@@ -2322,7 +2345,15 @@ impl OverlayFs {
                     if erases_subtree {
                         let prefix = format!("{}/", row.path);
                         for path in sealed.keys().filter(|p| p.starts_with(&prefix)) {
-                            candidates.insert(path.clone());
+                            // Git records files, not their directory objects. Nominate every
+                            // intermediate upper directory too, through the changed boundary, so
+                            // child-first trim does not strand `swap/sub/` after removing
+                            // `swap/sub/file` and then retry `remove_dir("swap")` forever.
+                            nominate_retained_path_and_parents(
+                                &mut candidates,
+                                path,
+                                Some(row.path.as_str()),
+                            );
                         }
                     }
                     let path = row.path.as_str();
@@ -2344,7 +2375,9 @@ impl OverlayFs {
                 // daemon startup, so the map is the complete set — and an upper file OUTSIDE
                 // it is dirty or ignored content that must never be nominated.
                 let sealed = self.sealed_oids.lock().expect("sealed oid lock");
-                candidates.extend(sealed.keys().cloned());
+                for path in sealed.keys() {
+                    nominate_retained_path_and_parents(&mut candidates, path, None);
+                }
             }
         }
         if candidates.is_empty() {
@@ -2455,9 +2488,9 @@ impl OverlayFs {
     /// - a path under a pending rename is skipped (the redirect table is the authority there).
     ///
     /// Runs under the exclusive side of the trim fence, so no copy-up or open can interleave
-    /// with the unlinks. Empty parent directories are deliberately left in place: git has no
-    /// empty trees, so a directory emptied by trim may exist nowhere in the lower — removing
-    /// it would change the merged view.
+    /// with the unlinks. Parent directories are left in place unless the caller explicitly
+    /// nominates them from a sealed descendant; those nominated parents use `remove_dir`, so an
+    /// unrelated dirty or ignored child safely keeps the directory and its merged view.
     ///
     /// Dirty entries, sealer caches, and the epoch are untouched: logically nothing changed
     /// (the lower serves the same bytes), the kernel just needs fresh lookups where an upper
@@ -2852,6 +2885,28 @@ mod tests {
     use tensorlake::artifact_storage::ArtifactStorageClient;
     use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
     use tensorlake::artifact_storage::workspaces::CreateWorkspaceRequest;
+
+    #[test]
+    fn retained_candidates_include_every_directory_to_the_changed_boundary() {
+        let mut candidates = std::collections::HashSet::new();
+        nominate_retained_path_and_parents(
+            &mut candidates,
+            "swap/sub/deeper/file.txt",
+            Some("swap"),
+        );
+        assert_eq!(
+            candidates,
+            [
+                "swap".to_string(),
+                "swap/sub".to_string(),
+                "swap/sub/deeper".to_string(),
+                "swap/sub/deeper/file.txt".to_string(),
+            ]
+            .into_iter()
+            .collect(),
+            "child-first trim receives the intermediate directories Git never records"
+        );
+    }
 
     // ---------------------------------------------------------------------------------------
     // Inode-table re-keying (pure, no server): the rename fix that lets `git init`/`git clone`
@@ -4070,21 +4125,24 @@ mod tests {
         let fs: Arc<OverlayFs> = OverlayFs::new(core.clone(), state.path(), false).unwrap();
 
         // The local file→dir replacement a previous seal would have published: whiteout at
-        // the name, upper directory over it, a child file inside.
+        // the name, upper directory over it, and a file below an intermediate directory Git
+        // never records as a sealed path.
         fs.unlink(ROOT_INO, "swap").await.unwrap();
         let dir_attr = fs.mkdir(ROOT_INO, "swap").await.unwrap();
-        let (kept, kfh) = fs.create(dir_attr.ino, "kept.txt", false).await.unwrap();
+        let sub_attr = fs.mkdir(dir_attr.ino, "sub").await.unwrap();
+        let (kept, kfh) = fs.create(sub_attr.ino, "kept.txt", false).await.unwrap();
         fs.release(kfh);
         fs.forget(kept.ino, 1);
+        fs.forget(sub_attr.ino, 1);
         fs.forget(dir_attr.ino, 1);
         assert!(state.path().join("wh/swap").is_file());
-        assert!(state.path().join("upper/swap").is_dir());
+        assert!(state.path().join("upper/swap/sub").is_dir());
         // "The seal published and pruned": records exist for the retained shapes, nothing
         // is dirty (trim skips dirty paths by design).
         fs.prune_dirty(fs.dirty_since(0).watermark);
         fs.record_sealed_oids([
             ("swap".to_string(), "0".repeat(40)),
-            ("swap/kept.txt".to_string(), "1".repeat(40)),
+            ("swap/sub/kept.txt".to_string(), "1".repeat(40)),
         ]);
 
         // The branch moves past the replacement: a Modified NON-directory row at the name
