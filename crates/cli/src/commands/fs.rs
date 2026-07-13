@@ -2089,7 +2089,7 @@ fn live_mount_of(workspace_id: &str) -> Option<String> {
 /// registry entry survives the crash, and treating it as a hold pushed the crash-resume onto
 /// a fresh suffixed dir — stranding the unsealed local overlay in the old one, which is the
 /// exact loss "run the same command again" recovery exists to prevent.
-fn alloc_state_dir(workspace_id: &str) -> PathBuf {
+fn alloc_state_dir(workspace_id: &str, skip: &std::collections::HashSet<PathBuf>) -> PathBuf {
     let registered: std::collections::HashSet<PathBuf> = registry_load()
         .values()
         .filter_map(|v| v.as_str().map(PathBuf::from))
@@ -2103,11 +2103,43 @@ fn alloc_state_dir(workspace_id: &str) -> PathBuf {
         } else {
             root.join(format!("{workspace_id}.{n}"))
         };
-        if !registered.contains(&candidate) {
+        if !registered.contains(&candidate) && !skip.contains(&candidate) {
             return candidate;
         }
         n += 1;
     }
+}
+
+/// Stake `dir` for THIS mount, atomically, before any state lands in it. The aliveness
+/// probe alone is racy: a daemon writes its pid only after credentials, server round
+/// trips, and the FUSE attach — a multi-second window in which a second mount of the same
+/// workspace sees the dir as free and two daemons end up sharing one overlay. The claim
+/// is an exclusive flock on `daemon.pid` holding the CLI's OWN pid; the daemon overwrites
+/// it once serving, and the caller keeps the returned guard (and its lock) until then.
+/// `None` = another process holds the claim or a live daemon owns the dir.
+fn claim_state_dir(dir: &Path) -> Result<Option<std::fs::File>> {
+    use std::io::Write;
+    use std::os::fd::AsRawFd;
+    std::fs::create_dir_all(dir)?;
+    let file = std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(dir.join("daemon.pid"))?;
+    if unsafe { libc::flock(file.as_raw_fd(), libc::LOCK_EX | libc::LOCK_NB) } != 0 {
+        return Ok(None);
+    }
+    // The lock arbitrates concurrent CLAIMS; a running daemon holds no flock, so its
+    // liveness is checked separately (its pid is what the file holds).
+    if daemon::daemon_pid(dir).is_some_and(daemon_alive) {
+        return Ok(None);
+    }
+    let mut file = file;
+    file.set_len(0)?;
+    write!(file, "{}", std::process::id())?;
+    file.sync_all()?;
+    Ok(Some(file))
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -2523,7 +2555,32 @@ pub async fn mount(
     let mountpoint = canonical_mountpoint(path)?;
     // A resume reopens EXACTLY the state dir it selected (the newest detached overlay);
     // re-allocating could land on a different dead registration of the same workspace.
-    let state_dir = resume_state_dir.unwrap_or_else(|| alloc_state_dir(&ws.id));
+    // `_state_claim` holds the exclusive claim (see claim_state_dir) until this function
+    // returns — by which point the daemon is serving and its own pid holds the dir.
+    let (state_dir, _state_claim) = match resume_state_dir {
+        Some(dir) => match claim_state_dir(&dir)? {
+            Some(guard) => (dir, guard),
+            None => {
+                return Err(CliError::usage(format!(
+                    "{unit} {} is already being mounted or served by another process",
+                    short_id(&ws.id)
+                )));
+            }
+        },
+        None => {
+            let mut skip: std::collections::HashSet<PathBuf> = Default::default();
+            loop {
+                let candidate = alloc_state_dir(&ws.id, &skip);
+                match claim_state_dir(&candidate)? {
+                    Some(guard) => break (candidate, guard),
+                    // Raced by a concurrent mount mid-claim: take the next dir.
+                    None => {
+                        skip.insert(candidate);
+                    }
+                }
+            }
+        }
+    };
     let (owner_uid, owner_gid) = mount_owner();
     daemon::save_mount_state(
         &state_dir,

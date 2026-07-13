@@ -1586,7 +1586,13 @@ impl OverlayFs {
                     self.core.forget(attr.ino, 1);
                     non_dir
                 }
-                Err(_) => false,
+                // Only a definite "nothing below" clears the marker: a transient probe
+                // failure (stale binding mid-refresh, index lag) must KEEP a possibly
+                // load-bearing whiteout — keeping is safe in every case (it hides only
+                // deleted-or-replaced lower state), clearing can resurface a replaced
+                // file underneath the new directory.
+                Err(MountError::NotFound(_)) => false,
+                Err(_) => true,
             },
             None => false,
         };
@@ -1690,9 +1696,11 @@ impl OverlayFs {
             let mut redirects = self.redirects.lock().expect("redirect lock");
             record_committed_rename(&mut redirects, src, dst, true_src);
             self.persist_redirects(&redirects)?;
+            // Under the redirects lock, so it serializes with the sealer's clock close —
+            // see close_dirty_base_if_clean.
+            self.stamp_mutation();
         }
         self.redirect_gen.fetch_add(1, Ordering::SeqCst);
-        self.stamp_mutation();
         // Stale deletion markers at the destination belong to whatever the replace displaced.
         let dst_wh = self.wh_path(dst);
         if dst_wh
@@ -2146,7 +2154,13 @@ impl OverlayFs {
         let dirty = self.dirty.lock().expect("dirty lock");
         if dirty.is_empty() {
             *self.dirty_base.lock().expect("dirty base lock") = None;
-            if !self.has_redirects() {
+            // The emptiness check and the zeroing hold the REDIRECTS lock together:
+            // rename_committed_dir stamps the clocks inside the same critical section, so
+            // a rename either lands before this check (kept running) or stamps after the
+            // zero (re-armed) — never a pending redirect with a zeroed clock, which the
+            // event-driven autosave would sleep past forever.
+            let redirects = self.redirects.lock().expect("redirect lock");
+            if redirects.is_empty() {
                 // Batch fully sealed: the clocks re-arm on the next write. Pending
                 // redirects keep them running — they are unsealed work the dirty map
                 // never sees.
@@ -2214,6 +2228,28 @@ impl OverlayFs {
                                 "healing dir-over-file at {path}: whiteout write failed: {e}"
                             ))
                         })?;
+                        // TOCTOU re-verify: the follow poller can adopt a commit where the
+                        // BRANCH itself made this path a directory between the probe and
+                        // the marker write — that whiteout would suppress the merged dir's
+                        // lower listing. Undo and skip; a genuine dir-over-file re-heals
+                        // on the next seal.
+                        match self.walk_lower(&path).await {
+                            Ok(attr2) => {
+                                let now_dir = attr2.kind == NodeKind::Dir;
+                                self.core.forget(attr2.ino, 1);
+                                if now_dir {
+                                    self.clear_whiteout(&path);
+                                    continue;
+                                }
+                            }
+                            Err(MountError::NotFound(_)) => {}
+                            Err(e) => {
+                                self.clear_whiteout(&path);
+                                return Err(MountError::Protocol(format!(
+                                    "healing dir-over-file at {path}: re-verify failed: {e}"
+                                )));
+                            }
+                        }
                         out.newly_healed.push(path.clone());
                         out.boundaries.push(path);
                     }
@@ -2316,16 +2352,33 @@ impl OverlayFs {
             return RefreshOutputs::default();
         }
         // A divergent candidate that carries a whiteout is a sealed DELETE the branch moved
-        // past — usually a remote (re-)add over it. The whiteout was masking lower content
-        // the branch now carries; keeping it would hide the other session's file
-        // indefinitely (the delivering application commit differs from the snapshot commit,
-        // so the seal-echo hygiene never matched). Derived from the final candidate set so
-        // pending retries re-probe too; retiring an actually-inert whiteout (branch also
-        // deleted) is the trim's original no-op.
+        // past — a remote (re-)add over it. The whiteout was masking lower content the
+        // branch now carries; keeping it would hide the other session's file indefinitely.
+        // Tombstoning requires EVIDENCE the branch carries the path (a delta row with an
+        // oid): on the divergence-unknown fallback the sealed delete may simply not have
+        // APPLIED yet (reconcile lag, a start-hint mount behind the branch), and removing
+        // the marker would resurface the very files the user deleted. A whiteout under an
+        // upper DIRECTORY is a live file→directory replacement boundary and is never
+        // retired here — the seal owns it.
         let candidates: Vec<String> = candidates.into_iter().collect();
+        let branch_carries: std::collections::HashSet<&str> = match &delta.changed {
+            Some(rows) => rows
+                .iter()
+                .filter(|row| row.oid.is_some())
+                .map(|row| row.path.as_str())
+                .collect(),
+            None => Default::default(),
+        };
         let tombstones: Vec<String> = candidates
             .iter()
-            .filter(|p| self.whited_out(p))
+            .filter(|p| {
+                branch_carries.contains(p.as_str())
+                    && self.whited_out(p)
+                    && !self
+                        .upper_path(p)
+                        .symlink_metadata()
+                        .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+            })
             .cloned()
             .collect();
         match self.try_trim_retained(&candidates, &tombstones) {
@@ -2359,11 +2412,9 @@ impl OverlayFs {
                     .map(String::as_str)
                     .collect();
                 let mut expectations: Vec<KernelExpectation> = Vec::new();
-                let mut covered: std::collections::HashSet<&str> = std::collections::HashSet::new();
                 if let Some(rows) = &delta.changed {
                     for row in rows {
                         if trimmed.contains(row.path.as_str()) {
-                            covered.insert(row.path.as_str());
                             expectations.push(KernelExpectation {
                                 path: row.path.clone(),
                                 present: row.oid.is_some(),
@@ -2372,15 +2423,13 @@ impl OverlayFs {
                         }
                     }
                 }
-                for path in &outcome.trimmed {
-                    if !covered.contains(path.as_str()) {
-                        expectations.push(KernelExpectation {
-                            path: path.clone(),
-                            present: true,
-                            size: None,
-                        });
-                    }
-                }
+                // Trimmed paths WITHOUT a covering delta row (boundary-expanded children,
+                // divergence-unknown drops) get no expectation: their branch-side presence
+                // is unknown, and a wrong `present: true` makes the probe loop hammer a
+                // genuinely absent path until its deadline — churning the overlay through
+                // probe_negative_dentry's create/unlink pairs on the writable mount. The
+                // Linux notify invals above cover them; macOS converges on the next
+                // covered refresh or kernel TTL.
                 RefreshOutputs {
                     invals,
                     expectations,

@@ -2260,6 +2260,12 @@ fn resolve_dirty(
             continue;
         };
         if meta.is_dir() && !meta.file_type().is_symlink() {
+            // Parity with resolve_seal's replacement arm: a whiteout under a directory
+            // upsert is the delete half of a file→directory replacement, and status must
+            // report what the next seal will publish.
+            if whited_out_on_disk(&wh, path) {
+                deletes.push(path.clone());
+            }
             collect_dir_upserts(&upper, path, &mut ignore, &mut upserts)?;
             continue;
         }
@@ -2269,7 +2275,14 @@ fn resolve_dirty(
         upserts.push((path.clone(), abs, git_mode(&meta)));
     }
     for path in delta.deletes.iter().chain(vanished.iter()) {
-        if upper.join(path).symlink_metadata().is_ok() {
+        // Parity with resolve_seal: an upper DIRECTORY over the deleted name is a
+        // file→directory replacement whose delete still publishes; only re-created
+        // CONTENT covers the event via its own upsert.
+        if upper
+            .join(path)
+            .symlink_metadata()
+            .is_ok_and(|m| !m.is_dir() || m.file_type().is_symlink())
+        {
             continue;
         }
         if ignore.is_ignored(path, false)? {
