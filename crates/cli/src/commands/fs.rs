@@ -1880,16 +1880,28 @@ fn registry_load() -> toml::map::Map<String, toml::Value> {
         .unwrap_or_default()
 }
 
+/// Serialize registry mutations across processes. Every writer is load-modify-save; without
+/// this, two concurrent `tl fs mount`s read the same table and the last save silently drops
+/// the other's entry — stranding a LIVE mount outside ls/status/unmount. Readers stay
+/// lock-free: [`plaindir::write_atomic`]'s rename means they see a complete document or the
+/// previous one, never a torn write (which `registry_load` would misread as an empty
+/// registry). Blocking acquire — the critical section is a small file rewrite.
+fn registry_lock() -> Result<std::fs::File> {
+    std::fs::create_dir_all(crate::config::files::config_dir())?;
+    plaindir::flock_exclusive(&crate::config::files::config_dir().join("mounts.lock"), true)?
+        .ok_or_else(|| CliError::usage("could not lock the mount registry"))
+}
+
 fn registry_save(table: &toml::map::Map<String, toml::Value>) -> Result<()> {
     std::fs::create_dir_all(crate::config::files::config_dir())?;
-    std::fs::write(
-        mounts_registry_path(),
-        toml::to_string_pretty(&toml::Value::Table(table.clone()))?,
-    )?;
-    Ok(())
+    plaindir::write_atomic(
+        &mounts_registry_path(),
+        toml::to_string_pretty(&toml::Value::Table(table.clone()))?.as_bytes(),
+    )
 }
 
 fn registry_add(mountpoint: &str, state_dir: &Path) -> Result<()> {
+    let _lock = registry_lock()?;
     let mut table = registry_load();
     // One state dir, one mountpoint: resuming a detached session at a NEW path must retire
     // the old path's binding, or management commands against the stale mountpoint report
@@ -1901,6 +1913,7 @@ fn registry_add(mountpoint: &str, state_dir: &Path) -> Result<()> {
 }
 
 fn registry_remove(mountpoint: &str) -> Result<()> {
+    let _lock = registry_lock()?;
     let mut table = registry_load();
     table.remove(mountpoint);
     registry_save(&table)

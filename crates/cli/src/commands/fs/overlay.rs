@@ -2180,9 +2180,10 @@ impl OverlayFs {
     /// consumed by an earlier empty seal BEFORE the racing file lands, leaving only child
     /// upserts to name the boundary.
     ///
-    /// Returns the paths healed THIS pass (for the daemon log and the current seal's
-    /// forced delete — the fresh record's generation is past the in-flight delta's
-    /// watermark, so this one seal injects it by hand).
+    /// Returns the paths healed THIS pass (for the daemon log, and so the sealer knows to
+    /// re-snapshot its delta: the fresh record's generation is past the delta it already
+    /// took, and both the current seal and its success-pruning watermark must cover it —
+    /// otherwise the boundary stays dirty and re-publishes every following seal).
     ///
     /// Errors abort the seal (retryable): a transient index error or a failed marker write
     /// swallowed here would let the seal publish the children WITHOUT the delete half.
@@ -2357,7 +2358,10 @@ impl OverlayFs {
         // APPLIED yet (reconcile lag, a start-hint mount behind the branch), and removing
         // the marker would resurface the very files the user deleted. A whiteout under an
         // upper DIRECTORY is a live file→directory replacement boundary and is never
-        // retired here — the seal owns it.
+        // retired while the directory stands — but this very trim can unwind the directory
+        // (the branch moved past the replacement, so the dir is itself a candidate), so
+        // the liveness check runs inside the fenced trim AFTER candidate removal, where it
+        // sees the post-trim upper.
         let candidates: Vec<String> = candidates.into_iter().collect();
         let branch_carries: std::collections::HashSet<&str> = match &delta.changed {
             Some(rows) => rows
@@ -2369,17 +2373,10 @@ impl OverlayFs {
         };
         let tombstones: Vec<String> = candidates
             .iter()
-            .filter(|p| {
-                branch_carries.contains(p.as_str())
-                    && self.whited_out(p)
-                    && !self
-                        .upper_path(p)
-                        .symlink_metadata()
-                        .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
-            })
+            .filter(|p| branch_carries.contains(p.as_str()) && self.whited_out(p))
             .cloned()
             .collect();
-        match self.try_trim_retained(&candidates, &tombstones) {
+        match self.try_trim_retained(&candidates, &tombstones, TrimBoundaries::KeepLive) {
             Some(outcome) => {
                 {
                     let mut sealed = self.sealed_oids.lock().expect("sealed oid lock");
@@ -2467,7 +2464,7 @@ impl OverlayFs {
     /// inode was presenting (`invals`).
     pub async fn trim_retained(&self, candidates: &[String], tombstones: &[String]) -> TrimOutcome {
         let _fence = self.mutate.write().await;
-        self.trim_fenced(candidates, tombstones)
+        self.trim_fenced(candidates, tombstones, TrimBoundaries::RetireInert)
     }
 
     /// Non-blocking [`OverlayFs::trim_retained`]: `None` when the fence is contended. The
@@ -2479,12 +2476,18 @@ impl OverlayFs {
         &self,
         candidates: &[String],
         tombstones: &[String],
+        boundaries: TrimBoundaries,
     ) -> Option<TrimOutcome> {
         let _fence = self.mutate.try_write().ok()?;
-        Some(self.trim_fenced(candidates, tombstones))
+        Some(self.trim_fenced(candidates, tombstones, boundaries))
     }
 
-    fn trim_fenced(&self, candidates: &[String], tombstones: &[String]) -> TrimOutcome {
+    fn trim_fenced(
+        &self,
+        candidates: &[String],
+        tombstones: &[String],
+        boundaries: TrimBoundaries,
+    ) -> TrimOutcome {
         let open_upper: std::collections::HashSet<String> = {
             let handles = self.handles.lock().expect("handle lock");
             handles
@@ -2500,6 +2503,11 @@ impl OverlayFs {
             dirty.keys().cloned().collect()
         };
         let mut out = TrimOutcome::default();
+        // Child-first: a sealed file→directory replacement nominates the directory AND its
+        // sealed children when the branch moves past it; the directory can only fall once
+        // its children have.
+        let mut candidates: Vec<&String> = candidates.iter().collect();
+        candidates.sort_by_key(|p| std::cmp::Reverse(p.matches('/').count()));
         for path in candidates {
             if dirty.contains(path) || self.redirect_covers(path) {
                 continue;
@@ -2509,13 +2517,22 @@ impl OverlayFs {
                 continue;
             }
             let abs = self.upper_path(path);
-            if abs.symlink_metadata().is_err() {
+            let Ok(meta) = abs.symlink_metadata() else {
                 // Already gone (an earlier trim, or a stale seal record) — report it trimmed
                 // so the caller drops the record.
                 out.trimmed.push(path.clone());
                 continue;
-            }
-            match std::fs::remove_file(&abs) {
+            };
+            // A retained upper DIRECTORY (a sealed file→dir replacement the branch moved
+            // past) drops with remove_dir; remove_file would EISDIR and requeue the path
+            // forever. A non-empty directory still holds live children (dirty, held-open,
+            // or ignored content) and genuinely shadows the lower — that is held_open.
+            let removed = if meta.is_dir() && !meta.file_type().is_symlink() {
+                std::fs::remove_dir(&abs)
+            } else {
+                std::fs::remove_file(&abs)
+            };
+            match removed {
                 Ok(()) => out.trimmed.push(path.clone()),
                 Err(e) => {
                     // A path that could not be dropped still shadows the lower; report it
@@ -2531,6 +2548,21 @@ impl OverlayFs {
             // content inside the renamed tree); the redirect table, not the sealed delete,
             // is the authority there.
             if dirty.contains(path) || self.redirect_covers(path) {
+                continue;
+            }
+            // A whiteout whose own name still carries an upper directory is a LIVE
+            // file→directory replacement boundary — the delete half of an unsealed (or
+            // un-applied) swap; retiring it would resurface the replaced lower file. The
+            // check runs here, after the candidate pass, so a directory this same trim
+            // unwound releases its whiteout in one pass. The post-seal hygiene callers
+            // assert inertness differently (the lower already serves the sealed commit)
+            // and retire regardless of upper kind.
+            if boundaries == TrimBoundaries::KeepLive
+                && self
+                    .upper_path(path)
+                    .symlink_metadata()
+                    .is_ok_and(|m| m.is_dir() && !m.file_type().is_symlink())
+            {
                 continue;
             }
             // An inert whiteout: the sealed delete is in the lower's history, so the marker
@@ -2766,6 +2798,18 @@ pub struct OverlayInval {
     pub parent_ino: Option<u64>,
     pub name: String,
     pub staled: bool,
+}
+
+/// How a trim treats a whiteout whose name still carries an upper directory — the delete
+/// half of a file→directory replacement. `KeepLive` (the divergence path) skips it while
+/// the directory stands: the swap may be unsealed or not yet applied, and retiring the
+/// marker would resurface the replaced lower file. `RetireInert` (the post-seal callers)
+/// removes it regardless: those callers only pass tombstones once the lower serves the
+/// sealed commit, so the marker hides nothing.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum TrimBoundaries {
+    KeepLive,
+    RetireInert,
 }
 
 /// What one [`OverlayFs::trim_retained`] pass did. `trimmed` includes candidates that were
@@ -3916,6 +3960,20 @@ mod tests {
             .await
             .unwrap();
         assert!(via_child.is_empty(), "marker present: nothing to re-heal");
+        // The sealer re-snapshots its delta after a heal, so the SECOND snapshot's
+        // watermark covers the heal record — success-pruning to it must leave the boundary
+        // clean. (Pruning to the pre-heal watermark would leave the record dirty and
+        // re-publish the same delete on every following seal.)
+        assert!(
+            gen_before < delta.watermark,
+            "the heal record advanced the clock past the pre-heal watermark"
+        );
+        let resnap = fs.dirty_since(gen_before);
+        fs.prune_dirty(resnap.watermark);
+        assert!(
+            fs.dirty_since(resnap.watermark).is_empty(),
+            "a success that prunes to the re-snapshotted watermark consumes the heal record"
+        );
         let attr = fs.getattr(dir_attr.ino).await.unwrap();
         assert_eq!(
             attr.kind,
@@ -3959,5 +4017,120 @@ mod tests {
         );
         fs.forget(rev.ino, 1);
         fs.forget(dir_attr.ino, 1);
+    }
+
+    /// A sealed file→directory replacement the branch later moves PAST (the directory swaps
+    /// back to a file remotely) must unwind in one divergence pass: the retained upper
+    /// directory drops via `remove_dir`, children first (`remove_file` would EISDIR and
+    /// requeue the path forever, permanently shadowing the branch's file), and the boundary
+    /// whiteout retires in the same pass once the directory is gone.
+    #[tokio::test(flavor = "multi_thread")]
+    #[ignore = "needs a local artifact-storage server"]
+    async fn divergence_unwinds_sealed_file_to_dir_replacement() {
+        if !server_up() {
+            eprintln!("skipping: no local artifact-storage server");
+            return;
+        }
+        let sdk = sdk();
+        let repo = format!(
+            "unwind-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        sdk.create_repo_with_credential(PROJECT, &repo, None, None, "t", TOKEN)
+            .await
+            .unwrap();
+        sdk.push_files(
+            PROJECT,
+            &repo,
+            "t",
+            TOKEN,
+            vec![push_file("swap", b"lower file\n", 0o100644)],
+            PushOptions {
+                message: "seed".into(),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let client = FsClient::new(BASE, PROJECT, &repo, Some(TOKEN.to_string())).unwrap();
+        let core = MountCore::new(
+            client,
+            MountOptions {
+                reference: "main".to_string(),
+                follow: true,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+        let state = tempfile::tempdir().unwrap();
+        let fs: Arc<OverlayFs> = OverlayFs::new(core.clone(), state.path(), false).unwrap();
+
+        // The local file→dir replacement a previous seal would have published: whiteout at
+        // the name, upper directory over it, a child file inside.
+        fs.unlink(ROOT_INO, "swap").await.unwrap();
+        let dir_attr = fs.mkdir(ROOT_INO, "swap").await.unwrap();
+        let (kept, kfh) = fs.create(dir_attr.ino, "kept.txt", false).await.unwrap();
+        fs.release(kfh);
+        fs.forget(kept.ino, 1);
+        fs.forget(dir_attr.ino, 1);
+        assert!(state.path().join("wh/swap").is_file());
+        assert!(state.path().join("upper/swap").is_dir());
+        // "The seal published and pruned": records exist for the retained shapes, nothing
+        // is dirty (trim skips dirty paths by design).
+        fs.prune_dirty(fs.dirty_since(0).watermark);
+        fs.record_sealed_oids([
+            ("swap".to_string(), "0".repeat(40)),
+            ("swap/kept.txt".to_string(), "1".repeat(40)),
+        ]);
+
+        // The branch moves past the replacement: a Modified NON-directory row at the name
+        // (dir→file remotely) implies everything sealed under `swap/` is gone.
+        let delta = gsvc_mount::RefreshDelta {
+            changed: Some(vec![gsvc_mount::ChangedRow {
+                path: "swap".to_string(),
+                change: gsvc_mount::ChangeKind::Modified,
+                is_dir: false,
+                oid: Some("2".repeat(40)),
+                size: Some(11),
+            }]),
+            appeared: Some(Vec::new()),
+            ..Default::default()
+        };
+        let outputs = fs.absorb_divergence(&delta);
+        assert!(
+            !state.path().join("upper/swap").exists(),
+            "the retained upper directory dropped (remove_dir, child-first)"
+        );
+        assert!(
+            !state.path().join("wh/swap").exists(),
+            "the boundary whiteout retired in the same pass the directory fell"
+        );
+        assert!(
+            outputs
+                .expectations
+                .iter()
+                .any(|e| e.path == "swap" && e.present),
+            "the delta-covered path converges via a present-probe: {:?}",
+            outputs
+                .expectations
+                .iter()
+                .map(|e| e.path.as_str())
+                .collect::<Vec<_>>()
+        );
+        // Nothing requeued: a second pass with the same delta has no candidates left.
+        let again = fs.absorb_divergence(&delta);
+        assert!(
+            again.expectations.is_empty() && again.invals.is_empty(),
+            "no held_open requeue loop"
+        );
+        // The branch's file resurfaces through the merged view (the lower still serves the
+        // seed commit here; kind is what matters — no dir, no whiteout in the way).
+        let looked = fs.lookup(ROOT_INO, "swap").await.unwrap();
+        assert_eq!(looked.kind, NodeKind::File);
+        fs.forget(looked.ino, 1);
     }
 }

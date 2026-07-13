@@ -54,7 +54,7 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
 #[cfg(unix)]
-use super::overlay::{KernelExpectation, OverlayFs, OverlayInval};
+use super::overlay::{KernelExpectation, OverlayFs, OverlayInval, TrimBoundaries};
 #[cfg(unix)]
 use std::sync::Arc;
 
@@ -1540,8 +1540,7 @@ impl Sealer {
                 eprintln!("seal: reaped {} sealed rename(s)", consumed.len());
             }
         }
-        let delta = self.overlay.dirty_since(st.sealed_gen);
-        let watermark = delta.watermark;
+        let mut delta = self.overlay.dirty_since(st.sealed_gen);
         // Dir-over-file self-heal: a mkdir that raced another session's same-named FILE
         // landing has an upper directory shadowing a lower file with no whiteout. Write
         // the missing marker now so this seal publishes the replacement's delete half and
@@ -1551,16 +1550,18 @@ impl Sealer {
             .heal_replaced_files(delta.upserts.iter().map(|(p, _)| p.as_str()))
             .await
             .map_err(|e| CliError::usage(format!("{e} (nothing was sealed; will retry)")))?;
-        // Freshly healed boundaries are recorded in the dirty index (they ride every FUTURE
-        // delta natively — retries re-derive nothing), but their record generation is past
-        // THIS delta's watermark, so this one seal carries the delete by hand.
-        let mut delta = delta;
-        for path in &healed {
-            eprintln!("seal: healed dir-over-file at {path} (whiteout written)");
-            if !delta.deletes.contains(path) {
-                delta.deletes.push(path.clone());
+        if !healed.is_empty() {
+            for path in &healed {
+                eprintln!("seal: healed dir-over-file at {path} (whiteout written)");
             }
+            // Healing records each boundary as a dirty dir upsert whose generation is past
+            // the delta just taken. Re-snapshot so THIS seal carries the boundary natively
+            // (the dir-upsert arm publishes the whiteout-delete plus children) AND so the
+            // watermark covers the heal record — pruning to the pre-heal watermark would
+            // leave the boundary dirty and re-publish the same delete every following seal.
+            delta = self.overlay.dirty_since(st.sealed_gen);
         }
+        let watermark = delta.watermark;
         if delta.is_empty() && !self.overlay.has_redirects() {
             st.sealed_gen = watermark;
             // Nothing to seal: close the mutation clocks (and batch base) so the autosave
@@ -1811,7 +1812,9 @@ impl Sealer {
             // try, not wait: hygiene must never park the seal (and, transitively, every new
             // mutating op queued behind the write-preferring fence) behind one slow in-flight
             // copy-up. A contended fence just leaves the markers for the next seal.
-            if let Some(outcome) = self.overlay.try_trim_retained(&[], &tombstones)
+            if let Some(outcome) =
+                self.overlay
+                    .try_trim_retained(&[], &tombstones, TrimBoundaries::RetireInert)
                 && !outcome.tombstones_removed.is_empty()
             {
                 for path in &outcome.tombstones_removed {

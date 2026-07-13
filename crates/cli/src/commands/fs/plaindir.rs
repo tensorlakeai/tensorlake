@@ -437,7 +437,7 @@ pub(crate) fn load_binding(state_dir: &Path) -> Result<Binding> {
 /// concurrent writers (e.g. two `tl fs init`s racing on the registry, or the push progress
 /// hook rewriting the journal) could interleave create/write/rename on the same temp inode
 /// and publish a torn file through the "atomic" path.
-fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
+pub(crate) fn write_atomic(path: &Path, bytes: &[u8]) -> Result<()> {
     use std::io::Write as _;
     let parent = path
         .parent()
@@ -505,7 +505,7 @@ struct BindingLock {
 /// it; `block: true` waits. The one flock implementation — the per-binding snapshot lock and
 /// the registry mutation lock both go through here.
 #[cfg(unix)]
-fn flock_exclusive(path: &Path, block: bool) -> Result<Option<std::fs::File>> {
+pub(crate) fn flock_exclusive(path: &Path, block: bool) -> Result<Option<std::fs::File>> {
     use std::os::unix::io::AsRawFd as _;
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -527,7 +527,7 @@ fn flock_exclusive(path: &Path, block: bool) -> Result<Option<std::fs::File>> {
 }
 
 #[cfg(not(unix))]
-fn flock_exclusive(_path: &Path, _block: bool) -> Result<Option<std::fs::File>> {
+pub(crate) fn flock_exclusive(_path: &Path, _block: bool) -> Result<Option<std::fs::File>> {
     Err(CliError::usage(
         "plain-directory bindings are supported on unix only in v1",
     ))
