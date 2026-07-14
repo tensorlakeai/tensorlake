@@ -3011,14 +3011,13 @@ pub async fn unmount(
 // Snapshot: the overlay is the dirty set.
 // ---------------------------------------------------------------------------------------------
 
-/// Walk the overlay state dir: `(upserts, deletes)` as repo paths. Ignored names (built-ins +
-/// the mount's `.tlignore`) are workspace-local and never enumerate.
+/// Walk the overlay state dir: `(upserts, deletes)` as repo paths. Nested `.gitignore` files are
+/// the sole authority for paths that do not enumerate.
 /// Overlay upserts as `(repo path, upper file, git mode)`.
 type OverlayUpserts = Vec<(String, PathBuf, u32)>;
 
 struct SnapshotIgnore {
     mount_root: PathBuf,
-    ignored_names: Vec<String>,
     gitignores: HashMap<PathBuf, Gitignore>,
 }
 
@@ -3026,7 +3025,6 @@ impl SnapshotIgnore {
     fn new(mount_root: &Path) -> Self {
         Self {
             mount_root: mount_root.to_path_buf(),
-            ignored_names: local::ignored_names(mount_root),
             gitignores: HashMap::new(),
         }
     }
@@ -3054,18 +3052,6 @@ impl SnapshotIgnore {
 
     fn is_ignored(&mut self, rel: &str, is_dir: bool) -> Result<bool> {
         let rel_path = Path::new(rel);
-        for component in rel_path.components() {
-            let Component::Normal(name) = component else {
-                continue;
-            };
-            let name = name.to_string_lossy();
-            if self.ignored_names.iter().any(|ignored| ignored == &*name)
-                || local::is_metadata_turd(&name)
-            {
-                return Ok(true);
-            }
-        }
-
         let abs = self.mount_root.join(rel_path);
         let mut ignored = false;
         for dir in gitignore_dirs_for(rel_path) {
@@ -5032,6 +5018,66 @@ mod tests {
 
         let upsert_paths: Vec<_> = upserts.iter().map(|(path, _, _)| path.as_str()).collect();
         assert_eq!(upsert_paths, vec!["keep.txt"]);
+        assert!(deletes.is_empty());
+    }
+
+    #[test]
+    fn snapshot_enumeration_has_no_implicit_exclusions() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let upper = state.path().join("upper");
+        std::fs::create_dir_all(state.path().join("wh")).unwrap();
+
+        let paths = [
+            ".git/HEAD",
+            "node_modules/pkg.js",
+            "target/debug/build.o",
+            "dist/app.js",
+            ".cache/entry",
+            "__pycache__/module.pyc",
+            ".DS_Store",
+            "._index",
+            ".tlignore",
+        ];
+        for path in paths {
+            let abs = upper.join(path);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, "snapshot me").unwrap();
+        }
+        // `.tlignore` is an ordinary tracked file now and has no exclusion semantics.
+        std::fs::write(mount.path().join(".tlignore"), "target\n").unwrap();
+
+        let (upserts, deletes) = enumerate_overlay(state.path(), mount.path()).unwrap();
+        let upsert_paths: Vec<_> = upserts.iter().map(|(path, _, _)| path.as_str()).collect();
+        assert_eq!(
+            upsert_paths,
+            vec![
+                ".DS_Store",
+                "._index",
+                ".cache/entry",
+                ".git/HEAD",
+                ".tlignore",
+                "__pycache__/module.pyc",
+                "dist/app.js",
+                "node_modules/pkg.js",
+                "target/debug/build.o",
+            ]
+        );
+        assert!(deletes.is_empty());
+    }
+
+    #[test]
+    fn snapshot_enumeration_excludes_former_builtins_when_gitignored() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let upper = state.path().join("upper");
+        std::fs::create_dir_all(upper.join("target/debug")).unwrap();
+        std::fs::create_dir_all(state.path().join("wh")).unwrap();
+        std::fs::write(mount.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(upper.join("target/debug/build.o"), "ignored by git").unwrap();
+
+        let (upserts, deletes) = enumerate_overlay(state.path(), mount.path()).unwrap();
+        assert!(upserts.is_empty());
         assert!(deletes.is_empty());
     }
 
