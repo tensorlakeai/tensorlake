@@ -3633,15 +3633,13 @@ async fn local_changes_guarded(
     // like the pre-established flag. A fast failure (no socket, dead daemon, handler error)
     // falls through to the raw overlay walk, whose mountpoint reads fail fast rather than
     // block.
-    let dirty_reply = match tokio::time::timeout(
-        STATUS_DAEMON_DEADLINE,
-        daemon::control(state_dir, "dirty"),
-    )
-    .await
-    {
-        Err(_elapsed) => return wedged_view(),
-        Ok(reply) => reply,
-    };
+    let dirty_reply =
+        match tokio::time::timeout(STATUS_DAEMON_DEADLINE, daemon::control(state_dir, "dirty"))
+            .await
+        {
+            Err(_elapsed) => return wedged_view(),
+            Ok(reply) => reply,
+        };
     if let Ok(reply) = dirty_reply
         && reply.get("ok").and_then(|v| v.as_bool()) == Some(true)
         // Every DirtyReply field is serde-defaulted, so a bare `{"ok":true}` ack (a handler
@@ -4315,20 +4313,20 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         daemon::control_timed(&state_dir, "conflicts", STATUS_DAEMON_DEADLINE).await
     }
     .ok()
-        .and_then(|r| r.get("conflicts").cloned())
-        .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
-        .map(|list| {
-            list.into_iter()
-                .filter_map(|c| {
-                    Some((
-                        c.get("path")?.as_str()?.to_string(),
-                        c.get("kind")?.as_str()?.to_string(),
-                        c.get("commit")?.as_str()?.to_string(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    .and_then(|r| r.get("conflicts").cloned())
+    .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
+    .map(|list| {
+        list.into_iter()
+            .filter_map(|c| {
+                Some((
+                    c.get("path")?.as_str()?.to_string(),
+                    c.get("kind")?.as_str()?.to_string(),
+                    c.get("commit")?.as_str()?.to_string(),
+                ))
+            })
+            .collect()
+    })
+    .unwrap_or_default();
 
     if output_json {
         println!(
@@ -5117,6 +5115,66 @@ mod tests {
 
         let upsert_paths: Vec<_> = upserts.iter().map(|(path, _, _)| path.as_str()).collect();
         assert_eq!(upsert_paths, vec!["keep.txt"]);
+        assert!(deletes.is_empty());
+    }
+
+    #[test]
+    fn snapshot_enumeration_has_no_implicit_exclusions() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let upper = state.path().join("upper");
+        std::fs::create_dir_all(state.path().join("wh")).unwrap();
+
+        let paths = [
+            ".git/HEAD",
+            "node_modules/pkg.js",
+            "target/debug/build.o",
+            "dist/app.js",
+            ".cache/entry",
+            "__pycache__/module.pyc",
+            ".DS_Store",
+            "._index",
+            ".tlignore",
+        ];
+        for path in paths {
+            let abs = upper.join(path);
+            std::fs::create_dir_all(abs.parent().unwrap()).unwrap();
+            std::fs::write(abs, "snapshot me").unwrap();
+        }
+        // `.tlignore` is an ordinary tracked file now and has no exclusion semantics.
+        std::fs::write(mount.path().join(".tlignore"), "target\n").unwrap();
+
+        let (upserts, deletes) = enumerate_overlay(state.path(), mount.path()).unwrap();
+        let upsert_paths: Vec<_> = upserts.iter().map(|(path, _, _)| path.as_str()).collect();
+        assert_eq!(
+            upsert_paths,
+            vec![
+                ".DS_Store",
+                "._index",
+                ".cache/entry",
+                ".git/HEAD",
+                ".tlignore",
+                "__pycache__/module.pyc",
+                "dist/app.js",
+                "node_modules/pkg.js",
+                "target/debug/build.o",
+            ]
+        );
+        assert!(deletes.is_empty());
+    }
+
+    #[test]
+    fn snapshot_enumeration_excludes_former_builtins_when_gitignored() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let upper = state.path().join("upper");
+        std::fs::create_dir_all(upper.join("target/debug")).unwrap();
+        std::fs::create_dir_all(state.path().join("wh")).unwrap();
+        std::fs::write(mount.path().join(".gitignore"), "target/\n").unwrap();
+        std::fs::write(upper.join("target/debug/build.o"), "ignored by git").unwrap();
+
+        let (upserts, deletes) = enumerate_overlay(state.path(), mount.path()).unwrap();
+        assert!(upserts.is_empty());
         assert!(deletes.is_empty());
     }
 

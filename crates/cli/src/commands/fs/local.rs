@@ -1,8 +1,7 @@
-//! Local helpers for `tl fs`: ignore rules and materializing tree entries into a directory.
+//! Local helpers for materializing `tl fs` tree entries into a directory.
 //!
-//! The FUSE overlay owns all mount state; what remains here is shared by snapshot enumeration
-//! (which paths never upload) and restore (writing fetched entries into the overlay's upper
-//! layer).
+//! The FUSE overlay owns all mount state; what remains here is shared by restore paths that write
+//! fetched entries into the overlay's upper layer.
 
 use std::path::Path;
 
