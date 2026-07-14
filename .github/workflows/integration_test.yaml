@@ -26,8 +26,11 @@ jobs:
       - name: Write test application
         run: |
           SUFFIX=$(openssl rand -hex 6)
+          echo "HEADER_APP_NAME=request_headers_${SUFFIX}" >> "$GITHUB_ENV"
           cat > /tmp/test_app.py << EOF
-          from tensorlake.applications import Image, application, function
+          import json
+
+          from tensorlake.applications import Image, RequestContext, application, function
 
           image = Image(name="test-image-${SUFFIX}", base_image="python:3.11-slim")
 
@@ -35,6 +38,83 @@ jobs:
           @function(image=image)
           def hello_${SUFFIX}(name: str) -> str:
               return f"Hello, {name}!"
+
+          @application(allow=["unauthorized_requests"])
+          @function(image=image)
+          def request_headers_${SUFFIX}(_: str) -> str:
+              headers = RequestContext.get().headers
+              return json.dumps(
+                  {
+                      "custom_header": headers["X-INTEGRATION-TEST"],
+                      "custom_header_in_lowercase": "x-integration-test" in headers,
+                      "authorization_filtered": "authorization" not in headers,
+                      "cookie_filtered": "cookie" not in headers,
+                      "host_filtered": "host" not in headers,
+                      "proxy_authorization_filtered": (
+                          "proxy-authorization" not in headers
+                      ),
+                  }
+              )
+          EOF
+
+          cat > /tmp/test_request_headers.py << 'EOF'
+          import json
+          import os
+
+          import httpx
+
+          from tensorlake.applications.remote.api_client import APIClient
+          from tensorlake.applications.remote.request import RemoteRequest
+
+
+          application_name = os.environ["HEADER_APP_NAME"]
+          expected_header = "header-reached-application"
+
+          with APIClient() as client:
+              endpoint = client.ensure_application_public_endpoint(
+                  application_name=application_name,
+                  allow=["unauthorized_requests"],
+              )
+              public_url = next(
+                  item.url for item in endpoint.endpoints if item.enabled
+              )
+
+              response = httpx.post(
+                  public_url,
+                  headers={
+                      "x-InTeGrAtIoN-tEsT": expected_header,
+                      "Authorization": "Bearer must-not-reach-application",
+                      "Cookie": "session=must-not-reach-application",
+                      "Proxy-Authorization": "Basic must-not-reach-application",
+                  },
+                  json="input",
+                  timeout=30,
+              )
+              response.raise_for_status()
+              request_id = response.json()["request_id"]
+
+              request = RemoteRequest(
+                  application_name=application_name,
+                  application_manifest=client.application(application_name),
+                  request_id=request_id,
+                  client=client,
+              )
+              observed = json.loads(request.output())
+
+          expected = {
+              "custom_header": expected_header,
+              "custom_header_in_lowercase": True,
+              "authorization_filtered": True,
+              "cookie_filtered": True,
+              "host_filtered": True,
+              "proxy_authorization_filtered": True,
+          }
+          if observed != expected:
+              raise AssertionError(
+                  f"Unexpected application request headers: {observed!r}"
+              )
+
+          print("Verified sanitized request headers in application RequestContext")
           EOF
 
       - name: Configure AWS credentials
@@ -74,7 +154,9 @@ jobs:
             -e TENSORLAKE_API_KEY="${{ secrets.TENSORLAKE_API_KEY }}" \
             -e TENSORLAKE_ONPREM=true \
             -e PYPI_VERSION="${PYPI_VERSION}" \
+            -e HEADER_APP_NAME="${HEADER_APP_NAME}" \
             -v /tmp/test_app.py:/tmp/test_app.py \
+            -v /tmp/test_request_headers.py:/tmp/test_request_headers.py \
             -v /var/run/docker.sock:/var/run/docker.sock \
             python:3.11-slim bash -c '
               set -e
@@ -103,6 +185,9 @@ jobs:
               tl deploy /tmp/test_app.py \
                 --build-env PIP_INDEX_URL=https://test.pypi.org/simple/ \
                 --build-env PIP_EXTRA_INDEX_URL=https://pypi.org/simple/
+
+              echo "--- 3. Verify public request headers ---"
+              python /tmp/test_request_headers.py
 
               echo "--- All integration tests passed ---"
             '
