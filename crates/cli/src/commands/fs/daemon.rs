@@ -442,6 +442,18 @@ pub async fn control_with(
     ))
 }
 
+/// [`control`] with a reply deadline.
+#[cfg(not(unix))]
+pub async fn control_timed(
+    _state_dir: &Path,
+    _op: &str,
+    _deadline: Duration,
+) -> Result<serde_json::Value> {
+    Err(CliError::usage(
+        "tl fs mounts are supported on Linux (FUSE) and macOS (FSKit) only.",
+    ))
+}
+
 /// [`control_with`] for line-streaming ops (`seal`).
 #[cfg(not(unix))]
 pub async fn control_streaming(
@@ -459,6 +471,28 @@ pub async fn control_streaming(
 #[cfg(unix)]
 pub async fn control(state_dir: &Path, op: &str) -> Result<serde_json::Value> {
     control_with(state_dir, op, serde_json::Value::Null).await
+}
+
+/// [`control`] with a reply deadline, for INSPECTION ops (`ping`/`dirty`/`conflicts`) whose
+/// handlers never wait on the sealer's state lock and answer in milliseconds on a healthy
+/// daemon. A wedged daemon accepts the connection and then never replies — without a deadline
+/// `tl fs status` would hang exactly when it is the diagnostic tool. Mutating ops (`trim`,
+/// `seal`) must NOT use this: they legitimately queue behind an in-flight seal for as long as
+/// its push takes.
+#[cfg(unix)]
+pub async fn control_timed(
+    state_dir: &Path,
+    op: &str,
+    deadline: Duration,
+) -> Result<serde_json::Value> {
+    match tokio::time::timeout(deadline, control(state_dir, op)).await {
+        Ok(result) => result,
+        Err(_) => Err(CliError::usage(format!(
+            "mount daemon did not answer {op} within {}s — it may be wedged; see {}",
+            deadline.as_secs(),
+            state_dir.join("daemon.log").display()
+        ))),
+    }
 }
 
 /// One control round-trip carrying an op payload: `args` must be a JSON object (or null); its

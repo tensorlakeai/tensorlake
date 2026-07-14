@@ -434,6 +434,20 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
 /// your work; `tl fs snapshot -m` remains the named save point.
 const FS_AUTOSAVE_DEFAULT_SECS: u64 = 30;
 
+/// Reply deadline for status's daemon inspection ops (`ping`/`dirty`/`conflicts`). Their
+/// handlers never queue behind the sealer's state lock (the dirty view reads the published
+/// mirror), so a healthy daemon answers in milliseconds even mid-snapshot — while a WEDGED one
+/// accepts the connection and never replies, and status must degrade instead of hanging on the
+/// one command that diagnoses it. Generous: the dirty view's ignore-rule reads go through the
+/// mountpoint and may fetch cold blobs.
+const STATUS_DAEMON_DEADLINE: std::time::Duration = std::time::Duration::from_secs(10);
+
+/// Whether the state dir's recorded daemon pid is a live process — distinguishes "not
+/// running" (stale socket, no process) from "not responding" (alive but wedged) in status.
+fn daemon_pid_alive(state_dir: &Path) -> bool {
+    daemon::daemon_pid(state_dir).is_some_and(daemon_alive)
+}
+
 /// `tl fs create <name>` — a new empty filesystem. Born with a genesis "empty" save
 /// server-side, so it mounts immediately.
 pub async fn create_filesystem(ctx: &CliContext, name: &str, output_json: bool) -> Result<()> {
@@ -3598,7 +3612,51 @@ impl LocalChanges {
 /// dirt-consulting command (`status`, `promote`, `sync`, `diff`) routes through here so none
 /// of them can disagree with what `tl fs snapshot` would actually seal.
 async fn local_changes(state_dir: &Path, mountpoint: &str) -> Result<LocalChanges> {
-    if let Ok(reply) = daemon::control(state_dir, "dirty").await
+    local_changes_guarded(state_dir, mountpoint, false).await
+}
+
+/// [`local_changes`] with a wedged-daemon guard. When the caller has already established the
+/// daemon is alive but NOT answering (status's deadlined ping), every mountpoint read is a
+/// kernel call served by that stuck process and blocks unpreemptably — the ignore-rule loads
+/// and the fallback overlay walk both go through the mount. `unresponsive` skips ALL of it and
+/// returns an inexact empty view; callers render "unknown", never a hang. The dead-daemon case
+/// (no process) keeps the fallback walk: those reads fail fast instead of blocking.
+async fn local_changes_guarded(
+    state_dir: &Path,
+    mountpoint: &str,
+    unresponsive: bool,
+) -> Result<LocalChanges> {
+    let wedged_view = || {
+        Ok(LocalChanges {
+            upserts: Vec::new(),
+            deletes: Vec::new(),
+            renames: pending_renames(state_dir)
+                .into_iter()
+                .map(|(to, from)| (from, to))
+                .collect(),
+            retained: 0,
+            ignored: 0,
+            exact: false,
+        })
+    };
+    if unresponsive {
+        return wedged_view();
+    }
+    // The dirty op carries its own deadline, and the deadline expiring IS the wedged signal
+    // (the daemon may have stalled between the caller's ping and now): skip the walk exactly
+    // like the pre-established flag. A fast failure (no socket, dead daemon, handler error)
+    // falls through to the raw overlay walk, whose mountpoint reads fail fast rather than
+    // block.
+    let dirty_reply = match tokio::time::timeout(
+        STATUS_DAEMON_DEADLINE,
+        daemon::control(state_dir, "dirty"),
+    )
+    .await
+    {
+        Err(_elapsed) => return wedged_view(),
+        Ok(reply) => reply,
+    };
+    if let Ok(reply) = dirty_reply
         && reply.get("ok").and_then(|v| v.as_bool()) == Some(true)
         // Every DirtyReply field is serde-defaulted, so a bare `{"ok":true}` ack (a handler
         // that acknowledges an op it never implemented) would otherwise parse as an EXACT
@@ -4251,16 +4309,26 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
             (ws.created_at_secs, ws.shared_target.clone(), Some(ws))
         }
     };
-    let daemon_commit = daemon::control(&state_dir, "ping")
-        .await
+    // Deadlined daemon reads: status is the diagnostic tool, so a wedged daemon (accepts the
+    // connection, never replies) must degrade the report, not hang it. A missing socket and a
+    // timeout render differently — "not running" and "not responding" call for different
+    // remedies.
+    let ping = daemon::control_timed(&state_dir, "ping", STATUS_DAEMON_DEADLINE).await;
+    let daemon_unresponsive = matches!(&ping, Err(_)) && daemon_pid_alive(&state_dir);
+    let daemon_commit = ping
         .ok()
         .and_then(|r| r.get("commit").and_then(|c| c.as_str().map(str::to_string)));
-    let changes = local_changes(&state_dir, &mountpoint).await?;
+    let changes = local_changes_guarded(&state_dir, &mountpoint, daemon_unresponsive).await?;
     // Collisions the followed state materialized that no later save has overwritten. Absent
     // daemon (or a pre-visibility daemon) reads as none — the section only ever adds signal.
-    let collisions: Vec<(String, String, String)> = daemon::control(&state_dir, "conflicts")
-        .await
-        .ok()
+    // An unresponsive daemon skips the query outright: it will not answer this op either,
+    // and stacking deadlines just delays the report.
+    let collisions: Vec<(String, String, String)> = if daemon_unresponsive {
+        Err(CliError::usage("daemon unresponsive".to_string()))
+    } else {
+        daemon::control_timed(&state_dir, "conflicts", STATUS_DAEMON_DEADLINE).await
+    }
+    .ok()
         .and_then(|r| r.get("conflicts").cloned())
         .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
         .map(|list| {
@@ -4282,6 +4350,7 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
             serde_json::to_string_pretty(&serde_json::json!({
                 "workspace": ws_record.expect("--json always fetches the live record"),
                 "mounted": daemon_commit.is_some(),
+                "daemon_unresponsive": daemon_unresponsive,
                 "lower_commit": daemon_commit,
                 "log": state_dir.join("daemon.log"),
                 "dirty": changes.upserts.iter().cloned()
@@ -4334,6 +4403,11 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     }
     match &daemon_commit {
         Some(commit) => println!("{} mounted at {commit}", style("daemon:").dim()),
+        None if daemon_unresponsive => println!(
+            "{} not responding within {}s — possibly wedged mid-operation (see the log below)",
+            style("daemon:").dim(),
+            STATUS_DAEMON_DEADLINE.as_secs()
+        ),
         None => println!(
             "{} not running (remount with tl fs mount)",
             style("daemon:").dim()
@@ -4367,7 +4441,14 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         .filter(|p| !changes.renames.iter().any(|(from, _)| &from == p))
         .collect();
     let dirty = changes.upserts.len() + deletes.len() + changes.renames.len();
-    if dirty == 0 {
+    if daemon_unresponsive {
+        // An unresponsive daemon means no dirty query ran and no mountpoint read was safe —
+        // claiming "clean" here would report a wedged mount as a healthy one.
+        println!(
+            "{} unknown (the daemon did not answer the dirty query)",
+            style("local:").dim()
+        );
+    } else if dirty == 0 {
         println!("{} clean", style("local:").dim());
     } else {
         println!("{} {} change(s):", style("local:").dim(), dirty);
