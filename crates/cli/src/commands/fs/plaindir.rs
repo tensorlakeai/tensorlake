@@ -1094,20 +1094,10 @@ struct ScanEntry {
     fingerprint: Fingerprint,
 }
 
-/// A strict ignore matcher: same semantics as mount snapshot enumeration (built-ins + root
-/// `.tlignore` names + nested `.gitignore`s via [`SnapshotIgnore`]), except that an
-/// unreadable `.tlignore` aborts instead of silently ignoring nothing — a vanished ignore
-/// rule would widen the tracked set and start uploading (or deleting!) paths the user
-/// declared workspace-local. `SnapshotIgnore` already aborts on unreadable `.gitignore`s.
+/// A strict ignore matcher with the same nested `.gitignore` semantics as mount snapshot
+/// enumeration. `SnapshotIgnore` aborts on unreadable `.gitignore`s so a vanished rule cannot
+/// silently widen the tracked set and start uploading or deleting paths.
 fn strict_ignore(root: &Path) -> Result<SnapshotIgnore> {
-    let tlignore = root.join(".tlignore");
-    if std::fs::symlink_metadata(&tlignore).is_ok() && std::fs::read_to_string(&tlignore).is_err() {
-        return Err(CliError::usage(format!(
-            "cannot read {}; aborting the scan (unreadable ignore rules would silently widen \
-             what gets uploaded)",
-            tlignore.display()
-        )));
-    }
     Ok(SnapshotIgnore::new(root))
 }
 
@@ -2579,26 +2569,6 @@ mod tests {
         h.update(b"../target/file");
         assert_eq!(hashed.oid, h.finalize_hex());
         assert!(hashed.stable_fingerprint.is_some());
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn unreadable_tlignore_aborts() {
-        use std::os::unix::fs::PermissionsExt as _;
-        if unsafe { libc::geteuid() } == 0 {
-            return;
-        }
-        let dir = tempfile::tempdir().unwrap();
-        let tlignore = dir.path().join(".tlignore");
-        std::fs::write(&tlignore, "scratch\n").unwrap();
-        std::fs::set_permissions(&tlignore, std::fs::Permissions::from_mode(0o000)).unwrap();
-        // (`unwrap_err` needs Debug on the Ok side; SnapshotIgnore has none.)
-        let err = match strict_ignore(dir.path()) {
-            Ok(_) => panic!("unreadable .tlignore must abort"),
-            Err(e) => e.to_string(),
-        };
-        std::fs::set_permissions(&tlignore, std::fs::Permissions::from_mode(0o644)).unwrap();
-        assert!(err.contains(".tlignore"), "{err}");
     }
 
     // -- journal recovery decision table ----------------------------------------------------

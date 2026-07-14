@@ -19,9 +19,9 @@
 //! upper keeps serving the byte-identical sealed content as a local byte cache, accounted
 //! for by the sealed index (`sealed.json`, which also survives daemon restarts) and
 //! reported by `status` as `retained`. `sync` asks the daemon to `trim` retained content
-//! (safe: it is all in workspace history; ignored files survive); `snapshot --clear`
-//! remains the explicit, destructive opt-in that drops the WHOLE overlay, ignored files
-//! included. `promote` CAS-advances a real branch (squash by default); `restore` refills
+//! (safe: it is all in workspace history; ignored files survive); `tl git snapshot
+//! --clear` (the fs surface lost the flag in the dumb-simple audit) remains the explicit,
+//! destructive opt-in that drops the WHOLE overlay, ignored files included. `promote` CAS-advances a real branch (squash by default); `restore` refills
 //! the overlay from any snapshot. FUSE is the only mount path — Linux builds carry it
 //! unconditionally, macOS requires macFUSE and the `macfuse` build feature.
 
@@ -3027,14 +3027,13 @@ pub async fn unmount(
 // Snapshot: the overlay is the dirty set.
 // ---------------------------------------------------------------------------------------------
 
-/// Walk the overlay state dir: `(upserts, deletes)` as repo paths. Ignored names (built-ins +
-/// the mount's `.tlignore`) are workspace-local and never enumerate.
+/// Walk the overlay state dir: `(upserts, deletes)` as repo paths. Nested `.gitignore` files are
+/// the sole authority for paths that do not enumerate.
 /// Overlay upserts as `(repo path, upper file, git mode)`.
 type OverlayUpserts = Vec<(String, PathBuf, u32)>;
 
 struct SnapshotIgnore {
     mount_root: PathBuf,
-    ignored_names: Vec<String>,
     gitignores: HashMap<PathBuf, Gitignore>,
 }
 
@@ -3042,7 +3041,6 @@ impl SnapshotIgnore {
     fn new(mount_root: &Path) -> Self {
         Self {
             mount_root: mount_root.to_path_buf(),
-            ignored_names: local::ignored_names(mount_root),
             gitignores: HashMap::new(),
         }
     }
@@ -3070,18 +3068,6 @@ impl SnapshotIgnore {
 
     fn is_ignored(&mut self, rel: &str, is_dir: bool) -> Result<bool> {
         let rel_path = Path::new(rel);
-        for component in rel_path.components() {
-            let Component::Normal(name) = component else {
-                continue;
-            };
-            let name = name.to_string_lossy();
-            if self.ignored_names.iter().any(|ignored| ignored == &*name)
-                || local::is_metadata_turd(&name)
-            {
-                return Ok(true);
-            }
-        }
-
         let abs = self.mount_root.join(rel_path);
         let mut ignored = false;
         for dir in gitignore_dirs_for(rel_path) {
@@ -3596,7 +3582,7 @@ struct LocalChanges {
     renames: Vec<(String, String)>,
     /// Upper files sealed into a snapshot and kept as the local byte cache.
     retained: usize,
-    /// Ignored local-only files (never enter a snapshot; only `snapshot --clear` drops them).
+    /// Ignored local-only files (never enter a snapshot; only `tl git snapshot --clear` drops them).
     ignored: usize,
     exact: bool,
 }
@@ -4475,7 +4461,7 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     if changes.retained > 0 {
         println!(
             "{} {} file(s) sealed into snapshots and kept locally as the byte cache \
-             (`tl fs snapshot --clear` drops them)",
+             (reclaim the disk with `tl git snapshot --clear`)",
             style("retained:").dim(),
             changes.retained
         );

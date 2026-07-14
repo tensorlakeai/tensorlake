@@ -148,7 +148,7 @@ pub struct MountState {
     #[serde(default)]
     pub read_only: Option<bool>,
     /// Periodic auto-commit: the daemon seals the overlay's dirty set into a snapshot commit
-    /// every this many seconds. The overlay is kept (only `tl fs snapshot --clear` drops it),
+    /// every this many seconds. The overlay is kept (only `tl git snapshot --clear` drops it),
     /// so writes racing an auto-commit are never dropped — they ride the next one. Absent on
     /// mounts that didn't opt in and in state files from before the feature.
     #[serde(default)]
@@ -948,7 +948,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     // generation: everything sealed earlier is already served by the lower (the workspace ref
     // advances with each snapshot), so commits are incremental deltas, and unchanged dirty
     // files are never re-hashed or re-sent. The overlay is NOT cleared — the upper keeps
-    // shadowing the byte-identical sealed content (only `tl fs snapshot --clear` drops it,
+    // shadowing the byte-identical sealed content (only `tl git snapshot --clear` drops it,
     // an explicitly destructive opt-in that requires quiesced writers).
     if let Some(secs) = state.auto_commit_interval_secs
         && let Some(sealer) = sealer.clone()
@@ -1524,7 +1524,7 @@ impl Sealer {
     /// published, and the dirty set stays pending for the next cycle.
     ///
     /// `clear` drops the WHOLE overlay after the seal (and its lower refresh), inside this
-    /// same cycle's state lock — the destructive `tl fs snapshot --clear` opt-in. Running it
+    /// same cycle's state lock — the destructive `tl git snapshot --clear` opt-in. Running it
     /// here, not as a separate control op, is what makes the drop coherent: no writer-visible
     /// window where another seal (or auto-commit tick) interleaves between seal and clear,
     /// and the outcome reports exactly which paths the clear removed. A clean seal still
@@ -1878,7 +1878,7 @@ impl Sealer {
                 self.clear_overlay(&mut st).map_err(|e| {
                     CliError::usage(format!(
                         "snapshot {} sealed, but clearing the overlay failed: {e}; the \
-                         overlay is kept — retry with `tl fs snapshot --clear`",
+                         overlay is kept — retry with `tl git snapshot --clear`",
                         report.commit
                     ))
                 })
