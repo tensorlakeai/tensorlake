@@ -39,6 +39,13 @@ pub const ENTRY_MODE_MASK: u32 = 0o7777;
 const NATIVE_METADATA_REQUEST_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const NATIVE_METADATA_REQUEST_MAX_OBJECTS: usize = 4096;
 const NATIVE_METADATA_UPLOAD_CONCURRENCY: usize = 8;
+// Keep cold-snapshot segments small enough to remain in bounded memory while their single-part PUT
+// is in flight. This preserves exact full-object SHA-256 validation without a local tempfile or a
+// multipart completion protocol.
+const NATIVE_MEMORY_SEGMENT_TARGET_BYTES: u64 = 32 * 1024 * 1024;
+const NATIVE_RECORD_LOGICAL_BYTES: u64 = 16 * 1024 * 1024;
+const NATIVE_SEGMENT_UPLOAD_QUEUE: usize = 4;
+const NATIVE_SEGMENT_UPLOAD_CONCURRENCY: usize = 8;
 // Snapshots optimize for wall time: immutable segment dedup amortizes the modest ratio difference,
 // while level 2 keeps compression from becoming the bottleneck ahead of direct blob uploads.
 const NATIVE_SEGMENT_ZSTD_LEVEL: i32 = 2;
@@ -663,14 +670,23 @@ pub struct NativePushReport {
 struct BuiltSegment {
     id: ObjectId,
     len: u64,
-    temp: tempfile::NamedTempFile,
+    // Pipelined cold snapshots move the in-memory body to the uploader immediately and retain only
+    // this segment's immutable identity. Non-pipelined delta preparation keeps its existing
+    // tempfile fallback so a large change set does not accumulate all segment bodies in memory.
+    temp: Option<tempfile::NamedTempFile>,
 }
 
 #[derive(Clone)]
 struct PreparedSegmentUpload {
     id: ObjectId,
     len: u64,
-    path: PathBuf,
+    body: PreparedSegmentBody,
+}
+
+#[derive(Clone)]
+enum PreparedSegmentBody {
+    Memory(bytes::Bytes),
+    File(PathBuf),
 }
 
 struct PipelinedSegmentReport {
@@ -798,11 +814,11 @@ struct SegmentBuilder {
     max_bytes: u64,
     current: Option<OpenSegment>,
     complete: Vec<BuiltSegment>,
-    completed_segments: Option<tokio::sync::mpsc::UnboundedSender<Vec<PreparedSegmentUpload>>>,
+    completed_segments: Option<tokio::sync::mpsc::Sender<Vec<PreparedSegmentUpload>>>,
 }
 
 struct OpenSegment {
-    temp: tempfile::NamedTempFile,
+    bytes: Vec<u8>,
     hasher: SegmentIdHasher,
     len: u64,
 }
@@ -815,7 +831,7 @@ impl SegmentBuilder {
             ));
         }
         Ok(Self {
-            target_bytes,
+            target_bytes: target_bytes.min(NATIVE_MEMORY_SEGMENT_TARGET_BYTES),
             max_bytes: max_bytes.min(MAX_SEGMENT_BYTES),
             current: None,
             complete: Vec::new(),
@@ -825,7 +841,7 @@ impl SegmentBuilder {
 
     fn with_completed_segments(
         mut self,
-        completed_segments: Option<tokio::sync::mpsc::UnboundedSender<Vec<PreparedSegmentUpload>>>,
+        completed_segments: Option<tokio::sync::mpsc::Sender<Vec<PreparedSegmentUpload>>>,
     ) -> Self {
         self.completed_segments = completed_segments;
         self
@@ -852,7 +868,7 @@ impl SegmentBuilder {
             self.finish_current()?;
         }
         let current = self.current.get_or_insert(OpenSegment {
-            temp: tempfile::NamedTempFile::new()?,
+            bytes: Vec::with_capacity(self.target_bytes as usize),
             hasher: ObjectId::segment_hasher(),
             len: 0,
         });
@@ -863,7 +879,7 @@ impl SegmentBuilder {
             )));
         }
         let offset = current.len;
-        current.temp.write_all(&stored)?;
+        current.bytes.extend_from_slice(&stored);
         current.hasher.update(&stored);
         current.len += stored.len() as u64;
         Ok(PendingSlice {
@@ -876,26 +892,36 @@ impl SegmentBuilder {
     }
 
     fn finish_current(&mut self) -> Result<(), SdkError> {
-        let Some(mut current) = self.current.take() else {
+        let Some(current) = self.current.take() else {
             return Ok(());
         };
-        current.temp.flush()?;
-        let segment = BuiltSegment {
-            id: current.hasher.finalize(),
-            len: current.len,
-            temp: current.temp,
-        };
+        let id = current.hasher.finalize();
+        let len = current.len;
+        let bytes = bytes::Bytes::from(current.bytes);
         if let Some(sender) = &self.completed_segments {
-            // Keep the tempfile owned by the prepared snapshot while the uploader reads it. A
-            // dropped receiver means another upload already failed; the scanner still returns its
-            // own precise result to the async join point.
-            let _ = sender.send(vec![PreparedSegmentUpload {
-                id: segment.id,
-                len: segment.len,
-                path: segment.temp.path().to_path_buf(),
+            // Backpressure bounds the combined scanner/uploader memory even when blob storage is
+            // slower than local compression. A dropped receiver means another upload already
+            // failed; scanning still returns its own precise result to the async join point.
+            let _ = sender.blocking_send(vec![PreparedSegmentUpload {
+                id,
+                len,
+                body: PreparedSegmentBody::Memory(bytes),
             }]);
+            self.complete.push(BuiltSegment {
+                id,
+                len,
+                temp: None,
+            });
+        } else {
+            let mut temp = tempfile::NamedTempFile::new()?;
+            temp.write_all(&bytes)?;
+            temp.flush()?;
+            self.complete.push(BuiltSegment {
+                id,
+                len,
+                temp: Some(temp),
+            });
         }
-        self.complete.push(segment);
         Ok(())
     }
 
@@ -918,7 +944,7 @@ fn prepare_native_snapshot_with_sender(
     root: &Path,
     target_segment_bytes: u64,
     max_segment_bytes: u64,
-    completed_segments: Option<tokio::sync::mpsc::UnboundedSender<Vec<PreparedSegmentUpload>>>,
+    completed_segments: Option<tokio::sync::mpsc::Sender<Vec<PreparedSegmentUpload>>>,
 ) -> Result<PreparedNativeSnapshot, SdkError> {
     let root = root.canonicalize()?;
     if !root.is_dir() {
@@ -1359,7 +1385,7 @@ fn read_file_once(
     let expected_slices = expected
         .len()
         .max(prefix.len() as u64)
-        .div_ceil(MAX_SEGMENT_SLICE_LOGICAL_BYTES) as usize;
+        .div_ceil(NATIVE_RECORD_LOGICAL_BYTES) as usize;
     // A one-slice recipe's leaf, root, record, and whole-file identities are identical. Avoid
     // hashing nearly every ordinary file three times. Multi-slice files still hash each record
     // once plus the recipe nodes needed for range-addressable reads; the recipe root is already
@@ -1373,7 +1399,7 @@ fn read_file_once(
     let mut total_len = 0u64;
     let mut logical = prefix;
     loop {
-        let remaining = MAX_SEGMENT_SLICE_LOGICAL_BYTES as usize - logical.len();
+        let remaining = NATIVE_RECORD_LOGICAL_BYTES as usize - logical.len();
         Read::by_ref(&mut file)
             .take(remaining as u64)
             .read_to_end(&mut logical)?;
@@ -1392,10 +1418,10 @@ fn read_file_once(
         let record_id = ObjectId::file_content(&logical);
         total_len += logical.len() as u64;
         parts.push(segments.append_record(&logical, record_id)?);
-        if logical.len() < MAX_SEGMENT_SLICE_LOGICAL_BYTES as usize {
+        if logical.len() < NATIVE_RECORD_LOGICAL_BYTES as usize {
             break;
         }
-        logical = Vec::with_capacity(MAX_SEGMENT_SLICE_LOGICAL_BYTES as usize);
+        logical = Vec::with_capacity(NATIVE_RECORD_LOGICAL_BYTES as usize);
     }
     if parts.len() != expected_slices {
         return Err(client_error(format!(
@@ -2337,7 +2363,8 @@ impl ArtifactStorageClient {
         let source = root.to_path_buf();
         let target_segment_bytes = session.target_segment_bytes;
         let max_segment_bytes = session.max_segment_bytes;
-        let (segment_sender, segment_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let (segment_sender, segment_receiver) =
+            tokio::sync::mpsc::channel(NATIVE_SEGMENT_UPLOAD_QUEUE);
         let scanner = tokio::task::spawn_blocking(move || {
             prepare_native_snapshot_with_sender(
                 &source,
@@ -3675,9 +3702,8 @@ async fn upload_pipelined_segments(
     session: &NativeUploadSession,
     username: &str,
     token: &str,
-    mut completed: tokio::sync::mpsc::UnboundedReceiver<Vec<PreparedSegmentUpload>>,
+    mut completed: tokio::sync::mpsc::Receiver<Vec<PreparedSegmentUpload>>,
 ) -> Result<PipelinedSegmentReport, SdkError> {
-    const UPLOAD_CONCURRENCY: usize = 32;
     let query_limit = session.max_segments_per_query.clamp(1, 4096);
     let mut seen = HashSet::new();
     let mut uploaded_ids = HashSet::new();
@@ -3726,7 +3752,7 @@ async fn upload_pipelined_segments(
             if !missing.contains(&segment.id) {
                 continue;
             }
-            while uploads.len() >= UPLOAD_CONCURRENCY {
+            while uploads.len() >= NATIVE_SEGMENT_UPLOAD_CONCURRENCY {
                 let (id, bytes) = uploads
                     .join_next()
                     .await
@@ -3780,6 +3806,9 @@ async fn upload_prepared_segment(
     token: &str,
     segment: &BuiltSegment,
 ) -> Result<u64, SdkError> {
+    let temp = segment.temp.as_ref().ok_or_else(|| {
+        client_error("pipelined native segment body was not handed to its uploader")
+    })?;
     upload_prepared_segment_file(
         client,
         project_id,
@@ -3790,7 +3819,7 @@ async fn upload_prepared_segment(
         PreparedSegmentUpload {
             id: segment.id,
             len: segment.len,
-            path: segment.temp.path().to_path_buf(),
+            body: PreparedSegmentBody::File(temp.path().to_path_buf()),
         },
     )
     .await
@@ -3827,14 +3856,7 @@ async fn upload_prepared_segment_file(
                 .await?,
         )
         .await?;
-        let file = tokio::fs::File::open(&segment.path).await?;
-        // ReaderStream's small default buffer creates hundreds of thousands of HTTP body frames
-        // for a multi-gigabyte snapshot. Multi-MiB frames keep syscall and Hyper framing overhead below
-        // the object-store transfer cost while preserving bounded memory per concurrent upload.
-        let body = Body::wrap_stream(tokio_util::io::ReaderStream::with_capacity(
-            file,
-            4 * 1024 * 1024,
-        ));
+        let body = prepared_segment_body(&segment.body).await?;
         match target.url {
             Some(url) => {
                 let checksum = target.checksum_sha256.as_deref().ok_or_else(|| {
@@ -3854,9 +3876,9 @@ async fn upload_prepared_segment_file(
                         StatusCode::FORBIDDEN | StatusCode::UNAUTHORIZED
                     )
                 {
-                    // A short-lived object-store signature can expire while a large segment is
-                    // streaming. The segment is already in a local temp file, so mint a fresh
-                    // random target and replay it without rereading the user's source file.
+                    // A short-lived object-store signature can expire while a segment is
+                    // streaming. Its immutable in-memory body or fallback tempfile can be replayed
+                    // with a freshly minted random target without rereading the user's source.
                     continue;
                 }
                 expect_ok(response).await?;
@@ -3910,6 +3932,20 @@ async fn upload_prepared_segment_file(
         return Ok(segment.len);
     }
     unreachable!("the final presigned upload attempt returns")
+}
+
+async fn prepared_segment_body(body: &PreparedSegmentBody) -> Result<Body, SdkError> {
+    match body {
+        PreparedSegmentBody::Memory(bytes) => Ok(Body::from(bytes.clone())),
+        PreparedSegmentBody::File(path) => {
+            let file = tokio::fs::File::open(path).await?;
+            // Multi-MiB frames keep syscall and Hyper framing overhead below the object-store
+            // transfer cost for the non-pipelined tempfile fallback.
+            Ok(Body::wrap_stream(
+                tokio_util::io::ReaderStream::with_capacity(file, 4 * 1024 * 1024),
+            ))
+        }
+    }
 }
 
 async fn wait_for_native_verification(
@@ -4458,10 +4494,37 @@ mod tests {
             .iter()
             .find(|segment| segment.id == slice.segment)
             .unwrap();
-        let bytes = std::fs::read(segment.temp.path()).unwrap();
+        let bytes = std::fs::read(segment.temp.as_ref().unwrap().path()).unwrap();
         let stored =
             &bytes[slice.offset as usize..slice.offset as usize + slice.stored_len as usize];
         assert_eq!(zstd::stream::decode_all(stored).unwrap(), payload);
+    }
+
+    #[test]
+    fn native_cold_scan_hands_off_memory_without_a_tempfile() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload = vec![b'm'; MAX_INLINE_BYTES + 123];
+        std::fs::write(temp.path().join("payload.bin"), &payload).unwrap();
+        let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+
+        let prepared = prepare_native_snapshot_with_sender(
+            temp.path(),
+            96 * 1024 * 1024,
+            MAX_SEGMENT_BYTES,
+            Some(sender),
+        )
+        .unwrap();
+
+        assert_eq!(prepared.segments.len(), 1);
+        assert!(prepared.segments[0].temp.is_none());
+        let uploads = receiver.blocking_recv().unwrap();
+        assert_eq!(uploads.len(), 1);
+        let PreparedSegmentBody::Memory(bytes) = &uploads[0].body else {
+            panic!("cold scan must hand an in-memory segment directly to the uploader")
+        };
+        assert_eq!(bytes.len() as u64, uploads[0].len);
+        assert_eq!(ObjectId::segment(bytes), uploads[0].id);
+        assert_eq!(zstd::stream::decode_all(bytes.as_ref()).unwrap(), payload);
     }
 
     #[cfg(unix)]
