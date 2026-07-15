@@ -19,7 +19,7 @@ use pyo3_async_runtimes::tokio::future_into_py;
 use reqwest::Method;
 use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
-use serde_json::Value;
+use serde_json::{Value, json};
 use tensorlake::artifact_storage::ArtifactStorageClient;
 use tensorlake::artifact_storage::ingest::PushOptions;
 use tensorlake::artifact_storage::merge::MergeRequest;
@@ -131,6 +131,29 @@ impl CloudApiClient {
 
                 let _response = client.execute(request).await?;
                 Ok(())
+            }
+        })
+    }
+
+    fn ensure_application_public_endpoint_json(
+        &self,
+        application_name: String,
+        allow: Vec<String>,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |client| {
+            let application_name = application_name.clone();
+            let allow = allow.clone();
+            async move {
+                let request = client
+                    .request(Method::POST, "/platform/v1/application-public-endpoints")
+                    .json(&json!({
+                        "application_name": application_name,
+                        "allow": allow,
+                    }))
+                    .build()?;
+
+                let response = client.execute(request).await?;
+                Ok(response.text().await?)
             }
         })
     }

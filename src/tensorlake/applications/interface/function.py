@@ -2,7 +2,7 @@ import inspect
 import types
 from collections.abc import Coroutine
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, Iterable, List
+from typing import Any, Callable, Dict, Iterable, List, Literal
 
 from tensorlake.image import Image
 
@@ -20,6 +20,8 @@ from .futures import (
     _wrap_future_into_coroutine,
 )
 from .retries import Retries
+
+ApplicationCapability = Literal["unauthorized_requests"]
 
 
 @dataclass
@@ -52,6 +54,7 @@ class _ApplicationConfiguration:
     tags: Dict[str, str]
     retries: Retries
     region: str | None
+    allow: List[ApplicationCapability]
     version: str
 
 

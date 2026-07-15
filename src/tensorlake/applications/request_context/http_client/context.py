@@ -8,6 +8,7 @@ from tensorlake.applications.internal_logger import InternalLogger
 
 from ...interface.request_context import (
     FunctionProgress,
+    Headers,
     RequestContext,
     RequestMetrics,
     RequestState,
@@ -36,11 +37,13 @@ class RequestContextHTTPClient(RequestContext):
         http_client: RequestContextHTTPTransport,
         blob_store: BLOBStore,
         logger: InternalLogger,
+        headers: dict[str, str] | list[tuple[str, str]] | Headers | None = None,
     ):
         self._request_id: str = request_id
         self._allocation_id: str = allocation_id
         self._function_name: str = function_name
         self._function_run_id: str = function_run_id
+        self._headers: Headers = Headers(headers)
         self._server_base_url: str = server_base_url
         self._blob_store: BLOBStore = blob_store
         self._logger: InternalLogger = logger.bind(module=__name__)
@@ -90,6 +93,7 @@ class RequestContextHTTPClient(RequestContext):
             "allocation_id": self._allocation_id,
             "function_name": self._function_name,
             "function_run_id": self._function_run_id,
+            "headers": self._headers.multi_items(),
             "server_base_url": self._server_base_url,
             "blob_store": self._blob_store,
             "logger": self._logger,
@@ -110,11 +114,16 @@ class RequestContextHTTPClient(RequestContext):
             ),
             blob_store=state["blob_store"],
             logger=state["logger"],
+            headers=state.get("headers"),
         )
 
     @property
     def request_id(self) -> str:
         return self._request_id
+
+    @property
+    def headers(self) -> Headers:
+        return Headers(self._headers.multi_items())
 
     @property
     def state(self) -> RequestState:
