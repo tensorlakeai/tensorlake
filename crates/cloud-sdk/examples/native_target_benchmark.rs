@@ -175,6 +175,7 @@ async fn main() -> Result<()> {
     let fixture_wall = fixture_started.elapsed();
     let changed_files = upserts.len();
     let incremental_started = Instant::now();
+    let incremental_progress_started = incremental_started;
     let incremental = client
         .push_native_changes_with_credential(
             &project,
@@ -189,6 +190,12 @@ async fn main() -> Result<()> {
                 message: "One-percent Rust target update".into(),
                 expected_snapshot_id: Some(cold.snapshot_id.clone()),
                 workspace_id: Some(workspace.workspace_id.clone()),
+                progress: Some(Arc::new(move |event: NativePushEvent| {
+                    eprintln!(
+                        "incremental phase elapsed_ms={} event={event:?}",
+                        incremental_progress_started.elapsed().as_millis()
+                    );
+                })),
                 ..Default::default()
             },
         )

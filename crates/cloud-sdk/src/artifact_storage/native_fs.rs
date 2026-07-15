@@ -38,6 +38,7 @@ pub const ENTRY_MODE_MASK: u32 = 0o7777;
 // turn a valid large tree into a 413 response.
 const NATIVE_METADATA_REQUEST_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const NATIVE_METADATA_REQUEST_MAX_OBJECTS: usize = 4096;
+const NATIVE_METADATA_UPLOAD_CONCURRENCY: usize = 8;
 // Snapshots optimize for wall time: immutable segment dedup amortizes the modest ratio difference,
 // while level 2 keeps compression from becoming the bottleneck ahead of direct blob uploads.
 const NATIVE_SEGMENT_ZSTD_LEVEL: i32 = 2;
@@ -797,6 +798,7 @@ struct SegmentBuilder {
     max_bytes: u64,
     current: Option<OpenSegment>,
     complete: Vec<BuiltSegment>,
+    completed_segments: Option<tokio::sync::mpsc::UnboundedSender<Vec<PreparedSegmentUpload>>>,
 }
 
 struct OpenSegment {
@@ -817,7 +819,16 @@ impl SegmentBuilder {
             max_bytes: max_bytes.min(MAX_SEGMENT_BYTES),
             current: None,
             complete: Vec::new(),
+            completed_segments: None,
         })
+    }
+
+    fn with_completed_segments(
+        mut self,
+        completed_segments: Option<tokio::sync::mpsc::UnboundedSender<Vec<PreparedSegmentUpload>>>,
+    ) -> Self {
+        self.completed_segments = completed_segments;
+        self
     }
 
     fn append_record(
@@ -869,11 +880,22 @@ impl SegmentBuilder {
             return Ok(());
         };
         current.temp.flush()?;
-        self.complete.push(BuiltSegment {
+        let segment = BuiltSegment {
             id: current.hasher.finalize(),
             len: current.len,
             temp: current.temp,
-        });
+        };
+        if let Some(sender) = &self.completed_segments {
+            // Keep the tempfile owned by the prepared snapshot while the uploader reads it. A
+            // dropped receiver means another upload already failed; the scanner still returns its
+            // own precise result to the async join point.
+            let _ = sender.send(vec![PreparedSegmentUpload {
+                id: segment.id,
+                len: segment.len,
+                path: segment.temp.path().to_path_buf(),
+            }]);
+        }
+        self.complete.push(segment);
         Ok(())
     }
 
@@ -1046,10 +1068,10 @@ fn prepare_native_snapshot_with_sender(
         .iter()
         .map(|task| task.before.len().max(64 * 1024))
         .sum();
-    // Byte-balance one independently scheduled group per worker. SegmentBuilder still splits any
-    // group that crosses the server target, while avoiding an object-count floor above CPU
-    // parallelism on highly compressible trees.
-    let desired_groups = rayon::current_num_threads().max(1);
+    // Keep two independently scheduled groups per worker. The extra deterministic work units let
+    // Rayon's faster cores steal the tail from slower cores without recreating the old tiny-pack
+    // explosion; SegmentBuilder still splits a group that crosses the server target.
+    let desired_groups = rayon::current_num_threads().saturating_mul(2).max(1);
     let group_target = total_weight
         .div_ceil(desired_groups as u64)
         .max(64 * 1024 * 1024);
@@ -1071,7 +1093,8 @@ fn prepare_native_snapshot_with_sender(
     let group_results: Vec<ParallelFileGroup> = groups
         .into_par_iter()
         .map(|tasks| {
-            let mut builder = SegmentBuilder::new(target_segment_bytes, max_segment_bytes)?;
+            let mut builder = SegmentBuilder::new(target_segment_bytes, max_segment_bytes)?
+                .with_completed_segments(completed_segments.clone());
             let mut files = Vec::with_capacity(tasks.len());
             for task in tasks {
                 let (content, size) = read_file_once(&task.source, &task.before, &mut builder)?;
@@ -1097,19 +1120,6 @@ fn prepare_native_snapshot_with_sender(
                 files.push((task.entry_index, content, size));
             }
             let segments = builder.finish()?;
-            if let Some(sender) = &completed_segments {
-                let upload = segments
-                    .iter()
-                    .map(|segment| PreparedSegmentUpload {
-                        id: segment.id,
-                        len: segment.len,
-                        path: segment.temp.path().to_path_buf(),
-                    })
-                    .collect();
-                // A dropped receiver means another upload already failed. Scanning remains
-                // independently fallible and returns its own precise error to the join point.
-                let _ = sender.send(upload);
-            }
             Ok(ParallelFileGroup { files, segments })
         })
         .collect::<Result<_, SdkError>>()?;
@@ -1350,8 +1360,15 @@ fn read_file_once(
         .len()
         .max(prefix.len() as u64)
         .div_ceil(MAX_SEGMENT_SLICE_LOGICAL_BYTES) as usize;
-    let mut recipe_plan = RecipeHashPlan::new(expected_slices)?;
-    let mut whole_hasher = ObjectId::file_content_hasher();
+    // A one-slice recipe's leaf, root, record, and whole-file identities are identical. Avoid
+    // hashing nearly every ordinary file three times. Multi-slice files still hash each record
+    // once plus the recipe nodes needed for range-addressable reads; the recipe root is already
+    // the whole-file identity, so a separate whole-file hasher is always redundant.
+    let mut recipe_plan = if expected_slices == 1 {
+        None
+    } else {
+        Some(RecipeHashPlan::new(expected_slices)?)
+    };
     let mut parts = Vec::with_capacity(expected_slices);
     let mut total_len = 0u64;
     let mut logical = prefix;
@@ -1364,14 +1381,15 @@ fn read_file_once(
             break;
         }
         let part_index = parts.len();
-        recipe_plan.note(part_index, &logical).map_err(|_| {
-            client_error(format!(
-                "{} grew while it was being snapshotted; retry",
-                path.display()
-            ))
-        })?;
+        if let Some(plan) = &mut recipe_plan {
+            plan.note(part_index, &logical).map_err(|_| {
+                client_error(format!(
+                    "{} grew while it was being snapshotted; retry",
+                    path.display()
+                ))
+            })?;
+        }
         let record_id = ObjectId::file_content(&logical);
-        whole_hasher.update(&logical);
         total_len += logical.len() as u64;
         parts.push(segments.append_record(&logical, record_id)?);
         if logical.len() < MAX_SEGMENT_SLICE_LOGICAL_BYTES as usize {
@@ -1385,10 +1403,25 @@ fn read_file_once(
             path.display()
         )));
     }
-    let content_id = whole_hasher.finalize();
-    let recipe = recipe_plan.finish(parts);
+    let recipe = match recipe_plan {
+        Some(plan) => plan.finish(parts),
+        None => {
+            let content_id = parts[0].content_id;
+            PendingRecipe {
+                parts,
+                nodes: vec![PendingRecipeNode {
+                    level: 0,
+                    part_range: 0..1,
+                    children: Vec::new(),
+                    logical_len: total_len,
+                    content_id,
+                }],
+                root: 0,
+            }
+        }
+    };
+    let content_id = recipe.nodes[recipe.root].content_id;
     debug_assert_eq!(recipe.nodes[recipe.root].logical_len, total_len);
-    debug_assert_eq!(recipe.nodes[recipe.root].content_id, content_id);
     Ok((
         PendingContent::Segments {
             logical_len: total_len,
@@ -1556,54 +1589,99 @@ fn build_metadata(
             .push(entry);
     }
 
-    let mut order: Vec<PathBuf> = directories.keys().cloned().collect();
-    order.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    let mut levels: BTreeMap<usize, Vec<PathBuf>> = BTreeMap::new();
+    for directory in directories.keys() {
+        levels
+            .entry(directory.components().count())
+            .or_default()
+            .push(directory.clone());
+    }
     let mut roots = BTreeMap::new();
     let mut pages = Vec::new();
     let mut recipes = Vec::new();
-    for directory in order {
-        let children = directories.remove(&directory).unwrap_or_default();
-        let mut entries = Vec::with_capacity(children.len());
-        for child in children {
-            let name = child
-                .rel
-                .file_name()
-                .map(raw_os_bytes)
-                .ok_or_else(|| client_error("filesystem entry has no filename"))?;
-            let data = match child.data {
-                ScannedData::Directory => EntryData::Directory {
-                    root: *roots.get(&child.rel).ok_or_else(|| {
-                        client_error(format!(
-                            "directory {} was not built bottom-up",
-                            child.rel.display()
-                        ))
-                    })?,
-                },
-                ScannedData::Symlink { target } => EntryData::Symlink { target },
-                ScannedData::File {
-                    size,
-                    content,
-                    hardlink_group,
-                } => EntryData::File {
-                    size,
-                    content: resolve_content(content, segments, &mut recipes)?,
-                    hardlink_group,
-                },
-            };
-            entries.push(DirectoryEntry {
-                name,
-                metadata: child.metadata,
-                data,
-            });
+    for (_, directories_at_depth) in levels.into_iter().rev() {
+        // A directory only references roots from deeper levels, so all directories at one depth
+        // are independent. Collecting an indexed parallel iterator retains lexical input order and
+        // therefore keeps the staged-object vectors deterministic as well as their content ids.
+        let work: Vec<_> = directories_at_depth
+            .into_iter()
+            .map(|directory| {
+                let children = directories.remove(&directory).unwrap_or_default();
+                (directory, children)
+            })
+            .collect();
+        let built: Vec<_> = work
+            .into_par_iter()
+            .map(|(directory, children)| build_one_directory(directory, children, &roots, segments))
+            .collect::<Result<_, SdkError>>()?;
+        for built_directory in built {
+            pages.extend(built_directory.pages);
+            recipes.extend(built_directory.recipes);
+            roots.insert(built_directory.path, built_directory.root);
         }
-        entries.sort_by(|a, b| a.name.cmp(&b.name));
-        let root = build_directory_pages(entries, &mut pages)?;
-        roots.insert(directory, root);
     }
     let root = roots
         .remove(&PathBuf::new())
         .ok_or_else(|| client_error("snapshot root was not built"))?;
     Ok((root, pages, recipes))
+}
+
+struct BuiltDirectory {
+    path: PathBuf,
+    root: ObjectId,
+    pages: Vec<DirectoryPage>,
+    recipes: Vec<ChunkRecipe>,
+}
+
+fn build_one_directory(
+    directory: PathBuf,
+    children: Vec<ScannedEntry>,
+    roots: &BTreeMap<PathBuf, ObjectId>,
+    segments: &[BuiltSegment],
+) -> Result<BuiltDirectory, SdkError> {
+    let mut entries = Vec::with_capacity(children.len());
+    let mut recipes = Vec::new();
+    for child in children {
+        let name = child
+            .rel
+            .file_name()
+            .map(raw_os_bytes)
+            .ok_or_else(|| client_error("filesystem entry has no filename"))?;
+        let data = match child.data {
+            ScannedData::Directory => EntryData::Directory {
+                root: *roots.get(&child.rel).ok_or_else(|| {
+                    client_error(format!(
+                        "directory {} was not built bottom-up",
+                        child.rel.display()
+                    ))
+                })?,
+            },
+            ScannedData::Symlink { target } => EntryData::Symlink { target },
+            ScannedData::File {
+                size,
+                content,
+                hardlink_group,
+            } => EntryData::File {
+                size,
+                content: resolve_content(content, segments, &mut recipes)?,
+                hardlink_group,
+            },
+        };
+        entries.push(DirectoryEntry {
+            name,
+            metadata: child.metadata,
+            data,
+        });
+    }
+    entries.sort_by(|a, b| a.name.cmp(&b.name));
+    let mut pages = Vec::new();
+    let root = build_directory_pages(entries, &mut pages)?;
+    Ok(BuiltDirectory {
+        path: directory,
+        root,
+        pages,
+        recipes,
+    })
 }
 
 fn resolve_content(
@@ -2299,6 +2377,16 @@ impl ArtifactStorageClient {
                 )));
             }
         };
+        note_progress(
+            &options.progress,
+            NativePushEvent::Scanned {
+                files: prepared.files,
+                directories: prepared.directories,
+                logical_bytes: prepared.logical_bytes,
+                stored_bytes: prepared.stored_bytes,
+                segments: prepared.segments.len(),
+            },
+        );
         // Metadata is independent of aggregate-object transfer once scanning has produced its
         // canonical ids. Stage it while the final segment PUTs are still draining.
         let metadata = stage_native_metadata_batches(
@@ -2410,6 +2498,16 @@ impl ArtifactStorageClient {
             changes.renames,
         )
         .await?;
+        note_progress(
+            &options.progress,
+            NativePushEvent::Scanned {
+                files: prepared.files,
+                directories: prepared.directories,
+                logical_bytes: prepared.logical_bytes,
+                stored_bytes: prepared.stored_bytes,
+                segments: prepared.segments.len(),
+            },
+        );
         finish_native_push(
             self,
             project_id,
@@ -3379,17 +3477,6 @@ async fn finish_native_push(
     metadata_staged: bool,
     options: NativePushOptions,
 ) -> Result<NativePushReport, SdkError> {
-    note_progress(
-        &options.progress,
-        NativePushEvent::Scanned {
-            files: prepared.files,
-            directories: prepared.directories,
-            logical_bytes: prepared.logical_bytes,
-            stored_bytes: prepared.stored_bytes,
-            segments: prepared.segments.len(),
-        },
-    );
-
     let (uploaded_segments, uploaded_bytes) = if let Some(report) = pipelined {
         (report.uploaded_ids.len(), report.uploaded_bytes)
     } else {
@@ -4049,42 +4136,59 @@ async fn stage_native_metadata_batches(
     recipes: &[ChunkRecipe],
 ) -> Result<NativeMetadataResponse, SdkError> {
     let suffix = format!("fs/uploads/{session}/metadata");
+    let mut batches = Vec::new();
+    let mut page_offset = 0usize;
+    let mut recipe_offset = 0usize;
+    if pages.is_empty() && recipes.is_empty() {
+        batches.push((0, 0, 0, 0));
+    }
+    while page_offset < pages.len() || recipe_offset < recipes.len() {
+        let (page_end, recipe_end) =
+            next_metadata_batch(pages, recipes, page_offset, recipe_offset)?;
+        batches.push((page_offset, page_end, recipe_offset, recipe_end));
+        page_offset = page_end;
+        recipe_offset = recipe_end;
+    }
+
+    // Metadata objects are content-addressed and each batch is independently idempotent. Sending
+    // the byte-bounded batches concurrently removes a full network round trip per ~8 MiB page of
+    // inline-heavy directory metadata while retaining input order in the combined response.
+    let mut responses = futures::stream::iter(batches)
+        .map(|(page_offset, page_end, recipe_offset, recipe_end)| {
+            let suffix = &suffix;
+            async move {
+                super::ingest::with_transient_retries(|| async {
+                    let (request, _) = client.git_request(
+                        Method::POST,
+                        project_id,
+                        repo,
+                        Some(suffix),
+                        username,
+                        token,
+                    )?;
+                    expect_json(
+                        request
+                            .json(&MetadataRequest {
+                                pages: &pages[page_offset..page_end],
+                                recipes: &recipes[recipe_offset..recipe_end],
+                            })
+                            .send()
+                            .await?,
+                    )
+                    .await
+                })
+                .await
+            }
+        })
+        .buffered(NATIVE_METADATA_UPLOAD_CONCURRENCY);
     let mut staged = NativeMetadataResponse {
         pages: Vec::with_capacity(pages.len()),
         recipes: Vec::with_capacity(recipes.len()),
     };
-    let mut page_offset = 0usize;
-    let mut recipe_offset = 0usize;
-    let mut send_empty = pages.is_empty() && recipes.is_empty();
-    while send_empty || page_offset < pages.len() || recipe_offset < recipes.len() {
-        let (page_end, recipe_end) = if send_empty {
-            (0, 0)
-        } else {
-            next_metadata_batch(pages, recipes, page_offset, recipe_offset)?
-        };
-        let (request, _) = client.git_request(
-            Method::POST,
-            project_id,
-            repo,
-            Some(&suffix),
-            username,
-            token,
-        )?;
-        let response: NativeMetadataResponse = expect_json(
-            request
-                .json(&MetadataRequest {
-                    pages: &pages[page_offset..page_end],
-                    recipes: &recipes[recipe_offset..recipe_end],
-                })
-                .send()
-                .await?,
-        )
-        .await?;
+    while let Some(response) = responses.next().await {
+        let response: NativeMetadataResponse = response?;
         staged.pages.extend(response.pages);
         staged.recipes.extend(response.recipes);
-        page_offset = page_end;
-        recipe_offset = recipe_end;
-        send_empty = false;
     }
     Ok(staged)
 }
@@ -4436,6 +4540,50 @@ mod tests {
         assert_eq!(
             copies[0], copies[1],
             "separate inodes with identical bytes must share one immutable content reference"
+        );
+    }
+
+    #[test]
+    fn native_parallel_scan_is_deterministic() {
+        let temp = tempfile::tempdir().unwrap();
+        for directory in 0..64 {
+            let nested = temp.path().join(format!("dir-{directory:02}/nested"));
+            std::fs::create_dir_all(&nested).unwrap();
+            let payload: Vec<u8> = (0..MAX_INLINE_BYTES + directory + 1)
+                .map(|index| ((index + directory) % 251) as u8)
+                .collect();
+            std::fs::write(nested.join("payload.bin"), payload).unwrap();
+        }
+
+        let first =
+            prepare_native_snapshot(temp.path(), 96 * 1024 * 1024, MAX_SEGMENT_BYTES).unwrap();
+        let second =
+            prepare_native_snapshot(temp.path(), 96 * 1024 * 1024, MAX_SEGMENT_BYTES).unwrap();
+
+        assert_eq!(first.root, second.root);
+        assert_eq!(
+            first
+                .pages
+                .iter()
+                .map(|page| page.id().unwrap())
+                .collect::<Vec<_>>(),
+            second
+                .pages
+                .iter()
+                .map(|page| page.id().unwrap())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            first
+                .segments
+                .iter()
+                .map(|segment| (segment.id, segment.len))
+                .collect::<Vec<_>>(),
+            second
+                .segments
+                .iter()
+                .map(|segment| (segment.id, segment.len))
+                .collect::<Vec<_>>()
         );
     }
 
