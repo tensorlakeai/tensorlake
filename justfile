@@ -63,6 +63,32 @@ build-cli-full *ARGS:
 # Back-compat alias for the old recipe name.
 build-cli-mount *ARGS: (build-cli-full ARGS)
 
+# Run the CLI test suite with the same ephemeral private-crate swap as the official full build.
+# This is the authoritative local validation for mount/daemon code: the public placeholders are
+# deliberately unbuildable when the `mount` and `git-clone` features are enabled directly.
+test-cli-full *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifact_storage="{{ARTIFACT_STORAGE_DIR}}"
+    for crate in gsvc-mount gsvc-codec; do
+        if [ ! -d "$artifact_storage/crates/$crate/src" ]; then
+            echo "error: $artifact_storage/crates/$crate/src not found." >&2
+            exit 1
+        fi
+    done
+    restore() {
+        for crate in gsvc-mount gsvc-codec; do
+            git checkout -q -- "crates/$crate/src" 2>/dev/null || true
+            git clean -fdq "crates/$crate/src" 2>/dev/null || true
+        done
+    }
+    trap restore EXIT
+    for crate in gsvc-mount gsvc-codec; do
+        rm -f "crates/$crate/src"/*.rs
+        cp "$artifact_storage/crates/$crate/src"/*.rs "crates/$crate/src"/
+    done
+    cargo test -p tensorlake-cli --features mount,git-clone {{ARGS}}
+
 # Run all Rust tests
 test-rust:
     cargo test --workspace

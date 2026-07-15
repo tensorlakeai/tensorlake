@@ -1,15 +1,13 @@
 //! `tl fs` — filesystems on artifact storage: create, mount, save, restore.
 //!
 //! Product model (the fs/git split): the *filesystem* is the unit `tl fs` manages — `create`
-//! makes one (a `kind=filesystem` repo, born with a genesis empty save), `ls` lists them,
+//! makes one (a `kind=filesystem` storage namespace), `ls` lists them,
 //! `rm` deletes them, `mount` attaches one, `push` uploads a folder into one. The vocabulary
-//! is drives and saves: every mount is a publish-on-save session (shared-rw onto the default
-//! branch, autosave on), sessions survive crashes and auto-resume on remount, and the words
-//! branch/commit/workspace never surface. `tl git mount` is the branch-vocabulary sibling on
-//! the same engine (explicit checkpointing, promote/sync verbs, publish only with --publish);
-//! both are served by the same workspace machinery below and the same FUSE daemon — reads
-//! stream lazily from the server through the vendored `gsvc-mount` core's immutable caches,
-//! writes land in a local overlay.
+//! is drives and saves: native filesystem snapshots use BLAKE3 metadata trees plus aggregate
+//! blob segments and are deliberately not Git-addressable. `tl fs push` scans each file once,
+//! uploads missing aggregates directly to blob storage, waits for closure verification, and
+//! publishes with head CAS. Mount migration follows the same native snapshot/workspace API;
+//! writes continue to land in a local overlay before sealing.
 //! **The daemon's sealer owns the definition of dirty**: the overlay's dirty index resolves
 //! into incremental snapshot commits on the workspace ref (auto-commit ticks it; `tl fs
 //! snapshot` runs one cycle through the `seal` control op), and the mount's lower layer
@@ -36,6 +34,9 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tensorlake::artifact_storage::ArtifactStorageClient;
 use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
 use tensorlake::artifact_storage::models::GitCredential;
+use tensorlake::artifact_storage::native_fs::{
+    NativePushEvent, NativePushOptions, NativeSnapshotInfo, NativeWorkspaceInfo,
+};
 use tensorlake::artifact_storage::workspaces::{
     CreateWorkspaceRequest, PromoteOutcome, PromoteWorkspaceRequest, SyncWorkspaceRequest,
     TreeEntry, WorkspaceFleetItem, WorkspaceFleetQuery, WorkspaceInfo,
@@ -193,6 +194,29 @@ fn fleet_item_to_info(item: &WorkspaceFleetItem) -> WorkspaceInfo {
     }
 }
 
+fn native_workspace_to_mount_info(workspace: NativeWorkspaceInfo) -> WorkspaceInfo {
+    let base = workspace.base_snapshot_id.unwrap_or_default();
+    let head = workspace
+        .latest_snapshot_id
+        .clone()
+        .unwrap_or_else(|| base.clone());
+    WorkspaceInfo {
+        id: workspace.workspace_id,
+        ref_name: "fs/head".to_string(),
+        principal: workspace.principal,
+        base,
+        base_ref: Some("fs/head".to_string()),
+        head,
+        created_at_secs: workspace.created_at_ms / 1000,
+        lease_secs: 0,
+        lease_due_ms: workspace.expires_at_ms,
+        pinned: workspace.expires_at_ms.is_none(),
+        // The existing mount state machine interprets Some as publish-on-save. The native mount
+        // client ignores the Git-shaped spelling and follows `/fs/head` directly.
+        shared_target: (!workspace.read_only).then(|| "native-head".to_string()),
+    }
+}
+
 /// Every workspace visible to this caller across the whole project — one paginated fleet
 /// request instead of one listing per file system — newest first, as `(file system, item)`.
 ///
@@ -300,6 +324,18 @@ struct LsRow {
 /// `tl fs ls [file-system]` — every live workspace (across all file systems by default), with
 /// where each one is currently mounted on this machine.
 pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) -> Result<()> {
+    // The product surface calls this with a filesystem name. Native workspaces are deliberately
+    // absent from the project-wide Git workspace fleet, so use their repo-scoped API directly.
+    if let Some(fs) = file_system {
+        let session = FsSession::open(ctx, Some(fs)).await?;
+        let (user, token) = session.creds();
+        let mut workspaces = session
+            .client
+            .list_native_workspaces_with_credential(&session.project_id, fs, user, token)
+            .await?;
+        workspaces.sort_by_key(|workspace| std::cmp::Reverse(workspace.created_at_ms));
+        return print_native_workspaces(fs, workspaces, output_json);
+    }
     // Project-wide session first: the fleet listing requires `project:read`, which repo-scoped
     // credentials deliberately lack — a named file system narrows server-side via `?repo=`.
     let session = FsSession::open(ctx, None).await?;
@@ -423,6 +459,68 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
     Ok(())
 }
 
+fn print_native_workspaces(
+    fs: &str,
+    workspaces: Vec<NativeWorkspaceInfo>,
+    output_json: bool,
+) -> Result<()> {
+    let mounts = live_mounts();
+    let mounted_at = |id: &str| {
+        mounts
+            .iter()
+            .find(|(_, state)| state.workspace_id == id)
+            .map(|(path, _)| path.clone())
+    };
+    if output_json {
+        let rows: Vec<_> = workspaces
+            .iter()
+            .map(|workspace| {
+                serde_json::json!({
+                    "file_system": fs,
+                    "workspace": workspace,
+                    "mounted_at": mounted_at(&workspace.workspace_id),
+                    "kind": mounted_at(&workspace.workspace_id).map(|_| "mount"),
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&rows)?);
+        return Ok(());
+    }
+    if workspaces.is_empty() {
+        println!("No sessions. Mount the filesystem to start one: tl fs mount {fs} <path>");
+        return Ok(());
+    }
+    let mut table = new_table(&[
+        "Session",
+        "Filesystem",
+        "Base",
+        "Saves",
+        "Mode",
+        "Mounted",
+        "Age",
+    ]);
+    for workspace in workspaces {
+        let base = workspace.base_snapshot_id.as_deref().unwrap_or("-");
+        let latest = workspace.latest_snapshot_id.as_deref().unwrap_or(base);
+        table.add_row(vec![
+            Cell::new(&workspace.workspace_id),
+            Cell::new(fs),
+            Cell::new(short_id(base)),
+            Cell::new(if latest == base { "-" } else { "yes" }),
+            Cell::new(if workspace.read_only {
+                "read-only"
+            } else {
+                "publishing"
+            }),
+            Cell::new(mounted_at(&workspace.workspace_id).unwrap_or_else(|| "-".to_string())),
+            Cell::new(age_display(workspace.created_at_ms / 1000)),
+        ]);
+    }
+    println!("{table}");
+    println!("Remounting the filesystem resumes its newest detached session on this machine.");
+    Ok(())
+}
+
 // ---------------------------------------------------------------------------------------------
 // The filesystem product surface: create / ls / rm / mount / push / history. A filesystem is a
 // `kind=filesystem` repo; the vocabulary here is drives and saves — never branches, commits, or
@@ -452,6 +550,32 @@ pub async fn create_filesystem(ctx: &CliContext, name: &str, output_json: bool) 
             token,
         )
         .await?;
+    // A native filesystem has no Git genesis commit. Publish the canonical empty directory so a
+    // just-created filesystem has a mountable/time-travelable head immediately.
+    let empty = tempfile::tempdir()?;
+    if let Err(error) = session
+        .client
+        .push_native_directory_with_credential(
+            &session.project_id,
+            name,
+            empty.path(),
+            user,
+            token,
+            NativePushOptions {
+                message: "Initial empty filesystem".to_string(),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        // Creation is one product operation. Do not leave a half-created, headless filesystem
+        // when initial snapshot verification or publication fails.
+        let _ = session
+            .client
+            .delete_repo_with_credential(&session.project_id, name, user, token)
+            .await;
+        return Err(error.into());
+    }
     if output_json {
         println!(
             "{}",
@@ -640,7 +764,74 @@ pub async fn push_dir(
     name: &str,
     message: Option<&str>,
 ) -> Result<()> {
-    plaindir::push(ctx, dir, name, message).await
+    let session = FsSession::open(ctx, Some(name)).await?;
+    let started = std::time::Instant::now();
+    let bar = indicatif::ProgressBar::new_spinner();
+    bar.enable_steady_tick(std::time::Duration::from_millis(120));
+    bar.set_message("scanning files once...");
+    let progress_bar = bar.clone();
+    let progress = std::sync::Arc::new(move |event| {
+        match event {
+        NativePushEvent::Scanned {
+            files,
+            logical_bytes,
+            segments,
+            ..
+        } => progress_bar.set_message(format!(
+            "scanned {files} files ({}, {segments} aggregate segment(s)); negotiating...",
+            format_bytes(logical_bytes)
+        )),
+        NativePushEvent::Negotiated {
+            missing_segments,
+            total_segments,
+            transport,
+        } => progress_bar.set_message(format!(
+            "uploading {missing_segments} of {total_segments} aggregate segment(s) via {transport}..."
+        )),
+        NativePushEvent::Uploaded { .. } => {
+            progress_bar.set_message("verifying snapshot closure...")
+        }
+        NativePushEvent::Verifying { .. } => {
+            progress_bar.set_message("verifying snapshot closure...")
+        }
+        NativePushEvent::Published { .. } => progress_bar.set_message("published"),
+    }
+    });
+    let (user, token) = session.creds();
+    let result = session
+        .client
+        .push_native_directory_with_credential(
+            &session.project_id,
+            name,
+            dir,
+            user,
+            token,
+            NativePushOptions {
+                message: message.unwrap_or_default().to_string(),
+                progress: Some(progress),
+                ..Default::default()
+            },
+        )
+        .await;
+    bar.finish_and_clear();
+    let report = result?;
+    let elapsed = started.elapsed();
+    let throughput = if elapsed.as_secs_f64() > 0.0 {
+        report.logical_bytes as f64 / elapsed.as_secs_f64()
+    } else {
+        0.0
+    };
+    println!(
+        "Saved {} ({} file(s), {} logical, {} uploaded via {} in {}; {}/s)",
+        short_id(&report.snapshot_id),
+        report.files,
+        format_bytes(report.logical_bytes),
+        format_bytes(report.uploaded_bytes),
+        report.transport,
+        fmt_dur(elapsed),
+        format_bytes(throughput as u64),
+    );
+    Ok(())
 }
 
 /// `tl fs history` — the save timeline of a filesystem (target: a filesystem name or a
@@ -667,39 +858,40 @@ pub async fn history(
             }
         }
     };
-    // Project-wide session: the operation log is project-scoped, and repo-scoped mints
-    // deliberately omit that scope (a repo credential would 403 here).
-    let session = FsSession::open(ctx, None).await?;
+    let session = FsSession::open(ctx, Some(&fs_name)).await?;
     let (user, token) = session.creds();
-    let ops = session
+    // Snapshot ownership is keyed by content id and therefore not chronological. The atomic
+    // head-event journal is server-ordered newest-first and is the filesystem's visible save
+    // timeline (including restores and workspace promotions).
+    let events = session
         .client
-        .list_operations_with_credential(&session.project_id, &fs_name, user, token)
-        .await
-        .map_err(|e| match e {
-            tensorlake::error::SdkError::ServerError { status, .. } if status.as_u16() == 403 => {
-                CliError::usage(
-                    "the save history is read from the operation log, which needs project \
-                     admin access on this project"
-                        .to_string(),
-                )
-            }
-            e => e.into(),
-        })?
-        .into_inner();
-    // Saves are the operations that LANDED content: committed pushes, publishes (shared-rw
-    // applications, kind "reconcile"), promotes, and merges. Failed/rejected operations are
-    // not saves, and lifecycle noise (create/fork/GC) is not history. Newest first regardless
-    // of the server's return order.
-    let mut saves: Vec<_> = ops
-        .operations
-        .iter()
-        .filter(|op| {
-            matches!(op.kind.as_str(), "push" | "reconcile" | "promote" | "merge")
-                && op.result == "committed"
-        })
-        .collect();
-    saves.sort_by_key(|op| std::cmp::Reverse(op.at_secs));
-    saves.truncate(limit);
+        .native_head_events_with_credential(&session.project_id, &fs_name, limit, user, token)
+        .await?;
+    let snapshots: Vec<Result<NativeSnapshotInfo>> =
+        futures::stream::iter(events.into_iter().map(|event| event.snapshot_id))
+            .map(|snapshot_id| {
+                let client = session.client.clone();
+                let project_id = session.project_id.clone();
+                let fs_name = fs_name.clone();
+                let user = user.to_string();
+                let token = token.to_string();
+                async move {
+                    client
+                        .native_snapshot_with_credential(
+                            &project_id,
+                            &fs_name,
+                            &snapshot_id,
+                            &user,
+                            &token,
+                        )
+                        .await
+                        .map_err(Into::into)
+                }
+            })
+            .buffered(8)
+            .collect()
+            .await;
+    let saves: Vec<NativeSnapshotInfo> = snapshots.into_iter().collect::<Result<_>>()?;
     if output_json {
         println!("{}", serde_json::to_string_pretty(&saves)?);
         return Ok(());
@@ -708,37 +900,46 @@ pub async fn history(
         println!("No saves yet. Mount and `tl fs snapshot`, or `tl fs push <dir> {fs_name}`.");
         return Ok(());
     }
-    let mut table = new_table(&["When", "Who", "Via", "Save"]);
-    for op in &saves {
+    let mut table = new_table(&["When", "Who", "Message", "Save"]);
+    for snapshot in &saves {
         table.add_row(vec![
-            Cell::new(age_display(op.at_secs)),
-            Cell::new(if op.actor.is_empty() { "-" } else { &op.actor }),
-            Cell::new(if op.conflicted {
-                format!("{} (collision)", op.kind)
+            Cell::new(age_display(snapshot.created_at_ms / 1000)),
+            Cell::new(if snapshot.principal.is_empty() {
+                "-"
             } else {
-                op.kind.clone()
+                &snapshot.principal
             }),
-            Cell::new(
-                op.refs
-                    .first()
-                    .and_then(|r| r.new.as_deref())
-                    .map(|oid| oid[..12.min(oid.len())].to_string())
-                    .unwrap_or_else(|| "-".to_string()),
-            ),
+            Cell::new(if snapshot.message.is_empty() {
+                "-"
+            } else {
+                &snapshot.message
+            }),
+            Cell::new(short_id(&snapshot.snapshot_id)),
         ]);
     }
     println!("{table}");
-    if saves.iter().any(|op| op.conflicted) {
-        println!(
-            "Collision saves kept both sides; markers are in the affected files (`tl fs \
-             status` lists unresolved ones)."
-        );
-    }
     Ok(())
 }
 
-/// `tl fs mount <name> <path>` — the filesystem-surface mount: publish-on-save, autosave on,
-/// detached local sessions auto-resume. One server round trip: the create carries
+fn format_bytes(bytes: u64) -> String {
+    const KIB: f64 = 1024.0;
+    const MIB: f64 = KIB * 1024.0;
+    const GIB: f64 = MIB * 1024.0;
+    let bytes = bytes as f64;
+    if bytes >= GIB {
+        format!("{:.2} GiB", bytes / GIB)
+    } else if bytes >= MIB {
+        format!("{:.2} MiB", bytes / MIB)
+    } else if bytes >= KIB {
+        format!("{:.2} KiB", bytes / KIB)
+    } else {
+        format!("{} B", bytes as u64)
+    }
+}
+
+/// `tl fs mount <name>[:<save>] <path>` — the filesystem-surface mount: the live filesystem is
+/// writable with autosave, while an explicit retained save is a pinned read-only time-travel
+/// view. Detached local writer sessions auto-resume. One server round trip: the create carries
 /// `surface=filesystem` and the SERVER applies the semantics (publish target, kind check)
 /// from the repo's authoritative kind — no listing, so a filesystem created milliseconds ago
 /// mounts, and a repo-scoped credential suffices (the sandbox story).
@@ -751,18 +952,16 @@ pub async fn mount_filesystem(
     trace_ops: bool,
     log_level: &str,
 ) -> Result<()> {
-    if target.contains(':') {
-        return Err(CliError::usage(
-            "a filesystem mounts as a whole; branch-addressed mounts are `tl git mount \
-             <repo>:<ref> <path>`",
-        ));
-    }
+    let historical = target.contains(':');
     // A drive doesn't lose your work: writable filesystem mounts always autosave.
-    let autosave = (!ro).then_some(FS_AUTOSAVE_DEFAULT_SECS);
+    let autosave = (!ro && !historical).then_some(FS_AUTOSAVE_DEFAULT_SECS);
     // Auto-resume first — no server round trip. A detached local session of this filesystem
     // (mount state present, daemon dead) picks up where it left off: "run the same command
     // again" is the crash recovery. WritePolicy::Auto keeps the single-writer downgrade.
-    if !ro && let Some((workspace_id, state_dir)) = detached_local_session(target) {
+    if !ro
+        && !historical
+        && let Some((workspace_id, state_dir)) = detached_local_session(target)
+    {
         println!(
             "Resuming detached session {} of filesystem {target}.",
             short_id(&workspace_id)
@@ -795,7 +994,7 @@ pub async fn mount_filesystem(
         ctx,
         target,
         path,
-        if ro {
+        if ro || historical {
             WritePolicy::Ro
         } else {
             WritePolicy::Auto
@@ -2242,6 +2441,11 @@ pub async fn mount(
         Some((name, base)) => (name, Some(base.to_string())),
         None => (target, None),
     };
+    if fs_surface && base.is_some() && mode == WritePolicy::Rw {
+        return Err(CliError::usage(
+            "a historical filesystem save is immutable; omit `--mode rw` to mount it read-only",
+        ));
+    }
     if shared_target.is_some() && mode == WritePolicy::Ro {
         return Err(CliError::usage(
             "publishing every snapshot cannot be combined with a read-only mount",
@@ -2327,6 +2531,25 @@ pub async fn mount(
         "mount timing"
     );
     let workspace_started = std::time::Instant::now();
+    let pinned_native_snapshot = if fs_surface {
+        match base.as_deref() {
+            Some(prefix) => Some(
+                session
+                    .client
+                    .resolve_native_snapshot_id_with_credential(
+                        &session.project_id,
+                        name,
+                        prefix,
+                        user,
+                        token,
+                    )
+                    .await?,
+            ),
+            None => None,
+        }
+    } else {
+        None
+    };
 
     // `<file-system>[:<base>]` creates a workspace; a bare target that names no file system is
     // resolved as a workspace id (unique prefix) and attached. Attach = reconnect: the
@@ -2342,102 +2565,143 @@ pub async fn mount(
         Created(WorkspaceInfo),
         Attached(String, WorkspaceInfo),
     }
-    let create_req = CreateWorkspaceRequest {
-        base: base.clone(),
-        shared_target: shared_target.clone(),
-        // The server applies product semantics from the repo's authoritative kind: an
-        // fs-surface create gets its publish target filled server-side (and a repository is
-        // rejected with the right command). Clients never pre-read listings to decide this.
-        surface: fs_surface.then(|| "filesystem".to_string()),
-        read_only: mode == WritePolicy::Ro,
-        ..Default::default()
-    };
-    // One create call site for both the first attempt and the post-seed retry, so the two can
-    // never drift apart.
-    let try_create = || {
-        session
-            .client
-            .create_workspace(&session.project_id, name, user, token, &create_req)
-    };
     let resume_state_dir = resume.as_ref().and_then(|r| r.state_dir.clone());
-    let resolved = if let Some(id) = resume.map(|r| r.workspace_id) {
-        let ws = session
-            .client
-            .get_workspace(&session.project_id, name, user, token, id)
-            .await
-            .map_err(|e| {
-                CliError::usage(format!(
-                    "resuming {} {} of {name} failed: {e} (start fresh: tl fs mount {name} \
-                     <path>)",
-                    unit,
-                    short_id(id),
-                ))
-            })?
-            .into_inner();
-        Resolved::Attached(name.to_string(), ws)
+    let resolved = if fs_surface {
+        if resume.is_some() && pinned_native_snapshot.is_some() {
+            return Err(CliError::usage(
+                "a historical save cannot be combined with a resumed session; mount the save \
+                 without `--workspace`",
+            ));
+        }
+        if let Some(resume) = resume.as_ref() {
+            let workspace = session
+                .client
+                .native_workspace_with_credential(
+                    &session.project_id,
+                    name,
+                    resume.workspace_id,
+                    user,
+                    token,
+                )
+                .await
+                .map_err(|error| {
+                    CliError::usage(format!(
+                        "resuming session {} of {name} failed: {error}",
+                        short_id(resume.workspace_id)
+                    ))
+                })?;
+            Resolved::Attached(name.to_string(), native_workspace_to_mount_info(workspace))
+        } else {
+            let workspace = session
+                .client
+                .create_native_workspace_with_credential(
+                    &session.project_id,
+                    name,
+                    pinned_native_snapshot.as_deref(),
+                    mode == WritePolicy::Ro || pinned_native_snapshot.is_some(),
+                    user,
+                    token,
+                )
+                .await?;
+            Resolved::Created(native_workspace_to_mount_info(workspace))
+        }
     } else {
-        match try_create().await {
-            Ok(ws) => Resolved::Created(ws.into_inner()),
-            Err(e) => match create_recovery(&e) {
-                // No file system by this name and no branch was named: try it as a workspace id.
-                Some(CreateRecovery::RepoMissing) if base.is_none() => {
-                    match resolve_workspace(&session, name).await? {
-                        Some((repo, ws)) => Resolved::Attached(repo, ws),
-                        None if fs_surface => {
-                            return Err(CliError::usage(format!(
-                                "no filesystem named {name:?} (see: tl fs ls; create one: tl fs \
+        let create_req = CreateWorkspaceRequest {
+            base: base.clone(),
+            shared_target: shared_target.clone(),
+            // The server applies product semantics from the repo's authoritative kind: an
+            // fs-surface create gets its publish target filled server-side (and a repository is
+            // rejected with the right command). Clients never pre-read listings to decide this.
+            surface: fs_surface.then(|| "filesystem".to_string()),
+            read_only: mode == WritePolicy::Ro,
+            ..Default::default()
+        };
+        // One create call site for both the first attempt and the post-seed retry, so the two can
+        // never drift apart.
+        let try_create = || {
+            session
+                .client
+                .create_workspace(&session.project_id, name, user, token, &create_req)
+        };
+        if let Some(id) = resume.map(|r| r.workspace_id) {
+            let ws = session
+                .client
+                .get_workspace(&session.project_id, name, user, token, id)
+                .await
+                .map_err(|e| {
+                    CliError::usage(format!(
+                        "resuming {} {} of {name} failed: {e} (start fresh: tl fs mount {name} \
+                     <path>)",
+                        unit,
+                        short_id(id),
+                    ))
+                })?
+                .into_inner();
+            Resolved::Attached(name.to_string(), ws)
+        } else {
+            match try_create().await {
+                Ok(ws) => Resolved::Created(ws.into_inner()),
+                Err(e) => match create_recovery(&e) {
+                    // No file system by this name and no branch was named: try it as a workspace id.
+                    Some(CreateRecovery::RepoMissing) if base.is_none() => {
+                        match resolve_workspace(&session, name).await? {
+                            Some((repo, ws)) => Resolved::Attached(repo, ws),
+                            None if fs_surface => {
+                                return Err(CliError::usage(format!(
+                                    "no filesystem named {name:?} (see: tl fs ls; create one: tl fs \
                              create {name})"
-                            )));
-                        }
-                        None => {
-                            return Err(CliError::usage(format!(
-                                "no repo or workspace matches {name:?}. See `tl git ls`, or \
+                                )));
+                            }
+                            None => {
+                                return Err(CliError::usage(format!(
+                                    "no repo or workspace matches {name:?}. See `tl git ls`, or \
                              create the repo first: tl git create {name}"
-                            )));
+                                )));
+                            }
                         }
                     }
-                }
-                Some(CreateRecovery::RepoMissing) if fs_surface => {
-                    return Err(CliError::usage(format!(
-                        "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create \
+                    Some(CreateRecovery::RepoMissing) if fs_surface => {
+                        return Err(CliError::usage(format!(
+                            "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create \
                      {name})"
-                    )));
-                }
-                Some(CreateRecovery::RepoMissing) => {
-                    return Err(CliError::usage(format!(
-                        "no repo named {name:?}; create it first: tl git create {name}"
-                    )));
-                }
-                // Seed an unborn default branch whether it is implied OR named (either spelling):
-                // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
-                // fail with `base "main" does not resolve to a commit` while plain
-                // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
-                // write to the server (and with read-scoped credentials the seed push would fail
-                // opaquely); ro keeps the clear server error. Other branch names stay strict —
-                // seeding cannot conjure them.
-                Some(CreateRecovery::BaseUnresolved) if fs_surface => return Err(e.into()),
-                Some(CreateRecovery::BaseUnresolved) => {
-                    let file_systems = session
-                        .client
-                        .list_repos_with_credential(&session.project_id, None, user, token)
-                        .await?
-                        .into_inner();
-                    let Some(fs) = file_systems.repos.iter().find(|r| r.name == name) else {
-                        return Err(e.into());
-                    };
-                    let default_branch = fs.default_branch.clone();
-                    let names_default = base.as_deref().is_none_or(|b| {
-                        b == default_branch
-                            || b.strip_prefix("refs/heads/") == Some(&default_branch)
-                    });
-                    if !names_default || mode == WritePolicy::Ro {
-                        return Err(e.into());
+                        )));
                     }
-                    ensure_seeded(&session, &default_branch, name).await?;
-                    Resolved::Created(try_create().await?.into_inner())
-                }
-                None => return Err(e.into()),
-            },
+                    Some(CreateRecovery::RepoMissing) => {
+                        return Err(CliError::usage(format!(
+                            "no repo named {name:?}; create it first: tl git create {name}"
+                        )));
+                    }
+                    // Seed an unborn default branch whether it is implied OR named (either spelling):
+                    // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
+                    // fail with `base "main" does not resolve to a commit` while plain
+                    // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
+                    // write to the server (and with read-scoped credentials the seed push would fail
+                    // opaquely); ro keeps the clear server error. Other branch names stay strict —
+                    // seeding cannot conjure them.
+                    Some(CreateRecovery::BaseUnresolved) if fs_surface => return Err(e.into()),
+                    Some(CreateRecovery::BaseUnresolved) => {
+                        let file_systems = session
+                            .client
+                            .list_repos_with_credential(&session.project_id, None, user, token)
+                            .await?
+                            .into_inner();
+                        let Some(fs) = file_systems.repos.iter().find(|r| r.name == name) else {
+                            return Err(e.into());
+                        };
+                        let default_branch = fs.default_branch.clone();
+                        let names_default = base.as_deref().is_none_or(|b| {
+                            b == default_branch
+                                || b.strip_prefix("refs/heads/") == Some(&default_branch)
+                        });
+                        if !names_default || mode == WritePolicy::Ro {
+                            return Err(e.into());
+                        }
+                        ensure_seeded(&session, &default_branch, name).await?;
+                        Resolved::Created(try_create().await?.into_inner())
+                    }
+                    None => return Err(e.into()),
+                },
+            }
         }
     };
     tracing::debug!(
@@ -2503,7 +2767,7 @@ pub async fn mount(
             (repo, ws, true, read_only, follow_ref, start_oid)
         }
         Resolved::Created(ws) => {
-            let read_only = mode == WritePolicy::Ro;
+            let read_only = mode == WritePolicy::Ro || pinned_native_snapshot.is_some();
             // What the view follows. Writable workspaces follow their own ref; shared-rw
             // follows the branch it publishes to, so every writer's view converges on the
             // reconciled branch rather than staying pinned to its own snapshots. The publish
@@ -2512,7 +2776,9 @@ pub async fn mount(
             // named branch (fs surface: HEAD itself, resolved per poll) so new commits
             // appear — except a fixed commit base, which is a pinned view that never
             // advances.
-            let follow_ref = if let Some(target) = &ws.shared_target {
+            let follow_ref = if pinned_native_snapshot.is_some() {
+                None
+            } else if let Some(target) = &ws.shared_target {
                 Some(format!("refs/heads/{target}"))
             } else if read_only && fs_surface {
                 Some("HEAD".to_string())
@@ -2606,6 +2872,8 @@ pub async fn mount(
             owner_uid: Some(owner_uid),
             owner_gid: Some(owner_gid),
             repo: repo.clone(),
+            native_filesystem: fs_surface,
+            pinned_snapshot: pinned_native_snapshot.clone(),
             workspace_id: ws.id.clone(),
             ref_name: ws.ref_name.clone(),
             mountpoint: PathBuf::from(&mountpoint),
@@ -2672,6 +2940,8 @@ pub async fn mount(
                         short_id(&ws.id),
                         if ws.shared_target.is_some() {
                             ", saves publish automatically"
+                        } else if pinned_native_snapshot.is_some() {
+                            ", read-only, pinned to a historical save"
                         } else if read_only {
                             ", read-only, follows the filesystem"
                         } else {
@@ -2696,10 +2966,14 @@ pub async fn mount(
                 }
                 if read_only {
                     if fs_surface {
-                        println!(
-                            "Reading save {}; new saves appear as the filesystem advances.",
-                            resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
-                        );
+                        let save = resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?");
+                        if pinned_native_snapshot.is_some() {
+                            println!("Reading historical save {save}; this view stays pinned.");
+                        } else {
+                            println!(
+                                "Reading save {save}; new saves appear as the filesystem advances."
+                            );
+                        }
                     } else {
                         println!(
                             "Reading commit {}; new commits appear as the followed ref advances.",
@@ -2741,10 +3015,23 @@ pub async fn mount(
                 // A workspace we just created is useless without its daemon; an attached one
                 // predates this mount and is not ours to destroy.
                 if !attached {
-                    let _ = session
-                        .client
-                        .delete_workspace(&session.project_id, &repo, user, token, &ws.id)
-                        .await;
+                    if fs_surface {
+                        let _ = session
+                            .client
+                            .delete_native_workspace_with_credential(
+                                &session.project_id,
+                                &repo,
+                                &ws.id,
+                                user,
+                                token,
+                            )
+                            .await;
+                    } else {
+                        let _ = session
+                            .client
+                            .delete_workspace(&session.project_id, &repo, user, token, &ws.id)
+                            .await;
+                    }
                 }
                 // The daemon's own last words are the diagnosis; read them before the state
                 // dir (and the log with it) goes away.
@@ -2962,16 +3249,29 @@ pub async fn unmount(
     if delete {
         let session = FsSession::open(ctx, Some(&state.repo)).await?;
         let (user, token) = session.creds();
-        session
-            .client
-            .delete_workspace(
-                &session.project_id,
-                &state.repo,
-                user,
-                token,
-                &state.workspace_id,
-            )
-            .await?;
+        if state.native_filesystem {
+            session
+                .client
+                .delete_native_workspace_with_credential(
+                    &session.project_id,
+                    &state.repo,
+                    &state.workspace_id,
+                    user,
+                    token,
+                )
+                .await?;
+        } else {
+            session
+                .client
+                .delete_workspace(
+                    &session.project_id,
+                    &state.repo,
+                    user,
+                    token,
+                    &state.workspace_id,
+                )
+                .await?;
+        }
     }
     // Point of no return. Writes that landed after the gate's answer (through the mount
     // while it was still attached) would be silently destroyed here — the daemon is gone,
@@ -3276,20 +3576,6 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
             ))
         })
     }
-    // Files the OS strews into every volume it touches (AppleDouble resource forks,
-    // Finder/Spotlight/Trash state). They are ignored-by-rule and mechanically recreated, so
-    // they are not user work and must not make a clean unmount demand --discard — on macOS
-    // every mount acquires them within seconds of being browsed.
-    fn is_os_junk(rel: &str) -> bool {
-        let base = rel.rsplit('/').next().unwrap_or(rel);
-        base == ".DS_Store"
-            || base == ".Spotlight-V100"
-            || base == ".fseventsd"
-            || base == ".Trashes"
-            || base == ".TemporaryItems"
-            || base == ".apdisk"
-            || base.starts_with("._")
-    }
     fn classify_upper(
         root: &Path,
         dir: &Path,
@@ -3313,14 +3599,6 @@ async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Opt
                 Err(e) => return Err(overlay_unreadable(&abs, &e)),
             };
             let rel = overlay_rel_path(root, &abs);
-            // OS junk first, BEFORE gitignore classification: `.Spotlight-V100`,
-            // `.fseventsd` and friends are not inherently gitignored, and letting them fall
-            // through to the recursive walk classified their children as uncovered — which
-            // refused the very unmounts this allowlist exists to permit. Junk never counts
-            // and is never descended into.
-            if is_os_junk(&rel) {
-                continue;
-            }
             if meta.is_dir() && !meta.file_type().is_symlink() {
                 if check_ignored(ignore, &rel, true)? {
                     // One ignored SUBTREE, not a recursive file count: walking a large
@@ -4207,17 +4485,32 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     let state = daemon::load_mount_state(&state_dir)?;
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
     let (user, token) = session.creds();
-    let ws = session
-        .client
-        .get_workspace(
-            &session.project_id,
-            &state.repo,
-            user,
-            token,
-            &state.workspace_id,
+    let ws = if state.native_filesystem {
+        native_workspace_to_mount_info(
+            session
+                .client
+                .native_workspace_with_credential(
+                    &session.project_id,
+                    &state.repo,
+                    &state.workspace_id,
+                    user,
+                    token,
+                )
+                .await?,
         )
-        .await?
-        .into_inner();
+    } else {
+        session
+            .client
+            .get_workspace(
+                &session.project_id,
+                &state.repo,
+                user,
+                token,
+                &state.workspace_id,
+            )
+            .await?
+            .into_inner()
+    };
     let _ = heartbeat(&session, &state).await;
     let daemon_commit = daemon::control(&state_dir, "ping")
         .await
@@ -4283,8 +4576,21 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     // A publish-on-save mount follows its target branch for convergence but is writable —
     // read_only() (not follow_ref presence) decides which mode the user is in.
     if state.read_only() {
-        let followed = state.follow_ref.as_deref().unwrap_or("the current state");
-        println!("{} read-only, follows {followed}", style("mode:").dim());
+        if let Some(snapshot) = state.pinned_snapshot.as_deref() {
+            println!(
+                "{} read-only, pinned to save {}",
+                style("mode:").dim(),
+                short_id(snapshot)
+            );
+        } else {
+            let followed = state.follow_ref.as_deref().unwrap_or("the current state");
+            println!("{} read-only, follows {followed}", style("mode:").dim());
+        }
+    } else if state.native_filesystem {
+        println!(
+            "{} publishing — every save lands on the filesystem head",
+            style("mode:").dim()
+        );
     } else if let Some(target) = &ws.shared_target {
         println!(
             "{} publishing — every save lands on {target} (view follows it)",
@@ -4377,8 +4683,9 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     Ok(())
 }
 
-/// Restore: refill the overlay so the merged view equals `version`. The mount's lower layer is
-/// untouched (history preserved); the next snapshot seals the restored state.
+/// Restore a mounted filesystem to a historical save. Native filesystems publish a metadata-only
+/// snapshot that reuses the historical root, then refresh the mount; legacy Git mounts retain the
+/// overlay materialization path below.
 pub async fn restore(
     ctx: &CliContext,
     path: &Path,
@@ -4427,6 +4734,74 @@ pub async fn restore(
         .get("commit")
         .and_then(|c| c.as_str().map(str::to_string))
         .ok_or_else(|| CliError::usage("daemon did not report a commit"))?;
+    if state.native_filesystem {
+        let (user, token) = session.creds();
+        let target = session
+            .client
+            .resolve_native_snapshot_id_with_credential(
+                &session.project_id,
+                &state.repo,
+                version,
+                user,
+                token,
+            )
+            .await?;
+        // Catch writes that landed while resolving a short history id before changing the
+        // server. The CAS below independently catches concurrent filesystem publication.
+        if let Some(baseline) = local_baseline.as_ref()
+            && overlay_fingerprint(&state_dir)? != *baseline
+        {
+            return Err(CliError::usage(format!(
+                "local changes landed while the restore was preparing; nothing was changed. \
+                 Seal them first (`tl fs snapshot {path}`) and retry, or use --discard.",
+                path = path.display(),
+            )));
+        }
+        let restored = session
+            .client
+            .restore_native_snapshot_with_credential(
+                &session.project_id,
+                &state.repo,
+                &state.workspace_id,
+                &target,
+                &lower,
+                user,
+                token,
+            )
+            .await?;
+        // Publication is already durable. If a local write raced the network operation, retain
+        // it above the restored lower rather than deleting user data; the next snapshot merges
+        // that write onto the restored timeline.
+        if let Some(baseline) = local_baseline
+            && overlay_fingerprint(&state_dir)? != baseline
+        {
+            return Err(CliError::usage(format!(
+                "restored the filesystem head to {}, but local changes landed during the \
+                 operation and were kept above it. Snapshot those changes, or retry with \
+                 --discard to see only the restored save.",
+                short_id(&restored),
+            )));
+        }
+        daemon::control(&state_dir, "clear_upper").await?;
+        // `clear_upper` arms the sealer's fail-closed reindex guard. There is no native refill,
+        // but the now-empty overlay still must be indexed to let autosave resume.
+        daemon::control(&state_dir, "reindex").await?;
+        let refresh = daemon::control(&state_dir, "refresh").await?;
+        if cfg!(target_os = "macos") {
+            let (expect, _complete, _new_daemon) = parse_refresh_probes(&refresh);
+            if !expect.is_empty() {
+                let changed: std::collections::BTreeSet<String> = expect.keys().cloned().collect();
+                converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
+            }
+        }
+        println!(
+            "Restored {} to {} as save {} (no file bytes transferred).",
+            path.display(),
+            short_id(&target),
+            short_id(&restored),
+        );
+        return Ok(());
+    }
     // Read everything from the server BEFORE touching local state, so a failed restore leaves
     // the workspace exactly as it was. A commit's index materializes asynchronously after its
     // snapshot publishes; a restore issued right behind one can land in that window — the
@@ -4905,6 +5280,11 @@ async fn walk_remote_tree(
 }
 
 async fn heartbeat(session: &FsSession, state: &MountState) -> Result<()> {
+    // Native writable workspaces are pinned by the filesystem product and therefore have no
+    // lease to renew. Read-only native workspaces are pinned as well.
+    if state.native_filesystem {
+        return Ok(());
+    }
     let (user, token) = session.creds();
     session
         .client

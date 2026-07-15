@@ -351,6 +351,36 @@ pub struct OverlayAttr {
     pub mtime: std::time::SystemTime,
 }
 
+fn system_time_from_unix_ns(value: i64) -> std::time::SystemTime {
+    let duration = std::time::Duration::from_nanos(value.unsigned_abs());
+    if value >= 0 {
+        std::time::UNIX_EPOCH + duration
+    } else {
+        std::time::UNIX_EPOCH - duration
+    }
+}
+
+fn preserve_lower_metadata(path: &Path, attr: &NodeAttr) -> Result<(), MountError> {
+    use std::os::unix::fs::PermissionsExt;
+
+    if attr.kind != NodeKind::Symlink {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(attr.perm as u32))
+            .map_err(io_err)?;
+    }
+    if let Some(mtime_ns) = attr.mtime_ns {
+        let timestamp = filetime::FileTime::from_unix_time(
+            mtime_ns.div_euclid(1_000_000_000),
+            mtime_ns.rem_euclid(1_000_000_000) as u32,
+        );
+        if attr.kind == NodeKind::Symlink {
+            filetime::set_symlink_file_times(path, timestamp, timestamp).map_err(io_err)?;
+        } else {
+            filetime::set_file_mtime(path, timestamp).map_err(io_err)?;
+        }
+    }
+    Ok(())
+}
+
 #[derive(Clone, Debug)]
 pub struct OverlayDirEntry {
     pub next_offset: u64,
@@ -886,7 +916,10 @@ impl OverlayFs {
             size: attr.size,
             perm: attr.perm,
             upper: false,
-            mtime: self.lower_mtime(&attr.commit),
+            mtime: attr
+                .mtime_ns
+                .map(system_time_from_unix_ns)
+                .unwrap_or_else(|| self.lower_mtime(&attr.commit)),
         }
     }
 
@@ -1403,17 +1436,22 @@ impl OverlayFs {
         let attr = self.core.getattr(core_ino)?;
         match attr.kind {
             NodeKind::Dir => {
-                std::fs::create_dir_all(self.upper_path(&node.path)).map_err(io_err)?;
+                let dest = self.upper_path(&node.path);
+                std::fs::create_dir_all(&dest).map_err(io_err)?;
+                preserve_lower_metadata(&dest, &attr)?;
                 return Ok(());
             }
             NodeKind::Symlink => {
+                use std::os::unix::ffi::OsStrExt;
+
                 let target = self.core.readlink(core_ino).await?;
                 let dest = self.upper_path(&node.path);
                 if let Some(parent) = dest.parent() {
                     std::fs::create_dir_all(parent).map_err(io_err)?;
                 }
-                std::os::unix::fs::symlink(String::from_utf8_lossy(&target).as_ref(), &dest)
+                std::os::unix::fs::symlink(std::ffi::OsStr::from_bytes(&target), &dest)
                     .map_err(io_err)?;
+                preserve_lower_metadata(&dest, &attr)?;
                 self.record(&node.path, DirtyKind::Upsert);
                 return Ok(());
             }
@@ -1445,13 +1483,9 @@ impl OverlayFs {
                 out.write_all(&chunk).map_err(io_err)?;
             }
             self.core.release(fh);
-            if attr.perm & 0o111 != 0 {
-                use std::os::unix::fs::PermissionsExt;
-                out.set_permissions(std::fs::Permissions::from_mode(0o755))
-                    .map_err(io_err)?;
-            }
         }
         std::fs::rename(&tmp, &dest).map_err(io_err)?;
+        preserve_lower_metadata(&dest, &attr)?;
         // The upper backs this path from here on, so the path is dirty NOW — not at the first
         // write() through the handle. An open-for-write that never writes (or a `touch`, whose
         // setattr carries neither size nor mode) would otherwise leave an upper file no dirty

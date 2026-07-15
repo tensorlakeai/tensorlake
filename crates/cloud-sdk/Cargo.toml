@@ -11,6 +11,7 @@ documentation = "https://docs.rs/tensorlake"
 
 [dependencies]
 anyhow = { workspace = true }
+blake3 = { workspace = true }
 fastcdc = { workspace = true }
 bytes = { workspace = true }
 base64 = { workspace = true }
@@ -26,6 +27,7 @@ hex = { workspace = true }
 ignore = { workspace = true }
 pin-project-lite = { workspace = true }
 png = { workspace = true }
+postcard = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }
 eventsource-stream = { workspace = true }
@@ -47,6 +49,7 @@ tokio-util = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
 uuid = { workspace = true }
+xattr = { workspace = true }
 des = { workspace = true }
 rand = "0.9.2"
 # Chunk-pack assembly for presigned-PUT staging (matches the server's chunk frame encoding).

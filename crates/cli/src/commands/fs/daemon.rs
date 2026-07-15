@@ -54,7 +54,7 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
 #[cfg(unix)]
-use super::overlay::{KernelExpectation, OverlayFs, OverlayInval, TrimBoundaries};
+use super::overlay::{KernelExpectation, OverlayFs, OverlayInval, RedirectSeal, TrimBoundaries};
 #[cfg(unix)]
 use std::sync::Arc;
 
@@ -134,6 +134,13 @@ pub struct MountState {
     #[serde(default)]
     pub owner_gid: Option<u32>,
     pub repo: String,
+    /// Native filesystem snapshots rather than Git commits and refs.
+    #[serde(default)]
+    pub native_filesystem: bool,
+    /// A retained native snapshot mounted as an immutable point-in-time view. Unlike a normal
+    /// read-only filesystem mount, this view never follows `fs/head`.
+    #[serde(default)]
+    pub pinned_snapshot: Option<String>,
     pub workspace_id: String,
     pub ref_name: String,
     pub mountpoint: PathBuf,
@@ -690,28 +697,42 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     // failing an hour into the mount's life.
     let api_creds = Arc::new(std::sync::Mutex::new((git_username, token.clone())));
 
-    let client = FsClient::new(
-        sdk.git_base_url(),
-        &state.project_id,
-        &state.repo,
-        Some(token),
-    )
+    let client = if state.native_filesystem {
+        FsClient::new_native(
+            sdk.git_base_url(),
+            &state.project_id,
+            &state.repo,
+            Some(token),
+        )
+    } else {
+        FsClient::new(
+            sdk.git_base_url(),
+            &state.project_id,
+            &state.repo,
+            Some(token),
+        )
+    }
     .map_err(|e| CliError::usage(format!("mount client: {e}")))?;
     // Keep a handle onto the shared credential slot for rotation.
     let rotating_client = client.clone();
 
     // Shared-ro sessions follow the branch itself; writable mounts follow their workspace ref.
-    let followed = state
-        .follow_ref
-        .clone()
-        .unwrap_or_else(|| state.ref_name.clone());
+    // Historical native views are different: their immutable snapshot id is the reference and
+    // the watcher stays disabled, so a later head promotion cannot move the mount.
+    let followed = state.pinned_snapshot.clone().unwrap_or_else(|| {
+        state
+            .follow_ref
+            .clone()
+            .unwrap_or_else(|| state.ref_name.clone())
+    });
+    let follows = state.pinned_snapshot.is_none();
     let mount_options = MountOptions {
         reference: followed,
-        follow: true,
+        follow: follows,
         poll_interval: Duration::from_secs(5),
         // Manifest-driven cache prefill in the background: first walks serve warm instead
         // of paying a per-directory crawl. Best-effort — a failed warmup just starts cold.
-        warmup: true,
+        warmup: !state.native_filesystem,
         // The create/attach response's commit: lets the core overlap its serve probe with
         // ref resolution (one startup round trip instead of two chained). The ref answer
         // stays authoritative, so a stale value is superseded at mount.
@@ -789,7 +810,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     // Lease heartbeat. An auth failure here is the running daemon's signal that its token
     // died early (revocation, epoch rotation): nudge the rotation task instead of waiting
     // out the scheduled re-mint.
-    {
+    if !state.native_filesystem {
         let sdk = sdk.clone();
         let (project, repo, ws) = (
             project.clone(),
@@ -869,6 +890,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
             project: project.clone(),
             repo: state.repo.clone(),
             workspace: state.workspace_id.clone(),
+            native_filesystem: state.native_filesystem,
             state_dir: state_dir.to_path_buf(),
             mountpoint: mountpoint.clone(),
             overlay: overlay.clone(),
@@ -1417,6 +1439,7 @@ struct Sealer {
     project: String,
     repo: String,
     workspace: String,
+    native_filesystem: bool,
     state_dir: PathBuf,
     mountpoint: PathBuf,
     overlay: Arc<OverlayFs>,
@@ -1629,7 +1652,20 @@ impl Sealer {
         // delete the whiteout already produced. Expansion failing leaves the whole delta
         // pending — publishing the source delete without the destination would lose the
         // subtree.
-        let redirect_seals = if self.overlay.has_redirects() {
+        let redirect_seals = if self.native_filesystem {
+            // Native metadata can move an immutable directory root directly. Expanding a
+            // lower-backed rename into every descendant is a Git-only necessity and would turn
+            // an O(1) native rename into a full remote walk on large trees.
+            self.overlay
+                .redirect_entries()
+                .into_iter()
+                .map(|(dst, src)| RedirectSeal {
+                    dst,
+                    src,
+                    files: Vec::new(),
+                })
+                .collect()
+        } else if self.overlay.has_redirects() {
             self.overlay.expand_redirects().await.map_err(|e| {
                 CliError::usage(format!(
                     "expanding pending renames failed (will retry): {e}"
@@ -1638,7 +1674,10 @@ impl Sealer {
         } else {
             Vec::new()
         };
-        if resolved.files.is_empty() && redirect_seals.is_empty() {
+        if resolved.files.is_empty()
+            && redirect_seals.is_empty()
+            && (!self.native_filesystem || resolved.directories.is_empty())
+        {
             // The whole delta was ignored paths, bare directories, or files that were born
             // and died between seals: sealed through, nothing to publish.
             st.sealed_gen = watermark;
@@ -1689,9 +1728,141 @@ impl Sealer {
             .filter(|f| f.delete)
             .map(|f| f.repo_path.clone())
             .collect();
-        let sealed_paths: Vec<String> =
-            resolved.files.iter().map(|f| f.repo_path.clone()).collect();
+        let sealed_paths: Vec<String> = resolved
+            .files
+            .iter()
+            .map(|f| f.repo_path.clone())
+            .chain(resolved.directories.iter().map(|(path, _)| path.clone()))
+            .collect();
         let push_started = std::time::Instant::now();
+        if self.native_filesystem {
+            use tensorlake::artifact_storage::native_fs::{
+                NativeChangeSet, NativeLocalUpsert, NativeRename,
+            };
+            let mut upserts: std::collections::BTreeMap<String, PathBuf> = resolved
+                .directories
+                .iter()
+                .map(|(path, source)| (path.clone(), source.clone()))
+                .collect();
+            for file in &resolved.files {
+                if file.delete {
+                    continue;
+                }
+                let source = match &file.source {
+                    // Lower-backed directory-renames are represented by `redirect_seals`
+                    // below, which moves their immutable directory root in O(1).
+                    PushSource::KnownOid(_) => continue,
+                    // Every other resolved upsert is upper-backed. Use its actual directory
+                    // entry so native scanning can preserve symlink/xattr/POSIX metadata;
+                    // Git's `Bytes` representation intentionally discarded that information.
+                    _ => self.state_dir.join("upper").join(&file.repo_path),
+                };
+                upserts.insert(file.repo_path.clone(), source);
+            }
+            let changes = NativeChangeSet {
+                upserts: upserts
+                    .into_iter()
+                    .map(|(path, source)| NativeLocalUpsert { path, source })
+                    .collect(),
+                deletes: delete_paths.clone(),
+                renames: redirect_seals
+                    .iter()
+                    .map(|seal| NativeRename {
+                        from: seal.src.clone(),
+                        to: seal.dst.clone(),
+                    })
+                    .collect(),
+            };
+            let report = self
+                .sdk
+                .push_native_changes_with_credential(
+                    &self.project,
+                    &self.repo,
+                    changes,
+                    &user,
+                    &token,
+                    tensorlake::artifact_storage::native_fs::NativePushOptions {
+                        message: message.to_string(),
+                        expected_snapshot_id: Some(lower.to_string()),
+                        workspace_id: Some(self.workspace.clone()),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    CliError::usage(format!("native snapshot push failed (will retry): {error}"))
+                })?;
+            let push_ms = push_started.elapsed().as_millis() as u64;
+            tracing::info!(
+                transport = %report.transport,
+                logical_bytes = report.logical_bytes,
+                stored_bytes = report.stored_bytes,
+                uploaded_bytes = report.uploaded_bytes,
+                uploaded_segments = report.uploaded_segments,
+                total_segments = report.total_segments,
+                push_ms,
+                "native snapshot data path"
+            );
+            st.sealed_gen = watermark;
+            self.overlay.prune_dirty(watermark);
+            self.overlay.close_dirty_base_if_clean();
+            st.recent_seals
+                .push((report.snapshot_id.clone(), resolved.sealed_upserts.clone()));
+            st.chunk_cache.clear();
+            self.publish_mirror(&st);
+            if self.overlay.epoch() != st.seen_epoch {
+                st.sealed = SealedIndex::default();
+                SealedIndex::reset(&self.state_dir);
+            } else {
+                for (path, stat) in &resolved.stats {
+                    st.sealed.upserts.insert(path.clone(), *stat);
+                    st.sealed.deletes.remove(path);
+                }
+                for path in &delete_paths {
+                    st.sealed.upserts.remove(path);
+                    st.sealed.deletes.insert(path.clone());
+                }
+                st.sealed.commit = report.snapshot_id.clone();
+                if let Err(error) = st.sealed.save(&self.state_dir) {
+                    eprintln!("seal: persisting sealed index failed: {error}");
+                }
+            }
+            match self.core.poll_ref().await {
+                Ok(Some(refresh)) => {
+                    absorb_refresh(&self.overlay, &self.invalidate, &self.pending, &refresh)
+                }
+                Ok(None) => {}
+                Err(error) => {
+                    eprintln!("seal: post-seal refresh failed (follow poll catches up): {error}")
+                }
+            }
+            if !redirect_seals.is_empty() && self.core.current_commit() == report.snapshot_id {
+                let destinations: Vec<String> =
+                    redirect_seals.iter().map(|seal| seal.dst.clone()).collect();
+                if let Err(error) = self.overlay.consume_redirects(&destinations) {
+                    eprintln!("seal: consuming sealed renames failed: {error}");
+                }
+            }
+            let cleared = clear
+                .then(|| {
+                    self.clear_overlay(&mut st).map_err(|error| {
+                        CliError::usage(format!(
+                            "snapshot {} sealed, but clearing the overlay failed: {error}",
+                            report.snapshot_id
+                        ))
+                    })
+                })
+                .transpose()?;
+            return Ok(SealOutcome::Sealed(SealReport {
+                commit: report.snapshot_id,
+                files: report.files,
+                chunks_uploaded: report.uploaded_segments,
+                chunks_total: report.total_segments,
+                sealed_paths,
+                push_ms,
+                cleared,
+            }));
+        }
         let report = self
             .sdk
             .push_files(
@@ -1970,13 +2141,15 @@ impl Sealer {
             });
         }
         let (sd, mp) = (self.state_dir.clone(), self.mountpoint.clone());
+        let include_directories = self.native_filesystem;
         // Same blocking-pool rule as resolve_seal: the ignore rules read through the
         // mountpoint this very process serves.
-        let (upserts, deletes) =
-            tokio::task::spawn_blocking(move || resolve_dirty(&sd, &mp, &delta, &recently))
-                .await
-                .map_err(|e| CliError::usage(format!("dirty resolution task failed: {e}")))?
-                .map_err(|e| CliError::usage(format!("resolving the dirty view failed: {e}")))?;
+        let (upserts, deletes) = tokio::task::spawn_blocking(move || {
+            resolve_dirty(&sd, &mp, &delta, &recently, include_directories)
+        })
+        .await
+        .map_err(|e| CliError::usage(format!("dirty resolution task failed: {e}")))?
+        .map_err(|e| CliError::usage(format!("resolving the dirty view failed: {e}")))?;
         Ok(DirtyReply {
             upserts,
             deletes,
@@ -2075,6 +2248,9 @@ fn collect_raw_overlay_paths(root: &Path, out: &mut std::collections::BTreeSet<S
 #[cfg(unix)]
 struct ResolvedSeal {
     files: Vec<tensorlake::artifact_storage::ingest::PushFile>,
+    /// Upper-backed directories touched by the delta, including empty directories and the
+    /// descendants of a directory upsert. Native snapshots preserve these; Git ignores them.
+    directories: Vec<(String, PathBuf)>,
     /// Paths whose content this seal publishes — the next ticks' resurrection guard.
     sealed_upserts: std::collections::HashSet<String>,
     /// Vanished-but-recently-sealed paths that got a whiteout written here; their merged view
@@ -2108,6 +2284,7 @@ fn resolve_seal(
     let upper = state_dir.join("upper");
     let wh = state_dir.join("wh");
     let mut upserts: super::OverlayUpserts = Vec::new();
+    let mut directories: Vec<(String, PathBuf)> = Vec::new();
     let mut deletes: Vec<String> = Vec::new();
     let mut tombstoned: Vec<String> = Vec::new();
     let mut vanished: Vec<String> = Vec::new();
@@ -2134,7 +2311,7 @@ fn resolve_seal(
             if whited_out_on_disk(&wh, path) {
                 deletes.push(path.clone());
             }
-            collect_dir_upserts(&upper, path, &mut ignore, &mut upserts)?;
+            collect_dir_upserts(&upper, path, &mut ignore, &mut upserts, &mut directories)?;
             continue;
         }
         if ignore.is_ignored(path, false)? {
@@ -2168,6 +2345,8 @@ fn resolve_seal(
     }
     upserts.sort_by(|a, b| a.0.cmp(&b.0));
     upserts.dedup_by(|a, b| a.0 == b.0);
+    directories.sort_by(|a, b| a.0.cmp(&b.0));
+    directories.dedup_by(|a, b| a.0 == b.0);
     deletes.sort();
     deletes.dedup();
     // The sealed index's identity capture, stat'd here — before the push reads the bytes —
@@ -2225,8 +2404,13 @@ fn resolve_seal(
     }
 
     Ok(ResolvedSeal {
-        sealed_upserts: upserts.iter().map(|(p, _, _)| p.clone()).collect(),
+        sealed_upserts: upserts
+            .iter()
+            .map(|(p, _, _)| p.clone())
+            .chain(directories.iter().map(|(p, _)| p.clone()))
+            .collect(),
         files,
+        directories,
         tombstoned,
         stats,
     })
@@ -2246,11 +2430,13 @@ fn resolve_dirty(
     mount_root: &Path,
     delta: &super::overlay::DirtyDelta,
     recently_sealed: &std::collections::HashSet<String>,
+    include_directories: bool,
 ) -> crate::error::Result<(Vec<String>, Vec<String>)> {
     let mut ignore = super::SnapshotIgnore::new(mount_root);
     let upper = state_dir.join("upper");
     let wh = state_dir.join("wh");
     let mut upserts: super::OverlayUpserts = Vec::new();
+    let mut directories = Vec::new();
     let mut deletes: Vec<String> = Vec::new();
     let mut vanished: Vec<String> = Vec::new();
     for (path, _) in &delta.upserts {
@@ -2266,7 +2452,7 @@ fn resolve_dirty(
             if whited_out_on_disk(&wh, path) {
                 deletes.push(path.clone());
             }
-            collect_dir_upserts(&upper, path, &mut ignore, &mut upserts)?;
+            collect_dir_upserts(&upper, path, &mut ignore, &mut upserts, &mut directories)?;
             continue;
         }
         if ignore.is_ignored(path, false)? {
@@ -2293,6 +2479,9 @@ fn resolve_dirty(
         }
     }
     let mut upserts: Vec<String> = upserts.into_iter().map(|(rel, _, _)| rel).collect();
+    if include_directories {
+        upserts.extend(directories.into_iter().map(|(rel, _)| rel));
+    }
     upserts.sort();
     upserts.dedup();
     deletes.sort();
@@ -2322,8 +2511,13 @@ fn collect_dir_upserts(
     dir_rel: &str,
     ignore: &mut super::SnapshotIgnore,
     upserts: &mut super::OverlayUpserts,
+    directories: &mut Vec<(String, PathBuf)>,
 ) -> crate::error::Result<()> {
     let abs_dir = upper.join(dir_rel);
+    if ignore.is_ignored(dir_rel, true)? {
+        return Ok(());
+    }
+    directories.push((dir_rel.to_string(), abs_dir.clone()));
     let Ok(read) = std::fs::read_dir(&abs_dir) else {
         return Ok(());
     };
@@ -2335,7 +2529,7 @@ fn collect_dir_upserts(
         let rel = format!("{dir_rel}/{}", entry.file_name().to_string_lossy());
         if meta.is_dir() && !meta.file_type().is_symlink() {
             if !ignore.is_ignored(&rel, true)? {
-                collect_dir_upserts(upper, &rel, ignore, upserts)?;
+                collect_dir_upserts(upper, &rel, ignore, upserts, directories)?;
             }
         } else if !ignore.is_ignored(&rel, false)? {
             upserts.push((rel, abs, git_mode(&meta)));
@@ -2873,6 +3067,7 @@ mod seal_tracking_tests {
             mount.path(),
             &d,
             &std::collections::HashSet::new(),
+            false,
         )
         .unwrap();
         let sealed = resolve_seal(
@@ -2918,9 +3113,27 @@ mod seal_tracking_tests {
             mount.path(),
             &delta(&["moved"], &[]),
             &std::collections::HashSet::new(),
+            false,
         )
         .unwrap();
         assert_eq!(upserts, vec!["moved/a.txt", "moved/sub/b.txt"]);
+        assert!(deletes.is_empty());
+    }
+
+    #[test]
+    fn native_dirty_view_preserves_empty_directories() {
+        let state = state_with(&[], &[]);
+        std::fs::create_dir_all(state.path().join("upper/empty")).unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let (upserts, deletes) = resolve_dirty(
+            state.path(),
+            mount.path(),
+            &delta(&["empty"], &[]),
+            &std::collections::HashSet::new(),
+            true,
+        )
+        .unwrap();
+        assert_eq!(upserts, vec!["empty"]);
         assert!(deletes.is_empty());
     }
 
@@ -2938,6 +3151,7 @@ mod seal_tracking_tests {
             mount.path(),
             &delta(&["vanished.txt"], &[]),
             &recently,
+            false,
         )
         .unwrap();
         assert!(upserts.is_empty());

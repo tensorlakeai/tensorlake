@@ -230,9 +230,10 @@ enum FsCommands {
     },
 
     /// Mount a filesystem (FUSE): reads stream lazily, saves publish to the filesystem.
+    /// Name a retained save as `filesystem:save-id` for a pinned read-only time-travel view.
     /// Remounting a filesystem this machine has a detached session for resumes that session
     Mount {
-        /// Filesystem name (see `tl fs ls`)
+        /// Filesystem name, optionally followed by `:<save-id>` (see `tl fs history`)
         target: String,
 
         /// Mountpoint directory (created; must be empty)
