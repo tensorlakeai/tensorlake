@@ -1035,7 +1035,10 @@ fn prepare_native_snapshot_with_sender(
         .iter()
         .map(|task| task.before.len().max(64 * 1024))
         .sum();
-    let desired_groups = rayon::current_num_threads().max(1) * 4;
+    // Byte-balance one independently scheduled group per worker. SegmentBuilder still splits any
+    // group that crosses the server target, while avoiding an object-count floor above CPU
+    // parallelism on highly compressible trees.
+    let desired_groups = rayon::current_num_threads().max(1);
     let group_target = total_weight
         .div_ceil(desired_groups as u64)
         .max(64 * 1024 * 1024);
