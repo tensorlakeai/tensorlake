@@ -532,7 +532,7 @@ fn is_transient(e: &SdkError) -> bool {
 /// orphans the server GC's, and commit submission reattaches through its idempotency key.
 /// Large tokened offset requests are deliberately NOT wrapped — a lost success would make the
 /// replayed offset conflict.
-async fn with_transient_retries<T, F, Fut>(mut op: F) -> Result<T, SdkError>
+pub(super) async fn with_transient_retries<T, F, Fut>(mut op: F) -> Result<T, SdkError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, SdkError>>,

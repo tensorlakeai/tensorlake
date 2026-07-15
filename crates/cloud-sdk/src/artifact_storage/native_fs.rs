@@ -2798,19 +2798,25 @@ async fn fetch_native_directory(
             suffix.push_str("&after=");
             suffix.push_str(&urlencoding::encode(cursor));
         }
-        let (request, _) = client.git_request(
-            Method::GET,
-            project_id,
-            repo,
-            Some(&suffix),
-            username,
-            token,
-        )?;
-        let response = request.send().await?;
-        if response.status() == StatusCode::NOT_FOUND {
+        let page: Option<NativeTreePage> = super::ingest::with_transient_retries(|| async {
+            let (request, _) = client.git_request(
+                Method::GET,
+                project_id,
+                repo,
+                Some(&suffix),
+                username,
+                token,
+            )?;
+            let response = request.send().await?;
+            if response.status() == StatusCode::NOT_FOUND {
+                return Ok(None);
+            }
+            expect_json(response).await.map(Some)
+        })
+        .await?;
+        let Some(page) = page else {
             return Ok(None);
-        }
-        let page: NativeTreePage = expect_json(response).await?;
+        };
         entries.extend(page.entries);
         let Some(next) = page.next_after else { break };
         after = Some(next);
@@ -3647,7 +3653,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn native_delta_reuses_renamed_root_and_rebuilds_only_parent() {
+    async fn native_delta_retries_rate_limits_and_reuses_renamed_root() {
         let reused_root = DirectoryPage::empty().id().unwrap();
         let root_entries = vec![
             DirectoryEntry {
@@ -3673,28 +3679,39 @@ mod tests {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
-            let mut request = Vec::new();
-            loop {
-                let mut bytes = [0u8; 4096];
-                let count = stream.read(&mut bytes).await.unwrap();
-                request.extend_from_slice(&bytes[..count]);
-                if request.windows(4).any(|window| window == b"\r\n\r\n") {
-                    break;
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut bytes = [0u8; 4096];
+                    let count = stream.read(&mut bytes).await.unwrap();
+                    request.extend_from_slice(&bytes[..count]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
                 }
-            }
-            assert!(String::from_utf8_lossy(&request).contains("/project/p/repos/r/fs/tree?"));
-            stream
-                .write_all(
-                    format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
-                        response.len()
+                assert!(String::from_utf8_lossy(&request).contains("/project/p/repos/r/fs/tree?"));
+                if request_index == 0 {
+                    stream
+                        .write_all(
+                            b"HTTP/1.1 429 Too Many Requests\r\ncontent-length: 0\r\nconnection: close\r\n\r\n",
+                        )
+                        .await
+                        .unwrap();
+                    continue;
+                }
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            response.len()
+                        )
+                        .as_bytes(),
                     )
-                    .as_bytes(),
-                )
-                .await
-                .unwrap();
-            stream.write_all(&response).await.unwrap();
+                    .await
+                    .unwrap();
+                stream.write_all(&response).await.unwrap();
+            }
         });
         let base = format!("http://{addr}");
         let api = crate::ClientBuilder::new(&base)
