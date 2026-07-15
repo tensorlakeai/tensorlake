@@ -218,13 +218,7 @@ class TestDeployEntrypoints(unittest.TestCase):
             patch.object(deploy_module, "_warning_missing_secrets", return_value=[]),
             patch.object(deploy_module, "get_functions", return_value=["fn"]),
             patch.object(deploy_module, "_prepare_images", prepare_images),
-            patch.object(
-                deploy_module,
-                "deploy_applications",
-                return_value={
-                    "app-one": "https://api.tensorlake.ai/applications/public/endpoint_123"
-                },
-            ) as deploy_apps,
+            patch.object(deploy_module, "deploy_applications") as deploy_apps,
             patch.object(
                 deploy_module,
                 "filter_applications",
@@ -261,10 +255,6 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(deployed_event["type"], "deployed")
         self.assertEqual(deployed_event["application"], "app-one")
         self.assertEqual(deployed_event["curl_command"], "curl https://example.test")
-        self.assertEqual(
-            deployed_event["public_endpoint_url"],
-            "https://api.tensorlake.ai/applications/public/endpoint_123",
-        )
 
     def test_deploy_emits_missing_secret_names(self):
         prepare_images = AsyncMock()

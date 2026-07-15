@@ -142,19 +142,6 @@ class CloudClient:
         except Exception as e:
             _raise_as_tensorlake_error(e)
 
-    def ensure_application_public_endpoint_json(
-        self,
-        application_name: str,
-        allow: list[str],
-    ) -> str:
-        try:
-            return self._client.ensure_application_public_endpoint_json(
-                application_name=application_name,
-                allow=allow,
-            )
-        except Exception as e:
-            _raise_as_tensorlake_error(e)
-
     def delete_application(self, application_name: str) -> None:
         try:
             self._client.delete_application(application_name=application_name)

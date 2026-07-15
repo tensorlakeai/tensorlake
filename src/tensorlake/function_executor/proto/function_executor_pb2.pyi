@@ -181,24 +181,6 @@ class SerializedObjectInsideBLOB(_message.Message):
         offset: _Optional[int] = ...,
     ) -> None: ...
 
-class HttpRequestHeader(_message.Message):
-    __slots__ = ("name", "value")
-    NAME_FIELD_NUMBER: _ClassVar[int]
-    VALUE_FIELD_NUMBER: _ClassVar[int]
-    name: str
-    value: str
-    def __init__(
-        self, name: _Optional[str] = ..., value: _Optional[str] = ...
-    ) -> None: ...
-
-class RequestContext(_message.Message):
-    __slots__ = ("headers",)
-    HEADERS_FIELD_NUMBER: _ClassVar[int]
-    headers: _containers.RepeatedCompositeFieldContainer[HttpRequestHeader]
-    def __init__(
-        self, headers: _Optional[_Iterable[_Union[HttpRequestHeader, _Mapping]]] = ...
-    ) -> None: ...
-
 class FunctionRef(_message.Message):
     __slots__ = (
         "namespace",
@@ -366,30 +348,21 @@ class AllocationState(_message.Message):
     ) -> None: ...
 
 class FunctionInputs(_message.Message):
-    __slots__ = (
-        "args",
-        "arg_blobs",
-        "request_error_blob",
-        "function_call_metadata",
-        "request_context",
-    )
+    __slots__ = ("args", "arg_blobs", "request_error_blob", "function_call_metadata")
     ARGS_FIELD_NUMBER: _ClassVar[int]
     ARG_BLOBS_FIELD_NUMBER: _ClassVar[int]
     REQUEST_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALL_METADATA_FIELD_NUMBER: _ClassVar[int]
-    REQUEST_CONTEXT_FIELD_NUMBER: _ClassVar[int]
     args: _containers.RepeatedCompositeFieldContainer[SerializedObjectInsideBLOB]
     arg_blobs: _containers.RepeatedCompositeFieldContainer[BLOB]
     request_error_blob: BLOB
     function_call_metadata: bytes
-    request_context: RequestContext
     def __init__(
         self,
         args: _Optional[_Iterable[_Union[SerializedObjectInsideBLOB, _Mapping]]] = ...,
         arg_blobs: _Optional[_Iterable[_Union[BLOB, _Mapping]]] = ...,
         request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
         function_call_metadata: _Optional[bytes] = ...,
-        request_context: _Optional[_Union[RequestContext, _Mapping]] = ...,
     ) -> None: ...
 
 class FunctionArg(_message.Message):

@@ -2,7 +2,6 @@ import json
 import unittest
 
 import validate_all_applications
-from pydantic import ValidationError
 
 from tensorlake.applications import Image, Retries, application, cls, function
 from tensorlake.applications.registry import get_functions
@@ -29,12 +28,6 @@ def default_application_function(x: int) -> str:
     return "success"
 
 
-@application(allow=["unauthorized_requests"])
-@function()
-def application_function_with_allowed_unauthorized_requests(x: int) -> str:
-    return "success"
-
-
 @function()
 def function_with_default_timeout(x: int) -> str:
     return "success"
@@ -53,40 +46,6 @@ class FunctionWithInitializationTimeout:
 
 
 class TestFunctionManifestTimeouts(unittest.TestCase):
-    def test_default_application_allow_is_empty(self):
-        app_manifest: ApplicationManifest = create_application_manifest(
-            application_function=default_application_function,
-            all_functions=get_functions(),
-        )
-
-        self.assertEqual(app_manifest.allow, [])
-        self.assertEqual(json.loads(app_manifest.model_dump_json())["allow"], [])
-
-    def test_application_allow_preserves_supported_capability(self):
-        app_manifest: ApplicationManifest = create_application_manifest(
-            application_function=application_function_with_allowed_unauthorized_requests,
-            all_functions=get_functions(),
-        )
-
-        self.assertEqual(app_manifest.allow, ["unauthorized_requests"])
-        self.assertEqual(
-            json.loads(app_manifest.model_dump_json())["allow"],
-            ["unauthorized_requests"],
-        )
-
-    def test_application_allow_rejects_unsupported_capability(self):
-        original_allow = default_application_function._application_config.allow
-        default_application_function._application_config.allow = ["admin_mode"]
-
-        try:
-            with self.assertRaises(ValidationError):
-                create_application_manifest(
-                    application_function=default_application_function,
-                    all_functions=get_functions(),
-                )
-        finally:
-            default_application_function._application_config.allow = original_allow
-
     def test_expected_timeouts(self):
         app_manifest: ApplicationManifest = create_application_manifest(
             application_function=default_application_function,

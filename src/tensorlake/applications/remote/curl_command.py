@@ -4,8 +4,7 @@ import json
 from tensorlake.applications import Function
 from tensorlake.applications.function.type_hints import (
     function_parameters,
-    is_http_body_type_hint,
-    is_raw_body_type_hint,
+    is_file_type_hint,
     parameter_type_hint,
 )
 
@@ -21,7 +20,7 @@ def example_application_curl_command(
 ) -> str | None:
     """Generates an example cURL command to call the deployed application function.
 
-    The file_paths dict maps parameter names to file paths for raw body type hint parameters.
+    The file_paths dict maps parameter names to file paths for File type hint parameters.
     If None then the example command will generate placeholder file paths. The dict is
     mainly used for testing at the moment.
 
@@ -47,10 +46,10 @@ def example_application_curl_command(
     if len(parameters) == 0:
         # No application function parameters: empty body.
         curl_command_lines.append("--json ''")
-    elif len(parameters) == 1 and not is_raw_body_type_hint(
+    elif len(parameters) == 1 and not is_file_type_hint(
         parameter_type_hint(parameters[0])
     ):
-        # Use simple JSON body calling convention for single non-raw-body parameter.
+        # Use simple JSON body calling convention for single non-File parameter.
         # This is easier to use for users.
         param_value: str | None = _render_parameter_value(
             parameters[0], app_func_manifest.parameters[0], file_paths
@@ -101,9 +100,9 @@ def _render_multipart_parameter(
     if param_value is None:
         return None
 
-    # We do pre-deployment validation that ensures that raw body type hints
-    # are always used in a simple foo: File or foo: HttpBody form.
-    if is_raw_body_type_hint(parameter_type_hint(param)):
+    # We do pre-deployment validation that ensures that File type hint
+    # is always used in a simple foo: File form.
+    if is_file_type_hint(parameter_type_hint(param)):
         # Note: curl guesses file content type automatically.
         return (
             f"{param_definition_name}='{param_value}'",
@@ -126,13 +125,11 @@ def _render_parameter_value(
     Returns None if the parameter has unsupported type hint.
     Raises TensorlakeError on error.
     """
-    # We do pre-deployment validation that ensures that raw body type hints
-    # are always used in a simple foo: File or foo: HttpBody form.
-    if is_raw_body_type_hint(parameter_type_hint(param)):
+    # We do pre-deployment validation that ensures that File type hint
+    # is always used in a simple foo: File form.
+    if is_file_type_hint(parameter_type_hint(param)):
         if file_paths is not None and param.name in file_paths:
             return f"@{file_paths[param.name]}"
-        elif is_http_body_type_hint(parameter_type_hint(param)):
-            return "HTTP_BODY"
         else:
             # Always render File params even if they have default parameter values
             # because we can't render File default values in curl command.
