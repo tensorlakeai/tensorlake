@@ -2563,7 +2563,7 @@ impl ArtifactStorageClient {
         )
         .await?
         {
-            NativeHeadAdvance::Published { .. } => Ok(submitted.snapshot_id),
+            NativeHeadAdvance::Published { snapshot_id, .. } => Ok(snapshot_id),
             NativeHeadAdvance::Conflict {
                 actual_snapshot_id,
                 snapshot_id,
@@ -3115,11 +3115,11 @@ async fn finish_native_push(
         )
         .await?
     };
-    let previous_snapshot_id = match advance {
+    let (previous_snapshot_id, published_snapshot_id) = match advance {
         NativeHeadAdvance::Published {
             previous_snapshot_id,
-            ..
-        } => previous_snapshot_id,
+            snapshot_id,
+        } => (previous_snapshot_id, snapshot_id),
         NativeHeadAdvance::Conflict {
             actual_snapshot_id,
             snapshot_id,
@@ -3133,11 +3133,11 @@ async fn finish_native_push(
     note_progress(
         &options.progress,
         NativePushEvent::Published {
-            snapshot_id: submitted.snapshot_id.clone(),
+            snapshot_id: published_snapshot_id.clone(),
         },
     );
     Ok(NativePushReport {
-        snapshot_id: submitted.snapshot_id,
+        snapshot_id: published_snapshot_id,
         previous_snapshot_id,
         files: prepared.files,
         directories: prepared.directories,
@@ -3924,6 +3924,96 @@ mod tests {
             .native_workspace_heartbeat_with_credential("p", "r", "ws-1", "user", "token")
             .await
             .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn native_workspace_publish_returns_the_reconciled_server_head() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for request_index in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut bytes = [0u8; 4096];
+                    let count = stream.read(&mut bytes).await.unwrap();
+                    request.extend_from_slice(&bytes[..count]);
+                    let Some(header_end) = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|offset| offset + 4)
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&request);
+                let body = if request_index == 0 {
+                    assert!(text.contains("PUT /project/p/repos/r/fs/workspaces/ws/snapshot "));
+                    serde_json::json!({
+                        "previous_snapshot_id": "workspace-base",
+                        "snapshot_id": "source-snapshot",
+                    })
+                } else {
+                    assert!(text.contains("POST /project/p/repos/r/fs/workspaces/ws/promote "));
+                    serde_json::json!({
+                        "previous_snapshot_id": "concurrent-head",
+                        "snapshot_id": "reconciled-head",
+                    })
+                };
+                let body = serde_json::to_vec(&body).unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+        });
+        let base = format!("http://{addr}");
+        let api = crate::ClientBuilder::new(&base)
+            .bearer_token("unused")
+            .build()
+            .unwrap();
+        let client = ArtifactStorageClient::new(api, &base).unwrap();
+        let result = publish_native_workspace_snapshot(
+            &client,
+            "p",
+            "r",
+            "user",
+            "token",
+            "ws",
+            "upload",
+            "source-snapshot",
+            Some("workspace-base"),
+            Some("shared-base"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            result,
+            NativeHeadAdvance::Published {
+                previous_snapshot_id: Some("concurrent-head".into()),
+                snapshot_id: "reconciled-head".into(),
+            }
+        );
         server.await.unwrap();
     }
 }
