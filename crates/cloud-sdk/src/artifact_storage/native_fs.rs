@@ -14,8 +14,10 @@ use std::time::Duration;
 
 use futures::StreamExt;
 use ignore::WalkBuilder;
+use rayon::prelude::*;
 use reqwest::{Body, Method, StatusCode};
 use serde::{Deserialize, Serialize};
+use sha2::Digest;
 
 use crate::error::SdkError;
 
@@ -37,7 +39,6 @@ pub const ENTRY_MODE_MASK: u32 = 0o7777;
 const NATIVE_METADATA_REQUEST_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const NATIVE_METADATA_REQUEST_MAX_OBJECTS: usize = 4096;
 
-const SEGMENT_DOMAIN: &[u8] = b"tensorlake.fs.segment.v1\0";
 const FILE_CONTENT_DOMAIN: &[u8] = b"tensorlake.fs.file-content.v1\0";
 const DIRECTORY_PAGE_DOMAIN: &[u8] = b"tensorlake.fs.directory-page.v1\0";
 const CHUNK_RECIPE_DOMAIN: &[u8] = b"tensorlake.fs.chunk-recipe.v1\0";
@@ -122,8 +123,8 @@ impl ObjectId {
         hasher.finalize()
     }
 
-    pub fn segment_hasher() -> ObjectIdHasher {
-        ObjectIdHasher::new(SEGMENT_DOMAIN)
+    pub fn segment_hasher() -> SegmentIdHasher {
+        SegmentIdHasher::new()
     }
 
     pub fn file_content_hasher() -> ObjectIdHasher {
@@ -162,6 +163,28 @@ impl ObjectIdHasher {
 
     pub fn finalize(&self) -> ObjectId {
         ObjectId::from_array(*self.hasher.finalize().as_bytes())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SegmentIdHasher {
+    hasher: sha2::Sha256,
+}
+
+impl SegmentIdHasher {
+    fn new() -> Self {
+        Self {
+            hasher: sha2::Sha256::new(),
+        }
+    }
+
+    pub fn update(&mut self, bytes: &[u8]) -> &mut Self {
+        self.hasher.update(bytes);
+        self
+    }
+
+    pub fn finalize(&self) -> ObjectId {
+        ObjectId::from_array(self.hasher.clone().finalize().into())
     }
 }
 
@@ -640,6 +663,18 @@ struct BuiltSegment {
 }
 
 #[derive(Clone)]
+struct PreparedSegmentUpload {
+    id: ObjectId,
+    len: u64,
+    path: PathBuf,
+}
+
+struct PipelinedSegmentReport {
+    uploaded_ids: HashSet<ObjectId>,
+    uploaded_bytes: u64,
+}
+
+#[derive(Clone)]
 struct PendingSlice {
     segment_index: usize,
     offset: u64,
@@ -706,6 +741,32 @@ struct ScannedEntry {
     data: ScannedData,
 }
 
+enum PreScannedData {
+    File { hardlink_group: Option<[u8; 16]> },
+    Directory,
+    Symlink { target: Vec<u8> },
+}
+
+struct PreScannedEntry {
+    rel: PathBuf,
+    source: PathBuf,
+    before: std::fs::Metadata,
+    metadata: EntryMetadata,
+    data: PreScannedData,
+}
+
+struct ParallelFileTask {
+    entry_index: usize,
+    source: PathBuf,
+    before: std::fs::Metadata,
+    expected_content: Option<ObjectId>,
+}
+
+struct ParallelFileGroup {
+    files: Vec<(usize, PendingContent, u64)>,
+    segments: Vec<BuiltSegment>,
+}
+
 struct PreparedNativeSnapshot {
     root: ObjectId,
     pages: Vec<DirectoryPage>,
@@ -737,7 +798,7 @@ struct SegmentBuilder {
 
 struct OpenSegment {
     temp: tempfile::NamedTempFile,
-    hasher: ObjectIdHasher,
+    hasher: SegmentIdHasher,
     len: u64,
 }
 
@@ -761,7 +822,7 @@ impl SegmentBuilder {
         logical: &[u8],
         content_id: ObjectId,
     ) -> Result<PendingSlice, SdkError> {
-        let stored = zstd::stream::encode_all(logical, 1)?;
+        let stored = zstd::stream::encode_all(logical, 3)?;
         let stored_len = u32::try_from(stored.len())
             .map_err(|_| client_error("compressed native record exceeds u32"))?;
         if stored.is_empty() || stored.len() as u64 > self.max_bytes {
@@ -819,10 +880,20 @@ impl SegmentBuilder {
     }
 }
 
+#[cfg(test)]
 fn prepare_native_snapshot(
     root: &Path,
     target_segment_bytes: u64,
     max_segment_bytes: u64,
+) -> Result<PreparedNativeSnapshot, SdkError> {
+    prepare_native_snapshot_with_sender(root, target_segment_bytes, max_segment_bytes, None)
+}
+
+fn prepare_native_snapshot_with_sender(
+    root: &Path,
+    target_segment_bytes: u64,
+    max_segment_bytes: u64,
+    completed_segments: Option<tokio::sync::mpsc::UnboundedSender<Vec<PreparedSegmentUpload>>>,
 ) -> Result<PreparedNativeSnapshot, SdkError> {
     let root = root.canonicalize()?;
     if !root.is_dir() {
@@ -831,13 +902,6 @@ fn prepare_native_snapshot(
             root.display()
         )));
     }
-    let mut segment_builder = SegmentBuilder::new(target_segment_bytes, max_segment_bytes)?;
-    let mut scanned = Vec::new();
-    let mut files = 0usize;
-    let mut directories = 1usize;
-    let mut logical_bytes = 0u64;
-    let mut hardlinks: HashMap<[u8; 16], (PendingContent, u64, std::fs::Metadata)> = HashMap::new();
-
     let mut walker = WalkBuilder::new(&root);
     walker
         .hidden(false)
@@ -851,7 +915,7 @@ fn prepare_native_snapshot(
         .git_global(false)
         .follow_links(false)
         .sort_by_file_path(|a, b| a.cmp(b));
-
+    let mut paths = Vec::new();
     for result in walker.build() {
         let entry = result.map_err(|error| client_error(error.to_string()))?;
         let path = entry.path();
@@ -862,65 +926,248 @@ fn prepare_native_snapshot(
             .strip_prefix(&root)
             .map_err(|_| client_error("snapshot walker escaped its root"))?
             .to_path_buf();
-        let before = std::fs::symlink_metadata(path)?;
-        let metadata = native_entry_metadata(path, &before)?;
-        let file_type = before.file_type();
-        let data = if file_type.is_dir() {
-            directories += 1;
-            ScannedData::Directory
-        } else if file_type.is_symlink() {
-            files += 1;
-            let target = raw_path_bytes(&std::fs::read_link(path)?);
-            logical_bytes = logical_bytes.saturating_add(target.len() as u64);
-            ScannedData::Symlink { target }
-        } else if file_type.is_file() {
-            files += 1;
-            let hardlink_group = hardlink_group(&before);
-            let (content, size) = match hardlink_group.and_then(|group| hardlinks.get(&group)) {
-                Some((content, size, cached)) if same_snapshot_stat(cached, &before) => {
-                    (content.clone(), *size)
+        paths.push((path.to_path_buf(), rel));
+    }
+
+    // Stat/xattr work is syscall-heavy on build trees. Preserve the walker's deterministic order
+    // while issuing those independent operations in parallel.
+    let pre_scanned: Vec<PreScannedEntry> = paths
+        .into_par_iter()
+        .map(|(source, rel)| {
+            let before = std::fs::symlink_metadata(&source)?;
+            let metadata = native_entry_metadata(&source, &before)?;
+            let file_type = before.file_type();
+            let data = if file_type.is_dir() {
+                PreScannedData::Directory
+            } else if file_type.is_symlink() {
+                PreScannedData::Symlink {
+                    target: raw_path_bytes(&std::fs::read_link(&source)?),
                 }
-                Some(_) => {
+            } else if file_type.is_file() {
+                PreScannedData::File {
+                    hardlink_group: hardlink_group(&before),
+                }
+            } else {
+                return Err(client_error(format!(
+                    "{} is not a regular file, directory, or symlink",
+                    source.display()
+                )));
+            };
+            if !file_type.is_file() {
+                let after = std::fs::symlink_metadata(&source)?;
+                if !same_snapshot_stat(&before, &after) {
                     return Err(client_error(format!(
-                        "{} changed through another hardlink while it was being snapshotted; retry",
-                        path.display()
+                        "{} changed while it was being snapshotted; retry",
+                        source.display()
                     )));
                 }
-                None => {
-                    let content = read_file_once(path, &before, &mut segment_builder)?;
-                    if let Some(group) = hardlink_group {
-                        hardlinks.insert(group, (content.0.clone(), content.1, before.clone()));
-                    }
-                    content
-                }
-            };
-            logical_bytes = logical_bytes.saturating_add(size);
-            ScannedData::File {
-                size,
-                content,
-                hardlink_group,
             }
-        } else {
-            return Err(client_error(format!(
-                "{} is not a regular file, directory, or symlink",
-                path.display()
-            )));
+            Ok(PreScannedEntry {
+                rel,
+                source,
+                before,
+                metadata,
+                data,
+            })
+        })
+        .collect::<Result<_, SdkError>>()?;
+
+    // Assign each hardlink inode one deterministic primary. Primaries are partitioned into stable
+    // byte-balanced groups; every group owns a SegmentBuilder, avoiding locks in compression and
+    // temp-file writes while keeping aggregate-object counts small.
+    let mut hardlink_primaries = HashMap::<[u8; 16], usize>::new();
+    let mut hardlink_aliases = vec![None; pre_scanned.len()];
+    let mut file_tasks = Vec::new();
+    for (entry_index, entry) in pre_scanned.iter().enumerate() {
+        let PreScannedData::File { hardlink_group } = &entry.data else {
+            continue;
         };
-        let after = std::fs::symlink_metadata(path)?;
-        if !same_snapshot_stat(&before, &after) {
-            return Err(client_error(format!(
-                "{} changed while it was being snapshotted; retry",
-                path.display()
-            )));
+        if let Some(group) = hardlink_group {
+            if let Some(primary) = hardlink_primaries.get(group).copied() {
+                if !same_snapshot_stat(&pre_scanned[primary].before, &entry.before) {
+                    return Err(client_error(format!(
+                        "{} changed through another hardlink while it was being snapshotted; retry",
+                        entry.source.display()
+                    )));
+                }
+                hardlink_aliases[entry_index] = Some(primary);
+                continue;
+            }
+            hardlink_primaries.insert(*group, entry_index);
         }
-        scanned.push(ScannedEntry {
-            rel,
-            metadata,
-            data,
+        file_tasks.push(ParallelFileTask {
+            entry_index,
+            source: entry.source.clone(),
+            before: entry.before.clone(),
+            expected_content: None,
         });
     }
 
-    let segments = segment_builder.finish()?;
+    // Exact copies are common in compiler caches and language build trees. Hash large files in a
+    // cheap parallel pass, select the first path deterministically, and let later paths reference
+    // that one immutable recipe. This avoids compressing and uploading identical bytes repeatedly;
+    // inline files are already embedded in metadata and do not consume segment bandwidth.
+    let hashed_tasks: Vec<ParallelFileTask> = file_tasks
+        .into_par_iter()
+        .map(|mut task| {
+            if task.before.len() > MAX_INLINE_BYTES as u64 {
+                task.expected_content = Some(hash_file_once(&task.source, &task.before)?);
+            }
+            Ok(task)
+        })
+        .collect::<Result<_, SdkError>>()?;
+    let mut content_primaries = HashMap::<(ObjectId, u64), usize>::new();
+    let mut content_aliases = vec![None; pre_scanned.len()];
+    let mut file_tasks = Vec::with_capacity(hashed_tasks.len());
+    for task in hashed_tasks {
+        if let Some(content_id) = task.expected_content {
+            let key = (content_id, task.before.len());
+            if let Some(primary) = content_primaries.get(&key).copied() {
+                content_aliases[task.entry_index] = Some(primary);
+                continue;
+            }
+            content_primaries.insert(key, task.entry_index);
+        }
+        file_tasks.push(task);
+    }
+
+    let total_weight: u64 = file_tasks
+        .iter()
+        .map(|task| task.before.len().max(64 * 1024))
+        .sum();
+    let desired_groups = rayon::current_num_threads().max(1) * 4;
+    let group_target = total_weight
+        .div_ceil(desired_groups as u64)
+        .max(64 * 1024 * 1024);
+    let mut groups: Vec<Vec<ParallelFileTask>> = Vec::new();
+    let mut group = Vec::new();
+    let mut group_weight = 0u64;
+    for task in file_tasks {
+        let weight = task.before.len().max(64 * 1024);
+        if !group.is_empty() && group_weight.saturating_add(weight) > group_target {
+            groups.push(std::mem::take(&mut group));
+            group_weight = 0;
+        }
+        group_weight = group_weight.saturating_add(weight);
+        group.push(task);
+    }
+    if !group.is_empty() {
+        groups.push(group);
+    }
+    let group_results: Vec<ParallelFileGroup> = groups
+        .into_par_iter()
+        .map(|tasks| {
+            let mut builder = SegmentBuilder::new(target_segment_bytes, max_segment_bytes)?;
+            let mut files = Vec::with_capacity(tasks.len());
+            for task in tasks {
+                let (content, size) = read_file_once(&task.source, &task.before, &mut builder)?;
+                if let Some(expected) = task.expected_content {
+                    let actual = match &content {
+                        PendingContent::Segments { content_id, .. } => *content_id,
+                        PendingContent::Inline(bytes) => ObjectId::file_content(bytes),
+                    };
+                    if actual != expected {
+                        return Err(client_error(format!(
+                            "{} changed after duplicate detection; retry",
+                            task.source.display()
+                        )));
+                    }
+                }
+                let after = std::fs::symlink_metadata(&task.source)?;
+                if !same_snapshot_stat(&task.before, &after) {
+                    return Err(client_error(format!(
+                        "{} changed while it was being snapshotted; retry",
+                        task.source.display()
+                    )));
+                }
+                files.push((task.entry_index, content, size));
+            }
+            let segments = builder.finish()?;
+            if let Some(sender) = &completed_segments {
+                let upload = segments
+                    .iter()
+                    .map(|segment| PreparedSegmentUpload {
+                        id: segment.id,
+                        len: segment.len,
+                        path: segment.temp.path().to_path_buf(),
+                    })
+                    .collect();
+                // A dropped receiver means another upload already failed. Scanning remains
+                // independently fallible and returns its own precise error to the join point.
+                let _ = sender.send(upload);
+            }
+            Ok(ParallelFileGroup { files, segments })
+        })
+        .collect::<Result<_, SdkError>>()?;
+
+    let mut file_content: Vec<Option<(PendingContent, u64)>> =
+        (0..pre_scanned.len()).map(|_| None).collect();
+    let mut segments = Vec::new();
+    for result in group_results {
+        let segment_base = segments.len();
+        for (entry_index, mut content, size) in result.files {
+            shift_pending_segment_indexes(&mut content, segment_base);
+            file_content[entry_index] = Some((content, size));
+        }
+        segments.extend(result.segments);
+    }
+    for (alias, primary) in content_aliases.iter().enumerate() {
+        let Some(primary) = primary else { continue };
+        let after = std::fs::symlink_metadata(&pre_scanned[alias].source)?;
+        if !same_snapshot_stat(&pre_scanned[alias].before, &after) {
+            return Err(client_error(format!(
+                "{} changed after duplicate detection; retry",
+                pre_scanned[alias].source.display()
+            )));
+        }
+        file_content[alias] = file_content[*primary].clone();
+    }
+    for (alias, primary) in hardlink_aliases.iter().enumerate() {
+        let Some(primary) = primary else { continue };
+        let after = std::fs::symlink_metadata(&pre_scanned[alias].source)?;
+        if !same_snapshot_stat(&pre_scanned[alias].before, &after) {
+            return Err(client_error(format!(
+                "{} changed while it was being snapshotted; retry",
+                pre_scanned[alias].source.display()
+            )));
+        }
+        file_content[alias] = file_content[*primary].clone();
+    }
+
+    let mut files = 0usize;
+    let mut directories = 1usize;
+    let mut logical_bytes = 0u64;
+    let mut scanned = Vec::with_capacity(pre_scanned.len());
+    for (entry_index, entry) in pre_scanned.into_iter().enumerate() {
+        let data = match entry.data {
+            PreScannedData::Directory => {
+                directories += 1;
+                ScannedData::Directory
+            }
+            PreScannedData::Symlink { target } => {
+                files += 1;
+                logical_bytes = logical_bytes.saturating_add(target.len() as u64);
+                ScannedData::Symlink { target }
+            }
+            PreScannedData::File { hardlink_group } => {
+                files += 1;
+                let (content, size) = file_content[entry_index]
+                    .take()
+                    .ok_or_else(|| client_error("parallel native scanner lost file content"))?;
+                logical_bytes = logical_bytes.saturating_add(size);
+                ScannedData::File {
+                    size,
+                    content,
+                    hardlink_group,
+                }
+            }
+        };
+        scanned.push(ScannedEntry {
+            rel: entry.rel,
+            metadata: entry.metadata,
+            data,
+        });
+    }
     let stored_bytes = segments.iter().map(|segment| segment.len).sum();
     let (root, pages, recipes) = build_metadata(scanned, &segments)?;
     Ok(PreparedNativeSnapshot {
@@ -933,6 +1180,14 @@ fn prepare_native_snapshot(
         logical_bytes,
         stored_bytes,
     })
+}
+
+fn shift_pending_segment_indexes(content: &mut PendingContent, base: usize) {
+    if let PendingContent::Segments { recipe, .. } = content {
+        for part in &mut recipe.parts {
+            part.segment_index += base;
+        }
+    }
 }
 
 fn prepare_local_upserts(
@@ -1128,6 +1383,36 @@ fn read_file_once(
         },
         total_len,
     ))
+}
+
+fn hash_file_once(path: &Path, expected: &std::fs::Metadata) -> Result<ObjectId, SdkError> {
+    let mut file = std::fs::File::open(path)?;
+    let opened = file.metadata()?;
+    if !same_snapshot_stat(expected, &opened) {
+        return Err(client_error(format!(
+            "{} changed before duplicate detection; retry",
+            path.display()
+        )));
+    }
+    let mut hasher = ObjectId::file_content_hasher();
+    let mut total = 0u64;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        total = total.saturating_add(read as u64);
+    }
+    let after = std::fs::symlink_metadata(path)?;
+    if total != expected.len() || !same_snapshot_stat(expected, &after) {
+        return Err(client_error(format!(
+            "{} changed during duplicate detection; retry",
+            path.display()
+        )));
+    }
+    Ok(hasher.finalize())
 }
 
 impl RecipeHashPlan {
@@ -1659,6 +1944,7 @@ pub struct NativeUploadSession {
 pub struct NativeSegmentTarget {
     pub staging_id: String,
     pub url: Option<String>,
+    pub checksum_sha256: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -1959,11 +2245,63 @@ impl ArtifactStorageClient {
         let source = root.to_path_buf();
         let target_segment_bytes = session.target_segment_bytes;
         let max_segment_bytes = session.max_segment_bytes;
-        let prepared = tokio::task::spawn_blocking(move || {
-            prepare_native_snapshot(&source, target_segment_bytes, max_segment_bytes)
-        })
-        .await
-        .map_err(|error| client_error(format!("native snapshot scanner failed: {error}")))??;
+        let (segment_sender, segment_receiver) = tokio::sync::mpsc::unbounded_channel();
+        let scanner = tokio::task::spawn_blocking(move || {
+            prepare_native_snapshot_with_sender(
+                &source,
+                target_segment_bytes,
+                max_segment_bytes,
+                Some(segment_sender),
+            )
+        });
+        let upload_client = self.clone();
+        let upload_project = project_id.to_string();
+        let upload_repo = repo.to_string();
+        let upload_session = session.clone();
+        let upload_username = username.to_string();
+        let upload_token = token.to_string();
+        let uploader = tokio::spawn(async move {
+            upload_pipelined_segments(
+                &upload_client,
+                &upload_project,
+                &upload_repo,
+                &upload_session,
+                &upload_username,
+                &upload_token,
+                segment_receiver,
+            )
+            .await
+        });
+        let prepared = match scanner.await {
+            Ok(Ok(prepared)) => prepared,
+            Ok(Err(error)) => {
+                uploader.abort();
+                return Err(error);
+            }
+            Err(error) => {
+                uploader.abort();
+                return Err(client_error(format!(
+                    "native snapshot scanner failed: {error}"
+                )));
+            }
+        };
+        // Metadata is independent of aggregate-object transfer once scanning has produced its
+        // canonical ids. Stage it while the final segment PUTs are still draining.
+        let metadata = stage_native_metadata_batches(
+            self,
+            project_id,
+            repo,
+            &session.session_id,
+            username,
+            token,
+            &prepared.pages,
+            &prepared.recipes,
+        )
+        .await;
+        let pipelined = uploader.await.map_err(|error| {
+            client_error(format!("native upload coordinator failed: {error}"))
+        })??;
+        metadata?;
         finish_native_push(
             self,
             project_id,
@@ -1974,6 +2312,8 @@ impl ArtifactStorageClient {
             expected_workspace,
             session,
             prepared,
+            Some(pipelined),
+            true,
             options,
         )
         .await
@@ -2066,6 +2406,8 @@ impl ArtifactStorageClient {
             expected_workspace,
             session,
             prepared,
+            None,
+            false,
             options,
         )
         .await
@@ -2120,6 +2462,8 @@ impl ArtifactStorageClient {
         project_id: &str,
         repo: &str,
         session: &str,
+        segment_id: &str,
+        stored_len: u64,
     ) -> Result<NativeSegmentTarget, SdkError> {
         let credential = self.git_credential_for_repo(project_id, repo).await?;
         let suffix = format!("fs/uploads/{session}/segments");
@@ -2131,7 +2475,16 @@ impl ArtifactStorageClient {
             &credential.git_username,
             &credential.token,
         )?;
-        expect_json(request.send().await?).await
+        expect_json(
+            request
+                .json(&RegisterSegmentRequest {
+                    segment_id,
+                    stored_len,
+                })
+                .send()
+                .await?,
+        )
+        .await
     }
 
     /// Upload one segment through the authenticated service fallback.
@@ -2173,12 +2526,14 @@ impl ArtifactStorageClient {
         &self,
         url: &str,
         stored_len: u64,
+        checksum_sha256: &str,
         body: Body,
     ) -> Result<(), SdkError> {
         expect_ok(
             self.git_client
                 .put(url)
                 .header(reqwest::header::CONTENT_LENGTH, stored_len)
+                .header("x-amz-checksum-sha256", checksum_sha256)
                 .body(body)
                 .send()
                 .await?,
@@ -3006,6 +3361,8 @@ async fn finish_native_push(
     expected_workspace: Option<String>,
     session: NativeUploadSession,
     prepared: PreparedNativeSnapshot,
+    pipelined: Option<PipelinedSegmentReport>,
+    metadata_staged: bool,
     options: NativePushOptions,
 ) -> Result<NativePushReport, SdkError> {
     note_progress(
@@ -3019,86 +3376,96 @@ async fn finish_native_push(
         },
     );
 
-    let mut missing = HashSet::new();
-    let segment_ids: Vec<String> = prepared
-        .segments
-        .iter()
-        .map(|segment| segment.id.to_hex())
-        .collect();
-    let query_size = session.max_segments_per_query.clamp(1, 4096);
-    for ids in segment_ids.chunks(query_size) {
-        let suffix = format!("fs/uploads/{}/segments/missing", session.session_id);
-        let (request, _) = client.git_request(
-            Method::POST,
-            project_id,
-            repo,
-            Some(&suffix),
-            username,
-            token,
-        )?;
-        let response: MissingSegmentsResponse = expect_json(
-            request
-                .json(&MissingSegmentsRequest { segment_ids: ids })
-                .send()
-                .await?,
-        )
-        .await?;
-        missing.extend(response.missing_segment_ids);
-    }
+    let (uploaded_segments, uploaded_bytes) = if let Some(report) = pipelined {
+        (report.uploaded_ids.len(), report.uploaded_bytes)
+    } else {
+        let mut missing = HashSet::new();
+        let segment_ids: Vec<String> = prepared
+            .segments
+            .iter()
+            .map(|segment| segment.id.to_hex())
+            .collect();
+        let query_size = session.max_segments_per_query.clamp(1, 4096);
+        for ids in segment_ids.chunks(query_size) {
+            let suffix = format!("fs/uploads/{}/segments/missing", session.session_id);
+            let (request, _) = client.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&suffix),
+                username,
+                token,
+            )?;
+            let response: MissingSegmentsResponse = expect_json(
+                request
+                    .json(&MissingSegmentsRequest { segment_ids: ids })
+                    .send()
+                    .await?,
+            )
+            .await?;
+            missing.extend(response.missing_segment_ids);
+        }
+
+        let mut uploaded_bytes = 0u64;
+        let missing_indexes: Vec<usize> = prepared
+            .segments
+            .iter()
+            .enumerate()
+            .filter_map(|(index, segment)| missing.contains(&segment.id.to_hex()).then_some(index))
+            .collect();
+        // Aggregate segments are independent and direct PUTs do not consume service-body
+        // bandwidth. Thirty-two streams fills a high-bandwidth object-store link while bounding open
+        // temp files and HTTP bodies.
+        for indexes in missing_indexes.chunks(32) {
+            let uploads: Vec<_> = indexes
+                .iter()
+                .map(|index| {
+                    upload_prepared_segment(
+                        client,
+                        project_id,
+                        repo,
+                        &session.session_id,
+                        username,
+                        token,
+                        &prepared.segments[*index],
+                    )
+                })
+                .collect();
+            for result in futures::future::join_all(uploads).await {
+                uploaded_bytes = uploaded_bytes.saturating_add(result?);
+            }
+        }
+        (missing.len(), uploaded_bytes)
+    };
     note_progress(
         &options.progress,
         NativePushEvent::Negotiated {
-            missing_segments: missing.len(),
+            missing_segments: uploaded_segments,
             total_segments: prepared.segments.len(),
             transport: session.transport.clone(),
         },
     );
-
-    let mut uploaded_bytes = 0u64;
-    let missing_indexes: Vec<usize> = prepared
-        .segments
-        .iter()
-        .enumerate()
-        .filter_map(|(index, segment)| missing.contains(&segment.id.to_hex()).then_some(index))
-        .collect();
-    for indexes in missing_indexes.chunks(4) {
-        let uploads: Vec<_> = indexes
-            .iter()
-            .map(|index| {
-                upload_prepared_segment(
-                    client,
-                    project_id,
-                    repo,
-                    &session.session_id,
-                    username,
-                    token,
-                    &prepared.segments[*index],
-                )
-            })
-            .collect();
-        for result in futures::future::join_all(uploads).await {
-            uploaded_bytes = uploaded_bytes.saturating_add(result?);
-        }
-    }
     note_progress(
         &options.progress,
         NativePushEvent::Uploaded {
-            segments: missing.len(),
+            segments: uploaded_segments,
             stored_bytes: uploaded_bytes,
         },
     );
 
-    stage_native_metadata_batches(
-        client,
-        project_id,
-        repo,
-        &session.session_id,
-        username,
-        token,
-        &prepared.pages,
-        &prepared.recipes,
-    )
-    .await?;
+    if !metadata_staged {
+        stage_native_metadata_batches(
+            client,
+            project_id,
+            repo,
+            &session.session_id,
+            username,
+            token,
+            &prepared.pages,
+            &prepared.recipes,
+        )
+        .await?;
+    }
 
     let snapshot_request = SubmitNativeSnapshotRequest {
         root: prepared.root.to_hex(),
@@ -3193,9 +3560,113 @@ async fn finish_native_push(
         logical_bytes: prepared.logical_bytes,
         stored_bytes: prepared.stored_bytes,
         total_segments: prepared.segments.len(),
-        uploaded_segments: missing.len(),
+        uploaded_segments,
         uploaded_bytes,
         transport: session.transport,
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_pipelined_segments(
+    client: &ArtifactStorageClient,
+    project_id: &str,
+    repo: &str,
+    session: &NativeUploadSession,
+    username: &str,
+    token: &str,
+    mut completed: tokio::sync::mpsc::UnboundedReceiver<Vec<PreparedSegmentUpload>>,
+) -> Result<PipelinedSegmentReport, SdkError> {
+    const UPLOAD_CONCURRENCY: usize = 32;
+    let query_limit = session.max_segments_per_query.clamp(1, 4096);
+    let mut seen = HashSet::new();
+    let mut uploaded_ids = HashSet::new();
+    let mut uploaded_bytes = 0u64;
+    let mut uploads = tokio::task::JoinSet::new();
+
+    while let Some(mut batch) = completed.recv().await {
+        while batch.len() < query_limit {
+            let Ok(mut ready) = completed.try_recv() else {
+                break;
+            };
+            batch.append(&mut ready);
+        }
+        batch.retain(|segment| seen.insert(segment.id));
+        if batch.is_empty() {
+            continue;
+        }
+        let segment_ids: Vec<String> = batch.iter().map(|segment| segment.id.to_hex()).collect();
+        let suffix = format!("fs/uploads/{}/segments/missing", session.session_id);
+        let (request, _) = client.git_request(
+            Method::POST,
+            project_id,
+            repo,
+            Some(&suffix),
+            username,
+            token,
+        )?;
+        let response: MissingSegmentsResponse = expect_json(
+            request
+                .json(&MissingSegmentsRequest {
+                    segment_ids: &segment_ids,
+                })
+                .send()
+                .await?,
+        )
+        .await?;
+        let missing: HashSet<ObjectId> = response
+            .missing_segment_ids
+            .into_iter()
+            .map(|id| {
+                ObjectId::from_hex(&id)
+                    .map_err(|_| client_error("server returned an invalid native segment id"))
+            })
+            .collect::<Result<_, SdkError>>()?;
+        for segment in batch {
+            if !missing.contains(&segment.id) {
+                continue;
+            }
+            while uploads.len() >= UPLOAD_CONCURRENCY {
+                let (id, bytes) = uploads
+                    .join_next()
+                    .await
+                    .expect("non-empty native upload set")
+                    .map_err(|error| {
+                        client_error(format!("native upload task failed: {error}"))
+                    })??;
+                uploaded_ids.insert(id);
+                uploaded_bytes = uploaded_bytes.saturating_add(bytes);
+            }
+            let upload_client = client.clone();
+            let project_id = project_id.to_string();
+            let repo = repo.to_string();
+            let session_id = session.session_id.clone();
+            let username = username.to_string();
+            let token = token.to_string();
+            uploads.spawn(async move {
+                let id = segment.id;
+                let bytes = upload_prepared_segment_file(
+                    &upload_client,
+                    &project_id,
+                    &repo,
+                    &session_id,
+                    &username,
+                    &token,
+                    segment,
+                )
+                .await?;
+                Ok::<_, SdkError>((id, bytes))
+            });
+        }
+    }
+    while let Some(result) = uploads.join_next().await {
+        let (id, bytes) = result
+            .map_err(|error| client_error(format!("native upload task failed: {error}")))??;
+        uploaded_ids.insert(id);
+        uploaded_bytes = uploaded_bytes.saturating_add(bytes);
+    }
+    Ok(PipelinedSegmentReport {
+        uploaded_ids,
+        uploaded_bytes,
     })
 }
 
@@ -3208,7 +3679,34 @@ async fn upload_prepared_segment(
     token: &str,
     segment: &BuiltSegment,
 ) -> Result<u64, SdkError> {
+    upload_prepared_segment_file(
+        client,
+        project_id,
+        repo,
+        session,
+        username,
+        token,
+        PreparedSegmentUpload {
+            id: segment.id,
+            len: segment.len,
+            path: segment.temp.path().to_path_buf(),
+        },
+    )
+    .await
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_prepared_segment_file(
+    client: &ArtifactStorageClient,
+    project_id: &str,
+    repo: &str,
+    session: &str,
+    username: &str,
+    token: &str,
+    segment: PreparedSegmentUpload,
+) -> Result<u64, SdkError> {
     for attempt in 0..2 {
+        let segment_id = segment.id.to_hex();
         let suffix = format!("fs/uploads/{session}/segments");
         let (request, _) = client.git_request(
             Method::POST,
@@ -3218,15 +3716,34 @@ async fn upload_prepared_segment(
             username,
             token,
         )?;
-        let target: NativeSegmentTarget = expect_json(request.send().await?).await?;
-        let file = tokio::fs::File::open(segment.temp.path()).await?;
-        let body = Body::wrap_stream(tokio_util::io::ReaderStream::new(file));
+        let target: NativeSegmentTarget = expect_json(
+            request
+                .json(&RegisterSegmentRequest {
+                    segment_id: &segment_id,
+                    stored_len: segment.len,
+                })
+                .send()
+                .await?,
+        )
+        .await?;
+        let file = tokio::fs::File::open(&segment.path).await?;
+        // ReaderStream's small default buffer creates hundreds of thousands of HTTP body frames
+        // for a multi-gigabyte snapshot. Multi-MiB frames keep syscall and Hyper framing overhead below
+        // the object-store transfer cost while preserving bounded memory per concurrent upload.
+        let body = Body::wrap_stream(tokio_util::io::ReaderStream::with_capacity(
+            file,
+            4 * 1024 * 1024,
+        ));
         match target.url {
             Some(url) => {
+                let checksum = target.checksum_sha256.as_deref().ok_or_else(|| {
+                    client_error("presigned native segment target omitted its SHA-256 header")
+                })?;
                 let response = client
                     .git_client
                     .put(url)
                     .header(reqwest::header::CONTENT_LENGTH, segment.len)
+                    .header("x-amz-checksum-sha256", checksum)
                     .body(body)
                     .send()
                     .await?;
@@ -3257,7 +3774,7 @@ async fn upload_prepared_segment(
                 expect_ok(
                     request
                         .json(&RegisterSegmentRequest {
-                            segment_id: &segment.id.to_hex(),
+                            segment_id: &segment_id,
                             stored_len: segment.len,
                         })
                         .send()
@@ -3644,7 +4161,7 @@ mod tests {
         );
         assert_eq!(
             ObjectId::segment(b"one").to_hex(),
-            "ff637f16c476ddfab990720821fdd4269930d14d43ee6cd574613da58c8e9098"
+            "7692c3ad3540bb803c020b3aee66cd8887123234ea0c6e7143c0add73ff431ed"
         );
         assert_eq!(
             ObjectId::file_content(b"one").to_hex(),
@@ -3869,6 +4386,43 @@ mod tests {
             .collect();
         assert_eq!(hardlinks.len(), 2);
         assert_eq!(hardlinks[0], hardlinks[1]);
+    }
+
+    #[test]
+    fn native_scan_reuses_exact_copy_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let payload: Vec<u8> = (0..MAX_INLINE_BYTES + 4096)
+            .map(|index| (index % 251) as u8)
+            .collect();
+        std::fs::write(temp.path().join("first.bin"), &payload).unwrap();
+        std::fs::write(temp.path().join("second.bin"), &payload).unwrap();
+
+        let prepared =
+            prepare_native_snapshot(temp.path(), 96 * 1024 * 1024, MAX_SEGMENT_BYTES).unwrap();
+        let root = prepared
+            .pages
+            .iter()
+            .find(|page| page.id().unwrap() == prepared.root)
+            .unwrap();
+        let DirectoryPage::Leaf { entries, .. } = root else {
+            panic!("two copied files should fit in one directory page")
+        };
+        let copies: Vec<_> = entries
+            .iter()
+            .filter_map(|entry| match &entry.data {
+                EntryData::File {
+                    content,
+                    hardlink_group: None,
+                    ..
+                } => Some(content),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(copies.len(), 2);
+        assert_eq!(
+            copies[0], copies[1],
+            "separate inodes with identical bytes must share one immutable content reference"
+        );
     }
 
     #[test]

@@ -3683,6 +3683,7 @@ dependencies = [
  "png",
  "postcard",
  "rand 0.9.4",
+ "rayon",
  "reqwest",
  "reqwest-middleware",
  "rustls",

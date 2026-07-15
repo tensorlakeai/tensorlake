@@ -5,12 +5,13 @@
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, bail};
 use tensorlake::artifact_storage::ArtifactStorageClient;
 use tensorlake::artifact_storage::native_fs::{
-    NativeChangeSet, NativeLocalUpsert, NativePushOptions,
+    NativeChangeSet, NativeLocalUpsert, NativePushEvent, NativePushOptions,
 };
 
 fn collect_files(root: &Path, directory: &Path, files: &mut Vec<PathBuf>) -> Result<()> {
@@ -113,6 +114,7 @@ async fn main() -> Result<()> {
         .await?;
 
     let cold_started = Instant::now();
+    let cold_progress_started = cold_started;
     let cold = client
         .push_native_directory_with_credential(
             &project,
@@ -122,6 +124,12 @@ async fn main() -> Result<()> {
             token,
             NativePushOptions {
                 message: "Cold Rust target snapshot".into(),
+                progress: Some(Arc::new(move |event: NativePushEvent| {
+                    eprintln!(
+                        "cold phase elapsed_ms={} event={event:?}",
+                        cold_progress_started.elapsed().as_millis()
+                    );
+                })),
                 ..Default::default()
             },
         )
