@@ -655,6 +655,7 @@ pub struct NativeChangeSet {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct NativePushReport {
+    pub operation_id: String,
     pub snapshot_id: String,
     pub previous_snapshot_id: Option<String>,
     pub files: usize,
@@ -665,6 +666,374 @@ pub struct NativePushReport {
     pub uploaded_segments: usize,
     pub uploaded_bytes: u64,
     pub transport: String,
+    pub client_timings: NativePushTimings,
+}
+
+/// Client-observed timings for one save. Milestones are offsets from operation start because scan,
+/// compression, metadata staging, and direct uploads overlap and therefore do not add up linearly.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize)]
+pub struct NativePushTimings {
+    pub total_ms: u64,
+    pub walk_ms: Option<u64>,
+    pub metadata_scan_ms: Option<u64>,
+    pub duplicate_hash_ms: Option<u64>,
+    pub content_prepare_ms: Option<u64>,
+    pub metadata_build_ms: Option<u64>,
+    pub first_segment_ready_ms: Option<u64>,
+    pub scan_complete_ms: Option<u64>,
+    pub upload_complete_ms: Option<u64>,
+    pub metadata_complete_ms: Option<u64>,
+    pub verification_complete_ms: Option<u64>,
+    pub publish_complete_ms: Option<u64>,
+    pub producer_blocked_ms: u64,
+}
+
+#[derive(Clone, Debug, Default)]
+struct NativePrepareTimings {
+    walk_ms: Option<u64>,
+    metadata_scan_ms: Option<u64>,
+    duplicate_hash_ms: Option<u64>,
+    content_prepare_ms: Option<u64>,
+    metadata_build_ms: Option<u64>,
+}
+
+struct NativePipelineMeasurements {
+    operation_started: std::time::Instant,
+    first_segment_ready_ms: std::sync::atomic::AtomicU64,
+    producer_blocked_ns: std::sync::atomic::AtomicU64,
+}
+
+impl NativePipelineMeasurements {
+    fn new(operation_started: std::time::Instant) -> Self {
+        Self {
+            operation_started,
+            first_segment_ready_ms: std::sync::atomic::AtomicU64::new(u64::MAX),
+            producer_blocked_ns: std::sync::atomic::AtomicU64::new(0),
+        }
+    }
+
+    fn note_segment_ready(&self) {
+        use std::sync::atomic::Ordering;
+        let elapsed = self.operation_started.elapsed().as_millis() as u64;
+        let _ = self.first_segment_ready_ms.compare_exchange(
+            u64::MAX,
+            elapsed,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn note_blocked(&self, elapsed: Duration) {
+        use std::sync::atomic::Ordering;
+        self.producer_blocked_ns.fetch_add(
+            elapsed.as_nanos().min(u64::MAX as u128) as u64,
+            Ordering::Relaxed,
+        );
+    }
+
+    fn first_segment_ready_ms(&self) -> Option<u64> {
+        use std::sync::atomic::Ordering;
+        match self.first_segment_ready_ms.load(Ordering::Relaxed) {
+            u64::MAX => None,
+            value => Some(value),
+        }
+    }
+
+    fn producer_blocked_ms(&self) -> u64 {
+        use std::sync::atomic::Ordering;
+        self.producer_blocked_ns.load(Ordering::Relaxed) / 1_000_000
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NativeClientOperationPhase {
+    Preparing,
+    Uploading,
+    Verifying,
+    Publishing,
+    Completed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NativeClientOperationState {
+    Running,
+    Succeeded,
+    Failed,
+}
+
+#[derive(Clone, Copy, Debug, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum NativeClientOperationMode {
+    ColdDirectory,
+    MountedDelta,
+}
+
+#[derive(Clone, Debug, Default, Serialize)]
+struct NativeClientOperationMetrics {
+    total_ms: u64,
+    walk_ms: Option<u64>,
+    metadata_scan_ms: Option<u64>,
+    duplicate_hash_ms: Option<u64>,
+    content_prepare_ms: Option<u64>,
+    metadata_build_ms: Option<u64>,
+    first_segment_ready_ms: Option<u64>,
+    scan_complete_ms: Option<u64>,
+    upload_complete_ms: Option<u64>,
+    metadata_complete_ms: Option<u64>,
+    verification_complete_ms: Option<u64>,
+    publish_complete_ms: Option<u64>,
+    producer_blocked_ms: u64,
+    files: u64,
+    directories: u64,
+    logical_bytes: u64,
+    stored_bytes: u64,
+    uploaded_bytes: u64,
+    total_segments: u64,
+    uploaded_segments: u64,
+}
+
+impl NativeClientOperationMetrics {
+    fn timings(&self) -> NativePushTimings {
+        NativePushTimings {
+            total_ms: self.total_ms,
+            walk_ms: self.walk_ms,
+            metadata_scan_ms: self.metadata_scan_ms,
+            duplicate_hash_ms: self.duplicate_hash_ms,
+            content_prepare_ms: self.content_prepare_ms,
+            metadata_build_ms: self.metadata_build_ms,
+            first_segment_ready_ms: self.first_segment_ready_ms,
+            scan_complete_ms: self.scan_complete_ms,
+            upload_complete_ms: self.upload_complete_ms,
+            metadata_complete_ms: self.metadata_complete_ms,
+            verification_complete_ms: self.verification_complete_ms,
+            publish_complete_ms: self.publish_complete_ms,
+            producer_blocked_ms: self.producer_blocked_ms,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct NativeClientOperationRequest {
+    format_ver: u16,
+    phase: NativeClientOperationPhase,
+    state: NativeClientOperationState,
+    mode: NativeClientOperationMode,
+    client_version: &'static str,
+    client_os: &'static str,
+    client_arch: &'static str,
+    upload_session: Option<String>,
+    transport: Option<String>,
+    failure_code: Option<String>,
+    metrics: NativeClientOperationMetrics,
+}
+
+#[derive(Clone)]
+struct NativeClientOperationReporter {
+    client: ArtifactStorageClient,
+    project_id: String,
+    repo: String,
+    username: String,
+    token: String,
+    operation_id: String,
+    mode: NativeClientOperationMode,
+    started: std::time::Instant,
+    current: Arc<std::sync::Mutex<NativeClientOperationCurrent>>,
+}
+
+#[derive(Clone)]
+struct NativeClientOperationCurrent {
+    phase: NativeClientOperationPhase,
+    upload_session: Option<String>,
+    transport: Option<String>,
+    metrics: NativeClientOperationMetrics,
+}
+
+impl NativeClientOperationReporter {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        client: &ArtifactStorageClient,
+        project_id: &str,
+        repo: &str,
+        username: &str,
+        token: &str,
+        operation_id: String,
+        mode: NativeClientOperationMode,
+    ) -> Self {
+        Self {
+            client: client.clone(),
+            project_id: project_id.to_string(),
+            repo: repo.to_string(),
+            username: username.to_string(),
+            token: token.to_string(),
+            operation_id,
+            mode,
+            started: std::time::Instant::now(),
+            current: Arc::new(std::sync::Mutex::new(NativeClientOperationCurrent {
+                phase: NativeClientOperationPhase::Preparing,
+                upload_session: None,
+                transport: None,
+                metrics: NativeClientOperationMetrics::default(),
+            })),
+        }
+    }
+
+    fn elapsed_ms(&self) -> u64 {
+        self.started.elapsed().as_millis() as u64
+    }
+
+    fn update(&self, f: impl FnOnce(&mut NativeClientOperationCurrent)) {
+        let mut current = self.current.lock().expect("native telemetry lock");
+        f(&mut current);
+        current.metrics.total_ms = self.elapsed_ms();
+    }
+
+    fn set_session(&self, session: &NativeUploadSession) {
+        self.update(|current| {
+            current.upload_session = Some(session.session_id.clone());
+            current.transport = Some(session.transport.clone());
+        });
+    }
+
+    fn note_prepared(
+        &self,
+        prepared: &PreparedNativeSnapshot,
+        measurements: &NativePipelineMeasurements,
+    ) {
+        self.update(|current| {
+            current.metrics.walk_ms = prepared.prepare_timings.walk_ms;
+            current.metrics.metadata_scan_ms = prepared.prepare_timings.metadata_scan_ms;
+            current.metrics.duplicate_hash_ms = prepared.prepare_timings.duplicate_hash_ms;
+            current.metrics.content_prepare_ms = prepared.prepare_timings.content_prepare_ms;
+            current.metrics.metadata_build_ms = prepared.prepare_timings.metadata_build_ms;
+            current.metrics.first_segment_ready_ms = measurements.first_segment_ready_ms();
+            current.metrics.scan_complete_ms = Some(self.elapsed_ms());
+            current.metrics.producer_blocked_ms = measurements.producer_blocked_ms();
+            current.metrics.files = prepared.files as u64;
+            current.metrics.directories = prepared.directories as u64;
+            current.metrics.logical_bytes = prepared.logical_bytes;
+            current.metrics.stored_bytes = prepared.stored_bytes;
+            current.metrics.total_segments = prepared.segments.len() as u64;
+        });
+    }
+
+    fn note_upload_complete(&self, uploaded_segments: usize, uploaded_bytes: u64) {
+        self.update(|current| {
+            current.metrics.upload_complete_ms = Some(self.elapsed_ms());
+            current.metrics.uploaded_segments = uploaded_segments as u64;
+            current.metrics.uploaded_bytes = uploaded_bytes;
+        });
+    }
+
+    fn note_metadata_complete(&self) {
+        self.update(|current| {
+            current.metrics.metadata_complete_ms = Some(self.elapsed_ms());
+        });
+    }
+
+    fn set_phase(&self, phase: NativeClientOperationPhase) {
+        self.update(|current| current.phase = phase);
+        self.spawn_report(NativeClientOperationState::Running, None);
+    }
+
+    fn note_verification_complete(&self) {
+        self.update(|current| {
+            current.metrics.verification_complete_ms = Some(self.elapsed_ms());
+        });
+    }
+
+    fn note_publish_complete(&self) {
+        self.update(|current| {
+            current.phase = NativeClientOperationPhase::Completed;
+            current.metrics.publish_complete_ms = Some(self.elapsed_ms());
+        });
+    }
+
+    fn request(
+        &self,
+        state: NativeClientOperationState,
+        failure_code: Option<String>,
+    ) -> NativeClientOperationRequest {
+        let current = self.current.lock().expect("native telemetry lock").clone();
+        NativeClientOperationRequest {
+            format_ver: 1,
+            phase: current.phase,
+            state,
+            mode: self.mode,
+            client_version: env!("CARGO_PKG_VERSION"),
+            client_os: std::env::consts::OS,
+            client_arch: std::env::consts::ARCH,
+            upload_session: current.upload_session,
+            transport: current.transport,
+            failure_code,
+            metrics: current.metrics,
+        }
+    }
+
+    fn spawn_report(&self, state: NativeClientOperationState, failure_code: Option<String>) {
+        let reporter = self.clone();
+        let request = self.request(state, failure_code);
+        tokio::spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_millis(750), reporter.send(request)).await;
+        });
+    }
+
+    async fn send(&self, request: NativeClientOperationRequest) -> Result<(), SdkError> {
+        let suffix = format!("fs/client-operations/{}", self.operation_id);
+        let (builder, _) = self.client.git_request(
+            Method::PUT,
+            &self.project_id,
+            &self.repo,
+            Some(&suffix),
+            &self.username,
+            &self.token,
+        )?;
+        let response = builder.json(&request).send().await?;
+        if response.status().is_success() {
+            Ok(())
+        } else {
+            Err(client_error(format!(
+                "native client telemetry returned HTTP {}",
+                response.status()
+            )))
+        }
+    }
+
+    async fn send_terminal(&self, state: NativeClientOperationState, failure_code: Option<String>) {
+        self.update(|_| {});
+        let request = self.request(state, failure_code);
+        let _ = tokio::time::timeout(Duration::from_millis(750), self.send(request)).await;
+    }
+
+    fn timings(&self) -> NativePushTimings {
+        self.current
+            .lock()
+            .expect("native telemetry lock")
+            .metrics
+            .timings()
+    }
+}
+
+fn native_client_failure_code(error: &SdkError) -> String {
+    match error {
+        SdkError::Authentication(_) => "authentication",
+        SdkError::Authorization(_) => "authorization",
+        SdkError::Http(_) | SdkError::Middleware(_) => "network",
+        SdkError::Io(_) => "local_io",
+        SdkError::ServerError { status, .. } if status.is_server_error() => "server_5xx",
+        SdkError::ServerError { status, .. } if *status == StatusCode::CONFLICT => "conflict",
+        SdkError::ServerError { .. } => "server_4xx",
+        SdkError::ClientError(message) if message.contains("filesystem head changed") => "conflict",
+        SdkError::ClientError(message)
+            if message.contains("changed") && message.contains("retry") =>
+        {
+            "source_changed"
+        }
+        SdkError::ClientError(_) => "client",
+        _ => "other",
+    }
+    .to_string()
 }
 
 struct BuiltSegment {
@@ -796,6 +1165,7 @@ struct PreparedNativeSnapshot {
     directories: usize,
     logical_bytes: u64,
     stored_bytes: u64,
+    prepare_timings: NativePrepareTimings,
 }
 
 struct PreparedLocalUpserts {
@@ -815,6 +1185,7 @@ struct SegmentBuilder {
     current: Option<OpenSegment>,
     complete: Vec<BuiltSegment>,
     completed_segments: Option<tokio::sync::mpsc::Sender<Vec<PreparedSegmentUpload>>>,
+    measurements: Option<Arc<NativePipelineMeasurements>>,
 }
 
 struct OpenSegment {
@@ -836,6 +1207,7 @@ impl SegmentBuilder {
             current: None,
             complete: Vec::new(),
             completed_segments: None,
+            measurements: None,
         })
     }
 
@@ -844,6 +1216,11 @@ impl SegmentBuilder {
         completed_segments: Option<tokio::sync::mpsc::Sender<Vec<PreparedSegmentUpload>>>,
     ) -> Self {
         self.completed_segments = completed_segments;
+        self
+    }
+
+    fn with_measurements(mut self, measurements: Option<Arc<NativePipelineMeasurements>>) -> Self {
+        self.measurements = measurements;
         self
     }
 
@@ -898,15 +1275,22 @@ impl SegmentBuilder {
         let id = current.hasher.finalize();
         let len = current.len;
         let bytes = bytes::Bytes::from(current.bytes);
+        if let Some(measurements) = &self.measurements {
+            measurements.note_segment_ready();
+        }
         if let Some(sender) = &self.completed_segments {
             // Backpressure bounds the combined scanner/uploader memory even when blob storage is
             // slower than local compression. A dropped receiver means another upload already
             // failed; scanning still returns its own precise result to the async join point.
+            let blocked = std::time::Instant::now();
             let _ = sender.blocking_send(vec![PreparedSegmentUpload {
                 id,
                 len,
                 body: PreparedSegmentBody::Memory(bytes),
             }]);
+            if let Some(measurements) = &self.measurements {
+                measurements.note_blocked(blocked.elapsed());
+            }
             self.complete.push(BuiltSegment {
                 id,
                 len,
@@ -937,7 +1321,7 @@ fn prepare_native_snapshot(
     target_segment_bytes: u64,
     max_segment_bytes: u64,
 ) -> Result<PreparedNativeSnapshot, SdkError> {
-    prepare_native_snapshot_with_sender(root, target_segment_bytes, max_segment_bytes, None)
+    prepare_native_snapshot_with_sender(root, target_segment_bytes, max_segment_bytes, None, None)
 }
 
 fn prepare_native_snapshot_with_sender(
@@ -945,7 +1329,9 @@ fn prepare_native_snapshot_with_sender(
     target_segment_bytes: u64,
     max_segment_bytes: u64,
     completed_segments: Option<tokio::sync::mpsc::Sender<Vec<PreparedSegmentUpload>>>,
+    measurements: Option<Arc<NativePipelineMeasurements>>,
 ) -> Result<PreparedNativeSnapshot, SdkError> {
+    let walk_started = std::time::Instant::now();
     let root = root.canonicalize()?;
     if !root.is_dir() {
         return Err(client_error(format!(
@@ -979,9 +1365,11 @@ fn prepare_native_snapshot_with_sender(
             .to_path_buf();
         paths.push((path.to_path_buf(), rel));
     }
+    let walk_ms = walk_started.elapsed().as_millis() as u64;
 
     // Stat/xattr work is syscall-heavy on build trees. Preserve the walker's deterministic order
     // while issuing those independent operations in parallel.
+    let metadata_scan_started = std::time::Instant::now();
     let pre_scanned: Vec<PreScannedEntry> = paths
         .into_par_iter()
         .map(|(source, rel)| {
@@ -1022,6 +1410,7 @@ fn prepare_native_snapshot_with_sender(
             })
         })
         .collect::<Result<_, SdkError>>()?;
+    let metadata_scan_ms = metadata_scan_started.elapsed().as_millis() as u64;
 
     // Assign each hardlink inode one deterministic primary. Primaries are partitioned into stable
     // byte-balanced groups; every group owns a SegmentBuilder, avoiding locks in compression and
@@ -1058,6 +1447,7 @@ fn prepare_native_snapshot_with_sender(
     // cheap parallel pass, select the first path deterministically, and let later paths reference
     // that one immutable recipe. This avoids compressing and uploading identical bytes repeatedly;
     // inline files are already embedded in metadata and do not consume segment bandwidth.
+    let duplicate_hash_started = std::time::Instant::now();
     let mut size_frequency = HashMap::<u64, usize>::new();
     for task in &file_tasks {
         *size_frequency.entry(task.before.len()).or_default() += 1;
@@ -1089,7 +1479,9 @@ fn prepare_native_snapshot_with_sender(
         }
         file_tasks.push(task);
     }
+    let duplicate_hash_ms = duplicate_hash_started.elapsed().as_millis() as u64;
 
+    let content_prepare_started = std::time::Instant::now();
     let total_weight: u64 = file_tasks
         .iter()
         .map(|task| task.before.len().max(64 * 1024))
@@ -1120,7 +1512,8 @@ fn prepare_native_snapshot_with_sender(
         .into_par_iter()
         .map(|tasks| {
             let mut builder = SegmentBuilder::new(target_segment_bytes, max_segment_bytes)?
-                .with_completed_segments(completed_segments.clone());
+                .with_completed_segments(completed_segments.clone())
+                .with_measurements(measurements.clone());
             let mut files = Vec::with_capacity(tasks.len());
             for task in tasks {
                 let (content, size) = read_file_once(&task.source, &task.before, &mut builder)?;
@@ -1149,7 +1542,9 @@ fn prepare_native_snapshot_with_sender(
             Ok(ParallelFileGroup { files, segments })
         })
         .collect::<Result<_, SdkError>>()?;
+    let content_prepare_ms = content_prepare_started.elapsed().as_millis() as u64;
 
+    let metadata_build_started = std::time::Instant::now();
     let mut file_content: Vec<Option<(PendingContent, u64)>> =
         (0..pre_scanned.len()).map(|_| None).collect();
     let mut segments = Vec::new();
@@ -1220,6 +1615,7 @@ fn prepare_native_snapshot_with_sender(
     }
     let stored_bytes = segments.iter().map(|segment| segment.len).sum();
     let (root, pages, recipes) = build_metadata(scanned, &segments)?;
+    let metadata_build_ms = metadata_build_started.elapsed().as_millis() as u64;
     Ok(PreparedNativeSnapshot {
         root,
         pages,
@@ -1229,6 +1625,13 @@ fn prepare_native_snapshot_with_sender(
         directories,
         logical_bytes,
         stored_bytes,
+        prepare_timings: NativePrepareTimings {
+            walk_ms: Some(walk_ms),
+            metadata_scan_ms: Some(metadata_scan_ms),
+            duplicate_hash_ms: Some(duplicate_hash_ms),
+            content_prepare_ms: Some(content_prepare_ms),
+            metadata_build_ms: Some(metadata_build_ms),
+        },
     })
 }
 
@@ -2317,7 +2720,67 @@ impl ArtifactStorageClient {
         root: &Path,
         username: &str,
         token: &str,
+        mut options: NativePushOptions,
+    ) -> Result<NativePushReport, SdkError> {
+        let operation_id = options
+            .operation_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        options.operation_id = Some(operation_id.clone());
+        let reporter = NativeClientOperationReporter::new(
+            self,
+            project_id,
+            repo,
+            username,
+            token,
+            operation_id,
+            NativeClientOperationMode::ColdDirectory,
+        );
+        let measurements = Arc::new(NativePipelineMeasurements::new(reporter.started));
+        reporter.spawn_report(NativeClientOperationState::Running, None);
+        let result = self
+            .push_native_directory_with_credential_inner(
+                project_id,
+                repo,
+                root,
+                username,
+                token,
+                options,
+                &reporter,
+                measurements,
+            )
+            .await;
+        match result {
+            Ok(mut report) => {
+                reporter
+                    .send_terminal(NativeClientOperationState::Succeeded, None)
+                    .await;
+                report.client_timings = reporter.timings();
+                Ok(report)
+            }
+            Err(error) => {
+                reporter
+                    .send_terminal(
+                        NativeClientOperationState::Failed,
+                        Some(native_client_failure_code(&error)),
+                    )
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn push_native_directory_with_credential_inner(
+        &self,
+        project_id: &str,
+        repo: &str,
+        root: &Path,
+        username: &str,
+        token: &str,
         options: NativePushOptions,
+        reporter: &NativeClientOperationReporter,
+        measurements: Arc<NativePipelineMeasurements>,
     ) -> Result<NativePushReport, SdkError> {
         let head: NativeHead = {
             let (request, _) = self.git_request(
@@ -2359,18 +2822,21 @@ impl ArtifactStorageClient {
             )?;
             expect_json(request.send().await?).await?
         };
+        reporter.set_session(&session);
 
         let source = root.to_path_buf();
         let target_segment_bytes = session.target_segment_bytes;
         let max_segment_bytes = session.max_segment_bytes;
         let (segment_sender, segment_receiver) =
             tokio::sync::mpsc::channel(NATIVE_SEGMENT_UPLOAD_QUEUE);
+        let scanner_measurements = measurements.clone();
         let scanner = tokio::task::spawn_blocking(move || {
             prepare_native_snapshot_with_sender(
                 &source,
                 target_segment_bytes,
                 max_segment_bytes,
                 Some(segment_sender),
+                Some(scanner_measurements),
             )
         });
         let upload_client = self.clone();
@@ -2404,6 +2870,8 @@ impl ArtifactStorageClient {
                 )));
             }
         };
+        reporter.note_prepared(&prepared, &measurements);
+        reporter.set_phase(NativeClientOperationPhase::Uploading);
         note_progress(
             &options.progress,
             NativePushEvent::Scanned {
@@ -2427,9 +2895,13 @@ impl ArtifactStorageClient {
             &prepared.recipes,
         )
         .await;
+        if metadata.is_ok() {
+            reporter.note_metadata_complete();
+        }
         let pipelined = uploader.await.map_err(|error| {
             client_error(format!("native upload coordinator failed: {error}"))
         })??;
+        reporter.note_upload_complete(pipelined.uploaded_ids.len(), pipelined.uploaded_bytes);
         metadata?;
         finish_native_push(
             self,
@@ -2444,6 +2916,7 @@ impl ArtifactStorageClient {
             Some(pipelined),
             true,
             options,
+            Some(reporter),
         )
         .await
     }
@@ -2458,11 +2931,71 @@ impl ArtifactStorageClient {
         changes: NativeChangeSet,
         username: &str,
         token: &str,
-        options: NativePushOptions,
+        mut options: NativePushOptions,
     ) -> Result<NativePushReport, SdkError> {
         if changes.upserts.is_empty() && changes.deletes.is_empty() && changes.renames.is_empty() {
             return Err(client_error("native change set is empty"));
         }
+        let operation_id = options
+            .operation_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        options.operation_id = Some(operation_id.clone());
+        let reporter = NativeClientOperationReporter::new(
+            self,
+            project_id,
+            repo,
+            username,
+            token,
+            operation_id,
+            NativeClientOperationMode::MountedDelta,
+        );
+        let measurements = Arc::new(NativePipelineMeasurements::new(reporter.started));
+        reporter.spawn_report(NativeClientOperationState::Running, None);
+        let result = self
+            .push_native_changes_with_credential_inner(
+                project_id,
+                repo,
+                changes,
+                username,
+                token,
+                options,
+                &reporter,
+                &measurements,
+            )
+            .await;
+        match result {
+            Ok(mut report) => {
+                reporter
+                    .send_terminal(NativeClientOperationState::Succeeded, None)
+                    .await;
+                report.client_timings = reporter.timings();
+                Ok(report)
+            }
+            Err(error) => {
+                reporter
+                    .send_terminal(
+                        NativeClientOperationState::Failed,
+                        Some(native_client_failure_code(&error)),
+                    )
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn push_native_changes_with_credential_inner(
+        &self,
+        project_id: &str,
+        repo: &str,
+        changes: NativeChangeSet,
+        username: &str,
+        token: &str,
+        options: NativePushOptions,
+        reporter: &NativeClientOperationReporter,
+        measurements: &NativePipelineMeasurements,
+    ) -> Result<NativePushReport, SdkError> {
         let expected = match options.expected_snapshot_id.clone() {
             Some(expected) => expected,
             None => {
@@ -2505,15 +3038,19 @@ impl ArtifactStorageClient {
             )?;
             expect_json(request.send().await?).await?
         };
+        reporter.set_session(&session);
         let upserts = changes.upserts;
         let target_segment_bytes = session.target_segment_bytes;
         let max_segment_bytes = session.max_segment_bytes;
+        let content_prepare_started = std::time::Instant::now();
         let local = tokio::task::spawn_blocking(move || {
             prepare_local_upserts(upserts, target_segment_bytes, max_segment_bytes)
         })
         .await
         .map_err(|error| client_error(format!("native delta scanner failed: {error}")))??;
-        let prepared = compose_native_changes(
+        let content_prepare_ms = content_prepare_started.elapsed().as_millis() as u64;
+        let metadata_build_started = std::time::Instant::now();
+        let mut prepared = compose_native_changes(
             self,
             project_id,
             repo,
@@ -2525,6 +3062,11 @@ impl ArtifactStorageClient {
             changes.renames,
         )
         .await?;
+        prepared.prepare_timings.content_prepare_ms = Some(content_prepare_ms);
+        prepared.prepare_timings.metadata_build_ms =
+            Some(metadata_build_started.elapsed().as_millis() as u64);
+        reporter.note_prepared(&prepared, measurements);
+        reporter.set_phase(NativeClientOperationPhase::Uploading);
         note_progress(
             &options.progress,
             NativePushEvent::Scanned {
@@ -2548,6 +3090,7 @@ impl ArtifactStorageClient {
             None,
             false,
             options,
+            Some(reporter),
         )
         .await
     }
@@ -3486,6 +4029,7 @@ async fn compose_native_changes(
         directories: local.directories,
         logical_bytes: local.logical_bytes,
         stored_bytes: local.stored_bytes,
+        prepare_timings: NativePrepareTimings::default(),
     })
 }
 
@@ -3503,7 +4047,9 @@ async fn finish_native_push(
     pipelined: Option<PipelinedSegmentReport>,
     metadata_staged: bool,
     options: NativePushOptions,
+    reporter: Option<&NativeClientOperationReporter>,
 ) -> Result<NativePushReport, SdkError> {
+    let upload_was_pipelined = pipelined.is_some();
     let (uploaded_segments, uploaded_bytes) = if let Some(report) = pipelined {
         (report.uploaded_ids.len(), report.uploaded_bytes)
     } else {
@@ -3565,6 +4111,9 @@ async fn finish_native_push(
         }
         (missing.len(), uploaded_bytes)
     };
+    if !upload_was_pipelined && let Some(reporter) = reporter {
+        reporter.note_upload_complete(uploaded_segments, uploaded_bytes);
+    }
     note_progress(
         &options.progress,
         NativePushEvent::Negotiated {
@@ -3593,16 +4142,24 @@ async fn finish_native_push(
             &prepared.recipes,
         )
         .await?;
+        if let Some(reporter) = reporter {
+            reporter.note_metadata_complete();
+        }
     }
 
+    let operation_id = options
+        .operation_id
+        .clone()
+        .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+    if let Some(reporter) = reporter {
+        reporter.set_phase(NativeClientOperationPhase::Verifying);
+    }
     let snapshot_request = SubmitNativeSnapshotRequest {
         root: prepared.root.to_hex(),
         parents: expected.iter().cloned().collect(),
         created_at_ms: None,
         message: options.message,
-        operation_id: options
-            .operation_id
-            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+        operation_id: operation_id.clone(),
     };
     let submitted: SubmitNativeSnapshotResponse = {
         let suffix = format!("fs/uploads/{}/snapshots", session.session_id);
@@ -3632,6 +4189,10 @@ async fn finish_native_push(
         &submitted.snapshot_id,
     )
     .await?;
+    if let Some(reporter) = reporter {
+        reporter.note_verification_complete();
+        reporter.set_phase(NativeClientOperationPhase::Publishing);
+    }
 
     let advance = if let Some(workspace_id) = options.workspace_id.as_deref() {
         publish_native_workspace_snapshot(
@@ -3680,7 +4241,11 @@ async fn finish_native_push(
             snapshot_id: published_snapshot_id.clone(),
         },
     );
+    if let Some(reporter) = reporter {
+        reporter.note_publish_complete();
+    }
     Ok(NativePushReport {
+        operation_id,
         snapshot_id: published_snapshot_id,
         previous_snapshot_id,
         files: prepared.files,
@@ -3691,6 +4256,7 @@ async fn finish_native_push(
         uploaded_segments,
         uploaded_bytes,
         transport: session.transport,
+        client_timings: NativePushTimings::default(),
     })
 }
 
@@ -4278,6 +4844,34 @@ mod tests {
         }
     }
 
+    #[test]
+    fn native_client_telemetry_wire_contains_only_bounded_aggregate_fields() {
+        let request = NativeClientOperationRequest {
+            format_ver: 1,
+            phase: NativeClientOperationPhase::Completed,
+            state: NativeClientOperationState::Succeeded,
+            mode: NativeClientOperationMode::ColdDirectory,
+            client_version: "0.5.75",
+            client_os: "linux",
+            client_arch: "x86_64",
+            upload_session: Some("session-1".into()),
+            transport: Some("presigned_put".into()),
+            failure_code: None,
+            metrics: NativeClientOperationMetrics {
+                total_ms: 123,
+                logical_bytes: 4_000,
+                uploaded_bytes: 1_000,
+                ..Default::default()
+            },
+        };
+        let json = serde_json::to_string(&request).unwrap();
+        assert!(json.contains("\"mode\":\"cold_directory\""));
+        assert!(json.contains("\"logical_bytes\":4000"));
+        for forbidden in ["path", "filename", "content_id", "segment_id", "token"] {
+            assert!(!json.contains(forbidden), "wire leaked field {forbidden:?}");
+        }
+    }
+
     fn page() -> DirectoryPage {
         DirectoryPage::Leaf {
             version: FORMAT_VERSION,
@@ -4506,12 +5100,14 @@ mod tests {
         let payload = vec![b'm'; MAX_INLINE_BYTES + 123];
         std::fs::write(temp.path().join("payload.bin"), &payload).unwrap();
         let (sender, mut receiver) = tokio::sync::mpsc::channel(2);
+        let measurements = Arc::new(NativePipelineMeasurements::new(std::time::Instant::now()));
 
         let prepared = prepare_native_snapshot_with_sender(
             temp.path(),
             96 * 1024 * 1024,
             MAX_SEGMENT_BYTES,
             Some(sender),
+            Some(measurements.clone()),
         )
         .unwrap();
 
@@ -4525,6 +5121,7 @@ mod tests {
         assert_eq!(bytes.len() as u64, uploads[0].len);
         assert_eq!(ObjectId::segment(bytes), uploads[0].id);
         assert_eq!(zstd::stream::decode_all(bytes.as_ref()).unwrap(), payload);
+        assert!(measurements.first_segment_ready_ms().is_some());
     }
 
     #[cfg(unix)]

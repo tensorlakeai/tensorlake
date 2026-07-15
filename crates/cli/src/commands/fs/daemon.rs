@@ -1813,6 +1813,7 @@ impl Sealer {
                 })?;
             let push_ms = push_started.elapsed().as_millis() as u64;
             tracing::info!(
+                operation_id = %report.operation_id,
                 transport = %report.transport,
                 logical_bytes = report.logical_bytes,
                 stored_bytes = report.stored_bytes,
@@ -1820,6 +1821,19 @@ impl Sealer {
                 uploaded_segments = report.uploaded_segments,
                 total_segments = report.total_segments,
                 push_ms,
+                client_total_ms = report.client_timings.total_ms,
+                walk_ms = ?report.client_timings.walk_ms,
+                metadata_scan_ms = ?report.client_timings.metadata_scan_ms,
+                duplicate_hash_ms = ?report.client_timings.duplicate_hash_ms,
+                content_prepare_ms = ?report.client_timings.content_prepare_ms,
+                metadata_build_ms = ?report.client_timings.metadata_build_ms,
+                first_segment_ready_ms = ?report.client_timings.first_segment_ready_ms,
+                scan_complete_ms = ?report.client_timings.scan_complete_ms,
+                upload_complete_ms = ?report.client_timings.upload_complete_ms,
+                metadata_complete_ms = ?report.client_timings.metadata_complete_ms,
+                verification_complete_ms = ?report.client_timings.verification_complete_ms,
+                publish_complete_ms = ?report.client_timings.publish_complete_ms,
+                producer_blocked_ms = report.client_timings.producer_blocked_ms,
                 "native snapshot data path"
             );
             st.sealed_gen = watermark;

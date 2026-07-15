@@ -801,7 +801,7 @@ pub async fn push_dir(
         0.0
     };
     println!(
-        "Saved {} ({} file(s), {} logical, {} uploaded via {} in {}; {}/s)",
+        "Saved {} ({} file(s), {} logical, {} uploaded via {} in {}; {}/s; operation {})",
         short_id(&report.snapshot_id),
         report.files,
         format_bytes(report.logical_bytes),
@@ -809,6 +809,7 @@ pub async fn push_dir(
         report.transport,
         fmt_dur(elapsed),
         format_bytes(throughput as u64),
+        report.operation_id,
     );
     Ok(())
 }
