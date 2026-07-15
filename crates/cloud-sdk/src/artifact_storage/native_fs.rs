@@ -1007,10 +1007,18 @@ fn prepare_native_snapshot_with_sender(
     // cheap parallel pass, select the first path deterministically, and let later paths reference
     // that one immutable recipe. This avoids compressing and uploading identical bytes repeatedly;
     // inline files are already embedded in metadata and do not consume segment bandwidth.
+    let mut size_frequency = HashMap::<u64, usize>::new();
+    for task in &file_tasks {
+        *size_frequency.entry(task.before.len()).or_default() += 1;
+    }
     let hashed_tasks: Vec<ParallelFileTask> = file_tasks
         .into_par_iter()
         .map(|mut task| {
-            if task.before.len() > MAX_INLINE_BYTES as u64 {
+            if task.before.len() > MAX_INLINE_BYTES as u64
+                && size_frequency
+                    .get(&task.before.len())
+                    .is_some_and(|count| *count > 1)
+            {
                 task.expected_content = Some(hash_file_once(&task.source, &task.before)?);
             }
             Ok(task)
