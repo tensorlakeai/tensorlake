@@ -31,6 +31,12 @@ pub const MAX_SEGMENT_BYTES: u64 = 256 * 1024 * 1024;
 pub const MAX_SEGMENT_SLICE_LOGICAL_BYTES: u64 = 64 * 1024 * 1024;
 pub const ENTRY_MODE_MASK: u32 = 0o7777;
 
+// The server accepts at most 16 MiB and 4096 objects on the metadata route. Keep the client target
+// comfortably below the transport ceiling so request headers and future additive wire fields do not
+// turn a valid large tree into a 413 response.
+const NATIVE_METADATA_REQUEST_TARGET_BYTES: usize = 8 * 1024 * 1024;
+const NATIVE_METADATA_REQUEST_MAX_OBJECTS: usize = 4096;
+
 const SEGMENT_DOMAIN: &[u8] = b"tensorlake.fs.segment.v1\0";
 const FILE_CONTENT_DOMAIN: &[u8] = b"tensorlake.fs.file-content.v1\0";
 const DIRECTORY_PAGE_DOMAIN: &[u8] = b"tensorlake.fs.directory-page.v1\0";
@@ -1677,6 +1683,65 @@ struct MetadataRequest<'a> {
     recipes: &'a [ChunkRecipe],
 }
 
+fn next_metadata_batch(
+    pages: &[DirectoryPage],
+    recipes: &[ChunkRecipe],
+    page_offset: usize,
+    recipe_offset: usize,
+) -> Result<(usize, usize), SdkError> {
+    let mut encoded_bytes = serde_json::to_vec(&MetadataRequest {
+        pages: &[],
+        recipes: &[],
+    })
+    .map_err(|error| client_error(format!("cannot encode native metadata request: {error}")))?
+    .len();
+    let mut object_count = 0usize;
+    let mut page_end = page_offset;
+    let mut recipe_end = recipe_offset;
+
+    while page_end < pages.len() && object_count < NATIVE_METADATA_REQUEST_MAX_OBJECTS {
+        let object_bytes = serde_json::to_vec(&pages[page_end])
+            .map_err(|error| client_error(format!("cannot encode native directory page: {error}")))?
+            .len();
+        let separator = usize::from(page_end > page_offset);
+        if object_count > 0
+            && encoded_bytes
+                .saturating_add(separator)
+                .saturating_add(object_bytes)
+                > NATIVE_METADATA_REQUEST_TARGET_BYTES
+        {
+            break;
+        }
+        encoded_bytes = encoded_bytes
+            .saturating_add(separator)
+            .saturating_add(object_bytes);
+        page_end += 1;
+        object_count += 1;
+    }
+
+    while recipe_end < recipes.len() && object_count < NATIVE_METADATA_REQUEST_MAX_OBJECTS {
+        let object_bytes = serde_json::to_vec(&recipes[recipe_end])
+            .map_err(|error| client_error(format!("cannot encode native chunk recipe: {error}")))?
+            .len();
+        let separator = usize::from(recipe_end > recipe_offset);
+        if object_count > 0
+            && encoded_bytes
+                .saturating_add(separator)
+                .saturating_add(object_bytes)
+                > NATIVE_METADATA_REQUEST_TARGET_BYTES
+        {
+            break;
+        }
+        encoded_bytes = encoded_bytes
+            .saturating_add(separator)
+            .saturating_add(object_bytes);
+        recipe_end += 1;
+        object_count += 1;
+    }
+
+    Ok((page_end, recipe_end))
+}
+
 #[derive(Clone, Debug, Deserialize)]
 pub struct NativeMetadataResponse {
     pub pages: Vec<String>,
@@ -2161,20 +2226,15 @@ impl ArtifactStorageClient {
         recipes: &[ChunkRecipe],
     ) -> Result<NativeMetadataResponse, SdkError> {
         let credential = self.git_credential_for_repo(project_id, repo).await?;
-        let suffix = format!("fs/uploads/{session}/metadata");
-        let (request, _) = self.git_request(
-            Method::POST,
+        stage_native_metadata_batches(
+            self,
             project_id,
             repo,
-            Some(&suffix),
+            session,
             &credential.git_username,
             &credential.token,
-        )?;
-        expect_json(
-            request
-                .json(&MetadataRequest { pages, recipes })
-                .send()
-                .await?,
+            pages,
+            recipes,
         )
         .await
     }
@@ -3022,34 +3082,17 @@ async fn finish_native_push(
         },
     );
 
-    let mut page_offset = 0usize;
-    let mut recipe_offset = 0usize;
-    while page_offset < prepared.pages.len() || recipe_offset < prepared.recipes.len() {
-        let page_end = (page_offset + 4096).min(prepared.pages.len());
-        let remaining = 4096 - (page_end - page_offset);
-        let recipe_end = (recipe_offset + remaining).min(prepared.recipes.len());
-        let suffix = format!("fs/uploads/{}/metadata", session.session_id);
-        let (request, _) = client.git_request(
-            Method::POST,
-            project_id,
-            repo,
-            Some(&suffix),
-            username,
-            token,
-        )?;
-        let _: NativeMetadataResponse = expect_json(
-            request
-                .json(&MetadataRequest {
-                    pages: &prepared.pages[page_offset..page_end],
-                    recipes: &prepared.recipes[recipe_offset..recipe_end],
-                })
-                .send()
-                .await?,
-        )
-        .await?;
-        page_offset = page_end;
-        recipe_offset = recipe_end;
-    }
+    stage_native_metadata_batches(
+        client,
+        project_id,
+        repo,
+        &session.session_id,
+        username,
+        token,
+        &prepared.pages,
+        &prepared.recipes,
+    )
+    .await?;
 
     let snapshot_request = SubmitNativeSnapshotRequest {
         root: prepared.root.to_hex(),
@@ -3457,6 +3500,58 @@ fn note_progress(progress: &Option<NativePushProgress>, event: NativePushEvent) 
     }
 }
 
+#[allow(clippy::too_many_arguments)]
+async fn stage_native_metadata_batches(
+    client: &ArtifactStorageClient,
+    project_id: &str,
+    repo: &str,
+    session: &str,
+    username: &str,
+    token: &str,
+    pages: &[DirectoryPage],
+    recipes: &[ChunkRecipe],
+) -> Result<NativeMetadataResponse, SdkError> {
+    let suffix = format!("fs/uploads/{session}/metadata");
+    let mut staged = NativeMetadataResponse {
+        pages: Vec::with_capacity(pages.len()),
+        recipes: Vec::with_capacity(recipes.len()),
+    };
+    let mut page_offset = 0usize;
+    let mut recipe_offset = 0usize;
+    let mut send_empty = pages.is_empty() && recipes.is_empty();
+    while send_empty || page_offset < pages.len() || recipe_offset < recipes.len() {
+        let (page_end, recipe_end) = if send_empty {
+            (0, 0)
+        } else {
+            next_metadata_batch(pages, recipes, page_offset, recipe_offset)?
+        };
+        let (request, _) = client.git_request(
+            Method::POST,
+            project_id,
+            repo,
+            Some(&suffix),
+            username,
+            token,
+        )?;
+        let response: NativeMetadataResponse = expect_json(
+            request
+                .json(&MetadataRequest {
+                    pages: &pages[page_offset..page_end],
+                    recipes: &recipes[recipe_offset..recipe_end],
+                })
+                .send()
+                .await?,
+        )
+        .await?;
+        staged.pages.extend(response.pages);
+        staged.recipes.extend(response.recipes);
+        page_offset = page_end;
+        recipe_offset = recipe_end;
+        send_empty = false;
+    }
+    Ok(staged)
+}
+
 fn now_ms() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -3813,6 +3908,59 @@ mod tests {
         };
         assert!(children.len() >= 2);
         assert!(pages.iter().all(|page| page.canonical_bytes().is_ok()));
+    }
+
+    #[test]
+    fn native_metadata_batches_bound_serialized_body() {
+        let page = DirectoryPage::Leaf {
+            version: FORMAT_VERSION,
+            entries: vec![
+                DirectoryEntry {
+                    name: b"a".to_vec(),
+                    metadata: metadata(),
+                    data: EntryData::File {
+                        size: MAX_INLINE_BYTES as u64,
+                        content: FileContent::Inline(vec![b'a'; MAX_INLINE_BYTES]),
+                        hardlink_group: None,
+                    },
+                },
+                DirectoryEntry {
+                    name: b"b".to_vec(),
+                    metadata: metadata(),
+                    data: EntryData::File {
+                        size: MAX_INLINE_BYTES as u64,
+                        content: FileContent::Inline(vec![b'b'; MAX_INLINE_BYTES]),
+                        hardlink_group: None,
+                    },
+                },
+            ],
+        };
+        let pages = vec![page; 1_100];
+        let mut offset = 0usize;
+        let mut batches = 0usize;
+        while offset < pages.len() {
+            let (end, recipe_end) = next_metadata_batch(&pages, &[], offset, 0).unwrap();
+            assert!(end > offset);
+            assert_eq!(recipe_end, 0);
+            let body = serde_json::to_vec(&MetadataRequest {
+                pages: &pages[offset..end],
+                recipes: &[],
+            })
+            .unwrap();
+            assert!(body.len() <= NATIVE_METADATA_REQUEST_TARGET_BYTES);
+            assert!(end - offset <= NATIVE_METADATA_REQUEST_MAX_OBJECTS);
+            offset = end;
+            batches += 1;
+        }
+        assert!(batches >= 2, "large metadata must span multiple requests");
+    }
+
+    #[test]
+    fn native_metadata_batches_bound_object_count() {
+        let pages = vec![DirectoryPage::empty(); NATIVE_METADATA_REQUEST_MAX_OBJECTS + 1];
+        let (page_end, recipe_end) = next_metadata_batch(&pages, &[], 0, 0).unwrap();
+        assert_eq!(page_end, NATIVE_METADATA_REQUEST_MAX_OBJECTS);
+        assert_eq!(recipe_end, 0);
     }
 
     #[tokio::test]
