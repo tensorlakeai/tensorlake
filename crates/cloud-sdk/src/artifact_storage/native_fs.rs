@@ -38,6 +38,9 @@ pub const ENTRY_MODE_MASK: u32 = 0o7777;
 // turn a valid large tree into a 413 response.
 const NATIVE_METADATA_REQUEST_TARGET_BYTES: usize = 8 * 1024 * 1024;
 const NATIVE_METADATA_REQUEST_MAX_OBJECTS: usize = 4096;
+// Snapshots optimize for wall time: immutable segment dedup amortizes the modest ratio difference,
+// while level 2 keeps compression from becoming the bottleneck ahead of direct blob uploads.
+const NATIVE_SEGMENT_ZSTD_LEVEL: i32 = 2;
 
 const FILE_CONTENT_DOMAIN: &[u8] = b"tensorlake.fs.file-content.v1\0";
 const DIRECTORY_PAGE_DOMAIN: &[u8] = b"tensorlake.fs.directory-page.v1\0";
@@ -822,7 +825,7 @@ impl SegmentBuilder {
         logical: &[u8],
         content_id: ObjectId,
     ) -> Result<PendingSlice, SdkError> {
-        let stored = zstd::stream::encode_all(logical, 3)?;
+        let stored = zstd::stream::encode_all(logical, NATIVE_SEGMENT_ZSTD_LEVEL)?;
         let stored_len = u32::try_from(stored.len())
             .map_err(|_| client_error("compressed native record exceeds u32"))?;
         if stored.is_empty() || stored.len() as u64 > self.max_bytes {
