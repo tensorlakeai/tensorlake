@@ -171,13 +171,17 @@ fn token_subject(token: &str) -> Option<String> {
     Some(claims.get("sub")?.as_str()?.to_string())
 }
 
-/// The legacy per-workspace record, rebuilt from a fleet row. Lease fields come off the wire
+/// The mount-facing workspace record, rebuilt from a fleet row. Lease fields come off the wire
 /// (`lease_due_ms` absent = pinned); servers that predate them omit both, which decodes to the
 /// durable-workspace constants.
 fn fleet_item_to_info(item: &WorkspaceFleetItem) -> WorkspaceInfo {
     WorkspaceInfo {
         id: item.id.clone(),
-        ref_name: format!("refs/workspaces/{}", item.id),
+        ref_name: if item.storage == "native" {
+            "fs/head".to_string()
+        } else {
+            format!("refs/workspaces/{}", item.id)
+        },
         principal: item
             .created_by
             .as_ref()
@@ -280,6 +284,7 @@ async fn resolve_workspace(
     let mut matches: Vec<(String, String)> = fleet_workspaces(session, None, Some(id))
         .await?
         .into_iter()
+        .filter(|(_, item)| item.storage != "native")
         // The fleet's `q` is a substring match; a prefix is what resolves here.
         .filter(|(_, item)| item.id.starts_with(id))
         .map(|(fs, item)| (fs, item.id))
@@ -311,8 +316,8 @@ async fn resolve_workspace(
     }
 }
 
-/// One `tl fs ls` row: the workspace record plus the fleet's liveness enrichments — absent on
-/// the per-repo fallback path, where the server does no activity join.
+/// One `tl fs ls` row: the workspace record plus project-fleet liveness enrichments. A named
+/// filesystem is rendered directly from its repo-scoped native workspace page.
 struct LsRow {
     fs: String,
     ws: WorkspaceInfo,
@@ -324,8 +329,8 @@ struct LsRow {
 /// `tl fs ls [file-system]` — every live workspace (across all file systems by default), with
 /// where each one is currently mounted on this machine.
 pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) -> Result<()> {
-    // The product surface calls this with a filesystem name. Native workspaces are deliberately
-    // absent from the project-wide Git workspace fleet, so use their repo-scoped API directly.
+    // A named filesystem works with a repo-scoped token; the all-filesystems form uses the bounded
+    // project fleet below.
     if let Some(fs) = file_system {
         let session = FsSession::open(ctx, Some(fs)).await?;
         let (user, token) = session.creds();
@@ -339,44 +344,18 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
     // Project-wide session first: the fleet listing requires `project:read`, which repo-scoped
     // credentials deliberately lack — a named file system narrows server-side via `?repo=`.
     let session = FsSession::open(ctx, None).await?;
-    let rows: Vec<LsRow> = match fleet_workspaces(&session, file_system, None).await {
-        Ok(rows) => rows
-            .into_iter()
-            .map(|(fs, item)| LsRow {
-                fs,
-                ws: fleet_item_to_info(&item),
-                status: Some(item.status),
-                snapshot_count: Some(item.snapshot_count),
-                mounted_on: item.mounted_on,
-            })
-            .collect(),
-        // A caller holding only a repo-scoped credential is refused by the project-scope fleet
-        // but can still list one named file system the pre-fleet way: the per-repo,
-        // principal-bound listing (GitRead). Liveness enrichments are simply absent there.
-        Err(CliError::Sdk(tensorlake::error::SdkError::ServerError { status, .. }))
-            if status == reqwest::StatusCode::FORBIDDEN && file_system.is_some() =>
-        {
-            let fs = file_system.expect("guarded above");
-            let session = FsSession::open(ctx, Some(fs)).await?;
-            let (user, token) = session.creds();
-            let mut list = session
-                .client
-                .list_workspaces(&session.project_id, fs, user, token)
-                .await?
-                .into_inner();
-            list.sort_by_key(|ws| std::cmp::Reverse(ws.created_at_secs));
-            list.into_iter()
-                .map(|ws| LsRow {
-                    fs: fs.to_string(),
-                    ws,
-                    status: None,
-                    snapshot_count: None,
-                    mounted_on: None,
-                })
-                .collect()
-        }
-        Err(e) => return Err(e),
-    };
+    let rows: Vec<LsRow> = fleet_workspaces(&session, None, None)
+        .await?
+        .into_iter()
+        .filter(|(_, item)| item.storage == "native")
+        .map(|(fs, item)| LsRow {
+            fs,
+            ws: fleet_item_to_info(&item),
+            status: Some(item.status),
+            snapshot_count: Some(item.snapshot_count),
+            mounted_on: item.mounted_on,
+        })
+        .collect();
     let mounts = live_mounts();
     let bound = plaindir::bound_workspaces();
     // A workspace's local attachment: the directory plus what kind of attachment it is.
@@ -435,7 +414,7 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
         table.add_row(vec![
             Cell::new(&ws.id),
             Cell::new(&row.fs),
-            Cell::new(ws.base_ref.as_deref().unwrap_or(&ws.base[..12])),
+            Cell::new(ws.base_ref.as_deref().unwrap_or(short_id(&ws.base))),
             Cell::new(if ws.head == ws.base { "-" } else { "yes" }),
             Cell::new(match &ws.shared_target {
                 Some(_) => "publishing".to_string(),
@@ -939,10 +918,7 @@ fn format_bytes(bytes: u64) -> String {
 
 /// `tl fs mount <name>[:<save>] <path>` — the filesystem-surface mount: the live filesystem is
 /// writable with autosave, while an explicit retained save is a pinned read-only time-travel
-/// view. Detached local writer sessions auto-resume. One server round trip: the create carries
-/// `surface=filesystem` and the SERVER applies the semantics (publish target, kind check)
-/// from the repo's authoritative kind — no listing, so a filesystem created milliseconds ago
-/// mounts, and a repo-scoped credential suffices (the sandbox story).
+/// view. Detached local writer sessions auto-resume. Filesystems use the native `/fs` wire.
 pub async fn mount_filesystem(
     ctx: &CliContext,
     target: &str,
@@ -5280,9 +5256,18 @@ async fn walk_remote_tree(
 }
 
 async fn heartbeat(session: &FsSession, state: &MountState) -> Result<()> {
-    // Native writable workspaces are pinned by the filesystem product and therefore have no
-    // lease to renew. Read-only native workspaces are pinned as well.
     if state.native_filesystem {
+        let (user, token) = session.creds();
+        session
+            .client
+            .native_workspace_heartbeat_with_credential(
+                &session.project_id,
+                &state.repo,
+                &state.workspace_id,
+                user,
+                token,
+            )
+            .await?;
         return Ok(());
     }
     let (user, token) = session.creds();

@@ -810,36 +810,55 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     // Lease heartbeat. An auth failure here is the running daemon's signal that its token
     // died early (revocation, epoch rotation): nudge the rotation task instead of waiting
     // out the scheduled re-mint.
-    if !state.native_filesystem {
-        let sdk = sdk.clone();
-        let (project, repo, ws) = (
-            project.clone(),
-            state.repo.clone(),
-            state.workspace_id.clone(),
-        );
-        let creds = api_creds.clone();
-        let remint = rotates.then(|| remint.clone());
-        tokio::spawn(async move {
-            loop {
-                let (user, token) = creds.lock().expect("creds lock").clone();
-                if let Err(e) = sdk
-                    .workspace_heartbeat(&project, &repo, &user, &token, &ws)
+    let heartbeat_sdk = sdk.clone();
+    let (heartbeat_project, heartbeat_repo, heartbeat_ws) = (
+        project.clone(),
+        state.repo.clone(),
+        state.workspace_id.clone(),
+    );
+    let native_filesystem = state.native_filesystem;
+    let creds = api_creds.clone();
+    let remint = rotates.then(|| remint.clone());
+    tokio::spawn(async move {
+        loop {
+            let (user, token) = creds.lock().expect("creds lock").clone();
+            let result = if native_filesystem {
+                heartbeat_sdk
+                    .native_workspace_heartbeat_with_credential(
+                        &heartbeat_project,
+                        &heartbeat_repo,
+                        &heartbeat_ws,
+                        &user,
+                        &token,
+                    )
                     .await
+                    .map(|_| ())
+            } else {
+                heartbeat_sdk
+                    .workspace_heartbeat(
+                        &heartbeat_project,
+                        &heartbeat_repo,
+                        &user,
+                        &token,
+                        &heartbeat_ws,
+                    )
+                    .await
+                    .map(|_| ())
+            };
+            if let Err(e) = result {
+                tracing::warn!("workspace heartbeat failed: {e}");
+                if let (
+                    Some(remint),
+                    tensorlake::error::SdkError::Authentication(_)
+                    | tensorlake::error::SdkError::Authorization(_),
+                ) = (&remint, &e)
                 {
-                    tracing::warn!("workspace heartbeat failed: {e}");
-                    if let (
-                        Some(remint),
-                        tensorlake::error::SdkError::Authentication(_)
-                        | tensorlake::error::SdkError::Authorization(_),
-                    ) = (&remint, &e)
-                    {
-                        remint.notify_one();
-                    }
+                    remint.notify_one();
                 }
-                tokio::time::sleep(HEARTBEAT_INTERVAL).await;
             }
-        });
-    }
+            tokio::time::sleep(HEARTBEAT_INTERVAL).await;
+        }
+    });
 
     let mountpoint = state.mountpoint.clone();
 

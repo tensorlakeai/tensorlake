@@ -1763,6 +1763,10 @@ pub struct NativeWorkspaceInfo {
 #[derive(Deserialize)]
 struct NativeWorkspaceList {
     workspaces: Vec<NativeWorkspaceInfo>,
+    /// Servers predating workspace pagination returned only `workspaces`; treating omission as
+    /// end-of-list keeps an upgraded CLI compatible during a rolling server deployment.
+    #[serde(default)]
+    next_after: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -1777,6 +1781,15 @@ struct CreateNativeWorkspaceRequest<'a> {
     read_only: bool,
     ttl_seconds: Option<u64>,
 }
+
+#[derive(Serialize)]
+struct NativeWorkspaceHeartbeatRequest {
+    ttl_seconds: u64,
+}
+
+/// Native workspaces are durable enough to survive a disconnected mount, but not immortal. The
+/// CLI refreshes this one-day lease every twenty minutes while mounted.
+pub const NATIVE_WORKSPACE_TTL_SECONDS: u64 = 24 * 60 * 60;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum NativeHeadAdvance {
@@ -2360,7 +2373,7 @@ impl ArtifactStorageClient {
                 .json(&CreateNativeWorkspaceRequest {
                     snapshot_id,
                     read_only,
-                    ttl_seconds: None,
+                    ttl_seconds: Some(NATIVE_WORKSPACE_TTL_SECONDS),
                 })
                 .send()
                 .await?,
@@ -2375,16 +2388,63 @@ impl ArtifactStorageClient {
         username: &str,
         token: &str,
     ) -> Result<Vec<NativeWorkspaceInfo>, SdkError> {
+        let mut workspaces = Vec::new();
+        let mut after: Option<String> = None;
+        loop {
+            let mut suffix = "fs/workspaces?limit=1000".to_string();
+            if let Some(cursor) = after.as_deref() {
+                suffix.push_str("&after=");
+                suffix.push_str(&urlencoding::encode(cursor));
+            }
+            let (request, _) = self.git_request(
+                Method::GET,
+                project_id,
+                repo,
+                Some(&suffix),
+                username,
+                token,
+            )?;
+            let response: NativeWorkspaceList = expect_json(request.send().await?).await?;
+            workspaces.extend(response.workspaces);
+            let Some(next) = response.next_after else {
+                break;
+            };
+            if after.as_deref() == Some(next.as_str()) {
+                return Err(client_error(
+                    "native workspace pagination cursor did not advance",
+                ));
+            }
+            after = Some(next);
+        }
+        Ok(workspaces)
+    }
+
+    pub async fn native_workspace_heartbeat_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        workspace_id: &str,
+        username: &str,
+        token: &str,
+    ) -> Result<NativeWorkspaceInfo, SdkError> {
+        let suffix = format!("fs/workspaces/{workspace_id}/heartbeat");
         let (request, _) = self.git_request(
-            Method::GET,
+            Method::POST,
             project_id,
             repo,
-            Some("fs/workspaces"),
+            Some(&suffix),
             username,
             token,
         )?;
-        let response: NativeWorkspaceList = expect_json(request.send().await?).await?;
-        Ok(response.workspaces)
+        expect_json(
+            request
+                .json(&NativeWorkspaceHeartbeatRequest {
+                    ttl_seconds: NATIVE_WORKSPACE_TTL_SECONDS,
+                })
+                .send()
+                .await?,
+        )
+        .await
     }
 
     pub async fn native_workspace_with_credential(
@@ -3753,5 +3813,117 @@ mod tests {
         };
         assert!(children.len() >= 2);
         assert!(pages.iter().all(|page| page.canonical_bytes().is_ok()));
+    }
+
+    #[tokio::test]
+    async fn native_workspace_client_paginates_and_renews_its_lease() {
+        fn workspace(id: &str) -> serde_json::Value {
+            serde_json::json!({
+                "workspace_id": id,
+                "principal": "user:test",
+                "base_snapshot_id": null,
+                "latest_snapshot_id": null,
+                "created_at_ms": 1,
+                "updated_at_ms": 1,
+                "expires_at_ms": 86_400_001u64,
+                "read_only": false,
+            })
+        }
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for request_index in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                loop {
+                    let mut bytes = [0u8; 4096];
+                    let count = stream.read(&mut bytes).await.unwrap();
+                    request.extend_from_slice(&bytes[..count]);
+                    let Some(header_end) = request
+                        .windows(4)
+                        .position(|window| window == b"\r\n\r\n")
+                        .map(|offset| offset + 4)
+                    else {
+                        continue;
+                    };
+                    let headers = String::from_utf8_lossy(&request[..header_end]);
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            line.to_ascii_lowercase()
+                                .strip_prefix("content-length:")
+                                .and_then(|value| value.trim().parse::<usize>().ok())
+                        })
+                        .unwrap_or(0);
+                    if request.len() >= header_end + content_length {
+                        break;
+                    }
+                }
+                let text = String::from_utf8_lossy(&request);
+                let body = match request_index {
+                    0 => {
+                        assert!(text.contains("GET /project/p/repos/r/fs/workspaces?limit=1000 "));
+                        serde_json::json!({
+                            "workspaces": [workspace("ws-1")],
+                            "next_after": "ws-1",
+                        })
+                    }
+                    1 => {
+                        assert!(text.contains(
+                            "GET /project/p/repos/r/fs/workspaces?limit=1000&after=ws-1 "
+                        ));
+                        serde_json::json!({
+                            "workspaces": [workspace("ws-2")],
+                        })
+                    }
+                    _ => {
+                        assert!(
+                            text.contains("POST /project/p/repos/r/fs/workspaces/ws-1/heartbeat ")
+                        );
+                        assert!(
+                            text.contains(&format!(
+                                "\"ttl_seconds\":{NATIVE_WORKSPACE_TTL_SECONDS}"
+                            ))
+                        );
+                        workspace("ws-1")
+                    }
+                };
+                let body = serde_json::to_vec(&body).unwrap();
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+        });
+        let base = format!("http://{addr}");
+        let api = crate::ClientBuilder::new(&base)
+            .bearer_token("unused")
+            .build()
+            .unwrap();
+        let client = ArtifactStorageClient::new(api, &base).unwrap();
+        let workspaces = client
+            .list_native_workspaces_with_credential("p", "r", "user", "token")
+            .await
+            .unwrap();
+        assert_eq!(
+            workspaces
+                .iter()
+                .map(|workspace| workspace.workspace_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["ws-1", "ws-2"]
+        );
+        client
+            .native_workspace_heartbeat_with_credential("p", "r", "ws-1", "user", "token")
+            .await
+            .unwrap();
+        server.await.unwrap();
     }
 }

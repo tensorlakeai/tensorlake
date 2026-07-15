@@ -200,6 +200,10 @@ pub struct WorkspaceFleetItem {
     pub id: String,
     /// Full repo id (`{project}/{repo}`).
     pub repo: String,
+    /// `git` for repository workspaces, `native` for filesystem workspaces. Defaults to `git`
+    /// against servers predating native fleet rows.
+    #[serde(default = "default_workspace_storage")]
+    pub storage: String,
     /// Derived server-side at read time: `live` | `gap` | `idle` | `detached`.
     pub status: String,
     /// `default` | `shared-rw`.
@@ -233,6 +237,10 @@ pub struct WorkspaceFleetItem {
     /// Host reported by the currently-open mount session, if any.
     #[serde(default)]
     pub mounted_on: Option<String>,
+}
+
+fn default_workspace_storage() -> String {
+    "git".to_string()
 }
 
 /// A workspace's creating principal: the authenticated `sub` and its human/agent classification.
@@ -664,7 +672,7 @@ mod tests {
         let body = r#"{
             "project": "p1",
             "items": [{
-                "id": "aabbccdd", "repo": "p1/demo", "status": "live", "mode": "shared-rw",
+                "id": "aabbccdd", "repo": "p1/demo", "storage": "native", "status": "live", "mode": "shared-rw",
                 "created_by": {"name": "user:u1", "kind": "human"},
                 "base": "1111111111111111111111111111111111111111",
                 "base_ref": "refs/heads/main",
@@ -690,6 +698,7 @@ mod tests {
         let item = &page.items[0];
         assert_eq!(item.id, "aabbccdd");
         assert_eq!(item.repo, "p1/demo");
+        assert_eq!(item.storage, "native");
         assert_eq!(item.status, "live");
         assert_eq!(item.mode, "shared-rw");
         assert_eq!(item.created_by.as_ref().unwrap().name, "user:u1");
@@ -721,6 +730,7 @@ mod tests {
         let page: WorkspaceFleetPage = serde_json::from_str(body).unwrap();
         let item = &page.items[0];
         assert!(item.created_by.is_none(), "unbound workspace");
+        assert_eq!(item.storage, "git", "old servers default to git rows");
         assert!(item.base_ref.is_none());
         assert_eq!(item.lease_secs, 0, "old servers omit lease_secs");
         assert!(item.lease_due_ms.is_none(), "omitted lease row = pinned");
