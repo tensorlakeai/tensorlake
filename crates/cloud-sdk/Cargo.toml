@@ -49,11 +49,13 @@ tokio-util = { workspace = true }
 url = { workspace = true }
 urlencoding = { workspace = true }
 uuid = { workspace = true }
-xattr = { workspace = true }
 des = { workspace = true }
 rand = "0.9.2"
 # Chunk-pack assembly for presigned-PUT staging (matches the server's chunk frame encoding).
 zstd = "0.13"
+
+[target.'cfg(unix)'.dependencies]
+xattr = { workspace = true }
 
 [dev-dependencies]
 data-encoding = "2.5"
