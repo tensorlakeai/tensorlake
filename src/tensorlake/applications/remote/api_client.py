@@ -1,7 +1,7 @@
 import json
 import os
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from tensorlake.applications.interface.exceptions import (
     InternalError,
@@ -26,24 +26,9 @@ class Application(BaseModel):
     name: str
     description: str
     tags: dict[str, str]
-    allow: list[str] = Field(default_factory=list)
     version: str
     tombstoned: bool = False
     created_at: int | None = None
-
-
-class ApplicationPublicEndpoint(BaseModel):
-    id: str
-    url: str
-    enabled: bool
-    created_at: str
-    updated_at: str
-
-
-class ApplicationPublicEndpoints(BaseModel):
-    application_name: str
-    allow_unauthorized_requests: bool
-    endpoints: list[ApplicationPublicEndpoint] = Field(default_factory=list)
 
 
 class RequestError(BaseModel):
@@ -110,17 +95,6 @@ class APIClient:
             code_zip=code_zip,
             upgrade_running_requests=upgrade_running_requests,
         )
-
-    def ensure_application_public_endpoint(
-        self,
-        application_name: str,
-        allow: list[str],
-    ) -> ApplicationPublicEndpoints:
-        response_json = self._cloud_client.ensure_application_public_endpoint_json(
-            application_name=application_name,
-            allow=allow,
-        )
-        return ApplicationPublicEndpoints.model_validate_json(response_json)
 
     def delete_application(
         self,

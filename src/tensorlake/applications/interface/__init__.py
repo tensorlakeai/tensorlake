@@ -19,9 +19,8 @@ from .exceptions import (
     TimeoutError,
 )
 from .file import File
-from .function import ApplicationCapability, Function
+from .function import Function
 from .futures import RETURN_WHEN, Future
-from .http import Headers, HttpBody
 from .logger import Logger
 from .request import Request
 from .request_context import (
@@ -37,7 +36,6 @@ from .run import (
 
 __all__ = [
     "application",
-    "ApplicationCapability",
     "cls",
     "run_local_application",
     "run_remote_application",
@@ -46,8 +44,6 @@ __all__ = [
     "File",
     "Function",
     "Future",
-    "Headers",
-    "HttpBody",
     "FunctionError",
     "TimeoutError",
     "FunctionProgress",

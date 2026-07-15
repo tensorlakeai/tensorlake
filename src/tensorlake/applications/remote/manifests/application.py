@@ -3,7 +3,7 @@ import inspect
 import pickle
 from typing import Any, Dict, List
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel
 
 from ...function.type_hints import (
     function_parameters,
@@ -16,11 +16,7 @@ from ...function.user_data_serializer import (
     function_input_serializer,
     function_output_serializer,
 )
-from ...interface.function import (
-    ApplicationCapability,
-    Function,
-    _ApplicationConfiguration,
-)
+from ...interface.function import Function, _ApplicationConfiguration
 from .function import FunctionManifest, create_function_manifest
 
 
@@ -51,7 +47,6 @@ class ApplicationManifest(BaseModel):
     name: str
     description: str
     tags: Dict[str, str]
-    allow: List[ApplicationCapability] = Field(default_factory=list)
     version: str
     functions: Dict[str, FunctionManifest]
     entrypoint: EntryPointManifest
@@ -97,7 +92,6 @@ def create_application_manifest(
         name=application_function._function_config.function_name,
         description=application_function._function_config.description,
         tags=app_config.tags,
-        allow=app_config.allow,
         version=app_config.version,
         functions=function_manifests,
         entrypoint=EntryPointManifest(

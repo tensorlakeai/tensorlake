@@ -15,11 +15,9 @@ from ..function.type_hints import (
     function_signature,
     is_file_type_hint,
     is_future_type_hint,
-    is_http_body_type_hint,
-    is_raw_body_type_hint,
 )
 from ..function.user_data_serializer import function_input_serializer
-from ..interface import File, Function, HttpBody, InternalError, SerializationError
+from ..interface import File, Function, InternalError, SerializationError
 from ..interface.decorators import (
     _ApplicationDecorator,
     _class_name,
@@ -484,7 +482,7 @@ def _validate_application_function(
                 )
             )
         else:
-            if is_raw_body_type_hint(parameter.annotation):
+            if is_file_type_hint(parameter.annotation):
                 continue  # Not serialized using Pydantic
 
             try:
@@ -492,18 +490,13 @@ def _validate_application_function(
                     parameter.annotation
                 )
             except Exception as e:
-                if str(File) in str(e) or str(HttpBody) in str(e):
-                    wrapper_name = (
-                        "HttpBody"
-                        if str(HttpBody) in str(e) and str(File) not in str(e)
-                        else "File"
-                    )
+                if str(File) in str(e):
                     messages.append(
                         ValidationMessage(
-                            message=f"Application function parameter '{parameter.name}' uses a {wrapper_name} object in a complex type hint '{parameter.annotation}'. "
-                            f"Only simple type hints like '{parameter.name}: {wrapper_name}' are supported for {wrapper_name} objects in application function parameters. "
-                            f"A {wrapper_name} object cannot be embedded inside other type hints like '{parameter.name}: list[{wrapper_name}]', '{parameter.name}: dict[str, {wrapper_name}]', etc or be a part of union "
-                            f"type hint like '{parameter.name}: {wrapper_name} | None'.",
+                            message=f"Application function parameter '{parameter.name}' uses a File object in a complex type hint '{parameter.annotation}'. "
+                            f"Only simple type hints like '{parameter.name}: File' are supported for File objects in application function parameters. "
+                            f"A File object cannot be embedded inside other type hints like '{parameter.name}: list[File]', '{parameter.name}: dict[str, File]', etc or be a part of union "
+                            f"type hint like '{parameter.name}: File | None'.",
                             severity=ValidationMessageSeverity.ERROR,
                             details=function_details,
                         )
@@ -565,16 +558,6 @@ def _validate_application_function(
     else:
         if is_file_type_hint(signature.return_annotation):
             pass  # Not serialized using Pydantic
-        elif is_http_body_type_hint(signature.return_annotation):
-            messages.append(
-                ValidationMessage(
-                    message="Application function return type hint is an HttpBody. "
-                    "HttpBody is only supported for application function parameters. "
-                    "Use File or bytes-compatible JSON types for application return values.",
-                    severity=ValidationMessageSeverity.ERROR,
-                    details=function_details,
-                )
-            )
         elif is_future_type_hint(signature.return_annotation):
             messages.append(
                 ValidationMessage(
@@ -593,18 +576,13 @@ def _validate_application_function(
                 )
             except Exception as e:
                 e_str: str = str(e)
-                if str(File) in e_str or str(HttpBody) in e_str:
-                    wrapper_name = (
-                        "HttpBody"
-                        if str(HttpBody) in e_str and str(File) not in e_str
-                        else "File"
-                    )
+                if str(File) in e_str:
                     messages.append(
                         ValidationMessage(
-                            message=f"Application function return type hint '{signature.return_annotation}' uses a {wrapper_name} object in a complex type hint. "
-                            f"Only simple type hints like 'foo: {wrapper_name}' are supported for {wrapper_name} objects in application function return types. "
-                            f"A {wrapper_name} object cannot be embedded inside other type hints like 'foo: list[{wrapper_name}]', 'foo: dict[str, {wrapper_name}]', etc or be a part of union "
-                            f"type hint like 'foo: {wrapper_name} | None'.",
+                            message=f"Application function return type hint '{signature.return_annotation}' uses a File object in a complex type hint. "
+                            "Only simple type hints like 'foo: File' are supported for File objects in application function return types. "
+                            "A File object cannot be embedded inside other type hints like 'foo: list[File]', 'foo: dict[str, File]', etc or be a part of union "
+                            "type hint like 'foo: File | None'.",
                             severity=ValidationMessageSeverity.ERROR,
                             details=function_details,
                         )

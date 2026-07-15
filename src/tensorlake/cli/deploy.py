@@ -329,7 +329,7 @@ def _deploy_applications(
     _emit({"type": "status", "message": "Deploying applications..."})
 
     try:
-        public_endpoint_urls = deploy_applications(
+        deploy_applications(
             applications_file_path=application_file_path,
             upgrade_running_requests=upgrade_running_requests,
             load_source_dir_modules=False,
@@ -348,9 +348,6 @@ def _deploy_applications(
                     "type": "deployed",
                     "application": application_function._name,
                     "curl_command": curl_command,
-                    "public_endpoint_url": public_endpoint_urls.get(
-                        application_function._name
-                    ),
                 }
             )
     except SDKUsageError as e:

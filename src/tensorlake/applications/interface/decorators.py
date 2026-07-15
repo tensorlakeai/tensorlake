@@ -9,7 +9,6 @@ from ..registry import (
     register_function,
 )
 from .function import (
-    ApplicationCapability,
     Function,
     _ApplicationConfiguration,
     _function_name,
@@ -58,13 +57,11 @@ class _ApplicationDecorator(_Decorator):
         tags: Dict[str, str],
         retries: Retries,
         region: str | None,
-        allow: List[ApplicationCapability],
     ):
         super().__init__()
         self._tags: Dict[str, str] = tags
         self._retries: Retries = retries
         self._region: str | None = region
-        self._allow: List[ApplicationCapability] = list(allow)
 
     def __call__(self, fn: _Decorator | Callable | Function) -> Function | _Decorator:
         fn: Function | _Decorator = self.create_function(fn)
@@ -76,7 +73,6 @@ class _ApplicationDecorator(_Decorator):
             tags=self._tags,
             retries=self._retries,
             region=self._region,
-            allow=self._allow,
             # Use a unique random version. We don't provide user controlled versioning at the moment.
             # Use only alphanumeric characters so app version can be used as container tags.
             version=nanoid(
@@ -91,14 +87,12 @@ def application(
     tags: Dict[str, str] = {},
     retries: Retries = Retries(),
     region: Literal["us-east-1", "eu-west-1"] | None = None,
-    allow: List[ApplicationCapability] | None = None,
 ) -> _ApplicationDecorator:
     return _ApplicationDecorator(
         # NB: the first argument here is used during pre-deployment validation.
         tags=tags,
         retries=retries,
         region=region,
-        allow=allow or [],
     )
 
 
