@@ -180,7 +180,7 @@ enum Commands {
     #[command(subcommand)]
     Secrets(SecretsCommands),
 
-    /// Manage Tensorlake workspaces (versioned file systems mounted over FUSE)
+    /// Manage versioned filesystems
     #[command(subcommand, name = "fs")]
     Fs(FsCommands),
 
@@ -229,8 +229,8 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Mount a filesystem (FUSE): reads stream lazily, saves publish to the filesystem.
-    /// Name a retained save as `filesystem:save-id` for a pinned read-only time-travel view.
+    /// Mount a filesystem: reads stream lazily, saves publish to the filesystem.
+    /// Name a retained save as `filesystem:save-id` for a fixed read-only time-travel view.
     /// Remounting a filesystem this machine has a detached session for resumes that session
     Mount {
         /// Filesystem name, optionally followed by `:<save-id>` (see `tl fs history`)
@@ -357,9 +357,14 @@ enum FsCommands {
         /// Save message
         #[arg(short, long)]
         message: Option<String>,
+
+        /// After publishing, drop the mount's retained byte cache and ignored local files.
+        /// If preparation is still pending, nothing is cleared; run the command again
+        #[arg(long)]
+        clear: bool,
     },
 
-    /// Show workspace, lease, and local-change status for a mount
+    /// Show mount, autosave, and local-change status
     Status {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
@@ -369,13 +374,13 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Restore a mount's tracked files to a snapshot or commit
+    /// Restore a writable filesystem mount to an earlier save
     #[command(allow_missing_positional = true)]
     Restore {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
 
-        /// Snapshot/commit hex, branch, or ref to restore to
+        /// Save ID or unambiguous hexadecimal prefix
         version: String,
 
         /// Drop the local overlay to apply the restore. Destructive: unsaved changes AND
@@ -2444,7 +2449,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             if path.is_none() {
                 commands::fs::reject_mount_like_positional(
                     version,
-                    "snapshot or ref",
+                    "save ID",
                     "tl fs restore [PATH] <VERSION>",
                 )?;
             }
@@ -2508,8 +2513,8 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             state_dir,
             log_level,
         } => commands::fs::daemon::run(ctx, &state_dir, &log_level).await,
-        FsCommands::Snapshot { message, .. } => {
-            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), false).await
+        FsCommands::Snapshot { message, clear, .. } => {
+            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), clear).await
         }
         FsCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
         FsCommands::Restore {
@@ -3215,27 +3220,31 @@ mod tests {
             Commands::Fs(FsCommands::Snapshot {
                 path: None,
                 message: None,
+                clear: false,
             }) => {}
             _ => panic!("expected fs snapshot command"),
         }
 
-        match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip"]) {
-            Commands::Fs(FsCommands::Snapshot { path, message }) => {
+        match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip", "--clear"]) {
+            Commands::Fs(FsCommands::Snapshot {
+                path,
+                message,
+                clear,
+            }) => {
                 assert_eq!(path, Some(PathBuf::from("./w")));
                 assert_eq!(message.as_deref(), Some("wip"));
+                assert!(clear);
             }
             _ => panic!("expected fs snapshot command"),
         }
 
-        // Promote, sync, diff, init, and the overlay-clearing snapshot left the fs surface
-        // entirely (promote/sync/--clear live on `tl git`; diff and init were cut — push
-        // binds a directory, unmount forgets it).
+        // Promote, sync, diff, and init left the fs surface entirely. Filesystem saves publish
+        // directly; push binds a directory and unmount forgets it.
         assert!(Cli::try_parse_from(["tl", "fs", "promote", "main"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "sync"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "diff"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "init"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "unbind"]).is_err());
-        assert!(Cli::try_parse_from(["tl", "fs", "snapshot", "--clear"]).is_err());
         // `tl git snapshot --clear` keeps the disk-reclaim hatch (hidden).
         match parse_command(["tl", "git", "snapshot", "--clear"]) {
             Commands::Git(GitCommands::Snapshot { clear: true, .. }) => {}

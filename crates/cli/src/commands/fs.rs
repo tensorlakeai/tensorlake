@@ -1,28 +1,17 @@
 //! `tl fs` — filesystems on artifact storage: create, mount, save, restore.
 //!
 //! Product model (the fs/git split): the *filesystem* is the unit `tl fs` manages — `create`
-//! makes one (a `kind=filesystem` storage namespace), `ls` lists them,
-//! `rm` deletes them, `mount` attaches one, `push` uploads a folder into one. The vocabulary
-//! is drives and saves: native filesystem snapshots use BLAKE3 metadata trees plus aggregate
-//! blob segments and are deliberately not Git-addressable. `tl fs push` scans each file once,
-//! uploads missing aggregates directly to blob storage, waits for closure verification, and
-//! publishes with head CAS. Mount migration follows the same native snapshot/workspace API;
-//! writes continue to land in a local overlay before sealing.
-//! **The daemon's sealer owns the definition of dirty**: the overlay's dirty index resolves
-//! into incremental snapshot commits on the workspace ref (auto-commit ticks it; `tl fs
-//! snapshot` asks the background preparer to publish; an unprepared generation returns a pending
-//! watermark immediately and later quiet writes may coalesce into that save), and the mount's lower
-//! layer follows the ref to the new snapshot. Every dirt-consulting command (`status`, `promote`,
-//! `sync`, `diff`) reads the same view through the `dirty` control op, so none of them can
-//! disagree with what a snapshot would seal. The overlay is **kept** after sealing — the
-//! upper keeps serving the byte-identical sealed content as a local byte cache, accounted
-//! for by the sealed index (`sealed.json`, which also survives daemon restarts) and
-//! reported by `status` as `retained`. `sync` asks the daemon to `trim` retained content
-//! (safe: it is all in workspace history; ignored files survive); `snapshot --clear`
-//! remains the explicit, destructive opt-in that drops the WHOLE overlay, ignored files
-//! included. `promote` CAS-advances a real branch (squash by default); `restore` refills
-//! the overlay from any snapshot. FUSE is the only mount path — Linux builds carry it
-//! unconditionally, macOS requires macFUSE and the `macfuse` build feature.
+//! makes one (a `kind=filesystem` storage namespace), `ls` lists them, `rm` deletes them,
+//! `mount` attaches one, and `push` uploads a folder into one. Native saves use metadata trees
+//! plus aggregate blob segments and are deliberately not Git-addressable.
+//!
+//! The mount daemon's journal is the authority for local changes. Its background preparer reads,
+//! hashes, compresses, and uploads changed content before a save is requested; autosave or
+//! `snapshot` then publishes the prepared root. If preparation has not caught up, `snapshot`
+//! reports a pending watermark without blocking the mount. Published upper files remain as a
+//! local byte cache and are reported by `status` as retained. `snapshot --clear` is the explicit,
+//! destructive opt-in that drops that cache and ignored local files. `restore` moves the
+//! filesystem back to a retained save without transferring file bytes.
 
 use std::collections::HashMap;
 use std::path::{Component, Path, PathBuf};
@@ -222,6 +211,18 @@ fn native_workspace_to_mount_info(workspace: NativeWorkspaceInfo) -> WorkspaceIn
     }
 }
 
+fn filesystem_session_json(session: &WorkspaceInfo) -> serde_json::Value {
+    serde_json::json!({
+        "session_id": session.id,
+        "principal": session.principal,
+        "base_save_id": (!session.base.is_empty()).then_some(&session.base),
+        "latest_save_id": (!session.head.is_empty()).then_some(&session.head),
+        "created_at_secs": session.created_at_secs,
+        "expires_at_ms": session.lease_due_ms,
+        "read_only": session.shared_target.is_none(),
+    })
+}
+
 /// Every workspace visible to this caller across the whole project — one paginated fleet
 /// request instead of one listing per file system — newest first, as `(file system, item)`.
 ///
@@ -384,12 +385,12 @@ pub async fn ls(ctx: &CliContext, file_system: Option<&str>, output_json: bool) 
                 let attached = attachment(&row.ws.id);
                 serde_json::json!({
                     "file_system": row.fs,
-                    "workspace": row.ws,
+                    "session": filesystem_session_json(&row.ws),
                     "mounted_at": attached.as_ref().map(|(path, _)| path.clone()),
                     "kind": attached.as_ref().map(|(_, kind)| *kind),
                     // Fleet liveness enrichments; null on the per-repo fallback path.
                     "status": row.status,
-                    "snapshot_count": row.snapshot_count,
+                    "save_count": row.snapshot_count,
                     "mounted_on": row.mounted_on,
                 })
             })
@@ -455,9 +456,10 @@ fn print_native_workspaces(
         let rows: Vec<_> = workspaces
             .iter()
             .map(|workspace| {
+                let session = native_workspace_to_mount_info(workspace.clone());
                 serde_json::json!({
                     "file_system": fs,
-                    "workspace": workspace,
+                    "session": filesystem_session_json(&session),
                     "mounted_at": mounted_at(&workspace.workspace_id),
                     "kind": mounted_at(&workspace.workspace_id).map(|_| "mount"),
                 })
@@ -769,12 +771,12 @@ pub async fn push_dir(
             "uploading {missing_segments} of {total_segments} aggregate segment(s) via {transport}..."
         )),
         NativePushEvent::Uploaded { .. } => {
-            progress_bar.set_message("verifying snapshot closure...")
+            progress_bar.set_message("validating save metadata...")
         }
         NativePushEvent::Verifying { .. } => {
-            progress_bar.set_message("verifying snapshot closure...")
+            progress_bar.set_message("validating save metadata...")
         }
-        NativePushEvent::Published { .. } => progress_bar.set_message("published"),
+        NativePushEvent::Published { .. } => progress_bar.set_message("save published"),
     }
     });
     let (user, token) = session.creds();
@@ -874,6 +876,22 @@ pub async fn history(
             .await;
     let saves: Vec<NativeSnapshotInfo> = snapshots.into_iter().collect::<Result<_>>()?;
     if output_json {
+        let saves: Vec<_> = saves
+            .iter()
+            .map(|save| {
+                serde_json::json!({
+                    "save_id": save.snapshot_id,
+                    "filesystem_id": save.filesystem_id,
+                    "root_id": save.root,
+                    "parent_save_ids": save.parents,
+                    "created_at_ms": save.created_at_ms,
+                    "principal": save.principal,
+                    "message": save.message,
+                    "operation_id": save.operation_id,
+                    "pinned": save.pinned,
+                })
+            })
+            .collect();
         println!("{}", serde_json::to_string_pretty(&saves)?);
         return Ok(());
     }
@@ -970,7 +988,7 @@ fn format_bytes(bytes: u64) -> String {
 }
 
 /// `tl fs mount <name>[:<save>] <path>` — the filesystem-surface mount: the live filesystem is
-/// writable with autosave, while an explicit retained save is a pinned read-only time-travel
+/// writable with autosave, while an explicit retained save is a fixed read-only time-travel
 /// view. Detached local writer sessions auto-resume. Filesystems use the native `/fs` wire.
 pub async fn mount_filesystem(
     ctx: &CliContext,
@@ -2405,7 +2423,7 @@ pub async fn mount(
     auto_commit_interval_secs: Option<u64>,
     // The surface speaking: true = `tl fs` (drives, sessions, saves), false = `tl git`
     // (workspaces, snapshots, branches). One engine, two vocabularies — the fs surface
-    // promises the words workspace/snapshot/branch never appear in its output.
+    // keeps branch, commit, ref, and merge terminology out of its output.
     fs_surface: bool,
     // A workspace KNOWN to live in `target`'s repo (auto-resume, `--workspace`): attach
     // through the per-repo, principal-checked endpoint directly. Never routed through name
@@ -2970,7 +2988,7 @@ pub async fn mount(
                         if ws.shared_target.is_some() {
                             ", saves publish automatically"
                         } else if pinned_native_snapshot.is_some() {
-                            ", read-only, pinned to a historical save"
+                            ", read-only, fixed at a historical save"
                         } else if read_only {
                             ", read-only, follows the filesystem"
                         } else {
@@ -2997,7 +3015,10 @@ pub async fn mount(
                     if fs_surface {
                         let save = resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?");
                         if pinned_native_snapshot.is_some() {
-                            println!("Reading historical save {save}; this view stays pinned.");
+                            println!(
+                                "Reading historical save {save}; this view does not follow new \
+                                 saves."
+                            );
                         } else {
                             println!(
                                 "Reading save {save}; new saves appear as the filesystem advances."
@@ -3322,6 +3343,12 @@ pub async fn unmount(
         println!(
             "Unmounted {mountpoint} (session {} deleted).",
             short_id(&state.workspace_id)
+        );
+    } else if state.native_filesystem {
+        println!(
+            "Unmounted {mountpoint}. Session {} kept — `tl fs mount {} <path>` resumes it.",
+            short_id(&state.workspace_id),
+            state.repo,
         );
     } else {
         println!(
@@ -4030,6 +4057,16 @@ pub async fn snapshot(
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
+        if state.native_filesystem {
+            let view = state
+                .pinned_snapshot
+                .as_deref()
+                .map(|save| format!("fixed at save {}", short_id(save)))
+                .unwrap_or_else(|| "following the filesystem's current state".to_string());
+            return Err(CliError::usage(format!(
+                "this is a read-only filesystem view {view}; there is nothing to save"
+            )));
+        }
         return Err(CliError::usage(format!(
             "this is a read-only mount following {}; there is nothing to {}",
             state.follow_ref.as_deref().unwrap_or("the branch"),
@@ -4586,51 +4623,61 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     let changes = local_changes(&state_dir, &mountpoint).await?;
     // Collisions the followed state materialized that no later save has overwritten. Absent
     // daemon (or a pre-visibility daemon) reads as none — the section only ever adds signal.
-    let collisions: Vec<(String, String, String)> = daemon::control(&state_dir, "conflicts")
-        .await
-        .ok()
-        .and_then(|r| r.get("conflicts").cloned())
-        .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
-        .map(|list| {
-            list.into_iter()
-                .filter_map(|c| {
-                    Some((
-                        c.get("path")?.as_str()?.to_string(),
-                        c.get("kind")?.as_str()?.to_string(),
-                        c.get("commit")?.as_str()?.to_string(),
-                    ))
-                })
-                .collect()
-        })
-        .unwrap_or_default();
+    let collisions: Vec<(String, String, String)> = if state.native_filesystem {
+        Vec::new()
+    } else {
+        daemon::control(&state_dir, "conflicts")
+            .await
+            .ok()
+            .and_then(|r| r.get("conflicts").cloned())
+            .and_then(|v| serde_json::from_value::<Vec<serde_json::Value>>(v).ok())
+            .map(|list| {
+                list.into_iter()
+                    .filter_map(|c| {
+                        Some((
+                            c.get("path")?.as_str()?.to_string(),
+                            c.get("kind")?.as_str()?.to_string(),
+                            c.get("commit")?.as_str()?.to_string(),
+                        ))
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
 
     if output_json {
-        println!(
-            "{}",
-            serde_json::to_string_pretty(&serde_json::json!({
-                "workspace": ws,
-                "mounted": daemon_commit.is_some(),
-                "lower_commit": daemon_commit,
-                "log": state_dir.join("daemon.log"),
-                "dirty": changes.upserts.iter().cloned()
-                    .chain(changes.deletes.iter().cloned()).collect::<Vec<_>>(),
-                // False when the daemon did not answer the dirty query and the counts fell
-                // back to a raw overlay walk (which may include already-sealed files).
-                "dirty_exact": changes.exact,
-                "retained": changes.retained,
-                "ignored": changes.ignored,
-                "pending_renames": changes.renames
-                    .iter()
-                    .map(|(from, to)| serde_json::json!({ "from": from, "to": to }))
-                    .collect::<Vec<_>>(),
-                "unresolved_collisions": collisions
-                    .iter()
-                    .map(|(path, kind, commit)| serde_json::json!({
-                        "path": path, "kind": kind, "commit": commit,
-                    }))
-                    .collect::<Vec<_>>(),
-            }))?
-        );
+        let mut output = serde_json::json!({
+            "session": filesystem_session_json(&ws),
+            "mounted": daemon_commit.is_some(),
+            "log": state_dir.join("daemon.log"),
+            "dirty": changes.upserts.iter().cloned()
+                .chain(changes.deletes.iter().cloned()).collect::<Vec<_>>(),
+            // False when the daemon did not answer the dirty query and the counts fell
+            // back to a raw overlay walk (which may include already-saved files).
+            "dirty_exact": changes.exact,
+            "retained": changes.retained,
+            "ignored": changes.ignored,
+            "pending_renames": changes.renames
+                .iter()
+                .map(|(from, to)| serde_json::json!({ "from": from, "to": to }))
+                .collect::<Vec<_>>(),
+            "unresolved_collisions": collisions
+                .iter()
+                .map(|(path, kind, commit)| serde_json::json!({
+                    "path": path, "kind": kind, "commit": commit,
+                }))
+                .collect::<Vec<_>>(),
+        });
+        let state_key = if state.native_filesystem {
+            "current_save"
+        } else {
+            "lower_commit"
+        };
+        output
+            .as_object_mut()
+            .expect("status JSON is an object")
+            .insert(state_key.to_string(), serde_json::json!(daemon_commit));
+        println!("{}", serde_json::to_string_pretty(&output)?);
         return Ok(());
     }
     println!("{} {}", style("filesystem:").dim(), state.repo);
@@ -4645,9 +4692,14 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     if state.read_only() {
         if let Some(snapshot) = state.pinned_snapshot.as_deref() {
             println!(
-                "{} read-only, pinned to save {}",
+                "{} read-only, fixed at save {}",
                 style("mode:").dim(),
                 short_id(snapshot)
+            );
+        } else if state.native_filesystem {
+            println!(
+                "{} read-only, follows the filesystem's current state",
+                style("mode:").dim()
             );
         } else {
             let followed = state.follow_ref.as_deref().unwrap_or("the current state");
@@ -4655,7 +4707,7 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         }
     } else if state.native_filesystem {
         println!(
-            "{} publishing — every save lands on the filesystem head",
+            "{} writable — every save becomes the filesystem's current state",
             style("mode:").dim()
         );
     } else if let Some(target) = &ws.shared_target {
@@ -4668,14 +4720,17 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     }
     if let Some(secs) = state.auto_commit_interval_secs {
         println!(
-            "{} local changes seal into a save every {secs}s (sealed content below is kept \
+            "{} local changes are saved every {secs}s (saved content below is kept \
              locally as the byte cache)",
             style("autosave:").dim()
         );
     }
-    match &daemon_commit {
-        Some(commit) => println!("{} mounted at {commit}", style("daemon:").dim()),
-        None => println!(
+    match (&daemon_commit, state.native_filesystem) {
+        (Some(save), true) => {
+            println!("{} serving save {}", style("daemon:").dim(), short_id(save))
+        }
+        (Some(commit), false) => println!("{} mounted at {commit}", style("daemon:").dim()),
+        (None, _) => println!(
             "{} not running (remount with tl fs mount)",
             style("daemon:").dim()
         ),
@@ -4727,14 +4782,14 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
         if !changes.exact {
             println!(
                 "{} the mount daemon did not answer the dirty query; counts may include \
-                 files already sealed into a snapshot",
+                 files already included in a save",
                 style("note:").yellow()
             );
         }
     }
     if changes.retained > 0 {
         println!(
-            "{} {} file(s) sealed into snapshots and kept locally as the byte cache \
+            "{} {} file(s) included in saves and kept locally as the byte cache \
              (`tl fs snapshot --clear` drops them)",
             style("retained:").dim(),
             changes.retained
@@ -4742,7 +4797,7 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     }
     if changes.ignored > 0 {
         println!(
-            "{} {} local-only ignored file(s) (never snapshotted)",
+            "{} {} local-only ignored file(s) (never saved)",
             style("ignored:").dim(),
             changes.ignored
         );
@@ -4759,15 +4814,22 @@ pub async fn restore(
     version: &str,
     discard_local: bool,
 ) -> Result<()> {
-    if plaindir::binding_for_lenient(path).is_some() {
-        return Err(CliError::usage(
-            "restore is not supported for plain-directory bindings in v1 (it would overwrite \
-             local files the index has not sealed); check out the snapshot elsewhere instead",
-        ));
+    if let Some((_, binding_state)) = plaindir::binding_for_lenient(path) {
+        let file_system = plaindir::binding_repo(&binding_state)?;
+        return Err(CliError::usage(format!(
+            "restore is not supported for a pushed directory because it could overwrite local \
+             files that have not been saved. Mount the earlier save at another path instead:\n  \
+             tl fs mount {file_system}:{version} <path>"
+        )));
     }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
     if state.read_only() {
+        if state.native_filesystem {
+            return Err(CliError::usage(
+                "this is already a read-only filesystem view; restore a writable mount instead",
+            ));
+        }
         return Err(CliError::usage(format!(
             "this is a read-only mount following {}; there is nothing to restore",
             state.follow_ref.as_deref().unwrap_or("the branch"),
@@ -4843,7 +4905,7 @@ pub async fn restore(
             && overlay_fingerprint(&state_dir)? != baseline
         {
             return Err(CliError::usage(format!(
-                "restored the filesystem head to {}, but local changes landed during the \
+                "restored the filesystem's current state to {}, but local changes landed during the \
                  operation and were kept above it. Snapshot those changes, or retry with \
                  --discard to see only the restored save.",
                 short_id(&restored),
