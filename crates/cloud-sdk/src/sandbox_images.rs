@@ -209,12 +209,11 @@ pub struct CommonBuildOptions {
     pub cpus: Option<f64>,
     pub memory_mb: Option<i64>,
     pub is_public: bool,
-    /// Non-default opt-in: build a content-addressed streaming (cas-streaming)
-    /// image. Streaming builds are base-only — the Dockerfile FROM must be an
-    /// unregistered OCI image — and complete through the platform's trusted
-    /// CAS ingest, so registration takes longer while the image is verified
-    /// and admitted.
-    pub streaming: bool,
+    /// Non-default opt-in: build a CAS (content-addressed streaming,
+    /// `cas-streaming` on the wire) image. CAS builds complete through the
+    /// platform's trusted CAS ingest, so registration takes longer while
+    /// the image is verified and admitted.
+    pub cas: bool,
     pub user_agent: Option<String>,
     pub docker_compat: bool,
 }
@@ -490,7 +489,7 @@ where
         &platform_client,
         &plan,
         options.is_public,
-        options.streaming,
+        options.cas,
     )
     .await?;
     emit(SandboxImageBuildEvent::Status(format!(
@@ -500,7 +499,7 @@ where
             _ => "Base",
         },
         if prepared.rootfs_format.as_deref() == Some("cas-streaming") {
-            " (content-addressed streaming)"
+            " (CAS)"
         } else {
             ""
         }
@@ -692,8 +691,7 @@ where
 
             if complete_request.rootfs_format.as_deref() == Some("cas-streaming") {
                 emit(SandboxImageBuildEvent::Status(
-                    "Submitting the image for verification and admission into the streaming \
-                     CAS..."
+                    "Submitting the image for verification and admission into the CAS..."
                         .to_string(),
                 ));
             } else {
@@ -716,7 +714,7 @@ where
                     || completed.get("status").and_then(Value::as_str) == Some("ingesting"))
             {
                 emit(SandboxImageBuildEvent::Status(
-                    "Verifying and admitting the image into the streaming CAS (this can take \
+                    "Verifying and admitting the image into the CAS (this can take \
                      a few minutes for large images)..."
                         .to_string(),
                 ));
@@ -917,10 +915,10 @@ async fn wait_for_sandbox_status(
 /// JSON entry the prepare endpoint expects for that local-image slot, or
 /// `None` if the lookup did not resolve.
 ///
-/// References that resolve but are not usable as a build image (only
-/// `durable_archive_v1` base templates are supported by the rootfs builder
-/// today) fail with a clear message tied to the offending reference so the
-/// user gets feedback on the exact image string that's incompatible.
+/// The client performs no template-eligibility validation (node kind,
+/// snapshot format): the in-sandbox rootfs builder owns materialization of
+/// build images and validates what it can handle. Only the structural
+/// fields required to construct the prepare payload are checked.
 async fn resolve_template_payload(
     templates: &crate::sandbox_templates::SandboxTemplatesClient,
     reference: &str,
@@ -928,7 +926,16 @@ async fn resolve_template_payload(
     let Some(found) = templates.find_by_name(reference).await? else {
         return Ok(None);
     };
-    let template = found.into_inner();
+    template_build_payload(&found.into_inner(), reference).map(Some)
+}
+
+/// Map a fetched template to the prepare-endpoint local-image payload,
+/// failing only when the lookup response is missing a field the payload
+/// needs (id, name, snapshot id).
+fn template_build_payload(
+    template: &crate::sandbox_templates::models::SandboxTemplate,
+    reference: &str,
+) -> Result<Value> {
     let template_id = template.id.clone().ok_or_else(|| {
         SandboxImageBuildError::other(format!(
             "platform returned a template lookup for '{}' without an id",
@@ -948,31 +955,13 @@ async fn resolve_template_payload(
         ))
     })?;
     let is_public = template.public.unwrap_or(false);
-    if let Some(kind) = template.rootfs_node_kind.as_deref()
-        && kind != "base"
-    {
-        return Err(SandboxImageBuildError::other(format!(
-            "template '{}' cannot be used as a build image (only base templates are supported, got rootfsNodeKind='{}'). \
-             Build a base image from this template first.",
-            reference, kind
-        )));
-    }
-    if let Some(fmt) = template.snapshot_format_version.as_deref()
-        && fmt != "durable_archive_v1"
-    {
-        return Err(SandboxImageBuildError::other(format!(
-            "template '{}' uses snapshot format '{}', which the rootfs builder cannot materialize. \
-             Re-register the template with durable_archive_v1.",
-            reference, fmt
-        )));
-    }
-    Ok(Some(json!({
+    Ok(json!({
         "templateId": template_id,
         "name": name,
         "reference": reference,
         "snapshotId": snapshot_id,
         "public": is_public,
-    })))
+    }))
 }
 
 async fn prepare_rootfs_build(
@@ -980,7 +969,7 @@ async fn prepare_rootfs_build(
     client: &Client,
     plan: &DockerfileBuildPlan,
     is_public: bool,
-    streaming: bool,
+    cas: bool,
 ) -> Result<(PreparedSandboxTemplateBuild, Value)> {
     // Resolve every external image reference against the platform's template
     // registry. The final-stage FROM is treated separately so its resolution
@@ -1015,34 +1004,13 @@ async fn prepare_rootfs_build(
             additional_payload.push(payload);
         }
     }
-    let rootfs_node_kind = if parent_template_payload.is_some() {
-        "diff"
-    } else {
-        "base"
-    };
-    // Streaming images are content-addressed and self-contained: fail before
-    // any sandbox spins up if the FROM resolved to a registered template.
-    if streaming && (parent_template_payload.is_some() || !additional_payload.is_empty()) {
-        return Err(SandboxImageBuildError::usage(
-            "--streaming builds support only base images: the Dockerfile FROM (and any \
-             COPY --from references) must be unregistered OCI images, not registered \
-             Tensorlake templates",
-        ));
-    }
-    let parent_template_json = parent_template_payload.unwrap_or(Value::Null);
-
-    let mut prepare_body = json!({
-        "name": plan.registered_name,
-        "dockerfile": plan.dockerfile_text,
-        "baseImage": plan.base_image,
-        "public": is_public,
-        "rootfsNodeKind": rootfs_node_kind,
-        "parentTemplate": parent_template_json,
-        "additionalLocalImages": additional_payload,
-    });
-    if streaming {
-        prepare_body["rootfsFormat"] = Value::String("cas-streaming".to_string());
-    }
+    let prepare_body = prepare_request_body(
+        plan,
+        parent_template_payload,
+        additional_payload,
+        is_public,
+        cas,
+    );
     let request = client
         .request(Method::POST, &sandbox_template_builds_path(ctx))
         .json(&prepare_body)
@@ -1061,6 +1029,39 @@ async fn prepare_rootfs_build(
     let raw: Value = response.json().await?;
     let prepared = serde_json::from_value(raw.clone())?;
     Ok((prepared, raw))
+}
+
+/// Assemble the prepare-request body from the plan and the resolved
+/// local-image payloads. A FROM that resolved to a registered template
+/// becomes the lineage parent (`rootfsNodeKind: "diff"`); registered
+/// `COPY --from` references ride along as `additionalLocalImages`. CAS
+/// builds additionally request the `cas-streaming` rootfs format — the
+/// in-sandbox rootfs builder handles template parents for both formats.
+fn prepare_request_body(
+    plan: &DockerfileBuildPlan,
+    parent_template_payload: Option<Value>,
+    additional_payload: Vec<Value>,
+    is_public: bool,
+    cas: bool,
+) -> Value {
+    let rootfs_node_kind = if parent_template_payload.is_some() {
+        "diff"
+    } else {
+        "base"
+    };
+    let mut prepare_body = json!({
+        "name": plan.registered_name,
+        "dockerfile": plan.dockerfile_text,
+        "baseImage": plan.base_image,
+        "public": is_public,
+        "rootfsNodeKind": rootfs_node_kind,
+        "parentTemplate": parent_template_payload.unwrap_or(Value::Null),
+        "additionalLocalImages": additional_payload,
+    });
+    if cas {
+        prepare_body["rootfsFormat"] = Value::String("cas-streaming".to_string());
+    }
+    prepare_body
 }
 
 async fn complete_rootfs_build(
@@ -1130,7 +1131,7 @@ async fn wait_for_build_completed(
                     .and_then(Value::as_str)
                     .unwrap_or("admission failed");
                 return Err(SandboxImageBuildError::other(format!(
-                    "streaming image admission failed: {error}"
+                    "CAS image admission failed: {error}"
                 )));
             }
             Some("ingesting") | Some("prepared") => {}
@@ -1142,7 +1143,7 @@ async fn wait_for_build_completed(
         }
         if std::time::Instant::now() >= deadline {
             return Err(SandboxImageBuildError::other(
-                "timed out waiting for the streaming image admission",
+                "timed out waiting for the CAS image admission",
             ));
         }
         tokio::time::sleep(BUILD_STATUS_POLL_INTERVAL).await;
@@ -1657,29 +1658,9 @@ fn complete_request_from_metadata(
     signed_snapshot_uri: Option<&str>,
     rootfs_disk_bytes: u64,
 ) -> Result<CompleteSandboxTemplateBuildRequest> {
-    // cas-streaming builds: the builder staged a pre-chunked image; the
-    // registered identity comes from the platform's trusted verify-and-admit,
-    // so the completion only reports the staged artifacts and declared sizes.
-    if metadata_string(metadata, "rootfs_format", "rootfsFormat").as_deref()
-        == Some("cas-streaming")
-    {
-        return Ok(CompleteSandboxTemplateBuildRequest {
-            snapshot_id: metadata_string(metadata, "snapshot_id", "snapshotId")
-                .unwrap_or_else(|| prepared.snapshot_id.clone()),
-            snapshot_uri: completion_snapshot_uri(prepared, metadata, signed_snapshot_uri)?,
-            snapshot_format_version: "content_addressed_streaming_v1".to_string(),
-            snapshot_size_bytes: required_metadata_u64(
-                metadata,
-                "image_size_bytes",
-                "imageSizeBytes",
-            )?,
-            rootfs_disk_bytes,
-            rootfs_node_kind: "base".to_string(),
-            parent_manifest_uri: None,
-            rootfs_format: Some("cas-streaming".to_string()),
-        });
-    }
-
+    // Lineage is shared by both completion shapes: builder metadata wins,
+    // falling back to the prepare response for the node kind and the diff
+    // parent manifest.
     let rootfs_node_kind = metadata_string(metadata, "rootfs_node_kind", "rootfsNodeKind")
         .unwrap_or_else(|| prepared.rootfs_node_kind.clone());
     let parent_manifest_uri = metadata_string(metadata, "parent_manifest_uri", "parentManifestUri")
@@ -1698,6 +1679,30 @@ fn complete_request_from_metadata(
         return Err(SandboxImageBuildError::other(
             "rootfs diff build completed without parent_manifest_uri",
         ));
+    }
+
+    // cas-streaming builds: the builder staged a pre-chunked image; the
+    // registered identity comes from the platform's trusted verify-and-admit,
+    // so the completion only reports the staged artifacts, declared sizes,
+    // and the lineage resolved above.
+    if metadata_string(metadata, "rootfs_format", "rootfsFormat").as_deref()
+        == Some("cas-streaming")
+    {
+        return Ok(CompleteSandboxTemplateBuildRequest {
+            snapshot_id: metadata_string(metadata, "snapshot_id", "snapshotId")
+                .unwrap_or_else(|| prepared.snapshot_id.clone()),
+            snapshot_uri: completion_snapshot_uri(prepared, metadata, signed_snapshot_uri)?,
+            snapshot_format_version: "content_addressed_streaming_v1".to_string(),
+            snapshot_size_bytes: required_metadata_u64(
+                metadata,
+                "image_size_bytes",
+                "imageSizeBytes",
+            )?,
+            rootfs_disk_bytes,
+            rootfs_node_kind,
+            parent_manifest_uri,
+            rootfs_format: Some("cas-streaming".to_string()),
+        });
     }
 
     Ok(CompleteSandboxTemplateBuildRequest {
@@ -2950,10 +2955,10 @@ mod tests {
         complete_request_from_metadata, contains_disk_space_evidence, contains_oom_killer_evidence,
         create_context_archive, default_registered_name, load_dockerfile_plan,
         load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
-        parse_df_line_usage_percent, parse_df_max_usage_percent, process_terminal_status,
-        rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
-        sandbox_proxy_base_with_explicit, splice_signed_upload, streaming_process_payload,
-        upload_percent,
+        parse_df_line_usage_percent, parse_df_max_usage_percent, prepare_request_body,
+        process_terminal_status, rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes,
+        rootfs_disk_bytes_to_mb, sandbox_proxy_base_with_explicit, splice_signed_upload,
+        streaming_process_payload, template_build_payload, upload_percent,
     };
     use crate::sandboxes::models::ProcessInfo;
     use serde_json::{Value, json};
@@ -3615,6 +3620,190 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         assert_eq!(request.rootfs_node_kind, "base");
         assert_eq!(request.rootfs_format.as_deref(), Some("cas-streaming"));
         assert!(request.parent_manifest_uri.is_none());
+    }
+
+    fn prepared_cas_diff() -> PreparedSandboxTemplateBuild {
+        PreparedSandboxTemplateBuild {
+            build_id: "build-1".to_string(),
+            snapshot_id: "snapshot-1".to_string(),
+            snapshot_uri: Some(
+                "s3://bucket/projects/p/sandbox-template-builds/b/snapshot-1.pack".to_string(),
+            ),
+            rootfs_node_kind: "diff".to_string(),
+            rootfs_format: Some("cas-streaming".to_string()),
+            builder: PreparedRootfsBuilder {
+                image: "tensorlake/rootfs-builder".to_string(),
+                command: "tl-rootfs-build".to_string(),
+                cpus: 2.0,
+                memory_mb: 4096,
+                disk_mb: 30720,
+            },
+            parent: Some(PreparedRootfsParent {
+                parent_manifest_uri: "s3://bucket/parents/prepared.manifest".to_string(),
+                rootfs_disk_bytes: None,
+            }),
+            snapshot_rel_path: None,
+        }
+    }
+
+    #[test]
+    fn complete_request_for_cas_diff_takes_lineage_from_metadata() {
+        let prepared = prepared_cas_diff();
+        let metadata = json!({
+            "rootfsFormat": "cas-streaming",
+            "snapshotId": "snapshot-1",
+            "imageSizeBytes": 600_000_000u64,
+            "rootfsNodeKind": "diff",
+            "parentManifestUri": "s3://bucket/parents/metadata.manifest",
+        });
+        let request =
+            complete_request_from_metadata(&prepared, &metadata, None, 10 * 1024 * 1024 * 1024)
+                .unwrap();
+        assert_eq!(request.rootfs_node_kind, "diff");
+        assert_eq!(
+            request.parent_manifest_uri.as_deref(),
+            Some("s3://bucket/parents/metadata.manifest")
+        );
+        assert_eq!(request.rootfs_format.as_deref(), Some("cas-streaming"));
+        assert_eq!(
+            request.snapshot_format_version,
+            "content_addressed_streaming_v1"
+        );
+    }
+
+    #[test]
+    fn complete_request_for_cas_diff_falls_back_to_prepared_lineage() {
+        let prepared = prepared_cas_diff();
+        // The builder metadata omits lineage entirely: the prepare response's
+        // node kind and parent manifest must carry the completion.
+        let metadata = json!({
+            "rootfsFormat": "cas-streaming",
+            "snapshotId": "snapshot-1",
+            "imageSizeBytes": 600_000_000u64,
+        });
+        let request =
+            complete_request_from_metadata(&prepared, &metadata, None, 10 * 1024 * 1024 * 1024)
+                .unwrap();
+        assert_eq!(request.rootfs_node_kind, "diff");
+        assert_eq!(
+            request.parent_manifest_uri.as_deref(),
+            Some("s3://bucket/parents/prepared.manifest")
+        );
+        assert_eq!(request.rootfs_format.as_deref(), Some("cas-streaming"));
+    }
+
+    #[test]
+    fn complete_request_for_cas_diff_without_parent_manifest_fails() {
+        let mut prepared = prepared_cas_diff();
+        prepared.parent = None;
+        let metadata = json!({
+            "rootfsFormat": "cas-streaming",
+            "snapshotId": "snapshot-1",
+            "imageSizeBytes": 600_000_000u64,
+        });
+        let error =
+            complete_request_from_metadata(&prepared, &metadata, None, 10 * 1024 * 1024 * 1024)
+                .unwrap_err();
+        assert!(error.to_string().contains("without parent_manifest_uri"));
+    }
+
+    #[test]
+    fn prepare_request_body_allows_cas_with_registered_parent_and_additional_images() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(
+            &dockerfile_path,
+            "FROM tensorlake/ubuntu-minimal\n\
+             COPY --from=tensorlake/utility:1.0 /bin/foo /usr/local/bin/foo\n",
+        )
+        .unwrap();
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+
+        let parent = json!({
+            "templateId": "tmpl-1",
+            "name": "ubuntu-minimal",
+            "reference": "tensorlake/ubuntu-minimal",
+            "snapshotId": "snap-1",
+            "public": true,
+        });
+        let additional = json!({
+            "templateId": "tmpl-2",
+            "name": "utility",
+            "reference": "tensorlake/utility:1.0",
+            "snapshotId": "snap-2",
+            "public": false,
+        });
+        // A cas build with a registered FROM and a registered COPY --from is
+        // constructed without a rejection: the in-sandbox builder owns
+        // template materialization.
+        let body = prepare_request_body(
+            &plan,
+            Some(parent.clone()),
+            vec![additional.clone()],
+            false,
+            true,
+        );
+
+        assert_eq!(body["rootfsFormat"], "cas-streaming");
+        assert_eq!(body["rootfsNodeKind"], "diff");
+        assert_eq!(body["parentTemplate"], parent);
+        assert_eq!(body["additionalLocalImages"], json!([additional]));
+    }
+
+    #[test]
+    fn prepare_request_body_omits_rootfs_format_by_default() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let dockerfile_path = temp_dir.path().join("Dockerfile");
+        std::fs::write(&dockerfile_path, "FROM ubuntu:24.04\n").unwrap();
+        let plan = load_dockerfile_plan(&dockerfile_path, None).unwrap();
+
+        let body = prepare_request_body(&plan, None, Vec::new(), false, false);
+
+        assert!(body.get("rootfsFormat").is_none());
+        assert_eq!(body["rootfsNodeKind"], "base");
+        assert_eq!(body["parentTemplate"], Value::Null);
+    }
+
+    #[test]
+    fn template_build_payload_imposes_no_eligibility_policy() {
+        // The client owns no node-kind or snapshot-format allowlist: diff
+        // templates, cas-streaming templates, and formats this client has
+        // never heard of all map to prepare payloads. Eligibility is the
+        // in-sandbox rootfs builder's call.
+        for (kind, fmt) in [
+            (Some("diff"), Some("durable_archive_v1")),
+            (Some("base"), Some("content_addressed_streaming_v1")),
+            (Some("diff"), Some("some_future_format_v9")),
+            (None, None),
+        ] {
+            let template = crate::sandbox_templates::models::SandboxTemplate {
+                id: Some("tmpl-1".to_string()),
+                name: Some("ubuntu-minimal".to_string()),
+                snapshot_id: Some("snap-1".to_string()),
+                rootfs_node_kind: kind.map(str::to_string),
+                snapshot_format_version: fmt.map(str::to_string),
+                public: Some(true),
+                ..Default::default()
+            };
+            let payload = template_build_payload(&template, "tensorlake/ubuntu-minimal").unwrap();
+            assert_eq!(payload["templateId"], "tmpl-1");
+            assert_eq!(payload["name"], "ubuntu-minimal");
+            assert_eq!(payload["reference"], "tensorlake/ubuntu-minimal");
+            assert_eq!(payload["snapshotId"], "snap-1");
+            assert_eq!(payload["public"], true);
+        }
+    }
+
+    #[test]
+    fn template_build_payload_requires_structural_fields() {
+        let template = crate::sandbox_templates::models::SandboxTemplate {
+            id: Some("tmpl-1".to_string()),
+            name: Some("ubuntu-minimal".to_string()),
+            snapshot_id: None,
+            ..Default::default()
+        };
+        let error = template_build_payload(&template, "tensorlake/ubuntu-minimal").unwrap_err();
+        assert!(error.to_string().contains("without a snapshot id"));
     }
 
     #[test]
