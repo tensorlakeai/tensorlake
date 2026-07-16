@@ -2894,6 +2894,14 @@ pub struct NativeSnapshotInfo {
     pub principal: String,
     pub message: String,
     pub operation_id: String,
+    #[serde(default)]
+    pub pinned: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct NativeSnapshotPinState {
+    pub snapshot_id: String,
+    pub pinned: bool,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
@@ -4252,6 +4260,46 @@ impl ArtifactStorageClient {
         let suffix = format!("fs/snapshots/{snapshot_id}");
         let (request, _) = self.git_request(
             Method::GET,
+            project_id,
+            repo,
+            Some(&suffix),
+            username,
+            token,
+        )?;
+        expect_json(request.send().await?).await
+    }
+
+    pub async fn pin_native_snapshot_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        snapshot_id: &str,
+        username: &str,
+        token: &str,
+    ) -> Result<NativeSnapshotPinState, SdkError> {
+        let suffix = format!("fs/snapshots/{snapshot_id}/pin");
+        let (request, _) = self.git_request(
+            Method::PUT,
+            project_id,
+            repo,
+            Some(&suffix),
+            username,
+            token,
+        )?;
+        expect_json(request.send().await?).await
+    }
+
+    pub async fn unpin_native_snapshot_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        snapshot_id: &str,
+        username: &str,
+        token: &str,
+    ) -> Result<NativeSnapshotPinState, SdkError> {
+        let suffix = format!("fs/snapshots/{snapshot_id}/pin");
+        let (request, _) = self.git_request(
+            Method::DELETE,
             project_id,
             repo,
             Some(&suffix),

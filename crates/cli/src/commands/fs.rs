@@ -10,8 +10,9 @@
 //! writes continue to land in a local overlay before sealing.
 //! **The daemon's sealer owns the definition of dirty**: the overlay's dirty index resolves
 //! into incremental snapshot commits on the workspace ref (auto-commit ticks it; `tl fs
-//! snapshot` runs one cycle through the `seal` control op), and the mount's lower layer
-//! follows the ref to the new snapshot. Every dirt-consulting command (`status`, `promote`,
+//! snapshot` asks the background preparer to publish; an unprepared generation returns a pending
+//! watermark immediately and later quiet writes may coalesce into that save), and the mount's lower
+//! layer follows the ref to the new snapshot. Every dirt-consulting command (`status`, `promote`,
 //! `sync`, `diff`) reads the same view through the `dirty` control op, so none of them can
 //! disagree with what a snapshot would seal. The overlay is **kept** after sealing — the
 //! upper keeps serving the byte-identical sealed content as a local byte cache, accounted
@@ -880,7 +881,7 @@ pub async fn history(
         println!("No saves yet. Mount and `tl fs snapshot`, or `tl fs push <dir> {fs_name}`.");
         return Ok(());
     }
-    let mut table = new_table(&["When", "Who", "Message", "Save"]);
+    let mut table = new_table(&["When", "Who", "Message", "Pinned", "Save"]);
     for snapshot in &saves {
         table.add_row(vec![
             Cell::new(age_display(snapshot.created_at_ms / 1000)),
@@ -894,10 +895,61 @@ pub async fn history(
             } else {
                 &snapshot.message
             }),
+            Cell::new(if snapshot.pinned { "yes" } else { "" }),
             Cell::new(short_id(&snapshot.snapshot_id)),
         ]);
     }
     println!("{table}");
+    Ok(())
+}
+
+pub async fn set_snapshot_pin(
+    ctx: &CliContext,
+    file_system: &str,
+    version: &str,
+    pinned: bool,
+) -> Result<()> {
+    let session = FsSession::open(ctx, Some(file_system)).await?;
+    let (user, token) = session.creds();
+    let snapshot_id = session
+        .client
+        .resolve_native_snapshot_id_with_credential(
+            &session.project_id,
+            file_system,
+            version,
+            user,
+            token,
+        )
+        .await?;
+    let state = if pinned {
+        session
+            .client
+            .pin_native_snapshot_with_credential(
+                &session.project_id,
+                file_system,
+                &snapshot_id,
+                user,
+                token,
+            )
+            .await?
+    } else {
+        session
+            .client
+            .unpin_native_snapshot_with_credential(
+                &session.project_id,
+                file_system,
+                &snapshot_id,
+                user,
+                token,
+            )
+            .await?
+    };
+    println!(
+        "{} save {} in filesystem {}.",
+        if state.pinned { "Pinned" } else { "Unpinned" },
+        short_id(&state.snapshot_id),
+        file_system
+    );
     Ok(())
 }
 
@@ -3994,9 +4046,28 @@ pub async fn snapshot(
     let (outcome, cleared) = seal_via_daemon(&state_dir, &mountpoint, message, clear, &bar).await?;
     let total = started.elapsed();
     bar.finish_and_clear();
-    let Some(sealed) = outcome else {
-        println!("{}", clean_snapshot_message(cleared));
-        return Ok(());
+    let sealed = match outcome {
+        DaemonSealOutcome::Clean => {
+            println!("{}", clean_snapshot_message(cleared));
+            return Ok(());
+        }
+        DaemonSealOutcome::Pending { watermark } => {
+            if clear {
+                println!(
+                    "Snapshot preparation queued at dirty watermark {watermark}; nothing was \
+                     published or cleared. Run `tl fs snapshot --clear {}` again after \
+                     preparation completes.",
+                    path.display(),
+                );
+            } else {
+                println!(
+                    "Snapshot preparation queued at dirty watermark {watermark}; the mount daemon \
+                     will publish it in the background."
+                );
+            }
+            return Ok(());
+        }
+        DaemonSealOutcome::Sealed(sealed) => sealed,
     };
     // Small files skip chunk negotiation (token-only commits), so uploads can exceed the
     // negotiated chunk count — clamp so the summary never reads "3 of 0 chunks".
@@ -4026,6 +4097,12 @@ struct DaemonSeal {
     push_ms: Option<u64>,
 }
 
+enum DaemonSealOutcome {
+    Clean,
+    Pending { watermark: u64 },
+    Sealed(DaemonSeal),
+}
+
 /// What a clean (nothing-to-seal) snapshot prints. Never claims a clean workspace when a
 /// requested clear actually dropped retained files — ignored files and previously sealed
 /// content live in the upper without ever enumerating as dirty.
@@ -4043,9 +4120,9 @@ fn clean_snapshot_message(cleared: Option<usize>) -> String {
 /// which is what makes manual snapshots correct: the shared dirty watermark means an
 /// auto-commit mount never re-publishes manually sealed paths (and vice versa), only paths
 /// touched since the last seal are pushed instead of the whole ever-dirty upper, and deletes
-/// racing a seal go through the sealer's resurrection tombstone guard. Returns
-/// `(None, cleared)` when nothing was dirty; `cleared` reports how many retained files a
-/// requested clear dropped.
+/// racing a seal go through the sealer's resurrection tombstone guard. A dirty generation
+/// that has not finished background preparation returns [`DaemonSealOutcome::Pending`]
+/// immediately; no scan, hash, compression, or upload runs on this control request.
 ///
 /// The daemon advances the lower to the sealed commit before replying, so the mount serves
 /// the new snapshot when this returns; the reply also drains the banked probe backlog, which
@@ -4064,7 +4141,7 @@ async fn seal_via_daemon(
     message: Option<&str>,
     clear: bool,
     bar: &indicatif::ProgressBar,
-) -> Result<(Option<DaemonSeal>, Option<usize>)> {
+) -> Result<(DaemonSealOutcome, Option<usize>)> {
     let request = daemon::SealRequest {
         message: message.map(str::to_string),
         clear,
@@ -4111,6 +4188,19 @@ async fn seal_via_daemon(
             converge_kernel_view(Path::new(mountpoint), &changed, &expect);
         }
     }
+    if reply.pending {
+        if reply.clean {
+            return Err(CliError::usage(
+                "the mount daemon sent a contradictory seal reply (both clean and pending)",
+            ));
+        }
+        let watermark = reply.pending_watermark.ok_or_else(|| {
+            CliError::usage(
+                "the mount daemon's pending seal reply is missing \"pending_watermark\"",
+            )
+        })?;
+        return Ok((DaemonSealOutcome::Pending { watermark }, None));
+    }
     let cleared = if clear {
         let cleared = reply.cleared.ok_or_else(|| {
             CliError::usage(
@@ -4128,7 +4218,7 @@ async fn seal_via_daemon(
         None
     };
     if reply.clean {
-        return Ok((None, cleared));
+        return Ok((DaemonSealOutcome::Clean, cleared));
     }
     let sealed_field = |name: &str, v: Option<u64>| {
         v.ok_or_else(|| {
@@ -4139,7 +4229,7 @@ async fn seal_via_daemon(
         })
     };
     Ok((
-        Some(DaemonSeal {
+        DaemonSealOutcome::Sealed(DaemonSeal {
             commit: reply.commit,
             files: sealed_field("files", reply.files)?,
             chunks_uploaded: sealed_field("chunks_uploaded", reply.chunks_uploaded)?,
@@ -5942,7 +6032,9 @@ mod tests {
         )
         .await
         .unwrap();
-        let sealed = sealed.expect("daemon sealed a commit");
+        let DaemonSealOutcome::Sealed(sealed) = sealed else {
+            panic!("daemon did not seal a commit");
+        };
 
         assert_eq!(
             *ops.lock().unwrap(),
@@ -5987,7 +6079,7 @@ mod tests {
             vec!["seal"],
             "the clear must not be a separate control round-trip"
         );
-        assert!(sealed.is_some());
+        assert!(matches!(sealed, DaemonSealOutcome::Sealed(_)));
         // The fake daemon cleared 3 paths (one sealed, two never-sealed) — the revalidation
         // set came from `cleared`, not the seal delta.
         assert_eq!(cleared, Some(3));
@@ -6019,12 +6111,61 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(sealed.expect("sealed").commit, "cafe0000");
+        let DaemonSealOutcome::Sealed(sealed) = sealed else {
+            panic!("daemon did not seal");
+        };
+        assert_eq!(sealed.commit, "cafe0000");
         assert_eq!(
             bar.message(),
             "uploaded 3 chunks (2 KiB)...",
             "the spinner followed the streamed event lines"
         );
+    }
+
+    /// Snapshot requests never fall back to client-side preparation. When the daemon has no
+    /// prepared root yet, the pending watermark is a successful, structured outcome and a
+    /// destructive clear has not happened.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn snapshot_seal_returns_pending_without_requiring_sealed_fields() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let ops = fake_daemon_with_replies(
+            state.path(),
+            [(
+                "seal".to_string(),
+                serde_json::json!({
+                    "ok": true,
+                    "clean": false,
+                    "pending": true,
+                    "pending_watermark": 42,
+                    "commit": "current",
+                }),
+            )]
+            .into_iter()
+            .collect(),
+        );
+
+        let bar = indicatif::ProgressBar::hidden();
+        let (outcome, cleared) = seal_via_daemon(
+            state.path(),
+            mount.path().to_str().unwrap(),
+            Some("save point"),
+            true,
+            &bar,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            outcome,
+            DaemonSealOutcome::Pending { watermark: 42 }
+        ));
+        assert_eq!(
+            cleared, None,
+            "pending publication cannot clear the overlay"
+        );
+        assert_eq!(*ops.lock().unwrap(), vec!["seal"]);
     }
 
     /// A clean seal that cleared retained files must say so — never "workspace is clean".

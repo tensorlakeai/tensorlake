@@ -297,6 +297,24 @@ enum FsCommands {
         json: bool,
     },
 
+    /// Keep a save indefinitely, independent of the normal retention window
+    Pin {
+        /// Filesystem name
+        name: String,
+
+        /// Save ID or unambiguous hexadecimal prefix
+        version: String,
+    },
+
+    /// Return a pinned save to the normal retention window
+    Unpin {
+        /// Filesystem name
+        name: String,
+
+        /// Save ID or unambiguous hexadecimal prefix
+        version: String,
+    },
+
     /// List filesystems (with a name: that filesystem's sessions and mounts)
     #[command(name = "ls")]
     Ls {
@@ -2467,6 +2485,12 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             limit,
             json,
         } => commands::fs::history(ctx, target.as_deref(), limit, json).await,
+        FsCommands::Pin { name, version } => {
+            commands::fs::set_snapshot_pin(ctx, &name, &version, true).await
+        }
+        FsCommands::Unpin { name, version } => {
+            commands::fs::set_snapshot_pin(ctx, &name, &version, false).await
+        }
         FsCommands::Mount {
             target,
             path,
@@ -3136,6 +3160,22 @@ mod tests {
                 assert_eq!(limit, 5);
             }
             _ => panic!("expected fs history command"),
+        }
+
+        match parse_command(["tl", "fs", "pin", "scratch", "abc123"]) {
+            Commands::Fs(FsCommands::Pin { name, version }) => {
+                assert_eq!(name, "scratch");
+                assert_eq!(version, "abc123");
+            }
+            _ => panic!("expected fs pin command"),
+        }
+
+        match parse_command(["tl", "fs", "unpin", "scratch", "abc123"]) {
+            Commands::Fs(FsCommands::Unpin { name, version }) => {
+                assert_eq!(name, "scratch");
+                assert_eq!(version, "abc123");
+            }
+            _ => panic!("expected fs unpin command"),
         }
 
         match parse_command(["tl", "fs", "ls"]) {

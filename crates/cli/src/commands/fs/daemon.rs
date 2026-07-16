@@ -14,16 +14,18 @@
 //!                         without a kernel notify channel (macOS) can converge the kernel
 //!                         view themselves. `complete: false` means some refresh since the
 //!                         last drain could not enumerate first-appearance names.
-//! {"op":"seal","message":?,"clear":?} -> run ONE cycle of the sealer (the same machinery as
-//!                         auto-commit): resolve the dirty delta, push it as a snapshot
-//!                         commit with the given message, advance the lower. Streaming op:
-//!                         the daemon writes zero or more `{"event":"<phase>"}` progress
-//!                         lines (throttled push progress plus a keepalive during long
-//!                         server-side commit phases) before the single final reply line.
-//!                         The reply is a [`SealReply`] (+`ok`) — {ok, clean, commit} when
-//!                         nothing was dirty, else {ok, clean, commit, files,
-//!                         chunks_uploaded, chunks_total, sealed, push_ms} — plus the same
-//!                         drained "changed"/"complete" probe list as `refresh`. With
+//! {"op":"seal","message":?,"clear":?} -> publish the dirty generation only when the daemon's
+//!                         background journal worker has already resolved, hashed,
+//!                         compressed, uploaded, and validated it. Otherwise wake that
+//!                         worker and return `{ok:true,pending:true,pending_watermark:N}`
+//!                         immediately; the durable request publishes after preparation.
+//!                         A ready generation performs only metadata publication and lower
+//!                         advancement. The final [`SealReply`] (+`ok`) is
+//!                         `{ok,clean,commit}` for a clean workspace,
+//!                         `{ok,pending,pending_watermark,commit}` while preparing, or
+//!                         `{ok,clean:false,commit,files,chunks_uploaded,chunks_total,sealed,
+//!                         push_ms}` after publication — plus the same drained
+//!                         "changed"/"complete" probe list as `refresh`. With
 //!                         `clear:true` the daemon drops the whole overlay itself right
 //!                         after the seal (under the sealer lock, so no write can land
 //!                         between seal and clear unobserved) and the reply carries
@@ -364,6 +366,13 @@ pub(crate) struct SealRequest {
 pub(crate) struct SealReply {
     /// Nothing was dirty: no commit was minted (`commit` is the current lower).
     pub clean: bool,
+    /// The dirty generation is being prepared by the daemon's background journal worker.
+    /// No snapshot was published and `commit` remains the currently served lower.
+    #[serde(default)]
+    pub pending: bool,
+    /// Dirty-index watermark requested for background preparation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_watermark: Option<u64>,
     pub commit: String,
     /// Sealed-only fields (absent on clean replies).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -903,6 +912,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     // re-pushed the entire ever-dirty set on every run, and its deletes bypassed the
     // recent-seals tombstone guard.)
     let sealer: Option<Arc<Sealer>> = (!state.read_only()).then(|| {
+        let native_prepare_notify = Arc::new(tokio::sync::Notify::new());
         Arc::new(Sealer {
             sdk: sdk.clone(),
             creds: api_creds.clone(),
@@ -916,6 +926,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
             core: core.clone(),
             invalidate: invalidate.clone(),
             pending: pending.clone(),
+            native_prepare_notify,
             state: tokio::sync::Mutex::new(SealerState {
                 sealed_gen: 0,
                 seen_epoch: overlay.epoch(),
@@ -938,6 +949,10 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                     .then(|| PreparedNativeJournal::load(state_dir))
                     .flatten(),
                 prepared_native_validated: false,
+                pending_native_seal: state
+                    .native_filesystem
+                    .then(|| PendingNativeSeal::load(state_dir))
+                    .flatten(),
             }),
             mirror: std::sync::Mutex::new(SealerMirror::default()),
         })
@@ -949,23 +964,39 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     if state.native_filesystem
         && let Some(sealer) = sealer.clone()
     {
+        let notify = sealer.native_prepare_notify.clone();
+        let worker = sealer.clone();
         tokio::spawn(async move {
             const PREPARE_POLL: Duration = Duration::from_millis(500);
             const PREPARE_QUIET_MS: u64 = 750;
             loop {
-                tokio::time::sleep(PREPARE_POLL).await;
-                let Some((_, last)) = sealer.overlay.dirty_clock() else {
-                    continue;
+                let explicitly_requested = tokio::select! {
+                    _ = notify.notified() => true,
+                    _ = tokio::time::sleep(PREPARE_POLL) => false,
                 };
-                if sealer.overlay.clock_ms().saturating_sub(last) < PREPARE_QUIET_MS {
+                if !explicitly_requested {
+                    let Some((_, last)) = worker.overlay.dirty_clock() else {
+                        continue;
+                    };
+                    if worker.overlay.clock_ms().saturating_sub(last) < PREPARE_QUIET_MS {
+                        continue;
+                    }
+                }
+                if let Err(error) = worker.prepare_native_dirty().await {
+                    eprintln!("autosave: background prepare failed (will retry): {error}");
+                    tokio::time::sleep(Duration::from_secs(2)).await;
                     continue;
                 }
-                if let Err(error) = sealer.prepare_native_dirty().await {
-                    eprintln!("autosave: background prepare failed (will retry): {error}");
+                if let Err(error) = worker.publish_pending_native_seal().await {
+                    eprintln!("autosave: pending native seal failed (will retry): {error}");
                     tokio::time::sleep(Duration::from_secs(2)).await;
                 }
             }
         });
+        // A request persisted before a crash should not wait for the first polling interval.
+        if PendingNativeSeal::load(state_dir).is_some() {
+            sealer.native_prepare_notify.notify_one();
+        }
     }
 
     // Auto-commit: seal dirty paths into snapshot commits every interval, event-driven. The
@@ -1018,6 +1049,11 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             report.commit,
                             seal_started.elapsed().as_millis(),
                             report.push_ms,
+                        );
+                    }
+                    Ok(SealOutcome::Pending { watermark }) => {
+                        eprintln!(
+                            "autosave: preparation queued watermark={watermark}; publish will resume in background"
                         );
                     }
                     Ok(SealOutcome::Clean { .. }) => {}
@@ -1412,6 +1448,8 @@ async fn handle_seal(
             let reply = match outcome {
                 SealOutcome::Clean { cleared } => SealReply {
                     clean: true,
+                    pending: false,
+                    pending_watermark: None,
                     commit: core.current_commit(),
                     files: None,
                     chunks_uploaded: None,
@@ -1420,8 +1458,22 @@ async fn handle_seal(
                     push_ms: None,
                     cleared,
                 },
+                SealOutcome::Pending { watermark } => SealReply {
+                    clean: false,
+                    pending: true,
+                    pending_watermark: Some(watermark),
+                    commit: core.current_commit(),
+                    files: None,
+                    chunks_uploaded: None,
+                    chunks_total: None,
+                    sealed: None,
+                    push_ms: None,
+                    cleared: None,
+                },
                 SealOutcome::Sealed(r) => SealReply {
                     clean: false,
+                    pending: false,
+                    pending_watermark: None,
                     commit: r.commit,
                     files: Some(r.files as u64),
                     chunks_uploaded: Some(r.chunks_uploaded as u64),
@@ -1457,6 +1509,10 @@ enum SealOutcome {
     /// drop retained files (earlier kept-overlay seals, ignored files).
     Clean {
         cleared: Option<Vec<String>>,
+    },
+    /// Preparation was requested without doing content work on the seal request path.
+    Pending {
+        watermark: u64,
     },
     Sealed(SealReport),
 }
@@ -1495,6 +1551,9 @@ struct Sealer {
     core: Arc<gsvc_mount::MountCore>,
     invalidate: InvalSink,
     pending: Arc<std::sync::Mutex<PendingProbe>>,
+    /// Single daemon-owned preparation worker. Explicit snapshots wake the same worker used by
+    /// quiet-time preparation; the control request never scans, hashes, compresses, or uploads.
+    native_prepare_notify: Arc<tokio::sync::Notify>,
     state: tokio::sync::Mutex<SealerState>,
     /// A lock-cheap copy of the dirty-relevant sealer state (`sealed_gen`, the resurrection
     /// guard set), republished by [`Sealer::publish_mirror`] whenever the real state changes.
@@ -1549,6 +1608,9 @@ struct SealerState {
     /// path intent and stat identities against the rebuilt overlay journal. Candidates produced in
     /// this process are validated by construction.
     prepared_native_validated: bool,
+    /// A manual/autosave request waiting for the background-prepared generation to become
+    /// publishable. Persisted separately so a daemon restart resumes publication.
+    pending_native_seal: Option<PendingNativeSeal>,
 }
 
 #[cfg(unix)]
@@ -1566,6 +1628,41 @@ struct PreparedNativeJournal {
     redirects: Vec<(String, String)>,
     tombstoned: Vec<String>,
     candidate: tensorlake::artifact_storage::native_fs::NativePreparedSnapshotCandidate,
+}
+
+#[cfg(unix)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
+struct PendingNativeSeal {
+    format_ver: u16,
+    message: String,
+}
+
+#[cfg(unix)]
+impl PendingNativeSeal {
+    fn file(state_dir: &Path) -> PathBuf {
+        state_dir.join("native-seal-request.json")
+    }
+
+    fn load(state_dir: &Path) -> Option<Self> {
+        std::fs::read(Self::file(state_dir))
+            .ok()
+            .and_then(|raw| serde_json::from_slice(&raw).ok())
+            .filter(|request: &Self| request.format_ver == 1)
+    }
+
+    fn save(&self, state_dir: &Path) -> std::io::Result<()> {
+        let tmp = state_dir.join("native-seal-request.json.tmp");
+        std::fs::write(
+            &tmp,
+            serde_json::to_vec(self).expect("native seal request serializes"),
+        )?;
+        std::fs::rename(tmp, Self::file(state_dir))
+    }
+
+    fn reset(state_dir: &Path) {
+        let _ = std::fs::remove_file(Self::file(state_dir));
+        let _ = std::fs::remove_file(state_dir.join("native-seal-request.json.tmp"));
+    }
 }
 
 #[cfg(unix)]
@@ -1659,17 +1756,6 @@ impl Sealer {
         if !self.native_filesystem {
             return Ok(());
         }
-        let mut st = self.state.lock().await;
-        if st.reindex_pending {
-            return Ok(());
-        }
-        let epoch = self.overlay.epoch();
-        if epoch != st.seen_epoch {
-            st.seen_epoch = epoch;
-            st.prepared_native = None;
-            st.prepared_native_validated = false;
-            PreparedNativeJournal::reset(&self.state_dir);
-        }
         if self.overlay.has_redirects() {
             let consumed = self
                 .overlay
@@ -1682,7 +1768,36 @@ impl Sealer {
                 eprintln!("autosave: reaped {} sealed rename(s)", consumed.len());
             }
         }
-        let mut delta = self.overlay.dirty_since(st.sealed_gen);
+        let (epoch, sealed_gen, recently, existing) = {
+            let mut st = self.state.lock().await;
+            if st.reindex_pending {
+                return Ok(());
+            }
+            let epoch = self.overlay.epoch();
+            if epoch != st.seen_epoch {
+                st.seen_epoch = epoch;
+                st.prepared_native = None;
+                st.prepared_native_validated = false;
+                PreparedNativeJournal::reset(&self.state_dir);
+                st.pending_native_seal = None;
+                PendingNativeSeal::reset(&self.state_dir);
+            }
+            let recently = st
+                .recent_seals
+                .iter()
+                .flat_map(|(_, set)| set)
+                .cloned()
+                .collect();
+            (
+                epoch,
+                st.sealed_gen,
+                recently,
+                st.prepared_native
+                    .clone()
+                    .filter(|_| st.prepared_native_validated),
+            )
+        };
+        let mut delta = self.overlay.dirty_since(sealed_gen);
         let healed = self
             .overlay
             .heal_replaced_files(delta.upserts.iter().map(|(path, _)| path.as_str()))
@@ -1693,26 +1808,18 @@ impl Sealer {
                 ))
             })?;
         if !healed.is_empty() {
-            delta = self.overlay.dirty_since(st.sealed_gen);
+            delta = self.overlay.dirty_since(sealed_gen);
             (self.invalidate)(self.overlay.invals_for(&healed));
         }
         if delta.is_empty() && !self.overlay.has_redirects() {
             return Ok(());
         }
         let current_redirects = self.overlay.redirect_entries();
-        if st.prepared_native.as_ref().is_some_and(|prepared| {
-            st.prepared_native_validated
-                && prepared.watermark == delta.watermark
-                && prepared.redirects == current_redirects
+        if existing.as_ref().is_some_and(|prepared| {
+            prepared.watermark == delta.watermark && prepared.redirects == current_redirects
         }) {
             return Ok(());
         }
-        let recently: std::collections::HashSet<String> = st
-            .recent_seals
-            .iter()
-            .flat_map(|(_, set)| set)
-            .cloned()
-            .collect();
         let watermark = delta.watermark;
         let (sd, mp) = (self.state_dir.clone(), self.mountpoint.clone());
         let resolved = tokio::task::spawn_blocking(move || {
@@ -1765,6 +1872,10 @@ impl Sealer {
             renames,
         };
         if changes.upserts.is_empty() && changes.deletes.is_empty() && changes.renames.is_empty() {
+            let mut st = self.state.lock().await;
+            if self.overlay.epoch() != epoch || st.sealed_gen != sealed_gen {
+                return Ok(());
+            }
             st.sealed_gen = watermark;
             self.overlay.prune_dirty(watermark);
             self.overlay.close_dirty_base_if_clean();
@@ -1813,7 +1924,7 @@ impl Sealer {
         if !tombstoned.is_empty() {
             (self.invalidate)(self.overlay.invals_for(&tombstoned));
         }
-        if let Some(mut recovered) = st.prepared_native.take()
+        if let Some(mut recovered) = existing
             && recovered.matches_resolved(
                 &signature,
                 &stats,
@@ -1831,11 +1942,14 @@ impl Sealer {
                     "persisting recovered native prepared journal failed: {error}"
                 ))
             })?;
+            let mut st = self.state.lock().await;
+            if self.overlay.epoch() != epoch || st.sealed_gen != sealed_gen {
+                return Ok(());
+            }
             st.prepared_native = Some(recovered);
             st.prepared_native_validated = true;
             return Ok(());
         }
-        st.prepared_native_validated = false;
         let base_snapshot = self
             .overlay
             .dirty_base()
@@ -1855,9 +1969,6 @@ impl Sealer {
             .map_err(|error| {
                 CliError::usage(format!("native background upload failed: {error}"))
             })?;
-        if self.overlay.epoch() != st.seen_epoch {
-            return Ok(());
-        }
         let journal = PreparedNativeJournal {
             format_ver: 3,
             watermark,
@@ -1872,6 +1983,10 @@ impl Sealer {
             tombstoned,
             candidate,
         };
+        let mut st = self.state.lock().await;
+        if self.overlay.epoch() != epoch || st.sealed_gen != sealed_gen {
+            return Ok(());
+        }
         journal.save(&self.state_dir).map_err(|error| {
             CliError::usage(format!(
                 "persisting native prepared journal failed: {error}"
@@ -1905,25 +2020,43 @@ impl Sealer {
         Ok(())
     }
 
+    /// Resume a manual/autosave publication request after the background journal worker finishes.
+    /// A newer write invalidates the candidate match and simply wakes preparation again; no content
+    /// work moves back onto the original control request.
+    async fn publish_pending_native_seal(&self) -> Result<()> {
+        let request = { self.state.lock().await.pending_native_seal.clone() };
+        let Some(request) = request else {
+            return Ok(());
+        };
+        match self.seal_native_once(&request.message, false).await? {
+            SealOutcome::Sealed(report) => {
+                eprintln!(
+                    "autosave: published requested native snapshot {} push_ms={}",
+                    report.commit, report.push_ms
+                );
+            }
+            SealOutcome::Clean { .. } => {}
+            SealOutcome::Pending { .. } => {}
+        }
+        Ok(())
+    }
+
     /// Publish one fully prepared native journal generation. The preparation worker owns every
     /// content-bearing operation; this path only freezes the prepared watermark, records the
     /// immutable snapshot, advances the workspace, and retires that journal prefix.
     async fn seal_native_once(&self, message: &str, clear: bool) -> Result<SealOutcome> {
-        let needs_prepare = {
-            let st = self.state.lock().await;
+        let mut st = self.state.lock().await;
+        let prepared_matches = {
             let delta = self.overlay.dirty_since(st.sealed_gen);
             let redirects = self.overlay.redirect_entries();
-            !st.prepared_native.as_ref().is_some_and(|prepared| {
+            let matches = st.prepared_native.as_ref().is_some_and(|prepared| {
                 st.prepared_native_validated
                     && prepared.watermark == delta.watermark
                     && prepared.redirects == redirects
-            })
+            });
+            (matches, delta)
         };
-        if needs_prepare {
-            self.prepare_native_dirty().await?;
-        }
-
-        let mut st = self.state.lock().await;
+        let (matches, delta) = prepared_matches;
         if st.reindex_pending {
             return Err(CliError::usage(
                 "the overlay is being restored (reindex pending); nothing was sealed",
@@ -1933,9 +2066,36 @@ impl Sealer {
             st.prepared_native = None;
             st.prepared_native_validated = false;
             PreparedNativeJournal::reset(&self.state_dir);
+            st.pending_native_seal = None;
+            PendingNativeSeal::reset(&self.state_dir);
             return Err(CliError::usage(
                 "the overlay changed while preparing the native journal; retry the snapshot",
             ));
+        }
+        if !matches {
+            if delta.is_empty() && !self.overlay.has_redirects() {
+                st.pending_native_seal = None;
+                PendingNativeSeal::reset(&self.state_dir);
+                let cleared = clear.then(|| self.clear_overlay(&mut st)).transpose()?;
+                return Ok(SealOutcome::Clean { cleared });
+            }
+            // `--clear` cannot be completed asynchronously: dropping the whole overlay after this
+            // reply could erase writes that arrived after the requested watermark. Prepare in the
+            // background, but require the caller to retry the destructive operation explicitly.
+            if !clear {
+                let request = PendingNativeSeal {
+                    format_ver: 1,
+                    message: message.to_string(),
+                };
+                request.save(&self.state_dir).map_err(|error| {
+                    CliError::usage(format!("persisting native seal request failed: {error}"))
+                })?;
+                st.pending_native_seal = Some(request);
+            }
+            let watermark = delta.watermark;
+            drop(st);
+            self.native_prepare_notify.notify_one();
+            return Ok(SealOutcome::Pending { watermark });
         }
         let Some(prepared) = st
             .prepared_native
@@ -2004,6 +2164,8 @@ impl Sealer {
         st.prepared_native = None;
         st.prepared_native_validated = false;
         PreparedNativeJournal::reset(&self.state_dir);
+        st.pending_native_seal = None;
+        PendingNativeSeal::reset(&self.state_dir);
         self.publish_mirror(&st);
 
         for (path, stat) in &prepared.stats {
@@ -2095,6 +2257,8 @@ impl Sealer {
             st.prepared_native = None;
             st.prepared_native_validated = false;
             PreparedNativeJournal::reset(&self.state_dir);
+            st.pending_native_seal = None;
+            PendingNativeSeal::reset(&self.state_dir);
             // The sealed index describes the pre-rewrite world too. Restore's own reindex
             // reconciles what genuinely survives; keeping records here would let a
             // stat-coincident future file absolve against dropped content.
@@ -2465,6 +2629,8 @@ impl Sealer {
         st.prepared_native = None;
         st.prepared_native_validated = false;
         PreparedNativeJournal::reset(&self.state_dir);
+        st.pending_native_seal = None;
+        PendingNativeSeal::reset(&self.state_dir);
         // Nothing is retained anymore; a stale record would absolve a future upper file that
         // happens to stat-match dropped content.
         st.sealed = SealedIndex::default();
@@ -2505,6 +2671,8 @@ impl Sealer {
         st.prepared_native = None;
         st.prepared_native_validated = false;
         PreparedNativeJournal::reset(&self.state_dir);
+        st.pending_native_seal = None;
+        PendingNativeSeal::reset(&self.state_dir);
         st.sealed = SealedIndex::default();
         SealedIndex::reset(&self.state_dir);
         st.reindex_pending = true;
@@ -2527,6 +2695,8 @@ impl Sealer {
         st.prepared_native = None;
         st.prepared_native_validated = false;
         PreparedNativeJournal::reset(&self.state_dir);
+        st.pending_native_seal = None;
+        PendingNativeSeal::reset(&self.state_dir);
         st.reindex_pending = false;
         self.publish_mirror(&st);
         Ok(())
@@ -3633,6 +3803,26 @@ mod seal_tracking_tests {
         assert!(
             corrupt.upserts.is_empty() && corrupt.deletes.is_empty(),
             "corruption degrades to the pessimistic empty index, never an error"
+        );
+    }
+
+    #[test]
+    fn pending_native_seal_roundtrips_and_reset_removes_it() {
+        let state = tempfile::tempdir().unwrap();
+        let request = PendingNativeSeal {
+            format_ver: 1,
+            message: "durable save point".to_string(),
+        };
+        request.save(state.path()).unwrap();
+
+        let loaded = PendingNativeSeal::load(state.path()).expect("request survives restart");
+        assert_eq!(loaded.format_ver, 1);
+        assert_eq!(loaded.message, "durable save point");
+
+        PendingNativeSeal::reset(state.path());
+        assert!(
+            PendingNativeSeal::load(state.path()).is_none(),
+            "published or invalidated requests must not replay"
         );
     }
 
