@@ -23,6 +23,7 @@ pub async fn run(
     memory_mb: Option<i64>,
     is_public: bool,
     docker_compat: bool,
+    cas: bool,
     output_json: bool,
 ) -> Result<()> {
     let options = SandboxImageImportOptions {
@@ -39,7 +40,7 @@ pub async fn run(
             cpus,
             memory_mb,
             is_public,
-            cas: false,
+            cas,
             user_agent: Some(format!(
                 "Tensorlake CLI (rust/{})",
                 env!("CARGO_PKG_VERSION")

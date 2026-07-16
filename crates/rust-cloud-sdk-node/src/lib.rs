@@ -73,6 +73,9 @@ pub struct SandboxImageImportOptionsJs {
     pub use_scope_headers: Option<bool>,
     pub user_agent: Option<String>,
     pub docker_compat: Option<bool>,
+    /// Opt into the non-default CAS (content-addressed streaming) image
+    /// format.
+    pub cas: Option<bool>,
 }
 
 #[napi(object)]
@@ -176,7 +179,7 @@ pub async fn import_sandbox_image(
             cpus: options.cpus,
             memory_mb: options.memory_mb,
             is_public: options.is_public.unwrap_or(false),
-            cas: false,
+            cas: options.cas.unwrap_or(false),
             user_agent: options.user_agent,
             docker_compat: options.docker_compat.unwrap_or(false),
         },

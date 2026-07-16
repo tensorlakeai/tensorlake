@@ -3609,6 +3609,7 @@ fn build_sandbox_image(
     use_scope_headers=false,
     user_agent=None,
     docker_compat=false,
+    cas=false,
     emit=None,
 ))]
 fn import_sandbox_image(
@@ -3628,6 +3629,7 @@ fn import_sandbox_image(
     use_scope_headers: bool,
     user_agent: Option<String>,
     docker_compat: bool,
+    cas: bool,
     emit: Option<Py<PyAny>>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageImportOptions {
@@ -3646,7 +3648,7 @@ fn import_sandbox_image(
             is_public,
             user_agent,
             docker_compat,
-            false,
+            cas,
         ),
         image_reference,
     };

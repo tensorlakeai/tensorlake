@@ -375,7 +375,8 @@ class TestImportSandboxImage(unittest.TestCase):
             False,
             sbm.USER_AGENT,
             False,
-            ANY,
+            cas=False,
+            emit=ANY,
         )
 
     def test_default_name_strips_registry_path_and_digest(self):
