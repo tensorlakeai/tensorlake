@@ -1484,12 +1484,11 @@ enum ImageCommands {
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
-        /// Build a content-addressed streaming image (non-default). Streaming
+        /// Build a CAS (content-addressed streaming) image (non-default). CAS
         /// images cold-boot by faulting content on demand instead of
-        /// localizing a monolithic snapshot; the FROM image must be an
-        /// unregistered OCI image (base builds only).
+        /// localizing a monolithic snapshot.
         #[arg(long, hide = true)]
-        streaming: bool,
+        cas: bool,
 
         /// Print the registered sandbox image JSON response to stdout
         #[arg(long = "json", hide = true)]
@@ -1531,6 +1530,12 @@ enum ImageCommands {
         /// Use Docker/BuildKit max compatibility mode (import is slower and uses more memory and disk space on builder sandbox)
         #[arg(long = "docker_compat")]
         docker_compat: bool,
+
+        /// Import as a CAS (content-addressed streaming) image (non-default).
+        /// CAS images cold-boot by faulting content on demand instead of
+        /// localizing a monolithic snapshot.
+        #[arg(long, hide = true)]
+        cas: bool,
 
         /// Print the registered sandbox image JSON response to stdout
         #[arg(long = "json")]
@@ -2254,7 +2259,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             memory,
                             public,
                             docker_compat,
-                            streaming,
+                            cas,
                             json,
                         } => {
                             let disk_mb = if let Some(value) = disk_mb {
@@ -2278,7 +2283,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 memory,
                                 public,
                                 docker_compat,
-                                streaming,
+                                cas,
                                 json,
                             )
                             .await
@@ -2292,6 +2297,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             memory,
                             public,
                             docker_compat,
+                            cas,
                             json,
                         } => {
                             commands::sbx::image::import::run(
@@ -2304,6 +2310,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 memory,
                                 public,
                                 docker_compat,
+                                cas,
                                 json,
                             )
                             .await
@@ -3898,6 +3905,26 @@ mod tests {
         ]) {
             Commands::Sbx(SbxCommands::Image(ImageCommands::Import { docker_compat, .. })) => {
                 assert!(docker_compat)
+            }
+            _ => panic!("expected sbx image import command"),
+        }
+    }
+
+    #[test]
+    fn image_create_parses_cas() {
+        match parse_command(["tl", "sbx", "image", "create", "./Dockerfile", "--cas"]) {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Create { cas, .. })) => {
+                assert!(cas)
+            }
+            _ => panic!("expected sbx image create command"),
+        }
+    }
+
+    #[test]
+    fn image_import_parses_cas() {
+        match parse_command(["tl", "sbx", "image", "import", "ubuntu:24.04", "--cas"]) {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Import { cas, .. })) => {
+                assert!(cas)
             }
             _ => panic!("expected sbx image import command"),
         }

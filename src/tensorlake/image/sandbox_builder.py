@@ -246,7 +246,7 @@ def _run_rust_image_create(
         docker_compat,
         dockerfile_text,
         context_dir,
-        streaming=False,
+        cas=False,
         emit=_forwarder(emit),
     )
     return _finish_image_registration(result_json, registered_name, emit)
@@ -291,7 +291,8 @@ def _run_rust_image_import(
         ctx.personal_access_token is not None and ctx.api_key is None,
         USER_AGENT,
         docker_compat,
-        _forwarder(emit),
+        cas=False,
+        emit=_forwarder(emit),
     )
     return _finish_image_registration(result_json, registered_name, emit)
 

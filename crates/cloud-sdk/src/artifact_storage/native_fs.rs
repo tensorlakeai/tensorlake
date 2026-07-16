@@ -6485,7 +6485,7 @@ mod tests {
             phase: NativeClientOperationPhase::Completed,
             state: NativeClientOperationState::Succeeded,
             mode: NativeClientOperationMode::ColdDirectory,
-            client_version: "0.5.75",
+            client_version: "0.5.78",
             client_os: "linux",
             client_arch: "x86_64",
             upload_session: Some("session-1".into()),
