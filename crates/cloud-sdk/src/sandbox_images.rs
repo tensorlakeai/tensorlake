@@ -209,12 +209,12 @@ pub struct CommonBuildOptions {
     pub cpus: Option<f64>,
     pub memory_mb: Option<i64>,
     pub is_public: bool,
-    /// Non-default opt-in: build a content-addressed streaming (cas-streaming)
-    /// image. Streaming builds are base-only — the Dockerfile FROM must be an
-    /// unregistered OCI image — and complete through the platform's trusted
-    /// CAS ingest, so registration takes longer while the image is verified
-    /// and admitted.
-    pub streaming: bool,
+    /// Non-default opt-in: build a CAS (content-addressed streaming,
+    /// `cas-streaming` on the wire) image. CAS builds are base-only — the
+    /// Dockerfile FROM must be an unregistered OCI image — and complete
+    /// through the platform's trusted CAS ingest, so registration takes
+    /// longer while the image is verified and admitted.
+    pub cas: bool,
     pub user_agent: Option<String>,
     pub docker_compat: bool,
 }
@@ -490,7 +490,7 @@ where
         &platform_client,
         &plan,
         options.is_public,
-        options.streaming,
+        options.cas,
     )
     .await?;
     emit(SandboxImageBuildEvent::Status(format!(
@@ -500,7 +500,7 @@ where
             _ => "Base",
         },
         if prepared.rootfs_format.as_deref() == Some("cas-streaming") {
-            " (content-addressed streaming)"
+            " (CAS)"
         } else {
             ""
         }
@@ -692,8 +692,7 @@ where
 
             if complete_request.rootfs_format.as_deref() == Some("cas-streaming") {
                 emit(SandboxImageBuildEvent::Status(
-                    "Submitting the image for verification and admission into the streaming \
-                     CAS..."
+                    "Submitting the image for verification and admission into the CAS..."
                         .to_string(),
                 ));
             } else {
@@ -716,7 +715,7 @@ where
                     || completed.get("status").and_then(Value::as_str) == Some("ingesting"))
             {
                 emit(SandboxImageBuildEvent::Status(
-                    "Verifying and admitting the image into the streaming CAS (this can take \
+                    "Verifying and admitting the image into the CAS (this can take \
                      a few minutes for large images)..."
                         .to_string(),
                 ));
@@ -980,7 +979,7 @@ async fn prepare_rootfs_build(
     client: &Client,
     plan: &DockerfileBuildPlan,
     is_public: bool,
-    streaming: bool,
+    cas: bool,
 ) -> Result<(PreparedSandboxTemplateBuild, Value)> {
     // Resolve every external image reference against the platform's template
     // registry. The final-stage FROM is treated separately so its resolution
@@ -1020,11 +1019,11 @@ async fn prepare_rootfs_build(
     } else {
         "base"
     };
-    // Streaming images are content-addressed and self-contained: fail before
+    // CAS images are content-addressed and self-contained: fail before
     // any sandbox spins up if the FROM resolved to a registered template.
-    if streaming && (parent_template_payload.is_some() || !additional_payload.is_empty()) {
+    if cas && (parent_template_payload.is_some() || !additional_payload.is_empty()) {
         return Err(SandboxImageBuildError::usage(
-            "--streaming builds support only base images: the Dockerfile FROM (and any \
+            "--cas builds support only base images: the Dockerfile FROM (and any \
              COPY --from references) must be unregistered OCI images, not registered \
              Tensorlake templates",
         ));
@@ -1040,7 +1039,7 @@ async fn prepare_rootfs_build(
         "parentTemplate": parent_template_json,
         "additionalLocalImages": additional_payload,
     });
-    if streaming {
+    if cas {
         prepare_body["rootfsFormat"] = Value::String("cas-streaming".to_string());
     }
     let request = client
@@ -1130,7 +1129,7 @@ async fn wait_for_build_completed(
                     .and_then(Value::as_str)
                     .unwrap_or("admission failed");
                 return Err(SandboxImageBuildError::other(format!(
-                    "streaming image admission failed: {error}"
+                    "CAS image admission failed: {error}"
                 )));
             }
             Some("ingesting") | Some("prepared") => {}
@@ -1142,7 +1141,7 @@ async fn wait_for_build_completed(
         }
         if std::time::Instant::now() >= deadline {
             return Err(SandboxImageBuildError::other(
-                "timed out waiting for the streaming image admission",
+                "timed out waiting for the CAS image admission",
             ));
         }
         tokio::time::sleep(BUILD_STATUS_POLL_INTERVAL).await;

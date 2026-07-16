@@ -3516,7 +3516,7 @@ fn create_image_context_file(
     docker_compat=false,
     dockerfile_text=None,
     context_dir=None,
-    streaming=false,
+    cas=false,
     emit=None,
 ))]
 fn build_sandbox_image(
@@ -3538,7 +3538,7 @@ fn build_sandbox_image(
     docker_compat: bool,
     dockerfile_text: Option<String>,
     context_dir: Option<String>,
-    streaming: bool,
+    cas: bool,
     emit: Option<Py<PyAny>>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageBuildOptions {
@@ -3557,7 +3557,7 @@ fn build_sandbox_image(
             is_public,
             user_agent,
             docker_compat,
-            streaming,
+            cas,
         ),
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text,
@@ -3697,7 +3697,7 @@ fn common_build_options(
     is_public: bool,
     user_agent: Option<String>,
     docker_compat: bool,
-    streaming: bool,
+    cas: bool,
 ) -> tensorlake::sandbox_images::CommonBuildOptions {
     tensorlake::sandbox_images::CommonBuildOptions {
         api_url,
@@ -3712,7 +3712,7 @@ fn common_build_options(
         cpus,
         memory_mb,
         is_public,
-        streaming,
+        cas,
         user_agent,
         docker_compat,
     }

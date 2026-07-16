@@ -246,7 +246,7 @@ def _run_rust_image_create(
         docker_compat,
         dockerfile_text,
         context_dir,
-        streaming=False,
+        cas=False,
         emit=_forwarder(emit),
     )
     return _finish_image_registration(result_json, registered_name, emit)

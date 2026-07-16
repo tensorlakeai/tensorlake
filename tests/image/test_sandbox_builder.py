@@ -93,7 +93,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             False,
             None,
             None,
-            streaming=False,
+            cas=False,
             emit=ANY,
         )
 
@@ -139,7 +139,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             False,
             None,
             None,
-            streaming=False,
+            cas=False,
             emit=ANY,
         )
 
