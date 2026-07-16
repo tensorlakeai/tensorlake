@@ -269,7 +269,8 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Upload a folder into a filesystem as one save (no mount needed)
+    /// Upload a folder into a filesystem and track it for later incremental saves (no mount
+    /// needed). Interrupted attempts resume from durable local state
     Push {
         /// Local directory to upload
         dir: PathBuf,
@@ -358,20 +359,43 @@ enum FsCommands {
         #[arg(short, long)]
         message: Option<String>,
 
-        /// After publishing, drop the mount's retained byte cache and ignored local files.
-        /// If preparation is still pending, nothing is cleared; run the command again
+        /// After publishing, trim that generation's retained byte cache. Later writes and
+        /// ignored/local-only files are preserved; pending preparation completes this in background
         #[arg(long)]
         clear: bool,
     },
 
     /// Show mount, autosave, and local-change status
     Status {
-        /// A mounted directory (default: the mount containing the current directory)
+        /// A mounted or tracked directory (default: the attachment containing the current
+        /// directory)
         path: Option<PathBuf>,
 
         /// Print status as JSON
         #[arg(long)]
         json: bool,
+    },
+
+    /// Inspect the crash-safe local snapshot journal of a native mount or tracked directory
+    Doctor {
+        /// A mounted or tracked directory (default: the attachment containing the current
+        /// directory)
+        path: Option<PathBuf>,
+
+        /// Print the diagnostic report as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Rebuild a corrupt or missing native-mount journal from the raw local overlay.
+        /// The mount must be detached; the original journal and staging metadata are exported
+        /// before replacement, and the repair never contacts the server
+        #[arg(long)]
+        repair_journal: bool,
+
+        /// Required repair baseline when the existing journal cannot prove one. Pass a native
+        /// save ID, or `empty` only for a filesystem that has never had a save.
+        #[arg(long, value_name = "SAVE_ID|empty", requires = "repair_journal")]
+        base: Option<String>,
     },
 
     /// Restore a writable filesystem mount to an earlier save
@@ -2439,6 +2463,15 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             }
             return commands::fs::plaindir::unbind(path.clone()).await;
         }
+        if commands::fs::is_tracked_directory(&probe)? {
+            if *delete || *discard {
+                return Err(CliError::usage(
+                    "a tracked ordinary directory is your own files; unmount only stops local \
+                     tracking (--discard/--delete do not apply)",
+                ));
+            }
+            return commands::fs::unmount(ctx, &probe, false, false).await;
+        }
     }
     // Path-addressed commands default their mounted-directory argument to the mount containing
     // the CWD; resolve it up front so scope hydration and the command agree on the path.
@@ -2457,16 +2490,48 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         }
         FsCommands::Snapshot { path, .. }
         | FsCommands::Status { path, .. }
+        | FsCommands::Doctor { path, .. }
         | FsCommands::Unmount { path, .. } => {
             mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
         }
         _ => {}
     }
+    if let Some(path) = mount_dir.as_ref()
+        && matches!(
+            &subcmd,
+            FsCommands::Snapshot { .. }
+                | FsCommands::Status { .. }
+                | FsCommands::Restore { .. }
+                | FsCommands::Unmount { .. }
+        )
+    {
+        commands::fs::require_native_filesystem_attachment(path)?;
+    }
+    // Doctor is intentionally local-only: it must remain usable when authentication or the
+    // server is unavailable. Inspection is read-only; the explicit repair mode mutates only
+    // exported local journal artifacts and never publishes anything.
+    if let FsCommands::Doctor {
+        json,
+        repair_journal,
+        base,
+        ..
+    } = &subcmd
+    {
+        return commands::fs::doctor(
+            &mount_dir
+                .as_ref()
+                .expect("resolved for every path-addressed command"),
+            *json,
+            *repair_journal,
+            base.as_deref(),
+        )
+        .await;
+    }
     // Path-addressed commands carry their scope in the mount state; resolve it from there so
     // they work from any CWD instead of triggering the interactive init flow (which, run from
     // inside a mount, would write .tensorlake/config.toml into the workspace).
     if let Some(mount_dir) = &mount_dir {
-        commands::fs::hydrate_scope_from_mount(ctx, mount_dir);
+        commands::fs::hydrate_scope_from_mount(ctx, mount_dir)?;
     }
     ensure_auth_and_project(ctx).await?;
     // Set for exactly the path-addressed commands, whose dispatch arms are the only readers.
@@ -2517,6 +2582,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), clear).await
         }
         FsCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
+        FsCommands::Doctor { .. } => unreachable!("handled before the auth guard"),
         FsCommands::Restore {
             version, discard, ..
         } => commands::fs::restore(ctx, &mount_dir(), &version, discard).await,
@@ -2566,8 +2632,11 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
         }
         _ => {}
     }
+    if let Some(path) = mount_dir.as_ref() {
+        commands::fs::require_repository_mount_attachment(path)?;
+    }
     if let Some(mount_dir) = &mount_dir {
-        commands::fs::hydrate_scope_from_mount(ctx, mount_dir);
+        commands::fs::hydrate_scope_from_mount(ctx, mount_dir)?;
     }
     ensure_auth_and_project(ctx).await?;
     let mount_dir = move || mount_dir.expect("resolved for every path-addressed command above");
@@ -3236,6 +3305,30 @@ mod tests {
                 assert!(clear);
             }
             _ => panic!("expected fs snapshot command"),
+        }
+
+        match parse_command([
+            "tl",
+            "fs",
+            "doctor",
+            "./w",
+            "--json",
+            "--repair-journal",
+            "--base",
+            "snapshot-1",
+        ]) {
+            Commands::Fs(FsCommands::Doctor {
+                path,
+                json,
+                repair_journal,
+                base,
+            }) => {
+                assert_eq!(path, Some(PathBuf::from("./w")));
+                assert!(json);
+                assert!(repair_journal);
+                assert_eq!(base.as_deref(), Some("snapshot-1"));
+            }
+            _ => panic!("expected fs doctor command"),
         }
 
         // Promote, sync, diff, and init left the fs surface entirely. Filesystem saves publish

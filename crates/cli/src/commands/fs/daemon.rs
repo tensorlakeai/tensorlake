@@ -25,12 +25,11 @@
 //!                         `{ok,pending,pending_watermark,commit}` while preparing, or
 //!                         `{ok,clean:false,commit,files,chunks_uploaded,chunks_total,sealed,
 //!                         push_ms}` after publication — plus the same drained
-//!                         "changed"/"complete" probe list as `refresh`. With
-//!                         `clear:true` the daemon drops the whole overlay itself right
-//!                         after the seal (under the sealer lock, so no write can land
-//!                         between seal and clear unobserved) and the reply carries
-//!                         `cleared`: every repo path the drop actually removed. This is
-//!                         what `tl fs snapshot` calls — manual snapshots and auto-commits
+//!                         "changed"/"complete" probe list as `refresh`. For native filesystems,
+//!                         `clear:true` generation-safely trims only retained paths owned by the
+//!                         published generation; later writes and ignored/local-only content
+//!                         survive. Repository mounts retain the legacy whole-overlay clear.
+//!                         This is what `tl fs snapshot` calls — manual snapshots and auto-commits
 //!                         share one dirty watermark, resurrection guard, and chunk cache.
 //! {"op":"clear_upper"} -> drop all overlay state without sealing (restore's reset; `tl fs
 //!                         snapshot --clear` instead rides the seal op for coherence)
@@ -56,9 +55,105 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
 #[cfg(unix)]
-use super::overlay::{KernelExpectation, OverlayFs, OverlayInval, TrimBoundaries};
+use super::overlay::{
+    KernelExpectation, OverlayDirtySeed, OverlayFs, OverlayInval, OverlayMutationIntent,
+    OverlayMutationJournal, TrimBoundaries,
+};
 #[cfg(unix)]
 use std::sync::Arc;
+
+#[cfg(unix)]
+struct LocalStateMutationJournal(super::local_state::LocalState);
+
+#[cfg(unix)]
+impl OverlayMutationJournal for LocalStateMutationJournal {
+    fn record_intents(
+        &self,
+        intents: &[OverlayMutationIntent],
+    ) -> std::result::Result<(), gsvc_mount::MountError> {
+        let intents = intents
+            .iter()
+            .map(|intent| match intent {
+                OverlayMutationIntent::Upsert {
+                    path,
+                    min_write_offset,
+                } => super::local_state::MutationIntent::Upsert {
+                    path: path.clone(),
+                    min_write_offset: *min_write_offset,
+                },
+                OverlayMutationIntent::Delete { path } => {
+                    super::local_state::MutationIntent::Delete { path: path.clone() }
+                }
+                OverlayMutationIntent::Rename {
+                    source,
+                    destination,
+                } => super::local_state::MutationIntent::Rename {
+                    source: source.clone(),
+                    destination: destination.clone(),
+                },
+            })
+            .collect::<Vec<_>>();
+        let result = self.0.record_mutations(&intents).map(|_| ());
+        result.map_err(|error| gsvc_mount::MountError::Protocol(error.to_string()))
+    }
+
+    fn mark_rename_applied(
+        &self,
+        source: &str,
+        destination: &str,
+    ) -> std::result::Result<(), gsvc_mount::MountError> {
+        self.0
+            .mark_rename_applied(source, destination)
+            .map_err(|error| gsvc_mount::MountError::Protocol(error.to_string()))
+    }
+}
+
+#[cfg(unix)]
+fn overlay_recovery_seed(
+    recovery: &super::local_state::RecoveryDirtyState,
+) -> Vec<OverlayDirtySeed> {
+    recovery
+        .paths
+        .iter()
+        .map(|path| OverlayDirtySeed {
+            path: path.path.clone(),
+            kind: match path.kind {
+                super::local_state::DirtyKind::Upsert => super::overlay::DirtyKind::Upsert,
+                super::local_state::DirtyKind::Delete => super::overlay::DirtyKind::Delete,
+            },
+            min_write_offset: path.min_write_offset,
+            generation: path.sequence,
+        })
+        .collect()
+}
+
+#[cfg(unix)]
+fn overlay_recovery_renames(
+    recovery: &super::local_state::RecoveryDirtyState,
+) -> Vec<(String, String, String, u64)> {
+    let mut ordered = recovery
+        .renames
+        .iter()
+        .filter(|rename| rename.applied)
+        .cloned()
+        .collect::<Vec<_>>();
+    ordered.sort_by_key(|rename| rename.sequence);
+    let mut live: std::collections::HashMap<String, (String, String, u64)> =
+        std::collections::HashMap::new();
+    for rename in ordered {
+        let true_source = live
+            .remove(&rename.local_from)
+            .map(|(source, _, _)| source)
+            .unwrap_or_else(|| rename.from.clone());
+        live.remove(&rename.to);
+        live.insert(rename.to, (true_source, rename.local_from, rename.sequence));
+    }
+    live.into_iter()
+        .map(|(destination, (true_source, local_source, sequence))| {
+            (destination, true_source, local_source, sequence)
+        })
+        .collect()
+}
 
 /// Pushes kernel-cache invalidations for a batch of overlay inos. On Linux this drives the FUSE
 /// session's `Notifier` (which is what makes the binding's long entry/attr TTLs sound); on
@@ -144,6 +239,11 @@ pub struct MountState {
     #[serde(default)]
     pub pinned_snapshot: Option<String>,
     pub workspace_id: String,
+    /// Identity of the crash-safe local mutation journal. Writable native filesystem mounts
+    /// persist one UUID and reuse it when resuming the same state directory; copying or mixing a
+    /// database with another mount then fails closed.
+    #[serde(default)]
+    pub local_state_uuid: Option<String>,
     pub ref_name: String,
     pub mountpoint: PathBuf,
     /// Branch-following view: the lower side follows this ref (a real branch) instead of the
@@ -230,7 +330,7 @@ pub(crate) struct SealedStat {
     pub size: u64,
     pub mtime_secs: i64,
     pub mtime_nanos: u32,
-    /// Git mode (100644/100755/120000) — a chmod flips it without touching size or mtime.
+    /// Git mode (040000/100644/100755/120000) — a chmod flips it without touching size or mtime.
     pub mode: u32,
 }
 
@@ -245,6 +345,66 @@ impl SealedStat {
             mode: git_mode(meta),
         }
     }
+}
+
+#[cfg(unix)]
+fn sealed_index_from_local_state(
+    local: &super::local_state::LocalState,
+) -> std::result::Result<SealedIndex, super::local_state::LocalStateError> {
+    let active_generation = local.active_generation()?;
+    sealed_index_from_records(
+        active_generation,
+        local.generation(active_generation)?,
+        local.sealed_baselines()?,
+    )
+}
+
+#[cfg(unix)]
+pub(crate) fn sealed_index_from_local_state_reader(
+    local: &super::local_state::LocalStateReader,
+) -> std::result::Result<SealedIndex, super::local_state::LocalStateError> {
+    let active_generation = local.active_generation()?;
+    sealed_index_from_records(
+        active_generation,
+        local.generation(active_generation)?,
+        local.sealed_baselines()?,
+    )
+}
+
+#[cfg(unix)]
+fn sealed_index_from_records(
+    active_generation: u64,
+    active: Option<super::local_state::GenerationRecord>,
+    baselines: Vec<super::local_state::SealedBaseline>,
+) -> std::result::Result<SealedIndex, super::local_state::LocalStateError> {
+    let active = active.ok_or_else(|| {
+        super::local_state::LocalStateError::Corrupt(format!(
+            "active generation {active_generation} is missing"
+        ))
+    })?;
+    let mut index = SealedIndex {
+        commit: active.base_snapshot.unwrap_or_default(),
+        ..Default::default()
+    };
+    for baseline in baselines {
+        match baseline.state {
+            super::local_state::SealedPathState::Upsert { identity, .. } => {
+                index.upserts.insert(
+                    baseline.path,
+                    SealedStat {
+                        size: identity.size,
+                        mtime_secs: identity.mtime_secs,
+                        mtime_nanos: identity.mtime_nanos as u32,
+                        mode: git_mode_from_raw(identity.mode),
+                    },
+                );
+            }
+            super::local_state::SealedPathState::Delete => {
+                index.deletes.insert(baseline.path);
+            }
+        }
+    }
+    Ok(index)
 }
 
 /// The persisted seal record (`<state dir>/sealed.json`): every overlay path whose current
@@ -299,6 +459,68 @@ impl SealedIndex {
     }
 }
 
+/// Remove metadata files superseded by the durable local-state database.
+///
+/// This runs only after the database's atomic legacy-import transaction has committed. Keeping
+/// the cleanup outside that transaction is safe because none of these files is authoritative for
+/// a native mount once `legacy_import_completed` is durable; retrying cleanup on the next startup
+/// also closes a crash between commit and unlink.
+#[cfg(unix)]
+fn remove_legacy_native_snapshot_state(state_dir: &Path) -> std::io::Result<()> {
+    for name in [
+        "sealed.json",
+        "sealed.json.tmp",
+        "native-prepared.json",
+        "native-prepared.json.tmp",
+        "native-seal-request.json",
+        "native-seal-request.json.tmp",
+        "redirects.json",
+        "redirects.json.tmp",
+    ] {
+        match std::fs::remove_file(state_dir.join(name)) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn install_local_state_format_marker(state_dir: &Path) -> Result<()> {
+    use std::io::Write as _;
+
+    let marker = state_dir.join(super::LOCAL_STATE_FORMAT_MARKER);
+    let database = state_dir.join(super::local_state::LOCAL_STATE_FILE);
+    if marker.exists() {
+        if !database.exists() {
+            return Err(CliError::usage(format!(
+                "durable local snapshot database {} is missing after this mount was converted; \
+                 refusing to reinterpret retained upper bytes against a newer server head. Run \
+                 `tl fs doctor {} --repair-journal` to rebuild a conservative generation.",
+                database.display(),
+                state_dir.display(),
+            )));
+        }
+        return Ok(());
+    }
+
+    match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&marker)
+    {
+        Ok(mut file) => {
+            file.write_all(b"tensorlake-native-local-state-v3\n")?;
+            file.sync_all()?;
+            std::fs::File::open(state_dir)?.sync_all()?;
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+        Err(error) => return Err(error.into()),
+    }
+    Ok(())
+}
+
 /// Startup/reindex reconciliation. [`OverlayFs::rebuild_dirty_index`] pessimistically marks
 /// every upper file an upsert and every whiteout a delete; absolve the ones whose on-disk
 /// identity still matches their persisted seal record — they are retained sealed content, not
@@ -349,11 +571,15 @@ fn sealed_survivors(state_dir: &Path, index: &SealedIndex) -> (Vec<String>, Vec<
 /// client path (`fs::seal_via_daemon`) so the wire shape cannot drift between them.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub(crate) struct SealRequest {
+    /// Stable client request id. Native snapshot publication persists this as the server
+    /// idempotency key and retains a bounded success receipt after generation retirement.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_id: Option<String>,
     /// Snapshot commit message; the daemon defaults it when absent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub message: Option<String>,
-    /// Drop the whole overlay after a successful seal, inside the same sealer cycle. The
-    /// reply then reports the dropped paths in [`SealReply::cleared`].
+    /// After a successful seal, trim only retained paths owned by that published generation.
+    /// Writes in a later generation and ignored/local-only content are never removed.
     #[serde(default)]
     pub clear: bool,
 }
@@ -373,6 +599,10 @@ pub(crate) struct SealReply {
     /// Dirty-index watermark requested for background preparation.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pending_watermark: Option<u64>,
+    /// Durable request whose exact success this reply delivers. The CLI acknowledges it only
+    /// after rendering the result to the caller.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub completed_request_id: Option<String>,
     pub commit: String,
     /// Sealed-only fields (absent on clean replies).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -386,9 +616,8 @@ pub(crate) struct SealReply {
     pub sealed: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub push_ms: Option<u64>,
-    /// Present iff the request set `clear`: the FULL list of repo paths the overlay drop
-    /// removed (including ignored files that never enter a snapshot) — the caller's kernel
-    /// revalidation set.
+    /// Present iff the request set `clear`: the generation-owned retained paths and tombstones
+    /// actually removed. Ignored/local-only files and later-generation writes are excluded.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cleared: Option<Vec<String>>,
 }
@@ -411,6 +640,16 @@ pub(crate) struct DirtyReply {
     /// The lower commit currently served.
     #[serde(default)]
     pub commit: String,
+}
+
+/// Destructive-gate view served by a live daemon. `sealed` comes from the same in-memory mirror
+/// the native sealer rebuilt from redb at startup, avoiding both the obsolete sealed.json
+/// authority and redb's intentional refusal to open a second read-only process while the daemon
+/// owns the writable database lock.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub(crate) struct OverlaySafetyReply {
+    pub dirty: DirtyReply,
+    pub sealed: SealedIndex,
 }
 
 /// Final reply of the `trim` control op: retained (sealed-and-kept) overlay state dropped in
@@ -659,7 +898,39 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     use gsvc_mount::{FsClient, MountCore, MountOptions};
 
     let started = std::time::Instant::now();
-    let state = load_mount_state(state_dir)?;
+    let mut state = load_mount_state(state_dir)?;
+    // Own the complete native local-state artifact set for the daemon's lifetime. Journal repair
+    // replaces the database and retires old capture directories, so the database's own lock is
+    // too narrow to serialize those operations. The offline doctor takes the same non-blocking
+    // flock and refuses while this guard is live.
+    let _local_state_writer_guard = if state.native_filesystem && !state.read_only() {
+        Some(
+            super::try_local_state_writer_lock(state_dir)?.ok_or_else(|| {
+                CliError::usage(format!(
+                    "native local snapshot state at {} is owned by another daemon or an \
+                         offline journal repair",
+                    state_dir.display()
+                ))
+            })?,
+        )
+    } else {
+        None
+    };
+    if state_dir.join(super::LOCAL_STATE_REPAIR_MARKER).exists() {
+        return Err(CliError::usage(format!(
+            "an interrupted journal repair marker exists at {}; run `tl fs doctor {} \
+             --repair-journal` before mounting",
+            state_dir.join(super::LOCAL_STATE_REPAIR_MARKER).display(),
+            state.mountpoint.display()
+        )));
+    }
+    if state.native_filesystem && !state.read_only() && state.local_state_uuid.is_none() {
+        // Local-only cutover for development mounts created before the durable journal. The
+        // server-side filesystem is pre-production and needs no migration, but unsnapshotted
+        // bytes under upper/ and wh/ must remain recoverable.
+        state.local_state_uuid = Some(uuid::Uuid::new_v4().to_string());
+        save_mount_state(state_dir, &state)?;
+    }
     let sdk = artifact_storage_client(ctx)?;
     let project = project_id(ctx)?;
 
@@ -765,11 +1036,145 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         other => other,
     }
     .map_err(|e| CliError::usage(format!("mount init: {e}")))?;
-    let overlay = OverlayFs::new(core.clone(), state_dir, state.read_only())
-        .map_err(|e| CliError::usage(format!("overlay init: {e}")))?;
-    // Before the kernel attaches (no events can race the absolve): retained sealed content the
-    // rebuild pessimistically marked dirty is reconciled back out against sealed.json.
-    if !state.read_only() {
+    let local_state = if state.native_filesystem && !state.read_only() {
+        install_local_state_format_marker(state_dir)?;
+        let identity = super::local_state::LocalStateIdentity {
+            project_id: state.project_id.clone(),
+            filesystem: state.repo.clone(),
+            workspace_id: state.workspace_id.clone(),
+            store_uuid: state
+                .local_state_uuid
+                .clone()
+                .expect("writable native mount has a local state UUID"),
+        };
+        let local = super::local_state::LocalState::open(
+            state_dir.join(super::local_state::LOCAL_STATE_FILE),
+            identity,
+        )
+        .map_err(|error| {
+            CliError::usage(format!(
+                "opening durable local snapshot state failed closed: {error}; \
+                 run `tl fs doctor {}` before retrying",
+                state.mountpoint.display()
+            ))
+        })?;
+        if local.needs_legacy_import().map_err(|error| {
+            CliError::usage(format!(
+                "checking durable local snapshot-state cutover failed closed: {error}"
+            ))
+        })? {
+            // This is the only automatic overlay walk in the durable format: conservatively
+            // import a pre-database mount's unsnapshotted local state before the kernel attaches.
+            let legacy = OverlayFs::new(core.clone(), state_dir, false)
+                .map_err(|error| CliError::usage(format!("legacy overlay import: {error}")))?;
+            // Do not reconcile against sealed.json here. The old stat-based baseline cannot
+            // distinguish a same-size/same-timestamp edit in its racy window, and the durable
+            // database has not imported those baselines. Treat every upper entry and whiteout as
+            // dirty once during cutover: an extra deduplicated upload is safe; dropping a local
+            // byte because a legacy identity happened to match is not.
+            let delta = legacy.dirty_since(0);
+            let mut mutations = Vec::with_capacity(
+                delta.upserts.len() + delta.deletes.len() + legacy.redirect_entries().len(),
+            );
+            mutations.extend(delta.upserts.into_iter().map(|(path, min_write_offset)| {
+                super::local_state::LegacyMutation::Upsert {
+                    path,
+                    min_write_offset,
+                }
+            }));
+            mutations.extend(
+                delta
+                    .deletes
+                    .into_iter()
+                    .map(|path| super::local_state::LegacyMutation::Delete { path }),
+            );
+            mutations.extend(
+                legacy
+                    .redirect_entries()
+                    .into_iter()
+                    .map(|(to, from)| super::local_state::LegacyMutation::Rename { from, to }),
+            );
+            let imported_dirty_paths = mutations.len();
+            let imported = local
+                .import_legacy_once(super::local_state::LegacyImport {
+                    base_snapshot: Some(core.current_commit()),
+                    mutations,
+                })
+                .map_err(|error| {
+                    CliError::usage(format!(
+                        "importing pre-database local snapshot state failed closed: {error}"
+                    ))
+                })?;
+            tracing::info!(
+                imported,
+                imported_dirty_paths,
+                "mount: durable local snapshot state initialized"
+            );
+        }
+        remove_legacy_native_snapshot_state(state_dir).map_err(|error| {
+            CliError::usage(format!(
+                "removing obsolete pre-database snapshot metadata failed: {error}"
+            ))
+        })?;
+        let owned_generations: std::collections::BTreeSet<u64> = local
+            .artifacts()
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "reading capture ownership for recovery failed closed: {error}"
+                ))
+            })?
+            .into_iter()
+            .map(|artifact| artifact.generation)
+            .collect();
+        let (reclaimed_captures, reclaimed_bytes) =
+            super::generation_capture::reclaim_orphan_generation_captures(
+                state_dir,
+                &owned_generations,
+            )
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "reclaiming orphaned generation captures failed closed: {error}"
+                ))
+            })?;
+        if reclaimed_captures > 0 {
+            tracing::info!(
+                reclaimed_captures,
+                reclaimed_bytes,
+                "mount: reclaimed orphaned generation captures"
+            );
+        }
+        Some(local)
+    } else {
+        None
+    };
+    let overlay = if let Some(local) = &local_state {
+        let recovery = local.recovery_dirty_state().map_err(|error| {
+            CliError::usage(format!(
+                "recovering durable local snapshot state failed closed: {error}"
+            ))
+        })?;
+        tracing::info!(
+            engine = "redb",
+            active_generation = recovery.active_generation,
+            dirty_paths = recovery.paths.len(),
+            rename_intents = recovery.renames.len(),
+            "mount: recovered durable local snapshot state without overlay walk"
+        );
+        OverlayFs::new_with_journal(
+            core.clone(),
+            state_dir,
+            false,
+            Arc::new(LocalStateMutationJournal(local.clone())),
+            overlay_recovery_seed(&recovery),
+            overlay_recovery_renames(&recovery),
+        )
+    } else {
+        OverlayFs::new(core.clone(), state_dir, state.read_only())
+    }
+    .map_err(|error| CliError::usage(format!("overlay init: {error}")))?;
+    // Git-backed and read-only legacy mounts retain their old reconstruction path. Writable native
+    // mounts were either seeded from the durable DB above or imported exactly once before attach.
+    if !state.read_only() && local_state.is_none() {
         let (upserts, deletes) = reconcile_sealed(state_dir, &overlay);
         if upserts + deletes > 0 {
             tracing::info!(
@@ -902,6 +1307,16 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         });
     }
 
+    let initial_sealed = if let Some(local) = &local_state {
+        sealed_index_from_local_state(local).map_err(|error| {
+            CliError::usage(format!(
+                "reading durable sealed-path baselines failed closed: {error}"
+            ))
+        })?
+    } else {
+        SealedIndex::load(state_dir)
+    };
+
     // The sealer: one cycle turns the overlay's dirty delta into a snapshot commit. Built for
     // EVERY writable mount, whether or not auto-commit is on — the `seal` control op (what
     // `tl fs snapshot` calls) runs a cycle on demand, and the auto-commit task below ticks the
@@ -920,6 +1335,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
             repo: state.repo.clone(),
             workspace: state.workspace_id.clone(),
             native_filesystem: state.native_filesystem,
+            local_state: local_state.clone(),
             state_dir: state_dir.to_path_buf(),
             mountpoint: mountpoint.clone(),
             overlay: overlay.clone(),
@@ -933,7 +1349,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 recent_seals: Vec::new(),
                 chunk_cache: std::collections::HashMap::new(),
                 sealed: {
-                    let index = SealedIndex::load(state_dir);
+                    let index = initial_sealed.clone();
                     // Retained upper files AND sealed-delete whiteouts from before this
                     // restart have seal records but no recorded oids: seed both so
                     // divergence eviction still covers them (unknown oid = divergent
@@ -944,15 +1360,6 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                     index
                 },
                 reindex_pending: false,
-                prepared_native: state
-                    .native_filesystem
-                    .then(|| PreparedNativeJournal::load(state_dir))
-                    .flatten(),
-                prepared_native_validated: false,
-                pending_native_seal: state
-                    .native_filesystem
-                    .then(|| PendingNativeSeal::load(state_dir))
-                    .flatten(),
             }),
             mirror: std::sync::Mutex::new(SealerMirror::default()),
         })
@@ -993,8 +1400,15 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 }
             }
         });
-        // A request persisted before a crash should not wait for the first polling interval.
-        if PendingNativeSeal::load(state_dir).is_some() {
+        // Frozen/prepared/requested state persisted before a crash should not wait for the first
+        // polling interval.
+        if local_state.as_ref().is_some_and(|local| {
+            local.generations().is_ok_and(|generations| {
+                generations
+                    .iter()
+                    .any(|generation| generation.state != super::local_state::GenerationState::Open)
+            })
+        }) {
             sealer.native_prepare_notify.notify_one();
         }
     }
@@ -1042,7 +1456,10 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 let reason = if quiet { "quiet" } else { "max-latency" };
                 eprintln!("autosave: sealing reason={reason} dirty_for_s={dirty_for_s}");
                 let seal_started = std::time::Instant::now();
-                match sealer.seal_once("tl fs auto-commit", false, None).await {
+                match sealer
+                    .seal_once("tl fs auto-commit", false, None, None)
+                    .await
+                {
                     Ok(SealOutcome::Sealed(report)) => {
                         eprintln!(
                             "autosave: sealed snapshot {} seal_ms={} push_ms={:?}",
@@ -1075,6 +1492,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         let invalidate = invalidate.clone();
         let pending = pending.clone();
         let sealer = sealer.clone();
+        let local_state = local_state.clone();
         let control_state_dir = state_dir.to_path_buf();
         tokio::spawn(async move {
             loop {
@@ -1087,6 +1505,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 let invalidate = invalidate.clone();
                 let pending = pending.clone();
                 let sealer = sealer.clone();
+                let local_state = local_state.clone();
                 let control_state_dir = control_state_dir.clone();
                 tokio::spawn(async move {
                     let mut reader = tokio::io::BufReader::new(stream);
@@ -1105,6 +1524,30 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                         "ping" => {
                             serde_json::json!({ "ok": true, "commit": core.current_commit() })
                         }
+                        "doctor-local-state" => match local_state.as_ref() {
+                            Some(store) => match super::local_state_doctor_lifecycle(store) {
+                                Ok(report) => match serde_json::to_value(report) {
+                                    Ok(mut value) => {
+                                        value["ok"] = serde_json::Value::Bool(true);
+                                        value
+                                    }
+                                    Err(error) => serde_json::json!({
+                                        "ok": false,
+                                        "error": error.to_string(),
+                                    }),
+                                },
+                                Err(error) => serde_json::json!({
+                                    "ok": false,
+                                    "error": format!(
+                                        "durable local snapshot state failed validation: {error}"
+                                    ),
+                                }),
+                            },
+                            None => serde_json::json!({
+                                "ok": false,
+                                "error": "this mount has no durable local snapshot state",
+                            }),
+                        },
                         // The truthful dirty view: exactly what the next seal would publish
                         // (`tl fs status`/`promote`/`sync`/`diff` all read this — one
                         // definition of dirty). A read-only mount has no sealer and can hold
@@ -1138,6 +1581,32 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 Err(e) => {
                                     serde_json::json!({ "ok": false, "error": e.to_string() })
                                 }
+                            },
+                        },
+                        // Destructive overlay gates also need the retained-path baselines. Native
+                        // mounts keep those in redb and the live daemon owns its writable lock, so
+                        // serve the in-memory mirror alongside the truthful dirty view instead of
+                        // reopening the database or reviving sealed.json.
+                        "overlay-safety" => match sealer.as_ref() {
+                            None => serde_json::json!({
+                                "ok": false,
+                                "error": "read-only mount: no overlay safety state",
+                            }),
+                            Some(sealer) => match sealer.overlay_safety_view().await {
+                                Ok(reply) => match serde_json::to_value(&reply) {
+                                    Ok(mut value) => {
+                                        value["ok"] = serde_json::Value::Bool(true);
+                                        value
+                                    }
+                                    Err(error) => serde_json::json!({
+                                        "ok": false,
+                                        "error": error.to_string(),
+                                    }),
+                                },
+                                Err(error) => serde_json::json!({
+                                    "ok": false,
+                                    "error": error.to_string(),
+                                }),
                             },
                         },
                         // The still-unresolved collisions on the followed branch (issue
@@ -1179,6 +1648,31 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 }
                             },
                         },
+                        "ack-snapshot" => {
+                            let request_id = request
+                                .get("request_id")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            match sealer.as_ref() {
+                                Some(sealer) if !request_id.is_empty() => {
+                                    match sealer.acknowledge_snapshot_response(request_id) {
+                                        Ok(()) => serde_json::json!({ "ok": true }),
+                                        Err(error) => serde_json::json!({
+                                            "ok": false,
+                                            "error": error.to_string(),
+                                        }),
+                                    }
+                                }
+                                Some(_) => serde_json::json!({
+                                    "ok": false,
+                                    "error": "ack-snapshot requires request_id",
+                                }),
+                                None => serde_json::json!({
+                                    "ok": false,
+                                    "error": "read-only mount has no snapshot receipts",
+                                }),
+                            }
+                        }
                         // Seal on demand: `tl fs snapshot` runs exactly one cycle of the same
                         // sealer auto-commit ticks, with the caller's message (and optional
                         // overlay clear). Streaming op — the handler writes its own event
@@ -1245,6 +1739,148 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                                 }
                             }
                         }
+                        // Native restore already advanced the server-side workspace/head. Adopt
+                        // that exact save locally in one daemon-serialized operation: clear the
+                        // old overlay first, then reset the durable generation engine to the new
+                        // base. No refill or repair walk is involved.
+                        "begin_native_restore" => {
+                            let target = request
+                                .get("target")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            let discard_local = request
+                                .get("discard_local")
+                                .and_then(|value| value.as_bool())
+                                .unwrap_or(false);
+                            match sealer.as_ref() {
+                                Some(sealer) if !target.is_empty() => {
+                                    match sealer.begin_native_restore(target, discard_local) {
+                                        Ok(operation) => match serde_json::to_value(operation) {
+                                            Ok(mut value) => {
+                                                value["ok"] = serde_json::Value::Bool(true);
+                                                value
+                                            }
+                                            Err(error) => serde_json::json!({
+                                                "ok": false,
+                                                "error": error.to_string(),
+                                            }),
+                                        },
+                                        Err(error) => serde_json::json!({
+                                            "ok": false,
+                                            "error": error.to_string(),
+                                        }),
+                                    }
+                                }
+                                Some(_) => serde_json::json!({
+                                    "ok": false,
+                                    "error": "begin_native_restore requires a target snapshot",
+                                }),
+                                None => serde_json::json!({
+                                    "ok": false,
+                                    "error": "read-only mounts cannot restore",
+                                }),
+                            }
+                        }
+                        "adopt_native_restore" => {
+                            let snapshot = request
+                                .get("snapshot")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            let request_id = request
+                                .get("request_id")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            let adopted = match sealer.as_ref() {
+                                Some(sealer) if !snapshot.is_empty() && !request_id.is_empty() => {
+                                    sealer.adopt_native_restore(request_id, snapshot).await
+                                }
+                                Some(_) => Err(CliError::usage(
+                                    "adopt_native_restore requires request_id and snapshot",
+                                )),
+                                None => Err(CliError::usage(
+                                    "read-only mounts cannot adopt a restored save",
+                                )),
+                            };
+                            match adopted {
+                                Ok(affected) => {
+                                    invalidate(affected);
+                                    serde_json::json!({ "ok": true })
+                                }
+                                Err(error) => {
+                                    serde_json::json!({ "ok": false, "error": error.to_string() })
+                                }
+                            }
+                        }
+                        "ack-restore" => {
+                            let request_id = request
+                                .get("request_id")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            match sealer.as_ref() {
+                                Some(sealer) if !request_id.is_empty() => {
+                                    match sealer.acknowledge_restore_response(request_id) {
+                                        Ok(()) => serde_json::json!({ "ok": true }),
+                                        Err(error) => serde_json::json!({
+                                            "ok": false,
+                                            "error": error.to_string(),
+                                        }),
+                                    }
+                                }
+                                Some(_) => serde_json::json!({
+                                    "ok": false,
+                                    "error": "ack-restore requires request_id",
+                                }),
+                                None => serde_json::json!({
+                                    "ok": false,
+                                    "error": "read-only mount has no restore receipts",
+                                }),
+                            }
+                        }
+                        "fail_native_restore" => {
+                            let request_id = request
+                                .get("request_id")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            let reason = request
+                                .get("reason")
+                                .and_then(|value| value.as_str())
+                                .unwrap_or_default();
+                            match sealer.as_ref() {
+                                Some(sealer) if !request_id.is_empty() && !reason.is_empty() => {
+                                    match sealer.fail_native_restore(request_id, reason) {
+                                        Ok(()) => serde_json::json!({ "ok": true }),
+                                        Err(error) => serde_json::json!({
+                                            "ok": false,
+                                            "error": error.to_string(),
+                                        }),
+                                    }
+                                }
+                                Some(_) => serde_json::json!({
+                                    "ok": false,
+                                    "error": "fail_native_restore requires request_id and reason",
+                                }),
+                                None => serde_json::json!({
+                                    "ok": false,
+                                    "error": "read-only mount has no restore lifecycle",
+                                }),
+                            }
+                        }
+                        "restore-status" => match sealer.as_ref() {
+                            Some(sealer) => match sealer.active_restore() {
+                                Ok(operation) => serde_json::json!({
+                                    "ok": true,
+                                    "operation": operation,
+                                }),
+                                Err(error) => serde_json::json!({
+                                    "ok": false,
+                                    "error": error.to_string(),
+                                }),
+                            },
+                            None => serde_json::json!({
+                                "ok": true,
+                                "operation": serde_json::Value::Null,
+                            }),
+                        },
                         // The upper was mutated out-of-band (restore writes into the state dir
                         // from the CLI process); rebuild the dirty index from disk so an
                         // auto-commit mount seals the new state, and disarm the fail-closed
@@ -1405,8 +2041,12 @@ async fn handle_seal(
         Arc::new(move |ev| drop(tx.send(crate::commands::push_event_message(&ev))));
     let message = req.message.unwrap_or_else(|| "tl fs snapshot".to_string());
     let clear = req.clear;
-    let mut seal =
-        tokio::spawn(async move { sealer.seal_once(&message, clear, Some(progress)).await });
+    let request_id = req.request_id;
+    let mut seal = tokio::spawn(async move {
+        sealer
+            .seal_once(&message, clear, Some(progress), request_id)
+            .await
+    });
     // Forward events as they come, throttled — a spinner can't render more than ~2/s anyway.
     // Write failures are ignored: the seal is not cancellable mid-push without stranding the
     // commit, so a vanished client just stops seeing progress.
@@ -1450,6 +2090,7 @@ async fn handle_seal(
                     clean: true,
                     pending: false,
                     pending_watermark: None,
+                    completed_request_id: None,
                     commit: core.current_commit(),
                     files: None,
                     chunks_uploaded: None,
@@ -1462,6 +2103,7 @@ async fn handle_seal(
                     clean: false,
                     pending: true,
                     pending_watermark: Some(watermark),
+                    completed_request_id: None,
                     commit: core.current_commit(),
                     files: None,
                     chunks_uploaded: None,
@@ -1474,6 +2116,7 @@ async fn handle_seal(
                     clean: false,
                     pending: false,
                     pending_watermark: None,
+                    completed_request_id: r.completed_request_id,
                     commit: r.commit,
                     files: Some(r.files as u64),
                     chunks_uploaded: Some(r.chunks_uploaded as u64),
@@ -1505,8 +2148,7 @@ type ChunkList = Vec<([u8; 32], u32)>;
 #[cfg(unix)]
 enum SealOutcome {
     /// Nothing dirty since the watermark and no pending renames: no commit was minted.
-    /// `cleared` reports a requested overlay clear all the same — a clean seal can still
-    /// drop retained files (earlier kept-overlay seals, ignored files).
+    /// `cleared` reports a requested generation-safe retained-byte trim all the same.
     Clean {
         cleared: Option<Vec<String>>,
     },
@@ -1519,7 +2161,10 @@ enum SealOutcome {
 
 /// What a completed seal knows — the `seal` control op's reply body.
 #[cfg(unix)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 struct SealReport {
+    #[serde(default)]
+    completed_request_id: Option<String>,
     commit: String,
     files: usize,
     chunks_uploaded: usize,
@@ -1528,9 +2173,8 @@ struct SealReport {
     sealed_paths: Vec<String>,
     /// Wall time of the push (chunk/hash + upload + server commit), for the CLI timing line.
     push_ms: u64,
-    /// Every repo path a requested overlay clear dropped (`None` when no clear was asked
-    /// for): the caller's kernel revalidation set — broader than `sealed_paths`, since the
-    /// upper also retains ignored files and previously sealed content.
+    /// Every generation-owned retained path a requested clear dropped (`None` when no clear was
+    /// asked for). Later-generation writes and ignored/local-only content are excluded.
     cleared: Option<Vec<String>>,
 }
 
@@ -1545,6 +2189,9 @@ struct Sealer {
     repo: String,
     workspace: String,
     native_filesystem: bool,
+    /// Authoritative mutation/generation state for writable native filesystems. Git-backed
+    /// mounts keep their existing in-memory generation machinery.
+    local_state: Option<super::local_state::LocalState>,
     state_dir: PathBuf,
     mountpoint: PathBuf,
     overlay: Arc<OverlayFs>,
@@ -1600,23 +2247,15 @@ struct SealerState {
     /// its dirty gate against a half-restored workspace). Seals, trims, and the dirty view
     /// all fail closed while this is set.
     reindex_pending: bool,
-    /// Fully verified native root prepared ahead of the publish watermark. The value is persisted,
-    /// so a daemon restart can validate it against the rebuilt dirty journal and seal with only a
-    /// metadata snapshot record plus pointer advance.
-    prepared_native: Option<PreparedNativeJournal>,
-    /// Persisted candidates are not trusted until the background preparer has matched their exact
-    /// path intent and stat identities against the rebuilt overlay journal. Candidates produced in
-    /// this process are validated by construction.
-    prepared_native_validated: bool,
-    /// A manual/autosave request waiting for the background-prepared generation to become
-    /// publishable. Persisted separately so a daemon restart resumes publication.
-    pending_native_seal: Option<PendingNativeSeal>,
 }
 
 #[cfg(unix)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
 struct PreparedNativeJournal {
     format_ver: u16,
+    /// Durable local generation this candidate was prepared from. Overlay watermarks are only
+    /// cache-pruning coordinates and must not identify publication/recovery state.
+    local_generation: u64,
     watermark: u64,
     base_snapshot: String,
     signature: Vec<String>,
@@ -1630,39 +2269,25 @@ struct PreparedNativeJournal {
     candidate: tensorlake::artifact_storage::native_fs::NativePreparedSnapshotCandidate,
 }
 
+/// Exact immutable local input captured while the overlay generation fence is held. This record is
+/// committed in the same redb transaction that changes Open(N) to Frozen(N); preparation after the
+/// fence never re-resolves the live overlay and therefore cannot absorb writes from N+1.
 #[cfg(unix)]
 #[derive(Clone, Debug, Serialize, Deserialize)]
-struct PendingNativeSeal {
+struct FrozenNativeGeneration {
     format_ver: u16,
-    message: String,
-}
-
-#[cfg(unix)]
-impl PendingNativeSeal {
-    fn file(state_dir: &Path) -> PathBuf {
-        state_dir.join("native-seal-request.json")
-    }
-
-    fn load(state_dir: &Path) -> Option<Self> {
-        std::fs::read(Self::file(state_dir))
-            .ok()
-            .and_then(|raw| serde_json::from_slice(&raw).ok())
-            .filter(|request: &Self| request.format_ver == 1)
-    }
-
-    fn save(&self, state_dir: &Path) -> std::io::Result<()> {
-        let tmp = state_dir.join("native-seal-request.json.tmp");
-        std::fs::write(
-            &tmp,
-            serde_json::to_vec(self).expect("native seal request serializes"),
-        )?;
-        std::fs::rename(tmp, Self::file(state_dir))
-    }
-
-    fn reset(state_dir: &Path) {
-        let _ = std::fs::remove_file(Self::file(state_dir));
-        let _ = std::fs::remove_file(state_dir.join("native-seal-request.json.tmp"));
-    }
+    local_generation: u64,
+    preparation_operation_id: String,
+    watermark: u64,
+    captured_upserts: Vec<(String, PathBuf)>,
+    deletes: Vec<String>,
+    redirects: Vec<(String, String)>,
+    signature: Vec<String>,
+    stats: std::collections::BTreeMap<String, SealedStat>,
+    path_stats: std::collections::BTreeMap<String, PreparedNativePathStat>,
+    sealed_upserts: Vec<String>,
+    sealed_paths: Vec<String>,
+    tombstoned: Vec<String>,
 }
 
 #[cfg(unix)]
@@ -1696,54 +2321,152 @@ impl PreparedNativePathStat {
 }
 
 #[cfg(unix)]
-impl PreparedNativeJournal {
-    fn file(state_dir: &Path) -> PathBuf {
-        state_dir.join("native-prepared.json")
-    }
+fn build_frozen_native_capture(
+    local: &super::local_state::LocalState,
+    state_dir: &Path,
+    mountpoint: &Path,
+    local_generation: u64,
+    delta: &super::overlay::DirtyDelta,
+    recently: &std::collections::HashSet<String>,
+    mut current_redirects: Vec<(String, String)>,
+) -> Result<FrozenNativeGeneration> {
+    use tensorlake::artifact_storage::native_fs::{
+        NativeChangeSet, NativeLocalUpsert, NativeRename,
+    };
 
-    fn load(state_dir: &Path) -> Option<Self> {
-        std::fs::read(Self::file(state_dir))
-            .ok()
-            .and_then(|raw| serde_json::from_slice(&raw).ok())
-            .filter(|prepared: &Self| prepared.format_ver == 3)
+    let resolved = resolve_seal(state_dir, mountpoint, delta, recently, &Default::default())
+        .map_err(|error| CliError::usage(format!("native freeze resolution failed: {error}")))?;
+    let mut upserts: std::collections::BTreeMap<String, PathBuf> = resolved
+        .directories
+        .iter()
+        .map(|(path, source)| (path.clone(), source.clone()))
+        .collect();
+    for file in &resolved.files {
+        if file.delete
+            || matches!(
+                &file.source,
+                tensorlake::artifact_storage::ingest::PushSource::KnownOid(_)
+            )
+        {
+            continue;
+        }
+        upserts.insert(
+            file.repo_path.clone(),
+            state_dir.join("upper").join(&file.repo_path),
+        );
     }
-
-    fn save(&self, state_dir: &Path) -> std::io::Result<()> {
-        let tmp = state_dir.join("native-prepared.json.tmp");
-        std::fs::write(
-            &tmp,
-            serde_json::to_vec(self).expect("native prepared journal serializes"),
-        )?;
-        std::fs::rename(tmp, Self::file(state_dir))
-    }
-
-    fn reset(state_dir: &Path) {
-        let _ = std::fs::remove_file(Self::file(state_dir));
-        let _ = std::fs::remove_file(state_dir.join("native-prepared.json.tmp"));
-    }
-
-    fn matches_resolved(
-        &self,
-        signature: &[String],
-        stats: &std::collections::BTreeMap<String, SealedStat>,
-        path_stats: &std::collections::BTreeMap<String, PreparedNativePathStat>,
-        sealed_upserts: &[String],
-        sealed_paths: &[String],
-        delete_paths: &[String],
-        redirects: &[(String, String)],
-    ) -> bool {
-        self.signature == signature
-            && &self.stats == stats
-            && &self.path_stats == path_stats
-            && self.sealed_upserts == sealed_upserts
-            && self.sealed_paths == sealed_paths
-            && self.delete_paths == delete_paths
-            && self.redirects == redirects
-    }
+    let mut deletes: Vec<String> = resolved
+        .files
+        .iter()
+        .filter(|file| file.delete)
+        .map(|file| file.repo_path.clone())
+        .collect();
+    deletes.sort();
+    deletes.dedup();
+    current_redirects.sort();
+    let mut renames: Vec<NativeRename> = current_redirects
+        .iter()
+        .cloned()
+        .map(|(to, from)| NativeRename { from, to })
+        .collect();
+    renames.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
+    let unresolved_changes = NativeChangeSet {
+        upserts: upserts
+            .iter()
+            .map(|(path, source)| NativeLocalUpsert {
+                path: path.clone(),
+                source: source.clone(),
+            })
+            .collect(),
+        deletes: deletes.clone(),
+        renames,
+    };
+    let signature = native_change_signature(&unresolved_changes);
+    let stats = resolved
+        .stats
+        .iter()
+        .map(|(path, stat)| (path.clone(), *stat))
+        .collect();
+    let path_stats = unresolved_changes
+        .upserts
+        .iter()
+        .map(|upsert| {
+            let metadata = std::fs::symlink_metadata(&upsert.source).map_err(|error| {
+                CliError::usage(format!(
+                    "statting frozen native path {} failed: {error}",
+                    upsert.path
+                ))
+            })?;
+            Ok((upsert.path.clone(), PreparedNativePathStat::of(&metadata)))
+        })
+        .collect::<Result<_>>()?;
+    let mut sealed_upserts: Vec<String> = resolved.sealed_upserts.iter().cloned().collect();
+    sealed_upserts.sort();
+    let mut sealed_paths: Vec<String> = resolved
+        .files
+        .iter()
+        .map(|file| file.repo_path.clone())
+        .chain(resolved.directories.iter().map(|(path, _)| path.clone()))
+        .collect();
+    sealed_paths.sort();
+    sealed_paths.dedup();
+    let tombstoned = resolved.tombstoned;
+    local
+        .claim_generation_capture(local_generation)
+        .map_err(|error| {
+            CliError::usage(format!(
+                "claiming generation capture before creation failed: {error}"
+            ))
+        })?;
+    let captured_upserts = super::generation_capture::capture_managed_generation_upserts(
+        state_dir,
+        local_generation,
+        upserts,
+    )?
+    .into_iter()
+    .map(|upsert| (upsert.path, upsert.source))
+    .collect();
+    let capture_bytes =
+        super::generation_capture::generation_capture_bytes(state_dir, local_generation)?;
+    local
+        .set_generation_capture_bytes(local_generation, capture_bytes)
+        .map_err(|error| {
+            CliError::usage(format!(
+                "recording generation capture bytes failed: {error}"
+            ))
+        })?;
+    Ok(FrozenNativeGeneration {
+        format_ver: 2,
+        local_generation,
+        preparation_operation_id: uuid::Uuid::new_v4().to_string(),
+        watermark: delta.watermark,
+        captured_upserts,
+        deletes,
+        redirects: current_redirects,
+        signature,
+        stats,
+        path_stats,
+        sealed_upserts,
+        sealed_paths,
+        tombstoned,
+    })
 }
 
 #[cfg(unix)]
 impl Sealer {
+    fn acknowledge_snapshot_response(&self, request_id: &str) -> Result<()> {
+        let local = self.local_state.as_ref().ok_or_else(|| {
+            CliError::usage("legacy repository mounts do not use native snapshot receipts")
+        })?;
+        local
+            .acknowledge_completed_publish_request(request_id)
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "acknowledging completed native snapshot request {request_id}: {error}"
+                ))
+            })
+    }
+
     /// Prepare the current native dirty generation without publishing it. This is the write-path
     /// half of snapshotting: local reads, hashing, compression, segment upload, Merkle composition,
     /// and declaration verification run after files become quiet. `seal_once` only freezes and
@@ -1756,6 +2479,10 @@ impl Sealer {
         if !self.native_filesystem {
             return Ok(());
         }
+        let local = self
+            .local_state
+            .as_ref()
+            .expect("writable native sealer has durable local state");
         if self.overlay.has_redirects() {
             let consumed = self
                 .overlay
@@ -1768,7 +2495,7 @@ impl Sealer {
                 eprintln!("autosave: reaped {} sealed rename(s)", consumed.len());
             }
         }
-        let (epoch, sealed_gen, recently, existing) = {
+        let (epoch, sealed_gen, recently) = {
             let mut st = self.state.lock().await;
             if st.reindex_pending {
                 return Ok(());
@@ -1776,204 +2503,316 @@ impl Sealer {
             let epoch = self.overlay.epoch();
             if epoch != st.seen_epoch {
                 st.seen_epoch = epoch;
-                st.prepared_native = None;
-                st.prepared_native_validated = false;
-                PreparedNativeJournal::reset(&self.state_dir);
-                st.pending_native_seal = None;
-                PendingNativeSeal::reset(&self.state_dir);
             }
-            let recently = st
+            let recently: std::collections::HashSet<String> = st
                 .recent_seals
                 .iter()
                 .flat_map(|(_, set)| set)
                 .cloned()
                 .collect();
-            (
-                epoch,
-                st.sealed_gen,
-                recently,
-                st.prepared_native
-                    .clone()
-                    .filter(|_| st.prepared_native_validated),
-            )
+            (epoch, st.sealed_gen, recently)
         };
-        let mut delta = self.overlay.dirty_since(sealed_gen);
-        let healed = self
-            .overlay
-            .heal_replaced_files(delta.upserts.iter().map(|(path, _)| path.as_str()))
-            .await
+
+        // Resume the oldest frozen generation first, while retaining already-prepared older
+        // generations for the serialized publisher. The capture watermark (not merely the last
+        // published watermark) prevents later generations from recapturing earlier dirty rows.
+        let mut generations = local.generations().map_err(|error| {
+            CliError::usage(format!(
+                "reading durable native generations failed: {error}"
+            ))
+        })?;
+        generations.sort_by_key(|generation| generation.generation);
+        let mut capture_since = sealed_gen;
+        let mut earlier_capture_has_rename = false;
+        for generation in generations
+            .iter()
+            .filter(|generation| generation.state != super::local_state::GenerationState::Open)
+        {
+            if matches!(
+                generation.state,
+                super::local_state::GenerationState::Prepared
+                    | super::local_state::GenerationState::PublishRequested
+                    | super::local_state::GenerationState::Published
+            ) {
+                let prepared = local
+                    .prepared(generation.generation)
+                    .map_err(|error| {
+                        CliError::usage(format!("reading durable native candidate failed: {error}"))
+                    })?
+                    .ok_or_else(|| {
+                        CliError::usage(format!(
+                            "durable native generation {} has no prepared candidate",
+                            generation.generation
+                        ))
+                    })?;
+                let _: PreparedNativeJournal = serde_json::from_slice(&prepared.candidate)
+                    .map_err(|error| {
+                        CliError::usage(format!(
+                            "durable native candidate {} is corrupt: {error}",
+                            generation.generation
+                        ))
+                    })?;
+            }
+            if let Some(bytes) = local
+                .frozen_capture(generation.generation)
+                .map_err(|error| {
+                    CliError::usage(format!(
+                        "reading frozen native capture {} failed: {error}",
+                        generation.generation
+                    ))
+                })?
+            {
+                let capture: FrozenNativeGeneration =
+                    serde_json::from_slice(&bytes).map_err(|error| {
+                        CliError::usage(format!(
+                            "frozen native capture {} is corrupt: {error}",
+                            generation.generation
+                        ))
+                    })?;
+                if capture.format_ver != 2 || capture.local_generation != generation.generation {
+                    return Err(CliError::usage(format!(
+                        "frozen native generation {} has an incompatible capture",
+                        generation.generation
+                    )));
+                }
+                capture_since = capture_since.max(capture.watermark);
+                earlier_capture_has_rename |= !capture.redirects.is_empty();
+            }
+        }
+
+        let frozen = generations
+            .iter()
+            .find(|generation| generation.state == super::local_state::GenerationState::Frozen)
+            .map(|generation| generation.generation);
+
+        // Heal while the generation is still open so the whiteout is journaled into the same
+        // generation. Recovery of an already-frozen generation skips this mutation and resolves
+        // only its durable path set.
+        let mut live_delta = self.overlay.dirty_since(capture_since);
+        if frozen.is_none() {
+            let in_flight = generations
+                .iter()
+                .filter(|generation| generation.state != super::local_state::GenerationState::Open)
+                .count();
+            if in_flight >= super::local_state::MAX_INFLIGHT_GENERATIONS {
+                return Ok(());
+            }
+            // A lower-backed rename in N changes the coordinate system for N+1. Wait until N is
+            // adopted and the lower refresh rebases the surviving redirect before freezing a
+            // later generation; ordinary content-only generations remain fully pipelined.
+            if earlier_capture_has_rename {
+                return Ok(());
+            }
+            if live_delta.is_empty() && !self.overlay.has_redirects() {
+                return Ok(());
+            }
+            let healed = self
+                .overlay
+                .heal_replaced_files(live_delta.upserts.iter().map(|path| path.0.as_str()))
+                .await
+                .map_err(|error| {
+                    CliError::usage(format!(
+                        "healing native dir-over-file state failed: {error}"
+                    ))
+                })?;
+            if !healed.is_empty() {
+                live_delta = self.overlay.dirty_since(capture_since);
+                (self.invalidate)(self.overlay.invals_for(&healed));
+            }
+        }
+
+        let local_generation = if let Some(generation) = frozen {
+            generation
+        } else {
+            let frozen_cell = std::sync::Mutex::new(None);
+            let active_generation = local.active_generation().map_err(|error| {
+                CliError::usage(format!("reading active native generation failed: {error}"))
+            })?;
+            let state_dir = self.state_dir.clone();
+            let mountpoint = self.mountpoint.clone();
+            let recently = recently.clone();
+            let overlay = self.overlay.clone();
+            self.overlay
+                .freeze_dirty_since_with(capture_since, |delta| {
+                    let capture = tokio::task::block_in_place(|| {
+                        build_frozen_native_capture(
+                            local,
+                            &state_dir,
+                            &mountpoint,
+                            active_generation,
+                            delta,
+                            &recently,
+                            overlay.redirect_entries(),
+                        )
+                    })
+                    .map_err(|error| gsvc_mount::MountError::Protocol(error.to_string()))?;
+                    let encoded = serde_json::to_vec(&capture).map_err(|error| {
+                        gsvc_mount::MountError::Protocol(format!(
+                            "serializing frozen native generation failed: {error}"
+                        ))
+                    })?;
+                    let frozen = local
+                        .freeze_current_with_capture(encoded)
+                        .map_err(|error| {
+                            gsvc_mount::MountError::Protocol(format!(
+                                "freezing durable native generation failed closed: {error}"
+                            ))
+                        })?;
+                    *frozen_cell.lock().expect("frozen generation cell") = frozen;
+                    Ok(())
+                })
+                .await
+                .map_err(|error| CliError::usage(format!("native generation freeze: {error}")))?;
+            let Some(frozen) = frozen_cell
+                .into_inner()
+                .expect("frozen generation cell is not poisoned")
+            else {
+                if live_delta.is_empty() {
+                    return Ok(());
+                }
+                return Err(CliError::usage(
+                    "durable journal reported a clean generation while the overlay was dirty; \
+                     refusing to prepare an incomplete snapshot",
+                ));
+            };
+            frozen.generation
+        };
+
+        let dirty = local.dirty_generation(local_generation).map_err(|error| {
+            CliError::usage(format!(
+                "reading frozen native generation {local_generation} failed: {error}"
+            ))
+        })?;
+        let capture_bytes = local
+            .frozen_capture(local_generation)
             .map_err(|error| {
                 CliError::usage(format!(
-                    "healing native dir-over-file state failed: {error}"
+                    "reading frozen native capture {local_generation} failed: {error}"
+                ))
+            })?
+            .ok_or_else(|| {
+                CliError::usage(format!(
+                    "frozen native generation {local_generation} has no immutable capture; \
+                     refusing to resolve it from a later live overlay"
                 ))
             })?;
-        if !healed.is_empty() {
-            delta = self.overlay.dirty_since(sealed_gen);
-            (self.invalidate)(self.overlay.invals_for(&healed));
+        let capture: FrozenNativeGeneration =
+            serde_json::from_slice(&capture_bytes).map_err(|error| {
+                CliError::usage(format!(
+                    "frozen native capture {local_generation} is corrupt: {error}"
+                ))
+            })?;
+        if capture.format_ver != 2 || capture.local_generation != local_generation {
+            return Err(CliError::usage(format!(
+                "frozen native generation {local_generation} has an incompatible capture"
+            )));
         }
-        if delta.is_empty() && !self.overlay.has_redirects() {
-            return Ok(());
-        }
-        let current_redirects = self.overlay.redirect_entries();
-        if existing.as_ref().is_some_and(|prepared| {
-            prepared.watermark == delta.watermark && prepared.redirects == current_redirects
-        }) {
-            return Ok(());
-        }
-        let watermark = delta.watermark;
-        let (sd, mp) = (self.state_dir.clone(), self.mountpoint.clone());
-        let resolved = tokio::task::spawn_blocking(move || {
-            resolve_seal(&sd, &mp, &delta, &recently, &Default::default())
-        })
-        .await
-        .map_err(|error| CliError::usage(format!("native prepare task failed: {error}")))?
-        .map_err(|error| CliError::usage(format!("native prepare resolution failed: {error}")))?;
-        let mut upserts: std::collections::BTreeMap<String, PathBuf> = resolved
-            .directories
-            .iter()
-            .map(|(path, source)| (path.clone(), source.clone()))
-            .collect();
-        for file in &resolved.files {
-            if file.delete {
-                continue;
-            }
-            if matches!(
-                &file.source,
-                tensorlake::artifact_storage::ingest::PushSource::KnownOid(_)
-            ) {
-                continue;
-            }
-            upserts.insert(
-                file.repo_path.clone(),
-                self.state_dir.join("upper").join(&file.repo_path),
-            );
-        }
-        let mut deletes: Vec<String> = resolved
-            .files
-            .iter()
-            .filter(|file| file.delete)
-            .map(|file| file.repo_path.clone())
-            .collect();
-        deletes.sort();
-        deletes.dedup();
-        let mut renames: Vec<NativeRename> = current_redirects
-            .iter()
-            .cloned()
-            .into_iter()
-            .map(|(to, from)| NativeRename { from, to })
-            .collect();
-        renames.sort_by(|a, b| (&a.from, &a.to).cmp(&(&b.from, &b.to)));
-        let changes = NativeChangeSet {
-            upserts: upserts
-                .into_iter()
-                .map(|(path, source)| NativeLocalUpsert { path, source })
-                .collect(),
-            deletes,
-            renames,
-        };
-        if changes.upserts.is_empty() && changes.deletes.is_empty() && changes.renames.is_empty() {
+        let watermark = capture.watermark;
+        if capture.captured_upserts.is_empty()
+            && capture.deletes.is_empty()
+            && capture.redirects.is_empty()
+        {
             let mut st = self.state.lock().await;
             if self.overlay.epoch() != epoch || st.sealed_gen != sealed_gen {
                 return Ok(());
             }
+            local
+                .abort_unpublished_generation(local_generation)
+                .map_err(|error| {
+                    CliError::usage(format!(
+                        "retiring empty durable native generation failed: {error}"
+                    ))
+                })?;
             st.sealed_gen = watermark;
             self.overlay.prune_dirty(watermark);
             self.overlay.close_dirty_base_if_clean();
-            st.prepared_native = None;
-            st.prepared_native_validated = false;
-            PreparedNativeJournal::reset(&self.state_dir);
             self.publish_mirror(&st);
             return Ok(());
         }
-        let signature = native_change_signature(&changes);
-        let stats: std::collections::BTreeMap<_, _> = resolved
-            .stats
+        let renames: Vec<NativeRename> = capture
+            .redirects
             .iter()
-            .map(|(p, s)| (p.clone(), *s))
-            .collect();
-        let path_stats: std::collections::BTreeMap<_, _> = changes
-            .upserts
-            .iter()
-            .map(|upsert| {
-                let meta = std::fs::symlink_metadata(&upsert.source).map_err(|error| {
-                    CliError::usage(format!(
-                        "statting native prepared path {} failed: {error}",
-                        upsert.path
-                    ))
-                })?;
-                Ok((upsert.path.clone(), PreparedNativePathStat::of(&meta)))
+            .map(|(to, from)| NativeRename {
+                from: from.clone(),
+                to: to.clone(),
             })
-            .collect::<Result<_>>()?;
-        let mut sealed_upserts: Vec<String> = resolved.sealed_upserts.iter().cloned().collect();
-        sealed_upserts.sort();
-        let mut sealed_paths: Vec<String> = resolved
-            .files
-            .iter()
-            .map(|file| file.repo_path.clone())
-            .chain(resolved.directories.iter().map(|(path, _)| path.clone()))
             .collect();
-        sealed_paths.sort();
-        sealed_paths.dedup();
-        let delete_paths = changes.deletes.clone();
-        let redirects: Vec<(String, String)> = changes
-            .renames
-            .iter()
-            .map(|rename| (rename.to.clone(), rename.from.clone()))
-            .collect();
-        let tombstoned = resolved.tombstoned.clone();
+        let changes = NativeChangeSet {
+            upserts: capture
+                .captured_upserts
+                .iter()
+                .map(|(path, source)| NativeLocalUpsert {
+                    path: path.clone(),
+                    source: source.clone(),
+                })
+                .collect(),
+            deletes: capture.deletes.clone(),
+            renames,
+        };
+        let signature = capture.signature;
+        let stats = capture.stats;
+        let path_stats = capture.path_stats;
+        let sealed_upserts = capture.sealed_upserts;
+        let sealed_paths = capture.sealed_paths;
+        let delete_paths = capture.deletes;
+        let redirects = capture.redirects;
+        let tombstoned = capture.tombstoned;
         if !tombstoned.is_empty() {
             (self.invalidate)(self.overlay.invals_for(&tombstoned));
         }
-        if let Some(mut recovered) = existing
-            && recovered.matches_resolved(
-                &signature,
-                &stats,
-                &path_stats,
-                &sealed_upserts,
-                &sealed_paths,
-                &delete_paths,
-                &redirects,
-            )
-        {
-            recovered.watermark = watermark;
-            recovered.tombstoned = tombstoned;
-            recovered.save(&self.state_dir).map_err(|error| {
-                CliError::usage(format!(
-                    "persisting recovered native prepared journal failed: {error}"
-                ))
-            })?;
-            let mut st = self.state.lock().await;
-            if self.overlay.epoch() != epoch || st.sealed_gen != sealed_gen {
-                return Ok(());
-            }
-            st.prepared_native = Some(recovered);
-            st.prepared_native_validated = true;
-            return Ok(());
-        }
-        let base_snapshot = self
-            .overlay
-            .dirty_base()
-            .unwrap_or_else(|| self.core.current_commit());
+        let base_snapshot = dirty.base_snapshot.clone().ok_or_else(|| {
+            CliError::usage(format!(
+                "frozen durable native generation {local_generation} has no base snapshot"
+            ))
+        })?;
         let (user, token) = self.creds.lock().expect("creds lock").clone();
+        let segment_staging = self
+            .state_dir
+            .join("staging")
+            .join("generations")
+            .join(local_generation.to_string())
+            .join("segments");
+        match tokio::fs::remove_dir_all(&segment_staging).await {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => {
+                return Err(CliError::usage(format!(
+                    "cleaning generation-owned segment staging failed: {error}"
+                )));
+            }
+        }
+        tokio::fs::create_dir_all(&segment_staging).await?;
         let candidate = self
             .sdk
-            .prepare_native_snapshot_candidate_with_credential(
+            .prepare_native_snapshot_candidate_with_operation_and_staging_directory(
                 &self.project,
                 &self.repo,
                 &base_snapshot,
                 changes,
                 &user,
                 &token,
+                capture.preparation_operation_id.clone(),
+                Some(segment_staging),
             )
             .await
             .map_err(|error| {
                 CliError::usage(format!("native background upload failed: {error}"))
             })?;
+        let owned_bytes =
+            super::generation_capture::generation_capture_bytes(&self.state_dir, local_generation)?;
+        local
+            .set_generation_capture_bytes(local_generation, owned_bytes)
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "recording final generation-owned staging bytes failed: {error}"
+                ))
+            })?;
         let journal = PreparedNativeJournal {
-            format_ver: 3,
+            format_ver: 4,
+            local_generation,
             watermark,
-            base_snapshot,
-            signature,
+            base_snapshot: base_snapshot.clone(),
+            signature: signature.clone(),
             stats,
             path_stats,
             sealed_upserts,
@@ -1983,15 +2822,35 @@ impl Sealer {
             tombstoned,
             candidate,
         };
-        let mut st = self.state.lock().await;
-        if self.overlay.epoch() != epoch || st.sealed_gen != sealed_gen {
-            return Ok(());
-        }
-        journal.save(&self.state_dir).map_err(|error| {
+        let candidate_bytes = serde_json::to_vec(&journal).map_err(|error| {
             CliError::usage(format!(
-                "persisting native prepared journal failed: {error}"
+                "serializing durable native prepared generation failed: {error}"
             ))
         })?;
+        use sha2::{Digest, Sha256};
+        let source_fingerprint = hex::encode(Sha256::digest(
+            serde_json::to_vec(&signature).expect("native signature serializes"),
+        ));
+        local
+            .mark_prepared(super::local_state::PreparedGeneration::new(
+                local_generation,
+                Some(base_snapshot.clone()),
+                journal.candidate.root_id(),
+                source_fingerprint,
+                candidate_bytes,
+            ))
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "persisting durable native prepared generation failed: {error}"
+                ))
+            })?;
+        let st = self.state.lock().await;
+        if self.overlay.epoch() != epoch || st.sealed_gen != sealed_gen {
+            // The prepared generation remains durable and recovery will either publish or expose
+            // it for explicit repair. Never delete immutable evidence because the local overlay
+            // epoch changed after upload.
+            return Ok(());
+        }
         eprintln!(
             "autosave: prepared watermark={} files={} logical_bytes={} prepare_ms={} uploaded_bytes={} uploaded_segments={}/{}",
             journal.watermark,
@@ -2015,20 +2874,36 @@ impl Sealer {
             prepare_ms = journal.candidate.preparation_ms,
             "native journal generation prepared"
         );
-        st.prepared_native = Some(journal);
-        st.prepared_native_validated = true;
         Ok(())
     }
 
     /// Resume a manual/autosave publication request after the background journal worker finishes.
-    /// A newer write invalidates the candidate match and simply wakes preparation again; no content
-    /// work moves back onto the original control request.
+    /// Requests and their server idempotency keys live in the durable store, so a daemon crash or
+    /// lost HTTP response resumes the exact same publication rather than manufacturing a new one.
     async fn publish_pending_native_seal(&self) -> Result<()> {
-        let request = { self.state.lock().await.pending_native_seal.clone() };
+        let local = self
+            .local_state
+            .as_ref()
+            .expect("writable native sealer has durable local state");
+        let request = local
+            .publish_requests()
+            .map_err(|error| {
+                CliError::usage(format!("reading durable native snapshot requests: {error}"))
+            })?
+            .into_iter()
+            .filter(|request| request.failure.is_none())
+            .min_by_key(|request| (request.generation, request.created_at_ms));
         let Some(request) = request else {
             return Ok(());
         };
-        match self.seal_native_once(&request.message, false).await? {
+        match self
+            .seal_native_once(
+                &request.message,
+                request.clear_after_publish,
+                Some(request.request_id.clone()),
+            )
+            .await?
+        {
             SealOutcome::Sealed(report) => {
                 eprintln!(
                     "autosave: published requested native snapshot {} push_ms={}",
@@ -2044,142 +2919,492 @@ impl Sealer {
     /// Publish one fully prepared native journal generation. The preparation worker owns every
     /// content-bearing operation; this path only freezes the prepared watermark, records the
     /// immutable snapshot, advances the workspace, and retires that journal prefix.
-    async fn seal_native_once(&self, message: &str, clear: bool) -> Result<SealOutcome> {
+    async fn seal_native_once(
+        &self,
+        message: &str,
+        clear: bool,
+        request_id: Option<String>,
+    ) -> Result<SealOutcome> {
+        let local = self
+            .local_state
+            .as_ref()
+            .expect("writable native sealer has durable local state");
+        if let Some(request_id) = request_id.as_deref() {
+            if let Some(completed) =
+                local
+                    .completed_publish_request(request_id)
+                    .map_err(|error| {
+                        CliError::usage(format!(
+                            "reading completed native snapshot request {request_id}: {error}"
+                        ))
+                    })?
+            {
+                if completed.request.message != message
+                    || completed.request.clear_after_publish != clear
+                {
+                    return Err(CliError::usage(format!(
+                        "native snapshot request id {request_id} was already completed with \
+                         different request parameters"
+                    )));
+                }
+                let report =
+                    serde_json::from_slice::<SealReport>(&completed.response).map_err(|error| {
+                        CliError::usage(format!(
+                            "completed native snapshot request {request_id} has a corrupt durable \
+                             response: {error}"
+                        ))
+                    })?;
+                if report.commit != completed.snapshot_id {
+                    return Err(CliError::usage(format!(
+                        "completed native snapshot request {request_id} response names {}, \
+                         expected {}",
+                        report.commit, completed.snapshot_id
+                    )));
+                }
+                return Ok(SealOutcome::Sealed(report));
+            }
+        }
         let mut st = self.state.lock().await;
-        let prepared_matches = {
-            let delta = self.overlay.dirty_since(st.sealed_gen);
-            let redirects = self.overlay.redirect_entries();
-            let matches = st.prepared_native.as_ref().is_some_and(|prepared| {
-                st.prepared_native_validated
-                    && prepared.watermark == delta.watermark
-                    && prepared.redirects == redirects
-            });
-            (matches, delta)
-        };
-        let (matches, delta) = prepared_matches;
         if st.reindex_pending {
             return Err(CliError::usage(
                 "the overlay is being restored (reindex pending); nothing was sealed",
             ));
         }
         if self.overlay.epoch() != st.seen_epoch {
-            st.prepared_native = None;
-            st.prepared_native_validated = false;
-            PreparedNativeJournal::reset(&self.state_dir);
-            st.pending_native_seal = None;
-            PendingNativeSeal::reset(&self.state_dir);
             return Err(CliError::usage(
-                "the overlay changed while preparing the native journal; retry the snapshot",
+                "the overlay epoch changed while durable native work is in flight; run `tl fs \
+                 doctor` before retrying",
             ));
         }
-        if !matches {
+
+        let mut generations = local.generations().map_err(|error| {
+            CliError::usage(format!(
+                "reading durable native generations failed: {error}"
+            ))
+        })?;
+        generations.sort_by_key(|generation| generation.generation);
+        let local_generation = if let Some(generation) = generations
+            .iter()
+            .find(|generation| generation.state != super::local_state::GenerationState::Open)
+        {
+            generation.generation
+        } else {
+            let delta = self.overlay.dirty_since(st.sealed_gen);
             if delta.is_empty() && !self.overlay.has_redirects() {
-                st.pending_native_seal = None;
-                PendingNativeSeal::reset(&self.state_dir);
-                let cleared = clear.then(|| self.clear_overlay(&mut st)).transpose()?;
+                let cleared = if clear {
+                    let baselines = local.sealed_baselines().map_err(|error| {
+                        CliError::usage(format!(
+                            "reading retained native snapshot baselines: {error}"
+                        ))
+                    })?;
+                    let mut candidates = Vec::new();
+                    let mut tombstones = Vec::new();
+                    for baseline in baselines {
+                        match baseline.state {
+                            super::local_state::SealedPathState::Upsert { .. } => {
+                                candidates.push(baseline.path)
+                            }
+                            super::local_state::SealedPathState::Delete => {
+                                tombstones.push(baseline.path)
+                            }
+                        }
+                    }
+                    let outcome = self.overlay.trim_retained(&candidates, &tombstones).await;
+                    (self.invalidate)(outcome.invals);
+                    let cleared: Vec<String> = outcome
+                        .trimmed
+                        .into_iter()
+                        .chain(outcome.tombstones_removed)
+                        .collect();
+                    local.remove_sealed_baselines(&cleared).map_err(|error| {
+                        CliError::usage(format!(
+                            "recording generation-safe native cleanup: {error}"
+                        ))
+                    })?;
+                    for path in &cleared {
+                        st.sealed.upserts.remove(path);
+                        st.sealed.deletes.remove(path);
+                    }
+                    self.publish_mirror(&st);
+                    Some(cleared)
+                } else {
+                    None
+                };
                 return Ok(SealOutcome::Clean { cleared });
             }
-            // `--clear` cannot be completed asynchronously: dropping the whole overlay after this
-            // reply could erase writes that arrived after the requested watermark. Prepare in the
-            // background, but require the caller to retry the destructive operation explicitly.
-            if !clear {
-                let request = PendingNativeSeal {
-                    format_ver: 1,
-                    message: message.to_string(),
-                };
-                request.save(&self.state_dir).map_err(|error| {
-                    CliError::usage(format!("persisting native seal request failed: {error}"))
-                })?;
-                st.pending_native_seal = Some(request);
+            let frozen_cell = std::sync::Mutex::new(None);
+            let active_generation = local.active_generation().map_err(|error| {
+                CliError::usage(format!("reading active native generation failed: {error}"))
+            })?;
+            let state_dir = self.state_dir.clone();
+            let mountpoint = self.mountpoint.clone();
+            let recently: std::collections::HashSet<String> = st
+                .recent_seals
+                .iter()
+                .flat_map(|(_, paths)| paths)
+                .cloned()
+                .collect();
+            let overlay = self.overlay.clone();
+            self.overlay
+                .freeze_dirty_since_with(st.sealed_gen, |delta| {
+                    let capture = tokio::task::block_in_place(|| {
+                        build_frozen_native_capture(
+                            local,
+                            &state_dir,
+                            &mountpoint,
+                            active_generation,
+                            delta,
+                            &recently,
+                            overlay.redirect_entries(),
+                        )
+                    })
+                    .map_err(|error| gsvc_mount::MountError::Protocol(error.to_string()))?;
+                    let encoded = serde_json::to_vec(&capture).map_err(|error| {
+                        gsvc_mount::MountError::Protocol(format!(
+                            "serializing frozen native generation failed: {error}"
+                        ))
+                    })?;
+                    let frozen = local
+                        .freeze_current_with_capture(encoded)
+                        .map_err(|error| {
+                            gsvc_mount::MountError::Protocol(format!(
+                                "freezing durable native generation failed closed: {error}"
+                            ))
+                        })?;
+                    *frozen_cell.lock().expect("frozen generation cell") = frozen;
+                    Ok(())
+                })
+                .await
+                .map_err(|error| CliError::usage(format!("native generation freeze: {error}")))?;
+            frozen_cell
+                .into_inner()
+                .expect("frozen generation cell is not poisoned")
+                .ok_or_else(|| {
+                    CliError::usage(
+                        "durable journal reported clean while the overlay was dirty; refusing \
+                         snapshot publication",
+                    )
+                })?
+                .generation
+        };
+
+        let existing_request = local
+            .publish_requests()
+            .map_err(|error| {
+                CliError::usage(format!("reading durable native snapshot requests: {error}"))
+            })?
+            .into_iter()
+            .find(|request| request.generation == local_generation);
+        if let (Some(existing), Some(incoming_request_id)) =
+            (existing_request.as_ref(), request_id.as_deref())
+            && existing.request_id != incoming_request_id
+        {
+            // Explicit coalescing rule: one frozen generation publishes once under the first
+            // durable idempotency key/message. Later manual/autosave callers join that request;
+            // `--clear` may only strengthen its cleanup policy below. Rejecting the fresh
+            // per-invocation CLI id made a Pending snapshot impossible to retry.
+            tracing::info!(
+                local_generation,
+                canonical_request_id = %existing.request_id,
+                joined_request_id = %incoming_request_id,
+                "coalesced native snapshot request onto the generation's durable publisher"
+            );
+        }
+        let mut request = match existing_request {
+            Some(request) if clear && !request.clear_after_publish => local
+                .require_clear_after_publish(local_generation)
+                .map_err(|error| {
+                    CliError::usage(format!(
+                        "upgrading durable native snapshot cleanup request failed: {error}"
+                    ))
+                })?,
+            Some(request) => request,
+            None => {
+                let external = request_id.is_some();
+                let request = super::local_state::PublishRequest::new(
+                    request_id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                    local_generation,
+                    message,
+                    clear,
+                    chrono::Utc::now().timestamp_millis().max(0) as u64,
+                );
+                if external {
+                    request
+                } else {
+                    request.background()
+                }
             }
-            let watermark = delta.watermark;
+        };
+        if let Some(failure) = request.failure.as_deref() {
+            return Err(CliError::usage(format!(
+                "native snapshot request {} failed permanently: {failure}. Evidence remains in \
+                 `tl fs doctor`; automatic retries are disabled",
+                request.request_id
+            )));
+        }
+        local
+            .put_publish_request(request.clone())
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "persisting native snapshot request before publication failed closed: {error}"
+                ))
+            })?;
+
+        let Some(prepared_record) = local.prepared(local_generation).map_err(|error| {
+            CliError::usage(format!(
+                "reading durable native prepared candidate: {error}"
+            ))
+        })?
+        else {
+            let watermark = local
+                .dirty_generation(local_generation)
+                .map_err(|error| {
+                    CliError::usage(format!("reading pending native generation: {error}"))
+                })?
+                .paths
+                .into_iter()
+                .map(|path| path.sequence)
+                .max()
+                .unwrap_or(st.sealed_gen);
             drop(st);
             self.native_prepare_notify.notify_one();
             return Ok(SealOutcome::Pending { watermark });
-        }
-        let Some(prepared) = st
-            .prepared_native
-            .as_ref()
-            .filter(|_| st.prepared_native_validated)
-            .cloned()
-        else {
-            let delta = self.overlay.dirty_since(st.sealed_gen);
-            if delta.is_empty() && !self.overlay.has_redirects() {
-                let cleared = clear.then(|| self.clear_overlay(&mut st)).transpose()?;
-                return Ok(SealOutcome::Clean { cleared });
-            }
-            return Err(CliError::usage(
-                "native journal preparation is still pending; nothing was published",
-            ));
         };
-
-        let (user, token) = self.creds.lock().expect("creds lock").clone();
-        let push_started = std::time::Instant::now();
-        eprintln!(
-            "seal: publishing prepared watermark={} files={} (metadata only)",
-            prepared.watermark, prepared.candidate.files,
-        );
-        let report = self
-            .sdk
-            .publish_native_snapshot_candidate_with_credential(
-                &self.project,
-                &self.repo,
-                prepared.candidate.clone(),
-                &user,
-                &token,
-                tensorlake::artifact_storage::native_fs::NativePushOptions {
-                    message: message.to_string(),
-                    expected_snapshot_id: Some(prepared.base_snapshot.clone()),
-                    workspace_id: Some(self.workspace.clone()),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|error| {
+        let mut prepared: PreparedNativeJournal =
+            serde_json::from_slice(&prepared_record.candidate).map_err(|error| {
                 CliError::usage(format!(
-                    "native snapshot publish failed (will retry): {error}"
+                    "durable native prepared generation {local_generation} is corrupt: {error}"
                 ))
             })?;
-        let push_ms = push_started.elapsed().as_millis() as u64;
-        tracing::info!(
-            operation_id = %report.operation_id,
-            transport = %report.transport,
-            logical_bytes = report.logical_bytes,
-            stored_bytes = report.stored_bytes,
+        if prepared.local_generation != local_generation || prepared.format_ver != 4 {
+            return Err(CliError::usage(format!(
+                "durable native prepared generation {local_generation} has an incompatible format"
+            )));
+        }
+        let generation = local
+            .generation(local_generation)
+            .map_err(|error| CliError::usage(format!("reading native generation state: {error}")))?
+            .ok_or_else(|| CliError::usage("durable native generation disappeared"))?;
+        let (snapshot_id, files, push_ms) =
+            if generation.state == super::local_state::GenerationState::Published {
+                (
+                    generation.published_snapshot.clone().ok_or_else(|| {
+                        CliError::usage("published native generation has no snapshot id")
+                    })?,
+                    prepared.candidate.files,
+                    0,
+                )
+            } else {
+                let (user, token) = self.creds.lock().expect("creds lock").clone();
+                eprintln!(
+                    "seal: publishing prepared generation={} watermark={} files={} (metadata only)",
+                    local_generation, prepared.watermark, prepared.candidate.files,
+                );
+                let journal_template = prepared.clone();
+                let published = super::publish_durable_native_candidate(
+                    &self.sdk,
+                    &self.project,
+                    &self.repo,
+                    local,
+                    local_generation,
+                    &prepared_record.source_fingerprint,
+                    prepared.candidate.clone(),
+                    request.clone(),
+                    &user,
+                    &token,
+                    Some(self.workspace.clone()),
+                    None,
+                    move |candidate| {
+                        let mut journal = journal_template.clone();
+                        journal.base_snapshot =
+                            candidate.base_snapshot_id.clone().ok_or_else(|| {
+                                CliError::usage("rebased mounted snapshot candidate has no base")
+                            })?;
+                        journal.candidate = candidate.clone();
+                        serde_json::to_vec(&journal).map_err(Into::into)
+                    },
+                )
+                .await?;
+                let report = published.report;
+                prepared.candidate = published.candidate;
+                prepared.base_snapshot = prepared
+                    .candidate
+                    .base_snapshot_id
+                    .clone()
+                    .unwrap_or_else(|| prepared.base_snapshot.clone());
+                request = published.request;
+                let push_ms = published.publish_ms;
+                tracing::info!(
+                    operation_id = %report.operation_id,
+                    local_generation,
+                    transport = %report.transport,
+                    logical_bytes = report.logical_bytes,
+                    stored_bytes = report.stored_bytes,
+                    push_ms,
+                    client_total_ms = report.client_timings.total_ms,
+                    publish_complete_ms = ?report.client_timings.publish_complete_ms,
+                    prepared_watermark = prepared.watermark,
+                    "native prepared journal publish"
+                );
+                (report.snapshot_id, report.files, push_ms)
+            };
+
+        if request.clear_after_publish && self.core.current_commit() != snapshot_id {
+            let mut refreshed = false;
+            for _ in 0..50 {
+                match self.core.poll_ref().await {
+                    Ok(Some(refresh)) => {
+                        absorb_refresh(&self.overlay, &self.invalidate, &self.pending, &refresh);
+                    }
+                    Ok(None) => {}
+                    Err(error) => {
+                        return Err(CliError::usage(format!(
+                            "snapshot {snapshot_id} published, but the mount could not refresh \
+                             before generation-safe cleanup; cleanup remains durable and will \
+                             retry: {error}"
+                        )));
+                    }
+                }
+                if self.core.current_commit() == snapshot_id {
+                    refreshed = true;
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+            if !refreshed {
+                return Err(CliError::usage(format!(
+                    "snapshot {snapshot_id} published, but the mount has not observed it yet; \
+                     generation-safe cleanup remains durable and will retry"
+                )));
+            }
+        }
+
+        let mut baselines =
+            Vec::with_capacity(prepared.path_stats.len() + prepared.delete_paths.len());
+        for (path, stat) in &prepared.path_stats {
+            baselines.push(super::local_state::SealedBaseline::upsert(
+                path.clone(),
+                snapshot_id.clone(),
+                super::local_state::FileIdentity {
+                    device: stat.dev,
+                    inode: stat.ino,
+                    size: stat.size,
+                    mtime_secs: stat.mtime_secs,
+                    mtime_nanos: stat.mtime_nanos,
+                    ctime_secs: stat.ctime_secs,
+                    ctime_nanos: stat.ctime_nanos,
+                    mode: stat.mode,
+                },
+                None,
+            ));
+        }
+        baselines.extend(prepared.delete_paths.iter().map(|path| {
+            super::local_state::SealedBaseline::delete(path.clone(), snapshot_id.clone())
+        }));
+        // A requested clear is part of the durable publication request. Complete it before
+        // retiring that request so a crash can replay the idempotent trim. `trim_retained` skips
+        // paths dirty in N+1 and therefore never deletes writes that raced this publication;
+        // ignored/local-only content is intentionally retained because no published snapshot
+        // vouches for it.
+        let cleared = if request.clear_after_publish {
+            // The just-published N entries are still present in the in-memory dirty mirror until
+            // retirement. Drop only entries through N's exact watermark before trimming, so they
+            // are eligible while writes recorded in N+1 remain protected. If retirement fails,
+            // the durable Published generation remains authoritative and the retry repeats this
+            // idempotently; a daemon restart seeds N again from redb.
+            self.overlay.prune_dirty(prepared.watermark);
+            let outcome = self
+                .overlay
+                .trim_retained(&prepared.sealed_paths, &prepared.delete_paths)
+                .await;
+            (self.invalidate)(outcome.invals);
+            if !outcome.held_open.is_empty() {
+                return Err(CliError::usage(format!(
+                    "snapshot {snapshot_id} published, but {} retained path(s) are still open \
+                     (first: {}); cleanup remains durable and will retry after handles close",
+                    outcome.held_open.len(),
+                    outcome.held_open[0],
+                )));
+            }
+            Some(
+                outcome
+                    .trimmed
+                    .into_iter()
+                    .chain(outcome.tombstones_removed)
+                    .collect(),
+            )
+        } else {
+            None
+        };
+        let report = SealReport {
+            completed_request_id: request.requires_ack.then(|| request.request_id.clone()),
+            commit: snapshot_id.clone(),
+            files,
+            chunks_uploaded: 0,
+            chunks_total: 0,
+            sealed_paths: prepared.sealed_paths.clone(),
             push_ms,
-            client_total_ms = report.client_timings.total_ms,
-            publish_complete_ms = ?report.client_timings.publish_complete_ms,
-            prepared_watermark = prepared.watermark,
-            "native prepared journal publish"
-        );
+            cleared: cleared.clone(),
+        };
+        let completed_response = serde_json::to_vec(&report).map_err(|error| {
+            CliError::usage(format!(
+                "serializing durable native snapshot response failed closed: {error}"
+            ))
+        })?;
+        let baseline_removals = cleared.as_deref().unwrap_or(&[]);
+        local
+            .retire_published(
+                local_generation,
+                &snapshot_id,
+                &baselines,
+                baseline_removals,
+                completed_response,
+            )
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "adopting and retiring published native generation failed closed: {error}"
+                ))
+            })?;
 
         st.sealed_gen = prepared.watermark;
         self.overlay.prune_dirty(prepared.watermark);
         self.overlay.close_dirty_base_if_clean();
         st.recent_seals.push((
-            report.snapshot_id.clone(),
+            snapshot_id.clone(),
             prepared.sealed_upserts.iter().cloned().collect(),
         ));
         st.chunk_cache.clear();
-        st.prepared_native = None;
-        st.prepared_native_validated = false;
-        PreparedNativeJournal::reset(&self.state_dir);
-        st.pending_native_seal = None;
-        PendingNativeSeal::reset(&self.state_dir);
+        if let Err(error) = super::generation_capture::retire_generation_capture(
+            &self.state_dir,
+            prepared.local_generation,
+        ) {
+            eprintln!(
+                "seal: retiring local generation capture {} failed: {error}",
+                prepared.local_generation
+            );
+        }
         self.publish_mirror(&st);
 
+        let cleared_set: std::collections::HashSet<&str> =
+            baseline_removals.iter().map(String::as_str).collect();
         for (path, stat) in &prepared.stats {
-            st.sealed.upserts.insert(path.clone(), *stat);
-            st.sealed.deletes.remove(path);
+            if cleared_set.contains(path.as_str()) {
+                st.sealed.upserts.remove(path);
+                st.sealed.deletes.remove(path);
+            } else {
+                st.sealed.upserts.insert(path.clone(), *stat);
+                st.sealed.deletes.remove(path);
+            }
         }
         for path in &prepared.delete_paths {
             st.sealed.upserts.remove(path);
-            st.sealed.deletes.insert(path.clone());
+            if cleared_set.contains(path.as_str()) {
+                st.sealed.deletes.remove(path);
+            } else {
+                st.sealed.deletes.insert(path.clone());
+            }
         }
-        st.sealed.commit = report.snapshot_id.clone();
-        if let Err(error) = st.sealed.save(&self.state_dir) {
-            eprintln!("seal: persisting sealed index failed: {error}");
-        }
+        st.sealed.commit = snapshot_id.clone();
 
         match self.core.poll_ref().await {
             Ok(Some(refresh)) => {
@@ -2190,30 +3415,12 @@ impl Sealer {
                 eprintln!("seal: post-seal refresh failed (follow poll catches up): {error}")
             }
         }
-        if !prepared.redirects.is_empty() && self.core.current_commit() == report.snapshot_id {
+        if !prepared.redirects.is_empty() && self.core.current_commit() == snapshot_id {
             if let Err(error) = self.overlay.consume_redirect_entries(&prepared.redirects) {
                 eprintln!("seal: consuming native rename journal failed: {error}");
             }
         }
-        let cleared = clear
-            .then(|| {
-                self.clear_overlay(&mut st).map_err(|error| {
-                    CliError::usage(format!(
-                        "snapshot {} sealed, but clearing the overlay failed: {error}",
-                        report.snapshot_id
-                    ))
-                })
-            })
-            .transpose()?;
-        Ok(SealOutcome::Sealed(SealReport {
-            commit: report.snapshot_id,
-            files: report.files,
-            chunks_uploaded: 0,
-            chunks_total: 0,
-            sealed_paths: prepared.sealed_paths,
-            push_ms,
-            cleared,
-        }))
+        Ok(SealOutcome::Sealed(report))
     }
 
     /// Run ONE seal cycle: resolve the dirty delta since the sealed watermark (plus pending
@@ -2221,13 +3428,9 @@ impl Sealer {
     /// and advance the lower to the sealed commit. Errors are retryable — nothing was
     /// published, and the dirty set stays pending for the next cycle.
     ///
-    /// `clear` drops the WHOLE overlay after the seal (and its lower refresh), inside this
-    /// same cycle's state lock — the destructive `tl fs snapshot --clear` opt-in. Running it
-    /// here, not as a separate control op, is what makes the drop coherent: no writer-visible
-    /// window where another seal (or auto-commit tick) interleaves between seal and clear,
-    /// and the outcome reports exactly which paths the clear removed. A clean seal still
-    /// clears — earlier kept-overlay seals leave a populated upper that `tl fs sync` refuses
-    /// to run over.
+    /// For native filesystems, `clear` trims only retained paths owned by the published generation;
+    /// later writes and ignored/local-only content survive. Repository mounts retain their legacy
+    /// whole-overlay clear behavior.
     ///
     /// `progress` receives the push's `PushEvent`s (the `seal` op streams them to the CLI).
     async fn seal_once(
@@ -2235,9 +3438,10 @@ impl Sealer {
         message: &str,
         clear: bool,
         progress: Option<tensorlake::artifact_storage::ingest::PushProgress>,
+        request_id: Option<String>,
     ) -> Result<SealOutcome> {
         if self.native_filesystem {
-            return self.seal_native_once(message, clear).await;
+            return self.seal_native_once(message, clear, request_id).await;
         }
         use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
         let mut st = self.state.lock().await;
@@ -2254,11 +3458,6 @@ impl Sealer {
             st.seen_epoch = epoch;
             st.chunk_cache.clear();
             st.recent_seals.clear();
-            st.prepared_native = None;
-            st.prepared_native_validated = false;
-            PreparedNativeJournal::reset(&self.state_dir);
-            st.pending_native_seal = None;
-            PendingNativeSeal::reset(&self.state_dir);
             // The sealed index describes the pre-rewrite world too. Restore's own reindex
             // reconciles what genuinely survives; keeping records here would let a
             // stat-coincident future file absolve against dropped content.
@@ -2591,6 +3790,7 @@ impl Sealer {
             })
             .transpose()?;
         Ok(SealOutcome::Sealed(SealReport {
+            completed_request_id: None,
             commit: report.commit,
             files: report.files,
             chunks_uploaded: report.chunks_uploaded,
@@ -2601,7 +3801,7 @@ impl Sealer {
         }))
     }
 
-    /// Drop the whole overlay (the `--clear` half of a seal cycle), returning the FULL list
+    /// Drop the whole overlay for legacy repository-mount clear/reset, returning the FULL list
     /// of repo paths the drop removed. [`OverlayFs::clear_upper`]'s inval list only covers
     /// paths the kernel ever interned, so the complete answer comes from walking the raw
     /// upper/wh trees first (ignored files and whiteouts included — exactly the state that
@@ -2626,11 +3826,6 @@ impl Sealer {
         st.seen_epoch = self.overlay.epoch();
         st.chunk_cache.clear();
         st.recent_seals.clear();
-        st.prepared_native = None;
-        st.prepared_native_validated = false;
-        PreparedNativeJournal::reset(&self.state_dir);
-        st.pending_native_seal = None;
-        PendingNativeSeal::reset(&self.state_dir);
         // Nothing is retained anymore; a stale record would absolve a future upper file that
         // happens to stat-match dropped content.
         st.sealed = SealedIndex::default();
@@ -2653,6 +3848,131 @@ impl Sealer {
             .collect();
     }
 
+    fn begin_native_restore(
+        &self,
+        target_snapshot_id: &str,
+        discard_local: bool,
+    ) -> Result<super::local_state::RestoreOperation> {
+        if !self.native_filesystem {
+            return Err(CliError::usage(
+                "begin_native_restore is only valid for native filesystems",
+            ));
+        }
+        self.local_state
+            .as_ref()
+            .expect("writable native sealer has durable local state")
+            .begin_restore(
+                target_snapshot_id,
+                discard_local,
+                chrono::Utc::now().timestamp_millis().max(0) as u64,
+            )
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "persisting native restore before server mutation failed closed: {error}"
+                ))
+            })
+    }
+
+    async fn adopt_native_restore(
+        &self,
+        request_id: &str,
+        snapshot_id: &str,
+    ) -> Result<Vec<crate::commands::fs::overlay::OverlayInval>> {
+        if !self.native_filesystem {
+            return Err(CliError::usage(
+                "adopt_native_restore is only valid for native filesystems",
+            ));
+        }
+        let local = self
+            .local_state
+            .as_ref()
+            .expect("writable native sealer has durable local state");
+        local
+            .record_restore_server_result(request_id, snapshot_id)
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "recording native restore result before local adoption failed closed: {error}"
+                ))
+            })?;
+        let mut st = self.state.lock().await;
+        let affected = self
+            .overlay
+            .with_mutations_frozen(|| self.overlay.clear_upper())
+            .await
+            .map_err(|error| CliError::usage(format!("adopting restored snapshot: {error}")))?;
+        let mut refreshed = self.core.current_commit() == snapshot_id;
+        for _ in 0..50 {
+            if refreshed {
+                break;
+            }
+            match self.core.poll_ref().await {
+                Ok(Some(refresh)) => {
+                    absorb_refresh(&self.overlay, &self.invalidate, &self.pending, &refresh);
+                    refreshed = self.core.current_commit() == snapshot_id;
+                }
+                Ok(None) => {
+                    refreshed = self.core.current_commit() == snapshot_id;
+                }
+                Err(error) => {
+                    return Err(CliError::usage(format!(
+                        "server restore {snapshot_id} is durable, but refreshing the mount failed; \
+                         the restore remains fenced and will resume: {error}"
+                    )));
+                }
+            }
+            if !refreshed {
+                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            }
+        }
+        if !refreshed {
+            return Err(CliError::usage(format!(
+                "server restore {snapshot_id} is durable, but the mount has not observed it yet; \
+                 the restore remains fenced and will resume"
+            )));
+        }
+        local.finish_restore(request_id).map_err(|error| {
+            CliError::usage(format!(
+                "resetting durable local state after server restore failed closed: {error}"
+            ))
+        })?;
+        st.seen_epoch = self.overlay.epoch();
+        st.sealed_gen = self.overlay.current_generation();
+        st.chunk_cache.clear();
+        st.recent_seals.clear();
+        st.sealed = SealedIndex::default();
+        st.sealed.commit = snapshot_id.to_string();
+        st.reindex_pending = false;
+        self.publish_mirror(&st);
+        Ok(affected)
+    }
+
+    fn acknowledge_restore_response(&self, request_id: &str) -> Result<()> {
+        let local = self.local_state.as_ref().ok_or_else(|| {
+            CliError::usage("legacy repository mounts do not use native restore receipts")
+        })?;
+        local
+            .acknowledge_restore(request_id)
+            .map_err(|error| CliError::usage(format!("acknowledging restore response: {error}")))
+    }
+
+    fn fail_native_restore(&self, request_id: &str, reason: &str) -> Result<()> {
+        let local = self.local_state.as_ref().ok_or_else(|| {
+            CliError::usage("legacy repository mounts do not use native restore lifecycle")
+        })?;
+        local.fail_restore(request_id, reason).map_err(|error| {
+            CliError::usage(format!("dead-lettering failed native restore: {error}"))
+        })
+    }
+
+    fn active_restore(&self) -> Result<Option<super::local_state::RestoreOperation>> {
+        match self.local_state.as_ref() {
+            Some(local) => local
+                .active_restore()
+                .map_err(|error| CliError::usage(format!("reading active restore: {error}"))),
+            None => Ok(None),
+        }
+    }
+
     /// `clear_upper` routed through the sealer (adopted from the parallel #840 draft): the
     /// state lock serializes the drop against in-flight seals — a clear can no longer land
     /// inside a push window — and `reindex_pending` arms the fail-closed guard for the
@@ -2668,11 +3988,6 @@ impl Sealer {
         st.seen_epoch = self.overlay.epoch();
         st.chunk_cache.clear();
         st.recent_seals.clear();
-        st.prepared_native = None;
-        st.prepared_native_validated = false;
-        PreparedNativeJournal::reset(&self.state_dir);
-        st.pending_native_seal = None;
-        PendingNativeSeal::reset(&self.state_dir);
         st.sealed = SealedIndex::default();
         SealedIndex::reset(&self.state_dir);
         st.reindex_pending = true;
@@ -2692,11 +4007,6 @@ impl Sealer {
         st.seen_epoch = self.overlay.epoch();
         st.chunk_cache.clear();
         st.recent_seals.clear();
-        st.prepared_native = None;
-        st.prepared_native_validated = false;
-        PreparedNativeJournal::reset(&self.state_dir);
-        st.pending_native_seal = None;
-        PendingNativeSeal::reset(&self.state_dir);
         st.reindex_pending = false;
         self.publish_mirror(&st);
         Ok(())
@@ -2753,6 +4063,60 @@ impl Sealer {
         })
     }
 
+    async fn overlay_safety_view(&self) -> Result<OverlaySafetyReply> {
+        let sealed = self.state.lock().await.sealed.clone();
+        let dirty = if let Some(local) = &self.local_state {
+            // Unlike the user-facing dirty view, the destructive gate must include frozen and
+            // publish-requested generations too. They no longer sit in the overlay's active
+            // in-memory generation, but deleting the state directory would still discard their
+            // captured work and retry authority.
+            let recovery = local.recovery_dirty_state().map_err(|error| {
+                CliError::usage(format!(
+                    "reading durable local overlay safety state failed closed: {error}"
+                ))
+            })?;
+            let mut upserts = std::collections::BTreeSet::new();
+            let mut deletes = std::collections::BTreeSet::new();
+            for path in recovery.paths {
+                match path.kind {
+                    super::local_state::DirtyKind::Upsert => {
+                        upserts.insert(path.path);
+                    }
+                    super::local_state::DirtyKind::Delete => {
+                        deletes.insert(path.path);
+                    }
+                }
+            }
+            let renames: std::collections::BTreeSet<(String, String)> = recovery
+                .renames
+                .into_iter()
+                .map(|rename| (rename.from, rename.to))
+                .collect();
+            let active = local
+                .generation(recovery.active_generation)
+                .map_err(|error| {
+                    CliError::usage(format!(
+                        "reading durable local overlay base failed closed: {error}"
+                    ))
+                })?
+                .ok_or_else(|| {
+                    CliError::usage(format!(
+                        "durable local overlay active generation {} is missing",
+                        recovery.active_generation
+                    ))
+                })?;
+            DirtyReply {
+                upserts: upserts.into_iter().collect(),
+                deletes: deletes.into_iter().collect(),
+                renames: renames.into_iter().collect(),
+                commit: active.base_snapshot.unwrap_or_default(),
+            }
+        } else {
+            self.dirty_view().await?
+        };
+        Ok(OverlaySafetyReply { dirty, sealed })
+    }
+
     /// Drop ALL retained overlay state (`trim` control op — `tl fs sync`'s pre-flight).
     /// Everything dropped is sealed into workspace history, so nothing is lost; the mount just
     /// stops shadowing the lower, which is exactly what a sync needs before it pulls content
@@ -2768,6 +4132,19 @@ impl Sealer {
         let epoch = self.overlay.epoch();
         if epoch != st.seen_epoch {
             // clear_upper/restore rewrote the world; the sealed index describes the old one.
+            if let Some(local) = &self.local_state {
+                let stale = local
+                    .sealed_baselines()
+                    .map_err(|error| {
+                        CliError::usage(format!("reading stale native retained baselines: {error}"))
+                    })?
+                    .into_iter()
+                    .map(|baseline| baseline.path)
+                    .collect::<Vec<_>>();
+                local.remove_sealed_baselines(&stale).map_err(|error| {
+                    CliError::usage(format!("retiring stale native retained baselines: {error}"))
+                })?;
+            }
             st.seen_epoch = epoch;
             st.chunk_cache.clear();
             st.recent_seals.clear();
@@ -2798,7 +4175,22 @@ impl Sealer {
         for path in &outcome.tombstones_removed {
             st.sealed.deletes.remove(path);
         }
-        if let Err(e) = st.sealed.save(&self.state_dir) {
+        if let Some(local) = &self.local_state {
+            let removed = outcome
+                .trimmed
+                .iter()
+                .chain(outcome.tombstones_removed.iter())
+                .cloned()
+                .collect::<Vec<_>>();
+            local.remove_sealed_baselines(&removed).map_err(|error| {
+                CliError::usage(format!(
+                    "recording native retained-path trim durably: {error}"
+                ))
+            })?;
+        }
+        if !self.native_filesystem
+            && let Err(e) = st.sealed.save(&self.state_dir)
+        {
             eprintln!("trim: persisting sealed index failed: {e}");
         }
         Ok(TrimReply {
@@ -3107,13 +4499,17 @@ fn resolve_dirty(
 /// The git mode a local file publishes as (same policy as `enumerate_overlay`'s walk).
 #[cfg(unix)]
 fn git_mode(meta: &std::fs::Metadata) -> u32 {
-    use std::os::unix::fs::PermissionsExt;
-    if meta.file_type().is_symlink() {
-        0o120000
-    } else if meta.permissions().mode() & 0o111 != 0 {
-        0o100755
-    } else {
-        0o100644
+    use std::os::unix::fs::MetadataExt;
+    git_mode_from_raw(meta.mode())
+}
+
+#[cfg(unix)]
+fn git_mode_from_raw(mode: u32) -> u32 {
+    match mode & libc::S_IFMT as u32 {
+        value if value == libc::S_IFDIR as u32 => 0o040000,
+        value if value == libc::S_IFLNK as u32 => 0o120000,
+        _ if mode & 0o111 != 0 => 0o100755,
+        _ => 0o100644,
     }
 }
 
@@ -3420,6 +4816,112 @@ pub(crate) fn still_mounted(mountpoint: &Path) -> bool {
 mod tests {
     use super::super::overlay::DirtyDelta;
     use super::*;
+
+    fn recovery_with_renames(
+        active_generation: u64,
+        renames: Vec<super::super::local_state::RenameIntent>,
+    ) -> super::super::local_state::RecoveryDirtyState {
+        super::super::local_state::RecoveryDirtyState {
+            active_generation,
+            maximum_mutation_sequence: renames
+                .iter()
+                .map(|rename| rename.sequence)
+                .max()
+                .unwrap_or(0),
+            paths: Vec::new(),
+            renames,
+            intents: Vec::new(),
+        }
+    }
+
+    fn recovery_rename(
+        generation: u64,
+        sequence: u64,
+        from: &str,
+        local_from: &str,
+        to: &str,
+        applied: bool,
+    ) -> super::super::local_state::RenameIntent {
+        super::super::local_state::RenameIntent {
+            format_ver: 1,
+            generation,
+            sequence,
+            from: from.to_string(),
+            local_from: local_from.to_string(),
+            to: to.to_string(),
+            applied,
+        }
+    }
+
+    #[test]
+    fn recovery_ignores_write_ahead_rename_until_namespace_application_commits() {
+        let recovery = recovery_with_renames(
+            1,
+            vec![recovery_rename(
+                1,
+                1,
+                "source",
+                "source",
+                "destination",
+                false,
+            )],
+        );
+        assert!(
+            overlay_recovery_renames(&recovery).is_empty(),
+            "a crash after intent persistence but before rename(2) must not move the namespace"
+        );
+
+        let recovery = recovery_with_renames(
+            1,
+            vec![recovery_rename(
+                1,
+                1,
+                "source",
+                "source",
+                "destination",
+                true,
+            )],
+        );
+        assert_eq!(
+            overlay_recovery_renames(&recovery),
+            vec![(
+                "destination".to_string(),
+                "source".to_string(),
+                "source".to_string(),
+                1,
+            )],
+            "the separately committed applied bit makes the redirect crash-visible"
+        );
+    }
+
+    #[test]
+    fn recovery_composes_rename_chains_across_generations_and_rebases_after_retirement() {
+        // Generation N moves lower-backed a -> b. While N is publishing, N+1 moves the live
+        // destination b -> c. Recovery before N retires must still serve c from the original
+        // lower coordinate a.
+        let before_retirement = recovery_with_renames(
+            2,
+            vec![
+                recovery_rename(1, 1, "a", "a", "b", true),
+                recovery_rename(2, 2, "b", "b", "c", true),
+            ],
+        );
+        assert_eq!(
+            overlay_recovery_renames(&before_retirement),
+            vec![("c".to_string(), "a".to_string(), "b".to_string(), 2)],
+            "the live redirect is one hop to the pre-publication lower coordinate"
+        );
+
+        // Once N is published, the refreshed lower serves b directly and retirement removes N's
+        // row. N+1 must therefore recover as c -> b, not retain the obsolete c -> a mapping.
+        let after_retirement =
+            recovery_with_renames(2, vec![recovery_rename(2, 2, "b", "b", "c", true)]);
+        assert_eq!(
+            overlay_recovery_renames(&after_retirement),
+            vec![("c".to_string(), "b".to_string(), "b".to_string(), 2)],
+            "surviving intent rebases to the coordinate provided by the advanced lower"
+        );
+    }
 
     pub(super) fn state_with(upper: &[(&str, &str)], wh: &[&str]) -> tempfile::TempDir {
         let state = tempfile::tempdir().unwrap();
@@ -3807,23 +5309,61 @@ mod seal_tracking_tests {
     }
 
     #[test]
-    fn pending_native_seal_roundtrips_and_reset_removes_it() {
+    fn sealed_index_uses_active_generation_base_not_an_arbitrary_path_baseline() {
         let state = tempfile::tempdir().unwrap();
-        let request = PendingNativeSeal {
-            format_ver: 1,
-            message: "durable save point".to_string(),
-        };
-        request.save(state.path()).unwrap();
-
-        let loaded = PendingNativeSeal::load(state.path()).expect("request survives restart");
-        assert_eq!(loaded.format_ver, 1);
-        assert_eq!(loaded.message, "durable save point");
-
-        PendingNativeSeal::reset(state.path());
-        assert!(
-            PendingNativeSeal::load(state.path()).is_none(),
-            "published or invalidated requests must not replay"
+        let identity = super::super::local_state::LocalStateIdentity::fresh(
+            "project",
+            "filesystem",
+            "workspace",
         );
+        let local = super::super::local_state::LocalState::open(
+            state
+                .path()
+                .join(super::super::local_state::LOCAL_STATE_FILE),
+            identity,
+        )
+        .unwrap();
+        local
+            .import_legacy_once(super::super::local_state::LegacyImport {
+                base_snapshot: Some("old-base".to_string()),
+                mutations: Vec::new(),
+            })
+            .unwrap();
+        local.reset_after_restore("current-base").unwrap();
+
+        let index = sealed_index_from_local_state(&local).unwrap();
+        assert_eq!(index.commit, "current-base");
+    }
+
+    #[test]
+    fn sealed_mode_preserves_directory_kind() {
+        let state = tempfile::tempdir().unwrap();
+        let directory = std::fs::symlink_metadata(state.path()).unwrap();
+        assert_eq!(git_mode(&directory), 0o040000);
+        assert_eq!(git_mode_from_raw(libc::S_IFDIR as u32 | 0o755), 0o040000);
+    }
+
+    #[test]
+    fn legacy_snapshot_metadata_cleanup_removes_every_superseded_file() {
+        let state = tempfile::tempdir().unwrap();
+        let names = [
+            "sealed.json",
+            "sealed.json.tmp",
+            "native-prepared.json",
+            "native-prepared.json.tmp",
+            "native-seal-request.json",
+            "native-seal-request.json.tmp",
+        ];
+        for name in names {
+            std::fs::write(state.path().join(name), b"legacy").unwrap();
+        }
+
+        remove_legacy_native_snapshot_state(state.path()).unwrap();
+        remove_legacy_native_snapshot_state(state.path()).unwrap();
+
+        for name in names {
+            assert!(!state.path().join(name).exists(), "{name} was not removed");
+        }
     }
 
     #[test]

@@ -89,6 +89,14 @@ test-cli-full *ARGS:
     done
     cargo test -p tensorlake-cli --features mount,git-clone {{ARGS}}
 
+# Authoritative validation for the durable `tl fs` mutation journal and generation engine.
+#
+# The state engine crosses the mount VFS, daemon recovery/publisher, plain-directory binding,
+# and CLI control protocol. Run the complete private/full-feature CLI suite rather than a narrow
+# module filter so changes cannot accidentally validate only one of those consumers.
+test-fs-journal:
+    just test-cli-full
+
 # Run all Rust tests
 test-rust:
     cargo test --workspace

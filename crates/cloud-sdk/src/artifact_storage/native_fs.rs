@@ -671,7 +671,7 @@ pub struct NativePreparedChangeSet {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct NativePreparedSnapshotCandidate {
     root_id: String,
-    pub base_snapshot_id: String,
+    pub base_snapshot_id: Option<String>,
     changes: NativeSnapshotChanges,
     pub preparation_operation_id: String,
     pub preparation_ms: u64,
@@ -682,6 +682,71 @@ pub struct NativePreparedSnapshotCandidate {
     pub total_segments: usize,
     pub uploaded_segments: usize,
     pub uploaded_bytes: u64,
+    /// Identities observed by the unavoidable cold walk. Kept client-side so a durable direct
+    /// push can seed its reconciliation index without performing a second metadata walk.
+    #[serde(default)]
+    source_observations: Vec<NativeSourceObservation>,
+    /// Mounted deltas retain immutable entry/recipe declarations so a CAS loser can recompose
+    /// the exact change set onto the serialized winner without rereading local file bytes.
+    #[serde(default)]
+    prepared_changes: Option<Box<NativePreparedChangeSet>>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativeSourceObservation {
+    pub path: String,
+    pub device: u64,
+    pub inode: u64,
+    pub size: u64,
+    pub mtime_secs: i64,
+    pub mtime_nanos: i64,
+    pub ctime_secs: i64,
+    pub ctime_nanos: i64,
+    pub mode: u32,
+    pub observed_at_secs: i64,
+    pub observed_at_nanos: i64,
+}
+
+impl NativePreparedSnapshotCandidate {
+    pub fn root_id(&self) -> &str {
+        &self.root_id
+    }
+
+    pub fn files(&self) -> usize {
+        self.files
+    }
+
+    pub fn is_rebaseable(&self) -> bool {
+        self.prepared_changes.is_some()
+    }
+
+    pub fn directories(&self) -> usize {
+        self.directories
+    }
+
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes
+    }
+
+    pub fn stored_bytes(&self) -> u64 {
+        self.stored_bytes
+    }
+
+    pub fn total_segments(&self) -> usize {
+        self.total_segments
+    }
+
+    pub fn uploaded_segments(&self) -> usize {
+        self.uploaded_segments
+    }
+
+    pub fn uploaded_bytes(&self) -> u64 {
+        self.uploaded_bytes
+    }
+
+    pub fn source_observations(&self) -> &[NativeSourceObservation] {
+        &self.source_observations
+    }
 }
 
 impl NativePreparedChangeSet {
@@ -755,6 +820,16 @@ pub struct NativePushReport {
     pub uploaded_bytes: u64,
     pub transport: String,
     pub client_timings: NativePushTimings,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum NativeCandidatePublishOutcome {
+    Published(NativePushReport),
+    Conflict {
+        operation_id: String,
+        snapshot_id: String,
+        actual_snapshot_id: Option<String>,
+    },
 }
 
 /// Client-observed timings for one save. Milestones are offsets from operation start because scan,
@@ -1276,6 +1351,7 @@ struct PreparedNativeSnapshot {
     stored_bytes: u64,
     prepare_timings: NativePrepareTimings,
     changes: NativeSnapshotChanges,
+    source_observations: Vec<NativeSourceObservation>,
 }
 
 struct PreparedLocalUpserts {
@@ -1297,6 +1373,7 @@ struct SegmentBuilder {
     completed_segments: Option<tokio::sync::mpsc::Sender<Vec<PreparedSegmentUpload>>>,
     measurements: Option<Arc<NativePipelineMeasurements>>,
     cancellation: Option<Arc<AtomicBool>>,
+    staging_directory: Option<PathBuf>,
 }
 
 struct OpenSegment {
@@ -1321,6 +1398,7 @@ impl SegmentBuilder {
             completed_segments: None,
             measurements: None,
             cancellation: None,
+            staging_directory: None,
         })
     }
 
@@ -1339,6 +1417,11 @@ impl SegmentBuilder {
 
     fn with_cancellation(mut self, cancellation: Option<Arc<AtomicBool>>) -> Self {
         self.cancellation = cancellation;
+        self
+    }
+
+    fn with_staging_directory(mut self, staging_directory: Option<PathBuf>) -> Self {
+        self.staging_directory = staging_directory;
         self
     }
 
@@ -1446,7 +1529,13 @@ impl SegmentBuilder {
                 temp: None,
             });
         } else {
-            let mut temp = tempfile::NamedTempFile::new()?;
+            let mut temp = match &self.staging_directory {
+                Some(directory) => {
+                    std::fs::create_dir_all(directory)?;
+                    tempfile::NamedTempFile::new_in(directory)?
+                }
+                None => tempfile::NamedTempFile::new()?,
+            };
             temp.write_all(&bytes)?;
             temp.flush()?;
             self.complete.push(BuiltSegment {
@@ -1490,6 +1579,7 @@ fn prepare_native_snapshot_with_sender(
     cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<PreparedNativeSnapshot, SdkError> {
     let walk_started = std::time::Instant::now();
+    let observed_at = native_observation_stamp();
     let root = root.canonicalize()?;
     if !root.is_dir() {
         return Err(client_error(format!(
@@ -1759,6 +1849,10 @@ fn prepare_native_snapshot_with_sender(
     let mut files = 0usize;
     let mut directories = 1usize;
     let mut logical_bytes = 0u64;
+    let source_observations = pre_scanned
+        .iter()
+        .map(|entry| native_source_observation(&entry.rel, &entry.before, observed_at))
+        .collect::<Result<Vec<_>, _>>()?;
     let mut scanned = Vec::with_capacity(pre_scanned.len());
     for (entry_index, entry) in pre_scanned.into_iter().enumerate() {
         let data = match entry.data {
@@ -1810,6 +1904,7 @@ fn prepare_native_snapshot_with_sender(
             metadata_build_ms: Some(metadata_build_ms),
         },
         changes: NativeSnapshotChanges::default(),
+        source_observations,
     })
 }
 
@@ -1825,8 +1920,10 @@ fn prepare_local_upserts(
     upserts: Vec<NativeLocalUpsert>,
     target_segment_bytes: u64,
     max_segment_bytes: u64,
+    staging_directory: Option<PathBuf>,
 ) -> Result<PreparedLocalUpserts, SdkError> {
-    let mut segment_builder = SegmentBuilder::new(target_segment_bytes, max_segment_bytes)?;
+    let mut segment_builder = SegmentBuilder::new(target_segment_bytes, max_segment_bytes)?
+        .with_staging_directory(staging_directory);
     let mut scanned = Vec::with_capacity(upserts.len());
     let mut files = 0usize;
     let mut directories = 0usize;
@@ -2567,6 +2664,83 @@ fn native_entry_metadata(
     }
 }
 
+fn native_observation_stamp() -> (i64, i64) {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| (duration.as_secs() as i64, duration.subsec_nanos() as i64))
+        .unwrap_or((0, 0))
+}
+
+#[cfg(unix)]
+fn native_source_observation(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    observed_at: (i64, i64),
+) -> Result<NativeSourceObservation, SdkError> {
+    use std::os::unix::fs::MetadataExt;
+
+    Ok(NativeSourceObservation {
+        path: path
+            .to_str()
+            .ok_or_else(|| {
+                client_error(format!(
+                    "native filesystem paths must be valid UTF-8: {}",
+                    path.display()
+                ))
+            })?
+            .to_string(),
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.size(),
+        mtime_secs: metadata.mtime(),
+        mtime_nanos: metadata.mtime_nsec(),
+        ctime_secs: metadata.ctime(),
+        ctime_nanos: metadata.ctime_nsec(),
+        mode: metadata.mode(),
+        observed_at_secs: observed_at.0,
+        observed_at_nanos: observed_at.1,
+    })
+}
+
+#[cfg(not(unix))]
+fn native_source_observation(
+    path: &Path,
+    metadata: &std::fs::Metadata,
+    observed_at: (i64, i64),
+) -> Result<NativeSourceObservation, SdkError> {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| (duration.as_secs() as i64, duration.subsec_nanos() as i64))
+        .unwrap_or((0, 0));
+    Ok(NativeSourceObservation {
+        path: path
+            .to_str()
+            .ok_or_else(|| {
+                client_error(format!(
+                    "native filesystem paths must be valid UTF-8: {}",
+                    path.display()
+                ))
+            })?
+            .to_string(),
+        device: 0,
+        inode: 0,
+        size: metadata.len(),
+        mtime_secs: modified.0,
+        mtime_nanos: modified.1,
+        ctime_secs: modified.0,
+        ctime_nanos: modified.1,
+        mode: if metadata.is_dir() {
+            0o040755
+        } else {
+            0o100644
+        },
+        observed_at_secs: observed_at.0,
+        observed_at_nanos: observed_at.1,
+    })
+}
+
 #[cfg(unix)]
 fn raw_os_bytes(value: &std::ffi::OsStr) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
@@ -3244,6 +3418,286 @@ impl ArtifactStorageClient {
         .await
     }
 
+    /// Perform the unavoidable first walk of an arbitrary directory, pipeline its aggregate
+    /// segments to blob storage, and persist all metadata needed for a later metadata-only
+    /// publication. The returned candidate contains no local paths or credentials and can be
+    /// durably stored by the CLI's local generation engine.
+    pub async fn prepare_native_directory_snapshot_candidate_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        root: &Path,
+        username: &str,
+        token: &str,
+        options: NativePushOptions,
+    ) -> Result<NativePreparedSnapshotCandidate, SdkError> {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        self.prepare_native_directory_snapshot_candidate_with_operation_id_and_credential(
+            project_id,
+            repo,
+            root,
+            username,
+            token,
+            options,
+            operation_id,
+        )
+        .await
+    }
+
+    /// Operation-id explicit form used by the durable local generation engine. The caller must
+    /// commit `operation_id` before invoking this method so a crash before the response remints
+    /// transport credentials but never creates an ambiguous second preparation identity.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_native_directory_snapshot_candidate_with_operation_id_and_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        root: &Path,
+        username: &str,
+        token: &str,
+        options: NativePushOptions,
+        operation_id: String,
+    ) -> Result<NativePreparedSnapshotCandidate, SdkError> {
+        let base_snapshot_id = options.expected_snapshot_id.clone();
+        let reporter = NativeClientOperationReporter::new(
+            self,
+            project_id,
+            repo,
+            username,
+            token,
+            operation_id.clone(),
+            NativeClientOperationMode::ColdDirectory,
+        );
+        let measurements = Arc::new(NativePipelineMeasurements::new(reporter.started));
+        reporter.spawn_report(NativeClientOperationState::Running, None);
+        let result = self
+            .prepare_native_directory_snapshot_candidate_inner(
+                project_id,
+                repo,
+                root,
+                username,
+                token,
+                &options,
+                &reporter,
+                measurements,
+                base_snapshot_id,
+                operation_id,
+            )
+            .await;
+        match result {
+            Ok(candidate) => {
+                reporter.note_preparation_complete();
+                reporter
+                    .send_terminal(NativeClientOperationState::Succeeded, None)
+                    .await;
+                Ok(candidate)
+            }
+            Err(error) => {
+                reporter
+                    .send_terminal(
+                        NativeClientOperationState::Failed,
+                        Some(native_client_failure_code(&error)),
+                    )
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_native_directory_snapshot_candidate_inner(
+        &self,
+        project_id: &str,
+        repo: &str,
+        root: &Path,
+        username: &str,
+        token: &str,
+        options: &NativePushOptions,
+        reporter: &NativeClientOperationReporter,
+        measurements: Arc<NativePipelineMeasurements>,
+        base_snapshot_id: Option<String>,
+        preparation_operation_id: String,
+    ) -> Result<NativePreparedSnapshotCandidate, SdkError> {
+        let session: NativeUploadSession = {
+            let (request, _) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some("fs/uploads"),
+                username,
+                token,
+            )?;
+            expect_json(request.send().await?).await?
+        };
+        reporter.set_session(&session);
+
+        let source = root.to_path_buf();
+        let target_segment_bytes = session.target_segment_bytes;
+        let max_segment_bytes = session.max_segment_bytes;
+        let (segment_sender, segment_receiver) =
+            tokio::sync::mpsc::channel(NATIVE_SEGMENT_UPLOAD_QUEUE);
+        let cancellation = Arc::new(AtomicBool::new(false));
+        let scanner_measurements = measurements.clone();
+        let scanner_cancellation = cancellation.clone();
+        let mut scanner = tokio::task::spawn_blocking(move || {
+            prepare_native_snapshot_with_sender(
+                &source,
+                target_segment_bytes,
+                max_segment_bytes,
+                Some(segment_sender),
+                Some(scanner_measurements),
+                Some(scanner_cancellation),
+            )
+        });
+        let upload_client = self.clone();
+        let upload_project = project_id.to_string();
+        let upload_repo = repo.to_string();
+        let upload_session = session.clone();
+        let upload_username = username.to_string();
+        let upload_token = token.to_string();
+        let upload_cancellation = cancellation.clone();
+        let mut uploader = tokio::spawn(async move {
+            let result = upload_pipelined_segments(
+                &upload_client,
+                &upload_project,
+                &upload_repo,
+                &upload_session,
+                &upload_username,
+                &upload_token,
+                segment_receiver,
+            )
+            .await;
+            upload_cancellation.store(true, Ordering::Relaxed);
+            result
+        });
+        let (prepared, early_upload) = tokio::select! {
+            scanned = &mut scanner => {
+                let prepared = match scanned {
+                    Ok(Ok(prepared)) => prepared,
+                    Ok(Err(error)) => {
+                        uploader.abort();
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        uploader.abort();
+                        return Err(client_error(format!(
+                            "native snapshot scanner failed: {error}"
+                        )));
+                    }
+                };
+                (prepared, None)
+            }
+            uploaded = &mut uploader => {
+                match uploaded {
+                    Ok(Ok(report)) => {
+                        let prepared = scanner.await.map_err(|error| {
+                            client_error(format!("native snapshot scanner failed: {error}"))
+                        })??;
+                        (prepared, Some(report))
+                    }
+                    Ok(Err(error)) => {
+                        cancellation.store(true, Ordering::Relaxed);
+                        let _ = scanner.await;
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        cancellation.store(true, Ordering::Relaxed);
+                        let _ = scanner.await;
+                        return Err(client_error(format!(
+                            "native upload coordinator failed: {error}"
+                        )));
+                    }
+                }
+            }
+        };
+        reporter.note_prepared(&prepared, &measurements);
+        reporter.set_phase(NativeClientOperationPhase::Uploading);
+        note_progress(
+            &options.progress,
+            NativePushEvent::Scanned {
+                files: prepared.files,
+                directories: prepared.directories,
+                logical_bytes: prepared.logical_bytes,
+                stored_bytes: prepared.stored_bytes,
+                segments: prepared.segments.len(),
+            },
+        );
+        let metadata = stage_native_metadata_batches(
+            self,
+            project_id,
+            repo,
+            &session.session_id,
+            username,
+            token,
+            &prepared.pages,
+            &prepared.recipes,
+        )
+        .await;
+        if metadata.is_ok() {
+            reporter.note_metadata_complete();
+        }
+        let pipelined = match early_upload {
+            Some(report) => report,
+            None => uploader.await.map_err(|error| {
+                client_error(format!("native upload coordinator failed: {error}"))
+            })??,
+        };
+        reporter.note_upload_complete(pipelined.uploaded_ids.len(), pipelined.uploaded_bytes);
+        metadata?;
+        note_progress(
+            &options.progress,
+            NativePushEvent::Negotiated {
+                missing_segments: pipelined.uploaded_ids.len(),
+                total_segments: prepared.segments.len(),
+                transport: session.transport.clone(),
+            },
+        );
+        note_progress(
+            &options.progress,
+            NativePushEvent::Uploaded {
+                segments: pipelined.uploaded_ids.len(),
+                stored_bytes: pipelined.uploaded_bytes,
+            },
+        );
+
+        reporter.set_phase(NativeClientOperationPhase::Verifying);
+        let root_id = prepared.root.to_hex();
+        let suffix = format!("fs/uploads/{}/metadata/verify-root", session.session_id);
+        let (request, _) = self.git_request(
+            Method::POST,
+            project_id,
+            repo,
+            Some(&suffix),
+            username,
+            token,
+        )?;
+        expect_ok(
+            request
+                .json(&serde_json::json!({ "root": &root_id }))
+                .send()
+                .await?,
+        )
+        .await?;
+        reporter.note_verification_complete();
+
+        Ok(NativePreparedSnapshotCandidate {
+            root_id,
+            base_snapshot_id,
+            changes: prepared.changes,
+            preparation_operation_id,
+            preparation_ms: reporter.elapsed_ms(),
+            files: prepared.files,
+            directories: prepared.directories,
+            logical_bytes: prepared.logical_bytes,
+            stored_bytes: prepared.stored_bytes,
+            total_segments: prepared.segments.len(),
+            uploaded_segments: pipelined.uploaded_ids.len(),
+            uploaded_bytes: pipelined.uploaded_bytes,
+            source_observations: prepared.source_observations,
+            prepared_changes: None,
+        })
+    }
+
     /// Publish a mounted filesystem delta without rereading unchanged files. Existing file
     /// recipes and untouched directory roots remain content-addressed references; only dirty
     /// local file bytes and directory pages on affected ancestor paths are produced.
@@ -3318,8 +3772,10 @@ impl ArtifactStorageClient {
         username: &str,
         token: &str,
     ) -> Result<NativePreparedChangeSet, SdkError> {
-        self.prepare_native_changes_with_reporter(project_id, repo, changes, username, token, None)
-            .await
+        self.prepare_native_changes_with_reporter(
+            project_id, repo, changes, username, token, None, None,
+        )
+        .await
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -3331,6 +3787,7 @@ impl ArtifactStorageClient {
         username: &str,
         token: &str,
         reporter: Option<&NativeClientOperationReporter>,
+        staging_directory: Option<PathBuf>,
     ) -> Result<NativePreparedChangeSet, SdkError> {
         let started = std::time::Instant::now();
         let session: NativeUploadSession = {
@@ -3350,7 +3807,14 @@ impl ArtifactStorageClient {
         let local = tokio::task::spawn_blocking({
             let target_segment_bytes = session.target_segment_bytes;
             let max_segment_bytes = session.max_segment_bytes;
-            move || prepare_local_upserts(changes.upserts, target_segment_bytes, max_segment_bytes)
+            move || {
+                prepare_local_upserts(
+                    changes.upserts,
+                    target_segment_bytes,
+                    max_segment_bytes,
+                    staging_directory,
+                )
+            }
         })
         .await
         .map_err(|error| client_error(format!("native background prepare failed: {error}")))??;
@@ -3438,6 +3902,56 @@ impl ArtifactStorageClient {
         token: &str,
     ) -> Result<NativePreparedSnapshotCandidate, SdkError> {
         let operation_id = uuid::Uuid::new_v4().to_string();
+        self.prepare_native_snapshot_candidate_with_operation_id_and_credential(
+            project_id,
+            repo,
+            base_snapshot_id,
+            changes,
+            username,
+            token,
+            operation_id,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_native_snapshot_candidate_with_operation_id_and_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        base_snapshot_id: &str,
+        changes: NativeChangeSet,
+        username: &str,
+        token: &str,
+        operation_id: String,
+    ) -> Result<NativePreparedSnapshotCandidate, SdkError> {
+        self.prepare_native_snapshot_candidate_with_operation_and_staging_directory(
+            project_id,
+            repo,
+            base_snapshot_id,
+            changes,
+            username,
+            token,
+            operation_id,
+            None,
+        )
+        .await
+    }
+
+    /// Durable CLI form: non-pipelined segment bodies live inside the generation-owned staging
+    /// directory, so an abnormal exit cannot leak anonymous system tempfiles.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn prepare_native_snapshot_candidate_with_operation_and_staging_directory(
+        &self,
+        project_id: &str,
+        repo: &str,
+        base_snapshot_id: &str,
+        changes: NativeChangeSet,
+        username: &str,
+        token: &str,
+        operation_id: String,
+        staging_directory: Option<PathBuf>,
+    ) -> Result<NativePreparedSnapshotCandidate, SdkError> {
         let reporter = NativeClientOperationReporter::new(
             self,
             project_id,
@@ -3457,6 +3971,7 @@ impl ArtifactStorageClient {
                     username,
                     token,
                     Some(&reporter),
+                    staging_directory,
                 )
                 .await?;
             self.finish_preparing_native_snapshot_candidate(
@@ -3515,6 +4030,7 @@ impl ArtifactStorageClient {
             )?;
             expect_json(request.send().await?).await?
         };
+        let reusable_changes = prepared_changes.clone();
         let NativePreparedChangeSet {
             upserts,
             deletes,
@@ -3596,7 +4112,7 @@ impl ArtifactStorageClient {
             .unwrap_or(preparation_ms);
         Ok(NativePreparedSnapshotCandidate {
             root_id,
-            base_snapshot_id: base_snapshot_id.to_string(),
+            base_snapshot_id: Some(base_snapshot_id.to_string()),
             changes: prepared.changes,
             preparation_operation_id,
             preparation_ms,
@@ -3607,13 +4123,58 @@ impl ArtifactStorageClient {
             total_segments,
             uploaded_segments,
             uploaded_bytes,
+            source_observations: Vec::new(),
+            prepared_changes: Some(Box::new(reusable_changes)),
         })
+    }
+
+    /// Recompose an already-uploaded mounted delta onto a newer serialized filesystem head.
+    /// This performs metadata reads/staging only; content bytes and recipes are reused.
+    pub async fn rebase_native_snapshot_candidate_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        candidate: &NativePreparedSnapshotCandidate,
+        new_base_snapshot_id: &str,
+        username: &str,
+        token: &str,
+    ) -> Result<NativePreparedSnapshotCandidate, SdkError> {
+        let prepared_changes = candidate
+            .prepared_changes
+            .as_deref()
+            .cloned()
+            .ok_or_else(|| {
+                client_error(
+                    "this prepared snapshot does not retain a rebaseable mounted change set",
+                )
+            })?;
+        use sha2::{Digest, Sha256};
+        let mut digest = Sha256::new();
+        digest.update(candidate.preparation_operation_id.as_bytes());
+        digest.update([0]);
+        digest.update(new_base_snapshot_id.as_bytes());
+        let operation_id = format!(
+            "{}-{}",
+            candidate.preparation_operation_id,
+            hex::encode(digest.finalize())
+        );
+        self.finish_preparing_native_snapshot_candidate(
+            project_id,
+            repo,
+            new_base_snapshot_id,
+            prepared_changes,
+            username,
+            token,
+            operation_id,
+            None,
+        )
+        .await
     }
 
     /// Publish a previously verified journal root. This records the user's final snapshot message
     /// and attribution, performs a metadata-only closure check, and advances the workspace/head;
     /// it never reads a local file, uploads content, or rebuilds a directory.
-    pub async fn publish_native_snapshot_candidate_with_credential(
+    pub async fn publish_native_snapshot_candidate_outcome_with_credential(
         &self,
         project_id: &str,
         repo: &str,
@@ -3621,7 +4182,7 @@ impl ArtifactStorageClient {
         username: &str,
         token: &str,
         options: NativePushOptions,
-    ) -> Result<NativePushReport, SdkError> {
+    ) -> Result<NativeCandidatePublishOutcome, SdkError> {
         let started = std::time::Instant::now();
         let operation_id = options
             .operation_id
@@ -3640,7 +4201,7 @@ impl ArtifactStorageClient {
         };
         let request_body = SubmitNativeSnapshotRequest {
             root: candidate.root_id.clone(),
-            parents: vec![candidate.base_snapshot_id.clone()],
+            parents: candidate.base_snapshot_id.iter().cloned().collect(),
             created_at_ms: None,
             message: options.message.clone(),
             operation_id: operation_id.clone(),
@@ -3658,6 +4219,12 @@ impl ArtifactStorageClient {
             )?;
             expect_json(request.json(&request_body).send().await?).await?
         };
+        note_progress(
+            &options.progress,
+            NativePushEvent::Verifying {
+                snapshot_id: submitted.snapshot_id.clone(),
+            },
+        );
         wait_for_native_verification(
             self,
             project_id,
@@ -3666,6 +4233,7 @@ impl ArtifactStorageClient {
             token,
             &session,
             &submitted.snapshot_id,
+            &operation_id,
         )
         .await?;
         let advance = if let Some(workspace_id) = options.workspace_id.as_deref() {
@@ -3678,8 +4246,8 @@ impl ArtifactStorageClient {
                 workspace_id,
                 &session.session_id,
                 &submitted.snapshot_id,
-                Some(&candidate.base_snapshot_id),
-                Some(&candidate.base_snapshot_id),
+                candidate.base_snapshot_id.as_deref(),
+                candidate.base_snapshot_id.as_deref(),
             )
             .await?
         } else {
@@ -3690,7 +4258,7 @@ impl ArtifactStorageClient {
                 username,
                 token,
                 &submitted.snapshot_id,
-                Some(&candidate.base_snapshot_id),
+                candidate.base_snapshot_id.as_deref(),
             )
             .await?
         };
@@ -3703,13 +4271,20 @@ impl ArtifactStorageClient {
                 actual_snapshot_id,
                 snapshot_id,
             } => {
-                return Err(client_error(format!(
-                    "filesystem head changed to {} while prepared snapshot {snapshot_id} was waiting to publish",
-                    actual_snapshot_id.as_deref().unwrap_or("empty")
-                )));
+                return Ok(NativeCandidatePublishOutcome::Conflict {
+                    operation_id,
+                    snapshot_id,
+                    actual_snapshot_id,
+                });
             }
         };
-        Ok(NativePushReport {
+        note_progress(
+            &options.progress,
+            NativePushEvent::Published {
+                snapshot_id: snapshot_id.clone(),
+            },
+        );
+        Ok(NativeCandidatePublishOutcome::Published(NativePushReport {
             operation_id,
             snapshot_id,
             previous_snapshot_id,
@@ -3726,7 +4301,34 @@ impl ArtifactStorageClient {
                 publish_complete_ms: Some(started.elapsed().as_millis() as u64),
                 ..NativePushTimings::default()
             },
-        })
+        }))
+    }
+
+    pub async fn publish_native_snapshot_candidate_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        candidate: NativePreparedSnapshotCandidate,
+        username: &str,
+        token: &str,
+        options: NativePushOptions,
+    ) -> Result<NativePushReport, SdkError> {
+        match self
+            .publish_native_snapshot_candidate_outcome_with_credential(
+                project_id, repo, candidate, username, token, options,
+            )
+            .await?
+        {
+            NativeCandidatePublishOutcome::Published(report) => Ok(report),
+            NativeCandidatePublishOutcome::Conflict {
+                snapshot_id,
+                actual_snapshot_id,
+                ..
+            } => Err(client_error(format!(
+                "filesystem head changed to {} while prepared snapshot {snapshot_id} was waiting to publish",
+                actual_snapshot_id.as_deref().unwrap_or("empty")
+            ))),
+        }
     }
 
     /// Publish a previously prepared mounted delta. This performs only base-tree composition,
@@ -3911,7 +4513,7 @@ impl ArtifactStorageClient {
         let max_segment_bytes = session.max_segment_bytes;
         let content_prepare_started = std::time::Instant::now();
         let local = tokio::task::spawn_blocking(move || {
-            prepare_local_upserts(upserts, target_segment_bytes, max_segment_bytes)
+            prepare_local_upserts(upserts, target_segment_bytes, max_segment_bytes, None)
         })
         .await
         .map_err(|error| client_error(format!("native delta scanner failed: {error}")))??;
@@ -4192,13 +4794,29 @@ impl ArtifactStorageClient {
 
     pub async fn native_head(&self, project_id: &str, repo: &str) -> Result<NativeHead, SdkError> {
         let credential = self.git_credential_for_repo(project_id, repo).await?;
+        self.native_head_with_credential(
+            project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+        )
+        .await
+    }
+
+    pub async fn native_head_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        username: &str,
+        token: &str,
+    ) -> Result<NativeHead, SdkError> {
         let (request, _) = self.git_request(
             Method::GET,
             project_id,
             repo,
             Some("fs/head"),
-            &credential.git_username,
-            &credential.token,
+            username,
+            token,
         )?;
         expect_json(request.send().await?).await
     }
@@ -4503,13 +5121,11 @@ impl ArtifactStorageClient {
         workspace_id: &str,
         target_snapshot_id: &str,
         current_snapshot_id: &str,
+        operation_id: &str,
+        created_at_ms: u64,
         username: &str,
         token: &str,
     ) -> Result<String, SdkError> {
-        let expected_workspace = self
-            .native_workspace_with_credential(project_id, repo, workspace_id, username, token)
-            .await?
-            .latest_snapshot_id;
         let target = self
             .native_snapshot_with_credential(project_id, repo, target_snapshot_id, username, token)
             .await?;
@@ -4527,12 +5143,12 @@ impl ArtifactStorageClient {
         let request = SubmitNativeSnapshotRequest {
             root: target.root,
             parents: vec![current_snapshot_id.to_string()],
-            created_at_ms: None,
+            created_at_ms: Some(created_at_ms),
             message: format!(
                 "Restore {}",
                 &target_snapshot_id[..target_snapshot_id.len().min(12)]
             ),
-            operation_id: uuid::Uuid::new_v4().to_string(),
+            operation_id: operation_id.to_string(),
             changes: NativeSnapshotChanges::default(),
         };
         let submitted: SubmitNativeSnapshotResponse = {
@@ -4555,6 +5171,7 @@ impl ArtifactStorageClient {
             token,
             &session,
             &submitted.snapshot_id,
+            operation_id,
         )
         .await?;
         match publish_native_workspace_snapshot(
@@ -4566,7 +5183,7 @@ impl ArtifactStorageClient {
             workspace_id,
             &session.session_id,
             &submitted.snapshot_id,
-            expected_workspace.as_deref(),
+            Some(current_snapshot_id),
             Some(current_snapshot_id),
         )
         .await?
@@ -4942,6 +5559,7 @@ async fn compose_native_changes(
         stored_bytes: local.stored_bytes,
         prepare_timings: NativePrepareTimings::default(),
         changes: NativeSnapshotChanges::default(),
+        source_observations: Vec::new(),
     })
 }
 
@@ -5156,6 +5774,7 @@ async fn finish_native_push(
         token,
         &session,
         &submitted.snapshot_id,
+        &operation_id,
     )
     .await?;
     if let Some(reporter) = reporter {
@@ -5535,11 +6154,13 @@ async fn wait_for_native_verification(
     token: &str,
     session: &NativeUploadSession,
     snapshot_id: &str,
+    operation_id: &str,
 ) -> Result<(), SdkError> {
     loop {
         let suffix = format!(
-            "fs/snapshots/{snapshot_id}/status?session={}",
-            urlencoding::encode(&session.session_id)
+            "fs/snapshots/{snapshot_id}/status?session={}&operation={}",
+            urlencoding::encode(&session.session_id),
+            urlencoding::encode(operation_id),
         );
         let (request, _) = client.git_request(
             Method::GET,
@@ -6084,6 +6705,29 @@ mod tests {
         assert!(names.contains(&b"target".as_slice()));
         assert!(names.contains(&b"empty".as_slice()));
         assert!(!names.contains(&b"ignored".as_slice()));
+        let observed: BTreeSet<_> = prepared
+            .source_observations
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
+        assert!(observed.contains("target/cache"));
+        assert!(observed.contains(".git/config"));
+        assert!(observed.contains("empty"));
+        assert!(!observed.contains("ignored/nope"));
+        let large_observation = prepared
+            .source_observations
+            .iter()
+            .find(|entry| entry.path == "large.bin")
+            .unwrap();
+        assert_eq!(large_observation.size, payload.len() as u64);
+        assert!(
+            (large_observation.mtime_secs, large_observation.mtime_nanos)
+                <= (
+                    large_observation.observed_at_secs,
+                    large_observation.observed_at_nanos
+                ),
+            "cold manifest carries the racy-window observation boundary"
+        );
 
         let large = entries
             .iter()

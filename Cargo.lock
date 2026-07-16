@@ -2855,6 +2855,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "redb"
+version = "4.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8e925444704b5f17d32bf42f5b6e2df050bceebc3dcd6e71cc73dafe8092e839"
+dependencies = [
+ "libc",
+]
+
+[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3743,6 +3752,7 @@ dependencies = [
  "minijinja",
  "open",
  "rand 0.9.4",
+ "redb",
  "reqwest",
  "rustls",
  "rustpython-parser",
@@ -3762,6 +3772,8 @@ dependencies = [
  "tracing-subscriber",
  "url",
  "urlencoding",
+ "uuid",
+ "xattr",
 ]
 
 [[package]]

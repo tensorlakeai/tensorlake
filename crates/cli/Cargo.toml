@@ -66,6 +66,7 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
+redb = { workspace = true }
 shlex = { workspace = true }
 rustpython-parser = "0.3"
 gsvc-codec = { workspace = true, optional = true }
@@ -75,6 +76,8 @@ tracing = { workspace = true }
 # Only the mount daemon installs a subscriber (writing to the state dir's daemon.log); the
 # rest of the CLI stays subscriber-free.
 tracing-subscriber = { workspace = true, optional = true }
+uuid = { workspace = true }
+xattr = { workspace = true }
 flate2 = { workspace = true }
 sha1 = { workspace = true }
 ignore = { workspace = true }

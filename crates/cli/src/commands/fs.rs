@@ -9,11 +9,11 @@
 //! hashes, compresses, and uploads changed content before a save is requested; autosave or
 //! `snapshot` then publishes the prepared root. If preparation has not caught up, `snapshot`
 //! reports a pending watermark without blocking the mount. Published upper files remain as a
-//! local byte cache and are reported by `status` as retained. `snapshot --clear` is the explicit,
-//! destructive opt-in that drops that cache and ignored local files. `restore` moves the
-//! filesystem back to a retained save without transferring file bytes.
+//! local byte cache and are reported by `status` as retained. `snapshot --clear` trims the
+//! published generation's retained cache without touching later writes or ignored/local-only
+//! files. `restore` moves the filesystem back to a retained save without transferring file bytes.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Component, Path, PathBuf};
 
 use comfy_table::Cell;
@@ -25,7 +25,9 @@ use tensorlake::artifact_storage::ArtifactStorageClient;
 use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
 use tensorlake::artifact_storage::models::GitCredential;
 use tensorlake::artifact_storage::native_fs::{
-    NativePushEvent, NativePushOptions, NativeSnapshotInfo, NativeWorkspaceInfo,
+    NativeChangeSet, NativeLocalUpsert, NativePreparedSnapshotCandidate, NativePushEvent,
+    NativePushOptions, NativePushProgress, NativePushReport, NativeSnapshotInfo,
+    NativeWorkspaceInfo,
 };
 use tensorlake::artifact_storage::workspaces::{
     CreateWorkspaceRequest, PromoteOutcome, PromoteWorkspaceRequest, SyncWorkspaceRequest,
@@ -40,7 +42,10 @@ use crate::output::table::new_table;
 pub mod daemon;
 #[cfg(target_os = "linux")]
 pub mod fusefs;
+#[cfg(unix)]
+mod generation_capture;
 pub mod local;
+pub mod local_state;
 #[cfg(unix)]
 pub mod overlay;
 // Plain-directory workspace snapshots: `tl fs init` binds a directory to a workspace with no
@@ -55,6 +60,19 @@ pub mod vfsserver;
 use daemon::MountState;
 
 const MATERIALIZE_CONCURRENCY: usize = 16;
+pub(crate) const LOCAL_STATE_WRITER_LOCK: &str = "snapshot-state.writer.lock";
+pub(crate) const LOCAL_STATE_FORMAT_MARKER: &str = "snapshot-state.format-v5";
+const LOCAL_STATE_REPAIR_MARKER: &str = "snapshot-state.repairing.json";
+
+/// Serialize the writable native mount daemon with offline journal repair.
+///
+/// redb itself protects an open database, but repair must also replace a missing/corrupt database
+/// and retire stale generation captures. A dedicated kernel-owned flock covers that larger
+/// artifact set and disappears automatically when either process crashes.
+#[cfg(unix)]
+pub(crate) fn try_local_state_writer_lock(state_dir: &Path) -> Result<Option<std::fs::File>> {
+    plaindir::flock_exclusive(&state_dir.join(LOCAL_STATE_WRITER_LOCK), false)
+}
 
 pub(crate) struct FsSession {
     pub(crate) client: ArtifactStorageClient,
@@ -588,6 +606,7 @@ pub async fn ls_filesystems(ctx: &CliContext, output_json: bool) -> Result<()> {
     // Local attachments: kernel mounts and plain-directory bindings, keyed by backing repo.
     let mounts = live_mounts();
     let bound = plaindir::bound_binding_repos();
+    let tracked = load_tracked_directories()?;
     let attached = |fs: &str| -> Vec<String> {
         let mut at: Vec<String> = mounts
             .iter()
@@ -599,6 +618,12 @@ pub async fn ls_filesystems(ctx: &CliContext, output_json: bool) -> Result<()> {
                 .iter()
                 .filter(|(repo, _)| repo == fs)
                 .map(|(_, root)| format!("{root} (bound)")),
+        );
+        at.extend(
+            tracked
+                .values()
+                .filter(|attachment| attachment.filesystem_id == fs)
+                .map(|attachment| format!("{} (tracked)", attachment.root)),
         );
         at
     };
@@ -666,9 +691,17 @@ pub async fn rm_filesystem(ctx: &CliContext, name: &str, force: bool) -> Result<
             "{name} is a repository, not a filesystem — use: tl git rm {name}"
         )));
     }
-    if let Some((mountpoint, _)) = live_mounts().into_iter().find(|(_, s)| s.repo == name) {
+    if let Some((mountpoint, _, _, alive)) = local_mount_states()
+        .into_iter()
+        .find(|(_, _, state, _)| state.repo == name)
+    {
         return Err(CliError::usage(format!(
-            "{name} is mounted at {mountpoint}; unmount first: tl fs unmount {mountpoint}"
+            "{name} has {} mount state at {mountpoint}; unmount first: tl fs unmount {mountpoint}",
+            if alive {
+                "a live"
+            } else {
+                "recoverable detached"
+            }
         )));
     }
     if let Some((_, root)) = plaindir::bound_binding_repos()
@@ -677,6 +710,15 @@ pub async fn rm_filesystem(ctx: &CliContext, name: &str, force: bool) -> Result<
     {
         return Err(CliError::usage(format!(
             "{name} is tracking {root}; stop first: tl fs unmount {root}"
+        )));
+    }
+    if let Some(attachment) = load_tracked_directories()?
+        .into_values()
+        .find(|attachment| attachment.filesystem_id == name)
+    {
+        return Err(CliError::usage(format!(
+            "{name} is tracking {}; stop first: tl fs unmount {}",
+            attachment.root, attachment.root
         )));
     }
     if !force {
@@ -739,13 +781,1305 @@ pub async fn token(ctx: &CliContext, name: &str, output_json: bool) -> Result<()
     Ok(())
 }
 
+const COLD_PUSH_STATE_FORMAT: u16 = 1;
+const COLD_PUSH_DIRTY_SENTINEL: &str = "__tensorlake_cold_import_root__";
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ColdPushStoreIdentity {
+    format_ver: u16,
+    api_url: String,
+    project_id: String,
+    filesystem_id: String,
+    source_root: String,
+    store_uuid: String,
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct TrackedDirectoryAttachment {
+    format_ver: u16,
+    root: String,
+    api_url: String,
+    project_id: String,
+    organization_id: Option<String>,
+    filesystem_id: String,
+    state_dir: PathBuf,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ColdPushCapture {
+    format_ver: u16,
+    source_root: String,
+    mode: ColdPushCaptureMode,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+enum ColdPushCaptureMode {
+    /// The unavoidable cold scan has already prepared and uploaded an immutable candidate. The
+    /// candidate lives in this atomic frozen-generation record until `mark_prepared` installs the
+    /// indexed copy, closing the crash window without copying the whole source tree.
+    Full {
+        candidate: NativePreparedSnapshotCandidate,
+        baselines: Vec<ColdPushObservedPath>,
+    },
+    /// A repeated push captured only changed/new path bytes into generation-owned immutable
+    /// sources. Unchanged files were never opened.
+    Delta {
+        upserts: Vec<ColdPushCapturedUpsert>,
+        deletes: Vec<String>,
+    },
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+struct ColdPushObservedPath {
+    path: String,
+    identity: local_state::FileIdentity,
+    observed_at_secs: i64,
+    observed_at_nanos: i64,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ColdPushCapturedUpsert {
+    path: String,
+    source: PathBuf,
+    identity: local_state::FileIdentity,
+    observed_at_secs: i64,
+    observed_at_nanos: i64,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct ColdPushOutcome {
+    operation_id: String,
+    snapshot_id: String,
+    files: usize,
+    logical_bytes: u64,
+    uploaded_bytes: u64,
+    transport: String,
+    recovered: bool,
+    #[serde(default)]
+    unchanged: bool,
+}
+
+fn cold_push_state_root() -> PathBuf {
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".local")
+        .join("share")
+        .join("tensorlake")
+        .join("pushes")
+}
+
+fn tracked_directories_registry_path() -> PathBuf {
+    crate::config::files::config_dir().join("tracked-directories.json")
+}
+
+fn tracked_directories_registry_lock() -> Result<std::fs::File> {
+    std::fs::create_dir_all(crate::config::files::config_dir())?;
+    plaindir::flock_exclusive(
+        &crate::config::files::config_dir().join("tracked-directories.lock"),
+        true,
+    )?
+    .ok_or_else(|| CliError::usage("could not lock the tracked-directory registry"))
+}
+
+fn load_tracked_directories() -> Result<BTreeMap<String, TrackedDirectoryAttachment>> {
+    let path = tracked_directories_registry_path();
+    let raw = match std::fs::read(&path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(BTreeMap::new());
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let attachments: BTreeMap<String, TrackedDirectoryAttachment> = serde_json::from_slice(&raw)
+        .map_err(|error| {
+            CliError::usage(format!(
+                "tracked-directory registry {} is corrupt: {error}",
+                path.display()
+            ))
+        })?;
+    for (root, attachment) in &attachments {
+        if attachment.format_ver != COLD_PUSH_STATE_FORMAT || attachment.root != *root {
+            return Err(CliError::usage(format!(
+                "tracked-directory registry entry {root} has an unsupported or mismatched format"
+            )));
+        }
+    }
+    Ok(attachments)
+}
+
+fn save_tracked_directories(
+    attachments: &BTreeMap<String, TrackedDirectoryAttachment>,
+) -> Result<()> {
+    std::fs::create_dir_all(crate::config::files::config_dir())?;
+    plaindir::write_atomic(
+        &tracked_directories_registry_path(),
+        &serde_json::to_vec_pretty(attachments)?,
+    )?;
+    Ok(())
+}
+
+fn register_tracked_directory(
+    ctx: &CliContext,
+    root: &Path,
+    filesystem_id: &str,
+    project_id: &str,
+    state_dir: &Path,
+) -> Result<()> {
+    let root = root.to_string_lossy().into_owned();
+    let _lock = tracked_directories_registry_lock()?;
+    let mut attachments = load_tracked_directories()?;
+    for (other_root, attachment) in &attachments {
+        let other = Path::new(other_root);
+        let candidate = Path::new(&root);
+        if candidate.starts_with(other) || other.starts_with(candidate) {
+            if other_root == &root
+                && attachment.api_url == ctx.api_url
+                && attachment.project_id == project_id
+                && attachment.filesystem_id == filesystem_id
+                && attachment.state_dir == state_dir
+            {
+                return Ok(());
+            }
+            return Err(CliError::usage(format!(
+                "{} overlaps tracked directory {} for filesystem {}; stop tracking it with `tl \
+                 fs unmount {}` before attaching another filesystem",
+                root, other_root, attachment.filesystem_id, other_root
+            )));
+        }
+    }
+    attachments.insert(
+        root.clone(),
+        TrackedDirectoryAttachment {
+            format_ver: COLD_PUSH_STATE_FORMAT,
+            root,
+            api_url: ctx.api_url.clone(),
+            project_id: project_id.to_string(),
+            organization_id: ctx.organization_id.clone(),
+            filesystem_id: filesystem_id.to_string(),
+            state_dir: state_dir.to_path_buf(),
+        },
+    );
+    save_tracked_directories(&attachments)
+}
+
+fn tracked_directory_for(path: &Path) -> Result<Option<TrackedDirectoryAttachment>> {
+    let path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    Ok(load_tracked_directories()?
+        .into_values()
+        .filter(|attachment| path.starts_with(&attachment.root))
+        .max_by_key(|attachment| Path::new(&attachment.root).components().count()))
+}
+
+fn remove_tracked_directory(root: &str) -> Result<Option<TrackedDirectoryAttachment>> {
+    let _lock = tracked_directories_registry_lock()?;
+    let mut attachments = load_tracked_directories()?;
+    let removed = attachments.remove(root);
+    save_tracked_directories(&attachments)?;
+    Ok(removed)
+}
+
+fn open_tracked_directory_state(
+    attachment: &TrackedDirectoryAttachment,
+) -> Result<local_state::LocalStateReader> {
+    let identity = read_cold_push_identity(&attachment.state_dir.join("identity.json"))?;
+    local_state::LocalState::open_existing(
+        attachment.state_dir.join(local_state::LOCAL_STATE_FILE),
+        local_state::LocalStateIdentity {
+            project_id: identity.project_id,
+            filesystem: identity.filesystem_id,
+            workspace_id: format!(
+                "cold-push:{}",
+                cold_push_state_key(
+                    &identity.api_url,
+                    &attachment.project_id,
+                    &attachment.filesystem_id,
+                    Path::new(&attachment.root),
+                )
+            ),
+            store_uuid: identity.store_uuid,
+        },
+    )
+    .map_err(|error| cold_push_state_error(&attachment.state_dir, error))
+}
+
+fn cold_push_state_key(
+    api_url: &str,
+    project_id: &str,
+    filesystem_id: &str,
+    root: &Path,
+) -> String {
+    use sha2::{Digest, Sha256};
+
+    let mut digest = Sha256::new();
+    for component in [
+        api_url.as_bytes(),
+        project_id.as_bytes(),
+        filesystem_id.as_bytes(),
+        root.as_os_str().as_encoded_bytes(),
+    ] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component);
+    }
+    hex::encode(digest.finalize())
+}
+
+fn cold_push_state_error(state_dir: &Path, error: impl std::fmt::Display) -> CliError {
+    CliError::usage(format!(
+        "cold-push recovery state {} is unavailable: {error}; refusing to start a second \
+         publication attempt. Preserve this directory for inspection, or remove it only after \
+         confirming the prior push did not publish.",
+        state_dir.display()
+    ))
+}
+
+fn read_cold_push_identity(path: &Path) -> Result<ColdPushStoreIdentity> {
+    let raw = std::fs::read(path).map_err(|error| {
+        CliError::usage(format!(
+            "cannot read cold-push identity {}: {error}; refusing to guess",
+            path.display()
+        ))
+    })?;
+    let identity: ColdPushStoreIdentity = serde_json::from_slice(&raw).map_err(|error| {
+        CliError::usage(format!(
+            "cold-push identity {} is corrupt ({error}); refusing to guess",
+            path.display()
+        ))
+    })?;
+    if identity.format_ver != COLD_PUSH_STATE_FORMAT {
+        return Err(CliError::usage(format!(
+            "cold-push identity {} uses unsupported format {} (this client supports {})",
+            path.display(),
+            identity.format_ver,
+            COLD_PUSH_STATE_FORMAT
+        )));
+    }
+    Ok(identity)
+}
+
+fn open_cold_push_state_at(
+    state_root: &Path,
+    api_url: &str,
+    project_id: &str,
+    filesystem_id: &str,
+    root: &Path,
+) -> Result<(PathBuf, local_state::LocalState)> {
+    let key = cold_push_state_key(api_url, project_id, filesystem_id, root);
+    let state_dir = state_root.join(&key);
+    std::fs::create_dir_all(&state_dir)?;
+    let identity_path = state_dir.join("identity.json");
+    let wanted = ColdPushStoreIdentity {
+        format_ver: COLD_PUSH_STATE_FORMAT,
+        api_url: api_url.to_string(),
+        project_id: project_id.to_string(),
+        filesystem_id: filesystem_id.to_string(),
+        source_root: root.to_string_lossy().into_owned(),
+        store_uuid: uuid::Uuid::new_v4().to_string(),
+    };
+    let (identity, identity_created) = match std::fs::OpenOptions::new()
+        .create_new(true)
+        .write(true)
+        .open(&identity_path)
+    {
+        Ok(mut file) => {
+            use std::io::Write;
+
+            let encoded = serde_json::to_vec_pretty(&wanted)?;
+            file.write_all(&encoded)?;
+            file.sync_all()?;
+            std::fs::File::open(&state_dir)?.sync_all()?;
+            (wanted, true)
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
+            (read_cold_push_identity(&identity_path)?, false)
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if identity.api_url != api_url
+        || identity.project_id != project_id
+        || identity.filesystem_id != filesystem_id
+        || identity.source_root != root.to_string_lossy()
+    {
+        return Err(CliError::usage(format!(
+            "cold-push state {} belongs to a different source or remote; refusing to reuse it",
+            state_dir.display()
+        )));
+    }
+    let store_identity = local_state::LocalStateIdentity {
+        project_id: project_id.to_string(),
+        filesystem: filesystem_id.to_string(),
+        workspace_id: format!("cold-push:{key}"),
+        store_uuid: identity.store_uuid,
+    };
+    let database_path = state_dir.join(local_state::LOCAL_STATE_FILE);
+    if !identity_created && !database_path.exists() {
+        return Err(CliError::usage(format!(
+            "tracked-directory identity {} exists but its durable database is missing; refusing \
+             to treat the directory as a first push because the prior remote baseline is \
+             unprovable. Preserve {}, then remove that state directory only after inspecting the \
+             filesystem head.",
+            identity_path.display(),
+            state_dir.display(),
+        )));
+    }
+    let store = local_state::LocalState::open(database_path, store_identity)
+        .map_err(|error| cold_push_state_error(&state_dir, error))?;
+    Ok((state_dir, store))
+}
+
+fn cold_push_candidate(
+    store: &local_state::LocalState,
+    generation: u64,
+    state_dir: &Path,
+) -> Result<Option<NativePreparedSnapshotCandidate>> {
+    store
+        .prepared(generation)
+        .map_err(|error| cold_push_state_error(state_dir, error))?
+        .map(|prepared| {
+            serde_json::from_slice(&prepared.candidate).map_err(|error| {
+                CliError::usage(format!(
+                    "cold-push candidate in {} is corrupt ({error}); refusing to re-scan and \
+                     risk publishing different bytes under the same request",
+                    state_dir.display()
+                ))
+            })
+        })
+        .transpose()
+}
+
+fn cold_push_outcome_from_candidate(
+    candidate: &NativePreparedSnapshotCandidate,
+    request_id: String,
+    snapshot_id: String,
+    recovered: bool,
+) -> ColdPushOutcome {
+    ColdPushOutcome {
+        operation_id: request_id,
+        snapshot_id,
+        files: candidate.files(),
+        logical_bytes: candidate.logical_bytes(),
+        uploaded_bytes: candidate.uploaded_bytes(),
+        transport: "prepared_journal".to_string(),
+        recovered,
+        unchanged: false,
+    }
+}
+
+pub(crate) fn next_native_publish_operation_id(
+    request_id: &str,
+    next_attempt: u32,
+    base_snapshot_id: &str,
+    root_id: &str,
+) -> String {
+    use sha2::{Digest as _, Sha256};
+
+    let mut digest = Sha256::new();
+    for component in [
+        request_id.as_bytes(),
+        &next_attempt.to_be_bytes(),
+        base_snapshot_id.as_bytes(),
+        root_id.as_bytes(),
+    ] {
+        digest.update((component.len() as u64).to_be_bytes());
+        digest.update(component);
+    }
+    hex::encode(digest.finalize())
+}
+
+#[derive(Debug)]
+struct ColdPushScan {
+    paths: Vec<ColdPushObservedPath>,
+}
+
+#[derive(Debug)]
+struct ColdPushDeltaPlan {
+    upserts: Vec<ColdPushObservedPath>,
+    deletes: Vec<String>,
+}
+
+fn cold_push_now_stamp() -> (i64, i64) {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| (duration.as_secs() as i64, duration.subsec_nanos() as i64))
+        .unwrap_or((0, 0))
+}
+
+#[cfg(unix)]
+fn cold_push_file_identity(metadata: &std::fs::Metadata) -> local_state::FileIdentity {
+    use std::os::unix::fs::MetadataExt;
+
+    local_state::FileIdentity {
+        device: metadata.dev(),
+        inode: metadata.ino(),
+        size: metadata.size(),
+        mtime_secs: metadata.mtime(),
+        mtime_nanos: metadata.mtime_nsec(),
+        ctime_secs: metadata.ctime(),
+        ctime_nanos: metadata.ctime_nsec(),
+        mode: metadata.mode(),
+    }
+}
+
+#[cfg(not(unix))]
+fn cold_push_file_identity(metadata: &std::fs::Metadata) -> local_state::FileIdentity {
+    let modified = metadata
+        .modified()
+        .ok()
+        .and_then(|time| time.duration_since(std::time::UNIX_EPOCH).ok())
+        .map(|duration| (duration.as_secs() as i64, duration.subsec_nanos() as i64))
+        .unwrap_or((0, 0));
+    local_state::FileIdentity {
+        device: 0,
+        inode: 0,
+        size: metadata.len(),
+        mtime_secs: modified.0,
+        mtime_nanos: modified.1,
+        ctime_secs: modified.0,
+        ctime_nanos: modified.1,
+        mode: if metadata.is_dir() {
+            0o040755
+        } else {
+            0o100644
+        },
+    }
+}
+
+fn scan_cold_push_tree(root: &Path) -> Result<ColdPushScan> {
+    let (observed_at_secs, observed_at_nanos) = cold_push_now_stamp();
+    let mut ignore = SnapshotIgnore::new(root);
+    let mut paths = Vec::new();
+    scan_cold_push_dir(
+        root,
+        "",
+        &mut ignore,
+        observed_at_secs,
+        observed_at_nanos,
+        &mut paths,
+    )?;
+    paths.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(ColdPushScan { paths })
+}
+
+fn scan_cold_push_dir(
+    root: &Path,
+    rel_dir: &str,
+    ignore: &mut SnapshotIgnore,
+    observed_at_secs: i64,
+    observed_at_nanos: i64,
+    paths: &mut Vec<ColdPushObservedPath>,
+) -> Result<()> {
+    let absolute = if rel_dir.is_empty() {
+        root.to_path_buf()
+    } else {
+        root.join(rel_dir)
+    };
+    let entries = std::fs::read_dir(&absolute).map_err(|error| {
+        CliError::usage(format!(
+            "cannot read directory {}: {error}; aborting the push because a skipped subtree \
+             would be interpreted as deletion",
+            absolute.display()
+        ))
+    })?;
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            CliError::usage(format!(
+                "cannot read an entry of {}: {error}; aborting the push",
+                absolute.display()
+            ))
+        })?;
+        let name = entry.file_name();
+        let Some(name) = name.to_str() else {
+            return Err(CliError::usage(format!(
+                "{} has a non-UTF-8 name; filesystem snapshot paths are UTF-8",
+                absolute.join(&name).display()
+            )));
+        };
+        let path = if rel_dir.is_empty() {
+            name.to_string()
+        } else {
+            format!("{rel_dir}/{name}")
+        };
+        let source = entry.path();
+        let metadata = std::fs::symlink_metadata(&source).map_err(|error| {
+            CliError::usage(format!(
+                "cannot stat {}: {error}; aborting the push",
+                source.display()
+            ))
+        })?;
+        let file_type = metadata.file_type();
+        if ignore.is_ignored(&path, file_type.is_dir())? {
+            continue;
+        }
+        if !(file_type.is_dir() || file_type.is_file() || file_type.is_symlink()) {
+            return Err(CliError::usage(format!(
+                "{} is not a regular file, directory, or symlink; remove or ignore it",
+                source.display()
+            )));
+        }
+        paths.push(ColdPushObservedPath {
+            path: path.clone(),
+            identity: cold_push_file_identity(&metadata),
+            observed_at_secs,
+            observed_at_nanos,
+        });
+        if file_type.is_dir() {
+            scan_cold_push_dir(
+                root,
+                &path,
+                ignore,
+                observed_at_secs,
+                observed_at_nanos,
+                paths,
+            )?;
+        }
+    }
+    Ok(())
+}
+
+fn cold_push_identity_is_proven_clean(
+    baseline: &local_state::SealedBaseline,
+    current: &ColdPushObservedPath,
+) -> bool {
+    let local_state::SealedPathState::Upsert { identity, .. } = &baseline.state else {
+        return false;
+    };
+    if identity != &current.identity {
+        return false;
+    }
+    let (Some(observed_secs), Some(observed_nanos)) =
+        (baseline.observed_at_secs, baseline.observed_at_nanos)
+    else {
+        return false;
+    };
+    let observed = (observed_secs, observed_nanos);
+    (identity.mtime_secs, identity.mtime_nanos) < observed
+        && (identity.ctime_secs, identity.ctime_nanos) < observed
+}
+
+fn cold_push_is_directory(identity: &local_state::FileIdentity) -> bool {
+    #[cfg(unix)]
+    {
+        identity.mode & libc::S_IFMT as u32 == libc::S_IFDIR as u32
+    }
+    #[cfg(not(unix))]
+    {
+        identity.mode & 0o170000 == 0o040000
+    }
+}
+
+fn plan_cold_push_delta(
+    root: &Path,
+    scan: &ColdPushScan,
+    baselines: &[local_state::SealedBaseline],
+) -> Result<ColdPushDeltaPlan> {
+    let baseline_by_path: BTreeMap<&str, &local_state::SealedBaseline> = baselines
+        .iter()
+        .map(|baseline| (baseline.path.as_str(), baseline))
+        .collect();
+    let scanned_paths: BTreeSet<&str> =
+        scan.paths.iter().map(|entry| entry.path.as_str()).collect();
+    let upserts = scan
+        .paths
+        .iter()
+        .filter(|entry| {
+            !baseline_by_path
+                .get(entry.path.as_str())
+                .is_some_and(|baseline| cold_push_identity_is_proven_clean(baseline, entry))
+        })
+        .cloned()
+        .collect();
+
+    let mut ignore = SnapshotIgnore::new(root);
+    let mut deletes = Vec::new();
+    for baseline in baselines {
+        if scanned_paths.contains(baseline.path.as_str()) {
+            continue;
+        }
+        let local_state::SealedPathState::Upsert { identity, .. } = &baseline.state else {
+            continue;
+        };
+        // Newly ignored is intentionally not newly deleted: ignore rules gate tracking, so the
+        // last published remote entry remains in place until it is explicitly visible+absent.
+        if ignore.is_ignored(&baseline.path, cold_push_is_directory(identity))? {
+            continue;
+        }
+        deletes.push(baseline.path.clone());
+    }
+    deletes.sort();
+    Ok(ColdPushDeltaPlan { upserts, deletes })
+}
+
+fn cold_push_baseline(
+    observed: &ColdPushObservedPath,
+    snapshot_id: &str,
+) -> local_state::SealedBaseline {
+    local_state::SealedBaseline::upsert_observed(
+        observed.path.clone(),
+        snapshot_id,
+        observed.identity.clone(),
+        None,
+        observed.observed_at_secs,
+        observed.observed_at_nanos,
+    )
+}
+
+fn cold_push_candidate_observations(
+    candidate: &NativePreparedSnapshotCandidate,
+) -> Vec<ColdPushObservedPath> {
+    candidate
+        .source_observations()
+        .iter()
+        .map(|observation| ColdPushObservedPath {
+            path: observation.path.clone(),
+            identity: local_state::FileIdentity {
+                device: observation.device,
+                inode: observation.inode,
+                size: observation.size,
+                mtime_secs: observation.mtime_secs,
+                mtime_nanos: observation.mtime_nanos,
+                ctime_secs: observation.ctime_secs,
+                ctime_nanos: observation.ctime_nanos,
+                mode: observation.mode,
+            },
+            observed_at_secs: observation.observed_at_secs,
+            observed_at_nanos: observation.observed_at_nanos,
+        })
+        .collect()
+}
+
+fn cold_push_retirement_baselines(
+    capture: &ColdPushCapture,
+    snapshot_id: &str,
+) -> (Vec<local_state::SealedBaseline>, Vec<String>) {
+    match &capture.mode {
+        ColdPushCaptureMode::Full { baselines, .. } => (
+            baselines
+                .iter()
+                .map(|observed| cold_push_baseline(observed, snapshot_id))
+                .collect(),
+            Vec::new(),
+        ),
+        ColdPushCaptureMode::Delta { upserts, deletes } => (
+            upserts
+                .iter()
+                .map(|upsert| {
+                    local_state::SealedBaseline::upsert_observed(
+                        upsert.path.clone(),
+                        snapshot_id,
+                        upsert.identity.clone(),
+                        None,
+                        upsert.observed_at_secs,
+                        upsert.observed_at_nanos,
+                    )
+                })
+                .collect(),
+            deletes.clone(),
+        ),
+    }
+}
+
+async fn durable_cold_push(
+    ctx: &CliContext,
+    session: &FsSession,
+    root: &Path,
+    name: &str,
+    message: Option<&str>,
+    progress: std::sync::Arc<dyn Fn(NativePushEvent) + Send + Sync>,
+) -> Result<ColdPushOutcome> {
+    use local_state::{
+        GenerationState, LegacyImport, LegacyMutation, PreparedGeneration, PublishRequest,
+    };
+
+    let (state_dir, store) = open_cold_push_state_at(
+        &cold_push_state_root(),
+        &ctx.api_url,
+        &session.project_id,
+        name,
+        root,
+    )?;
+    let _writer_lock = try_local_state_writer_lock(&state_dir)?.ok_or_else(|| {
+        CliError::usage(format!(
+            "another `tl fs push` owns the tracked-directory state at {}; wait for it to finish \
+             and retry",
+            state_dir.display()
+        ))
+    })?;
+    register_tracked_directory(ctx, root, name, &session.project_id, &state_dir)?;
+    let (user, token) = session.creds();
+
+    let completed = store
+        .completed_publish_requests()
+        .map_err(|error| cold_push_state_error(&state_dir, error))?
+        .into_iter();
+    // Retirement and the bounded completion receipt are one transaction. If the process died
+    // after that commit but before the CLI delivered the result, return the original success.
+    // Acknowledged receipts remain as the empty-tree-safe "this tracked root was initialized"
+    // marker and are not replayed.
+    if let Some(completed) = completed.clone().filter(|row| !row.acknowledged).last() {
+        let mut outcome: ColdPushOutcome =
+            serde_json::from_slice(&completed.response).map_err(|error| {
+                CliError::usage(format!(
+                    "completed cold-push receipt in {} is corrupt ({error}); the server result \
+                     was adopted, but this client refuses to fabricate a response",
+                    state_dir.display()
+                ))
+            })?;
+        outcome.recovered = true;
+        return Ok(outcome);
+    }
+    let previously_initialized = completed.count() > 0;
+
+    if store
+        .needs_legacy_import()
+        .map_err(|error| cold_push_state_error(&state_dir, error))?
+    {
+        let head = session
+            .client
+            .native_head_with_credential(&session.project_id, name, user, token)
+            .await?;
+        store
+            .import_legacy_once(LegacyImport {
+                base_snapshot: head.snapshot_id,
+                mutations: vec![LegacyMutation::Upsert {
+                    path: COLD_PUSH_DIRTY_SENTINEL.to_string(),
+                    min_write_offset: 0,
+                }],
+            })
+            .map_err(|error| cold_push_state_error(&state_dir, error))?;
+    }
+
+    #[cfg(unix)]
+    {
+        let owned = store
+            .artifacts()
+            .map_err(|error| cold_push_state_error(&state_dir, error))?
+            .into_iter()
+            .map(|artifact| artifact.generation)
+            .collect();
+        generation_capture::reclaim_orphan_generation_captures(&state_dir, &owned)?;
+    }
+
+    let mut generations = store
+        .generations()
+        .map_err(|error| cold_push_state_error(&state_dir, error))?;
+    generations.sort_by_key(|generation| generation.generation);
+    let pending_generation = generations
+        .iter()
+        .find(|generation| generation.state != GenerationState::Open)
+        .map(|generation| generation.generation);
+    let generation = if let Some(generation) = pending_generation {
+        generation
+    } else {
+        let baselines = store
+            .sealed_baselines()
+            .map_err(|error| cold_push_state_error(&state_dir, error))?;
+        let active_generation = generations
+            .iter()
+            .find(|generation| generation.state == GenerationState::Open)
+            .ok_or_else(|| {
+                CliError::usage(format!(
+                    "cold-push state {} has no open generation",
+                    state_dir.display()
+                ))
+            })?
+            .generation;
+
+        if baselines.is_empty() && !previously_initialized {
+            // Keep the high-throughput cold path intact: scan/hash/compress/upload stay pipelined
+            // directly from the source tree. The fully prepared immutable candidate is then
+            // committed in the same transaction that freezes the generation, so a crash never
+            // leaves a frozen generation whose bytes must be guessed from a changed live tree.
+            let base_snapshot_id = generations
+                .iter()
+                .find(|generation| generation.generation == active_generation)
+                .and_then(|generation| generation.base_snapshot.clone());
+            let preparation_operation_id = store
+                .ensure_preparation_operation_id(active_generation)
+                .map_err(|error| cold_push_state_error(&state_dir, error))?;
+            let candidate = session
+                .client
+                .prepare_native_directory_snapshot_candidate_with_operation_id_and_credential(
+                    &session.project_id,
+                    name,
+                    root,
+                    user,
+                    token,
+                    NativePushOptions {
+                        expected_snapshot_id: base_snapshot_id.clone(),
+                        progress: Some(progress.clone()),
+                        ..NativePushOptions::default()
+                    },
+                    preparation_operation_id,
+                )
+                .await?;
+            let capture = ColdPushCapture {
+                format_ver: COLD_PUSH_STATE_FORMAT,
+                source_root: root.to_string_lossy().into_owned(),
+                mode: ColdPushCaptureMode::Full {
+                    candidate: candidate.clone(),
+                    baselines: cold_push_candidate_observations(&candidate),
+                },
+            };
+            let generation = store
+                .freeze_current_with_capture(serde_json::to_vec(&capture)?)
+                .map_err(|error| cold_push_state_error(&state_dir, error))?
+                .ok_or_else(|| {
+                    CliError::usage(format!(
+                        "cold-push state {} unexpectedly contains no imported namespace",
+                        state_dir.display()
+                    ))
+                })?
+                .generation;
+            debug_assert_eq!(generation, active_generation);
+            let candidate_bytes = serde_json::to_vec(&candidate)?;
+            use sha2::{Digest, Sha256};
+            let mut digest = Sha256::new();
+            digest.update(root.as_os_str().as_encoded_bytes());
+            digest.update(candidate.root_id().as_bytes());
+            store
+                .mark_prepared(PreparedGeneration::new(
+                    generation,
+                    base_snapshot_id,
+                    candidate.root_id(),
+                    hex::encode(digest.finalize()),
+                    candidate_bytes,
+                ))
+                .map_err(|error| cold_push_state_error(&state_dir, error))?;
+            generation
+        } else {
+            let scan_root = root.to_path_buf();
+            let scan = tokio::task::spawn_blocking(move || scan_cold_push_tree(&scan_root))
+                .await
+                .map_err(|error| {
+                    CliError::usage(format!("tracked-directory scanner failed: {error}"))
+                })??;
+            let delta = plan_cold_push_delta(root, &scan, &baselines)?;
+            if delta.upserts.is_empty() && delta.deletes.is_empty() {
+                let snapshot_id = generations
+                    .iter()
+                    .find(|generation| generation.generation == active_generation)
+                    .and_then(|generation| generation.base_snapshot.clone())
+                    .ok_or_else(|| {
+                        CliError::usage(
+                            "tracked directory is clean but its adopted snapshot is missing",
+                        )
+                    })?;
+                return Ok(ColdPushOutcome {
+                    operation_id: String::new(),
+                    snapshot_id,
+                    files: 0,
+                    logical_bytes: 0,
+                    uploaded_bytes: 0,
+                    transport: "local-change-index".to_string(),
+                    recovered: false,
+                    unchanged: true,
+                });
+            }
+            store
+                .ensure_preparation_operation_id(active_generation)
+                .map_err(|error| cold_push_state_error(&state_dir, error))?;
+            // The durable mutations precede byte capture. A crash while the generation is still
+            // Open may reconcile again; once Frozen, only generation-owned immutable paths are
+            // consulted.
+            for upsert in &delta.upserts {
+                store
+                    .record_upsert(&upsert.path, 0)
+                    .map_err(|error| cold_push_state_error(&state_dir, error))?;
+            }
+            for delete in &delta.deletes {
+                store
+                    .record_delete(delete)
+                    .map_err(|error| cold_push_state_error(&state_dir, error))?;
+            }
+            #[cfg(unix)]
+            let captured = {
+                store
+                    .claim_generation_capture(active_generation)
+                    .map_err(|error| cold_push_state_error(&state_dir, error))?;
+                let captured = generation_capture::capture_generation_upserts(
+                    &state_dir,
+                    active_generation,
+                    delta
+                        .upserts
+                        .iter()
+                        .map(|entry| (entry.path.clone(), root.join(&entry.path))),
+                )?;
+                let bytes =
+                    generation_capture::generation_capture_bytes(&state_dir, active_generation)?;
+                store
+                    .set_generation_capture_bytes(active_generation, bytes)
+                    .map_err(|error| cold_push_state_error(&state_dir, error))?;
+                captured
+            };
+            #[cfg(not(unix))]
+            let captured: Vec<NativeLocalUpsert> = delta
+                .upserts
+                .iter()
+                .map(|entry| NativeLocalUpsert {
+                    path: entry.path.clone(),
+                    source: root.join(&entry.path),
+                })
+                .collect();
+            let identity_by_path: BTreeMap<&str, &ColdPushObservedPath> = delta
+                .upserts
+                .iter()
+                .map(|entry| (entry.path.as_str(), entry))
+                .collect();
+            let captured = captured
+                .into_iter()
+                .map(|upsert| {
+                    let observed = identity_by_path.get(upsert.path.as_str()).ok_or_else(|| {
+                        CliError::usage(format!(
+                            "captured path {} is absent from its frozen scan",
+                            upsert.path
+                        ))
+                    })?;
+                    Ok(ColdPushCapturedUpsert {
+                        path: upsert.path,
+                        source: upsert.source,
+                        identity: observed.identity.clone(),
+                        observed_at_secs: observed.observed_at_secs,
+                        observed_at_nanos: observed.observed_at_nanos,
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+            let capture = ColdPushCapture {
+                format_ver: COLD_PUSH_STATE_FORMAT,
+                source_root: root.to_string_lossy().into_owned(),
+                mode: ColdPushCaptureMode::Delta {
+                    upserts: captured,
+                    deletes: delta.deletes,
+                },
+            };
+            let generation = store
+                .freeze_current_with_capture(serde_json::to_vec(&capture)?)
+                .map_err(|error| cold_push_state_error(&state_dir, error))?
+                .ok_or_else(|| {
+                    CliError::usage(format!(
+                        "tracked push {} lost its just-recorded mutations",
+                        state_dir.display()
+                    ))
+                })?
+                .generation;
+            debug_assert_eq!(generation, active_generation);
+            generation
+        }
+    };
+    let generation_record = store
+        .generation(generation)
+        .map_err(|error| cold_push_state_error(&state_dir, error))?
+        .ok_or_else(|| {
+            CliError::usage(format!(
+                "cold-push state {} lost generation {generation}; refusing to guess",
+                state_dir.display()
+            ))
+        })?;
+    let existing_request = store
+        .publish_requests()
+        .map_err(|error| cold_push_state_error(&state_dir, error))?
+        .into_iter()
+        .find(|request| request.generation == generation);
+    let capture: ColdPushCapture = store
+        .frozen_capture(generation)
+        .map_err(|error| cold_push_state_error(&state_dir, error))?
+        .ok_or_else(|| {
+            CliError::usage(format!(
+                "tracked push generation {generation} in {} has no frozen capture",
+                state_dir.display()
+            ))
+        })
+        .and_then(|bytes| {
+            serde_json::from_slice(&bytes).map_err(|error| {
+                CliError::usage(format!(
+                    "tracked push capture in {} is corrupt ({error}); refusing to guess",
+                    state_dir.display()
+                ))
+            })
+        })?;
+    if capture.format_ver != COLD_PUSH_STATE_FORMAT || capture.source_root != root.to_string_lossy()
+    {
+        return Err(CliError::usage(format!(
+            "tracked push capture in {} belongs to a different source or format",
+            state_dir.display()
+        )));
+    }
+
+    if generation_record.state == GenerationState::Published {
+        let snapshot_id = generation_record.published_snapshot.ok_or_else(|| {
+            CliError::usage(format!(
+                "published cold-push generation {generation} in {} has no snapshot id",
+                state_dir.display()
+            ))
+        })?;
+        let candidate = cold_push_candidate(&store, generation, &state_dir)?.ok_or_else(|| {
+            CliError::usage(format!(
+                "published cold-push generation {generation} in {} has no prepared candidate",
+                state_dir.display()
+            ))
+        })?;
+        let request_id = existing_request
+            .as_ref()
+            .map(|request| request.request_id.clone())
+            .unwrap_or_else(|| candidate.preparation_operation_id.clone());
+        let outcome =
+            cold_push_outcome_from_candidate(&candidate, request_id, snapshot_id.clone(), true);
+        let completed_response = serde_json::to_vec(&outcome)?;
+        let (baseline_updates, baseline_removals) =
+            cold_push_retirement_baselines(&capture, &snapshot_id);
+        store
+            .retire_published(
+                generation,
+                &snapshot_id,
+                &baseline_updates,
+                &baseline_removals,
+                completed_response,
+            )
+            .map_err(|error| cold_push_state_error(&state_dir, error))?;
+        #[cfg(unix)]
+        if let Err(error) = generation_capture::retire_generation_capture(&state_dir, generation) {
+            eprintln!(
+                "warning: snapshot was adopted, but generation capture {generation} could not be \
+                 reclaimed: {error}"
+            );
+        }
+        return Ok(outcome);
+    }
+
+    let base_snapshot_id = generation_record.base_snapshot.clone();
+    let preparation_operation_id = generation_record
+        .preparation_operation_id
+        .clone()
+        .ok_or_else(|| {
+            CliError::usage(format!(
+                "tracked push generation {generation} in {} has no durable preparation operation \
+                 id; refusing an ambiguous retry",
+                state_dir.display()
+            ))
+        })?;
+    let candidate = match cold_push_candidate(&store, generation, &state_dir)? {
+        Some(candidate) => candidate,
+        None => {
+            let candidate = match &capture.mode {
+                ColdPushCaptureMode::Full { candidate, .. } => candidate.clone(),
+                ColdPushCaptureMode::Delta { upserts, deletes } => {
+                    let base = base_snapshot_id.as_deref().ok_or_else(|| {
+                        CliError::usage(
+                            "incremental tracked push requires an adopted base snapshot",
+                        )
+                    })?;
+                    let segment_staging = state_dir
+                        .join("staging")
+                        .join("generations")
+                        .join(generation.to_string())
+                        .join("segments");
+                    match tokio::fs::remove_dir_all(&segment_staging).await {
+                        Ok(()) => {}
+                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(error) => {
+                            return Err(CliError::usage(format!(
+                                "cleaning tracked generation segment staging failed: {error}"
+                            )));
+                        }
+                    }
+                    tokio::fs::create_dir_all(&segment_staging).await?;
+                    session
+                        .client
+                        .prepare_native_snapshot_candidate_with_operation_and_staging_directory(
+                            &session.project_id,
+                            name,
+                            base,
+                            NativeChangeSet {
+                                upserts: upserts
+                                    .iter()
+                                    .map(|upsert| NativeLocalUpsert {
+                                        path: upsert.path.clone(),
+                                        source: upsert.source.clone(),
+                                    })
+                                    .collect(),
+                                deletes: deletes.clone(),
+                                renames: Vec::new(),
+                            },
+                            user,
+                            token,
+                            preparation_operation_id.clone(),
+                            Some(segment_staging),
+                        )
+                        .await?
+                }
+            };
+            let candidate_bytes = serde_json::to_vec(&candidate)?;
+            use sha2::{Digest, Sha256};
+
+            let mut digest = Sha256::new();
+            digest.update(root.as_os_str().as_encoded_bytes());
+            digest.update(candidate.root_id().as_bytes());
+            let source_fingerprint = hex::encode(digest.finalize());
+            store
+                .mark_prepared(PreparedGeneration::new(
+                    generation,
+                    base_snapshot_id.clone(),
+                    candidate.root_id(),
+                    source_fingerprint,
+                    candidate_bytes,
+                ))
+                .map_err(|error| cold_push_state_error(&state_dir, error))?;
+            candidate
+        }
+    };
+
+    let request = match existing_request {
+        Some(request) => request,
+        None => {
+            let request = PublishRequest::new(
+                uuid::Uuid::new_v4().to_string(),
+                generation,
+                message.unwrap_or_default(),
+                false,
+                chrono::Utc::now().timestamp_millis().max(0) as u64,
+            );
+            store
+                .put_publish_request(request.clone())
+                .map_err(|error| cold_push_state_error(&state_dir, error))?;
+            request
+        }
+    };
+    if let Some(failure) = request.failure.as_deref() {
+        return Err(CliError::usage(format!(
+            "tracked-directory snapshot request {} failed permanently: {failure}. Evidence is \
+             retained in `tl fs doctor`",
+            request.request_id
+        )));
+    }
+    let source_fingerprint = store
+        .prepared(generation)
+        .map_err(|error| cold_push_state_error(&state_dir, error))?
+        .ok_or_else(|| {
+            CliError::usage(format!(
+                "tracked push generation {generation} in {} lost its prepared record",
+                state_dir.display()
+            ))
+        })?
+        .source_fingerprint;
+    let published = publish_durable_native_candidate(
+        &session.client,
+        &session.project_id,
+        name,
+        &store,
+        generation,
+        &source_fingerprint,
+        candidate,
+        request,
+        user,
+        token,
+        None,
+        Some(progress.clone()),
+        |candidate| serde_json::to_vec(candidate).map_err(Into::into),
+    )
+    .await?;
+    let report = published.report;
+    let outcome = ColdPushOutcome {
+        operation_id: report.operation_id,
+        snapshot_id: report.snapshot_id.clone(),
+        files: report.files,
+        logical_bytes: report.logical_bytes,
+        uploaded_bytes: report.uploaded_bytes,
+        transport: report.transport,
+        recovered: false,
+        unchanged: false,
+    };
+    let completed_response = serde_json::to_vec(&outcome)?;
+    let (baseline_updates, baseline_removals) =
+        cold_push_retirement_baselines(&capture, &report.snapshot_id);
+    store
+        .retire_published(
+            generation,
+            &report.snapshot_id,
+            &baseline_updates,
+            &baseline_removals,
+            completed_response,
+        )
+        .map_err(|error| cold_push_state_error(&state_dir, error))?;
+    #[cfg(unix)]
+    if let Err(error) = generation_capture::retire_generation_capture(&state_dir, generation) {
+        eprintln!(
+            "warning: snapshot was adopted, but generation capture {generation} could not be \
+             reclaimed: {error}"
+        );
+    }
+    Ok(outcome)
+}
+
+fn acknowledge_cold_push(
+    ctx: &CliContext,
+    session: &FsSession,
+    root: &Path,
+    name: &str,
+    request_id: &str,
+) -> Result<()> {
+    if request_id.is_empty() {
+        return Ok(());
+    }
+    let (state_dir, store) = open_cold_push_state_at(
+        &cold_push_state_root(),
+        &ctx.api_url,
+        &session.project_id,
+        name,
+        root,
+    )?;
+    store
+        .acknowledge_completed_publish_request(request_id)
+        .map_err(|error| cold_push_state_error(&state_dir, error))
+}
+
 /// `tl fs push <dir> <name>` — upload a folder into a filesystem as one save, no mount.
+///
+/// Its first invocation keeps the pipelined cold-import path. The durable local generation store
+/// then becomes a strict reconciliation index for the same canonical source+remote tuple, so
+/// later invocations stat the tree but read/hash/upload only changed files.
 pub async fn push_dir(
     ctx: &CliContext,
     dir: &Path,
     name: &str,
     message: Option<&str>,
 ) -> Result<()> {
+    let dir = dir.canonicalize().map_err(|error| {
+        CliError::usage(format!(
+            "cannot resolve directory {}: {error}",
+            dir.display()
+        ))
+    })?;
+    if !dir.is_dir() {
+        return Err(CliError::usage(format!(
+            "{} is not a directory",
+            dir.display()
+        )));
+    }
+    let dir_text = dir.to_str().ok_or_else(|| {
+        CliError::usage(format!(
+            "tracked directory root {} is not valid UTF-8; native filesystem paths and durable \
+             attachment identities require lossless UTF-8",
+            dir.display()
+        ))
+    })?;
+    let protected_roots = [
+        Some(cold_push_state_root()),
+        Some(daemon::state_dir_root()),
+        Some(crate::config::files::config_dir()),
+    ];
+    for protected in protected_roots
+        .into_iter()
+        .flatten()
+        .map(|path| path.canonicalize().unwrap_or(path))
+    {
+        if dir.starts_with(&protected) || protected.starts_with(&dir) {
+            return Err(CliError::usage(format!(
+                "{} overlaps Tensorlake's local state at {}; refusing to snapshot a live \
+                 journal/configuration tree",
+                dir.display(),
+                protected.display(),
+            )));
+        }
+    }
+    plaindir::assert_no_overlap(dir_text)?;
     let session = FsSession::open(ctx, Some(name)).await?;
     let started = std::time::Instant::now();
     let bar = indicatif::ProgressBar::new_spinner();
@@ -779,24 +2113,16 @@ pub async fn push_dir(
         NativePushEvent::Published { .. } => progress_bar.set_message("save published"),
     }
     });
-    let (user, token) = session.creds();
-    let result = session
-        .client
-        .push_native_directory_with_credential(
-            &session.project_id,
-            name,
-            dir,
-            user,
-            token,
-            NativePushOptions {
-                message: message.unwrap_or_default().to_string(),
-                progress: Some(progress),
-                ..Default::default()
-            },
-        )
-        .await;
+    let result = durable_cold_push(ctx, &session, &dir, name, message, progress).await;
     bar.finish_and_clear();
     let report = result?;
+    if report.unchanged {
+        println!(
+            "No changes; filesystem remains at {} (strict reconciliation walk, no file reads or uploads).",
+            short_id(&report.snapshot_id)
+        );
+        return Ok(());
+    }
     let elapsed = started.elapsed();
     let throughput = if elapsed.as_secs_f64() > 0.0 {
         report.logical_bytes as f64 / elapsed.as_secs_f64()
@@ -814,6 +2140,14 @@ pub async fn push_dir(
         format_bytes(throughput as u64),
         report.operation_id,
     );
+    if report.recovered {
+        println!("  recovered a previously published save from durable local state");
+    }
+    if let Err(error) = acknowledge_cold_push(ctx, &session, &dir, name, &report.operation_id) {
+        // The snapshot is already published. Leaving the receipt unacknowledged is deliberately
+        // fail-safe: the next invocation replays this success instead of risking a second publish.
+        eprintln!("warning: could not acknowledge the local completion receipt: {error}");
+    }
     Ok(())
 }
 
@@ -828,15 +2162,29 @@ pub async fn history(
     // A target that is a known local attachment (or none, meaning the CWD's) names its backing
     // filesystem; anything else is a filesystem name. Attachments are mounts OR tracked
     // (pushed) directories — the latter have binding state, not daemon mount state.
+    let target_is_attachment = target
+        .map(|target| is_registered_mount(Path::new(target)))
+        .transpose()?
+        .unwrap_or(true);
     let fs_name = match target {
-        Some(t) if !is_registered_mount(Path::new(t)) => t.to_string(),
+        Some(t) if !target_is_attachment => t.to_string(),
         other => {
             let path = resolve_mount_path(other.map(PathBuf::from))?;
-            match plaindir::binding_for_lenient(&path) {
-                Some((_, state_dir)) => plaindir::binding_repo(&state_dir)?,
-                None => {
-                    let (_, state_dir) = state_dir_for(&path)?;
-                    daemon::load_mount_state(&state_dir)?.repo
+            if let Some(attachment) = tracked_directory_for(&path)? {
+                attachment.filesystem_id
+            } else {
+                match plaindir::binding_for_lenient(&path) {
+                    Some((root, _)) => {
+                        return Err(CliError::usage(format!(
+                            "{root} uses the removed pre-release Git-backed directory binding. Stop \
+                         tracking it with `tl fs unmount {root}`, then attach the native engine \
+                         with `tl fs push {root} <filesystem>`."
+                        )));
+                    }
+                    None => {
+                        let (_, state_dir) = state_dir_for(&path)?;
+                        daemon::load_mount_state(&state_dir)?.repo
+                    }
                 }
             }
         }
@@ -1062,6 +2410,22 @@ pub async fn mount_filesystem(
 pub(crate) struct Resume<'a> {
     pub(crate) workspace_id: &'a str,
     pub(crate) state_dir: Option<PathBuf>,
+}
+
+fn local_state_uuid_for_mount(
+    native_filesystem: bool,
+    read_only: bool,
+    resume_state_dir: Option<&Path>,
+) -> Option<String> {
+    if !native_filesystem || read_only {
+        return None;
+    }
+    Some(
+        resume_state_dir
+            .and_then(|dir| daemon::load_mount_state(dir).ok())
+            .and_then(|state| state.local_state_uuid)
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+    )
 }
 
 /// A detached local session of `repo`: registered mount state on this machine whose daemon is
@@ -2179,6 +3543,106 @@ fn state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
     Ok((mountpoint, PathBuf::from(state_dir)))
 }
 
+/// Resolve doctor targets even after the live mount registry entry has been removed.
+///
+/// Repair is specifically for detached state, so requiring the live registry would make the
+/// command unreachable in the state where it is safe to run. An explicit state-directory path
+/// wins; otherwise scan only the managed mount-state root for an exact persisted mountpoint match.
+/// Normal path-addressed commands continue to use [`state_dir_for`] and retain their stricter
+/// live-registration semantics.
+fn doctor_state_dir_for_in(path: &Path, state_root: &Path) -> Result<(String, PathBuf)> {
+    let explicit_state = path.join("state.json");
+    match std::fs::symlink_metadata(&explicit_state) {
+        Ok(metadata) => {
+            if !metadata.is_file() || metadata.file_type().is_symlink() {
+                return Err(CliError::usage(format!(
+                    "mount state at {} is not a regular file",
+                    explicit_state.display()
+                )));
+            }
+            let state = daemon::load_mount_state(path).map_err(|error| {
+                CliError::usage(format!(
+                    "cannot read mount state at {}: {error}",
+                    explicit_state.display()
+                ))
+            })?;
+            let state_dir = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+            return Ok((canonical_mountpoint(&state.mountpoint)?, state_dir));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => {
+            return Err(CliError::usage(format!(
+                "cannot inspect possible mount state at {}: {error}",
+                explicit_state.display()
+            )));
+        }
+    }
+    if let Ok(found) = state_dir_for(path) {
+        return Ok(found);
+    }
+
+    let mountpoint = canonical_mountpoint(path)?;
+    let entries = match std::fs::read_dir(state_root) {
+        Ok(entries) => entries,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(not_a_mount_error(format!(
+                "{mountpoint} is not a live tl fs mount and no detached local state matches it"
+            )));
+        }
+        Err(error) => {
+            return Err(CliError::usage(format!(
+                "cannot scan detached mount state at {}: {error}",
+                state_root.display()
+            )));
+        }
+    };
+    let mut matches = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        let state_dir = entry.path();
+        let file_type = match entry.file_type() {
+            Ok(file_type) => file_type,
+            Err(_) => continue,
+        };
+        if !file_type.is_dir() || file_type.is_symlink() {
+            continue;
+        }
+        let Ok(state) = daemon::load_mount_state(&state_dir) else {
+            // Unrelated corrupt state cannot prevent repairing the explicitly named mount. A
+            // caller can pass that state directory itself to diagnose its state.json.
+            continue;
+        };
+        let Ok(saved_mountpoint) = canonical_mountpoint(&state.mountpoint) else {
+            continue;
+        };
+        if saved_mountpoint == mountpoint {
+            matches.push(state_dir);
+        }
+    }
+    matches.sort();
+    match matches.as_slice() {
+        [state_dir] => Ok((mountpoint, state_dir.clone())),
+        [] => Err(not_a_mount_error(format!(
+            "{mountpoint} is not a live tl fs mount and no detached local state matches it; pass \
+             the state directory under {} explicitly if its state.json is damaged",
+            state_root.display()
+        ))),
+        _ => Err(CliError::usage(format!(
+            "multiple detached mount-state directories claim {mountpoint}: {}; pass the intended \
+             state directory explicitly",
+            matches
+                .iter()
+                .map(|path| path.display().to_string())
+                .collect::<Vec<_>>()
+                .join(", ")
+        ))),
+    }
+}
+
+fn doctor_state_dir_for(path: &Path) -> Result<(String, PathBuf)> {
+    doctor_state_dir_for_in(path, &daemon::state_dir_root())
+}
+
 /// Build a "not a mount"-shaped usage error, appending the binding-registry corruption note
 /// when the lenient binding dispatch has silently degraded this session — the path may
 /// really be a plain-directory binding the corrupt registry can no longer name, and a
@@ -2194,8 +3658,68 @@ fn not_a_mount_error(message: String) -> CliError {
 /// disambiguate optional positional args (a path-addressed command's optional PATH) —
 /// a binding here resolves as the command's path, whose dispatch then answers with the
 /// binding-appropriate behavior (or a clear v1 "not supported").
-pub fn is_registered_mount(path: &Path) -> bool {
-    state_dir_for(path).is_ok() || plaindir::binding_for_lenient(path).is_some()
+pub fn is_registered_mount(path: &Path) -> Result<bool> {
+    Ok(state_dir_for(path).is_ok()
+        || tracked_directory_for(path)?.is_some()
+        || plaindir::binding_for_lenient(path).is_some())
+}
+
+pub fn is_tracked_directory(path: &Path) -> Result<bool> {
+    Ok(tracked_directory_for(path)?.is_some())
+}
+
+/// Enforce the product boundary for path-addressed `tl fs` commands before shared mount helpers
+/// run. The mount implementation is shared with `tl git`, but their state machines are not.
+pub fn require_native_filesystem_attachment(path: &Path) -> Result<()> {
+    if tracked_directory_for(path)?.is_some() {
+        return Ok(());
+    }
+    if let Some((root, _)) = plaindir::binding_for_lenient(path) {
+        return Err(CliError::usage(format!(
+            "{root} uses the removed pre-release Git-backed directory binding. Stop tracking it \
+             with `tl fs unmount {root}`, then attach the native engine with `tl fs push {root} \
+             <filesystem>`."
+        )));
+    }
+    match state_dir_for(path) {
+        Ok((mountpoint, state_dir)) => {
+            let state = daemon::load_mount_state(&state_dir)?;
+            if state.native_filesystem {
+                Ok(())
+            } else {
+                Err(CliError::usage(format!(
+                    "{mountpoint} is a repository mount; use `tl git` commands for it"
+                )))
+            }
+        }
+        Err(_error) if daemon::still_mounted(path) => Ok(()),
+        Err(error) => Err(error),
+    }
+}
+
+/// Mirror of [`require_native_filesystem_attachment`] for `tl git` mount verbs.
+pub fn require_repository_mount_attachment(path: &Path) -> Result<()> {
+    if let Some(attachment) = tracked_directory_for(path)? {
+        return Err(CliError::usage(format!(
+            "{} is a tracked native filesystem directory; use `tl fs` commands for it",
+            attachment.root
+        )));
+    }
+    if let Some((root, _)) = plaindir::binding_for_lenient(path) {
+        return Err(CliError::usage(format!(
+            "{root} is a removed pre-release filesystem binding; detach it with `tl fs unmount \
+             {root}`"
+        )));
+    }
+    let (mountpoint, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    if state.native_filesystem {
+        Err(CliError::usage(format!(
+            "{mountpoint} is a native filesystem mount; use `tl fs` commands for it"
+        )))
+    } else {
+        Ok(())
+    }
 }
 
 /// The registered mountpoint or bound directory containing the current directory (the
@@ -2205,6 +3729,7 @@ pub fn mount_containing_cwd() -> Result<PathBuf> {
     let cwd = std::env::current_dir()?;
     let cwd = cwd.canonicalize().unwrap_or(cwd);
     let mut roots: Vec<PathBuf> = registry_load().keys().map(PathBuf::from).collect();
+    roots.extend(load_tracked_directories()?.into_keys().map(PathBuf::from));
     roots.extend(
         plaindir::binding_roots_lenient()
             .into_iter()
@@ -2261,7 +3786,7 @@ fn is_path_shaped(value: &Path) -> bool {
 /// mount onto a branch literally named after the directory.
 pub fn reject_mount_like_positional(value: &str, what: &str, usage: &str) -> Result<()> {
     let as_path = Path::new(value);
-    if is_registered_mount(as_path) || is_path_shaped(as_path) {
+    if is_registered_mount(as_path)? || is_path_shaped(as_path) {
         return Err(CliError::usage(format!(
             "{value} looks like a mounted directory, not a {what}; usage: {usage}"
         )));
@@ -2274,9 +3799,17 @@ pub fn reject_mount_like_positional(value: &str, what: &str, usage: &str) -> Res
 /// from any working directory. Without this, running `tl fs snapshot` from a CWD with no
 /// `.tensorlake/config.toml` up-tree dropped into the interactive init flow — which, run from
 /// inside the mount, wrote its config INTO the workspace and the snapshot sealed it.
-pub fn hydrate_scope_from_mount(ctx: &mut CliContext, path: &Path) {
+pub fn hydrate_scope_from_mount(ctx: &mut CliContext, path: &Path) -> Result<()> {
     if ctx.effective_project_id().is_some() {
-        return;
+        return Ok(());
+    }
+    if let Some(attachment) = tracked_directory_for(path)? {
+        ctx.api_url = attachment.api_url;
+        ctx.project_id = Some(attachment.project_id);
+        if ctx.organization_id.is_none() {
+            ctx.organization_id = attachment.organization_id;
+        }
+        return Ok(());
     }
     // Plain-directory bindings carry the same scope record as mounts (binding.json).
     if let Some((_, binding_state)) = plaindir::binding_for_lenient(path)
@@ -2286,18 +3819,19 @@ pub fn hydrate_scope_from_mount(ctx: &mut CliContext, path: &Path) {
         if ctx.organization_id.is_none() {
             ctx.organization_id = binding.organization_id;
         }
-        return;
+        return Ok(());
     }
     let Ok((_, state_dir)) = state_dir_for(path) else {
-        return;
+        return Ok(());
     };
     let Ok(state) = daemon::load_mount_state(&state_dir) else {
-        return;
+        return Ok(());
     };
     ctx.project_id = Some(state.project_id);
     if ctx.organization_id.is_none() {
         ctx.organization_id = state.organization_id;
     }
+    Ok(())
 }
 
 #[cfg(unix)]
@@ -2886,6 +4420,8 @@ pub async fn mount(
     // re-allocating could land on a different dead registration of the same workspace.
     // `_state_claim` holds the exclusive claim (see claim_state_dir) until this function
     // returns — by which point the daemon is serving and its own pid holds the dir.
+    let local_state_uuid =
+        local_state_uuid_for_mount(fs_surface, read_only, resume_state_dir.as_deref());
     let (state_dir, _state_claim) = match resume_state_dir {
         Some(dir) => match claim_state_dir(&dir)? {
             Some(guard) => (dir, guard),
@@ -2922,6 +4458,7 @@ pub async fn mount(
             native_filesystem: fs_surface,
             pinned_snapshot: pinned_native_snapshot.clone(),
             workspace_id: ws.id.clone(),
+            local_state_uuid,
             ref_name: ws.ref_name.clone(),
             mountpoint: PathBuf::from(&mountpoint),
             follow_ref,
@@ -3175,12 +4712,164 @@ async fn detach_leftover(mountpoint: &str) -> Result<()> {
     Ok(())
 }
 
+async fn refuse_while_native_restore_active(
+    state_dir: &Path,
+    mountpoint: &str,
+    state: &MountState,
+    action: &str,
+) -> Result<()> {
+    if !state.native_filesystem || state.local_state_uuid.is_none() {
+        return Ok(());
+    }
+    let operation = match daemon::control(state_dir, "restore-status").await {
+        Ok(reply) => reply
+            .get("operation")
+            .cloned()
+            .map(serde_json::from_value::<Option<local_state::RestoreOperation>>)
+            .transpose()
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "cannot read durable restore status for {mountpoint}: {error}"
+                ))
+            })?
+            .flatten(),
+        Err(_) => {
+            let identity = local_state_doctor_identity(mountpoint, state)?;
+            local_state::LocalState::open_existing(
+                state_dir.join(local_state::LOCAL_STATE_FILE),
+                identity,
+            )
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "cannot verify durable restore status for {mountpoint}: {error}"
+                ))
+            })?
+            .active_restore()
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "cannot read durable restore status for {mountpoint}: {error}"
+                ))
+            })?
+        }
+    };
+    if let Some(operation) = operation {
+        return Err(CliError::usage(format!(
+            "cannot {action} while restore {} to {} is in progress. Resume it with `tl fs \
+             restore {mountpoint} {}`; the mount remains write-fenced until the durable restore \
+             is adopted.",
+            short_id(&operation.request_id),
+            short_id(&operation.target_snapshot_id),
+            operation.target_snapshot_id,
+        )));
+    }
+    Ok(())
+}
+
+fn native_lifecycle_inflight(lifecycle: &LocalStateDoctorLifecycle) -> Option<String> {
+    if let Some(restore) = lifecycle.active_restore.as_ref() {
+        return Some(format!(
+            "restore {} to {}",
+            short_id(&restore.request_id),
+            short_id(&restore.target_snapshot_id)
+        ));
+    }
+    if let Some(generation) = lifecycle
+        .generations
+        .iter()
+        .find(|generation| generation.state != "open")
+    {
+        return Some(format!(
+            "snapshot generation {} ({})",
+            generation.generation, generation.state
+        ));
+    }
+    lifecycle
+        .completed_publish_requests
+        .iter()
+        .find(|request| !request.acknowledged)
+        .map(|request| {
+            format!(
+                "undelivered snapshot response {}",
+                short_id(&request.request_id)
+            )
+        })
+}
+
+async fn native_lifecycle_for_mount(
+    state_dir: &Path,
+    mountpoint: &str,
+    state: &MountState,
+) -> Result<LocalStateDoctorLifecycle> {
+    match daemon::control(state_dir, "doctor-local-state").await {
+        Ok(response) => serde_json::from_value(response).map_err(|error| {
+            CliError::usage(format!(
+                "cannot decode durable snapshot lifecycle for {mountpoint}: {error}"
+            ))
+        }),
+        Err(_) => {
+            let identity = local_state_doctor_identity(mountpoint, state)?;
+            let store = local_state::LocalState::open_existing(
+                state_dir.join(local_state::LOCAL_STATE_FILE),
+                identity,
+            )
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "cannot verify durable snapshot lifecycle for {mountpoint}: {error}"
+                ))
+            })?;
+            local_state_doctor_lifecycle(&store).map_err(|error| {
+                CliError::usage(format!(
+                    "cannot read durable snapshot lifecycle for {mountpoint}: {error}"
+                ))
+            })
+        }
+    }
+}
+
 pub async fn unmount(
     ctx: &CliContext,
     path: &Path,
     delete: bool,
     discard_local: bool,
 ) -> Result<()> {
+    if let Some(attachment) = tracked_directory_for(path)? {
+        if delete || discard_local {
+            return Err(CliError::usage(
+                "a tracked ordinary directory is your own files; unmount only stops local \
+                 tracking (--discard/--delete do not apply). Use `tl fs rm` after unmount if the \
+                 filesystem itself should be deleted",
+            ));
+        }
+        let _writer_guard =
+            try_local_state_writer_lock(&attachment.state_dir)?.ok_or_else(|| {
+                CliError::usage(format!(
+                    "{} is currently saving; wait for `tl fs push` to finish before unmounting",
+                    attachment.root
+                ))
+            })?;
+        let store = open_tracked_directory_state(&attachment)?;
+        let lifecycle = local_state_doctor_lifecycle(&store).map_err(|error| {
+            CliError::usage(format!(
+                "cannot inspect tracked-directory snapshot lifecycle before unmount: {error}"
+            ))
+        })?;
+        if let Some(inflight) = native_lifecycle_inflight(&lifecycle) {
+            return Err(CliError::usage(format!(
+                "cannot stop tracking {} while {inflight} is unresolved; rerun `tl fs push` to \
+                 adopt it first",
+                attachment.root
+            )));
+        }
+        remove_tracked_directory(&attachment.root)?;
+        println!(
+            "Stopped tracking {} for filesystem {}. Local files were not changed; the durable \
+             change index remains at {} and is reused by a later `tl fs push`.",
+            attachment.root,
+            attachment.filesystem_id,
+            attachment.state_dir.display(),
+        );
+        return Ok(());
+    }
     if let Some((root, _)) = plaindir::binding_for_lenient(path) {
         return Err(CliError::usage(format!(
             "{root} is a pushed directory, not a mount; stop tracking it with: tl fs unmount \
@@ -3211,6 +4900,16 @@ pub async fn unmount(
         }
     };
     let state = daemon::load_mount_state(&state_dir)?;
+    refuse_while_native_restore_active(&state_dir, &mountpoint, &state, "unmount").await?;
+    if state.native_filesystem {
+        let lifecycle = native_lifecycle_for_mount(&state_dir, &mountpoint, &state).await?;
+        if let Some(inflight) = native_lifecycle_inflight(&lifecycle) {
+            return Err(CliError::usage(format!(
+                "cannot unmount {mountpoint} while {inflight} is unresolved; wait for the \
+                 snapshot worker or retry `tl fs snapshot {mountpoint}`"
+            )));
+        }
+    }
     // Unmount deletes the state dir — the overlay with it. Retained sealed content drops
     // loss-free (its bytes are in workspace history; sealing keeps the overlay, so this is
     // the normal post-snapshot state and must not gate). Anything TRULY losable — unsealed
@@ -3573,31 +5272,133 @@ fn overlay_rel_path(root: &Path, abs: &Path) -> String {
 /// state: unsealed changes (pending renames included), ignored local-only files and
 /// deletions, or overlay entries no seal record vouches for.
 ///
-/// The classification is OFFLINE-capable: sealed.json + per-path stat identity is the same
-/// mechanism daemon startup reconciliation trusts, so a dead daemon does not force a remount
-/// just to unmount — any file modified through the mount stat-mismatches its seal record and
-/// refuses. When the daemon answers the `dirty` op, its view is used as an ADDITIONAL
-/// refusal source (it catches same-stat modifications the stat check cannot see) and for
-/// friendlier counts.
+/// The classification is OFFLINE-capable. Native mounts read sealed baselines and every durable
+/// dirty/rename row from snapshot-state.redb; a live daemon serves the same state from its
+/// in-memory mirror because it owns redb's writable lock. Legacy repository mounts retain the old
+/// sealed.json fallback. Any file modified through the mount either has a durable dirty intent or
+/// stat-mismatches its retained baseline and refuses.
 ///
-/// Bare directories never block: git cannot represent an empty tree, so no snapshot can ever
-/// cover one — gating on them would make the gate permanently unsatisfiable, which is
-/// exactly the bug this classification exists to fix.
+/// Directory containers are not counted again by the stat walk. Native empty-directory mutations
+/// are represented by durable dirty rows; git cannot represent an empty tree.
 ///
 /// Fail-closed: an unreadable tree or an unevaluable ignore rule is an error naming the
 /// bypass flag, never a pass.
 #[cfg(unix)]
 async fn overlay_losable_state(state_dir: &Path, mountpoint: &str) -> Result<Option<String>> {
-    if !overlay_has_local_state(state_dir)? {
+    let has_overlay = overlay_has_local_state(state_dir)?;
+    let mount_state = state_dir
+        .join("state.json")
+        .exists()
+        .then(|| daemon::load_mount_state(state_dir))
+        .transpose()?;
+    let durable_native = mount_state
+        .as_ref()
+        .is_some_and(|state| state.native_filesystem && state.local_state_uuid.is_some());
+    let (dirty, sealed): (Option<daemon::DirtyReply>, daemon::SealedIndex) = if durable_native {
+        match daemon::control(state_dir, "overlay-safety").await {
+            Ok(reply) if reply.get("dirty").is_some() && reply.get("sealed").is_some() => {
+                let safety: daemon::OverlaySafetyReply =
+                    serde_json::from_value(reply).map_err(|error| {
+                        CliError::usage(format!(
+                            "cannot verify local overlay state: the mount daemon returned invalid \
+                             durable safety state ({error}); pass --discard only if losing local \
+                             work is intended"
+                        ))
+                    })?;
+                (Some(safety.dirty), safety.sealed)
+            }
+            _ => {
+                // The daemon is absent (or old enough not to serve the safety op). Open redb
+                // strictly read-only; this fails closed if a live writer owns the lock, the
+                // identity mismatches, or any required table/record is corrupt.
+                let mount_state = mount_state
+                    .as_ref()
+                    .expect("durable native mount has mount state");
+                let identity = local_state_doctor_identity(mountpoint, mount_state)?;
+                let database_path = state_dir.join(local_state::LOCAL_STATE_FILE);
+                let local = local_state::LocalState::open_existing(&database_path, identity)
+                    .map_err(|error| {
+                        CliError::usage(format!(
+                            "cannot verify local overlay state from {}: {error}; pass --discard \
+                             only if losing local work is intended",
+                            database_path.display()
+                        ))
+                    })?;
+                let recovery = local.recovery_dirty_state().map_err(|error| {
+                    CliError::usage(format!(
+                        "cannot read durable dirty state from {}: {error}; pass --discard only if \
+                         losing local work is intended",
+                        database_path.display()
+                    ))
+                })?;
+                let mut upserts = std::collections::BTreeSet::new();
+                let mut deletes = std::collections::BTreeSet::new();
+                for path in recovery.paths {
+                    match path.kind {
+                        local_state::DirtyKind::Upsert => {
+                            upserts.insert(path.path);
+                        }
+                        local_state::DirtyKind::Delete => {
+                            deletes.insert(path.path);
+                        }
+                    }
+                }
+                let renames: std::collections::BTreeSet<(String, String)> = recovery
+                    .renames
+                    .into_iter()
+                    .map(|rename| (rename.from, rename.to))
+                    .collect();
+                let active = local
+                    .generation(recovery.active_generation)
+                    .map_err(|error| {
+                        CliError::usage(format!(
+                            "cannot read durable active generation from {}: {error}",
+                            database_path.display()
+                        ))
+                    })?
+                    .ok_or_else(|| {
+                        CliError::usage(format!(
+                            "cannot verify local overlay state: durable active generation {} is \
+                             missing from {}",
+                            recovery.active_generation,
+                            database_path.display()
+                        ))
+                    })?;
+                let sealed =
+                    daemon::sealed_index_from_local_state_reader(&local).map_err(|error| {
+                        CliError::usage(format!(
+                            "cannot read durable sealed baselines from {}: {error}; pass --discard \
+                             only if losing local work is intended",
+                            database_path.display()
+                        ))
+                    })?;
+                (
+                    Some(daemon::DirtyReply {
+                        upserts: upserts.into_iter().collect(),
+                        deletes: deletes.into_iter().collect(),
+                        renames: renames.into_iter().collect(),
+                        commit: active.base_snapshot.unwrap_or_default(),
+                    }),
+                    sealed,
+                )
+            }
+        }
+    } else {
+        let dirty = match daemon::control(state_dir, "dirty").await {
+            Ok(reply) if reply.get("upserts").is_some() => serde_json::from_value(reply).ok(),
+            _ => None,
+        };
+        (dirty, daemon::SealedIndex::load(state_dir))
+    };
+    if !has_overlay
+        && dirty.as_ref().is_none_or(|dirty| {
+            dirty.upserts.is_empty() && dirty.deletes.is_empty() && dirty.renames.is_empty()
+        })
+    {
         // Truly empty. Also the answer for a never-written mount whose daemon is gone —
         // unmounting that must not demand a remount first.
         return Ok(None);
     }
-    let dirty: Option<daemon::DirtyReply> = match daemon::control(state_dir, "dirty").await {
-        Ok(reply) if reply.get("upserts").is_some() => serde_json::from_value(reply).ok(),
-        _ => None,
-    };
-    let sealed = daemon::SealedIndex::load(state_dir);
     let mut ignore = SnapshotIgnore::new(Path::new(mountpoint));
     let renames = match &dirty {
         Some(d) => d.renames.clone(),
@@ -3900,7 +5701,7 @@ struct LocalChanges {
     renames: Vec<(String, String)>,
     /// Upper files sealed into a snapshot and kept as the local byte cache.
     retained: usize,
-    /// Ignored local-only files (never enter a snapshot; only `snapshot --clear` drops them).
+    /// Ignored local-only files (never enter a snapshot and survive generation-safe cleanup).
     ignored: usize,
     exact: bool,
 }
@@ -4043,19 +5844,33 @@ pub async fn snapshot(
     message: Option<&str>,
     clear: bool,
 ) -> Result<()> {
-    // A plain-directory binding snapshots by scanning the directory against its stat index;
-    // there is no overlay, so the mount-only --clear flag has nothing to drop.
-    if let Some((root, binding_state)) = plaindir::binding_for_lenient(path) {
+    if let Some(attachment) = tracked_directory_for(path)? {
         if clear {
             return Err(CliError::usage(
-                "--clear drops a mount's local overlay; a plain-directory binding has no \
-                 overlay to clear",
+                "--clear trims a mount's retained byte cache; a tracked ordinary directory has \
+                 no overlay cache to trim",
             ));
         }
-        return plaindir::snapshot(ctx, &root, &binding_state, message).await;
+        return push_dir(
+            ctx,
+            Path::new(&attachment.root),
+            &attachment.filesystem_id,
+            message,
+        )
+        .await;
+    }
+    // A plain-directory binding snapshots by scanning the directory against its stat index;
+    // there is no overlay, so the mount-only --clear flag has nothing to drop.
+    if let Some((root, _)) = plaindir::binding_for_lenient(path) {
+        return Err(CliError::usage(format!(
+            "{root} uses the removed pre-release Git-backed directory binding. Stop tracking it \
+             with `tl fs unmount {root}`, then attach the native engine with `tl fs push {root} \
+             <filesystem>`."
+        )));
     }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
+    refuse_while_native_restore_active(&state_dir, &mountpoint, &state, "snapshot").await?;
     if state.read_only() {
         if state.native_filesystem {
             let view = state
@@ -4080,21 +5895,22 @@ pub async fn snapshot(
     let bar = indicatif::ProgressBar::new_spinner();
     bar.enable_steady_tick(std::time::Duration::from_millis(120));
     bar.set_message("sealing workspace changes...");
-    let (outcome, cleared) = seal_via_daemon(&state_dir, &mountpoint, message, clear, &bar).await?;
+    let (outcome, cleared, completed_request_id) =
+        seal_via_daemon(&state_dir, &mountpoint, message, clear, &bar).await?;
     let total = started.elapsed();
     bar.finish_and_clear();
     let sealed = match outcome {
         DaemonSealOutcome::Clean => {
             println!("{}", clean_snapshot_message(cleared));
+            acknowledge_daemon_snapshot(&state_dir, completed_request_id.as_deref()).await;
             return Ok(());
         }
         DaemonSealOutcome::Pending { watermark } => {
             if clear {
                 println!(
-                    "Snapshot preparation queued at dirty watermark {watermark}; nothing was \
-                     published or cleared. Run `tl fs snapshot --clear {}` again after \
-                     preparation completes.",
-                    path.display(),
+                    "Snapshot preparation queued at dirty watermark {watermark}; the mount daemon \
+                     will publish it and then generation-safely clear its retained paths in the \
+                     background."
                 );
             } else {
                 println!(
@@ -4116,6 +5932,7 @@ pub async fn snapshot(
         sealed.chunks_total.max(sealed.chunks_uploaded),
         fmt_dur(total),
     );
+    acknowledge_daemon_snapshot(&state_dir, completed_request_id.as_deref()).await;
     if let Some(push_ms) = sealed.push_ms {
         println!(
             "  push {} (sealed by the mount daemon)",
@@ -4140,14 +5957,32 @@ enum DaemonSealOutcome {
     Sealed(DaemonSeal),
 }
 
+async fn acknowledge_daemon_snapshot(state_dir: &Path, request_id: Option<&str>) {
+    let Some(request_id) = request_id else {
+        return;
+    };
+    if let Err(error) = daemon::control_with(
+        state_dir,
+        "ack-snapshot",
+        serde_json::json!({ "request_id": request_id }),
+    )
+    .await
+    {
+        // The snapshot is already published. Keeping the receipt unacknowledged is fail-safe:
+        // the next matching manual invocation replays the exact success.
+        eprintln!(
+            "warning: snapshot succeeded but its local response receipt could not be acknowledged: \
+             {error}"
+        );
+    }
+}
+
 /// What a clean (nothing-to-seal) snapshot prints. Never claims a clean workspace when a
-/// requested clear actually dropped retained files — ignored files and previously sealed
-/// content live in the upper without ever enumerating as dirty.
+/// requested clear actually dropped retained paths from an earlier save.
 fn clean_snapshot_message(cleared: Option<usize>) -> String {
     match cleared {
         Some(n) if n > 0 => format!(
-            "Nothing new to snapshot; cleared {n} locally retained file(s) (including \
-             ignored files) from the overlay."
+            "Nothing new to snapshot; cleared {n} locally retained path(s) from the overlay."
         ),
         _ => "Nothing to snapshot: workspace is clean.".to_string(),
     }
@@ -4166,30 +6001,43 @@ fn clean_snapshot_message(cleared: Option<usize>) -> String {
 /// macOS converges here (Linux rode the FUSE notifier inside the daemon). The `seal` op is
 /// line-streaming: progress events narrate onto `bar` until the final reply line arrives.
 ///
-/// `clear` rides the seal request itself — the daemon drops the whole overlay inside the
-/// same sealer cycle (the explicit, destructive opt-in: it also deletes ignored files and
-/// any writes racing the seal; it is what empties the local dirty set so `tl fs sync` can
-/// run) and replies with exactly the paths the drop removed, which is the kernel
-/// revalidation set here. The clear runs even after a clean seal: earlier kept-overlay seals
-/// leave a populated upper that `sync` refuses to run over.
+/// `clear` rides the seal request itself. Native mounts trim only retained paths owned by the
+/// published generation, preserving later writes and ignored/local-only content. Repository
+/// mounts retain their legacy whole-overlay behavior.
 async fn seal_via_daemon(
     state_dir: &Path,
     mountpoint: &str,
     message: Option<&str>,
     clear: bool,
     bar: &indicatif::ProgressBar,
-) -> Result<(DaemonSealOutcome, Option<usize>)> {
+) -> Result<(DaemonSealOutcome, Option<usize>, Option<String>)> {
+    let request_id = uuid::Uuid::new_v4().to_string();
     let request = daemon::SealRequest {
+        request_id: Some(request_id.clone()),
         message: message.map(str::to_string),
         clear,
     };
-    let resp = daemon::control_streaming(
-        state_dir,
-        "seal",
-        serde_json::to_value(&request)?,
-        |event| bar.set_message(event.to_string()),
-    )
-    .await?;
+    let request_value = serde_json::to_value(&request)?;
+    let resp = match daemon::control_streaming(state_dir, "seal", request_value.clone(), |event| {
+        bar.set_message(event.to_string())
+    })
+    .await
+    {
+        Ok(response) => response,
+        Err(first_error) => {
+            bar.set_message("reconnecting to recover snapshot result...");
+            daemon::control_streaming(state_dir, "seal", request_value, |event| {
+                bar.set_message(event.to_string())
+            })
+            .await
+            .map_err(|second_error| {
+                CliError::usage(format!(
+                    "snapshot request {request_id} lost its first daemon response ({first_error}) \
+                     and recovery also failed: {second_error}"
+                ))
+            })?
+        }
+    };
     if resp.get("ok").and_then(|v| v.as_bool()) != Some(true) {
         let error = resp
             .get("error")
@@ -4236,7 +6084,7 @@ async fn seal_via_daemon(
                 "the mount daemon's pending seal reply is missing \"pending_watermark\"",
             )
         })?;
-        return Ok((DaemonSealOutcome::Pending { watermark }, None));
+        return Ok((DaemonSealOutcome::Pending { watermark }, None, None));
     }
     let cleared = if clear {
         let cleared = reply.cleared.ok_or_else(|| {
@@ -4255,7 +6103,11 @@ async fn seal_via_daemon(
         None
     };
     if reply.clean {
-        return Ok((DaemonSealOutcome::Clean, cleared));
+        return Ok((
+            DaemonSealOutcome::Clean,
+            cleared,
+            reply.completed_request_id,
+        ));
     }
     let sealed_field = |name: &str, v: Option<u64>| {
         v.ok_or_else(|| {
@@ -4274,6 +6126,7 @@ async fn seal_via_daemon(
             push_ms: reply.push_ms,
         }),
         cleared,
+        reply.completed_request_id,
     ))
 }
 
@@ -4303,6 +6156,7 @@ pub async fn promote(
     }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
+    refuse_while_native_restore_active(&state_dir, &mountpoint, &state, "promote").await?;
     if state.read_only() {
         return Err(CliError::usage(format!(
             "this is a read-only mount following {}; there is nothing to promote",
@@ -4422,6 +6276,7 @@ pub async fn sync(
     }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
+    refuse_while_native_restore_active(&state_dir, &mountpoint, &state, "sync").await?;
     if state.read_only() {
         return Err(CliError::usage(format!(
             "this is a read-only mount following {}; it syncs automatically",
@@ -4581,9 +6436,1415 @@ pub async fn sync(
     Ok(())
 }
 
+#[derive(Debug)]
+struct RepairOverlayImage {
+    upserts: Vec<String>,
+    deletes: Vec<String>,
+    renames: Vec<(String, String)>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LocalStateRepairManifest {
+    format_ver: u16,
+    created_at_ms: u64,
+    mountpoint: String,
+    database_path: PathBuf,
+    backup_path: PathBuf,
+    original_database_present: bool,
+    base_snapshot: Option<String>,
+    upserts: usize,
+    deletes: usize,
+    renames: usize,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LocalStateRepairReport {
+    status: &'static str,
+    filesystem: String,
+    mountpoint: String,
+    state_directory: PathBuf,
+    database_path: PathBuf,
+    backup_path: PathBuf,
+    original_database_present: bool,
+    base_snapshot: Option<String>,
+    upserts: usize,
+    deletes: usize,
+    renames: usize,
+    #[serde(flatten)]
+    lifecycle: LocalStateDoctorLifecycle,
+}
+
+fn repair_timestamp_ms() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_millis().min(u64::MAX as u128) as u64)
+        .unwrap_or(0)
+}
+
+fn repair_rel_path(root: &Path, path: &Path) -> Result<String> {
+    let relative = path.strip_prefix(root).map_err(|_| {
+        CliError::usage(format!(
+            "{} escaped repair overlay root {}",
+            path.display(),
+            root.display()
+        ))
+    })?;
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(part) => {
+                let part = part.to_str().ok_or_else(|| {
+                    CliError::usage(format!(
+                        "repair cannot preserve the non-UTF-8 overlay path {}; no journal was \
+                         replaced",
+                        path.display()
+                    ))
+                })?;
+                if part.is_empty() {
+                    return Err(CliError::usage(format!(
+                        "repair found an empty overlay path component under {}; no journal was \
+                         replaced",
+                        root.display()
+                    )));
+                }
+                parts.push(part);
+            }
+            _ => {
+                return Err(CliError::usage(format!(
+                    "repair found a non-normal overlay path {}; no journal was replaced",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if parts.is_empty() {
+        return Err(CliError::usage(format!(
+            "repair attempted to journal the overlay root {}; no journal was replaced",
+            root.display()
+        )));
+    }
+    Ok(parts.join("/"))
+}
+
+fn repair_walk_overlay_tree(
+    root: &Path,
+    include_directories: bool,
+    label: &str,
+) -> Result<Vec<String>> {
+    let metadata = match std::fs::symlink_metadata(root) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(CliError::usage(format!(
+                "cannot inspect repair {label} at {}: {error}; no journal was replaced",
+                root.display()
+            )));
+        }
+    };
+    if !metadata.is_dir() || metadata.file_type().is_symlink() {
+        return Err(CliError::usage(format!(
+            "repair {label} at {} is not a real directory; no journal was replaced",
+            root.display()
+        )));
+    }
+
+    fn walk(
+        root: &Path,
+        directory: &Path,
+        include_directories: bool,
+        label: &str,
+        paths: &mut Vec<String>,
+    ) -> Result<()> {
+        let mut entries = std::fs::read_dir(directory)
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "cannot enumerate repair {label} directory {}: {error}; no journal was \
+                     replaced",
+                    directory.display()
+                ))
+            })?
+            .collect::<std::io::Result<Vec<_>>>()
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "cannot enumerate repair {label} directory {}: {error}; no journal was \
+                     replaced",
+                    directory.display()
+                ))
+            })?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            let path = entry.path();
+            let metadata = std::fs::symlink_metadata(&path).map_err(|error| {
+                CliError::usage(format!(
+                    "cannot inspect repair {label} entry {}: {error}; no journal was replaced",
+                    path.display()
+                ))
+            })?;
+            let file_type = metadata.file_type();
+            if file_type.is_dir() && !file_type.is_symlink() {
+                if include_directories {
+                    paths.push(repair_rel_path(root, &path)?);
+                }
+                walk(root, &path, include_directories, label, paths)?;
+            } else if file_type.is_file() || file_type.is_symlink() {
+                paths.push(repair_rel_path(root, &path)?);
+            } else {
+                return Err(CliError::usage(format!(
+                    "repair found unsupported local object {} in {label}; only regular files, \
+                     directories, and symlinks are safe to journal",
+                    path.display()
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    let mut paths = Vec::new();
+    walk(root, root, include_directories, label, &mut paths)?;
+    paths.sort();
+    paths.dedup();
+    Ok(paths)
+}
+
+fn validate_repair_journal_path(path: &str, label: &str) -> Result<()> {
+    let candidate = Path::new(path);
+    if path.is_empty()
+        || candidate.is_absolute()
+        || candidate.components().any(|component| {
+            matches!(
+                component,
+                Component::ParentDir
+                    | Component::CurDir
+                    | Component::RootDir
+                    | Component::Prefix(_)
+            )
+        })
+    {
+        return Err(CliError::usage(format!(
+            "repair found invalid {label} path {path:?}; no journal was replaced"
+        )));
+    }
+    if candidate
+        .components()
+        .any(|component| !matches!(component, Component::Normal(_)))
+    {
+        return Err(CliError::usage(format!(
+            "repair found invalid {label} path {path:?}; no journal was replaced"
+        )));
+    }
+    Ok(())
+}
+
+fn repair_redirects(state_dir: &Path) -> Result<Vec<(String, String)>> {
+    let path = state_dir.join("redirects.json");
+    let metadata = match std::fs::symlink_metadata(&path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(error) => {
+            return Err(CliError::usage(format!(
+                "cannot inspect repair redirect state at {}: {error}; no journal was replaced",
+                path.display()
+            )));
+        }
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(CliError::usage(format!(
+            "repair redirect state at {} is not a regular file; no journal was replaced",
+            path.display()
+        )));
+    }
+    let raw = std::fs::read(&path)?;
+    let redirects: HashMap<String, String> = serde_json::from_slice(&raw).map_err(|error| {
+        CliError::usage(format!(
+            "repair redirect state at {} is corrupt ({error}); no journal was replaced",
+            path.display()
+        ))
+    })?;
+    let mut entries = Vec::with_capacity(redirects.len());
+    for (to, from) in redirects {
+        validate_repair_journal_path(&to, "redirect destination")?;
+        validate_repair_journal_path(&from, "redirect source")?;
+        if from == to {
+            return Err(CliError::usage(format!(
+                "repair found a self-referential redirect {from:?}; no journal was replaced"
+            )));
+        }
+        entries.push((from, to));
+    }
+    entries.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+    Ok(entries)
+}
+
+fn repair_overlay_image(state_dir: &Path) -> Result<RepairOverlayImage> {
+    let upserts: std::collections::BTreeSet<String> =
+        repair_walk_overlay_tree(&state_dir.join("upper"), true, "upper tree")?
+            .into_iter()
+            .collect();
+    let mut deletes: std::collections::BTreeSet<String> =
+        repair_walk_overlay_tree(&state_dir.join("wh"), false, "whiteout tree")?
+            .into_iter()
+            .collect();
+    // A recreated upper entry shadows an old same-path whiteout. Descendant whiteouts remain
+    // meaningful and are retained.
+    deletes.retain(|path| !upserts.contains(path));
+    Ok(RepairOverlayImage {
+        upserts: upserts.into_iter().collect(),
+        deletes: deletes.into_iter().collect(),
+        renames: repair_redirects(state_dir)?,
+    })
+}
+
+fn copy_repair_metadata_file(state_dir: &Path, backup_dir: &Path, name: &str) -> Result<()> {
+    let source = state_dir.join(name);
+    let metadata = match std::fs::symlink_metadata(&source) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(CliError::usage(format!(
+            "repair evidence {} is not a regular file; refusing to replace the journal",
+            source.display()
+        )));
+    }
+    let destination = backup_dir.join(name);
+    std::fs::copy(&source, &destination)?;
+    std::fs::File::open(&destination)?.sync_all()?;
+    Ok(())
+}
+
+fn write_repair_json(path: &Path, value: &impl serde::Serialize) -> Result<()> {
+    let encoded = serde_json::to_vec_pretty(value)?;
+    plaindir::write_atomic(path, &encoded)?;
+    Ok(())
+}
+
+fn repair_database_base_snapshot(
+    database_path: &Path,
+    identity: local_state::LocalStateIdentity,
+    explicit_base: Option<&str>,
+) -> Result<Option<String>> {
+    let explicit_base = explicit_base
+        .map(|base| {
+            if base == "empty" {
+                Ok(None)
+            } else if base.trim().is_empty() {
+                Err(CliError::usage(
+                    "--base must be a native save ID, or `empty` for a filesystem with no saves",
+                ))
+            } else {
+                Ok(Some(base.to_string()))
+            }
+        })
+        .transpose()?;
+    let metadata = match std::fs::symlink_metadata(database_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return explicit_base.ok_or_else(|| {
+                CliError::usage(format!(
+                    "durable local snapshot state is missing at {}; the repair baseline cannot \
+                     be proven. Retry with `--base <SAVE_ID>` (or `--base empty` only for a \
+                     filesystem that has never had a save)",
+                    database_path.display()
+                ))
+            });
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() || metadata.file_type().is_symlink() {
+        return Err(CliError::usage(format!(
+            "durable local snapshot state at {} is not a regular file; refusing to replace it",
+            database_path.display()
+        )));
+    }
+    match local_state::LocalState::open_existing(database_path, identity) {
+        Ok(reader) => {
+            let active = reader.active_generation().map_err(|error| {
+                CliError::usage(format!(
+                    "cannot read the active generation from {}: {error}",
+                    database_path.display()
+                ))
+            })?;
+            let base = reader
+                .generation(active)
+                .map_err(|error| {
+                    CliError::usage(format!(
+                        "cannot read active generation {active} from {}: {error}",
+                        database_path.display()
+                    ))
+                })?
+                .and_then(|generation| generation.base_snapshot);
+            if let Some(explicit) = explicit_base
+                && explicit != base
+            {
+                return Err(CliError::usage(format!(
+                    "--base does not match the baseline proven by the readable journal at {}",
+                    database_path.display()
+                )));
+            }
+            Ok(base)
+        }
+        Err(error) => {
+            let detail = error.to_string().to_ascii_lowercase();
+            if detail.contains("already open")
+                || detail.contains("database lock")
+                || detail.contains("resource temporarily unavailable")
+            {
+                return Err(CliError::usage(format!(
+                    "durable local snapshot state at {} still has a live reader/writer ({error}); \
+                     refusing offline repair",
+                    database_path.display()
+                )));
+            }
+            explicit_base.ok_or_else(|| {
+                CliError::usage(format!(
+                    "durable local snapshot state at {} cannot prove its baseline ({error}). \
+                     Refusing to guess from attach-time mount metadata; retry with `--base \
+                     <SAVE_ID>` (or `--base empty` only for a filesystem that has never had a \
+                     save)",
+                    database_path.display()
+                ))
+            })
+        }
+    }
+}
+
+fn repair_local_state_journal(
+    mountpoint: String,
+    state_dir: PathBuf,
+    state: &MountState,
+    explicit_base: Option<&str>,
+) -> Result<LocalStateRepairReport> {
+    if !state.native_filesystem {
+        return Err(CliError::usage(
+            "`tl fs doctor --repair-journal` only repairs native filesystem mounts",
+        ));
+    }
+    if state.read_only() || state.local_state_uuid.is_none() {
+        return Err(CliError::usage(
+            "this mount has no writable native mutation journal to repair",
+        ));
+    }
+    if daemon::daemon_pid(&state_dir).is_some_and(daemon_alive)
+        || live_daemon_for(&mountpoint).is_some()
+        || daemon::still_mounted(Path::new(&mountpoint))
+    {
+        return Err(CliError::usage(format!(
+            "{mountpoint} is still mounted or has a live daemon; unmount it before repairing the \
+             journal"
+        )));
+    }
+    let _writer_guard = try_local_state_writer_lock(&state_dir)?.ok_or_else(|| {
+        CliError::usage(format!(
+            "native local snapshot state at {} has a live writer; refusing offline repair",
+            state_dir.display()
+        ))
+    })?;
+    // Close the check-vs-lock race: a previous-version daemon does not own the new writer flock,
+    // so repeat every legacy liveness probe after acquiring it.
+    if daemon::daemon_pid(&state_dir).is_some_and(daemon_alive)
+        || live_daemon_for(&mountpoint).is_some()
+        || daemon::still_mounted(Path::new(&mountpoint))
+    {
+        return Err(CliError::usage(format!(
+            "{mountpoint} became live while journal repair was starting; no journal was replaced"
+        )));
+    }
+
+    let identity = local_state_doctor_identity(&mountpoint, state)?;
+    let database_path = state_dir.join(local_state::LOCAL_STATE_FILE);
+    if let Ok(reader) = local_state::LocalState::open_existing(&database_path, identity.clone()) {
+        let lifecycle = local_state_doctor_lifecycle(&reader).map_err(|error| {
+            CliError::usage(format!(
+                "cannot inspect the existing lifecycle before repair: {error}"
+            ))
+        })?;
+        if let Some(inflight) = native_lifecycle_inflight(&lifecycle) {
+            return Err(CliError::usage(format!(
+                "refusing to replace the journal while {inflight} is unresolved; resume/adopt \
+                 that operation before repair"
+            )));
+        }
+    }
+    let base_snapshot =
+        repair_database_base_snapshot(&database_path, identity.clone(), explicit_base)?;
+    let image = repair_overlay_image(&state_dir)?;
+    let original_database_present = database_path.exists();
+    let created_at_ms = repair_timestamp_ms();
+    let backup_path = state_dir
+        .join("repair-backups")
+        .join(format!("{created_at_ms}-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&backup_path)?;
+
+    let manifest = LocalStateRepairManifest {
+        format_ver: 1,
+        created_at_ms,
+        mountpoint: mountpoint.clone(),
+        database_path: database_path.clone(),
+        backup_path: backup_path.clone(),
+        original_database_present,
+        base_snapshot: base_snapshot.clone(),
+        upserts: image.upserts.len(),
+        deletes: image.deletes.len(),
+        renames: image.renames.len(),
+    };
+    let marker_path = state_dir.join(LOCAL_STATE_REPAIR_MARKER);
+    let prior_repair_marker = marker_path.exists();
+    let backup_result = (|| -> Result<()> {
+        if prior_repair_marker {
+            copy_repair_metadata_file(&state_dir, &backup_path, LOCAL_STATE_REPAIR_MARKER)?;
+        }
+        for name in [
+            "state.json",
+            LOCAL_STATE_FORMAT_MARKER,
+            "redirects.json",
+            "sealed.json",
+            "sealed.json.tmp",
+            "native-prepared.json",
+            "native-prepared.json.tmp",
+            "native-seal-request.json",
+            "native-seal-request.json.tmp",
+        ] {
+            copy_repair_metadata_file(&state_dir, &backup_path, name)?;
+        }
+        if original_database_present {
+            copy_repair_metadata_file(&state_dir, &backup_path, local_state::LOCAL_STATE_FILE)?;
+        } else {
+            let missing = backup_path.join(format!("{}.missing", local_state::LOCAL_STATE_FILE));
+            std::fs::File::create(&missing)?.sync_all()?;
+        }
+        write_repair_json(&backup_path.join("manifest.json"), &manifest)?;
+        std::fs::File::open(&backup_path)?.sync_all()?;
+        Ok(())
+    })();
+    if let Err(error) = backup_result {
+        return Err(error);
+    }
+    // The original database and supporting metadata are durable in the export before repair
+    // marks or replaces anything in the live state directory.
+    write_repair_json(&marker_path, &manifest)?;
+
+    let temporary_database = state_dir.join(format!(
+        ".{}.repair-{}.tmp",
+        local_state::LOCAL_STATE_FILE,
+        uuid::Uuid::new_v4()
+    ));
+    let build_result = (|| -> Result<()> {
+        let store = local_state::LocalState::open(&temporary_database, identity.clone()).map_err(
+            |error| {
+                CliError::usage(format!(
+                    "cannot create replacement journal {}: {error}",
+                    temporary_database.display()
+                ))
+            },
+        )?;
+        let mut mutations =
+            Vec::with_capacity(image.upserts.len() + image.deletes.len() + image.renames.len());
+        mutations.extend(image.upserts.iter().cloned().map(|path| {
+            local_state::LegacyMutation::Upsert {
+                path,
+                min_write_offset: 0,
+            }
+        }));
+        mutations.extend(
+            image
+                .deletes
+                .iter()
+                .cloned()
+                .map(|path| local_state::LegacyMutation::Delete { path }),
+        );
+        mutations.extend(
+            image
+                .renames
+                .iter()
+                .cloned()
+                .map(|(from, to)| local_state::LegacyMutation::Rename { from, to }),
+        );
+        store
+            .import_legacy_once(local_state::LegacyImport {
+                base_snapshot: base_snapshot.clone(),
+                mutations,
+            })
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "cannot build conservative replacement journal: {error}"
+                ))
+            })?;
+        drop(store);
+        let reader = local_state::LocalState::open_existing(&temporary_database, identity.clone())
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "replacement journal failed strict validation before adoption: {error}"
+                ))
+            })?;
+        let generations = reader.generations().map_err(|error| {
+            CliError::usage(format!(
+                "replacement journal generation table failed validation: {error}"
+            ))
+        })?;
+        if generations.len() != 1
+            || generations[0].generation != 1
+            || generations[0].state != local_state::GenerationState::Open
+        {
+            return Err(CliError::usage(
+                "replacement journal did not contain exactly one open generation",
+            ));
+        }
+        Ok(())
+    })();
+    if let Err(error) = build_result {
+        let _ = std::fs::remove_file(&temporary_database);
+        if prior_repair_marker {
+            let _ = std::fs::copy(backup_path.join(LOCAL_STATE_REPAIR_MARKER), &marker_path);
+        } else {
+            let _ = std::fs::remove_file(&marker_path);
+        }
+        let _ = std::fs::File::open(&state_dir).and_then(|directory| directory.sync_all());
+        return Err(error);
+    }
+
+    // From here onward an interruption must leave the marker in place so daemon startup fails
+    // closed. The original database and every prior generation capture are already exported.
+    let staging = state_dir.join("staging");
+    if let Ok(metadata) = std::fs::symlink_metadata(&staging) {
+        if !metadata.is_dir() || metadata.file_type().is_symlink() {
+            return Err(CliError::usage(format!(
+                "generation staging path {} is not a real directory; original journal preserved \
+                 at {} and repair marker retained",
+                staging.display(),
+                backup_path.display()
+            )));
+        }
+        std::fs::rename(&staging, backup_path.join("staging"))?;
+        std::fs::File::open(&backup_path)?.sync_all()?;
+    }
+    std::fs::rename(&temporary_database, &database_path).map_err(|error| {
+        CliError::usage(format!(
+            "adopting replacement journal failed ({error}); original state is preserved at {} \
+             and the repair marker prevents mounting",
+            backup_path.display()
+        ))
+    })?;
+    std::fs::File::open(&state_dir)?.sync_all()?;
+
+    let repaired =
+        local_state::LocalState::open_existing(&database_path, identity).map_err(|error| {
+            CliError::usage(format!(
+                "adopted replacement journal failed validation ({error}); evidence is preserved \
+                 at {} and the repair marker prevents mounting",
+                backup_path.display()
+            ))
+        })?;
+    let lifecycle = local_state_doctor_lifecycle(&repaired).map_err(|error| {
+        CliError::usage(format!(
+            "adopted replacement journal lifecycle is unreadable ({error}); evidence is preserved \
+             at {} and the repair marker prevents mounting",
+            backup_path.display()
+        ))
+    })?;
+    drop(repaired);
+    std::fs::remove_file(&marker_path)?;
+    std::fs::File::open(&state_dir)?.sync_all()?;
+
+    Ok(LocalStateRepairReport {
+        status: "repaired",
+        filesystem: state.repo.clone(),
+        mountpoint,
+        state_directory: state_dir,
+        database_path,
+        backup_path,
+        original_database_present,
+        base_snapshot,
+        upserts: image.upserts.len(),
+        deletes: image.deletes.len(),
+        renames: image.renames.len(),
+        lifecycle,
+    })
+}
+
+#[derive(Debug, serde::Serialize)]
+struct LocalStateDoctorReport {
+    status: &'static str,
+    filesystem: String,
+    mountpoint: String,
+    state_directory: PathBuf,
+    database_path: PathBuf,
+    database_bytes: u64,
+    daemon_running: bool,
+    #[serde(flatten)]
+    lifecycle: LocalStateDoctorLifecycle,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LocalStateDoctorLifecycle {
+    identity: local_state::LocalStateIdentity,
+    active_generation: u64,
+    sealed_baseline_paths: usize,
+    ordered_mutation_intents: usize,
+    staging_artifacts: usize,
+    staging_bytes: u64,
+    oldest_unretired_generation: Option<u64>,
+    active_restore: Option<local_state::RestoreOperation>,
+    failed_restore: Option<local_state::RestoreOperation>,
+    completed_publish_requests: Vec<LocalStateDoctorCompletedRequest>,
+    generations: Vec<LocalStateDoctorGeneration>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LocalStateDoctorGeneration {
+    generation: u64,
+    state: String,
+    base_snapshot: Option<String>,
+    dirty_paths: usize,
+    rename_intents: usize,
+    ordered_mutation_intents: usize,
+    prepared: Option<LocalStateDoctorPrepared>,
+    publish_requests: Vec<LocalStateDoctorRequest>,
+    published_snapshot: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LocalStateDoctorPrepared {
+    root_id: String,
+    source_fingerprint: String,
+    candidate_bytes: usize,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LocalStateDoctorRequest {
+    request_id: String,
+    message: String,
+    clear_after_publish: bool,
+    created_at_ms: u64,
+    failure: Option<String>,
+}
+
+#[derive(Debug, serde::Serialize, serde::Deserialize)]
+struct LocalStateDoctorCompletedRequest {
+    request_id: String,
+    generation: u64,
+    snapshot_id: String,
+    clear_after_publish: bool,
+    created_at_ms: u64,
+    response_bytes: usize,
+    #[serde(default)]
+    acknowledged: bool,
+}
+
+fn local_state_generation_name(state: local_state::GenerationState) -> &'static str {
+    match state {
+        local_state::GenerationState::Open => "open",
+        local_state::GenerationState::Frozen => "frozen",
+        local_state::GenerationState::Prepared => "prepared",
+        local_state::GenerationState::PublishRequested => "publish_requested",
+        local_state::GenerationState::Published => "published",
+    }
+}
+
+trait LocalStateDoctorSource {
+    fn doctor_identity(&self) -> &local_state::LocalStateIdentity;
+    fn doctor_active_generation(&self) -> local_state::Result<u64>;
+    fn doctor_generations(&self) -> local_state::Result<Vec<local_state::GenerationRecord>>;
+    fn doctor_recovery_dirty_state(&self) -> local_state::Result<local_state::RecoveryDirtyState>;
+    fn doctor_prepared(
+        &self,
+        generation: u64,
+    ) -> local_state::Result<Option<local_state::PreparedGeneration>>;
+    fn doctor_publish_requests(&self) -> local_state::Result<Vec<local_state::PublishRequest>>;
+    fn doctor_completed_publish_requests(
+        &self,
+    ) -> local_state::Result<Vec<local_state::CompletedPublishRequest>>;
+    fn doctor_sealed_baselines(&self) -> local_state::Result<Vec<local_state::SealedBaseline>>;
+    fn doctor_active_restore(&self) -> local_state::Result<Option<local_state::RestoreOperation>>;
+    fn doctor_failed_restore(&self) -> local_state::Result<Option<local_state::RestoreOperation>>;
+    fn doctor_artifacts(&self) -> local_state::Result<Vec<local_state::ArtifactOwnership>>;
+}
+
+impl LocalStateDoctorSource for local_state::LocalState {
+    fn doctor_identity(&self) -> &local_state::LocalStateIdentity {
+        self.identity()
+    }
+
+    fn doctor_active_generation(&self) -> local_state::Result<u64> {
+        self.active_generation()
+    }
+
+    fn doctor_generations(&self) -> local_state::Result<Vec<local_state::GenerationRecord>> {
+        self.generations()
+    }
+
+    fn doctor_recovery_dirty_state(&self) -> local_state::Result<local_state::RecoveryDirtyState> {
+        self.recovery_dirty_state()
+    }
+
+    fn doctor_prepared(
+        &self,
+        generation: u64,
+    ) -> local_state::Result<Option<local_state::PreparedGeneration>> {
+        self.prepared(generation)
+    }
+
+    fn doctor_publish_requests(&self) -> local_state::Result<Vec<local_state::PublishRequest>> {
+        self.publish_requests()
+    }
+
+    fn doctor_completed_publish_requests(
+        &self,
+    ) -> local_state::Result<Vec<local_state::CompletedPublishRequest>> {
+        self.completed_publish_requests()
+    }
+
+    fn doctor_sealed_baselines(&self) -> local_state::Result<Vec<local_state::SealedBaseline>> {
+        self.sealed_baselines()
+    }
+
+    fn doctor_active_restore(&self) -> local_state::Result<Option<local_state::RestoreOperation>> {
+        self.active_restore()
+    }
+
+    fn doctor_failed_restore(&self) -> local_state::Result<Option<local_state::RestoreOperation>> {
+        self.failed_restore()
+    }
+
+    fn doctor_artifacts(&self) -> local_state::Result<Vec<local_state::ArtifactOwnership>> {
+        self.artifacts()
+    }
+}
+
+impl LocalStateDoctorSource for local_state::LocalStateReader {
+    fn doctor_identity(&self) -> &local_state::LocalStateIdentity {
+        self.identity()
+    }
+
+    fn doctor_active_generation(&self) -> local_state::Result<u64> {
+        self.active_generation()
+    }
+
+    fn doctor_generations(&self) -> local_state::Result<Vec<local_state::GenerationRecord>> {
+        self.generations()
+    }
+
+    fn doctor_recovery_dirty_state(&self) -> local_state::Result<local_state::RecoveryDirtyState> {
+        self.recovery_dirty_state()
+    }
+
+    fn doctor_prepared(
+        &self,
+        generation: u64,
+    ) -> local_state::Result<Option<local_state::PreparedGeneration>> {
+        self.prepared(generation)
+    }
+
+    fn doctor_publish_requests(&self) -> local_state::Result<Vec<local_state::PublishRequest>> {
+        self.publish_requests()
+    }
+
+    fn doctor_completed_publish_requests(
+        &self,
+    ) -> local_state::Result<Vec<local_state::CompletedPublishRequest>> {
+        self.completed_publish_requests()
+    }
+
+    fn doctor_sealed_baselines(&self) -> local_state::Result<Vec<local_state::SealedBaseline>> {
+        self.sealed_baselines()
+    }
+
+    fn doctor_active_restore(&self) -> local_state::Result<Option<local_state::RestoreOperation>> {
+        self.active_restore()
+    }
+
+    fn doctor_failed_restore(&self) -> local_state::Result<Option<local_state::RestoreOperation>> {
+        self.failed_restore()
+    }
+
+    fn doctor_artifacts(&self) -> local_state::Result<Vec<local_state::ArtifactOwnership>> {
+        self.artifacts()
+    }
+}
+
+fn local_state_doctor_lifecycle(
+    store: &impl LocalStateDoctorSource,
+) -> local_state::Result<LocalStateDoctorLifecycle> {
+    let active_generation = store.doctor_active_generation()?;
+    let requests = store.doctor_publish_requests()?;
+    let recovery = store.doctor_recovery_dirty_state()?;
+    let mut generations = Vec::new();
+    for generation in store.doctor_generations()? {
+        let prepared = store
+            .doctor_prepared(generation.generation)?
+            .map(|prepared| LocalStateDoctorPrepared {
+                root_id: prepared.root_id,
+                source_fingerprint: prepared.source_fingerprint,
+                candidate_bytes: prepared.candidate.len(),
+            });
+        let publish_requests = requests
+            .iter()
+            .filter(|request| request.generation == generation.generation)
+            .map(|request| LocalStateDoctorRequest {
+                request_id: request.request_id.clone(),
+                message: request.message.clone(),
+                clear_after_publish: request.clear_after_publish,
+                created_at_ms: request.created_at_ms,
+                failure: request.failure.clone(),
+            })
+            .collect();
+        generations.push(LocalStateDoctorGeneration {
+            generation: generation.generation,
+            state: local_state_generation_name(generation.state).to_string(),
+            base_snapshot: generation.base_snapshot,
+            dirty_paths: recovery
+                .paths
+                .iter()
+                .filter(|path| path.generation == generation.generation)
+                .count(),
+            rename_intents: recovery
+                .renames
+                .iter()
+                .filter(|rename| rename.generation == generation.generation)
+                .count(),
+            ordered_mutation_intents: recovery
+                .intents
+                .iter()
+                .filter(|intent| intent.generation == generation.generation)
+                .count(),
+            prepared,
+            publish_requests,
+            published_snapshot: generation.published_snapshot,
+        });
+    }
+    let artifacts = store.doctor_artifacts()?;
+    Ok(LocalStateDoctorLifecycle {
+        identity: store.doctor_identity().clone(),
+        active_generation,
+        sealed_baseline_paths: store.doctor_sealed_baselines()?.len(),
+        ordered_mutation_intents: recovery.intents.len(),
+        staging_artifacts: artifacts.len(),
+        staging_bytes: artifacts.iter().map(|artifact| artifact.bytes).sum(),
+        oldest_unretired_generation: generations
+            .iter()
+            .filter(|generation| generation.state != "open")
+            .map(|generation| generation.generation)
+            .min(),
+        active_restore: store.doctor_active_restore()?,
+        failed_restore: store.doctor_failed_restore()?,
+        completed_publish_requests: store
+            .doctor_completed_publish_requests()?
+            .into_iter()
+            .map(|completed| LocalStateDoctorCompletedRequest {
+                request_id: completed.request.request_id,
+                generation: completed.request.generation,
+                snapshot_id: completed.snapshot_id,
+                clear_after_publish: completed.request.clear_after_publish,
+                created_at_ms: completed.request.created_at_ms,
+                response_bytes: completed.response.len(),
+                acknowledged: completed.acknowledged,
+            })
+            .collect(),
+        generations,
+    })
+}
+
+fn local_state_doctor_identity(
+    mountpoint: &str,
+    state: &MountState,
+) -> Result<local_state::LocalStateIdentity> {
+    if !state.native_filesystem {
+        return Err(CliError::usage(format!(
+            "{mountpoint} is a repository mount; `tl fs doctor` only inspects native filesystem \
+             mounts"
+        )));
+    }
+    let Some(store_uuid) = state.local_state_uuid.clone() else {
+        let detail = if state.read_only() {
+            "this is a read-only mount and has no local mutation journal"
+        } else {
+            "its mount state predates the durable local journal identity"
+        };
+        return Err(CliError::usage(format!(
+            "{mountpoint} has no durable local snapshot state: {detail}. Nothing was treated as \
+             clean and no repair was attempted."
+        )));
+    };
+    Ok(local_state::LocalStateIdentity {
+        project_id: state.project_id.clone(),
+        filesystem: state.repo.clone(),
+        workspace_id: state.workspace_id.clone(),
+        store_uuid,
+    })
+}
+
+fn local_state_database_info(state_dir: &Path) -> Result<(PathBuf, u64)> {
+    let database_path = state_dir.join(local_state::LOCAL_STATE_FILE);
+    let database_bytes = match std::fs::metadata(&database_path) {
+        Ok(metadata) if metadata.is_file() => metadata.len(),
+        Ok(_) => {
+            return Err(CliError::usage(format!(
+                "durable local snapshot state at {} is not a regular file; refusing to inspect \
+                 or replace it",
+                database_path.display()
+            )));
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(CliError::usage(format!(
+                "durable local snapshot state is missing at {}; refusing to treat this mount as \
+                 clean. No repair was attempted.",
+                database_path.display()
+            )));
+        }
+        Err(error) => {
+            return Err(CliError::usage(format!(
+                "cannot inspect durable local snapshot state at {}: {error}",
+                database_path.display()
+            )));
+        }
+    };
+    Ok((database_path, database_bytes))
+}
+
+fn inspect_local_state(
+    mountpoint: String,
+    state_dir: PathBuf,
+    state: &MountState,
+) -> Result<LocalStateDoctorReport> {
+    let identity = local_state_doctor_identity(&mountpoint, state)?;
+    let (database_path, database_bytes) = local_state_database_info(&state_dir)?;
+    let store =
+        local_state::LocalState::open_existing(&database_path, identity).map_err(|error| {
+            CliError::usage(format!(
+                "durable local snapshot state at {} failed validation: {error}. Refusing to treat \
+             this mount as clean; no repair was attempted.",
+                database_path.display()
+            ))
+        })?;
+    let lifecycle = local_state_doctor_lifecycle(&store).map_err(|error| {
+        CliError::usage(format!(
+            "cannot inspect lifecycle records in {}: {error}",
+            database_path.display()
+        ))
+    })?;
+    Ok(LocalStateDoctorReport {
+        status: "healthy",
+        filesystem: state.repo.clone(),
+        mountpoint,
+        state_directory: state_dir.clone(),
+        database_path,
+        database_bytes,
+        daemon_running: false,
+        lifecycle,
+    })
+}
+
+/// Inspect a managed native mount's durable local state. The default mode never contacts the
+/// server, publishes a snapshot, repairs state, or walks the overlay. `repair_journal` remains
+/// local-only but explicitly exports and replaces the journal from a conservative raw-overlay
+/// walk while the mount is detached.
+pub async fn doctor(
+    path: &Path,
+    output_json: bool,
+    repair_journal: bool,
+    repair_base: Option<&str>,
+) -> Result<()> {
+    if let Some(attachment) = tracked_directory_for(path)? {
+        if repair_journal {
+            return Err(CliError::usage(
+                "tracked ordinary directories reconcile from their source tree on the next \
+                 snapshot; offline --repair-journal is only for managed mount overlays",
+            ));
+        }
+        let store = open_tracked_directory_state(&attachment)?;
+        let lifecycle = local_state_doctor_lifecycle(&store).map_err(|error| {
+            CliError::usage(format!(
+                "cannot inspect tracked-directory lifecycle records in {}: {error}",
+                attachment.state_dir.display()
+            ))
+        })?;
+        let database_path = attachment.state_dir.join(local_state::LOCAL_STATE_FILE);
+        let database_bytes = std::fs::metadata(&database_path)?.len();
+        let report = LocalStateDoctorReport {
+            status: "healthy",
+            filesystem: attachment.filesystem_id,
+            mountpoint: attachment.root,
+            state_directory: attachment.state_dir,
+            database_path,
+            database_bytes,
+            daemon_running: false,
+            lifecycle,
+        };
+        if output_json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+        } else {
+            println!("{} {}", style("status:").dim(), style("healthy").green());
+            println!("{} {}", style("filesystem:").dim(), report.filesystem);
+            println!("{} tracked directory", style("attachment:").dim());
+            println!("{} {}", style("root:").dim(), report.mountpoint);
+            println!(
+                "{} {} ({} bytes)",
+                style("database:").dim(),
+                report.database_path.display(),
+                report.database_bytes
+            );
+            println!(
+                "{} {} ({} sealed path baseline(s))",
+                style("active generation:").dim(),
+                report.lifecycle.active_generation,
+                report.lifecycle.sealed_baseline_paths
+            );
+            println!(
+                "{} {}",
+                style("pending generations:").dim(),
+                report
+                    .lifecycle
+                    .generations
+                    .iter()
+                    .filter(|generation| generation.state != "open")
+                    .count()
+            );
+            println!(
+                "{} intents={} artifacts={} staging_bytes={}",
+                style("local snapshot state:").dim(),
+                report.lifecycle.ordered_mutation_intents,
+                report.lifecycle.staging_artifacts,
+                report.lifecycle.staging_bytes,
+            );
+            if let Some(restore) = &report.lifecycle.active_restore {
+                println!(
+                    "{} {} -> {}",
+                    style("active restore:").dim(),
+                    restore.request_id,
+                    restore.target_snapshot_id,
+                );
+            }
+            if let Some(restore) = &report.lifecycle.failed_restore {
+                println!(
+                    "{} {}: {}",
+                    style("failed restore:").dim(),
+                    restore.request_id,
+                    restore.failure.as_deref().unwrap_or("unknown failure"),
+                );
+            }
+        }
+        return Ok(());
+    }
+    let (mountpoint, state_dir) = doctor_state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir).map_err(|error| {
+        CliError::usage(format!(
+            "cannot read mount state at {}: {error}",
+            state_dir.join("state.json").display()
+        ))
+    })?;
+    if repair_journal {
+        let report = repair_local_state_journal(mountpoint, state_dir, &state, repair_base)?;
+        if output_json {
+            println!("{}", serde_json::to_string_pretty(&report)?);
+            return Ok(());
+        }
+        println!(
+            "{} {}",
+            style("status:").dim(),
+            style(report.status).green()
+        );
+        println!("{} {}", style("filesystem:").dim(), report.filesystem);
+        println!("{} {}", style("mountpoint:").dim(), report.mountpoint);
+        println!(
+            "{} {}",
+            style("database:").dim(),
+            report.database_path.display()
+        );
+        println!(
+            "{} {}",
+            style("original state backup:").dim(),
+            report.backup_path.display()
+        );
+        println!(
+            "{} upserts={} deletes={} renames={} base={}",
+            style("rebuilt generation:").dim(),
+            report.upserts,
+            report.deletes,
+            report.renames,
+            report.base_snapshot.as_deref().unwrap_or("-"),
+        );
+        println!(
+            "{} {} ({})",
+            style("active generation:").dim(),
+            report.lifecycle.active_generation,
+            local_state_generation_name(local_state::GenerationState::Open)
+        );
+        return Ok(());
+    }
+    let daemon_running = daemon::daemon_pid(&state_dir).is_some_and(daemon_alive);
+    let report = if daemon_running {
+        let expected_identity = local_state_doctor_identity(&mountpoint, &state)?;
+        let (database_path, database_bytes) = local_state_database_info(&state_dir)?;
+        let response = daemon::control(&state_dir, "doctor-local-state")
+            .await
+            .map_err(|error| {
+                CliError::usage(format!(
+                    "the live mount daemon could not inspect its durable local state: {error}. \
+                     No repair was attempted."
+                ))
+            })?;
+        let lifecycle: LocalStateDoctorLifecycle =
+            serde_json::from_value(response).map_err(|error| {
+                CliError::usage(format!(
+                    "the live mount daemon returned an invalid local-state report: {error}"
+                ))
+            })?;
+        if lifecycle.identity != expected_identity {
+            return Err(CliError::usage(format!(
+                "the live mount daemon reported local state for a different mount (expected \
+                 {expected_identity:?}, found {:?}); refusing to continue",
+                lifecycle.identity
+            )));
+        }
+        LocalStateDoctorReport {
+            status: "healthy",
+            filesystem: state.repo.clone(),
+            mountpoint,
+            state_directory: state_dir,
+            database_path,
+            database_bytes,
+            daemon_running: true,
+            lifecycle,
+        }
+    } else {
+        inspect_local_state(mountpoint, state_dir, &state)?
+    };
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+
+    println!(
+        "{} {}",
+        style("status:").dim(),
+        style(report.status).green()
+    );
+    println!("{} {}", style("filesystem:").dim(), report.filesystem);
+    println!("{} {}", style("mountpoint:").dim(), report.mountpoint);
+    println!(
+        "{} {}",
+        style("state directory:").dim(),
+        report.state_directory.display()
+    );
+    println!(
+        "{} {} ({} bytes)",
+        style("database:").dim(),
+        report.database_path.display(),
+        report.database_bytes
+    );
+    println!(
+        "{} project={} filesystem={} workspace={} store={}",
+        style("identity:").dim(),
+        report.lifecycle.identity.project_id,
+        report.lifecycle.identity.filesystem,
+        report.lifecycle.identity.workspace_id,
+        report.lifecycle.identity.store_uuid,
+    );
+    println!(
+        "{} {}",
+        style("daemon:").dim(),
+        if report.daemon_running {
+            "running"
+        } else {
+            "not running"
+        }
+    );
+    println!(
+        "{} {} ({} sealed path baseline(s))",
+        style("active generation:").dim(),
+        report.lifecycle.active_generation,
+        report.lifecycle.sealed_baseline_paths
+    );
+    println!(
+        "{} intents={} artifacts={} staging_bytes={} oldest_unretired={}",
+        style("local snapshot state:").dim(),
+        report.lifecycle.ordered_mutation_intents,
+        report.lifecycle.staging_artifacts,
+        report.lifecycle.staging_bytes,
+        report
+            .lifecycle
+            .oldest_unretired_generation
+            .map(|generation| generation.to_string())
+            .as_deref()
+            .unwrap_or("-"),
+    );
+    if let Some(restore) = &report.lifecycle.active_restore {
+        println!(
+            "{} {} target={} expected={}",
+            style("active restore:").dim(),
+            restore.request_id,
+            restore.target_snapshot_id,
+            restore.expected_snapshot_id,
+        );
+    }
+    if let Some(restore) = &report.lifecycle.failed_restore {
+        println!(
+            "{} {} target={} reason={:?}",
+            style("failed restore:").dim(),
+            restore.request_id,
+            restore.target_snapshot_id,
+            restore.failure.as_deref().unwrap_or("unknown failure"),
+        );
+    }
+    println!(
+        "{} {}",
+        style("completed request receipts:").dim(),
+        report.lifecycle.completed_publish_requests.len()
+    );
+    for completed in &report.lifecycle.completed_publish_requests {
+        println!(
+            "  {}  generation={} snapshot={} clear={} acknowledged={} created_at_ms={} response={} bytes",
+            completed.request_id,
+            completed.generation,
+            completed.snapshot_id,
+            completed.clear_after_publish,
+            completed.acknowledged,
+            completed.created_at_ms,
+            completed.response_bytes,
+        );
+    }
+    println!("{}", style("generations:").dim());
+    for generation in &report.lifecycle.generations {
+        println!(
+            "  {}  {}  dirty={} renames={} intents={} base={} published={}",
+            generation.generation,
+            generation.state,
+            generation.dirty_paths,
+            generation.rename_intents,
+            generation.ordered_mutation_intents,
+            generation.base_snapshot.as_deref().unwrap_or("-"),
+            generation.published_snapshot.as_deref().unwrap_or("-"),
+        );
+        if let Some(prepared) = &generation.prepared {
+            println!(
+                "    prepared root={} source={} candidate={} bytes",
+                prepared.root_id, prepared.source_fingerprint, prepared.candidate_bytes
+            );
+        }
+        for request in &generation.publish_requests {
+            println!(
+                "    request {} clear={} created_at_ms={} failure={:?} message={:?}",
+                request.request_id,
+                request.clear_after_publish,
+                request.created_at_ms,
+                request.failure,
+                request.message,
+            );
+        }
+    }
+    Ok(())
+}
+
+async fn tracked_directory_status(
+    ctx: &CliContext,
+    attachment: TrackedDirectoryAttachment,
+    output_json: bool,
+) -> Result<()> {
+    let root = PathBuf::from(&attachment.root);
+    let store = open_tracked_directory_state(&attachment)?;
+    let baselines = store
+        .sealed_baselines()
+        .map_err(|error| cold_push_state_error(&attachment.state_dir, error))?;
+    let scan_root = root.clone();
+    let scan = tokio::task::spawn_blocking(move || scan_cold_push_tree(&scan_root))
+        .await
+        .map_err(|error| CliError::usage(format!("tracked-directory scan failed: {error}")))??;
+    let delta = plan_cold_push_delta(&root, &scan, &baselines)?;
+    let mut generations = store
+        .generations()
+        .map_err(|error| cold_push_state_error(&attachment.state_dir, error))?;
+    generations.sort_by_key(|generation| generation.generation);
+    let active = generations
+        .iter()
+        .find(|generation| generation.state == local_state::GenerationState::Open)
+        .ok_or_else(|| {
+            CliError::usage(format!(
+                "tracked directory {} has no open generation",
+                attachment.root
+            ))
+        })?;
+    let session = FsSession::open(ctx, Some(&attachment.filesystem_id)).await?;
+    let (user, token) = session.creds();
+    let head = session
+        .client
+        .native_head_with_credential(&session.project_id, &attachment.filesystem_id, user, token)
+        .await?;
+    let pending: Vec<serde_json::Value> = generations
+        .iter()
+        .filter(|generation| generation.state != local_state::GenerationState::Open)
+        .map(|generation| {
+            serde_json::json!({
+                "generation": generation.generation,
+                "state": local_state_generation_name(generation.state),
+                "base_snapshot": generation.base_snapshot,
+                "published_snapshot": generation.published_snapshot,
+            })
+        })
+        .collect();
+    let report = serde_json::json!({
+        "filesystem": attachment.filesystem_id,
+        "attachment": {
+            "kind": "tracked_directory",
+            "root": attachment.root,
+            "state_directory": attachment.state_dir,
+        },
+        "adopted_snapshot": active.base_snapshot.clone(),
+        "server_head": head.snapshot_id.clone(),
+        "dirty": {
+            "upserts": delta.upserts.iter().map(|path| path.path.clone()).collect::<Vec<_>>(),
+            "deletes": delta.deletes.clone(),
+            "renames": Vec::<serde_json::Value>::new(),
+            "exact": true,
+        },
+        "pending_generations": pending,
+        "daemon_running": false,
+        "retained": baselines.len(),
+        "ignored": serde_json::Value::Null,
+    });
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+        return Ok(());
+    }
+    println!(
+        "{} {}",
+        style("filesystem:").dim(),
+        report["filesystem"].as_str().unwrap_or("-")
+    );
+    println!("{} tracked directory", style("attachment:").dim());
+    println!("{} {}", style("root:").dim(), root.display());
+    println!(
+        "{} {}",
+        style("adopted save:").dim(),
+        active.base_snapshot.as_deref().map(short_id).unwrap_or("-")
+    );
+    println!(
+        "{} {}",
+        style("server head:").dim(),
+        head.snapshot_id.as_deref().map(short_id).unwrap_or("-")
+    );
+    println!(
+        "{} {} upsert(s), {} delete(s) (strict metadata reconciliation; regular file bytes were \
+         not opened)",
+        style("dirty:").dim(),
+        delta.upserts.len(),
+        report["dirty"]["deletes"].as_array().map_or(0, Vec::len),
+    );
+    if !pending.is_empty() {
+        println!("{} {}", style("pending generations:").dim(), pending.len());
+    }
+    Ok(())
+}
+
 pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<()> {
-    if let Some((root, binding_state)) = plaindir::binding_for_lenient(path) {
-        return plaindir::status(ctx, &root, &binding_state, output_json).await;
+    if let Some(attachment) = tracked_directory_for(path)? {
+        return tracked_directory_status(ctx, attachment, output_json).await;
+    }
+    if let Some((root, _)) = plaindir::binding_for_lenient(path) {
+        return Err(CliError::usage(format!(
+            "{root} uses the removed pre-release Git-backed directory binding. Stop tracking it \
+             with `tl fs unmount {root}`, then attach the native engine with `tl fs push {root} \
+             <filesystem>`."
+        )));
     }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
@@ -4805,21 +8066,212 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     Ok(())
 }
 
-/// Restore a mounted filesystem to a historical save. Native filesystems publish a metadata-only
-/// snapshot that reuses the historical root, then refresh the mount; legacy Git mounts retain the
-/// overlay materialization path below.
+/// Classify only errors for which retrying the same durable operation cannot make progress.
+fn native_operation_error_is_permanent(error: &tensorlake::error::SdkError) -> bool {
+    use tensorlake::error::SdkError;
+    match error {
+        SdkError::ServerError { status, .. } => {
+            status.is_client_error()
+                && status.as_u16() != 408
+                && status.as_u16() != 425
+                && status.as_u16() != 429
+        }
+        SdkError::ClientError(message) => {
+            let message = message.to_ascii_lowercase();
+            message.contains("filesystem changed to")
+                || message.contains("verification rejected")
+                || message.contains("invalid")
+                || message.contains("unknown native verification state")
+        }
+        SdkError::Json(_) | SdkError::JsonWithError(_) => true,
+        _ => false,
+    }
+}
+
+struct DurableNativePublish {
+    report: NativePushReport,
+    candidate: NativePreparedSnapshotCandidate,
+    request: local_state::PublishRequest,
+    publish_ms: u64,
+}
+
+/// One publication/rebase/dead-letter loop shared by mounted and tracked-directory saves.
+///
+/// Preparation remains workflow-specific because a managed overlay has an authoritative mutation
+/// journal while an unmanaged directory requires reconciliation. From a prepared immutable root
+/// onward, however, both products use this exact durable CAS state machine.
+#[allow(clippy::too_many_arguments)]
+async fn publish_durable_native_candidate(
+    client: &ArtifactStorageClient,
+    project_id: &str,
+    filesystem: &str,
+    store: &impl local_state::LocalSnapshotStore,
+    generation: u64,
+    source_fingerprint: &str,
+    mut candidate: NativePreparedSnapshotCandidate,
+    mut request: local_state::PublishRequest,
+    username: &str,
+    token: &str,
+    workspace_id: Option<String>,
+    progress: Option<NativePushProgress>,
+    encode_candidate: impl Fn(&NativePreparedSnapshotCandidate) -> Result<Vec<u8>>,
+) -> Result<DurableNativePublish> {
+    let started = std::time::Instant::now();
+    loop {
+        let outcome = match client
+            .publish_native_snapshot_candidate_outcome_with_credential(
+                project_id,
+                filesystem,
+                candidate.clone(),
+                username,
+                token,
+                NativePushOptions {
+                    message: request.message.clone(),
+                    expected_snapshot_id: candidate.base_snapshot_id.clone(),
+                    workspace_id: workspace_id.clone(),
+                    operation_id: Some(request.publish_operation_id.clone()),
+                    progress: progress.clone(),
+                },
+            )
+            .await
+        {
+            Ok(outcome) => outcome,
+            Err(error) if native_operation_error_is_permanent(&error) => {
+                let reason = error.to_string();
+                store
+                    .fail_publish_request(&request.request_id, &reason)
+                    .map_err(|record_error| {
+                        CliError::usage(format!(
+                            "native snapshot publication failed permanently ({error}), and \
+                             recording its durable failure failed: {record_error}"
+                        ))
+                    })?;
+                return Err(CliError::usage(format!(
+                    "native snapshot publication failed permanently and was dead-lettered: \
+                     {error}"
+                )));
+            }
+            Err(error) => {
+                return Err(CliError::usage(format!(
+                    "native snapshot publication failed (will retry idempotently as {}): {error}",
+                    request.request_id
+                )));
+            }
+        };
+        match outcome {
+            tensorlake::artifact_storage::native_fs::NativeCandidatePublishOutcome::Published(
+                report,
+            ) => {
+                store
+                    .mark_published(generation, &report.snapshot_id)
+                    .map_err(|error| {
+                        CliError::usage(format!(
+                            "recording published native snapshot failed closed: {error}"
+                        ))
+                    })?;
+                return Ok(DurableNativePublish {
+                    report,
+                    candidate,
+                    request,
+                    publish_ms: started.elapsed().as_millis() as u64,
+                });
+            }
+            tensorlake::artifact_storage::native_fs::NativeCandidatePublishOutcome::Conflict {
+                snapshot_id,
+                actual_snapshot_id: Some(actual),
+                ..
+            } => {
+                tracing::info!(
+                    generation,
+                    losing_snapshot = %snapshot_id,
+                    serialized_winner = %actual,
+                    "rebasing exact native change set after publish CAS conflict"
+                );
+                candidate = if candidate.is_rebaseable() {
+                    client
+                        .rebase_native_snapshot_candidate_with_credential(
+                            project_id, filesystem, &candidate, &actual, username, token,
+                        )
+                        .await
+                        .map_err(|error| {
+                            CliError::usage(format!(
+                                "native change-set rebase onto {actual} failed: {error}"
+                            ))
+                        })?
+                } else {
+                    // The unavoidable first full import already uploaded a complete immutable
+                    // root. Serializing it after a concurrently-created head is a metadata-only
+                    // last-writer-wins replacement; source bytes are never reopened.
+                    candidate.base_snapshot_id = Some(actual.clone());
+                    candidate.clone()
+                };
+                let next_publish_operation_id = next_native_publish_operation_id(
+                    &request.request_id,
+                    request.publish_attempt.saturating_add(1),
+                    &actual,
+                    candidate.root_id(),
+                );
+                request = store
+                    .replace_prepared_for_rebase(
+                        local_state::PreparedGeneration::new(
+                            generation,
+                            Some(actual),
+                            candidate.root_id(),
+                            source_fingerprint,
+                            encode_candidate(&candidate)?,
+                        ),
+                        &next_publish_operation_id,
+                    )
+                    .map_err(|error| {
+                        CliError::usage(format!(
+                            "persisting rebased native candidate failed closed: {error}"
+                        ))
+                    })?;
+                let backoff_ms = 25u64.saturating_mul(1u64 << request.publish_attempt.min(4));
+                tokio::time::sleep(std::time::Duration::from_millis(backoff_ms)).await;
+            }
+            tensorlake::artifact_storage::native_fs::NativeCandidatePublishOutcome::Conflict {
+                snapshot_id,
+                actual_snapshot_id: None,
+                ..
+            } => {
+                store
+                    .fail_publish_request(
+                        &request.request_id,
+                        "publish CAS lost to an empty head; no safe rebase base exists",
+                    )
+                    .map_err(|error| {
+                        CliError::usage(format!(
+                            "recording permanent empty-head publish conflict: {error}"
+                        ))
+                    })?;
+                return Err(CliError::usage(format!(
+                    "native snapshot {snapshot_id} lost publication to an empty head; refusing \
+                     to guess a rebase base (request dead-lettered)"
+                )));
+            }
+        }
+    }
+}
+
 pub async fn restore(
     ctx: &CliContext,
     path: &Path,
     version: &str,
     discard_local: bool,
 ) -> Result<()> {
-    if let Some((_, binding_state)) = plaindir::binding_for_lenient(path) {
-        let file_system = plaindir::binding_repo(&binding_state)?;
+    if let Some(attachment) = tracked_directory_for(path)? {
         return Err(CliError::usage(format!(
-            "restore is not supported for a pushed directory because it could overwrite local \
-             files that have not been saved. Mount the earlier save at another path instead:\n  \
-             tl fs mount {file_system}:{version} <path>"
+            "restore does not replace an ordinary tracked directory in place. Mount the earlier \
+             save at another path instead:\n  tl fs mount {}:{} <path>",
+            attachment.filesystem_id, version
+        )));
+    }
+    if let Some((root, _)) = plaindir::binding_for_lenient(path) {
+        return Err(CliError::usage(format!(
+            "{root} uses the removed pre-release Git-backed directory binding. Stop tracking it \
+             with `tl fs unmount {root}`, then attach the native engine with `tl fs push {root} \
+             <filesystem>`."
         )));
     }
     let (mountpoint, state_dir) = state_dir_for(path)?;
@@ -4847,16 +8299,36 @@ pub async fn restore(
             path = path.display(),
         )));
     }
-    // The gate's answer ages badly here: minutes of remote tree walks and content download
-    // sit between it and the destructive clear below, on a live writable mount. Fingerprint
-    // now, re-check at the point of no return.
+    let session = FsSession::open(ctx, Some(&state.repo)).await?;
+    heartbeat(&session, &state).await?;
+
+    // Drop retained byte-cache entries while the workspace is proven clean. Once the durable
+    // restore operation begins below, the local journal rejects every new mutation until the
+    // daemon has observed the new lower snapshot and adopted it transactionally.
+    if state.native_filesystem && !discard_local {
+        let trim = daemon::control(&state_dir, "trim").await?;
+        let trim: daemon::TrimReply = serde_json::from_value(trim).map_err(|error| {
+            CliError::usage(format!(
+                "the daemon's restore preflight did not parse: {error}"
+            ))
+        })?;
+        if !trim.held_open.is_empty() {
+            return Err(CliError::usage(format!(
+                "{} retained file(s) could not be released before restore (first: {}). Close the \
+                 process holding the file and retry; the server was not changed.",
+                trim.held_open.len(),
+                trim.held_open[0],
+            )));
+        }
+    }
+
+    // The gate's answer ages badly while resolving the target. Fingerprint after the retained
+    // cache trim, then re-check immediately before entering the durable restore fence.
     let local_baseline = if discard_local {
         None
     } else {
         Some(overlay_fingerprint(&state_dir)?)
     };
-    let session = FsSession::open(ctx, Some(&state.repo)).await?;
-    heartbeat(&session, &state).await?;
 
     let lower = daemon::control(&state_dir, "ping")
         .await?
@@ -4886,42 +8358,80 @@ pub async fn restore(
                 path = path.display(),
             )));
         }
-        let restored = session
-            .client
-            .restore_native_snapshot_with_credential(
-                &session.project_id,
-                &state.repo,
-                &state.workspace_id,
-                &target,
-                &lower,
-                user,
-                token,
+        let operation = daemon::control_with(
+            &state_dir,
+            "begin_native_restore",
+            serde_json::json!({
+                "target": target,
+                "discard_local": discard_local,
+            }),
+        )
+        .await?;
+        let operation: local_state::RestoreOperation =
+            serde_json::from_value(operation).map_err(|error| {
+                CliError::usage(format!(
+                    "the daemon's durable restore operation did not parse: {error}"
+                ))
+            })?;
+        let restored = match operation.completed_snapshot_id.clone() {
+            Some(snapshot_id) => snapshot_id,
+            None => {
+                match session
+                    .client
+                    .restore_native_snapshot_with_credential(
+                        &session.project_id,
+                        &state.repo,
+                        &state.workspace_id,
+                        &operation.target_snapshot_id,
+                        &operation.expected_snapshot_id,
+                        &operation.request_id,
+                        operation.created_at_ms,
+                        user,
+                        token,
+                    )
+                    .await
+                {
+                    Ok(snapshot_id) => snapshot_id,
+                    Err(error) => {
+                        if native_operation_error_is_permanent(&error) {
+                            let reason = error.to_string();
+                            daemon::control_with(
+                                &state_dir,
+                                "fail_native_restore",
+                                serde_json::json!({
+                                    "request_id": operation.request_id,
+                                    "reason": reason,
+                                }),
+                            )
+                            .await
+                            .map_err(|dead_letter_error| {
+                                CliError::usage(format!(
+                                    "restore failed permanently ({error}), and recording the \
+                                     durable failure also failed ({dead_letter_error}); the mount \
+                                     remains write-fenced"
+                                ))
+                            })?;
+                            return Err(CliError::usage(format!(
+                                "restore failed permanently and was dead-lettered: {error}. The \
+                                 mount is writable again; rerun restore to retry from the current \
+                                 filesystem head"
+                            )));
+                        }
+                        return Err(error.into());
+                    }
+                }
+            }
+        };
+        if !operation.locally_adopted {
+            daemon::control_with(
+                &state_dir,
+                "adopt_native_restore",
+                serde_json::json!({
+                    "request_id": operation.request_id,
+                    "snapshot": restored.clone(),
+                }),
             )
             .await?;
-        // Publication is already durable. If a local write raced the network operation, retain
-        // it above the restored lower rather than deleting user data; the next snapshot merges
-        // that write onto the restored timeline.
-        if let Some(baseline) = local_baseline
-            && overlay_fingerprint(&state_dir)? != baseline
-        {
-            return Err(CliError::usage(format!(
-                "restored the filesystem's current state to {}, but local changes landed during the \
-                 operation and were kept above it. Snapshot those changes, or retry with \
-                 --discard to see only the restored save.",
-                short_id(&restored),
-            )));
-        }
-        daemon::control(&state_dir, "clear_upper").await?;
-        // `clear_upper` arms the sealer's fail-closed reindex guard. There is no native refill,
-        // but the now-empty overlay still must be indexed to let autosave resume.
-        daemon::control(&state_dir, "reindex").await?;
-        let refresh = daemon::control(&state_dir, "refresh").await?;
-        if cfg!(target_os = "macos") {
-            let (expect, _complete, _new_daemon) = parse_refresh_probes(&refresh);
-            if !expect.is_empty() {
-                let changed: std::collections::BTreeSet<String> = expect.keys().cloned().collect();
-                converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
-            }
         }
         println!(
             "Restored {} to {} as save {} (no file bytes transferred).",
@@ -4929,6 +8439,18 @@ pub async fn restore(
             short_id(&target),
             short_id(&restored),
         );
+        if let Err(error) = daemon::control_with(
+            &state_dir,
+            "ack-restore",
+            serde_json::json!({ "request_id": operation.request_id }),
+        )
+        .await
+        {
+            eprintln!(
+                "warning: restore succeeded but its local response receipt could not be \
+                 acknowledged: {error}"
+            );
+        }
         return Ok(());
     }
     // Read everything from the server BEFORE touching local state, so a failed restore leaves
@@ -5458,6 +8980,359 @@ fn age_display(created_at_secs: u64) -> String {
 mod tests {
     use super::*;
 
+    fn doctor_mount_state(state_dir: &Path) -> MountState {
+        MountState {
+            project_id: "project-1".to_string(),
+            organization_id: None,
+            owner_uid: None,
+            owner_gid: None,
+            repo: "filesystem-1".to_string(),
+            native_filesystem: true,
+            pinned_snapshot: None,
+            workspace_id: "workspace-1".to_string(),
+            local_state_uuid: Some("store-1".to_string()),
+            ref_name: "refs/workspaces/workspace-1".to_string(),
+            mountpoint: state_dir.join("mount"),
+            follow_ref: None,
+            read_only: Some(false),
+            auto_commit_interval_secs: Some(FS_AUTOSAVE_DEFAULT_SECS),
+            start_oid: None,
+        }
+    }
+
+    #[test]
+    fn native_local_state_uuid_is_fresh_then_reused_on_resume() {
+        assert!(
+            local_state_uuid_for_mount(false, false, None).is_none(),
+            "repository mounts do not own the native snapshot journal"
+        );
+        assert!(
+            local_state_uuid_for_mount(true, true, None).is_none(),
+            "read-only native mounts have no mutation journal"
+        );
+        let fresh = local_state_uuid_for_mount(true, false, None).unwrap();
+        assert!(!fresh.is_empty());
+
+        let temp = tempfile::tempdir().unwrap();
+        let mut state = doctor_mount_state(temp.path());
+        state.local_state_uuid = Some("persisted-store".to_string());
+        daemon::save_mount_state(temp.path(), &state).unwrap();
+        assert_eq!(
+            local_state_uuid_for_mount(true, false, Some(temp.path())).as_deref(),
+            Some("persisted-store")
+        );
+    }
+
+    #[test]
+    fn doctor_reports_durable_lifecycle_without_overlay_walk() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().to_path_buf();
+        let state = doctor_mount_state(&state_dir);
+        let identity = local_state::LocalStateIdentity {
+            project_id: state.project_id.clone(),
+            filesystem: state.repo.clone(),
+            workspace_id: state.workspace_id.clone(),
+            store_uuid: state.local_state_uuid.clone().unwrap(),
+        };
+        let store =
+            local_state::LocalState::open(state_dir.join(local_state::LOCAL_STATE_FILE), identity)
+                .unwrap();
+        store
+            .set_base_snapshot(Some("snapshot-0".to_string()))
+            .unwrap();
+        store.record_upsert("dirty.txt", 7).unwrap();
+        let generation = store.freeze_current().unwrap().unwrap().generation;
+        store
+            .mark_prepared(local_state::PreparedGeneration::new(
+                generation,
+                Some("snapshot-0".to_string()),
+                "root-1",
+                "source-1",
+                vec![1, 2, 3],
+            ))
+            .unwrap();
+        store
+            .put_publish_request(local_state::PublishRequest::new(
+                "publish-1",
+                generation,
+                "save",
+                false,
+                123,
+            ))
+            .unwrap();
+        store.mark_published(generation, "snapshot-1").unwrap();
+        let live_lifecycle = local_state_doctor_lifecycle(&store).unwrap();
+        assert_eq!(live_lifecycle.active_generation, 2);
+        let wire = serde_json::to_value(&live_lifecycle).unwrap();
+        let decoded: LocalStateDoctorLifecycle = serde_json::from_value(wire).unwrap();
+        assert_eq!(decoded.generations[0].state, "published");
+        drop(store);
+
+        let report = inspect_local_state("/mnt/fs".to_string(), state_dir.clone(), &state).unwrap();
+        assert_eq!(report.status, "healthy");
+        assert_eq!(report.lifecycle.active_generation, 2);
+        assert_eq!(report.lifecycle.identity.store_uuid, "store-1");
+        let published = report
+            .lifecycle
+            .generations
+            .iter()
+            .find(|record| record.generation == generation)
+            .unwrap();
+        assert_eq!(published.state, "published");
+        assert_eq!(published.dirty_paths, 1);
+        assert_eq!(published.prepared.as_ref().unwrap().root_id, "root-1");
+        assert_eq!(published.publish_requests[0].request_id, "publish-1");
+        assert_eq!(published.published_snapshot.as_deref(), Some("snapshot-1"));
+
+        let json = serde_json::to_value(&report).unwrap();
+        assert_eq!(json["status"], "healthy");
+        assert_eq!(json["generations"][0]["dirty_paths"], 1);
+    }
+
+    #[test]
+    fn doctor_fails_closed_on_missing_or_identity_mismatched_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().to_path_buf();
+        let state = doctor_mount_state(&state_dir);
+        let missing =
+            inspect_local_state("/mnt/fs".to_string(), state_dir.clone(), &state).unwrap_err();
+        assert!(missing.to_string().contains("is missing"));
+
+        let actual_identity = local_state::LocalStateIdentity {
+            project_id: state.project_id.clone(),
+            filesystem: state.repo.clone(),
+            workspace_id: state.workspace_id.clone(),
+            store_uuid: "different-store".to_string(),
+        };
+        drop(
+            local_state::LocalState::open(
+                state_dir.join(local_state::LOCAL_STATE_FILE),
+                actual_identity,
+            )
+            .unwrap(),
+        );
+        let mismatch = inspect_local_state("/mnt/fs".to_string(), state_dir, &state).unwrap_err();
+        assert!(mismatch.to_string().contains("different mount"));
+    }
+
+    #[test]
+    fn doctor_resolves_detached_mountpoint_or_explicit_state_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_root = temp.path().join("managed-mounts");
+        let state_dir = state_root.join("workspace-1");
+        let mountpoint = temp.path().join("former-mount");
+        std::fs::create_dir_all(&state_dir).unwrap();
+        std::fs::create_dir_all(&mountpoint).unwrap();
+        let state = doctor_mount_state(&state_dir);
+        let state = MountState {
+            mountpoint: mountpoint.clone(),
+            ..state
+        };
+        daemon::save_mount_state(&state_dir, &state).unwrap();
+
+        let (resolved_mountpoint, resolved_state) =
+            doctor_state_dir_for_in(&mountpoint, &state_root).unwrap();
+        assert_eq!(
+            resolved_mountpoint,
+            canonical_mountpoint(&mountpoint).unwrap()
+        );
+        assert_eq!(resolved_state, state_dir);
+
+        let (_, explicit_state) = doctor_state_dir_for_in(&resolved_state, &state_root).unwrap();
+        assert_eq!(explicit_state, resolved_state.canonicalize().unwrap());
+
+        let duplicate = state_root.join("workspace-2");
+        std::fs::create_dir_all(&duplicate).unwrap();
+        daemon::save_mount_state(&duplicate, &state).unwrap();
+        let ambiguous = doctor_state_dir_for_in(&mountpoint, &state_root).unwrap_err();
+        assert!(ambiguous.to_string().contains("multiple detached"));
+    }
+
+    #[test]
+    fn doctor_repair_exports_original_and_rebuilds_one_all_dirty_generation() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().to_path_buf();
+        let mut state = doctor_mount_state(&state_dir);
+        state.start_oid = Some("snapshot-attached".to_string());
+        std::fs::create_dir_all(&state.mountpoint).unwrap();
+        daemon::save_mount_state(&state_dir, &state).unwrap();
+        let identity =
+            local_state_doctor_identity(state.mountpoint.to_str().unwrap(), &state).unwrap();
+        let original = local_state::LocalState::open(
+            state_dir.join(local_state::LOCAL_STATE_FILE),
+            identity.clone(),
+        )
+        .unwrap();
+        original
+            .import_legacy_once(local_state::LegacyImport {
+                base_snapshot: Some("snapshot-latest".to_string()),
+                mutations: vec![local_state::LegacyMutation::Upsert {
+                    path: "old-dirty.txt".to_string(),
+                    min_write_offset: 0,
+                }],
+            })
+            .unwrap();
+        drop(original);
+        let original_database =
+            std::fs::read(state_dir.join(local_state::LOCAL_STATE_FILE)).unwrap();
+
+        std::fs::create_dir_all(state_dir.join("upper/empty")).unwrap();
+        std::fs::write(state_dir.join("upper/file.txt"), b"new bytes").unwrap();
+        std::fs::create_dir_all(state_dir.join("wh")).unwrap();
+        std::fs::write(state_dir.join("wh/deleted.txt"), b"").unwrap();
+        // Same-path upper recreation wins over a stale whiteout.
+        std::fs::write(state_dir.join("wh/file.txt"), b"").unwrap();
+        std::fs::write(
+            state_dir.join("redirects.json"),
+            serde_json::to_vec(&serde_json::json!({"renamed": "original"})).unwrap(),
+        )
+        .unwrap();
+        std::fs::create_dir_all(state_dir.join("staging/generations/9")).unwrap();
+        std::fs::write(
+            state_dir.join("staging/generations/9/evidence"),
+            b"prepared bytes",
+        )
+        .unwrap();
+        std::fs::write(
+            state_dir.join(LOCAL_STATE_REPAIR_MARKER),
+            b"prior interrupted repair evidence",
+        )
+        .unwrap();
+
+        let report = repair_local_state_journal(
+            state.mountpoint.to_string_lossy().into_owned(),
+            state_dir.clone(),
+            &state,
+            None,
+        )
+        .unwrap();
+        assert_eq!(report.status, "repaired");
+        assert_eq!(report.base_snapshot.as_deref(), Some("snapshot-latest"));
+        assert_eq!(
+            std::fs::read(report.backup_path.join(local_state::LOCAL_STATE_FILE)).unwrap(),
+            original_database
+        );
+        assert_eq!(
+            std::fs::read(report.backup_path.join("staging/generations/9/evidence")).unwrap(),
+            b"prepared bytes"
+        );
+        assert_eq!(
+            std::fs::read(report.backup_path.join(LOCAL_STATE_REPAIR_MARKER)).unwrap(),
+            b"prior interrupted repair evidence"
+        );
+        assert!(report.backup_path.join("state.json").is_file());
+        assert!(report.backup_path.join("redirects.json").is_file());
+        assert!(!state_dir.join(LOCAL_STATE_REPAIR_MARKER).exists());
+        assert!(!state_dir.join("staging").exists());
+
+        let repaired = local_state::LocalState::open_existing(
+            state_dir.join(local_state::LOCAL_STATE_FILE),
+            identity,
+        )
+        .unwrap();
+        let generations = repaired.generations().unwrap();
+        assert_eq!(generations.len(), 1);
+        assert_eq!(generations[0].generation, 1);
+        assert_eq!(generations[0].state, local_state::GenerationState::Open);
+        assert_eq!(
+            generations[0].base_snapshot.as_deref(),
+            Some("snapshot-latest")
+        );
+        let recovery = repaired.recovery_dirty_state().unwrap();
+        let paths: std::collections::BTreeMap<_, _> = recovery
+            .paths
+            .into_iter()
+            .map(|path| (path.path, path.kind))
+            .collect();
+        assert_eq!(paths.get("empty"), Some(&local_state::DirtyKind::Upsert));
+        assert_eq!(paths.get("file.txt"), Some(&local_state::DirtyKind::Upsert));
+        assert_eq!(
+            paths.get("deleted.txt"),
+            Some(&local_state::DirtyKind::Delete)
+        );
+        assert_eq!(paths.get("original"), Some(&local_state::DirtyKind::Delete));
+        assert_eq!(paths.get("renamed"), Some(&local_state::DirtyKind::Upsert));
+        assert_eq!(recovery.renames.len(), 1);
+        assert_eq!(recovery.renames[0].from, "original");
+        assert_eq!(recovery.renames[0].to, "renamed");
+    }
+
+    #[test]
+    fn doctor_repair_recovers_corrupt_database_without_server_state() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().to_path_buf();
+        let mut state = doctor_mount_state(&state_dir);
+        state.start_oid = Some("snapshot-attach-fallback".to_string());
+        std::fs::create_dir_all(&state.mountpoint).unwrap();
+        daemon::save_mount_state(&state_dir, &state).unwrap();
+        std::fs::create_dir_all(state_dir.join("upper")).unwrap();
+        std::fs::write(state_dir.join("upper/survives.txt"), b"local").unwrap();
+        std::fs::write(
+            state_dir.join(local_state::LOCAL_STATE_FILE),
+            b"corrupt-original",
+        )
+        .unwrap();
+
+        let report = repair_local_state_journal(
+            state.mountpoint.to_string_lossy().into_owned(),
+            state_dir.clone(),
+            &state,
+            Some("snapshot-attach-fallback"),
+        )
+        .unwrap();
+        assert_eq!(
+            std::fs::read(report.backup_path.join(local_state::LOCAL_STATE_FILE)).unwrap(),
+            b"corrupt-original"
+        );
+        assert_eq!(
+            report.base_snapshot.as_deref(),
+            Some("snapshot-attach-fallback")
+        );
+        let repaired = local_state::LocalState::open_existing(
+            state_dir.join(local_state::LOCAL_STATE_FILE),
+            local_state_doctor_identity(state.mountpoint.to_str().unwrap(), &state).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            repaired.recovery_dirty_state().unwrap().paths[0].path,
+            "survives.txt"
+        );
+    }
+
+    #[test]
+    fn doctor_repair_refuses_live_writer_and_corrupt_redirects_fail_before_mutation() {
+        let temp = tempfile::tempdir().unwrap();
+        let state_dir = temp.path().to_path_buf();
+        let state = doctor_mount_state(&state_dir);
+        std::fs::create_dir_all(&state.mountpoint).unwrap();
+        daemon::save_mount_state(&state_dir, &state).unwrap();
+
+        let writer = try_local_state_writer_lock(&state_dir).unwrap().unwrap();
+        let live_writer = repair_local_state_journal(
+            state.mountpoint.to_string_lossy().into_owned(),
+            state_dir.clone(),
+            &state,
+            None,
+        )
+        .unwrap_err();
+        assert!(live_writer.to_string().contains("live writer"));
+        assert!(!state_dir.join("repair-backups").exists());
+        drop(writer);
+
+        std::fs::create_dir_all(state_dir.join("upper")).unwrap();
+        std::fs::write(state_dir.join("redirects.json"), b"{").unwrap();
+        let corrupt = repair_local_state_journal(
+            state.mountpoint.to_string_lossy().into_owned(),
+            state_dir.clone(),
+            &state,
+            Some("empty"),
+        )
+        .unwrap_err();
+        assert!(corrupt.to_string().contains("redirect state"));
+        assert!(!state_dir.join("repair-backups").exists());
+        assert!(!state_dir.join(local_state::LOCAL_STATE_FILE).exists());
+    }
+
     #[test]
     fn fleet_item_to_info_carries_real_lease_state() {
         let item: WorkspaceFleetItem = serde_json::from_value(serde_json::json!({
@@ -5664,6 +9539,53 @@ mod tests {
     #[cfg(unix)]
     fn fake_daemon(state_dir: &Path) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
         fake_daemon_with_events(state_dir, Vec::new())
+    }
+
+    #[cfg(unix)]
+    fn fake_daemon_drops_first_seal_response(
+        state_dir: &Path,
+    ) -> std::sync::Arc<std::sync::Mutex<Vec<String>>> {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
+        let request_ids = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let listener = std::os::unix::net::UnixListener::bind(daemon::control_socket(state_dir))
+            .expect("bind control socket");
+        listener.set_nonblocking(true).unwrap();
+        let listener = tokio::net::UnixListener::from_std(listener).unwrap();
+        let recorded = request_ids.clone();
+        tokio::spawn(async move {
+            let mut first = true;
+            while let Ok((stream, _)) = listener.accept().await {
+                let mut reader = tokio::io::BufReader::new(stream);
+                let mut line = String::new();
+                if reader.read_line(&mut line).await.is_err() {
+                    continue;
+                }
+                let request: serde_json::Value = serde_json::from_str(line.trim()).unwrap();
+                recorded.lock().unwrap().push(
+                    request["request_id"]
+                        .as_str()
+                        .expect("seal request id")
+                        .to_string(),
+                );
+                if first {
+                    first = false;
+                    continue;
+                }
+                let response = serde_json::json!({
+                    "ok": true,
+                    "clean": false,
+                    "commit": "recovered-snapshot",
+                    "files": 1,
+                    "chunks_uploaded": 0,
+                    "chunks_total": 0,
+                    "sealed": ["keep.txt"],
+                    "push_ms": 0,
+                });
+                let mut stream = reader.into_inner();
+                let _ = stream.write_all(format!("{response}\n").as_bytes()).await;
+            }
+        });
+        request_ids
     }
 
     /// A fake daemon that answers each op with a canned reply (`{"ok":true}` for ops not in
@@ -5945,6 +9867,126 @@ mod tests {
         );
     }
 
+    /// Native mounts no longer retain sealed.json. With the daemon down, the destructive gate
+    /// must still see durable journal dirt—even when an on-disk stat could happen to match an old
+    /// retained baseline—and refuse to discard it.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_losable_gate_reads_durable_dirty_state_offline() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        upper_file(state.path(), "dirty.txt", "local bytes");
+        let mount_state = doctor_mount_state(state.path());
+        daemon::save_mount_state(state.path(), &mount_state).unwrap();
+        let identity = local_state::LocalStateIdentity {
+            project_id: mount_state.project_id.clone(),
+            filesystem: mount_state.repo.clone(),
+            workspace_id: mount_state.workspace_id.clone(),
+            store_uuid: mount_state.local_state_uuid.clone().unwrap(),
+        };
+        let local = local_state::LocalState::open(
+            state.path().join(local_state::LOCAL_STATE_FILE),
+            identity,
+        )
+        .unwrap();
+        local
+            .import_legacy_once(local_state::LegacyImport {
+                base_snapshot: Some("base".to_string()),
+                mutations: vec![local_state::LegacyMutation::Upsert {
+                    path: "dirty.txt".to_string(),
+                    min_write_offset: 0,
+                }],
+            })
+            .unwrap();
+        drop(local);
+        assert!(!state.path().join("sealed.json").exists());
+
+        let losable = overlay_losable_state(state.path(), &mount.path().to_string_lossy())
+            .await
+            .unwrap()
+            .expect("durable dirty intent must block offline destruction");
+        assert!(losable.contains("unsealed"), "{losable}");
+    }
+
+    /// A retained native overlay remains loss-free offline using only redb baselines. This is the
+    /// counterpart to the dirty test above and guards the removal of the obsolete sealed.json
+    /// authority from turning every daemon-less unmount into a false refusal.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn native_losable_gate_reads_durable_baselines_offline() {
+        use std::os::unix::fs::MetadataExt;
+
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let meta = upper_file(state.path(), "kept.txt", "sealed bytes");
+        let mount_state = doctor_mount_state(state.path());
+        daemon::save_mount_state(state.path(), &mount_state).unwrap();
+        let identity = local_state::LocalStateIdentity {
+            project_id: mount_state.project_id.clone(),
+            filesystem: mount_state.repo.clone(),
+            workspace_id: mount_state.workspace_id.clone(),
+            store_uuid: mount_state.local_state_uuid.clone().unwrap(),
+        };
+        let local = local_state::LocalState::open(
+            state.path().join(local_state::LOCAL_STATE_FILE),
+            identity,
+        )
+        .unwrap();
+        local
+            .import_legacy_once(local_state::LegacyImport {
+                base_snapshot: Some("base".to_string()),
+                mutations: vec![local_state::LegacyMutation::Upsert {
+                    path: "kept.txt".to_string(),
+                    min_write_offset: 0,
+                }],
+            })
+            .unwrap();
+        let generation = local.freeze_current().unwrap().unwrap().generation;
+        local
+            .mark_prepared(local_state::PreparedGeneration::new(
+                generation,
+                Some("base".to_string()),
+                "root",
+                "fingerprint",
+                Vec::new(),
+            ))
+            .unwrap();
+        local
+            .put_publish_request(local_state::PublishRequest::new(
+                "request", generation, "snapshot", false, 1,
+            ))
+            .unwrap();
+        local.mark_published(generation, "snapshot").unwrap();
+        let baseline = local_state::SealedBaseline::upsert(
+            "kept.txt",
+            "snapshot",
+            local_state::FileIdentity {
+                device: meta.dev(),
+                inode: meta.ino(),
+                size: meta.size(),
+                mtime_secs: meta.mtime(),
+                mtime_nanos: meta.mtime_nsec(),
+                ctime_secs: meta.ctime(),
+                ctime_nanos: meta.ctime_nsec(),
+                mode: meta.mode(),
+            },
+            None,
+        );
+        local
+            .retire_published(generation, "snapshot", &[baseline], &[], Vec::new())
+            .unwrap();
+        drop(local);
+        assert!(!state.path().join("sealed.json").exists());
+
+        assert_eq!(
+            overlay_losable_state(state.path(), &mount.path().to_string_lossy())
+                .await
+                .unwrap(),
+            None,
+            "redb-vouched retained content is loss-free offline"
+        );
+    }
+
     /// Path membership alone must not vouch: a sealed path whose CONTENT no longer matches
     /// its seal record (out-of-band write, or a write racing the dirty reply) is losable.
     #[cfg(unix)]
@@ -6085,7 +10127,7 @@ mod tests {
         std::fs::write(upper.join("raced.txt"), "written mid-push").unwrap();
 
         let bar = indicatif::ProgressBar::hidden();
-        let (sealed, cleared) = seal_via_daemon(
+        let (sealed, cleared, _) = seal_via_daemon(
             state.path(),
             mount.path().to_str().unwrap(),
             Some("msg"),
@@ -6113,11 +10155,8 @@ mod tests {
         assert!(upper.join("raced.txt").exists(), "raced write survives");
     }
 
-    /// `--clear` keeps the old seal-and-clear behavior as an explicit opt-in (it is what
-    /// empties the dirty set so `sync` can run) — but the clear now rides the seal request
-    /// itself (ONE control op, the daemon clears under its sealer lock), and the caller's
-    /// revalidation set is exactly the daemon-reported `cleared` list, which is broader than
-    /// the seal delta (it includes ignored/retained files that never enumerate as dirty).
+    /// `--clear` rides the seal request itself (ONE control op), and the caller's revalidation set
+    /// is exactly the daemon-reported generation-safe `cleared` list.
     #[cfg(unix)]
     #[tokio::test]
     async fn snapshot_clear_rides_the_seal_op_and_reports_dropped_paths() {
@@ -6126,7 +10165,7 @@ mod tests {
         let ops = fake_daemon(state.path());
 
         let bar = indicatif::ProgressBar::hidden();
-        let (sealed, cleared) = seal_via_daemon(
+        let (sealed, cleared, _) = seal_via_daemon(
             state.path(),
             mount.path().to_str().unwrap(),
             None,
@@ -6147,6 +10186,35 @@ mod tests {
         assert_eq!(cleared, Some(3));
     }
 
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn seal_response_loss_retries_with_the_same_request_id() {
+        let state = tempfile::tempdir().unwrap();
+        let mount = tempfile::tempdir().unwrap();
+        let request_ids = fake_daemon_drops_first_seal_response(state.path());
+        let bar = indicatif::ProgressBar::hidden();
+
+        let (outcome, cleared, _) = seal_via_daemon(
+            state.path(),
+            mount.path().to_str().unwrap(),
+            Some("response-loss"),
+            false,
+            &bar,
+        )
+        .await
+        .unwrap();
+
+        let DaemonSealOutcome::Sealed(sealed) = outcome else {
+            panic!("retry did not recover the sealed response");
+        };
+        assert_eq!(sealed.commit, "recovered-snapshot");
+        assert_eq!(cleared, None);
+        let ids = request_ids.lock().unwrap();
+        assert_eq!(ids.len(), 2);
+        assert!(!ids[0].is_empty());
+        assert_eq!(ids[0], ids[1], "retry must preserve the idempotency key");
+    }
+
     /// The `seal` op is line-streaming: `{"event": ...}` progress lines narrate onto the
     /// spinner until the final reply line lands.
     #[cfg(unix)]
@@ -6163,7 +10231,7 @@ mod tests {
         );
 
         let bar = indicatif::ProgressBar::hidden();
-        let (sealed, _cleared) = seal_via_daemon(
+        let (sealed, _cleared, _) = seal_via_daemon(
             state.path(),
             mount.path().to_str().unwrap(),
             Some("msg"),
@@ -6209,7 +10277,7 @@ mod tests {
         );
 
         let bar = indicatif::ProgressBar::hidden();
-        let (outcome, cleared) = seal_via_daemon(
+        let (outcome, cleared, _) = seal_via_daemon(
             state.path(),
             mount.path().to_str().unwrap(),
             Some("save point"),
@@ -6243,8 +10311,7 @@ mod tests {
         );
         assert_eq!(
             clean_snapshot_message(Some(4)),
-            "Nothing new to snapshot; cleared 4 locally retained file(s) (including \
-             ignored files) from the overlay."
+            "Nothing new to snapshot; cleared 4 locally retained path(s) from the overlay."
         );
     }
 
@@ -6305,5 +10372,131 @@ mod tests {
         }
         // Restore so the tempdir can be cleaned up.
         std::fs::set_permissions(&upper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[test]
+    fn cold_push_state_reopens_with_the_same_store_identity() {
+        let state_root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let source = source.path().canonicalize().unwrap();
+        let (first_dir, first) =
+            open_cold_push_state_at(state_root.path(), "https://api", "project", "fs", &source)
+                .unwrap();
+        let identity = first.identity().clone();
+        assert!(first.needs_legacy_import().unwrap());
+        drop(first);
+
+        let (second_dir, second) =
+            open_cold_push_state_at(state_root.path(), "https://api", "project", "fs", &source)
+                .unwrap();
+        assert_eq!(first_dir, second_dir);
+        assert_eq!(second.identity(), &identity);
+    }
+
+    #[test]
+    fn cold_push_state_key_is_component_delimited() {
+        let root = Path::new("/tmp/source");
+        assert_ne!(
+            cold_push_state_key("a", "bc", "d", root),
+            cold_push_state_key("ab", "c", "d", root)
+        );
+        assert_eq!(
+            cold_push_state_key("a", "b", "c", root),
+            cold_push_state_key("a", "b", "c", root)
+        );
+    }
+
+    #[test]
+    fn tracked_push_delta_does_not_open_identity_proven_files() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::create_dir(source.path().join("dir")).unwrap();
+        std::fs::write(source.path().join("dir/unchanged"), b"stable").unwrap();
+        std::fs::write(source.path().join("changed"), b"before").unwrap();
+        std::fs::write(source.path().join("deleted"), b"gone").unwrap();
+
+        let first = scan_cold_push_tree(source.path()).unwrap();
+        let baselines: Vec<_> = first
+            .paths
+            .iter()
+            .map(|entry| cold_push_baseline(entry, "snapshot-1"))
+            .collect();
+        let unchanged = scan_cold_push_tree(source.path()).unwrap();
+        let clean = plan_cold_push_delta(source.path(), &unchanged, &baselines).unwrap();
+        assert!(clean.upserts.is_empty(), "{:?}", clean.upserts);
+        assert!(clean.deletes.is_empty(), "{:?}", clean.deletes);
+
+        std::fs::write(source.path().join("changed"), b"after-and-longer").unwrap();
+        std::fs::remove_file(source.path().join("deleted")).unwrap();
+        std::fs::write(source.path().join("new"), b"new").unwrap();
+        let second = scan_cold_push_tree(source.path()).unwrap();
+        let delta = plan_cold_push_delta(source.path(), &second, &baselines).unwrap();
+        let upserts: BTreeSet<_> = delta
+            .upserts
+            .iter()
+            .map(|entry| entry.path.as_str())
+            .collect();
+        assert!(upserts.contains("changed"));
+        assert!(upserts.contains("new"));
+        assert!(!upserts.contains("dir/unchanged"));
+        assert_eq!(delta.deletes, vec!["deleted"]);
+    }
+
+    #[test]
+    fn tracked_push_new_ignore_rule_preserves_the_remote_baseline() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("kept-remotely"), b"bytes").unwrap();
+        let first = scan_cold_push_tree(source.path()).unwrap();
+        let baselines: Vec<_> = first
+            .paths
+            .iter()
+            .map(|entry| cold_push_baseline(entry, "snapshot-1"))
+            .collect();
+
+        std::fs::write(source.path().join(".gitignore"), b"kept-remotely\n").unwrap();
+        let second = scan_cold_push_tree(source.path()).unwrap();
+        let delta = plan_cold_push_delta(source.path(), &second, &baselines).unwrap();
+        assert!(
+            !delta.deletes.iter().any(|path| path == "kept-remotely"),
+            "ignored is not absent: {:?}",
+            delta.deletes
+        );
+        assert!(delta.upserts.iter().any(|entry| entry.path == ".gitignore"));
+    }
+
+    #[test]
+    fn tracked_push_racy_window_forces_revalidation() {
+        let source = tempfile::tempdir().unwrap();
+        std::fs::write(source.path().join("racy"), b"bytes").unwrap();
+        let scan = scan_cold_push_tree(source.path()).unwrap();
+        let observed = scan
+            .paths
+            .iter()
+            .find(|entry| entry.path == "racy")
+            .unwrap();
+        let mut baseline = cold_push_baseline(observed, "snapshot-1");
+        baseline.observed_at_secs = Some(observed.identity.ctime_secs);
+        baseline.observed_at_nanos = Some(observed.identity.ctime_nanos);
+        let delta = plan_cold_push_delta(source.path(), &scan, &[baseline]).unwrap();
+        assert_eq!(delta.upserts.len(), 1);
+        assert_eq!(delta.upserts[0].path, "racy");
+    }
+
+    #[test]
+    fn corrupt_cold_push_identity_fails_closed() {
+        let state_root = tempfile::tempdir().unwrap();
+        let source = tempfile::tempdir().unwrap();
+        let source = source.path().canonicalize().unwrap();
+        let (state_dir, store) =
+            open_cold_push_state_at(state_root.path(), "https://api", "project", "fs", &source)
+                .unwrap();
+        drop(store);
+        std::fs::write(state_dir.join("identity.json"), b"{").unwrap();
+        let error =
+            open_cold_push_state_at(state_root.path(), "https://api", "project", "fs", &source)
+                .err()
+                .expect("corrupt identity must fail closed")
+                .to_string();
+        assert!(error.contains("corrupt"), "{error}");
+        assert!(error.contains("refusing to guess"), "{error}");
     }
 }

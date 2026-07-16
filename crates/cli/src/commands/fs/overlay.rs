@@ -14,11 +14,12 @@
 //! thin translation layer. Write operations are synchronous local filesystem work; only
 //! lower-layer access is async (delegated to the core).
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex};
+use std::time::{Duration, Instant};
 
 use bytes::Bytes;
 use gsvc_mount::{MountCore, MountError, NodeAttr, NodeKind, ROOT_INO};
@@ -392,6 +393,12 @@ pub struct OverlayFs {
     core: Arc<MountCore>,
     upper: PathBuf,
     wh: PathBuf,
+    /// Durable write-ahead intent sink. The sink returns only after the intent is durable;
+    /// overlay mutations never start before that return. Intents are conservative discovery
+    /// records, not filesystem operations to replay: recovery re-stats the upper/whiteout
+    /// trees for every named path, so a crash after the intent and before the mutation is a
+    /// harmless false positive.
+    mutation_journal: MutationJournalGate,
     /// Shared-ro mode: reject every mutation with [`MountError::ReadOnly`].
     read_only: bool,
     inodes: Mutex<InodeTable>,
@@ -451,14 +458,24 @@ pub struct OverlayFs {
     /// re-acquires it (tokio's RwLock is write-preferring: a nested read behind a queued
     /// writer deadlocks).
     mutate: tokio::sync::RwLock<()>,
+    /// Synchronous writes through already-open handles cannot await `mutate.read()`. This
+    /// companion fence lets generation freeze wait for those short write sections too, making
+    /// the dirty watermark and first-dirty journal reset one atomic boundary.
+    sync_mutate: std::sync::RwLock<()>,
+    /// Serializes the rare first post-freeze write that must break a staging hardlink. Snapshot
+    /// freeze stays metadata-only even without reflink support; the first writer to a shared inode
+    /// pays the copy and all open handles are atomically redirected to the new live inode.
+    cow_break: Mutex<()>,
     /// Pending committed-directory renames: merged-namespace destination path -> lower source
     /// path in **true lower coordinates** (composed through existing entries at insert, so
     /// resolution is always one hop). A `rename(2)` of a lower-backed directory records here
     /// instead of materializing the subtree; reads under the destination resolve through the
     /// remap, and the seal reconciles each entry into by-oid upserts plus the source delete.
-    /// Persisted to `<state dir>/redirects.json` alongside `upper/` and `wh/`.
+    /// Writable native mounts reconstruct this from the transactional rename journal. Legacy
+    /// mounts retain `redirects.json` only as a compatibility authority.
     redirects: Mutex<HashMap<String, String>>,
     redirects_path: PathBuf,
+    redirects_durable_in_journal: bool,
     /// Bumped on every redirect-table mutation. Lower bindings record it
     /// ([`ONode::bound_rgen`]) so cached path walks re-resolve when the remap changes.
     redirect_gen: AtomicU64,
@@ -471,6 +488,515 @@ pub struct OverlayFs {
 pub enum DirtyKind {
     Upsert,
     Delete,
+}
+
+/// One conservative write-ahead record for the durable local mutation journal.
+///
+/// Implementations must durably commit the record before returning `Ok(())`. These records
+/// deliberately describe paths to inspect, rather than operations to replay: an acknowledged
+/// record may outlive a filesystem syscall that subsequently fails or a process that crashes
+/// before applying it. Recovery must resolve each path against the actual upper/whiteout state.
+///
+/// A rename is one record so its source and destination are ordered atomically in the journal.
+/// The recovery view is equivalent to a source delete followed by a destination upsert.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum OverlayMutationIntent {
+    Upsert { path: String, min_write_offset: u64 },
+    Delete { path: String },
+    Rename { source: String, destination: String },
+}
+
+/// Durable sink used by [`OverlayFs`] before it mutates the local overlay.
+///
+/// The concrete local state engine implements this trait. `record_intent` must fail closed:
+/// returning an error prevents the corresponding overlay mutation from starting.
+pub trait OverlayMutationJournal: Send + Sync {
+    /// Atomically commit an ordered group. Returning an error must not acknowledge a prefix.
+    fn record_intents(&self, intents: &[OverlayMutationIntent]) -> Result<(), MountError>;
+
+    /// Commit the successful application point for one rename before the syscall returns.
+    /// Recovery may use only applied rename rows as metadata redirects; write-ahead-only rows
+    /// remain conservative path hints and are never replayed destructively.
+    fn mark_rename_applied(&self, _source: &str, _destination: &str) -> Result<(), MountError> {
+        Ok(())
+    }
+}
+
+struct NoopMutationJournal;
+
+impl OverlayMutationJournal for NoopMutationJournal {
+    fn record_intents(&self, _intents: &[OverlayMutationIntent]) -> Result<(), MountError> {
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy)]
+struct JournaledEntry {
+    kind: DirtyKind,
+    min_write_offset: u64,
+    /// `None` is an intent whose filesystem mutation has not yet been observed. It is retained
+    /// across pruning: a failed syscall or crash is a safe false positive, and a later retry can
+    /// reuse the already-durable intent.
+    generation: Option<u64>,
+}
+
+/// First-dirty suppression around the durable sink.
+///
+/// File handles can issue thousands of write(2)s in one snapshot generation. Once a path has a
+/// durable intent of the same final kind, later writes need only update the in-memory generation
+/// and minimum-offset cache. Freezing a generation re-arms every path for the next write.
+/// Maximum time the elected writer leaves a newly-open group available to concurrent first-dirty
+/// calls. This is deliberately fixed rather than runtime-configurable: journal durability is part
+/// of filesystem correctness, not a deployment tuning surface.
+#[cfg(not(test))]
+const MUTATION_JOURNAL_GROUP_WINDOW: Duration = Duration::from_micros(100);
+/// Bound one redb transaction and its temporary intent vector during create storms. Further
+/// queued intents remain ordered and elect the next writer immediately after this group commits.
+const MUTATION_JOURNAL_MAX_GROUP: usize = 256;
+/// Rolling completed-request latency window used only for structured diagnostics.
+const MUTATION_JOURNAL_LATENCY_SAMPLES: usize = 256;
+// Give deliberately simultaneous test threads enough scheduling room on loaded CI workers.
+#[cfg(test)]
+const MUTATION_JOURNAL_GROUP_WINDOW: Duration = Duration::from_millis(2);
+
+#[derive(Clone)]
+struct QueuedJournalIntent {
+    request_id: u64,
+    intent: OverlayMutationIntent,
+    enqueued_at: Instant,
+}
+
+#[derive(Clone)]
+enum JournalCommitResult {
+    Durable,
+    Failed(String),
+}
+
+struct JournalRequestState {
+    waiters: usize,
+    result: Option<JournalCommitResult>,
+}
+
+struct MutationJournalState {
+    covered: HashMap<String, JournaledEntry>,
+    queue: VecDeque<QueuedJournalIntent>,
+    inflight: Vec<QueuedJournalIntent>,
+    requests: HashMap<u64, JournalRequestState>,
+    latency_samples_us: VecDeque<u64>,
+    next_request_id: u64,
+    writer_active: bool,
+}
+
+struct MutationJournalGate {
+    sink: Arc<dyn OverlayMutationJournal>,
+    state: Mutex<MutationJournalState>,
+    ready: Condvar,
+}
+
+impl MutationJournalGate {
+    fn new(sink: Arc<dyn OverlayMutationJournal>) -> Self {
+        Self {
+            sink,
+            state: Mutex::new(MutationJournalState {
+                covered: HashMap::new(),
+                queue: VecDeque::new(),
+                inflight: Vec::new(),
+                requests: HashMap::new(),
+                latency_samples_us: VecDeque::with_capacity(MUTATION_JOURNAL_LATENCY_SAMPLES),
+                next_request_id: 1,
+                writer_active: false,
+            }),
+            ready: Condvar::new(),
+        }
+    }
+
+    fn prepare(&self, intent: OverlayMutationIntent) -> Result<(), MountError> {
+        let request_id = {
+            let mut state = self.state.lock().expect("journal state lock");
+            if !has_pending_effect(&state.queue, &state.inflight, &intent)
+                && intent_is_covered(&state.covered, &intent)
+            {
+                return Ok(());
+            }
+            let joined = {
+                let MutationJournalState {
+                    queue, inflight, ..
+                } = &mut *state;
+                join_pending_intent(queue, inflight, &intent)
+            };
+            if let Some(request_id) = joined {
+                state
+                    .requests
+                    .get_mut(&request_id)
+                    .expect("queued journal request")
+                    .waiters += 1;
+                request_id
+            } else {
+                let request_id = state.next_request_id;
+                state.next_request_id = state
+                    .next_request_id
+                    .checked_add(1)
+                    .expect("journal request id overflow");
+                state.queue.push_back(QueuedJournalIntent {
+                    request_id,
+                    intent,
+                    enqueued_at: Instant::now(),
+                });
+                state.requests.insert(
+                    request_id,
+                    JournalRequestState {
+                        waiters: 1,
+                        result: None,
+                    },
+                );
+                self.ready.notify_all();
+                request_id
+            }
+        };
+
+        let mut state = self.state.lock().expect("journal state lock");
+        loop {
+            if let Some(result) = state
+                .requests
+                .get(&request_id)
+                .and_then(|request| request.result.clone())
+            {
+                let request = state
+                    .requests
+                    .get_mut(&request_id)
+                    .expect("completed journal request");
+                request.waiters -= 1;
+                if request.waiters == 0 {
+                    state.requests.remove(&request_id);
+                }
+                return match result {
+                    JournalCommitResult::Durable => Ok(()),
+                    JournalCommitResult::Failed(error) => Err(MountError::Protocol(error)),
+                };
+            }
+
+            let is_next_writer = !state.writer_active
+                && state
+                    .queue
+                    .front()
+                    .is_some_and(|queued| queued.request_id == request_id);
+            if is_next_writer {
+                state.writer_active = true;
+                drop(state);
+                self.commit_one_group();
+                state = self.state.lock().expect("journal state lock");
+                continue;
+            }
+            state = self.ready.wait(state).expect("journal state lock");
+        }
+    }
+
+    fn observe(&self, path: &str, kind: DirtyKind, generation: u64) {
+        let mut state = self.state.lock().expect("journal state lock");
+        if let Some(entry) = state.covered.get_mut(path)
+            && entry.kind == kind
+        {
+            // Keep the latest mutation generation. A seal that covers an earlier write must not
+            // re-arm the path when a later write raced it.
+            entry.generation = Some(generation);
+        }
+    }
+
+    fn seed(&self, path: &str, kind: DirtyKind, min_write_offset: u64, generation: u64) {
+        self.state
+            .lock()
+            .expect("journal state lock")
+            .covered
+            .insert(
+                path.to_string(),
+                JournaledEntry {
+                    kind,
+                    min_write_offset,
+                    generation: Some(generation),
+                },
+            );
+    }
+
+    fn advance_generation(&self) {
+        let mut state = self.state.lock().expect("journal state lock");
+        assert!(
+            state.queue.is_empty() && state.inflight.is_empty() && !state.writer_active,
+            "generation fence must wait for every journal group"
+        );
+        state.covered.clear();
+    }
+
+    fn prune(&self, upto: u64) {
+        self.state
+            .lock()
+            .expect("journal state lock")
+            .covered
+            .retain(|_, entry| entry.generation.is_none_or(|generation| generation > upto));
+    }
+
+    fn commit_one_group(&self) {
+        std::thread::sleep(MUTATION_JOURNAL_GROUP_WINDOW);
+        let (group, waiter_count, oldest_wait) = {
+            let mut state = self.state.lock().expect("journal state lock");
+            let group_len = state.queue.len().min(MUTATION_JOURNAL_MAX_GROUP);
+            let group = state.queue.drain(..group_len).collect::<Vec<_>>();
+            state.inflight.clone_from(&group);
+            let waiter_count = group
+                .iter()
+                .map(|queued| {
+                    state
+                        .requests
+                        .get(&queued.request_id)
+                        .expect("queued journal request")
+                        .waiters
+                })
+                .sum::<usize>();
+            let oldest_wait = group
+                .first()
+                .map_or(Duration::ZERO, |queued| queued.enqueued_at.elapsed());
+            (group, waiter_count, oldest_wait)
+        };
+        debug_assert!(!group.is_empty(), "journal writer elected with no work");
+        let intents = group
+            .iter()
+            .map(|queued| queued.intent.clone())
+            .collect::<Vec<_>>();
+        let commit_started = Instant::now();
+        let result = self.sink.record_intents(&intents);
+        let commit_elapsed = commit_started.elapsed();
+
+        let mut state = self.state.lock().expect("journal state lock");
+        let commit_result = match result {
+            Ok(()) => {
+                for intent in &intents {
+                    apply_covered_intent(&mut state.covered, intent);
+                }
+                JournalCommitResult::Durable
+            }
+            Err(error) => JournalCommitResult::Failed(format!(
+                "durable local mutation journal failed closed: {error}"
+            )),
+        };
+        for queued in &group {
+            state
+                .requests
+                .get_mut(&queued.request_id)
+                .expect("journal request still has waiters")
+                .result = Some(commit_result.clone());
+        }
+        state.inflight.clear();
+        state.writer_active = false;
+        for queued in &group {
+            if state.latency_samples_us.len() == MUTATION_JOURNAL_LATENCY_SAMPLES {
+                state.latency_samples_us.pop_front();
+            }
+            state
+                .latency_samples_us
+                .push_back(queued.enqueued_at.elapsed().as_micros() as u64);
+        }
+        let latency_p50_us = journal_latency_percentile(&state.latency_samples_us, 50);
+        let latency_p95_us = journal_latency_percentile(&state.latency_samples_us, 95);
+        let latency_p99_us = journal_latency_percentile(&state.latency_samples_us, 99);
+        let success = matches!(commit_result, JournalCommitResult::Durable);
+        tracing::debug!(
+            target: "tensorlake::fs::mutation_journal",
+            group_intents = group.len(),
+            group_waiters = waiter_count,
+            group_window_us = MUTATION_JOURNAL_GROUP_WINDOW.as_micros() as u64,
+            max_group_intents = MUTATION_JOURNAL_MAX_GROUP as u64,
+            oldest_queue_us = oldest_wait.as_micros() as u64,
+            commit_us = commit_elapsed.as_micros() as u64,
+            latency_samples = state.latency_samples_us.len(),
+            latency_p50_us,
+            latency_p95_us,
+            latency_p99_us,
+            success,
+            "mount mutation journal group committed"
+        );
+        self.ready.notify_all();
+    }
+}
+
+fn journal_latency_percentile(samples: &VecDeque<u64>, percentile: usize) -> u64 {
+    if samples.is_empty() {
+        return 0;
+    }
+    let mut sorted = samples.iter().copied().collect::<Vec<_>>();
+    sorted.sort_unstable();
+    let index = sorted
+        .len()
+        .saturating_mul(percentile)
+        .div_ceil(100)
+        .saturating_sub(1);
+    sorted[index.min(sorted.len() - 1)]
+}
+
+fn intent_is_covered(
+    covered: &HashMap<String, JournaledEntry>,
+    intent: &OverlayMutationIntent,
+) -> bool {
+    match intent {
+        OverlayMutationIntent::Upsert {
+            path,
+            min_write_offset,
+        } => covered.get(path).is_some_and(|entry| {
+            entry.kind == DirtyKind::Upsert && entry.min_write_offset <= *min_write_offset
+        }),
+        OverlayMutationIntent::Delete { path } => covered
+            .get(path)
+            .is_some_and(|entry| entry.kind == DirtyKind::Delete),
+        // Preserve every rename as one ordered record even when both paths were already dirty.
+        OverlayMutationIntent::Rename { .. } => false,
+    }
+}
+
+fn intent_affects_path(intent: &OverlayMutationIntent, path: &str) -> bool {
+    match intent {
+        OverlayMutationIntent::Upsert {
+            path: intent_path, ..
+        }
+        | OverlayMutationIntent::Delete { path: intent_path } => intent_path == path,
+        OverlayMutationIntent::Rename {
+            source,
+            destination,
+        } => source == path || destination == path,
+    }
+}
+
+fn has_pending_effect(
+    queue: &VecDeque<QueuedJournalIntent>,
+    inflight: &[QueuedJournalIntent],
+    intent: &OverlayMutationIntent,
+) -> bool {
+    let affects_intent = |queued: &QueuedJournalIntent| match intent {
+        OverlayMutationIntent::Upsert { path, .. } | OverlayMutationIntent::Delete { path } => {
+            intent_affects_path(&queued.intent, path)
+        }
+        OverlayMutationIntent::Rename {
+            source,
+            destination,
+        } => {
+            intent_affects_path(&queued.intent, source)
+                || intent_affects_path(&queued.intent, destination)
+        }
+    };
+    queue.iter().chain(inflight.iter()).any(affects_intent)
+}
+
+/// Join only the latest pending effect for a path. Looking past a conflicting delete/rename would
+/// allow a caller to mutate after an older intent while a newer namespace effect was still not
+/// durable.
+fn join_pending_intent(
+    queue: &mut VecDeque<QueuedJournalIntent>,
+    inflight: &[QueuedJournalIntent],
+    intent: &OverlayMutationIntent,
+) -> Option<u64> {
+    match intent {
+        OverlayMutationIntent::Upsert {
+            path,
+            min_write_offset,
+        } => {
+            for queued in queue.iter_mut().rev() {
+                if !intent_affects_path(&queued.intent, path) {
+                    continue;
+                }
+                if let OverlayMutationIntent::Upsert {
+                    path: queued_path,
+                    min_write_offset: queued_offset,
+                } = &mut queued.intent
+                    && queued_path == path
+                {
+                    *queued_offset = (*queued_offset).min(*min_write_offset);
+                    return Some(queued.request_id);
+                }
+                return None;
+            }
+            for queued in inflight.iter().rev() {
+                if !intent_affects_path(&queued.intent, path) {
+                    continue;
+                }
+                return matches!(
+                    &queued.intent,
+                    OverlayMutationIntent::Upsert {
+                        path: queued_path,
+                        min_write_offset: queued_offset,
+                    } if queued_path == path && queued_offset <= min_write_offset
+                )
+                .then_some(queued.request_id);
+            }
+            None
+        }
+        OverlayMutationIntent::Delete { path } => {
+            for queued in queue.iter().rev() {
+                if !intent_affects_path(&queued.intent, path) {
+                    continue;
+                }
+                return matches!(&queued.intent, OverlayMutationIntent::Delete { path: queued_path } if queued_path == path)
+                    .then_some(queued.request_id);
+            }
+            for queued in inflight.iter().rev() {
+                if !intent_affects_path(&queued.intent, path) {
+                    continue;
+                }
+                return matches!(&queued.intent, OverlayMutationIntent::Delete { path: queued_path } if queued_path == path)
+                    .then_some(queued.request_id);
+            }
+            None
+        }
+        OverlayMutationIntent::Rename { .. } => None,
+    }
+}
+
+fn apply_covered_intent(
+    covered: &mut HashMap<String, JournaledEntry>,
+    intent: &OverlayMutationIntent,
+) {
+    match intent {
+        OverlayMutationIntent::Upsert {
+            path,
+            min_write_offset,
+        } => {
+            covered.insert(
+                path.clone(),
+                JournaledEntry {
+                    kind: DirtyKind::Upsert,
+                    min_write_offset: *min_write_offset,
+                    generation: None,
+                },
+            );
+        }
+        OverlayMutationIntent::Delete { path } => {
+            covered.insert(
+                path.clone(),
+                JournaledEntry {
+                    kind: DirtyKind::Delete,
+                    min_write_offset: 0,
+                    generation: None,
+                },
+            );
+        }
+        OverlayMutationIntent::Rename {
+            source,
+            destination,
+        } => {
+            covered.insert(
+                source.clone(),
+                JournaledEntry {
+                    kind: DirtyKind::Delete,
+                    min_write_offset: 0,
+                    generation: None,
+                },
+            );
+            covered.insert(
+                destination.clone(),
+                JournaledEntry {
+                    kind: DirtyKind::Upsert,
+                    min_write_offset: 0,
+                    generation: None,
+                },
+            );
+        }
+    }
 }
 
 struct DirtyEntry {
@@ -491,6 +1017,16 @@ pub struct DirtyDelta {
     pub upserts: Vec<(String, u64)>,
     pub deletes: Vec<String>,
     pub watermark: u64,
+}
+
+/// One durable journal row used to restore the in-memory dirty cache without walking `upper/`
+/// and `wh/` on a normal restart.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct OverlayDirtySeed {
+    pub path: String,
+    pub kind: DirtyKind,
+    pub min_write_offset: u64,
+    pub generation: u64,
 }
 
 impl DirtyDelta {
@@ -527,51 +1063,157 @@ fn io_err(e: std::io::Error) -> MountError {
     MountError::Protocol(format!("overlay io: {e}"))
 }
 
+fn remap_overlay_path(path: &str, source: &str, destination: &str) -> Option<String> {
+    if path == source {
+        return Some(destination.to_string());
+    }
+    path.strip_prefix(source)
+        .filter(|suffix| suffix.starts_with('/'))
+        .map(|suffix| format!("{destination}{suffix}"))
+}
+
 impl OverlayFs {
     pub fn new(
         core: Arc<MountCore>,
         state_dir: &Path,
         read_only: bool,
     ) -> Result<Arc<OverlayFs>, MountError> {
+        let fs = Self::new_inner(
+            core,
+            state_dir,
+            read_only,
+            Arc::new(NoopMutationJournal),
+            Vec::new(),
+            None,
+        )?;
+        // Legacy/non-durable callers recover by scanning the overlay. Durable callers use
+        // `new_with_journal` and seed this cache from their local state engine instead.
+        fs.rebuild_dirty_index()?;
+        Ok(fs)
+    }
+
+    /// Construct an overlay backed by a durable write-ahead journal.
+    ///
+    /// `initial_dirty` is the journal-derived restart view. Unlike [`OverlayFs::new`], this
+    /// constructor never walks `upper/` or `wh/`; an explicit repair path may still call
+    /// [`OverlayFs::rebuild_dirty_index`] when the durable store is missing or corrupt.
+    pub fn new_with_journal(
+        core: Arc<MountCore>,
+        state_dir: &Path,
+        read_only: bool,
+        mutation_journal: Arc<dyn OverlayMutationJournal>,
+        initial_dirty: Vec<OverlayDirtySeed>,
+        initial_renames: Vec<(String, String, String, u64)>,
+    ) -> Result<Arc<OverlayFs>, MountError> {
+        Self::new_inner(
+            core,
+            state_dir,
+            read_only,
+            mutation_journal,
+            initial_dirty,
+            Some(initial_renames),
+        )
+    }
+
+    fn new_inner(
+        core: Arc<MountCore>,
+        state_dir: &Path,
+        read_only: bool,
+        mutation_journal: Arc<dyn OverlayMutationJournal>,
+        initial_dirty: Vec<OverlayDirtySeed>,
+        initial_renames: Option<Vec<(String, String, String, u64)>>,
+    ) -> Result<Arc<OverlayFs>, MountError> {
         let upper = state_dir.join("upper");
         let wh = state_dir.join("wh");
         std::fs::create_dir_all(&upper).map_err(io_err)?;
         std::fs::create_dir_all(&wh).map_err(io_err)?;
         let redirects_path = state_dir.join("redirects.json");
-        // Pending renames from a previous daemon (re-mount, crash) still gate the merged
-        // namespace; an unreadable file is corrupt state worth failing loudly on.
-        let redirects: HashMap<String, String> = match std::fs::read(&redirects_path) {
-            Ok(raw) => serde_json::from_slice(&raw)
-                .map_err(|e| MountError::Protocol(format!("corrupt redirects.json: {e}")))?,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
-            Err(e) => return Err(io_err(e)),
+        let redirects_durable_in_journal = initial_renames.is_some();
+        let redirects: HashMap<String, String> = match initial_renames {
+            Some(renames) => renames
+                .into_iter()
+                .map(|(destination, true_source, _, _)| (destination, true_source))
+                .collect(),
+            // Pending renames from a legacy daemon still gate the merged namespace; an
+            // unreadable compatibility file is corrupt state worth failing loudly on.
+            None => match std::fs::read(&redirects_path) {
+                Ok(raw) => serde_json::from_slice(&raw)
+                    .map_err(|e| MountError::Protocol(format!("corrupt redirects.json: {e}")))?,
+                Err(e) if e.kind() == std::io::ErrorKind::NotFound => HashMap::new(),
+                Err(e) => return Err(io_err(e)),
+            },
         };
+        let mut dirty: HashMap<String, DirtyEntry> = HashMap::new();
+        let mut write_gen = 0;
+        for mut seed in initial_dirty {
+            // A crash can occur after a delete/rename intent is committed but before concurrent
+            // syscalls finish in journal order. The upper namespace is the authoritative applied
+            // fact for this one journaled path: existing content must be prepared as an upsert,
+            // never silently skipped as a delete that "expects" another record.
+            if seed.kind == DirtyKind::Delete && upper.join(&seed.path).symlink_metadata().is_ok() {
+                seed.kind = DirtyKind::Upsert;
+                seed.min_write_offset = 0;
+            }
+            write_gen = write_gen.max(seed.generation);
+            match dirty.get_mut(&seed.path) {
+                Some(entry) if entry.generation > seed.generation => {}
+                Some(entry) => {
+                    entry.generation = seed.generation;
+                    if entry.kind != seed.kind {
+                        entry.min_write_offset = 0;
+                    } else {
+                        entry.min_write_offset = entry.min_write_offset.min(seed.min_write_offset);
+                    }
+                    entry.kind = seed.kind;
+                }
+                None => {
+                    dirty.insert(
+                        seed.path,
+                        DirtyEntry {
+                            generation: seed.generation,
+                            kind: seed.kind,
+                            min_write_offset: seed.min_write_offset,
+                        },
+                    );
+                }
+            }
+        }
+        let has_initial_dirty = !dirty.is_empty();
+        let mutation_journal = MutationJournalGate::new(mutation_journal);
+        for (path, entry) in &dirty {
+            mutation_journal.seed(path, entry.kind, entry.min_write_offset, entry.generation);
+        }
+        let dirty_base = has_initial_dirty.then(|| core.current_commit());
         let fs = Arc::new(OverlayFs {
             core,
             upper,
             wh,
+            mutation_journal,
             read_only,
             inodes: Mutex::new(InodeTable::new()),
             handles: Mutex::new(HashMap::new()),
             next_fh: AtomicU64::new(1),
             lower_times: Mutex::new(HashMap::new()),
-            write_gen: AtomicU64::new(0),
-            dirty: Mutex::new(HashMap::new()),
+            write_gen: AtomicU64::new(write_gen),
+            dirty: Mutex::new(dirty),
             sealed_oids: Mutex::new(HashMap::new()),
             divergent_pending: Mutex::new(std::collections::HashSet::new()),
-            dirty_base: Mutex::new(None),
+            dirty_base: Mutex::new(dirty_base),
             epoch: AtomicU64::new(0),
             started: std::time::Instant::now(),
             first_dirty_ms: AtomicU64::new(0),
             last_mutation_ms: AtomicU64::new(0),
             mutate: tokio::sync::RwLock::new(()),
+            sync_mutate: std::sync::RwLock::new(()),
+            cow_break: Mutex::new(()),
             redirects: Mutex::new(redirects),
             redirects_path,
+            redirects_durable_in_journal,
             redirect_gen: AtomicU64::new(0),
         });
-        // Baseline: dirt left by a previous daemon (re-mount, crash) predates any events this
-        // process will see; seed the index from disk so the first seal covers it.
-        fs.rebuild_dirty_index()?;
+        if has_initial_dirty {
+            fs.stamp_mutation();
+        }
         Ok(fs)
     }
 
@@ -579,6 +1221,35 @@ impl OverlayFs {
     // Dirty tracking: the event feed behind auto-commit. Every mutating op below records the
     // path it touched, so sealing never scans — and an idle tick is one atomic load.
     // -------------------------------------------------------------------------------------
+
+    fn prepare_upsert(&self, path: &str, min_write_offset: u64) -> Result<(), MountError> {
+        self.mutation_journal
+            .prepare(OverlayMutationIntent::Upsert {
+                path: path.to_string(),
+                min_write_offset,
+            })
+    }
+
+    fn prepare_delete(&self, path: &str) -> Result<(), MountError> {
+        self.mutation_journal
+            .prepare(OverlayMutationIntent::Delete {
+                path: path.to_string(),
+            })
+    }
+
+    fn prepare_rename(&self, source: &str, destination: &str) -> Result<(), MountError> {
+        self.mutation_journal
+            .prepare(OverlayMutationIntent::Rename {
+                source: source.to_string(),
+                destination: destination.to_string(),
+            })
+    }
+
+    fn mark_rename_applied(&self, source: &str, destination: &str) -> Result<(), MountError> {
+        self.mutation_journal
+            .sink
+            .mark_rename_applied(source, destination)
+    }
 
     fn record(&self, path: &str, kind: DirtyKind) {
         self.record_at(path, kind, 0);
@@ -627,6 +1298,7 @@ impl OverlayFs {
                 );
             }
         }
+        self.mutation_journal.observe(path, kind, generation);
     }
 
     /// Every path mutated after `since`, split by the kind of its last mutation. The watermark
@@ -670,6 +1342,46 @@ impl OverlayFs {
             .lock()
             .expect("dirty lock")
             .retain(|_, entry| entry.generation > upto);
+        self.mutation_journal.prune(upto);
+    }
+
+    /// Atomically capture the current dirty delta and re-arm write-ahead logging for the next
+    /// generation.
+    ///
+    /// The async fence waits for namespace/copy-up operations; the synchronous fence waits for
+    /// write(2)s through existing handles. A mutation therefore falls wholly before or wholly
+    /// after this watermark. Call this when a generation freezes, not after publication.
+    pub async fn freeze_dirty_since_with<F>(
+        &self,
+        since: u64,
+        freeze_durable_generation: F,
+    ) -> Result<DirtyDelta, MountError>
+    where
+        F: FnOnce(&DirtyDelta) -> Result<(), MountError>,
+    {
+        let _async_mutations = self.mutate.write().await;
+        let _sync_writes = self.sync_mutate.write().expect("sync mutation fence");
+        let delta = self.dirty_since(since);
+        // The durable store rotates while both mutation classes are stopped. If it cannot
+        // freeze, leave coverage armed for the current generation and fail closed.
+        freeze_durable_generation(&delta)?;
+        self.mutation_journal.advance_generation();
+        Ok(delta)
+    }
+
+    /// Run a short local-state transition while every asynchronous namespace operation and
+    /// synchronous write through an existing handle is stopped.
+    ///
+    /// Restore/adoption uses this to make the "preserve raced writes or clear the old world"
+    /// decision against the same write-ahead boundary as the overlay mutation itself. The
+    /// callback must not wait on async work or call back into a method that acquires these fences.
+    pub async fn with_mutations_frozen<F, T>(&self, transition: F) -> Result<T, MountError>
+    where
+        F: FnOnce() -> Result<T, MountError>,
+    {
+        let _async_mutations = self.mutate.write().await;
+        let _sync_writes = self.sync_mutate.write().expect("sync mutation fence");
+        transition()
     }
 
     /// The mutation clock's current value — the generation ceiling for
@@ -733,6 +1445,7 @@ impl OverlayFs {
     /// straight into the state dir and then asks for a reindex).
     pub fn rebuild_dirty_index(&self) -> Result<(), MountError> {
         self.epoch.fetch_add(1, Ordering::SeqCst);
+        self.mutation_journal.advance_generation();
         self.first_dirty_ms.store(0, Ordering::SeqCst);
         self.last_mutation_ms.store(0, Ordering::SeqCst);
         self.sealed_oids.lock().expect("sealed oid lock").clear();
@@ -744,14 +1457,14 @@ impl OverlayFs {
             root: &Path,
             dir: &Path,
             include_directories: bool,
-            out: &mut dyn FnMut(String),
-        ) -> std::io::Result<()> {
+            out: &mut dyn FnMut(String) -> Result<(), MountError>,
+        ) -> Result<(), MountError> {
             let Ok(read) = std::fs::read_dir(dir) else {
                 return Ok(());
             };
             for entry in read.flatten() {
                 let abs = entry.path();
-                let meta = std::fs::symlink_metadata(&abs)?;
+                let meta = std::fs::symlink_metadata(&abs).map_err(io_err)?;
                 if meta.is_dir() && !meta.file_type().is_symlink() {
                     if include_directories {
                         let rel = abs
@@ -761,7 +1474,7 @@ impl OverlayFs {
                             .map(|c| c.as_os_str().to_string_lossy())
                             .collect::<Vec<_>>()
                             .join("/");
-                        out(rel);
+                        out(rel)?;
                     }
                     walk(root, &abs, include_directories, out)?;
                 } else {
@@ -772,20 +1485,22 @@ impl OverlayFs {
                         .map(|c| c.as_os_str().to_string_lossy())
                         .collect::<Vec<_>>()
                         .join("/");
-                    out(rel);
+                    out(rel)?;
                 }
             }
             Ok(())
         }
         self.dirty.lock().expect("dirty lock").clear();
         walk(&self.upper, &self.upper, true, &mut |rel| {
-            self.record(&rel, DirtyKind::Upsert)
-        })
-        .map_err(io_err)?;
+            self.prepare_upsert(&rel, 0)?;
+            self.record(&rel, DirtyKind::Upsert);
+            Ok(())
+        })?;
         walk(&self.wh, &self.wh, false, &mut |rel| {
-            self.record(&rel, DirtyKind::Delete)
-        })
-        .map_err(io_err)?;
+            self.prepare_delete(&rel)?;
+            self.record(&rel, DirtyKind::Delete);
+            Ok(())
+        })?;
         Ok(())
     }
 
@@ -890,6 +1605,9 @@ impl OverlayFs {
     /// Write the table through to `redirects.json` (tmp + rename: a crash never leaves a
     /// torn file — pending renames gate the merged namespace and the seal).
     fn persist_redirects(&self, redirects: &HashMap<String, String>) -> Result<(), MountError> {
+        if self.redirects_durable_in_journal {
+            return Ok(());
+        }
         let tmp = self.redirects_path.with_extension("json.tmp");
         std::fs::write(
             &tmp,
@@ -903,6 +1621,70 @@ impl OverlayFs {
 
     fn upper_meta(&self, path: &str) -> Option<std::fs::Metadata> {
         self.upper_path(path).symlink_metadata().ok()
+    }
+
+    fn break_shared_upper_inode(&self, path: &str) -> Result<(), MountError> {
+        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
+
+        let source = self.upper_path(path);
+        match source.symlink_metadata() {
+            Ok(metadata) if metadata.is_file() && metadata.nlink() > 1 => {}
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io_err(error)),
+        }
+        let _break = self.cow_break.lock().expect("hardlink break lock");
+        let metadata = match source.symlink_metadata() {
+            Ok(metadata) if metadata.is_file() && metadata.nlink() > 1 => metadata,
+            Ok(_) => return Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) => return Err(io_err(error)),
+        };
+        let temporary =
+            source.with_extension(format!("tl-live-cow-{:016x}", rand::random::<u64>()));
+        let _ = std::fs::remove_file(&temporary);
+        std::fs::copy(&source, &temporary).map_err(io_err)?;
+        std::fs::set_permissions(&temporary, std::fs::Permissions::from_mode(metadata.mode()))
+            .map_err(io_err)?;
+        let modified =
+            filetime::FileTime::from_unix_time(metadata.mtime(), metadata.mtime_nsec() as u32);
+        filetime::set_file_mtime(&temporary, modified).map_err(io_err)?;
+        for name in xattr::list(&source).map_err(io_err)? {
+            if let Some(value) = xattr::get(&source, &name).map_err(io_err)? {
+                xattr::set(&temporary, &name, &value).map_err(io_err)?;
+            }
+        }
+        std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&temporary)
+            .and_then(|file| file.sync_all())
+            .map_err(io_err)?;
+        std::fs::rename(&temporary, &source).map_err(io_err)?;
+        if let Some(parent) = source.parent() {
+            std::fs::File::open(parent)
+                .and_then(|directory| directory.sync_all())
+                .map_err(io_err)?;
+        }
+        let replacement = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&source)
+            .map_err(io_err)?;
+        let mut handles = self.handles.lock().expect("handle lock");
+        for handle in handles.values_mut() {
+            if let OHandle::Upper {
+                file,
+                path: handle_path,
+            } = handle
+                && handle_path == path
+                && file.metadata().map_err(io_err)?.dev() == metadata.dev()
+                && file.metadata().map_err(io_err)?.ino() == metadata.ino()
+            {
+                *file = replacement.try_clone().map_err(io_err)?;
+            }
+        }
+        Ok(())
     }
 
     fn attr_from_meta(&self, ino: u64, meta: &std::fs::Metadata) -> OverlayAttr {
@@ -1333,7 +2115,7 @@ impl OverlayFs {
             // Held through handle registration: once the handle is in the table, trim skips
             // the path; before that, the fence is what keeps trim from unlinking the upper
             // file between copy-up and this open.
-            Some(self.mutate.read().await)
+            Some(self.mutate.write().await)
         } else {
             None
         };
@@ -1344,7 +2126,8 @@ impl OverlayFs {
             return Err(not_found());
         }
         if write {
-            self.copy_up(&node).await?;
+            self.copy_up(&node, false).await?;
+            self.break_shared_upper_inode(&node.path)?;
         }
         let (handle, ident) = if self.upper_meta(&node.path).is_some() {
             let file = std::fs::OpenOptions::new()
@@ -1405,14 +2188,12 @@ impl OverlayFs {
 
     pub fn write(&self, fh: u64, offset: u64, data: &[u8]) -> Result<u32, MountError> {
         self.write_guard()?;
+        let _mutation = self.sync_mutate.read().expect("sync mutation fence");
         use std::os::unix::fs::FileExt;
         let path = {
             let handles = self.handles.lock().expect("handle lock");
             match handles.get(&fh) {
-                Some(OHandle::Upper { file, path }) => {
-                    file.write_all_at(data, offset).map_err(io_err)?;
-                    path.clone()
-                }
+                Some(OHandle::Upper { path, .. }) => path.clone(),
                 // open(write=true) always yields an upper handle; a write on a lower handle
                 // means the kernel opened read-only, which it won't for writes.
                 Some(OHandle::Lower { .. }) => {
@@ -1423,6 +2204,18 @@ impl OverlayFs {
                 _ => return Err(not_found()),
             }
         };
+        // The first write to this path in the current journal generation is durable before any
+        // byte can reach the upper file. If snapshot capture fell back to a hardlink, break it
+        // now and redirect every live descriptor before modifying the inode.
+        self.prepare_upsert(&path, offset)?;
+        self.break_shared_upper_inode(&path)?;
+        {
+            let handles = self.handles.lock().expect("handle lock");
+            let Some(OHandle::Upper { file, .. }) = handles.get(&fh) else {
+                return Err(not_found());
+            };
+            file.write_all_at(data, offset).map_err(io_err)?;
+        }
         self.record_write(&path, offset);
         Ok(data.len() as u32)
     }
@@ -1443,12 +2236,19 @@ impl OverlayFs {
     }
 
     /// Materialize a lower file into the upper layer (no-op when upper already has the path).
-    async fn copy_up(&self, node: &ONode) -> Result<(), MountError> {
+    ///
+    /// `intent_prepared` is used by rename/setattr, whose enclosing operation records its
+    /// complete intent before calling here. Logging a standalone upsert after an ordered rename
+    /// would invert recovery order and falsely resurrect the source name.
+    async fn copy_up(&self, node: &ONode, intent_prepared: bool) -> Result<(), MountError> {
         if self.upper_meta(&node.path).is_some() {
             return Ok(());
         }
         let core_ino = self.lower_binding(node).await?;
         let attr = self.core.getattr(core_ino)?;
+        if !intent_prepared {
+            self.prepare_upsert(&node.path, 0)?;
+        }
         match attr.kind {
             NodeKind::Dir => {
                 let dest = self.upper_path(&node.path);
@@ -1587,7 +2387,7 @@ impl OverlayFs {
         exec: bool,
     ) -> Result<(OverlayAttr, u64), MountError> {
         self.write_guard()?;
-        let _fence = self.mutate.read().await;
+        let _fence = self.mutate.write().await;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         if self
@@ -1596,6 +2396,7 @@ impl OverlayFs {
         {
             return Err(MountError::Exists);
         }
+        self.prepare_upsert(&path, 0)?;
         let dest = self.upper_path(&path);
         if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir).map_err(io_err)?;
@@ -1631,7 +2432,7 @@ impl OverlayFs {
 
     pub async fn mkdir(&self, parent: u64, name: &str) -> Result<OverlayAttr, MountError> {
         self.write_guard()?;
-        let _fence = self.mutate.read().await;
+        let _fence = self.mutate.write().await;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         if self
@@ -1640,6 +2441,7 @@ impl OverlayFs {
         {
             return Err(MountError::Exists);
         }
+        self.prepare_upsert(&path, 0)?;
         let dest = self.upper_path(&path);
         std::fs::create_dir_all(&dest).map_err(io_err)?;
         // A whiteout here can be load-bearing: `rm file; mkdir file` replaces a lower FILE
@@ -1684,7 +2486,7 @@ impl OverlayFs {
         target: &str,
     ) -> Result<OverlayAttr, MountError> {
         self.write_guard()?;
-        let _fence = self.mutate.read().await;
+        let _fence = self.mutate.write().await;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         if self
@@ -1693,6 +2495,7 @@ impl OverlayFs {
         {
             return Err(MountError::Exists);
         }
+        self.prepare_upsert(&path, 0)?;
         let dest = self.upper_path(&path);
         if let Some(dir) = dest.parent() {
             std::fs::create_dir_all(dir).map_err(io_err)?;
@@ -1708,18 +2511,22 @@ impl OverlayFs {
 
     pub async fn unlink(&self, parent: u64, name: &str) -> Result<(), MountError> {
         self.write_guard()?;
-        let _fence = self.mutate.read().await;
+        let _fence = self.mutate.write().await;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         let dest = self.upper_path(&path);
         let had_upper = dest.symlink_metadata().is_ok();
+        let had_lower = self.lower_has(parent_node.core_ino(), name).await;
+        if !had_upper && !had_lower {
+            return Err(not_found());
+        }
+        self.prepare_delete(&path)?;
         if had_upper {
+            self.break_shared_upper_inode(&path)?;
             std::fs::remove_file(&dest).map_err(io_err)?;
         }
-        if self.lower_has(parent_node.core_ino(), name).await {
+        if had_lower {
             self.set_whiteout(&path)?;
-        } else if !had_upper {
-            return Err(not_found());
         }
         self.record(&path, DirtyKind::Delete);
         Ok(())
@@ -1727,7 +2534,7 @@ impl OverlayFs {
 
     pub async fn rmdir(&self, parent: u64, name: &str) -> Result<(), MountError> {
         self.write_guard()?;
-        let _fence = self.mutate.read().await;
+        let _fence = self.mutate.write().await;
         let parent_node = self.node(parent)?;
         let path = Self::child_path(&parent_node.path, name);
         // Merged-empty check: opendir the directory and require zero entries.
@@ -1742,6 +2549,8 @@ impl OverlayFs {
             // directory must see ENOTEMPTY, or it reports a bewildering "Input/output error".
             return Err(MountError::NotEmpty);
         }
+        let had_lower = self.lower_has(parent_node.core_ino(), name).await;
+        self.prepare_delete(&path)?;
         let dest = self.upper_path(&path);
         if dest.symlink_metadata().is_ok() {
             std::fs::remove_dir_all(&dest).map_err(io_err)?;
@@ -1749,7 +2558,7 @@ impl OverlayFs {
         // A pending rename rooted here dies with the directory: its true source was
         // whiteouted when the rename was recorded, so nothing further hides.
         self.drop_redirect_tree(&path)?;
-        if self.lower_has(parent_node.core_ino(), name).await {
+        if had_lower {
             self.set_whiteout(&path)?;
         }
         self.record(&path, DirtyKind::Delete);
@@ -1843,16 +2652,13 @@ impl OverlayFs {
         new_name: &str,
     ) -> Result<(), MountError> {
         self.write_guard()?;
-        let _fence = self.mutate.read().await;
+        let _fence = self.mutate.write().await;
         let parent_node = self.node(parent)?;
         let new_parent_node = self.node(new_parent)?;
         let src = Self::child_path(&parent_node.path, name);
         let dst = Self::child_path(&new_parent_node.path, new_name);
         let src_upper = self.upper_path(&src);
         let dst_upper = self.upper_path(&dst);
-        if let Some(dir) = dst_upper.parent() {
-            std::fs::create_dir_all(dir).map_err(io_err)?;
-        }
 
         let src_meta = src_upper.symlink_metadata().ok();
         let src_redirect = self.redirect_source(&src).is_some();
@@ -1862,14 +2668,31 @@ impl OverlayFs {
                 .as_ref()
                 .map(|m| m.is_dir() && !m.file_type().is_symlink())
                 .unwrap_or(false);
-        let mut committed_dir_move = false;
-        if src_meta.is_some() && !upper_dir_over_redirect {
-            std::fs::rename(&src_upper, &dst_upper).map_err(io_err)?;
+        let plain_upper_move = src_meta.is_some() && !upper_dir_over_redirect;
+        let resolved_lower = if plain_upper_move {
+            None
         } else if lower_src || src_redirect {
             let attr = self.lookup(parent, name).await?;
             let node = self.node(attr.ino)?;
             let kind = attr.kind;
             self.forget(attr.ino, 1);
+            Some((node, kind))
+        } else {
+            return Err(not_found());
+        };
+
+        // One durable record orders source deletion before destination publication. Nothing in
+        // the upper tree, whiteout tree, or redirect table changes before this succeeds.
+        self.prepare_rename(&src, &dst)?;
+        self.break_shared_upper_inode(&dst)?;
+        if let Some(dir) = dst_upper.parent() {
+            std::fs::create_dir_all(dir).map_err(io_err)?;
+        }
+
+        let mut committed_dir_move = false;
+        if plain_upper_move {
+            std::fs::rename(&src_upper, &dst_upper).map_err(io_err)?;
+        } else if let Some((node, kind)) = resolved_lower {
             if matches!(kind, NodeKind::Dir) {
                 // A committed directory moves as a pending rename: metadata only, the seal
                 // reconciles it into by-oid upserts plus the source delete. Materializing the
@@ -1879,11 +2702,9 @@ impl OverlayFs {
                 committed_dir_move = true;
             } else {
                 // Copy the lower file up directly at the destination.
-                self.copy_up(&node).await?;
+                self.copy_up(&node, true).await?;
                 std::fs::rename(self.upper_path(&src), &dst_upper).map_err(io_err)?;
             }
-        } else {
-            return Err(not_found());
         }
         if !committed_dir_move {
             // Whatever the destination held is replaced wholesale; a pending rename that was
@@ -1894,6 +2715,17 @@ impl OverlayFs {
             self.set_whiteout(&src)?;
         }
         self.clear_whiteout(&dst);
+        {
+            let mut handles = self.handles.lock().expect("handle lock");
+            for handle in handles.values_mut() {
+                if let OHandle::Upper { path, .. } = handle
+                    && let Some(remapped) = remap_overlay_path(path, &src, &dst)
+                {
+                    *path = remapped;
+                }
+            }
+        }
+        self.mark_rename_applied(&src, &dst)?;
         self.record(&src, DirtyKind::Delete);
         self.record(&dst, DirtyKind::Upsert);
         // A directory rename moved a whole subtree with the two events above naming only the
@@ -1957,10 +2789,12 @@ impl OverlayFs {
         mode: Option<u32>,
     ) -> Result<OverlayAttr, MountError> {
         self.write_guard()?;
-        let _fence = self.mutate.read().await;
+        let _fence = self.mutate.write().await;
         let node = self.node(ino)?;
         if size.is_some() || mode.is_some() {
-            self.copy_up(&node).await?;
+            self.prepare_upsert(&node.path, 0)?;
+            self.copy_up(&node, true).await?;
+            self.break_shared_upper_inode(&node.path)?;
             let dest = self.upper_path(&node.path);
             if let Some(size) = size {
                 let file = std::fs::OpenOptions::new()
@@ -2178,6 +3012,7 @@ impl OverlayFs {
         // The epoch bump tells them their other caches (chunk lists, sealed guards, in-flight
         // resolutions) describe a dead world too.
         self.dirty.lock().expect("dirty lock").clear();
+        self.mutation_journal.advance_generation();
         self.epoch.fetch_add(1, Ordering::SeqCst);
         self.first_dirty_ms.store(0, Ordering::SeqCst);
         self.last_mutation_ms.store(0, Ordering::SeqCst);
@@ -2814,11 +3649,28 @@ impl OverlayFs {
             .iter()
             .map(|(dst, src)| (dst.as_str(), src.as_str()))
             .collect();
+        let mut published = entries.to_vec();
+        published.sort_by_key(|(_, source)| std::cmp::Reverse(source.len()));
         let changed = {
             let mut redirects = self.redirects.lock().expect("redirect lock");
-            let before = redirects.len();
+            let before = redirects.clone();
             redirects.retain(|dst, src| expected.get(dst.as_str()).copied() != Some(src.as_str()));
-            let changed = redirects.len() != before;
+            for source in redirects.values_mut() {
+                for (published_destination, published_source) in &published {
+                    if source == published_source {
+                        *source = published_destination.clone();
+                        break;
+                    }
+                    if let Some(suffix) = source
+                        .strip_prefix(published_source)
+                        .filter(|suffix| suffix.starts_with('/'))
+                    {
+                        *source = format!("{published_destination}{suffix}");
+                        break;
+                    }
+                }
+            }
+            let changed = *redirects != before;
             if changed {
                 self.persist_redirects(&redirects)?;
             }
@@ -2960,6 +3812,15 @@ mod tests {
     use tensorlake::artifact_storage::workspaces::CreateWorkspaceRequest;
 
     #[test]
+    fn journal_latency_percentiles_use_nearest_rank() {
+        let samples = VecDeque::from([10, 20, 30, 40, 50]);
+        assert_eq!(journal_latency_percentile(&samples, 50), 30);
+        assert_eq!(journal_latency_percentile(&samples, 95), 50);
+        assert_eq!(journal_latency_percentile(&samples, 99), 50);
+        assert_eq!(journal_latency_percentile(&VecDeque::new(), 99), 0);
+    }
+
+    #[test]
     fn retained_candidates_include_every_directory_to_the_changed_boundary() {
         let mut candidates = std::collections::HashSet::new();
         nominate_retained_path_and_parents(
@@ -2978,6 +3839,261 @@ mod tests {
             .into_iter()
             .collect(),
             "child-first trim receives the intermediate directories Git never records"
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingMutationJournal {
+        fail: std::sync::atomic::AtomicBool,
+        attempts: AtomicU64,
+        durable: Mutex<Vec<OverlayMutationIntent>>,
+        batches: Mutex<Vec<Vec<OverlayMutationIntent>>>,
+    }
+
+    impl OverlayMutationJournal for RecordingMutationJournal {
+        fn record_intents(&self, intents: &[OverlayMutationIntent]) -> Result<(), MountError> {
+            self.attempts.fetch_add(1, Ordering::SeqCst);
+            if self.fail.load(Ordering::SeqCst) {
+                return Err(MountError::Protocol("injected journal failure".to_string()));
+            }
+            self.durable
+                .lock()
+                .expect("durable intent lock")
+                .extend_from_slice(intents);
+            self.batches
+                .lock()
+                .expect("journal batch lock")
+                .push(intents.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn journal_failure_prevents_the_overlay_mutation() {
+        let sink = Arc::new(RecordingMutationJournal::default());
+        sink.fail.store(true, Ordering::SeqCst);
+        let gate = MutationJournalGate::new(sink.clone());
+        let state = tempfile::tempdir().expect("state dir");
+        let upper = state.path().join("upper/file.txt");
+        std::fs::create_dir_all(upper.parent().unwrap()).unwrap();
+
+        let result = gate
+            .prepare(OverlayMutationIntent::Upsert {
+                path: "file.txt".to_string(),
+                min_write_offset: 0,
+            })
+            .and_then(|()| std::fs::write(&upper, b"must not land").map_err(io_err));
+
+        assert!(result.is_err());
+        assert!(!upper.exists(), "the mutation closure never ran");
+        assert_eq!(sink.attempts.load(Ordering::SeqCst), 1);
+        assert!(
+            sink.durable.lock().expect("durable intent lock").is_empty(),
+            "a failed sink did not acknowledge a durable record"
+        );
+    }
+
+    #[test]
+    fn false_positive_intent_is_safe_and_suppresses_repeated_writes_until_freeze() {
+        let sink = Arc::new(RecordingMutationJournal::default());
+        let gate = MutationJournalGate::new(sink.clone());
+        let intent = OverlayMutationIntent::Upsert {
+            path: "file.txt".to_string(),
+            min_write_offset: 64,
+        };
+
+        gate.prepare(intent.clone()).unwrap();
+        // Model a syscall failure (or a crash) after the durable record but before the upper
+        // mutation. Recovery re-stats this path and finds nothing; it never replays "create".
+        let upper = tempfile::tempdir().unwrap().path().join("file.txt");
+        assert!(!upper.exists());
+        assert_eq!(
+            sink.durable.lock().expect("durable intent lock").as_slice(),
+            &[intent.clone()]
+        );
+
+        // A retry in the same generation reuses the conservative record. Once its mutation is
+        // observed, thousands of later writes still need no additional journal IO.
+        gate.prepare(intent.clone()).unwrap();
+        gate.observe("file.txt", DirtyKind::Upsert, 7);
+        gate.prepare(intent.clone()).unwrap();
+        assert_eq!(sink.attempts.load(Ordering::SeqCst), 1);
+
+        // Freeze, not publication, opens the next generation. A racing/new write is logged
+        // again even though the previous generation may still be uploading.
+        gate.advance_generation();
+        gate.prepare(intent.clone()).unwrap();
+        assert_eq!(sink.attempts.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            sink.durable.lock().expect("durable intent lock").as_slice(),
+            &[intent.clone(), intent]
+        );
+    }
+
+    #[test]
+    fn rename_is_one_ordered_intent_and_failure_moves_neither_path() {
+        let sink = Arc::new(RecordingMutationJournal::default());
+        sink.fail.store(true, Ordering::SeqCst);
+        let gate = MutationJournalGate::new(sink.clone());
+        let state = tempfile::tempdir().expect("state dir");
+        let source = state.path().join("source");
+        let destination = state.path().join("destination");
+        std::fs::write(&source, b"source").unwrap();
+        let intent = OverlayMutationIntent::Rename {
+            source: "source".to_string(),
+            destination: "destination".to_string(),
+        };
+
+        let result = gate
+            .prepare(intent.clone())
+            .and_then(|()| std::fs::rename(&source, &destination).map_err(io_err));
+        assert!(result.is_err());
+        assert!(source.exists(), "source remains when pre-log fails");
+        assert!(!destination.exists(), "destination was never created");
+
+        sink.fail.store(false, Ordering::SeqCst);
+        gate.prepare(intent.clone()).unwrap();
+        std::fs::rename(&source, &destination).unwrap();
+        gate.observe("source", DirtyKind::Delete, 8);
+        gate.observe("destination", DirtyKind::Upsert, 9);
+        assert!(!source.exists());
+        assert_eq!(std::fs::read(&destination).unwrap(), b"source");
+        assert_eq!(
+            sink.durable.lock().expect("durable intent lock").as_slice(),
+            &[intent],
+            "the two path effects are durably ordered by one rename record"
+        );
+    }
+
+    #[test]
+    fn disjoint_first_dirty_calls_share_bounded_group_commits() {
+        const WRITERS: usize = 16;
+        let sink = Arc::new(RecordingMutationJournal::default());
+        let gate = Arc::new(MutationJournalGate::new(sink.clone()));
+        let barrier = Arc::new(std::sync::Barrier::new(WRITERS + 1));
+        let mut writers = Vec::new();
+        for index in 0..WRITERS {
+            let gate = gate.clone();
+            let barrier = barrier.clone();
+            writers.push(std::thread::spawn(move || {
+                barrier.wait();
+                gate.prepare(OverlayMutationIntent::Upsert {
+                    path: format!("file-{index}"),
+                    min_write_offset: 0,
+                })
+                .unwrap();
+            }));
+        }
+        barrier.wait();
+        for writer in writers {
+            writer.join().unwrap();
+        }
+
+        let batches = sink.batches.lock().expect("journal batch lock");
+        assert_eq!(
+            batches.iter().map(Vec::len).sum::<usize>(),
+            WRITERS,
+            "every first-dirty intent reached durable storage"
+        );
+        assert!(
+            batches.iter().any(|batch| batch.len() > 1),
+            "the fixed group window combined concurrent disjoint writers: {batches:?}"
+        );
+    }
+
+    struct BlockingMutationJournal {
+        entered: (Mutex<bool>, Condvar),
+        release: (Mutex<bool>, Condvar),
+        batches: Mutex<Vec<Vec<OverlayMutationIntent>>>,
+    }
+
+    impl BlockingMutationJournal {
+        fn new() -> Self {
+            Self {
+                entered: (Mutex::new(false), Condvar::new()),
+                release: (Mutex::new(false), Condvar::new()),
+                batches: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn wait_until_commit_started(&self) {
+            let (entered, ready) = &self.entered;
+            let mut entered = entered.lock().expect("entered lock");
+            while !*entered {
+                entered = ready.wait(entered).expect("entered lock");
+            }
+        }
+
+        fn allow_commit(&self) {
+            let (release, ready) = &self.release;
+            *release.lock().expect("release lock") = true;
+            ready.notify_all();
+        }
+    }
+
+    impl OverlayMutationJournal for BlockingMutationJournal {
+        fn record_intents(&self, intents: &[OverlayMutationIntent]) -> Result<(), MountError> {
+            {
+                let (entered, ready) = &self.entered;
+                *entered.lock().expect("entered lock") = true;
+                ready.notify_all();
+            }
+            let (release, ready) = &self.release;
+            let mut release = release.lock().expect("release lock");
+            while !*release {
+                release = ready.wait(release).expect("release lock");
+            }
+            self.batches
+                .lock()
+                .expect("journal batch lock")
+                .push(intents.to_vec());
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn same_path_waiters_cannot_mutate_before_the_joined_intent_is_durable() {
+        let sink = Arc::new(BlockingMutationJournal::new());
+        let gate = Arc::new(MutationJournalGate::new(sink.clone()));
+        let first_mutated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let second_mutated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let intent = OverlayMutationIntent::Upsert {
+            path: "same".to_string(),
+            min_write_offset: 0,
+        };
+
+        let first = {
+            let gate = gate.clone();
+            let mutated = first_mutated.clone();
+            let intent = intent.clone();
+            std::thread::spawn(move || {
+                gate.prepare(intent).unwrap();
+                mutated.store(true, Ordering::SeqCst);
+            })
+        };
+        sink.wait_until_commit_started();
+        let second = {
+            let gate = gate.clone();
+            let mutated = second_mutated.clone();
+            let intent = intent.clone();
+            std::thread::spawn(move || {
+                gate.prepare(intent).unwrap();
+                mutated.store(true, Ordering::SeqCst);
+            })
+        };
+
+        std::thread::sleep(Duration::from_millis(10));
+        assert!(!first_mutated.load(Ordering::SeqCst));
+        assert!(!second_mutated.load(Ordering::SeqCst));
+        sink.allow_commit();
+        first.join().unwrap();
+        second.join().unwrap();
+        assert!(first_mutated.load(Ordering::SeqCst));
+        assert!(second_mutated.load(Ordering::SeqCst));
+        assert_eq!(
+            sink.batches.lock().expect("journal batch lock").as_slice(),
+            &[vec![intent]],
+            "same-path waiter joined the in-flight durable fact"
         );
     }
 

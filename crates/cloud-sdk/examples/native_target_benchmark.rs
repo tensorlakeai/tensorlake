@@ -223,6 +223,8 @@ async fn main() -> Result<()> {
             &workspace.workspace_id,
             &cold.snapshot_id,
             &incremental.snapshot_id,
+            &uuid::Uuid::new_v4().to_string(),
+            chrono::Utc::now().timestamp_millis().max(0) as u64,
             username,
             token,
         )
