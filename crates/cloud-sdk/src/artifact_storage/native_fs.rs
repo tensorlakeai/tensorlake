@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use futures::StreamExt;
@@ -46,6 +47,11 @@ const NATIVE_MEMORY_SEGMENT_TARGET_BYTES: u64 = 32 * 1024 * 1024;
 const NATIVE_RECORD_LOGICAL_BYTES: u64 = 16 * 1024 * 1024;
 const NATIVE_SEGMENT_UPLOAD_QUEUE: usize = 4;
 const NATIVE_SEGMENT_UPLOAD_CONCURRENCY: usize = 8;
+// Content preparation owns one open 32 MiB segment per worker. Keep that memory bound independent
+// of host core count so a large build machine cannot exhaust an agent sandbox.
+const NATIVE_CONTENT_PREPARE_CONCURRENCY: usize = 8;
+// Stable path-ordered grouping is part of segment identity. It must never depend on CPU count.
+const NATIVE_CONTENT_GROUP_TARGET_BYTES: u64 = 512 * 1024 * 1024;
 // Snapshots optimize for wall time: immutable segment dedup amortizes the modest ratio difference,
 // while level 2 keeps compression from becoming the bottleneck ahead of direct blob uploads.
 const NATIVE_SEGMENT_ZSTD_LEVEL: i32 = 2;
@@ -1186,6 +1192,7 @@ struct SegmentBuilder {
     complete: Vec<BuiltSegment>,
     completed_segments: Option<tokio::sync::mpsc::Sender<Vec<PreparedSegmentUpload>>>,
     measurements: Option<Arc<NativePipelineMeasurements>>,
+    cancellation: Option<Arc<AtomicBool>>,
 }
 
 struct OpenSegment {
@@ -1208,6 +1215,7 @@ impl SegmentBuilder {
             complete: Vec::new(),
             completed_segments: None,
             measurements: None,
+            cancellation: None,
         })
     }
 
@@ -1224,11 +1232,29 @@ impl SegmentBuilder {
         self
     }
 
+    fn with_cancellation(mut self, cancellation: Option<Arc<AtomicBool>>) -> Self {
+        self.cancellation = cancellation;
+        self
+    }
+
+    fn check_cancelled(&self) -> Result<(), SdkError> {
+        if self
+            .cancellation
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Relaxed))
+        {
+            Err(client_error("native snapshot upload was cancelled"))
+        } else {
+            Ok(())
+        }
+    }
+
     fn append_record(
         &mut self,
         logical: &[u8],
         content_id: ObjectId,
     ) -> Result<PendingSlice, SdkError> {
+        self.check_cancelled()?;
         let stored = zstd::stream::encode_all(logical, NATIVE_SEGMENT_ZSTD_LEVEL)?;
         let stored_len = u32::try_from(stored.len())
             .map_err(|_| client_error("compressed native record exceeds u32"))?;
@@ -1283,11 +1309,13 @@ impl SegmentBuilder {
             // slower than local compression. A dropped receiver means another upload already
             // failed; scanning still returns its own precise result to the async join point.
             let blocked = std::time::Instant::now();
-            let _ = sender.blocking_send(vec![PreparedSegmentUpload {
-                id,
-                len,
-                body: PreparedSegmentBody::Memory(bytes),
-            }]);
+            sender
+                .blocking_send(vec![PreparedSegmentUpload {
+                    id,
+                    len,
+                    body: PreparedSegmentBody::Memory(bytes),
+                }])
+                .map_err(|_| client_error("native segment uploader stopped during preparation"))?;
             if let Some(measurements) = &self.measurements {
                 measurements.note_blocked(blocked.elapsed());
             }
@@ -1321,7 +1349,14 @@ fn prepare_native_snapshot(
     target_segment_bytes: u64,
     max_segment_bytes: u64,
 ) -> Result<PreparedNativeSnapshot, SdkError> {
-    prepare_native_snapshot_with_sender(root, target_segment_bytes, max_segment_bytes, None, None)
+    prepare_native_snapshot_with_sender(
+        root,
+        target_segment_bytes,
+        max_segment_bytes,
+        None,
+        None,
+        None,
+    )
 }
 
 fn prepare_native_snapshot_with_sender(
@@ -1330,6 +1365,7 @@ fn prepare_native_snapshot_with_sender(
     max_segment_bytes: u64,
     completed_segments: Option<tokio::sync::mpsc::Sender<Vec<PreparedSegmentUpload>>>,
     measurements: Option<Arc<NativePipelineMeasurements>>,
+    cancellation: Option<Arc<AtomicBool>>,
 ) -> Result<PreparedNativeSnapshot, SdkError> {
     let walk_started = std::time::Instant::now();
     let root = root.canonicalize()?;
@@ -1354,6 +1390,12 @@ fn prepare_native_snapshot_with_sender(
         .sort_by_file_path(|a, b| a.cmp(b));
     let mut paths = Vec::new();
     for result in walker.build() {
+        if cancellation
+            .as_ref()
+            .is_some_and(|cancelled| cancelled.load(Ordering::Relaxed))
+        {
+            return Err(client_error("native snapshot upload was cancelled"));
+        }
         let entry = result.map_err(|error| client_error(error.to_string()))?;
         let path = entry.path();
         if path == root {
@@ -1373,6 +1415,12 @@ fn prepare_native_snapshot_with_sender(
     let pre_scanned: Vec<PreScannedEntry> = paths
         .into_par_iter()
         .map(|(source, rel)| {
+            if cancellation
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Relaxed))
+            {
+                return Err(client_error("native snapshot upload was cancelled"));
+            }
             let before = std::fs::symlink_metadata(&source)?;
             let metadata = native_entry_metadata(&source, &before)?;
             let file_type = before.file_type();
@@ -1455,6 +1503,12 @@ fn prepare_native_snapshot_with_sender(
     let hashed_tasks: Vec<ParallelFileTask> = file_tasks
         .into_par_iter()
         .map(|mut task| {
+            if cancellation
+                .as_ref()
+                .is_some_and(|cancelled| cancelled.load(Ordering::Relaxed))
+            {
+                return Err(client_error("native snapshot upload was cancelled"));
+            }
             if task.before.len() > MAX_INLINE_BYTES as u64
                 && size_frequency
                     .get(&task.before.len())
@@ -1482,17 +1536,9 @@ fn prepare_native_snapshot_with_sender(
     let duplicate_hash_ms = duplicate_hash_started.elapsed().as_millis() as u64;
 
     let content_prepare_started = std::time::Instant::now();
-    let total_weight: u64 = file_tasks
-        .iter()
-        .map(|task| task.before.len().max(64 * 1024))
-        .sum();
-    // Keep two independently scheduled groups per worker. The extra deterministic work units let
-    // Rayon's faster cores steal the tail from slower cores without recreating the old tiny-pack
-    // explosion; SegmentBuilder still splits a group that crosses the server target.
-    let desired_groups = rayon::current_num_threads().saturating_mul(2).max(1);
-    let group_target = total_weight
-        .div_ceil(desired_groups as u64)
-        .max(64 * 1024 * 1024);
+    // Group boundaries are derived only from stable path order and a fixed byte target. Host CPU
+    // count controls scheduling, never aggregate segment identity or cross-machine deduplication.
+    let group_target = NATIVE_CONTENT_GROUP_TARGET_BYTES;
     let mut groups: Vec<Vec<ParallelFileTask>> = Vec::new();
     let mut group = Vec::new();
     let mut group_weight = 0u64;
@@ -1508,40 +1554,49 @@ fn prepare_native_snapshot_with_sender(
     if !group.is_empty() {
         groups.push(group);
     }
-    let group_results: Vec<ParallelFileGroup> = groups
-        .into_par_iter()
-        .map(|tasks| {
-            let mut builder = SegmentBuilder::new(target_segment_bytes, max_segment_bytes)?
-                .with_completed_segments(completed_segments.clone())
-                .with_measurements(measurements.clone());
-            let mut files = Vec::with_capacity(tasks.len());
-            for task in tasks {
-                let (content, size) = read_file_once(&task.source, &task.before, &mut builder)?;
-                if let Some(expected) = task.expected_content {
-                    let actual = match &content {
-                        PendingContent::Segments { content_id, .. } => *content_id,
-                        PendingContent::Inline(bytes) => ObjectId::file_content(bytes),
-                    };
-                    if actual != expected {
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(NATIVE_CONTENT_PREPARE_CONCURRENCY)
+        .thread_name(|index| format!("native-content-{index}"))
+        .build()
+        .map_err(|error| client_error(format!("native content worker pool failed: {error}")))?;
+    let group_results: Vec<ParallelFileGroup> = pool.install(|| {
+        groups
+            .into_par_iter()
+            .map(|tasks| {
+                let mut builder = SegmentBuilder::new(target_segment_bytes, max_segment_bytes)?
+                    .with_completed_segments(completed_segments.clone())
+                    .with_measurements(measurements.clone())
+                    .with_cancellation(cancellation.clone());
+                let mut files = Vec::with_capacity(tasks.len());
+                for task in tasks {
+                    builder.check_cancelled()?;
+                    let (content, size) = read_file_once(&task.source, &task.before, &mut builder)?;
+                    if let Some(expected) = task.expected_content {
+                        let actual = match &content {
+                            PendingContent::Segments { content_id, .. } => *content_id,
+                            PendingContent::Inline(bytes) => ObjectId::file_content(bytes),
+                        };
+                        if actual != expected {
+                            return Err(client_error(format!(
+                                "{} changed after duplicate detection; retry",
+                                task.source.display()
+                            )));
+                        }
+                    }
+                    let after = std::fs::symlink_metadata(&task.source)?;
+                    if !same_snapshot_stat(&task.before, &after) {
                         return Err(client_error(format!(
-                            "{} changed after duplicate detection; retry",
+                            "{} changed while it was being snapshotted; retry",
                             task.source.display()
                         )));
                     }
+                    files.push((task.entry_index, content, size));
                 }
-                let after = std::fs::symlink_metadata(&task.source)?;
-                if !same_snapshot_stat(&task.before, &after) {
-                    return Err(client_error(format!(
-                        "{} changed while it was being snapshotted; retry",
-                        task.source.display()
-                    )));
-                }
-                files.push((task.entry_index, content, size));
-            }
-            let segments = builder.finish()?;
-            Ok(ParallelFileGroup { files, segments })
-        })
-        .collect::<Result<_, SdkError>>()?;
+                let segments = builder.finish()?;
+                Ok(ParallelFileGroup { files, segments })
+            })
+            .collect::<Result<_, SdkError>>()
+    })?;
     let content_prepare_ms = content_prepare_started.elapsed().as_millis() as u64;
 
     let metadata_build_started = std::time::Instant::now();
@@ -2829,14 +2884,17 @@ impl ArtifactStorageClient {
         let max_segment_bytes = session.max_segment_bytes;
         let (segment_sender, segment_receiver) =
             tokio::sync::mpsc::channel(NATIVE_SEGMENT_UPLOAD_QUEUE);
+        let cancellation = Arc::new(AtomicBool::new(false));
         let scanner_measurements = measurements.clone();
-        let scanner = tokio::task::spawn_blocking(move || {
+        let scanner_cancellation = cancellation.clone();
+        let mut scanner = tokio::task::spawn_blocking(move || {
             prepare_native_snapshot_with_sender(
                 &source,
                 target_segment_bytes,
                 max_segment_bytes,
                 Some(segment_sender),
                 Some(scanner_measurements),
+                Some(scanner_cancellation),
             )
         });
         let upload_client = self.clone();
@@ -2845,8 +2903,9 @@ impl ArtifactStorageClient {
         let upload_session = session.clone();
         let upload_username = username.to_string();
         let upload_token = token.to_string();
-        let uploader = tokio::spawn(async move {
-            upload_pipelined_segments(
+        let upload_cancellation = cancellation.clone();
+        let mut uploader = tokio::spawn(async move {
+            let result = upload_pipelined_segments(
                 &upload_client,
                 &upload_project,
                 &upload_repo,
@@ -2855,19 +2914,51 @@ impl ArtifactStorageClient {
                 &upload_token,
                 segment_receiver,
             )
-            .await
+            .await;
+            upload_cancellation.store(true, Ordering::Relaxed);
+            result
         });
-        let prepared = match scanner.await {
-            Ok(Ok(prepared)) => prepared,
-            Ok(Err(error)) => {
-                uploader.abort();
-                return Err(error);
+        // Surface an upload/auth failure as soon as it happens. The blocking scanner observes the
+        // cancellation flag or dropped receiver cooperatively; awaiting it here prevents detached
+        // CPU work while preserving the uploader's precise error for the caller.
+        let (prepared, early_upload) = tokio::select! {
+            scanned = &mut scanner => {
+                let prepared = match scanned {
+                    Ok(Ok(prepared)) => prepared,
+                    Ok(Err(error)) => {
+                        uploader.abort();
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        uploader.abort();
+                        return Err(client_error(format!(
+                            "native snapshot scanner failed: {error}"
+                        )));
+                    }
+                };
+                (prepared, None)
             }
-            Err(error) => {
-                uploader.abort();
-                return Err(client_error(format!(
-                    "native snapshot scanner failed: {error}"
-                )));
+            uploaded = &mut uploader => {
+                match uploaded {
+                    Ok(Ok(report)) => {
+                        let prepared = scanner.await.map_err(|error| {
+                            client_error(format!("native snapshot scanner failed: {error}"))
+                        })??;
+                        (prepared, Some(report))
+                    }
+                    Ok(Err(error)) => {
+                        cancellation.store(true, Ordering::Relaxed);
+                        let _ = scanner.await;
+                        return Err(error);
+                    }
+                    Err(error) => {
+                        cancellation.store(true, Ordering::Relaxed);
+                        let _ = scanner.await;
+                        return Err(client_error(format!(
+                            "native upload coordinator failed: {error}"
+                        )));
+                    }
+                }
             }
         };
         reporter.note_prepared(&prepared, &measurements);
@@ -2898,9 +2989,12 @@ impl ArtifactStorageClient {
         if metadata.is_ok() {
             reporter.note_metadata_complete();
         }
-        let pipelined = uploader.await.map_err(|error| {
-            client_error(format!("native upload coordinator failed: {error}"))
-        })??;
+        let pipelined = match early_upload {
+            Some(report) => report,
+            None => uploader.await.map_err(|error| {
+                client_error(format!("native upload coordinator failed: {error}"))
+            })??,
+        };
         reporter.note_upload_complete(pipelined.uploaded_ids.len(), pipelined.uploaded_bytes);
         metadata?;
         finish_native_push(
@@ -4276,7 +4370,26 @@ async fn upload_pipelined_segments(
     let mut uploaded_bytes = 0u64;
     let mut uploads = tokio::task::JoinSet::new();
 
-    while let Some(mut batch) = completed.recv().await {
+    loop {
+        let next_batch = if uploads.is_empty() {
+            completed.recv().await
+        } else {
+            tokio::select! {
+                biased;
+                result = uploads.join_next() => {
+                    let (id, bytes) = result
+                        .expect("non-empty native upload set")
+                        .map_err(|error| client_error(format!("native upload task failed: {error}")))??;
+                    uploaded_ids.insert(id);
+                    uploaded_bytes = uploaded_bytes.saturating_add(bytes);
+                    continue;
+                }
+                batch = completed.recv() => batch,
+            }
+        };
+        let Some(mut batch) = next_batch else {
+            break;
+        };
         while batch.len() < query_limit {
             let Ok(mut ready) = completed.try_recv() else {
                 break;
@@ -5108,6 +5221,7 @@ mod tests {
             MAX_SEGMENT_BYTES,
             Some(sender),
             Some(measurements.clone()),
+            None,
         )
         .unwrap();
 
@@ -5122,6 +5236,30 @@ mod tests {
         assert_eq!(ObjectId::segment(bytes), uploads[0].id);
         assert_eq!(zstd::stream::decode_all(bytes.as_ref()).unwrap(), payload);
         assert!(measurements.first_segment_ready_ms().is_some());
+    }
+
+    #[test]
+    fn native_cold_scan_stops_when_uploader_disappears() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            temp.path().join("payload.bin"),
+            vec![b'x'; MAX_INLINE_BYTES + 123],
+        )
+        .unwrap();
+        let (sender, receiver) = tokio::sync::mpsc::channel(1);
+        drop(receiver);
+        let result = prepare_native_snapshot_with_sender(
+            temp.path(),
+            96 * 1024 * 1024,
+            MAX_SEGMENT_BYTES,
+            Some(sender),
+            None,
+            Some(Arc::new(AtomicBool::new(false))),
+        );
+        let Err(error) = result else {
+            panic!("snapshot preparation unexpectedly survived a dropped uploader")
+        };
+        assert!(error.to_string().contains("uploader stopped"));
     }
 
     #[cfg(unix)]
@@ -5215,10 +5353,18 @@ mod tests {
             std::fs::write(nested.join("payload.bin"), payload).unwrap();
         }
 
-        let first =
-            prepare_native_snapshot(temp.path(), 96 * 1024 * 1024, MAX_SEGMENT_BYTES).unwrap();
-        let second =
-            prepare_native_snapshot(temp.path(), 96 * 1024 * 1024, MAX_SEGMENT_BYTES).unwrap();
+        let scan = |threads| {
+            rayon::ThreadPoolBuilder::new()
+                .num_threads(threads)
+                .build()
+                .unwrap()
+                .install(|| {
+                    prepare_native_snapshot(temp.path(), 96 * 1024 * 1024, MAX_SEGMENT_BYTES)
+                        .unwrap()
+                })
+        };
+        let first = scan(1);
+        let second = scan(12);
 
         assert_eq!(first.root, second.root);
         assert_eq!(
