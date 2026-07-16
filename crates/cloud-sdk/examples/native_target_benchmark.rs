@@ -175,31 +175,38 @@ async fn main() -> Result<()> {
     let fixture_wall = fixture_started.elapsed();
     let changed_files = upserts.len();
     let incremental_started = Instant::now();
-    let incremental_progress_started = incremental_started;
-    let incremental = client
-        .push_native_changes_with_credential(
+    let preparation_started = Instant::now();
+    let candidate = client
+        .prepare_native_snapshot_candidate_with_credential(
             &project,
             repo,
+            &cold.snapshot_id,
             NativeChangeSet {
                 upserts,
                 ..Default::default()
             },
             username,
             token,
+        )
+        .await?;
+    let preparation_wall = preparation_started.elapsed();
+    let seal_started = Instant::now();
+    let incremental = client
+        .publish_native_snapshot_candidate_with_credential(
+            &project,
+            repo,
+            candidate,
+            username,
+            token,
             NativePushOptions {
                 message: "One-percent Rust target update".into(),
                 expected_snapshot_id: Some(cold.snapshot_id.clone()),
                 workspace_id: Some(workspace.workspace_id.clone()),
-                progress: Some(Arc::new(move |event: NativePushEvent| {
-                    eprintln!(
-                        "incremental phase elapsed_ms={} event={event:?}",
-                        incremental_progress_started.elapsed().as_millis()
-                    );
-                })),
                 ..Default::default()
             },
         )
         .await?;
+    let seal_wall = seal_started.elapsed();
     let incremental_wall = incremental_started.elapsed();
 
     let fork_started = Instant::now();
@@ -249,6 +256,8 @@ async fn main() -> Result<()> {
             },
             "incremental": {
                 "wall_ms": incremental_wall.as_millis(),
+                "background_preparation_ms": preparation_wall.as_millis(),
+                "snapshot_seal_ms": seal_wall.as_millis(),
                 "snapshot_id": incremental.snapshot_id,
                 "logical_bytes": incremental.logical_bytes,
                 "stored_bytes": incremental.stored_bytes,

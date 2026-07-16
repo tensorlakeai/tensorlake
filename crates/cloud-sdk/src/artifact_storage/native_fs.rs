@@ -47,6 +47,9 @@ const NATIVE_MEMORY_SEGMENT_TARGET_BYTES: u64 = 32 * 1024 * 1024;
 const NATIVE_RECORD_LOGICAL_BYTES: u64 = 16 * 1024 * 1024;
 const NATIVE_SEGMENT_UPLOAD_QUEUE: usize = 4;
 const NATIVE_SEGMENT_UPLOAD_CONCURRENCY: usize = 8;
+// Registration publishes record facts in one bounded FDB transaction and carries declarations in a
+// bounded HTTP body. Tiny-file workloads therefore seal on record count as well as byte count.
+const NATIVE_RECORDS_PER_SEGMENT: usize = 4_096;
 // Content preparation owns one open 32 MiB segment per worker. Keep that memory bound independent
 // of host core count so a large build machine cannot exhaust an agent sandbox.
 const NATIVE_CONTENT_PREPARE_CONCURRENCY: usize = 8;
@@ -645,10 +648,61 @@ pub struct NativeLocalUpsert {
 }
 
 /// Move an existing immutable subtree by reference. No descendant bytes or metadata are read.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct NativeRename {
     pub from: String,
     pub to: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativePreparedChangeSet {
+    upserts: NativePreparedUpserts,
+    deletes: Vec<String>,
+    renames: Vec<NativeRename>,
+    preparation_ms: u64,
+    total_segments: usize,
+    uploaded_segments: usize,
+    uploaded_bytes: u64,
+}
+
+/// Fully verified immutable snapshot prepared for one journal watermark. No local path, content
+/// upload, Merkle rebuild, or declaration verification remains; publishing this candidate is a
+/// single workspace/head operation guarded by `base_snapshot_id`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativePreparedSnapshotCandidate {
+    root_id: String,
+    pub base_snapshot_id: String,
+    changes: NativeSnapshotChanges,
+    pub preparation_operation_id: String,
+    pub preparation_ms: u64,
+    pub files: usize,
+    pub directories: usize,
+    pub logical_bytes: u64,
+    pub stored_bytes: u64,
+    pub total_segments: usize,
+    pub uploaded_segments: usize,
+    pub uploaded_bytes: u64,
+}
+
+impl NativePreparedChangeSet {
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.upserts
+            .paths()
+            .chain(self.deletes.iter().map(String::as_str))
+            .chain(
+                self.renames
+                    .iter()
+                    .flat_map(|rename| [rename.from.as_str(), rename.to.as_str()]),
+            )
+    }
+
+    pub fn files(&self) -> usize {
+        self.upserts.files()
+    }
+
+    pub fn logical_bytes(&self) -> u64 {
+        self.upserts.logical_bytes()
+    }
 }
 
 /// A mounted-save delta relative to `NativePushOptions::expected_snapshot_id`.
@@ -657,6 +711,34 @@ pub struct NativeChangeSet {
     pub upserts: Vec<NativeLocalUpsert>,
     pub deletes: Vec<String>,
     pub renames: Vec<NativeRename>,
+}
+
+/// Content-prepared mounted upserts. File bytes have already been read once, compressed into
+/// aggregate segments, and uploaded; this durable value contains only immutable references and
+/// metadata, so a later seal can publish it without reopening the source paths.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativePreparedUpserts {
+    entries: BTreeMap<String, DirectoryEntry>,
+    local_directories: BTreeSet<String>,
+    recipes: Vec<ChunkRecipe>,
+    files: usize,
+    directories: usize,
+    logical_bytes: u64,
+    stored_bytes: u64,
+}
+
+impl NativePreparedUpserts {
+    pub fn paths(&self) -> impl Iterator<Item = &str> {
+        self.entries.keys().map(String::as_str)
+    }
+
+    pub fn files(&self) -> usize {
+        self.files
+    }
+
+    pub fn logical_bytes(&self) -> u64 {
+        self.logical_bytes
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -924,6 +1006,19 @@ impl NativeClientOperationReporter {
         });
     }
 
+    fn note_prepared_changes(&self, prepared: &PreparedLocalUpserts) {
+        self.update(|current| {
+            let elapsed = self.elapsed_ms();
+            current.metrics.content_prepare_ms = Some(elapsed);
+            current.metrics.scan_complete_ms = Some(elapsed);
+            current.metrics.files = prepared.files as u64;
+            current.metrics.directories = prepared.directories as u64;
+            current.metrics.logical_bytes = prepared.logical_bytes;
+            current.metrics.stored_bytes = prepared.stored_bytes;
+            current.metrics.total_segments = prepared.segments.len() as u64;
+        });
+    }
+
     fn note_upload_complete(&self, uploaded_segments: usize, uploaded_bytes: u64) {
         self.update(|current| {
             current.metrics.upload_complete_ms = Some(self.elapsed_ms());
@@ -953,6 +1048,12 @@ impl NativeClientOperationReporter {
         self.update(|current| {
             current.phase = NativeClientOperationPhase::Completed;
             current.metrics.publish_complete_ms = Some(self.elapsed_ms());
+        });
+    }
+
+    fn note_preparation_complete(&self) {
+        self.update(|current| {
+            current.phase = NativeClientOperationPhase::Completed;
         });
     }
 
@@ -1045,6 +1146,7 @@ fn native_client_failure_code(error: &SdkError) -> String {
 struct BuiltSegment {
     id: ObjectId,
     len: u64,
+    records: Vec<SegmentSlice>,
     // Pipelined cold snapshots move the in-memory body to the uploader immediately and retain only
     // this segment's immutable identity. Non-pipelined delta preparation keeps its existing
     // tempfile fallback so a large change set does not accumulate all segment bodies in memory.
@@ -1055,6 +1157,7 @@ struct BuiltSegment {
 struct PreparedSegmentUpload {
     id: ObjectId,
     len: u64,
+    records: Vec<SegmentSlice>,
     body: PreparedSegmentBody,
 }
 
@@ -1172,6 +1275,7 @@ struct PreparedNativeSnapshot {
     logical_bytes: u64,
     stored_bytes: u64,
     prepare_timings: NativePrepareTimings,
+    changes: NativeSnapshotChanges,
 }
 
 struct PreparedLocalUpserts {
@@ -1199,6 +1303,7 @@ struct OpenSegment {
     bytes: Vec<u8>,
     hasher: SegmentIdHasher,
     len: u64,
+    records: Vec<SegmentSlice>,
 }
 
 impl SegmentBuilder {
@@ -1266,7 +1371,8 @@ impl SegmentBuilder {
             )));
         }
         if self.current.as_ref().is_some_and(|current| {
-            current.len > 0 && current.len + stored.len() as u64 > self.target_bytes
+            current.records.len() >= NATIVE_RECORDS_PER_SEGMENT
+                || (current.len > 0 && current.len + stored.len() as u64 > self.target_bytes)
         }) {
             self.finish_current()?;
         }
@@ -1274,6 +1380,7 @@ impl SegmentBuilder {
             bytes: Vec::with_capacity(self.target_bytes as usize),
             hasher: ObjectId::segment_hasher(),
             len: 0,
+            records: Vec::new(),
         });
         if current.len + stored.len() as u64 > self.max_bytes {
             return Err(client_error(format!(
@@ -1285,6 +1392,14 @@ impl SegmentBuilder {
         current.bytes.extend_from_slice(&stored);
         current.hasher.update(&stored);
         current.len += stored.len() as u64;
+        current.records.push(SegmentSlice {
+            segment: ObjectId([0; 32]),
+            offset,
+            stored_len,
+            logical_len: logical.len() as u64,
+            compression: Compression::Zstd,
+            content_id,
+        });
         Ok(PendingSlice {
             segment_index: self.complete.len(),
             offset,
@@ -1300,6 +1415,10 @@ impl SegmentBuilder {
         };
         let id = current.hasher.finalize();
         let len = current.len;
+        let mut records = current.records;
+        for record in &mut records {
+            record.segment = id;
+        }
         let bytes = bytes::Bytes::from(current.bytes);
         if let Some(measurements) = &self.measurements {
             measurements.note_segment_ready();
@@ -1313,6 +1432,7 @@ impl SegmentBuilder {
                 .blocking_send(vec![PreparedSegmentUpload {
                     id,
                     len,
+                    records: records.clone(),
                     body: PreparedSegmentBody::Memory(bytes),
                 }])
                 .map_err(|_| client_error("native segment uploader stopped during preparation"))?;
@@ -1322,6 +1442,7 @@ impl SegmentBuilder {
             self.complete.push(BuiltSegment {
                 id,
                 len,
+                records,
                 temp: None,
             });
         } else {
@@ -1331,6 +1452,7 @@ impl SegmentBuilder {
             self.complete.push(BuiltSegment {
                 id,
                 len,
+                records,
                 temp: Some(temp),
             });
         }
@@ -1687,6 +1809,7 @@ fn prepare_native_snapshot_with_sender(
             content_prepare_ms: Some(content_prepare_ms),
             metadata_build_ms: Some(metadata_build_ms),
         },
+        changes: NativeSnapshotChanges::default(),
     })
 }
 
@@ -2534,15 +2657,89 @@ struct MissingSegmentsResponse {
 }
 
 #[derive(Clone, Debug, Serialize)]
+struct SegmentTargetRequest<'a> {
+    segment_id: &'a str,
+    stored_len: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
 struct RegisterSegmentRequest<'a> {
     segment_id: &'a str,
     stored_len: u64,
+    records: Vec<NativeSegmentRecordRequest>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct NativeSegmentRecordRequest {
+    offset: u64,
+    stored_len: u32,
+    logical_len: u64,
+    compression: &'static str,
+    content_id: String,
+}
+
+fn native_segment_record_requests(records: &[SegmentSlice]) -> Vec<NativeSegmentRecordRequest> {
+    records
+        .iter()
+        .map(|record| NativeSegmentRecordRequest {
+            offset: record.offset,
+            stored_len: record.stored_len,
+            logical_len: record.logical_len,
+            compression: match record.compression {
+                Compression::Raw => "raw",
+                Compression::Zstd => "zstd",
+            },
+            content_id: record.content_id.to_hex(),
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Serialize)]
 struct MetadataRequest<'a> {
     pages: &'a [DirectoryPage],
     recipes: &'a [ChunkRecipe],
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PreparedRecipeVerificationRequest {
+    recipes: Vec<PreparedRecipeDeclaration>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct PreparedRecipeDeclaration {
+    recipe: String,
+    logical_len: u64,
+    content_id: String,
+}
+
+fn prepared_recipe_declarations(
+    entries: &BTreeMap<String, DirectoryEntry>,
+) -> Vec<PreparedRecipeDeclaration> {
+    let mut roots = BTreeMap::new();
+    for entry in entries.values() {
+        if let EntryData::File {
+            content:
+                FileContent::Recipe {
+                    recipe,
+                    logical_len,
+                    content_id,
+                },
+            ..
+        } = &entry.data
+        {
+            roots.entry(*recipe).or_insert((*logical_len, *content_id));
+        }
+    }
+    roots
+        .into_iter()
+        .map(
+            |(recipe, (logical_len, content_id))| PreparedRecipeDeclaration {
+                recipe: recipe.to_hex(),
+                logical_len,
+                content_id: content_id.to_hex(),
+            },
+        )
+        .collect()
 }
 
 fn next_metadata_batch(
@@ -2620,6 +2817,30 @@ pub struct SubmitNativeSnapshotRequest {
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub message: String,
     pub operation_id: String,
+    #[serde(default, skip_serializing_if = "NativeSnapshotChanges::is_empty")]
+    pub changes: NativeSnapshotChanges,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct NativeSnapshotChanges {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub upserts: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub deletes: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub renames: Vec<NativeSnapshotRename>,
+}
+
+impl NativeSnapshotChanges {
+    fn is_empty(&self) -> bool {
+        self.upserts.is_empty() && self.deletes.is_empty() && self.renames.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct NativeSnapshotRename {
+    pub from: String,
+    pub to: String,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -3078,6 +3299,534 @@ impl ArtifactStorageClient {
         }
     }
 
+    /// Prepare and upload a mounted delta without publishing a snapshot. Mount daemons call this
+    /// while files are quiet; the returned value is safe to persist because it contains immutable
+    /// content references rather than source paths or credentials.
+    pub async fn prepare_native_changes_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        changes: NativeChangeSet,
+        username: &str,
+        token: &str,
+    ) -> Result<NativePreparedChangeSet, SdkError> {
+        self.prepare_native_changes_with_reporter(project_id, repo, changes, username, token, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn prepare_native_changes_with_reporter(
+        &self,
+        project_id: &str,
+        repo: &str,
+        changes: NativeChangeSet,
+        username: &str,
+        token: &str,
+        reporter: Option<&NativeClientOperationReporter>,
+    ) -> Result<NativePreparedChangeSet, SdkError> {
+        let started = std::time::Instant::now();
+        let session: NativeUploadSession = {
+            let (request, _) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some("fs/uploads"),
+                username,
+                token,
+            )?;
+            expect_json(request.send().await?).await?
+        };
+        if let Some(reporter) = reporter {
+            reporter.set_session(&session);
+        }
+        let local = tokio::task::spawn_blocking({
+            let target_segment_bytes = session.target_segment_bytes;
+            let max_segment_bytes = session.max_segment_bytes;
+            move || prepare_local_upserts(changes.upserts, target_segment_bytes, max_segment_bytes)
+        })
+        .await
+        .map_err(|error| client_error(format!("native background prepare failed: {error}")))??;
+        if let Some(reporter) = reporter {
+            reporter.note_prepared_changes(&local);
+            reporter.set_phase(NativeClientOperationPhase::Uploading);
+        }
+        let total_segments = local.segments.len();
+        let (uploaded_segments, uploaded_bytes) = upload_built_segments(
+            self,
+            project_id,
+            repo,
+            &session,
+            username,
+            token,
+            &local.segments,
+        )
+        .await?;
+        if let Some(reporter) = reporter {
+            reporter.note_upload_complete(uploaded_segments, uploaded_bytes);
+            reporter.set_phase(NativeClientOperationPhase::Verifying);
+        }
+        let recipe_declarations = prepared_recipe_declarations(&local.entries);
+        if !recipe_declarations.is_empty() {
+            stage_native_metadata_batches(
+                self,
+                project_id,
+                repo,
+                &session.session_id,
+                username,
+                token,
+                &[],
+                &local.recipes,
+            )
+            .await?;
+            let suffix = format!("fs/uploads/{}/metadata/verify-recipes", session.session_id);
+            let (request, _) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&suffix),
+                username,
+                token,
+            )?;
+            expect_ok(
+                request
+                    .json(&PreparedRecipeVerificationRequest {
+                        recipes: recipe_declarations,
+                    })
+                    .send()
+                    .await?,
+            )
+            .await?;
+        }
+        Ok(NativePreparedChangeSet {
+            upserts: NativePreparedUpserts {
+                entries: local.entries,
+                local_directories: local.local_directories,
+                recipes: local.recipes,
+                files: local.files,
+                directories: local.directories,
+                logical_bytes: local.logical_bytes,
+                stored_bytes: local.stored_bytes,
+            },
+            deletes: changes.deletes,
+            renames: changes.renames,
+            preparation_ms: started.elapsed().as_millis() as u64,
+            total_segments,
+            uploaded_segments,
+            uploaded_bytes,
+        })
+    }
+
+    /// Prepare, upload, compose, stage, and verify a mounted journal generation without publishing
+    /// it. This is the daemon's continuous write path: the returned candidate is immutable and
+    /// durable, so the later snapshot operation only freezes the matching watermark and advances a
+    /// pointer.
+    pub async fn prepare_native_snapshot_candidate_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        base_snapshot_id: &str,
+        changes: NativeChangeSet,
+        username: &str,
+        token: &str,
+    ) -> Result<NativePreparedSnapshotCandidate, SdkError> {
+        let operation_id = uuid::Uuid::new_v4().to_string();
+        let reporter = NativeClientOperationReporter::new(
+            self,
+            project_id,
+            repo,
+            username,
+            token,
+            operation_id.clone(),
+            NativeClientOperationMode::MountedDelta,
+        );
+        reporter.spawn_report(NativeClientOperationState::Running, None);
+        let result = async {
+            let prepared_changes = self
+                .prepare_native_changes_with_reporter(
+                    project_id,
+                    repo,
+                    changes,
+                    username,
+                    token,
+                    Some(&reporter),
+                )
+                .await?;
+            self.finish_preparing_native_snapshot_candidate(
+                project_id,
+                repo,
+                base_snapshot_id,
+                prepared_changes,
+                username,
+                token,
+                operation_id,
+                Some(&reporter),
+            )
+            .await
+        }
+        .await;
+        match result {
+            Ok(candidate) => {
+                reporter.note_preparation_complete();
+                reporter
+                    .send_terminal(NativeClientOperationState::Succeeded, None)
+                    .await;
+                Ok(candidate)
+            }
+            Err(error) => {
+                reporter
+                    .send_terminal(
+                        NativeClientOperationState::Failed,
+                        Some(native_client_failure_code(&error)),
+                    )
+                    .await;
+                Err(error)
+            }
+        }
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn finish_preparing_native_snapshot_candidate(
+        &self,
+        project_id: &str,
+        repo: &str,
+        base_snapshot_id: &str,
+        prepared_changes: NativePreparedChangeSet,
+        username: &str,
+        token: &str,
+        preparation_operation_id: String,
+        reporter: Option<&NativeClientOperationReporter>,
+    ) -> Result<NativePreparedSnapshotCandidate, SdkError> {
+        let session: NativeUploadSession = {
+            let (request, _) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some("fs/uploads"),
+                username,
+                token,
+            )?;
+            expect_json(request.send().await?).await?
+        };
+        let NativePreparedChangeSet {
+            upserts,
+            deletes,
+            renames,
+            preparation_ms,
+            total_segments,
+            uploaded_segments,
+            uploaded_bytes,
+        } = prepared_changes;
+        let snapshot_changes = NativeSnapshotChanges {
+            upserts: upserts.entries.keys().cloned().collect(),
+            deletes: deletes.clone(),
+            renames: renames
+                .iter()
+                .map(|rename| NativeSnapshotRename {
+                    from: rename.from.clone(),
+                    to: rename.to.clone(),
+                })
+                .collect(),
+        };
+        let mut prepared = compose_native_changes(
+            self,
+            project_id,
+            repo,
+            username,
+            token,
+            base_snapshot_id,
+            PreparedLocalUpserts {
+                entries: upserts.entries,
+                local_directories: upserts.local_directories,
+                recipes: upserts.recipes,
+                segments: Vec::new(),
+                files: upserts.files,
+                directories: upserts.directories,
+                logical_bytes: upserts.logical_bytes,
+                stored_bytes: upserts.stored_bytes,
+            },
+            deletes,
+            renames,
+        )
+        .await?;
+        prepared.changes = snapshot_changes;
+        stage_native_metadata_batches(
+            self,
+            project_id,
+            repo,
+            &session.session_id,
+            username,
+            token,
+            &prepared.pages,
+            &prepared.recipes,
+        )
+        .await?;
+        if let Some(reporter) = reporter {
+            reporter.note_metadata_complete();
+        }
+        let root_id = prepared.root.to_hex();
+        let suffix = format!("fs/uploads/{}/metadata/verify-root", session.session_id);
+        let (request, _) = self.git_request(
+            Method::POST,
+            project_id,
+            repo,
+            Some(&suffix),
+            username,
+            token,
+        )?;
+        expect_ok(
+            request
+                .json(&serde_json::json!({ "root": &root_id }))
+                .send()
+                .await?,
+        )
+        .await?;
+        if let Some(reporter) = reporter {
+            reporter.note_verification_complete();
+        }
+        let preparation_ms = reporter
+            .map(NativeClientOperationReporter::elapsed_ms)
+            .unwrap_or(preparation_ms);
+        Ok(NativePreparedSnapshotCandidate {
+            root_id,
+            base_snapshot_id: base_snapshot_id.to_string(),
+            changes: prepared.changes,
+            preparation_operation_id,
+            preparation_ms,
+            files: prepared.files,
+            directories: prepared.directories,
+            logical_bytes: prepared.logical_bytes,
+            stored_bytes: prepared.stored_bytes,
+            total_segments,
+            uploaded_segments,
+            uploaded_bytes,
+        })
+    }
+
+    /// Publish a previously verified journal root. This records the user's final snapshot message
+    /// and attribution, performs a metadata-only closure check, and advances the workspace/head;
+    /// it never reads a local file, uploads content, or rebuilds a directory.
+    pub async fn publish_native_snapshot_candidate_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        candidate: NativePreparedSnapshotCandidate,
+        username: &str,
+        token: &str,
+        options: NativePushOptions,
+    ) -> Result<NativePushReport, SdkError> {
+        let started = std::time::Instant::now();
+        let operation_id = options
+            .operation_id
+            .clone()
+            .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
+        let session: NativeUploadSession = {
+            let (request, _) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some("fs/uploads"),
+                username,
+                token,
+            )?;
+            expect_json(request.send().await?).await?
+        };
+        let request_body = SubmitNativeSnapshotRequest {
+            root: candidate.root_id.clone(),
+            parents: vec![candidate.base_snapshot_id.clone()],
+            created_at_ms: None,
+            message: options.message.clone(),
+            operation_id: operation_id.clone(),
+            changes: candidate.changes.clone(),
+        };
+        let submitted: SubmitNativeSnapshotResponse = {
+            let suffix = format!("fs/uploads/{}/snapshots", session.session_id);
+            let (request, _) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&suffix),
+                username,
+                token,
+            )?;
+            expect_json(request.json(&request_body).send().await?).await?
+        };
+        wait_for_native_verification(
+            self,
+            project_id,
+            repo,
+            username,
+            token,
+            &session,
+            &submitted.snapshot_id,
+        )
+        .await?;
+        let advance = if let Some(workspace_id) = options.workspace_id.as_deref() {
+            publish_native_workspace_snapshot(
+                self,
+                project_id,
+                repo,
+                username,
+                token,
+                workspace_id,
+                &session.session_id,
+                &submitted.snapshot_id,
+                Some(&candidate.base_snapshot_id),
+                Some(&candidate.base_snapshot_id),
+            )
+            .await?
+        } else {
+            advance_native_head_with_credential(
+                self,
+                project_id,
+                repo,
+                username,
+                token,
+                &submitted.snapshot_id,
+                Some(&candidate.base_snapshot_id),
+            )
+            .await?
+        };
+        let (previous_snapshot_id, snapshot_id) = match advance {
+            NativeHeadAdvance::Published {
+                previous_snapshot_id,
+                snapshot_id,
+            } => (previous_snapshot_id, snapshot_id),
+            NativeHeadAdvance::Conflict {
+                actual_snapshot_id,
+                snapshot_id,
+            } => {
+                return Err(client_error(format!(
+                    "filesystem head changed to {} while prepared snapshot {snapshot_id} was waiting to publish",
+                    actual_snapshot_id.as_deref().unwrap_or("empty")
+                )));
+            }
+        };
+        Ok(NativePushReport {
+            operation_id,
+            snapshot_id,
+            previous_snapshot_id,
+            files: candidate.files,
+            directories: candidate.directories,
+            logical_bytes: candidate.logical_bytes,
+            stored_bytes: candidate.stored_bytes,
+            total_segments: candidate.total_segments,
+            uploaded_segments: candidate.uploaded_segments,
+            uploaded_bytes: candidate.uploaded_bytes,
+            transport: "prepared_journal".to_string(),
+            client_timings: NativePushTimings {
+                total_ms: started.elapsed().as_millis() as u64,
+                publish_complete_ms: Some(started.elapsed().as_millis() as u64),
+                ..NativePushTimings::default()
+            },
+        })
+    }
+
+    /// Publish a previously prepared mounted delta. This performs only base-tree composition,
+    /// metadata staging, verification gating, and the workspace/head transaction; it never opens
+    /// a local file or uploads content bytes.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn push_prepared_native_changes_with_credential(
+        &self,
+        project_id: &str,
+        repo: &str,
+        prepared_changes: NativePreparedChangeSet,
+        username: &str,
+        token: &str,
+        mut options: NativePushOptions,
+    ) -> Result<NativePushReport, SdkError> {
+        let expected = match options.expected_snapshot_id.clone() {
+            Some(expected) => expected,
+            None => self
+                .native_head(project_id, repo)
+                .await?
+                .snapshot_id
+                .ok_or_else(|| client_error("prepared native push needs an existing base"))?,
+        };
+        let expected_workspace = match options.workspace_id.as_deref() {
+            Some(workspace_id) => {
+                self.native_workspace_with_credential(
+                    project_id,
+                    repo,
+                    workspace_id,
+                    username,
+                    token,
+                )
+                .await?
+                .latest_snapshot_id
+            }
+            None => None,
+        };
+        let session: NativeUploadSession = {
+            let (request, _) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some("fs/uploads"),
+                username,
+                token,
+            )?;
+            expect_json(request.send().await?).await?
+        };
+        let NativePreparedChangeSet {
+            upserts,
+            deletes,
+            renames,
+            ..
+        } = prepared_changes;
+        let snapshot_changes = NativeSnapshotChanges {
+            upserts: upserts.entries.keys().cloned().collect(),
+            deletes: deletes.clone(),
+            renames: renames
+                .iter()
+                .map(|rename| NativeSnapshotRename {
+                    from: rename.from.clone(),
+                    to: rename.to.clone(),
+                })
+                .collect(),
+        };
+        let mut prepared = compose_native_changes(
+            self,
+            project_id,
+            repo,
+            username,
+            token,
+            &expected,
+            PreparedLocalUpserts {
+                entries: upserts.entries,
+                local_directories: upserts.local_directories,
+                recipes: upserts.recipes,
+                segments: Vec::new(),
+                files: upserts.files,
+                directories: upserts.directories,
+                logical_bytes: upserts.logical_bytes,
+                stored_bytes: upserts.stored_bytes,
+            },
+            deletes,
+            renames,
+        )
+        .await?;
+        prepared.changes = snapshot_changes;
+        options
+            .operation_id
+            .get_or_insert_with(|| uuid::Uuid::new_v4().to_string());
+        finish_native_push(
+            self,
+            project_id,
+            repo,
+            username,
+            token,
+            Some(expected),
+            expected_workspace,
+            session,
+            prepared,
+            None,
+            false,
+            options,
+            None,
+        )
+        .await
+    }
+
     #[allow(clippy::too_many_arguments)]
     async fn push_native_changes_with_credential_inner(
         &self,
@@ -3133,6 +3882,22 @@ impl ArtifactStorageClient {
             expect_json(request.send().await?).await?
         };
         reporter.set_session(&session);
+        let snapshot_changes = NativeSnapshotChanges {
+            upserts: changes
+                .upserts
+                .iter()
+                .map(|upsert| upsert.path.clone())
+                .collect(),
+            deletes: changes.deletes.clone(),
+            renames: changes
+                .renames
+                .iter()
+                .map(|rename| NativeSnapshotRename {
+                    from: rename.from.clone(),
+                    to: rename.to.clone(),
+                })
+                .collect(),
+        };
         let upserts = changes.upserts;
         let target_segment_bytes = session.target_segment_bytes;
         let max_segment_bytes = session.max_segment_bytes;
@@ -3156,6 +3921,7 @@ impl ArtifactStorageClient {
             changes.renames,
         )
         .await?;
+        prepared.changes = snapshot_changes;
         prepared.prepare_timings.content_prepare_ms = Some(content_prepare_ms);
         prepared.prepare_timings.metadata_build_ms =
             Some(metadata_build_started.elapsed().as_millis() as u64);
@@ -3253,7 +4019,7 @@ impl ArtifactStorageClient {
         )?;
         expect_json(
             request
-                .json(&RegisterSegmentRequest {
+                .json(&SegmentTargetRequest {
                     segment_id,
                     stored_len,
                 })
@@ -3325,6 +4091,7 @@ impl ArtifactStorageClient {
         staging_id: &str,
         segment_id: &str,
         stored_len: u64,
+        records: &[SegmentSlice],
     ) -> Result<(), SdkError> {
         let credential = self.git_credential_for_repo(project_id, repo).await?;
         let suffix = format!("fs/uploads/{session}/segments/{staging_id}/register");
@@ -3341,6 +4108,7 @@ impl ArtifactStorageClient {
                 .json(&RegisterSegmentRequest {
                     segment_id,
                     stored_len,
+                    records: native_segment_record_requests(records),
                 })
                 .send()
                 .await?,
@@ -3717,6 +4485,7 @@ impl ArtifactStorageClient {
                 &target_snapshot_id[..target_snapshot_id.len().min(12)]
             ),
             operation_id: uuid::Uuid::new_v4().to_string(),
+            changes: NativeSnapshotChanges::default(),
         };
         let submitted: SubmitNativeSnapshotResponse = {
             let suffix = format!("fs/uploads/{}/snapshots", session.session_id);
@@ -4124,7 +4893,64 @@ async fn compose_native_changes(
         logical_bytes: local.logical_bytes,
         stored_bytes: local.stored_bytes,
         prepare_timings: NativePrepareTimings::default(),
+        changes: NativeSnapshotChanges::default(),
     })
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn upload_built_segments(
+    client: &ArtifactStorageClient,
+    project_id: &str,
+    repo: &str,
+    session: &NativeUploadSession,
+    username: &str,
+    token: &str,
+    segments: &[BuiltSegment],
+) -> Result<(usize, u64), SdkError> {
+    let mut missing = HashSet::new();
+    let query_size = session.max_segments_per_query.clamp(1, 4096);
+    let segment_ids: Vec<String> = segments.iter().map(|segment| segment.id.to_hex()).collect();
+    for ids in segment_ids.chunks(query_size) {
+        let suffix = format!("fs/uploads/{}/segments/missing", session.session_id);
+        let (request, _) = client.git_request(
+            Method::POST,
+            project_id,
+            repo,
+            Some(&suffix),
+            username,
+            token,
+        )?;
+        let response: MissingSegmentsResponse = expect_json(
+            request
+                .json(&MissingSegmentsRequest { segment_ids: ids })
+                .send()
+                .await?,
+        )
+        .await?;
+        missing.extend(response.missing_segment_ids);
+    }
+    let missing_segments: Vec<_> = segments
+        .iter()
+        .filter(|segment| missing.contains(&segment.id.to_hex()))
+        .collect();
+    let mut uploaded_bytes = 0u64;
+    for batch in missing_segments.chunks(NATIVE_SEGMENT_UPLOAD_CONCURRENCY) {
+        let uploads = batch.iter().map(|segment| {
+            upload_prepared_segment(
+                client,
+                project_id,
+                repo,
+                &session.session_id,
+                username,
+                token,
+                segment,
+            )
+        });
+        for result in futures::future::join_all(uploads).await {
+            uploaded_bytes = uploaded_bytes.saturating_add(result?);
+        }
+    }
+    Ok((missing_segments.len(), uploaded_bytes))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4254,6 +5080,7 @@ async fn finish_native_push(
         created_at_ms: None,
         message: options.message,
         operation_id: operation_id.clone(),
+        changes: prepared.changes,
     };
     let submitted: SubmitNativeSnapshotResponse = {
         let suffix = format!("fs/uploads/{}/snapshots", session.session_id);
@@ -4498,6 +5325,7 @@ async fn upload_prepared_segment(
         PreparedSegmentUpload {
             id: segment.id,
             len: segment.len,
+            records: segment.records.clone(),
             body: PreparedSegmentBody::File(temp.path().to_path_buf()),
         },
     )
@@ -4527,7 +5355,7 @@ async fn upload_prepared_segment_file(
         )?;
         let target: NativeSegmentTarget = expect_json(
             request
-                .json(&RegisterSegmentRequest {
+                .json(&SegmentTargetRequest {
                     segment_id: &segment_id,
                     stored_len: segment.len,
                 })
@@ -4578,6 +5406,7 @@ async fn upload_prepared_segment_file(
                         .json(&RegisterSegmentRequest {
                             segment_id: &segment_id,
                             stored_len: segment.len,
+                            records: native_segment_record_requests(&segment.records),
                         })
                         .send()
                         .await?,
@@ -4602,6 +5431,29 @@ async fn upload_prepared_segment_file(
                     request
                         .header(reqwest::header::CONTENT_LENGTH, segment.len)
                         .body(body)
+                        .send()
+                        .await?,
+                )
+                .await?;
+                let suffix = format!(
+                    "fs/uploads/{session}/segments/{}/register",
+                    target.staging_id
+                );
+                let (request, _) = client.git_request(
+                    Method::POST,
+                    project_id,
+                    repo,
+                    Some(&suffix),
+                    username,
+                    token,
+                )?;
+                expect_ok(
+                    request
+                        .json(&RegisterSegmentRequest {
+                            segment_id: &segment_id,
+                            stored_len: segment.len,
+                            records: native_segment_record_requests(&segment.records),
+                        })
                         .send()
                         .await?,
                 )

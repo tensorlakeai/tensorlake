@@ -740,7 +740,12 @@ impl OverlayFs {
             .lock()
             .expect("divergence lock")
             .clear();
-        fn walk(root: &Path, dir: &Path, out: &mut dyn FnMut(String)) -> std::io::Result<()> {
+        fn walk(
+            root: &Path,
+            dir: &Path,
+            include_directories: bool,
+            out: &mut dyn FnMut(String),
+        ) -> std::io::Result<()> {
             let Ok(read) = std::fs::read_dir(dir) else {
                 return Ok(());
             };
@@ -748,7 +753,17 @@ impl OverlayFs {
                 let abs = entry.path();
                 let meta = std::fs::symlink_metadata(&abs)?;
                 if meta.is_dir() && !meta.file_type().is_symlink() {
-                    walk(root, &abs, out)?;
+                    if include_directories {
+                        let rel = abs
+                            .strip_prefix(root)
+                            .expect("under root")
+                            .components()
+                            .map(|c| c.as_os_str().to_string_lossy())
+                            .collect::<Vec<_>>()
+                            .join("/");
+                        out(rel);
+                    }
+                    walk(root, &abs, include_directories, out)?;
                 } else {
                     let rel = abs
                         .strip_prefix(root)
@@ -763,11 +778,11 @@ impl OverlayFs {
             Ok(())
         }
         self.dirty.lock().expect("dirty lock").clear();
-        walk(&self.upper, &self.upper, &mut |rel| {
+        walk(&self.upper, &self.upper, true, &mut |rel| {
             self.record(&rel, DirtyKind::Upsert)
         })
         .map_err(io_err)?;
-        walk(&self.wh, &self.wh, &mut |rel| {
+        walk(&self.wh, &self.wh, false, &mut |rel| {
             self.record(&rel, DirtyKind::Delete)
         })
         .map_err(io_err)?;
@@ -2788,6 +2803,30 @@ impl OverlayFs {
             self.persist_redirects(&redirects)?;
         }
         self.redirect_gen.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+    }
+
+    /// Consume only the exact rename mappings a completed native journal generation published.
+    /// A later rename may reuse the same destination while the snapshot is in flight; destination-
+    /// only removal would then erase newer unsealed intent.
+    pub fn consume_redirect_entries(&self, entries: &[(String, String)]) -> Result<(), MountError> {
+        let expected: std::collections::HashMap<&str, &str> = entries
+            .iter()
+            .map(|(dst, src)| (dst.as_str(), src.as_str()))
+            .collect();
+        let changed = {
+            let mut redirects = self.redirects.lock().expect("redirect lock");
+            let before = redirects.len();
+            redirects.retain(|dst, src| expected.get(dst.as_str()).copied() != Some(src.as_str()));
+            let changed = redirects.len() != before;
+            if changed {
+                self.persist_redirects(&redirects)?;
+            }
+            changed
+        };
+        if changed {
+            self.redirect_gen.fetch_add(1, Ordering::SeqCst);
+        }
         Ok(())
     }
 }
