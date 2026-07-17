@@ -1,8 +1,7 @@
 //! Thin public CLI adapter for the private filesystem client engine.
 //!
-//! Command parsing and host authentication remain in this repository. Mount semantics, the
-//! journal, overlay, daemon, snapshot pipeline, recovery state, and native filesystem workflow
-//! live in `gsvc-fs-client`, which official builds vendor ephemerally from `artifact_storage`.
+//! Command parsing and host authentication remain in this repository. Official builds supply the
+//! implementation through the private `gsvc-fs-client` crate.
 
 use std::path::{Path, PathBuf};
 

@@ -92,11 +92,8 @@ test-cli-full *ARGS:
     CARGO_TARGET_DIR="$PWD/target" cargo test --manifest-path crates/gsvc-fs-client/Cargo.toml {{ARGS}}
     cargo test --workspace --features tensorlake-cli/mount,tensorlake-cli/git-clone {{ARGS}}
 
-# Authoritative validation for the durable `tl fs` mutation journal and generation engine.
-#
-# The state engine crosses the mount VFS, daemon recovery/publisher, plain-directory binding,
-# and CLI control protocol. Run the complete private/full-feature CLI suite rather than a narrow
-# module filter so changes cannot accidentally validate only one of those consumers.
+# Authoritative validation for the private filesystem client integration. Run the complete
+# full-feature CLI suite so changes exercise every consumer of the private crate.
 test-fs-journal:
     just test-cli-full
 
