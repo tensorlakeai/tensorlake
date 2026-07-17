@@ -1,5 +1,6 @@
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
+use std::collections::HashSet;
 
 use crate::{
     client::{Client, Traced},
@@ -317,6 +318,7 @@ impl ArtifactStorageClient {
     ) -> Result<Traced<ListReposResponse>, SdkError> {
         let mut repos = Vec::new();
         let mut after = None::<String>;
+        let mut seen_after = HashSet::new();
         loop {
             // `form_urlencoded::Serializer` contains a non-Send callback reference. Keep it in
             // this synchronous scope so napi/tonic callers can carry the async request future
@@ -355,7 +357,11 @@ impl ArtifactStorageClient {
                     },
                 ));
             };
-            after = Some(next);
+            after = Some(advance_pagination_cursor(
+                &mut seen_after,
+                next,
+                "repository listing",
+            )?);
         }
     }
 
@@ -530,6 +536,7 @@ impl ArtifactStorageClient {
     ) -> Result<Traced<ListOperationsResponse>, SdkError> {
         let mut operations = Vec::new();
         let mut after = None::<String>;
+        let mut seen_after = HashSet::new();
         loop {
             let suffix = after.as_ref().map_or_else(
                 || "admin/operations?limit=1000".to_string(),
@@ -563,7 +570,11 @@ impl ArtifactStorageClient {
                     },
                 ));
             };
-            after = Some(next);
+            after = Some(advance_pagination_cursor(
+                &mut seen_after,
+                next,
+                "operation listing",
+            )?);
         }
     }
 
@@ -663,6 +674,21 @@ fn encode_path_segment(segment: &str) -> String {
     urlencoding::encode(segment).into_owned()
 }
 
+/// A paged collection must always make forward progress. Treat an empty or repeated cursor as a
+/// malformed server response rather than spinning forever in an SDK call.
+fn advance_pagination_cursor(
+    seen: &mut HashSet<String>,
+    next: String,
+    surface: &str,
+) -> Result<String, SdkError> {
+    if next.is_empty() || !seen.insert(next.clone()) {
+        return Err(SdkError::ClientError(format!(
+            "{surface} returned an empty or repeated pagination cursor"
+        )));
+    }
+    Ok(next)
+}
+
 fn traceparent() -> (String, String) {
     let trace_id = hex::encode(rand::random::<[u8; 16]>());
     let span_id = hex::encode(rand::random::<[u8; 8]>());
@@ -707,7 +733,12 @@ async fn body_message(response: reqwest::Response) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{ArtifactStorageClient, encode_path_segment, resolve_artifact_storage_url};
+    use std::collections::HashSet;
+
+    use super::{
+        ArtifactStorageClient, advance_pagination_cursor, encode_path_segment,
+        resolve_artifact_storage_url,
+    };
     use crate::ClientBuilder;
 
     #[test]
@@ -744,5 +775,16 @@ mod tests {
             client.git_repo_url("project_123", "myrepo"),
             "https://git.tensorlake.ai/project_123/myrepo"
         );
+    }
+
+    #[test]
+    fn pagination_cursor_must_make_progress() {
+        let mut seen = HashSet::new();
+        assert_eq!(
+            advance_pagination_cursor(&mut seen, "page-2".to_string(), "test").unwrap(),
+            "page-2"
+        );
+        assert!(advance_pagination_cursor(&mut seen, "page-2".to_string(), "test").is_err());
+        assert!(advance_pagination_cursor(&mut seen, String::new(), "test").is_err());
     }
 }

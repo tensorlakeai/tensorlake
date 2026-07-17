@@ -15,7 +15,7 @@ use crate::error::SdkError;
 
 use super::ingest::expect_json;
 use super::merge::{MergeConflict, MergeReport, MergeStats, Signature, expect_json_or_conflict};
-use super::{ArtifactStorageClient, decode_empty};
+use super::{ArtifactStorageClient, advance_pagination_cursor, decode_empty};
 
 /// One workspace joined across its identity record, ref, and lease rows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -644,6 +644,10 @@ impl ArtifactStorageClient {
     ) -> Result<Traced<Vec<WorkspaceFleetItem>>, SdkError> {
         let mut items = Vec::new();
         let mut after: Option<String> = query.after.map(str::to_string);
+        let mut seen_after = std::collections::HashSet::new();
+        if let Some(after) = &after {
+            seen_after.insert(after.clone());
+        }
         loop {
             let page = self
                 .workspace_fleet(
@@ -662,10 +666,16 @@ impl ArtifactStorageClient {
             if !page.truncated {
                 return Ok(Traced::new(trace_id, items));
             }
-            let Some(next) = page.next_after else {
-                return Ok(Traced::new(trace_id, items));
-            };
-            after = Some(next);
+            let next = page.next_after.ok_or_else(|| {
+                SdkError::ClientError(
+                    "workspace fleet page was truncated without a pagination cursor".to_string(),
+                )
+            })?;
+            after = Some(advance_pagination_cursor(
+                &mut seen_after,
+                next,
+                "workspace fleet listing",
+            )?);
         }
     }
 
@@ -678,6 +688,7 @@ impl ArtifactStorageClient {
     ) -> Result<Traced<Vec<WorkspaceInfo>>, SdkError> {
         let mut workspaces = Vec::new();
         let mut after = None::<String>;
+        let mut seen_after = std::collections::HashSet::new();
         loop {
             let suffix = after.as_ref().map_or_else(
                 || "workspaces?limit=1000".to_string(),
@@ -696,7 +707,11 @@ impl ArtifactStorageClient {
             let Some(next) = page.next_after else {
                 return Ok(Traced::new(trace_id, workspaces));
             };
-            after = Some(next);
+            after = Some(advance_pagination_cursor(
+                &mut seen_after,
+                next,
+                "workspace listing",
+            )?);
         }
     }
 
