@@ -1442,7 +1442,7 @@ enum ImageCommands {
         #[arg(long, hide = true)]
         cas: bool,
 
-        /// Print the registered sandbox image JSON response to stdout
+        /// Print the sandbox image result JSON to stdout
         #[arg(long = "json", hide = true)]
         json: bool,
     },
@@ -1489,7 +1489,7 @@ enum ImageCommands {
         #[arg(long, hide = true)]
         cas: bool,
 
-        /// Print the registered sandbox image JSON response to stdout
+        /// Print the sandbox image result JSON to stdout
         #[arg(long = "json")]
         json: bool,
     },
