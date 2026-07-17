@@ -2581,6 +2581,20 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         )
         .await;
     }
+    // Human status is a local diagnostic: the private engine reads cached immutable session
+    // facts plus the local journal/control socket, so it must remain available when auth or the
+    // platform is unavailable. `--json` deliberately keeps its live server-record contract and
+    // therefore continues through the auth guard below.
+    if let FsCommands::Status { json: false, .. } = &subcmd {
+        return commands::fs::status(
+            ctx,
+            mount_dir
+                .as_ref()
+                .expect("resolved for every path-addressed command"),
+            false,
+        )
+        .await;
+    }
     // Path-addressed commands carry their scope in the mount state; resolve it from there so
     // they work from any CWD instead of triggering the interactive init flow (which, run from
     // inside a mount, would write .tensorlake/config.toml into the workspace).

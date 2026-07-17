@@ -101,6 +101,13 @@ ignored or local-only files.
 Native restore is one adoption operation: after the server selects the restored snapshot, the
 daemon clears the old overlay and transactionally resets the local generation engine to that
 snapshot. It does not enter a separate reindex state or rebuild the journal by walking.
+
+Human `tl fs status` is a local diagnostic. It reads cached immutable attachment facts, the local
+journal, and bounded daemon inspection calls without requiring authentication or platform
+availability. If a live daemon stops answering between its health probe and dirty-state query,
+status reports the daemon and local change state as unknown instead of hanging or claiming the
+mount is clean. `tl fs status --json` retains its explicit live-server record contract.
+
 The restore request ID is committed before the server call. A permanent failure moves it to a
 diagnostic dead-letter row and releases the write fence; an ambiguous/retryable result keeps the
 fence and all local evidence until recovery can prove an outcome.
