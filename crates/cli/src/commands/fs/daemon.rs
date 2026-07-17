@@ -231,6 +231,15 @@ pub struct MountState {
     #[serde(default)]
     pub owner_gid: Option<u32>,
     pub repo: String,
+    /// Canonical repository-relative directory exposed as this Git mount's root.
+    #[serde(default)]
+    pub subtree: Option<String>,
+    /// Server-resolved source for a stateless read-only Git view. Its presence record is
+    /// observational only: it expires and never roots history.
+    #[serde(default)]
+    pub git_mount_source: Option<tensorlake::artifact_storage::workspaces::GitMountSource>,
+    #[serde(default)]
+    pub mount_presence_id: Option<String>,
     /// Native filesystem snapshots rather than Git commits and refs.
     #[serde(default)]
     pub native_filesystem: bool,
@@ -293,10 +302,23 @@ pub fn load_mount_state(state_dir: &Path) -> Result<MountState> {
 
 pub fn save_mount_state(state_dir: &Path, state: &MountState) -> Result<()> {
     std::fs::create_dir_all(state_dir)?;
-    std::fs::write(
-        state_dir.join("state.json"),
-        serde_json::to_vec_pretty(state)?,
-    )?;
+    let bytes = serde_json::to_vec_pretty(state)?;
+    let pending = state_dir.join("state.json.next");
+    let final_path = state_dir.join("state.json");
+    {
+        use std::io::Write as _;
+        let mut file = std::fs::OpenOptions::new()
+            .create(true)
+            .truncate(true)
+            .write(true)
+            .open(&pending)?;
+        file.write_all(&bytes)?;
+        file.sync_all()?;
+    }
+    std::fs::rename(&pending, &final_path)?;
+    if let Ok(directory) = std::fs::File::open(state_dir) {
+        let _ = directory.sync_all();
+    }
     Ok(())
 }
 
@@ -1005,9 +1027,15 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
             .clone()
             .unwrap_or_else(|| state.ref_name.clone())
     });
-    let follows = state.pinned_snapshot.is_none();
+    let follows = if state.mount_presence_id.is_some() {
+        // Branch/tag presences follow their exact canonical ref; raw commits are pinned.
+        state.follow_ref.is_some()
+    } else {
+        state.pinned_snapshot.is_none()
+    };
     let mount_options = MountOptions {
         reference: followed,
+        subtree: state.subtree.clone(),
         follow: follows,
         poll_interval: Duration::from_secs(5),
         // Manifest-driven cache prefill in the background: first walks serve warm instead
@@ -1230,13 +1258,41 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         state.repo.clone(),
         state.workspace_id.clone(),
     );
+    let mount_presence = Arc::new(std::sync::RwLock::new(
+        state
+            .mount_presence_id
+            .clone()
+            .zip(state.git_mount_source.clone()),
+    ));
+    let heartbeat_mountpoint = state.mountpoint.to_string_lossy().into_owned();
     let native_filesystem = state.native_filesystem;
     let creds = api_creds.clone();
     let remint = rotates.then(|| remint.clone());
+    let heartbeat_presence = mount_presence.clone();
     tokio::spawn(async move {
         loop {
             let (user, token) = creds.lock().expect("creds lock").clone();
-            let result = if native_filesystem {
+            let presence = heartbeat_presence
+                .read()
+                .expect("mount presence lock")
+                .clone();
+            let result = if let Some((session_id, source)) = presence {
+                heartbeat_sdk
+                    .record_git_mount_presence(
+                        &heartbeat_project,
+                        &heartbeat_repo,
+                        &user,
+                        &token,
+                        &session_id,
+                        &tensorlake::artifact_storage::workspaces::RecordGitMountPresenceRequest {
+                            source: &source,
+                            mounted_on: &heartbeat_mountpoint,
+                            ttl_seconds: None,
+                        },
+                    )
+                    .await
+                    .map(|_| ())
+            } else if native_filesystem {
                 heartbeat_sdk
                     .native_workspace_heartbeat_with_credential(
                         &heartbeat_project,
@@ -1260,7 +1316,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                     .map(|_| ())
             };
             if let Err(e) = result {
-                tracing::warn!("workspace heartbeat failed: {e}");
+                tracing::warn!("mount heartbeat failed: {e}");
                 if let (
                     Some(remint),
                     tensorlake::error::SdkError::Authentication(_)
@@ -1333,6 +1389,7 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
             creds: api_creds.clone(),
             project: project.clone(),
             repo: state.repo.clone(),
+            subtree: state.subtree.clone(),
             workspace: state.workspace_id.clone(),
             native_filesystem: state.native_filesystem,
             local_state: local_state.clone(),
@@ -1481,6 +1538,10 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
     }
 
     // Control socket (mount is live).
+    // Source switching spans durable state, the mount core, and presence identity; serialize the
+    // whole transition so concurrent control clients cannot roll one another's persisted source
+    // back after a failed probe.
+    let source_switch = Arc::new(tokio::sync::Mutex::new(()));
     let sock_path = control_socket(state_dir);
     let _ = std::fs::remove_file(&sock_path);
     std::fs::write(pid_file(state_dir), std::process::id().to_string())?;
@@ -1493,6 +1554,8 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
         let pending = pending.clone();
         let sealer = sealer.clone();
         let local_state = local_state.clone();
+        let mount_presence = mount_presence.clone();
+        let source_switch = source_switch.clone();
         let control_state_dir = state_dir.to_path_buf();
         tokio::spawn(async move {
             loop {
@@ -1506,6 +1569,8 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                 let pending = pending.clone();
                 let sealer = sealer.clone();
                 let local_state = local_state.clone();
+                let mount_presence = mount_presence.clone();
+                let source_switch = source_switch.clone();
                 let control_state_dir = control_state_dir.clone();
                 tokio::spawn(async move {
                     let mut reader = tokio::io::BufReader::new(stream);
@@ -1714,6 +1779,110 @@ async fn run_mount(ctx: &CliContext, state_dir: &Path) -> Result<()> {
                             }
                             Err(e) => serde_json::json!({ "ok": false, "error": e.to_string() }),
                         },
+                        "switch-source" => {
+                            let _switch = source_switch.lock().await;
+                            let source = request
+                                .get("source")
+                                .cloned()
+                                .ok_or_else(|| "switch-source requires source".to_string())
+                                .and_then(|value| {
+                                    serde_json::from_value::<
+                                        tensorlake::artifact_storage::workspaces::GitMountSource,
+                                    >(value)
+                                    .map_err(|error| format!("invalid switch source: {error}"))
+                                });
+                            let presence_id = request
+                                .get("presence_id")
+                                .and_then(serde_json::Value::as_str)
+                                .filter(|id| !id.is_empty())
+                                .map(str::to_string)
+                                .ok_or_else(|| "switch-source requires presence_id".to_string());
+                            let prepared = source.and_then(|source| {
+                                let presence_id = presence_id?;
+                                let previous = load_mount_state(&control_state_dir)
+                                    .map_err(|error| format!("loading mount state: {error}"))?;
+                                if !previous.read_only()
+                                    || previous.native_filesystem
+                                    || previous.mount_presence_id.is_none()
+                                {
+                                    return Err(
+                                        "switch-source is only valid for a stateless read-only Git mount"
+                                            .to_string(),
+                                    );
+                                }
+                                if source.subtree != previous.subtree {
+                                    return Err(
+                                        "sync cannot change the mounted subtree; unmount and mount the new subtree"
+                                            .to_string(),
+                                    );
+                                }
+                                // Canonical branch and tag refs follow their exact namespace;
+                                // a raw commit has no canonical ref and remains pinned.
+                                let follow_ref = super::git_mount_follow_ref(&source)
+                                    .map_err(|error| error.to_string())?;
+                                let follow = follow_ref.is_some();
+                                let reference = if follow {
+                                    follow_ref.expect("follow policy returned a canonical ref")
+                                } else {
+                                    source.resolved_commit.clone()
+                                };
+                                let mut next = previous.clone();
+                                next.ref_name = reference.clone();
+                                next.follow_ref = follow.then(|| reference.clone());
+                                next.start_oid = Some(source.resolved_commit.clone());
+                                next.mount_presence_id = Some(presence_id.clone());
+                                next.git_mount_source = Some(source.clone());
+                                save_mount_state(&control_state_dir, &next)
+                                    .map_err(|error| format!("persisting switched source: {error}"))?;
+                                Ok((previous, source, presence_id, reference, follow))
+                            });
+                            match prepared {
+                                Err(error) => serde_json::json!({ "ok": false, "error": error }),
+                                Ok((previous, source, presence_id, reference, follow)) => {
+                                    match core.switch_source(&reference, follow).await {
+                                        Ok(delta) => {
+                                            *mount_presence.write().expect("mount presence lock") =
+                                                Some((presence_id.clone(), source));
+                                            absorb_refresh(&overlay, &invalidate, &pending, &delta);
+                                            let (changed, complete) = {
+                                                let mut p =
+                                                    pending.lock().expect("pending probe lock");
+                                                let changed: Vec<KernelExpectation> =
+                                                    std::mem::take(&mut p.expect)
+                                                        .into_values()
+                                                        .collect();
+                                                (
+                                                    changed,
+                                                    !std::mem::replace(&mut p.incomplete, false),
+                                                )
+                                            };
+                                            serde_json::json!({
+                                                "ok": true,
+                                                "commit": core.current_commit(),
+                                                "reference": reference,
+                                                "follow": follow,
+                                                "presence_id": presence_id,
+                                                "changed": changed,
+                                                "complete": complete,
+                                            })
+                                        }
+                                        Err(error) => {
+                                            let rollback =
+                                                save_mount_state(&control_state_dir, &previous);
+                                            serde_json::json!({
+                                                "ok": false,
+                                                "error": match rollback {
+                                                    Ok(()) => error.to_string(),
+                                                    Err(rollback) => format!(
+                                                        "{error}; restoring the prior persisted source also failed: {rollback}"
+                                                    ),
+                                                },
+                                            })
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         // The upper drop flips interned paths to their lower view with no
                         // kernel-visible operation; push the implied invalidations. Routed
                         // through the sealer (state-lock serialized against in-flight seals,
@@ -2187,6 +2356,8 @@ struct Sealer {
     creds: Arc<std::sync::Mutex<(String, String)>>,
     project: String,
     repo: String,
+    /// Full-repository prefix restored onto subtree-relative overlay paths at publish time.
+    subtree: Option<String>,
     workspace: String,
     native_filesystem: bool,
     /// Authoritative mutation/generation state for writable native filesystems. Git-backed
@@ -2454,6 +2625,20 @@ fn build_frozen_native_capture(
 
 #[cfg(unix)]
 impl Sealer {
+    fn mount_relative_path<'a>(&self, path: &'a str) -> Result<&'a str> {
+        match &self.subtree {
+            Some(prefix) => path
+                .strip_prefix(prefix)
+                .and_then(|path| path.strip_prefix('/'))
+                .ok_or_else(|| {
+                    CliError::usage(format!(
+                        "snapshot returned path {path:?} outside mounted subtree {prefix:?}"
+                    ))
+                }),
+            None => Ok(path),
+        }
+    }
+
     fn acknowledge_snapshot_response(&self, request_id: &str) -> Result<()> {
         let local = self.local_state.as_ref().ok_or_else(|| {
             CliError::usage("legacy repository mounts do not use native snapshot receipts")
@@ -3668,6 +3853,7 @@ impl Sealer {
                             .unwrap_or_else(|| lower.to_string()),
                     ),
                     collect_file_chunks: true,
+                    path_prefix: self.subtree.clone(),
                     progress,
                     ..Default::default()
                 },
@@ -3678,15 +3864,21 @@ impl Sealer {
         st.sealed_gen = watermark;
         self.overlay.prune_dirty(watermark);
         let report = report.into_inner();
-        self.overlay
-            .record_sealed_oids(report.file_blob_oids.iter().cloned());
+        let sealed_oids = report
+            .file_blob_oids
+            .iter()
+            .map(|(path, oid)| Ok((self.mount_relative_path(path)?.to_string(), oid.clone())))
+            .collect::<Result<Vec<_>>>()?;
+        self.overlay.record_sealed_oids(sealed_oids);
         self.overlay.close_dirty_base_if_clean();
         st.recent_seals
             .push((report.commit.clone(), resolved.sealed_upserts));
         // Remember what each file's content chunked to; a blunt cap bounds daemon memory (a
         // full re-learn is just one full-cost seal per file).
         for (path, chunks) in &report.file_chunks {
-            st.chunk_cache.insert(path.clone(), chunks.clone());
+            let local_path = self.mount_relative_path(path)?;
+            st.chunk_cache
+                .insert(local_path.to_string(), chunks.clone());
         }
         for path in &delete_paths {
             st.chunk_cache.remove(path);

@@ -621,14 +621,14 @@ enum GitCommands {
     /// Mount a repo branch as a working tree (FUSE), without cloning: reads stream lazily,
     /// writes stay local until `tl git snapshot`
     Mount {
-        /// `<repo>[:<ref-or-commit>]` — forks a private workspace off the tip (default: the
-        /// repo's default branch)
+        /// `<repo>[:<ref-or-full-commit>][//<subtree>]` — forks a private workspace off the
+        /// selected source and optionally exposes one directory as the mount root
         target: String,
 
         /// Mountpoint directory (created; must be empty)
         path: PathBuf,
 
-        /// A live read-only view that follows the branch
+        /// A stateless read-only view (branches and tags follow; full commits stay pinned)
         #[arg(long, conflicts_with = "publish")]
         ro: bool,
 
@@ -684,11 +684,27 @@ enum GitCommands {
         clear: bool,
     },
 
-    /// Pull the branch into the mounted working tree (server-side three-way merge;
-    /// conflicts materialize as diff3 markers in your files)
+    /// Refresh the mounted view, or switch a pristine workspace to another ref or commit
     Sync {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
+
+        /// Ref or full commit to switch to (default: refresh the current source)
+        target: Option<String>,
+    },
+
+    /// Replay a snapshotted workspace onto another ref or commit on the server
+    #[command(allow_missing_positional = true)]
+    Rebase {
+        /// A mounted directory (default: the mount containing the current directory)
+        path: Option<PathBuf>,
+
+        /// Ref or full commit to rebase onto
+        target: String,
+
+        /// Report conflicts without materializing them into the workspace
+        #[arg(long)]
+        fail_on_conflict: bool,
     },
 
     /// Land the mounted working tree's checkpoint on a branch (squash by default)
@@ -710,6 +726,30 @@ enum GitCommands {
     Status {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the active workspace snapshot chain and retained recovery chains
+    Log {
+        /// Mounted directory or repository name (default: mount containing the current directory)
+        subject: Option<String>,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show branch, tag, workspace, snapshot, and retained-chain positions
+    Smartlog {
+        /// Mounted directory or repository name (default: mount containing the current directory)
+        subject: Option<String>,
+
+        /// Show the bounded project-wide repository/workspace graph
+        #[arg(long)]
+        project: bool,
 
         /// Output JSON
         #[arg(long)]
@@ -1921,8 +1961,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     | GitCommands::Unmount { .. }
                     | GitCommands::Snapshot { .. }
                     | GitCommands::Sync { .. }
+                    | GitCommands::Rebase { .. }
                     | GitCommands::Promote { .. }
                     | GitCommands::Status { .. }
+                    | GitCommands::Log { .. }
+                    | GitCommands::Smartlog { .. }
             ) {
                 return run_git_mount_command(ctx, subcmd).await;
             }
@@ -2631,11 +2674,58 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
             }
             mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
         }
+        GitCommands::Rebase { path, target, .. } => {
+            if path.is_none() {
+                commands::fs::reject_mount_like_positional(
+                    target,
+                    "rebase target",
+                    "tl git rebase [PATH] <REF-OR-COMMIT>",
+                )?;
+            }
+            mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
+        }
+        GitCommands::Sync { path, target } => {
+            // With two optional positionals clap assigns a lone argument to PATH. Reinterpret a
+            // branch/tag/commit-shaped value as TARGET; explicit/existing paths remain paths.
+            if target.is_none()
+                && let Some(candidate) = path.as_ref()
+                && !commands::fs::positional_is_mount_path(candidate)?
+            {
+                *target = Some(candidate.to_string_lossy().into_owned());
+                *path = None;
+            }
+            mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
+        }
         GitCommands::Snapshot { path, .. }
-        | GitCommands::Sync { path, .. }
         | GitCommands::Status { path, .. }
         | GitCommands::Unmount { path, .. } => {
             mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
+        }
+        GitCommands::Log { subject, .. } => {
+            let candidate = subject.as_deref().map(std::path::Path::new);
+            if candidate.is_none()
+                || commands::fs::positional_is_mount_path(
+                    candidate.expect("checked Some").as_ref(),
+                )?
+            {
+                mount_dir = Some(commands::fs::resolve_mount_path(
+                    candidate.map(std::path::Path::to_path_buf),
+                )?);
+            }
+        }
+        GitCommands::Smartlog {
+            subject, project, ..
+        } => {
+            let candidate = subject.as_deref().map(std::path::Path::new);
+            let candidate_is_path = match candidate {
+                Some(path) => commands::fs::positional_is_mount_path(path)?,
+                None => false,
+            };
+            if candidate_is_path || (!*project && candidate.is_none()) {
+                mount_dir = Some(commands::fs::resolve_mount_path(
+                    candidate.map(std::path::Path::to_path_buf),
+                )?);
+            }
         }
         _ => {}
     }
@@ -2674,11 +2764,26 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
         GitCommands::Snapshot { message, clear, .. } => {
             commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), clear).await
         }
-        GitCommands::Sync { .. } => commands::fs::sync(ctx, &mount_dir(), None, false, None).await,
+        GitCommands::Sync { target, .. } => {
+            commands::fs::git_sync(ctx, &mount_dir(), target.as_deref()).await
+        }
+        GitCommands::Rebase {
+            target,
+            fail_on_conflict,
+            ..
+        } => commands::fs::git_rebase(ctx, &mount_dir(), &target, fail_on_conflict, None).await,
         GitCommands::Promote { branch, merge, .. } => {
             commands::fs::promote(ctx, &mount_dir(), &branch, false, merge, None).await
         }
-        GitCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
+        GitCommands::Status { json, .. } => commands::fs::git_status(ctx, &mount_dir(), json).await,
+        GitCommands::Log { subject, json } => {
+            commands::fs::git_log(ctx, subject.as_deref(), json).await
+        }
+        GitCommands::Smartlog {
+            subject,
+            project,
+            json,
+        } => commands::fs::git_smartlog(ctx, subject.as_deref(), project, json).await,
         GitCommands::Unmount {
             delete, discard, ..
         } => commands::fs::unmount(ctx, &mount_dir(), delete, discard).await,
@@ -2712,8 +2817,11 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
         | GitCommands::Unmount { .. }
         | GitCommands::Snapshot { .. }
         | GitCommands::Sync { .. }
+        | GitCommands::Rebase { .. }
         | GitCommands::Promote { .. }
-        | GitCommands::Status { .. } => {
+        | GitCommands::Status { .. }
+        | GitCommands::Log { .. }
+        | GitCommands::Smartlog { .. } => {
             unreachable!("the mount family is routed to run_git_mount_command before auth")
         }
         GitCommands::Clone {
@@ -3413,8 +3521,52 @@ mod tests {
             _ => panic!("expected git promote command"),
         }
         match parse_command(["tl", "git", "sync"]) {
-            Commands::Git(GitCommands::Sync { path: None, .. }) => {}
+            Commands::Git(GitCommands::Sync {
+                path: None,
+                target: None,
+            }) => {}
             _ => panic!("expected git sync command"),
+        }
+        match parse_command(["tl", "git", "sync", "./w", "refs/tags/v2"]) {
+            Commands::Git(GitCommands::Sync { path, target }) => {
+                assert_eq!(path, Some(PathBuf::from("./w")));
+                assert_eq!(target.as_deref(), Some("refs/tags/v2"));
+            }
+            _ => panic!("expected git sync path and target"),
+        }
+        match parse_command(["tl", "git", "rebase", "main", "--fail-on-conflict"]) {
+            Commands::Git(GitCommands::Rebase {
+                path: None,
+                target,
+                fail_on_conflict: true,
+            }) => assert_eq!(target, "main"),
+            _ => panic!("expected git rebase command"),
+        }
+        match parse_command(["tl", "git", "rebase", "./w", "main"]) {
+            Commands::Git(GitCommands::Rebase { path, target, .. }) => {
+                assert_eq!(path, Some(PathBuf::from("./w")));
+                assert_eq!(target, "main");
+            }
+            _ => panic!("expected git rebase path and target"),
+        }
+        match parse_command(["tl", "git", "log", "demo", "--json"]) {
+            Commands::Git(GitCommands::Log { subject, json }) => {
+                assert_eq!(subject.as_deref(), Some("demo"));
+                assert!(json);
+            }
+            _ => panic!("expected git log command"),
+        }
+        match parse_command(["tl", "git", "smartlog", "demo", "--project", "--json"]) {
+            Commands::Git(GitCommands::Smartlog {
+                subject,
+                project,
+                json,
+            }) => {
+                assert_eq!(subject.as_deref(), Some("demo"));
+                assert!(project);
+                assert!(json);
+            }
+            _ => panic!("expected git smartlog command"),
         }
         // `tl git status` is the mount status now; repo info keeps its `url` alias only.
         match parse_command(["tl", "git", "status"]) {

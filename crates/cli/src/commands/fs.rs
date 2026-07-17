@@ -23,6 +23,7 @@ use ignore::Match;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use tensorlake::artifact_storage::ArtifactStorageClient;
 use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
+use tensorlake::artifact_storage::merge::MergeRequest;
 use tensorlake::artifact_storage::models::GitCredential;
 use tensorlake::artifact_storage::native_fs::{
     NativeChangeSet, NativeLocalUpsert, NativePreparedSnapshotCandidate, NativePushEvent,
@@ -30,8 +31,9 @@ use tensorlake::artifact_storage::native_fs::{
     NativeWorkspaceInfo,
 };
 use tensorlake::artifact_storage::workspaces::{
-    CreateWorkspaceRequest, PromoteOutcome, PromoteWorkspaceRequest, SyncWorkspaceRequest,
-    TreeEntry, WorkspaceFleetItem, WorkspaceFleetQuery, WorkspaceInfo,
+    CreateWorkspaceRequest, GitMountSource, GitSmartlogPage, GitWorkspaceLogPage, PromoteOutcome,
+    PromoteWorkspaceRequest, RebaseWorkspaceRequest, SyncWorkspaceRequest, TreeEntry,
+    WorkspaceFleetItem, WorkspaceFleetQuery, WorkspaceInfo,
 };
 
 use crate::auth::context::CliContext;
@@ -2375,6 +2377,7 @@ pub async fn mount_filesystem(
             None,
             autosave,
             true,
+            None,
             Some(Resume {
                 workspace_id: &workspace_id,
                 state_dir: Some(state_dir),
@@ -2397,6 +2400,7 @@ pub async fn mount_filesystem(
         None,
         autosave,
         true,
+        None,
         None,
         foreground,
         trace_ops,
@@ -2463,7 +2467,8 @@ pub async fn mount_repo(
     trace_ops: bool,
     log_level: &str,
 ) -> Result<()> {
-    if publish && !target.contains(':') {
+    let (repo_source, subtree) = parse_git_mount_target(target)?;
+    if publish && !repo_source.contains(':') {
         return Err(CliError::usage(
             "--publish needs the branch to land on: tl git mount <repo>:<branch> ...",
         ));
@@ -2474,19 +2479,20 @@ pub async fn mount_repo(
         WritePolicy::Auto
     };
     let shared_target = publish.then(|| {
-        target
+        repo_source
             .split_once(':')
             .map(|(_, base)| base.to_string())
             .expect("guarded above")
     });
     mount(
         ctx,
-        target,
+        &repo_source,
         path,
         mode,
         shared_target,
         None,
         false,
+        subtree,
         // --workspace names an id inside `target`'s repo: per-repo attach, repo-scoped-safe.
         workspace.map(|id| Resume {
             workspace_id: id,
@@ -2497,6 +2503,56 @@ pub async fn mount_repo(
         log_level,
     )
     .await
+}
+
+/// Split the repository source from the optional subtree selector. A subtree is always a
+/// canonical repository-relative directory; keeping this parser at the command boundary means
+/// state files and mount-core options never have to represent ambiguous spellings.
+fn parse_git_mount_target(target: &str) -> Result<(String, Option<String>)> {
+    let Some((source, subtree)) = target.split_once("//") else {
+        if target.is_empty() {
+            return Err(CliError::usage("repository name cannot be empty"));
+        }
+        return Ok((target.to_string(), None));
+    };
+    if source.is_empty()
+        || subtree.is_empty()
+        || subtree.starts_with('/')
+        || subtree.ends_with('/')
+        || subtree.split('/').any(|component| {
+            component.is_empty()
+                || component == "."
+                || component == ".."
+                || component.as_bytes().contains(&0)
+        })
+    {
+        return Err(CliError::usage(format!(
+            "invalid subtree mount target {target:?}; use repo[:ref]//path/to/directory"
+        )));
+    }
+    Ok((source.to_string(), Some(subtree.to_string())))
+}
+
+/// Turn the server's explicit policy into the mount-core follow target, rejecting incoherent or
+/// future wire values instead of silently changing a live source into a pinned one.
+fn git_mount_follow_ref(source: &GitMountSource) -> Result<Option<String>> {
+    match (
+        source.kind.as_str(),
+        source.follow_policy.as_str(),
+        source.canonical_ref.as_deref(),
+    ) {
+        ("branch", "follow", Some(name)) if name.starts_with("refs/heads/") => {
+            Ok(Some(name.to_string()))
+        }
+        ("tag", "follow", Some(name)) if name.starts_with("refs/tags/") => {
+            Ok(Some(name.to_string()))
+        }
+        ("commit", "pinned", None) => Ok(None),
+        _ => Err(CliError::usage(
+            "server returned an incoherent repository mount source policy; update the server and \
+             CLI together",
+        )),
+    }
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -3780,6 +3836,13 @@ fn is_path_shaped(value: &Path) -> bool {
         || value.is_dir()
 }
 
+/// Resolve the intentional CLI ambiguity in commands that accept either `[PATH] [TARGET]` or a
+/// repository name: explicit/existing paths and registered mounts are paths; everything else is
+/// a ref/repository token.
+pub fn positional_is_mount_path(value: &Path) -> Result<bool> {
+    Ok(is_registered_mount(value)? || is_path_shaped(value))
+}
+
 /// Guard for `tl git promote <branch>` / `tl fs restore <version>` with the mount path omitted:
 /// when the sole positional is itself a mounted directory (or an explicit path), the user
 /// almost certainly forgot the branch/version — without this, promote would publish the CWD
@@ -3959,6 +4022,9 @@ pub async fn mount(
     // (workspaces, snapshots, branches). One engine, two vocabularies — the fs surface
     // keeps branch, commit, ref, and merge terminology out of its output.
     fs_surface: bool,
+    // Git-only repository-relative directory exposed as the mount root. Local overlay and
+    // status paths stay relative to it; snapshot submission restores this prefix.
+    subtree: Option<String>,
     // A workspace KNOWN to live in `target`'s repo (auto-resume, `--workspace`): attach
     // through the per-repo, principal-checked endpoint directly. Never routed through name
     // resolution — that path treats the id as a repo name and then falls back to a
@@ -3975,6 +4041,11 @@ pub async fn mount(
     if cfg!(not(unix)) {
         return Err(CliError::usage(
             "tl fs mount is supported on Linux (FUSE) and macOS (FSKit) only.",
+        ));
+    }
+    if fs_surface && subtree.is_some() {
+        return Err(CliError::usage(
+            "subtree selectors are a repository-mount feature; use `tl git mount repo//path`",
         ));
     }
     // The CLI's own phase timings (`phase=… "mount timing"`, debug level) surface on stderr
@@ -4145,6 +4216,9 @@ pub async fn mount(
     enum Resolved {
         Created(WorkspaceInfo),
         Attached(String, WorkspaceInfo),
+        /// Stateless read-only repository view. The UUID is a presence heartbeat id, not a
+        /// workspace and never a GC root.
+        ReadOnly(String, GitMountSource),
     }
     let resume_state_dir = resume.as_ref().and_then(|r| r.state_dir.clone());
     let resolved = if fs_surface {
@@ -4187,101 +4261,118 @@ pub async fn mount(
             Resolved::Created(native_workspace_to_mount_info(workspace))
         }
     } else {
-        let create_req = CreateWorkspaceRequest {
-            base: base.clone(),
-            shared_target: shared_target.clone(),
-            // The server applies product semantics from the repo's authoritative kind: an
-            // fs-surface create gets its publish target filled server-side (and a repository is
-            // rejected with the right command). Clients never pre-read listings to decide this.
-            surface: fs_surface.then(|| "filesystem".to_string()),
-            read_only: mode == WritePolicy::Ro,
-            ..Default::default()
-        };
-        // One create call site for both the first attempt and the post-seed retry, so the two can
-        // never drift apart.
-        let try_create = || {
-            session
+        if mode == WritePolicy::Ro && resume.is_none() {
+            let source = session
                 .client
-                .create_workspace(&session.project_id, name, user, token, &create_req)
-        };
-        if let Some(id) = resume.map(|r| r.workspace_id) {
-            let ws = session
-                .client
-                .get_workspace(&session.project_id, name, user, token, id)
-                .await
-                .map_err(|e| {
-                    CliError::usage(format!(
-                        "resuming {} {} of {name} failed: {e} (start fresh: tl fs mount {name} \
-                     <path>)",
-                        unit,
-                        short_id(id),
-                    ))
-                })?
+                .resolve_git_mount_source(
+                    &session.project_id,
+                    name,
+                    user,
+                    token,
+                    base.as_deref(),
+                    subtree.as_deref(),
+                )
+                .await?
                 .into_inner();
-            Resolved::Attached(name.to_string(), ws)
+            Resolved::ReadOnly(uuid::Uuid::new_v4().to_string(), source)
         } else {
-            match try_create().await {
-                Ok(ws) => Resolved::Created(ws.into_inner()),
-                Err(e) => match create_recovery(&e) {
-                    // No file system by this name and no branch was named: try it as a workspace id.
-                    Some(CreateRecovery::RepoMissing) if base.is_none() => {
-                        match resolve_workspace(&session, name).await? {
-                            Some((repo, ws)) => Resolved::Attached(repo, ws),
-                            None if fs_surface => {
-                                return Err(CliError::usage(format!(
-                                    "no filesystem named {name:?} (see: tl fs ls; create one: tl fs \
+            let create_req = CreateWorkspaceRequest {
+                base: base.clone(),
+                shared_target: shared_target.clone(),
+                // The server applies product semantics from the repo's authoritative kind: an
+                // fs-surface create gets its publish target filled server-side (and a repository is
+                // rejected with the right command). Clients never pre-read listings to decide this.
+                surface: fs_surface.then(|| "filesystem".to_string()),
+                read_only: mode == WritePolicy::Ro,
+                ..Default::default()
+            };
+            // One create call site for both the first attempt and the post-seed retry, so the two can
+            // never drift apart.
+            let try_create = || {
+                session
+                    .client
+                    .create_workspace(&session.project_id, name, user, token, &create_req)
+            };
+            if let Some(id) = resume.map(|r| r.workspace_id) {
+                let ws = session
+                    .client
+                    .get_workspace(&session.project_id, name, user, token, id)
+                    .await
+                    .map_err(|e| {
+                        CliError::usage(format!(
+                            "resuming {} {} of {name} failed: {e} (start fresh: tl fs mount {name} \
+                     <path>)",
+                            unit,
+                            short_id(id),
+                        ))
+                    })?
+                    .into_inner();
+                Resolved::Attached(name.to_string(), ws)
+            } else {
+                match try_create().await {
+                    Ok(ws) => Resolved::Created(ws.into_inner()),
+                    Err(e) => match create_recovery(&e) {
+                        // No file system by this name and no branch was named: try it as a workspace id.
+                        Some(CreateRecovery::RepoMissing) if base.is_none() => {
+                            match resolve_workspace(&session, name).await? {
+                                Some((repo, ws)) => Resolved::Attached(repo, ws),
+                                None if fs_surface => {
+                                    return Err(CliError::usage(format!(
+                                        "no filesystem named {name:?} (see: tl fs ls; create one: tl fs \
                              create {name})"
-                                )));
-                            }
-                            None => {
-                                return Err(CliError::usage(format!(
-                                    "no repo or workspace matches {name:?}. See `tl git ls`, or \
+                                    )));
+                                }
+                                None => {
+                                    return Err(CliError::usage(format!(
+                                        "no repo or workspace matches {name:?}. See `tl git ls`, or \
                              create the repo first: tl git create {name}"
-                                )));
+                                    )));
+                                }
                             }
                         }
-                    }
-                    Some(CreateRecovery::RepoMissing) if fs_surface => {
-                        return Err(CliError::usage(format!(
-                            "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create \
+                        Some(CreateRecovery::RepoMissing) if fs_surface => {
+                            return Err(CliError::usage(format!(
+                                "no filesystem named {name:?} (see: tl fs ls; create one: tl fs create \
                      {name})"
-                        )));
-                    }
-                    Some(CreateRecovery::RepoMissing) => {
-                        return Err(CliError::usage(format!(
-                            "no repo named {name:?}; create it first: tl git create {name}"
-                        )));
-                    }
-                    // Seed an unborn default branch whether it is implied OR named (either spelling):
-                    // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
-                    // fail with `base "main" does not resolve to a commit` while plain
-                    // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
-                    // write to the server (and with read-scoped credentials the seed push would fail
-                    // opaquely); ro keeps the clear server error. Other branch names stay strict —
-                    // seeding cannot conjure them.
-                    Some(CreateRecovery::BaseUnresolved) if fs_surface => return Err(e.into()),
-                    Some(CreateRecovery::BaseUnresolved) => {
-                        let file_systems = session
-                            .client
-                            .list_repos_with_credential(&session.project_id, None, user, token)
-                            .await?
-                            .into_inner();
-                        let Some(fs) = file_systems.repos.iter().find(|r| r.name == name) else {
-                            return Err(e.into());
-                        };
-                        let default_branch = fs.default_branch.clone();
-                        let names_default = base.as_deref().is_none_or(|b| {
-                            b == default_branch
-                                || b.strip_prefix("refs/heads/") == Some(&default_branch)
-                        });
-                        if !names_default || mode == WritePolicy::Ro {
-                            return Err(e.into());
+                            )));
                         }
-                        ensure_seeded(&session, &default_branch, name).await?;
-                        Resolved::Created(try_create().await?.into_inner())
-                    }
-                    None => return Err(e.into()),
-                },
+                        Some(CreateRecovery::RepoMissing) => {
+                            return Err(CliError::usage(format!(
+                                "no repo named {name:?}; create it first: tl git create {name}"
+                            )));
+                        }
+                        // Seed an unborn default branch whether it is implied OR named (either spelling):
+                        // a fresh `tl git create` repo has no commits, and `tl fs mount repo:main` used to
+                        // fail with `base "main" does not resolve to a commit` while plain
+                        // `tl fs mount repo` worked. Writable mounts only — a read-only view must never
+                        // write to the server (and with read-scoped credentials the seed push would fail
+                        // opaquely); ro keeps the clear server error. Other branch names stay strict —
+                        // seeding cannot conjure them.
+                        Some(CreateRecovery::BaseUnresolved) if fs_surface => return Err(e.into()),
+                        Some(CreateRecovery::BaseUnresolved) => {
+                            let file_systems = session
+                                .client
+                                .list_repos_with_credential(&session.project_id, None, user, token)
+                                .await?
+                                .into_inner();
+                            let Some(fs) = file_systems.repos.iter().find(|r| r.name == name)
+                            else {
+                                return Err(e.into());
+                            };
+                            let default_branch = fs.default_branch.clone();
+                            let names_default = base.as_deref().is_none_or(|b| {
+                                b == default_branch
+                                    || b.strip_prefix("refs/heads/") == Some(&default_branch)
+                            });
+                            if !names_default || mode == WritePolicy::Ro {
+                                return Err(e.into());
+                            }
+                            ensure_seeded(&session, &default_branch, name).await?;
+                            Resolved::Created(try_create().await?.into_inner())
+                        }
+                        None => return Err(e.into()),
+                    },
+                }
             }
         }
     };
@@ -4297,7 +4388,38 @@ pub async fn mount(
     // of two chained). The exception is a writable attach of a shared-rw workspace: its view
     // follows the target branch — a ref this response says nothing about — so the daemon
     // resolves that one serially.
-    let (repo, ws, attached, read_only, follow_ref, start_oid) = match resolved {
+    let (repo, ws, attached, read_only, follow_ref, start_oid, git_mount_source) = match resolved {
+        Resolved::ReadOnly(presence_id, source) => {
+            // Branches and tags follow the exact canonical namespace returned by the server;
+            // only raw commits are pinned.
+            let follow_ref = git_mount_follow_ref(&source)?;
+            let view_ref = follow_ref
+                .clone()
+                .unwrap_or_else(|| source.resolved_commit.clone());
+            let start_oid = Some(source.resolved_commit.clone());
+            let ws = WorkspaceInfo {
+                id: presence_id,
+                ref_name: view_ref,
+                principal: String::new(),
+                base: source.resolved_commit.clone(),
+                base_ref: source.canonical_ref.clone(),
+                head: source.resolved_commit.clone(),
+                created_at_secs: 0,
+                lease_secs: 0,
+                lease_due_ms: None,
+                pinned: false,
+                shared_target: None,
+            };
+            (
+                name.to_string(),
+                ws,
+                false,
+                true,
+                follow_ref,
+                start_oid,
+                Some(source),
+            )
+        }
         Resolved::Attached(repo, ws) => {
             if shared_target.is_some() {
                 return Err(CliError::usage(
@@ -4345,7 +4467,7 @@ pub async fn mount(
                     None => (None, Some(ws.head.clone())),
                 }
             };
-            (repo, ws, true, read_only, follow_ref, start_oid)
+            (repo, ws, true, read_only, follow_ref, start_oid, None)
         }
         Resolved::Created(ws) => {
             let read_only = mode == WritePolicy::Ro || pinned_native_snapshot.is_some();
@@ -4402,6 +4524,7 @@ pub async fn mount(
                 read_only,
                 follow_ref,
                 start_oid,
+                None,
             )
         }
     };
@@ -4455,6 +4578,9 @@ pub async fn mount(
             owner_uid: Some(owner_uid),
             owner_gid: Some(owner_gid),
             repo: repo.clone(),
+            subtree: subtree.clone(),
+            git_mount_source: git_mount_source.clone(),
+            mount_presence_id: git_mount_source.as_ref().map(|_| ws.id.clone()),
             native_filesystem: fs_surface,
             pinned_snapshot: pinned_native_snapshot.clone(),
             workspace_id: ws.id.clone(),
@@ -4532,6 +4658,26 @@ pub async fn mount(
                             ""
                         },
                     );
+                } else if let Some(source) = git_mount_source.as_ref() {
+                    println!(
+                        "Mounted read-only {}{} at {} (stateless; no workspace created)",
+                        repo,
+                        subtree
+                            .as_deref()
+                            .map(|path| format!("//{path}"))
+                            .unwrap_or_default(),
+                        mountpoint,
+                    );
+                    println!(
+                        "Source: {}{} at {}",
+                        source.kind,
+                        source
+                            .canonical_ref
+                            .as_deref()
+                            .map(|name| format!(" {name}"))
+                            .unwrap_or_default(),
+                        &source.resolved_commit[..source.resolved_commit.len().min(12)],
+                    );
                 } else {
                     println!(
                         "Mounted {}:{} at {} (workspace {}{})",
@@ -4561,6 +4707,14 @@ pub async fn mount(
                                 "Reading save {save}; new saves appear as the filesystem advances."
                             );
                         }
+                    } else if git_mount_source
+                        .as_ref()
+                        .is_some_and(|source| source.kind == "commit")
+                    {
+                        println!(
+                            "Reading pinned commit {}; this view does not follow a ref.",
+                            resp.get("commit").and_then(|c| c.as_str()).unwrap_or("?"),
+                        );
                     } else {
                         println!(
                             "Reading commit {}; new commits appear as the followed ref advances.",
@@ -4611,6 +4765,17 @@ pub async fn mount(
                                 &ws.id,
                                 user,
                                 token,
+                            )
+                            .await;
+                    } else if git_mount_source.is_some() {
+                        let _ = session
+                            .client
+                            .delete_git_mount_presence(
+                                &session.project_id,
+                                &repo,
+                                user,
+                                token,
+                                &ws.id,
                             )
                             .await;
                     } else {
@@ -4900,6 +5065,12 @@ pub async fn unmount(
         }
     };
     let state = daemon::load_mount_state(&state_dir)?;
+    if delete && state.mount_presence_id.is_some() {
+        return Err(CliError::usage(
+            "this is a stateless read-only repository view, so it has no workspace to delete; \
+             rerun `tl git unmount` without `--delete`",
+        ));
+    }
     refuse_while_native_restore_active(&state_dir, &mountpoint, &state, "unmount").await?;
     if state.native_filesystem {
         let lifecycle = native_lifecycle_for_mount(&state_dir, &mountpoint, &state).await?;
@@ -4995,6 +5166,36 @@ pub async fn unmount(
         }
     }
     bar.finish_and_clear();
+    if let Some(presence_id) = state.mount_presence_id.as_deref() {
+        // Presence is observational and TTL-bound, so failure to remove it must not strand a
+        // local unmount. A final best-effort DELETE makes clean exits disappear immediately;
+        // crashed/offline exits disappear at expiry.
+        match FsSession::open(ctx, Some(&state.repo)).await {
+            Ok(session) => {
+                let (user, token) = session.creds();
+                if let Err(error) = session
+                    .client
+                    .delete_git_mount_presence(
+                        &session.project_id,
+                        &state.repo,
+                        user,
+                        token,
+                        presence_id,
+                    )
+                    .await
+                {
+                    eprintln!(
+                        "warning: could not remove read-only mount presence (it will expire): \
+                         {error}"
+                    );
+                }
+            }
+            Err(error) => eprintln!(
+                "warning: could not authenticate to remove read-only mount presence (it will \
+                 expire): {error}"
+            ),
+        }
+    }
     if delete {
         let session = FsSession::open(ctx, Some(&state.repo)).await?;
         let (user, token) = session.creds();
@@ -5043,6 +5244,8 @@ pub async fn unmount(
             "Unmounted {mountpoint} (session {} deleted).",
             short_id(&state.workspace_id)
         );
+    } else if state.mount_presence_id.is_some() {
+        println!("Unmounted read-only repository view at {mountpoint}.");
     } else if state.native_filesystem {
         println!(
             "Unmounted {mountpoint}. Session {} kept — `tl fs mount {} <path>` resumes it.",
@@ -6218,7 +6421,7 @@ pub async fn promote(
                             eprintln!("  {:<14} {}", style(&c.kind).yellow(), c.path);
                         }
                         return Err(CliError::usage(format!(
-                            "pull {branch} into the working tree, resolve, and promote again:\n  tl git sync {}\n  # fix the conflict markers, then\n  tl git snapshot {} && tl git promote {} {branch} --merge",
+                            "rebase the workspace onto {branch}, resolve, and promote again:\n  tl git rebase {} {branch}\n  # fix the conflict markers, then\n  tl git snapshot {} && tl git promote {} {branch} --merge",
                             path.display(),
                             path.display(),
                             path.display(),
@@ -6253,7 +6456,7 @@ pub async fn promote(
     Ok(())
 }
 
-/// Sync: pull the target branch into a behind workspace — one server-side rebase-style merge
+/// Rebase: pull the target branch into a behind workspace — one server-side rebase-style merge
 /// commit on the target head; the mount's lower layer then advances to it. Under the default
 /// materialize policy conflicts land as diff3 markers in the workspace files; resolve them and
 /// snapshot. Local overlay changes would shadow synced content (markers included), so the
@@ -6261,26 +6464,34 @@ pub async fn promote(
 /// then ask the daemon to `trim` retained sealed content out of the overlay (safe: those bytes
 /// are in workspace history) so nothing sealed shadows the pull either. Ignored local-only
 /// files survive; a sealed file held open by a live writer blocks the sync by name.
-pub async fn sync(
+pub async fn git_rebase(
     ctx: &CliContext,
     path: &Path,
-    target: Option<&str>,
+    target: &str,
     fail_on_conflict: bool,
     message: Option<&str>,
 ) -> Result<()> {
     if plaindir::binding_for_lenient(path).is_some() {
         return Err(CliError::usage(
-            "sync is not supported for plain-directory bindings in v1 (there is no mount to \
-             materialize pulled content into); v1 bindings are single-writer capture only",
+            "rebase is not supported for plain-directory bindings in v1 (there is no mount to \
+             materialize rebased content into); v1 bindings are single-writer capture only",
         ));
     }
     let (mountpoint, state_dir) = state_dir_for(path)?;
     let state = daemon::load_mount_state(&state_dir)?;
-    refuse_while_native_restore_active(&state_dir, &mountpoint, &state, "sync").await?;
+    refuse_while_native_restore_active(&state_dir, &mountpoint, &state, "rebase").await?;
     if state.read_only() {
         return Err(CliError::usage(format!(
-            "this is a read-only mount following {}; it syncs automatically",
+            "this is a read-only mount following {}; it cannot be rebased",
             state.follow_ref.as_deref().unwrap_or("the branch"),
+        )));
+    }
+    if let Some(target_ref) = state.follow_ref.as_deref() {
+        return Err(CliError::usage(format!(
+            "this workspace publishes every snapshot to {target_ref} and serves that branch; \
+             rebasing only its private workspace ref would make the result invisible in the \
+             mount. Snapshot normally (server reconciliation incorporates branch advances), or \
+             create a non-publish workspace for an explicit rebase"
         )));
     }
     let session = FsSession::open(ctx, Some(&state.repo)).await?;
@@ -6292,12 +6503,12 @@ pub async fn sync(
         // on retained files.
         return Err(CliError::usage(
             "the mount daemon is not answering the dirty query (not running, or it predates \
-             this CLI); remount with `tl fs mount` and retry the sync",
+             this CLI); remount with `tl git mount` and retry the rebase",
         ));
     }
     if changes.dirty() > 0 {
         return Err(CliError::usage(format!(
-            "{} local change(s) would shadow synced content. Seal them first: `tl fs snapshot {}`, then rerun the sync.",
+            "{} local change(s) would shadow rebased content. Snapshot them first: `tl git snapshot {}`, then rerun the rebase.",
             changes.dirty(),
             path.display(),
         )));
@@ -6312,26 +6523,28 @@ pub async fn sync(
     if !trim.held_open.is_empty() {
         return Err(CliError::usage(format!(
             "{} sealed file(s) could not be released (held open by a running process, or the \
-             drop failed — first: {}); resolve that and rerun the sync",
+             drop failed — first: {}); resolve that and rerun the rebase",
             trim.held_open.len(),
             trim.held_open[0],
         )));
     }
     let (user, token) = session.creds();
-    let request = SyncWorkspaceRequest {
-        target: target.map(str::to_string),
+    let recovering =
+        target.starts_with(&format!("refs/workspaces/{}/presync/", state.workspace_id));
+    let request = RebaseWorkspaceRequest {
+        target: Some(target.to_string()),
         policy: fail_on_conflict.then(|| "fail".to_string()),
         message: message.map(str::to_string),
         ..Default::default()
     };
-    // Same 425 contract as promote: a sync issued right behind a snapshot can catch the
+    // Same 425 contract as promote: a rebase issued right behind a snapshot can catch the
     // commit index still materializing.
     let resp = {
         let deadline = std::time::Instant::now() + TOO_EARLY_DEADLINE;
         loop {
             match session
                 .client
-                .workspace_sync(
+                .workspace_rebase(
                     &session.project_id,
                     &state.repo,
                     user,
@@ -6351,6 +6564,32 @@ pub async fn sync(
             }
         }
     };
+    let recovery_ref = resp.recovery_ref.clone();
+    let mut resp = resp.result;
+    let mut outside_conflicts = Vec::new();
+    if let Some(prefix) = state.subtree.as_deref() {
+        let child_prefix = format!("{prefix}/");
+        resp.conflicts = resp
+            .conflicts
+            .into_iter()
+            .filter_map(|mut conflict| {
+                let repo_path = conflict.path.clone();
+                let projected = if repo_path == prefix {
+                    ".".to_string()
+                } else {
+                    match repo_path.strip_prefix(&child_prefix) {
+                        Some(path) => path.to_string(),
+                        None => {
+                            outside_conflicts.push(conflict);
+                            return None;
+                        }
+                    }
+                };
+                conflict.path = projected;
+                Some(conflict)
+            })
+            .collect();
+    }
     if resp.up_to_date {
         println!(
             "Already up to date with {}.",
@@ -6360,12 +6599,19 @@ pub async fn sync(
     }
     if !resp.clean && fail_on_conflict {
         eprintln!(
-            "{} sync conflicts on {} path(s); the workspace is unchanged:",
+            "{} rebase conflicts on {} path(s); the workspace is unchanged:",
             style("error:").red(),
-            resp.conflicts.len(),
+            resp.conflicts.len() + outside_conflicts.len(),
         );
         for c in &resp.conflicts {
             eprintln!("  {:<14} {}", style(&c.kind).yellow(), c.path);
+        }
+        for c in &outside_conflicts {
+            eprintln!(
+                "  {:<14} {} (outside mounted subtree)",
+                style(&c.kind).yellow(),
+                c.path
+            );
         }
         return Err(CliError::usage(
             "rerun without --fail-on-conflict to materialize the conflicts as diff3 markers",
@@ -6404,33 +6650,231 @@ pub async fn sync(
         } else if !complete {
             eprintln!(
                 "{} a refresh could not enumerate newly added paths; files pulled by this \
-                 sync can transiently answer ENOENT (kernel cache, ~30s)",
+                 rebase can transiently answer ENOENT (kernel cache, ~30s)",
                 style("warning:").yellow(),
             );
         }
     }
-    println!(
-        "Synced with {} ({} path(s) pulled){}.",
-        &resp.target_head[..resp.target_head.len().min(12)],
-        resp.changed_paths,
-        if resp.fast_forwarded {
-            "; workspace fast-forwarded"
-        } else {
-            ""
-        },
-    );
-    if !resp.conflicts.is_empty() {
+    if recovering {
+        println!(
+            "Recovered retained chain {} at {}.",
+            target,
+            &resp.workspace_head[..resp.workspace_head.len().min(12)],
+        );
+    } else {
+        println!(
+            "Rebased onto {} ({} path(s) changed){}.",
+            &resp.target_head[..resp.target_head.len().min(12)],
+            resp.changed_paths,
+            if resp.fast_forwarded {
+                "; workspace fast-forwarded"
+            } else {
+                ""
+            },
+        );
+    }
+    if !resp.conflicts.is_empty() || !outside_conflicts.is_empty() {
         println!(
             "{} {} conflict(s) materialized as diff3 markers:",
             style("note:").yellow(),
-            resp.conflicts.len(),
+            resp.conflicts.len() + outside_conflicts.len(),
         );
         for c in &resp.conflicts {
             println!("  {:<14} {}", style(&c.kind).yellow(), c.path);
         }
+        for c in &outside_conflicts {
+            println!(
+                "  {:<14} {} (outside mounted subtree)",
+                style(&c.kind).yellow(),
+                c.path
+            );
+        }
+        if outside_conflicts.is_empty() {
+            println!(
+                "Resolve the markers, then `tl git snapshot {}`.",
+                path.display()
+            );
+        } else {
+            println!(
+                "Resolve every marker by resuming this workspace in a full-repository mount (or \
+                 a subtree that contains the listed paths), then snapshot it."
+            );
+        }
+    }
+    if let Some(recovery_ref) = recovery_ref {
+        println!("Retained the replaced chain at {recovery_ref}.");
+    }
+    Ok(())
+}
+
+/// Refresh the current repository view, or switch a pristine workspace to another source. The
+/// server refuses any switch that would rewrite a snapshot chain and points the caller at
+/// `tl git rebase`; this client also refuses unsnapshotted local changes before making the call.
+pub async fn git_sync(ctx: &CliContext, path: &Path, target: Option<&str>) -> Result<()> {
+    let (mountpoint, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    if state.native_filesystem {
+        return Err(CliError::usage(
+            "this is a filesystem mount; use `tl fs status` or `tl fs snapshot`",
+        ));
+    }
+
+    if state.read_only() {
+        let refresh = if let Some(target) = target {
+            let previous_presence = state.mount_presence_id.as_deref().ok_or_else(|| {
+                CliError::usage(
+                    "this is a read-only attachment to a durable workspace; switching it would \
+                     move the active writer's view. Mount a stateless view with `--ro` instead",
+                )
+            })?;
+            let session = FsSession::open(ctx, Some(&state.repo)).await?;
+            let (user, token) = session.creds();
+            let source = session
+                .client
+                .resolve_git_mount_source(
+                    &session.project_id,
+                    &state.repo,
+                    user,
+                    token,
+                    Some(target),
+                    state.subtree.as_deref(),
+                )
+                .await?
+                .into_inner();
+            // Presence rows bind their source immutably. A source switch gets a fresh session id
+            // so a concurrent/stale heartbeat can never rewrite the identity of the old view.
+            let presence_id = uuid::Uuid::new_v4().to_string();
+            let refresh = daemon::control_with(
+                &state_dir,
+                "switch-source",
+                serde_json::json!({
+                    "source": source.clone(),
+                    "presence_id": presence_id.clone(),
+                }),
+            )
+            .await?;
+            if let Err(error) = session
+                .client
+                .record_git_mount_presence(
+                    &session.project_id,
+                    &state.repo,
+                    user,
+                    token,
+                    &presence_id,
+                    &tensorlake::artifact_storage::workspaces::RecordGitMountPresenceRequest {
+                        source: &source,
+                        mounted_on: &mountpoint,
+                        ttl_seconds: None,
+                    },
+                )
+                .await
+            {
+                eprintln!(
+                    "{} the view switched, but its presence update will wait for the next \
+                     heartbeat: {error}",
+                    style("warning:").yellow(),
+                );
+            }
+            if let Err(error) = session
+                .client
+                .delete_git_mount_presence(
+                    &session.project_id,
+                    &state.repo,
+                    user,
+                    token,
+                    previous_presence,
+                )
+                .await
+            {
+                eprintln!(
+                    "{} the old mount presence will disappear at expiry: {error}",
+                    style("warning:").yellow(),
+                );
+            }
+            refresh
+        } else {
+            daemon::control(&state_dir, "refresh").await?
+        };
+        let (expect, _, _) = parse_refresh_probes(&refresh);
+        if cfg!(target_os = "macos") && !expect.is_empty() {
+            let changed: BTreeSet<String> = expect.keys().cloned().collect();
+            converge_kernel_view(Path::new(&mountpoint), &changed, &expect);
+        }
+        let commit = refresh
+            .get("commit")
+            .and_then(serde_json::Value::as_str)
+            .or(state.start_oid.as_deref())
+            .unwrap_or("unknown");
         println!(
-            "Resolve the markers, then `tl fs snapshot {}`.",
-            path.display()
+            "{} {} at {}.",
+            if target.is_some() {
+                "Switched"
+            } else {
+                "Refreshed"
+            },
+            state.repo,
+            short_id(commit)
+        );
+        return Ok(());
+    }
+
+    if target.is_some()
+        && let Some(target_ref) = state.follow_ref.as_deref()
+    {
+        return Err(CliError::usage(format!(
+            "this workspace is fixed to its publish target {target_ref}; retargeting it would \
+             leave the live mount serving the old branch. Create a new publish workspace for \
+             the other target, or run `tl git sync` without a target to refresh this one"
+        )));
+    }
+
+    let changes = local_changes(&state_dir, &mountpoint).await?;
+    if !changes.exact {
+        return Err(CliError::usage(
+            "the mount daemon is not answering the dirty query; remount with `tl git mount` \
+             and retry the sync",
+        ));
+    }
+    if changes.dirty() > 0 {
+        return Err(CliError::usage(format!(
+            "{} local change(s) would shadow the switched view. Snapshot them first with \
+             `tl git snapshot {}`.",
+            changes.dirty(),
+            path.display(),
+        )));
+    }
+
+    let session = FsSession::open(ctx, Some(&state.repo)).await?;
+    heartbeat(&session, &state).await?;
+    let (user, token) = session.creds();
+    let request = SyncWorkspaceRequest {
+        target: target.map(str::to_string),
+        ..Default::default()
+    };
+    let response = session
+        .client
+        .workspace_sync(
+            &session.project_id,
+            &state.repo,
+            user,
+            token,
+            &state.workspace_id,
+            &request,
+        )
+        .await?
+        .into_inner();
+    let _ = daemon::control(&state_dir, "refresh").await?;
+    if !response.changed {
+        println!("Already at {}.", short_id(&response.target_head));
+    } else {
+        println!(
+            "Switched pristine workspace {} to {} at {}.",
+            short_id(&state.workspace_id),
+            response
+                .target_ref
+                .as_deref()
+                .unwrap_or("the requested commit"),
+            short_id(&response.target_head),
         );
     }
     Ok(())
@@ -8066,6 +8510,728 @@ pub async fn status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<
     Ok(())
 }
 
+#[derive(Debug, serde::Serialize)]
+struct GitStatusWorkspace {
+    id: String,
+    base: String,
+    snapshot: String,
+    target: Option<String>,
+    relationship: String,
+    conflicts: Vec<serde_json::Value>,
+    conflict_operation: Option<String>,
+    retained_chains: Vec<String>,
+    retained_chains_truncated: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct GitStatusLocal {
+    changed_paths: usize,
+    exact: bool,
+}
+
+#[derive(Debug, serde::Serialize)]
+struct GitStatusReport {
+    format_ver: u16,
+    state: String,
+    view_type: String,
+    repository: String,
+    subtree: Option<String>,
+    canonical_source: String,
+    resolved_commit: Option<String>,
+    following: bool,
+    connected: bool,
+    workspace: Option<GitStatusWorkspace>,
+    local: GitStatusLocal,
+    next_actions: Vec<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn classify_git_status(
+    source_deleted: bool,
+    connected: bool,
+    conflict_state: Option<&'static str>,
+    read_only: bool,
+    following: bool,
+    dirty: usize,
+    publish_workspace: bool,
+    target_advanced: bool,
+    snapshotted: bool,
+    has_unlanded_snapshots: bool,
+) -> (&'static str, Vec<String>) {
+    if source_deleted {
+        return (
+            "source_ref_deleted",
+            vec![if publish_workspace {
+                "unmount and create a new publish workspace on an existing branch".to_string()
+            } else if has_unlanded_snapshots {
+                "tl git rebase <REF-OR-COMMIT>".to_string()
+            } else {
+                "tl git sync <REF-OR-COMMIT>".to_string()
+            }],
+        );
+    }
+    if !connected {
+        return (
+            "server_unreachable_stale_view",
+            vec!["restore connectivity, then run tl git sync".to_string()],
+        );
+    }
+    if let Some(conflict_state) = conflict_state {
+        return (
+            conflict_state,
+            vec![
+                "resolve conflict markers".to_string(),
+                "tl git snapshot".to_string(),
+                "tl git promote <BRANCH>".to_string(),
+            ],
+        );
+    }
+    if read_only {
+        return if following {
+            ("read_only_following", vec!["tl git sync".to_string()])
+        } else {
+            ("read_only_pinned", Vec::new())
+        };
+    }
+    // A local edit always comes before branch relationship advice: rebase/sync intentionally reject
+    // dirty overlays, so the only valid next transition is to snapshot first.
+    if dirty > 0 {
+        return (
+            "workspace_locally_dirty",
+            vec!["tl git snapshot".to_string()],
+        );
+    }
+    if publish_workspace {
+        return (
+            "workspace_clean",
+            vec!["edit files or run tl git sync".to_string()],
+        );
+    }
+    if target_advanced && snapshotted {
+        return (
+            "workspace_target_advanced",
+            vec!["tl git rebase <REF-OR-COMMIT>".to_string()],
+        );
+    }
+    if has_unlanded_snapshots {
+        return (
+            "workspace_snapshotted_unpromoted",
+            vec![
+                "tl git promote <BRANCH>".to_string(),
+                "tl git rebase <REF-OR-COMMIT>".to_string(),
+            ],
+        );
+    }
+    (
+        "workspace_clean",
+        vec!["edit files or tl git sync [REF-OR-COMMIT]".to_string()],
+    )
+}
+
+/// Repository-specific status. This intentionally does not reuse the filesystem renderer: its
+/// stable JSON and text name Git workspaces, snapshots, refs, conflicts, and recovery actions.
+pub async fn git_status(ctx: &CliContext, path: &Path, output_json: bool) -> Result<()> {
+    let (mountpoint, state_dir) = state_dir_for(path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    if state.native_filesystem {
+        return Err(CliError::usage(format!(
+            "{} is a native filesystem mount; use `tl fs status {}`",
+            mountpoint, mountpoint,
+        )));
+    }
+    let changes = local_changes(&state_dir, &mountpoint).await?;
+    let dirty = changes.dirty();
+    let daemon_ping = daemon::control(&state_dir, "ping").await.ok();
+    let conflicts = daemon::control(&state_dir, "conflicts")
+        .await
+        .ok()
+        .and_then(|reply| reply.get("conflicts").cloned())
+        .and_then(|value| value.as_array().cloned())
+        .unwrap_or_default();
+
+    // Status must remain useful during an outage. Credential loading/minting and every remote
+    // lookup are therefore evidence for `connected`, not `?` exits that hide the stale local view.
+    let session = FsSession::open(ctx, Some(&state.repo)).await.ok();
+    let expects_workspace = state.mount_presence_id.is_none();
+    let workspace = if expects_workspace {
+        match session.as_ref() {
+            Some(session) => {
+                let (user, token) = session.creds();
+                session
+                    .client
+                    .get_workspace(
+                        &session.project_id,
+                        &state.repo,
+                        user,
+                        token,
+                        &state.workspace_id,
+                    )
+                    .await
+                    .ok()
+                    .map(|response| response.into_inner())
+            }
+            None => None,
+        }
+    } else {
+        None
+    };
+    let canonical_source = state
+        .git_mount_source
+        .as_ref()
+        .and_then(|source| source.canonical_ref.clone())
+        .or_else(|| state.follow_ref.clone())
+        .or_else(|| {
+            workspace
+                .as_ref()
+                .and_then(|workspace| workspace.base_ref.clone())
+        })
+        .or_else(|| workspace.as_ref().map(|workspace| workspace.base.clone()))
+        .unwrap_or_else(|| state.ref_name.clone());
+    let source_status_result = match session.as_ref() {
+        Some(session) if canonical_source.starts_with("refs/") => {
+            let (user, token) = session.creds();
+            Some(
+                session
+                    .client
+                    .ref_status(
+                        &session.project_id,
+                        &state.repo,
+                        user,
+                        token,
+                        &canonical_source,
+                    )
+                    .await
+                    .map(|status| status.into_inner()),
+            )
+        }
+        _ => None,
+    };
+    // A pinned full-commit mount has no ref to probe. Re-resolving its exact commit is a bounded
+    // read-only reachability check and also revalidates the selected subtree.
+    let pinned_probe_ok = if !expects_workspace && !canonical_source.starts_with("refs/") {
+        match session.as_ref() {
+            Some(session) => {
+                let (user, token) = session.creds();
+                session
+                    .client
+                    .resolve_git_mount_source(
+                        &session.project_id,
+                        &state.repo,
+                        user,
+                        token,
+                        Some(&canonical_source),
+                        state.subtree.as_deref(),
+                    )
+                    .await
+                    .is_ok()
+            }
+            None => false,
+        }
+    } else {
+        true
+    };
+    let server_reachable = session.is_some()
+        && (!expects_workspace || workspace.is_some())
+        && source_status_result
+            .as_ref()
+            .is_none_or(|result| result.is_ok())
+        && pinned_probe_ok;
+    let source_status = source_status_result.and_then(|result| result.ok());
+    let connected = daemon_ping.is_some() && server_reachable;
+    let source_deleted = source_status
+        .as_ref()
+        .is_some_and(|status| status.oid.is_none());
+    let target_oid = source_status.as_ref().and_then(|status| {
+        status
+            .resolved_commit
+            .as_deref()
+            .or(status.oid.as_deref())
+            .map(str::to_string)
+    });
+    let snapshotted = workspace
+        .as_ref()
+        .is_some_and(|workspace| workspace.head != workspace.base);
+
+    // Equality handles the common cases without another request. The ambiguous case needs a real
+    // graph relation: a publish reconcile often makes a merge commit that contains the workspace
+    // snapshot, so `target != head` is not evidence of divergence.
+    let relationship = match (workspace.as_ref(), target_oid.as_deref()) {
+        (None, _) => "not_applicable",
+        (Some(workspace), None) if workspace.head == workspace.base => "aligned",
+        (Some(_), None) => "ahead",
+        (Some(workspace), Some(target)) if target == workspace.head => "aligned",
+        (Some(workspace), Some(target)) if target == workspace.base => {
+            if workspace.head == workspace.base {
+                "aligned"
+            } else {
+                "ahead"
+            }
+        }
+        (Some(workspace), Some(_)) if workspace.head == workspace.base => "behind",
+        (Some(workspace), Some(target)) => match session.as_ref() {
+            Some(session) => {
+                let (user, token) = session.creds();
+                match session
+                    .client
+                    .repo_merge(
+                        &session.project_id,
+                        &state.repo,
+                        user,
+                        token,
+                        &MergeRequest {
+                            ours: target.to_string(),
+                            theirs: workspace.head.clone(),
+                            ..Default::default()
+                        },
+                    )
+                    .await
+                {
+                    Ok(report) if report.already_merged => "behind",
+                    Ok(report) if report.fast_forward => "ahead",
+                    Ok(_) => "diverged",
+                    Err(_) => "unknown",
+                }
+            }
+            None => "unknown",
+        },
+    };
+    let target_advanced = matches!(relationship, "behind" | "diverged");
+    let has_unlanded_snapshots =
+        snapshotted && matches!(relationship, "ahead" | "diverged" | "unknown");
+    let publish_workspace = !state.read_only() && state.follow_ref.is_some();
+
+    let (conflict_operation, retained_chains, retained_chains_truncated) =
+        match (session.as_ref(), workspace.as_ref()) {
+            (Some(session), Some(workspace)) => {
+                let (user, token) = session.creds();
+                let conflict_operation = if conflicts.is_empty() {
+                    None
+                } else {
+                    session
+                        .client
+                        .workspace_log(
+                            &session.project_id,
+                            &state.repo,
+                            user,
+                            token,
+                            &state.workspace_id,
+                            None,
+                            1,
+                        )
+                        .await
+                        .ok()
+                        .and_then(|page| {
+                            page.into_inner()
+                                .active_chain
+                                .into_iter()
+                                .find(|entry| entry.oid == workspace.head && entry.conflicted)
+                                .and_then(|entry| entry.operation)
+                        })
+                };
+                // Jump directly to the retained-ref phase. Walking a long active chain first can
+                // otherwise make status falsely claim there are no recovery refs.
+                let retained = session
+                    .client
+                    .workspace_log(
+                        &session.project_id,
+                        &state.repo,
+                        user,
+                        token,
+                        &state.workspace_id,
+                        Some("r:"),
+                        200,
+                    )
+                    .await
+                    .ok()
+                    .map(|page| page.into_inner());
+                let truncated = retained.as_ref().is_some_and(|page| page.truncated);
+                let refs = retained
+                    .into_iter()
+                    .flat_map(|page| page.retained_chains)
+                    .map(|chain| chain.recovery_ref)
+                    .collect();
+                (conflict_operation, refs, truncated)
+            }
+            _ => (None, Vec::new(), false),
+        };
+    let conflict_state = conflict_operation
+        .as_deref()
+        .is_some_and(|operation| operation == "rebase" || operation == "workspace_sync")
+        .then_some("rebase_conflict")
+        .unwrap_or("merge_conflict_requires_sync_rebase");
+    let (state_name, next_actions) = classify_git_status(
+        source_deleted,
+        connected,
+        (!conflicts.is_empty()).then_some(conflict_state),
+        state.read_only(),
+        state.follow_ref.is_some(),
+        dirty,
+        publish_workspace,
+        target_advanced,
+        snapshotted,
+        has_unlanded_snapshots,
+    );
+    let workspace_report = if expects_workspace {
+        let base = workspace
+            .as_ref()
+            .map(|workspace| workspace.base.clone())
+            .or_else(|| state.start_oid.clone())
+            .unwrap_or_else(|| "unknown".to_string());
+        let snapshot = workspace
+            .as_ref()
+            .map(|workspace| workspace.head.clone())
+            .or_else(|| {
+                daemon_ping.as_ref().and_then(|reply| {
+                    reply
+                        .get("commit")
+                        .and_then(serde_json::Value::as_str)
+                        .map(str::to_string)
+                })
+            })
+            .unwrap_or_else(|| "unknown".to_string());
+        Some(GitStatusWorkspace {
+            id: workspace
+                .as_ref()
+                .map(|workspace| workspace.id.clone())
+                .unwrap_or_else(|| state.workspace_id.clone()),
+            base,
+            snapshot,
+            target: workspace
+                .as_ref()
+                .and_then(|workspace| workspace.shared_target.clone())
+                .or_else(|| {
+                    state
+                        .follow_ref
+                        .as_deref()
+                        .and_then(|name| name.strip_prefix("refs/heads/"))
+                        .map(str::to_string)
+                }),
+            relationship: relationship.to_string(),
+            conflicts,
+            conflict_operation,
+            retained_chains,
+            retained_chains_truncated,
+        })
+    } else {
+        None
+    };
+    let report = GitStatusReport {
+        format_ver: 1,
+        state: state_name.to_string(),
+        view_type: if state.read_only() {
+            "read_only_view".to_string()
+        } else {
+            "writable_workspace".to_string()
+        },
+        repository: state.repo.clone(),
+        subtree: state.subtree.clone(),
+        canonical_source,
+        resolved_commit: daemon_ping.as_ref().and_then(|reply| {
+            reply
+                .get("commit")
+                .and_then(|v| v.as_str())
+                .map(str::to_string)
+        }),
+        following: state.follow_ref.is_some(),
+        connected,
+        workspace: workspace_report,
+        local: GitStatusLocal {
+            changed_paths: dirty,
+            exact: changes.exact,
+        },
+        next_actions,
+    };
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&report)?);
+    } else {
+        render_git_status(&report);
+    }
+    Ok(())
+}
+
+fn render_git_status(report: &GitStatusReport) {
+    println!("{} {}", style("repository:").dim(), report.repository);
+    println!("{} {}", style("state:").dim(), report.state);
+    println!("{} {}", style("source:").dim(), report.canonical_source);
+    if let Some(subtree) = report.subtree.as_deref() {
+        println!("{} {subtree}", style("subtree:").dim());
+    }
+    if let Some(commit) = report.resolved_commit.as_deref() {
+        println!("{} {}", style("commit:").dim(), short_id(commit));
+    }
+    if let Some(workspace) = report.workspace.as_ref() {
+        println!("{} {}", style("workspace:").dim(), workspace.id);
+        println!("{} {}", style("base:").dim(), short_id(&workspace.base));
+        println!(
+            "{} {}",
+            style("snapshot:").dim(),
+            short_id(&workspace.snapshot)
+        );
+        if let Some(target) = workspace.target.as_deref() {
+            println!("{} {target}", style("target:").dim());
+        }
+        println!(
+            "{} {}",
+            style("relationship:").dim(),
+            workspace.relationship
+        );
+        if !workspace.conflicts.is_empty() {
+            println!(
+                "{} {}{}",
+                style("conflicts:").yellow(),
+                workspace.conflicts.len(),
+                workspace
+                    .conflict_operation
+                    .as_deref()
+                    .map(|operation| format!(" (created by {operation})"))
+                    .unwrap_or_default()
+            );
+        }
+        if !workspace.retained_chains.is_empty() {
+            println!(
+                "{} {}{}",
+                style("recovery chains:").dim(),
+                workspace.retained_chains.join(", "),
+                if workspace.retained_chains_truncated {
+                    " (more available via tl git log)"
+                } else {
+                    ""
+                }
+            );
+        }
+    }
+    println!(
+        "{} {} path(s){}",
+        style("local changes:").dim(),
+        report.local.changed_paths,
+        if report.local.exact {
+            ""
+        } else {
+            " (estimate)"
+        },
+    );
+    for action in &report.next_actions {
+        println!("{} {action}", style("next:").green());
+    }
+}
+
+fn mounted_git_subject(subject: Option<&str>) -> Result<Option<(String, PathBuf, MountState)>> {
+    let path = match subject {
+        None => Some(mount_containing_cwd()?),
+        Some(subject) if positional_is_mount_path(Path::new(subject))? => {
+            Some(PathBuf::from(subject))
+        }
+        Some(_) => None,
+    };
+    let Some(path) = path else {
+        return Ok(None);
+    };
+    let (mountpoint, state_dir) = state_dir_for(&path)?;
+    let state = daemon::load_mount_state(&state_dir)?;
+    if state.native_filesystem {
+        return Err(CliError::usage(
+            "the selected path is a native filesystem attachment, not a Git mount",
+        ));
+    }
+    Ok(Some((mountpoint, state_dir, state)))
+}
+
+pub async fn git_log(ctx: &CliContext, subject: Option<&str>, output_json: bool) -> Result<()> {
+    let mounted = mounted_git_subject(subject)?;
+    if mounted
+        .as_ref()
+        .is_some_and(|(_, _, state)| state.mount_presence_id.is_some())
+    {
+        return Err(CliError::usage(
+            "this is a read-only repository view and has no workspace snapshot chain; use \
+             `tl git smartlog` to inspect repository and workspace positions",
+        ));
+    }
+    let repo = mounted
+        .as_ref()
+        .map(|(_, _, state)| state.repo.as_str())
+        .or(subject)
+        .ok_or_else(|| CliError::usage("usage: tl git log [PATH|REPO]"))?;
+    let session = FsSession::open(ctx, Some(repo)).await?;
+    let (user, token) = session.creds();
+    let workspaces = if let Some((_, _, state)) = mounted.as_ref() {
+        vec![state.workspace_id.clone()]
+    } else {
+        let mut ids = BTreeSet::new();
+        let mut after = None;
+        loop {
+            let graph = session
+                .client
+                .repo_smartlog(
+                    &session.project_id,
+                    repo,
+                    user,
+                    token,
+                    after.as_deref(),
+                    200,
+                )
+                .await?
+                .into_inner();
+            ids.extend(graph.nodes.into_iter().filter_map(|node| node.workspace_id));
+            if !graph.truncated {
+                break;
+            }
+            let Some(next) = graph.next_after else {
+                break;
+            };
+            after = Some(next);
+        }
+        ids.into_iter().collect()
+    };
+    let mut pages = Vec::<GitWorkspaceLogPage>::new();
+    for workspace in workspaces {
+        let mut after = None;
+        loop {
+            let page = session
+                .client
+                .workspace_log(
+                    &session.project_id,
+                    repo,
+                    user,
+                    token,
+                    &workspace,
+                    after.as_deref(),
+                    200,
+                )
+                .await?
+                .into_inner();
+            let next = page.next_after.clone();
+            let done = !page.truncated;
+            pages.push(page);
+            if done {
+                break;
+            }
+            after = next;
+        }
+    }
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&pages)?);
+        return Ok(());
+    }
+    for page in pages {
+        println!("{} {}", style("workspace").bold(), page.workspace_id);
+        for entry in page.active_chain {
+            println!(
+                "  {} {}{}",
+                short_id(&entry.oid),
+                entry.subject,
+                if entry.conflicted {
+                    " (conflicted)"
+                } else {
+                    ""
+                },
+            );
+        }
+        for retained in page.retained_chains {
+            println!(
+                "  {} {} -> {} ({})",
+                style("retained").yellow(),
+                retained.recovery_ref,
+                short_id(&retained.head),
+                retained.reason,
+            );
+        }
+    }
+    Ok(())
+}
+
+pub async fn git_smartlog(
+    ctx: &CliContext,
+    subject: Option<&str>,
+    project: bool,
+    output_json: bool,
+) -> Result<()> {
+    let mounted = if project && subject.is_none() {
+        None
+    } else {
+        mounted_git_subject(subject)?
+    };
+    let repo = mounted
+        .as_ref()
+        .map(|(_, _, state)| state.repo.as_str())
+        .or(subject);
+    let session = FsSession::open(ctx, if project { None } else { repo }).await?;
+    let workspace = mounted
+        .as_ref()
+        .map(|(_, _, state)| state.workspace_id.as_str());
+    let (user, token) = session.creds();
+    let mut pages = Vec::<GitSmartlogPage>::new();
+    let mut after = None;
+    loop {
+        let page = if project {
+            session
+                .client
+                .project_smartlog(
+                    &session.project_id,
+                    user,
+                    token,
+                    repo,
+                    workspace,
+                    after.as_deref(),
+                    200,
+                )
+                .await?
+                .into_inner()
+        } else {
+            let repo = repo
+                .ok_or_else(|| CliError::usage("usage: tl git smartlog [PATH|REPO] [--project]"))?;
+            session
+                .client
+                .repo_smartlog(
+                    &session.project_id,
+                    repo,
+                    user,
+                    token,
+                    after.as_deref(),
+                    200,
+                )
+                .await?
+                .into_inner()
+        };
+        let next = page.next_after.clone();
+        let done = !page.truncated;
+        pages.push(page);
+        if done {
+            break;
+        }
+        after = next;
+    }
+    if output_json {
+        println!("{}", serde_json::to_string_pretty(&pages)?);
+        return Ok(());
+    }
+    for page in pages {
+        if let Some(repo) = page.repo.as_deref() {
+            println!("{} {repo}", style("repository").bold());
+        }
+        for node in &page.nodes {
+            println!(
+                "{} {:<10} {}{}{}",
+                node.oid.as_deref().map(short_id).unwrap_or("-"),
+                node.kind,
+                node.repo
+                    .as_deref()
+                    .map(|repo| format!("[{repo}] "))
+                    .unwrap_or_default(),
+                node.label.as_deref().unwrap_or(&node.id),
+                node.state
+                    .as_deref()
+                    .map(|state| format!(" [{state}]"))
+                    .unwrap_or_default(),
+            );
+        }
+        for edge in &page.edges {
+            println!("  {} {} -> {}", style(&edge.kind).dim(), edge.from, edge.to,);
+        }
+    }
+    Ok(())
+}
+
 /// Classify only errors for which retrying the same durable operation cannot make progress.
 fn native_operation_error_is_permanent(error: &tensorlake::error::SdkError) -> bool {
     use tensorlake::error::SdkError;
@@ -8987,6 +10153,9 @@ mod tests {
             owner_uid: None,
             owner_gid: None,
             repo: "filesystem-1".to_string(),
+            subtree: None,
+            git_mount_source: None,
+            mount_presence_id: None,
             native_filesystem: true,
             pinned_snapshot: None,
             workspace_id: "workspace-1".to_string(),
@@ -8997,6 +10166,72 @@ mod tests {
             read_only: Some(false),
             auto_commit_interval_secs: Some(FS_AUTOSAVE_DEFAULT_SECS),
             start_oid: None,
+        }
+    }
+
+    #[test]
+    fn git_mount_target_parses_subtree_without_changing_source() {
+        assert_eq!(
+            parse_git_mount_target("monorepo:main//services/auth").unwrap(),
+            (
+                "monorepo:main".to_string(),
+                Some("services/auth".to_string())
+            )
+        );
+        assert_eq!(
+            parse_git_mount_target("monorepo//services/auth").unwrap(),
+            ("monorepo".to_string(), Some("services/auth".to_string()))
+        );
+        assert_eq!(
+            parse_git_mount_target("monorepo:main").unwrap(),
+            ("monorepo:main".to_string(), None)
+        );
+    }
+
+    #[test]
+    fn git_mount_target_rejects_noncanonical_subtrees() {
+        for target in [
+            "repo//",
+            "repo///absolute",
+            "repo//path/",
+            "repo//a//b",
+            "repo//a/./b",
+            "repo//a/../b",
+        ] {
+            assert!(parse_git_mount_target(target).is_err(), "{target:?}");
+        }
+    }
+
+    #[test]
+    fn git_mount_follow_policy_is_explicit_and_namespace_safe() {
+        let source = |kind: &str, policy: &str, canonical_ref: Option<&str>| GitMountSource {
+            format_ver: 1,
+            kind: kind.to_string(),
+            follow_policy: policy.to_string(),
+            canonical_ref: canonical_ref.map(str::to_string),
+            resolved_commit: "1".repeat(40),
+            subtree: None,
+            root_tree: "2".repeat(40),
+        };
+        assert_eq!(
+            git_mount_follow_ref(&source("branch", "follow", Some("refs/heads/main"))).unwrap(),
+            Some("refs/heads/main".to_string())
+        );
+        assert_eq!(
+            git_mount_follow_ref(&source("tag", "follow", Some("refs/tags/v1"))).unwrap(),
+            Some("refs/tags/v1".to_string())
+        );
+        assert_eq!(
+            git_mount_follow_ref(&source("commit", "pinned", None)).unwrap(),
+            None
+        );
+        for invalid in [
+            source("tag", "follow", Some("refs/heads/v1")),
+            source("branch", "pinned", Some("refs/heads/main")),
+            source("commit", "follow", None),
+            source("commit", "future", None),
+        ] {
+            assert!(git_mount_follow_ref(&invalid).is_err());
         }
     }
 
@@ -10498,5 +11733,99 @@ mod tests {
                 .to_string();
         assert!(error.contains("corrupt"), "{error}");
         assert!(error.contains("refusing to guess"), "{error}");
+    }
+
+    #[test]
+    fn git_status_json_has_only_repository_workspace_vocabulary() {
+        let report = GitStatusReport {
+            format_ver: 1,
+            state: "workspace_snapshotted_unpromoted".to_string(),
+            view_type: "writable_workspace".to_string(),
+            repository: "demo".to_string(),
+            subtree: Some("services/api".to_string()),
+            canonical_source: "refs/heads/main".to_string(),
+            resolved_commit: Some("abc".to_string()),
+            following: false,
+            connected: true,
+            workspace: Some(GitStatusWorkspace {
+                id: "ws-1".to_string(),
+                base: "base".to_string(),
+                snapshot: "head".to_string(),
+                target: Some("main".to_string()),
+                relationship: "ahead".to_string(),
+                conflicts: Vec::new(),
+                conflict_operation: None,
+                retained_chains: vec!["refs/recovery/ws-1/one".to_string()],
+                retained_chains_truncated: false,
+            }),
+            local: GitStatusLocal {
+                changed_paths: 0,
+                exact: true,
+            },
+            next_actions: vec!["tl git promote main".to_string()],
+        };
+        let json = serde_json::to_string(&report).unwrap();
+        for forbidden in ["filesystem", "session", "save_id", "current_save"] {
+            assert!(!json.contains(forbidden), "{forbidden} leaked into {json}");
+        }
+        assert!(json.contains("\"workspace\""));
+        assert!(json.contains("\"snapshot\""));
+        assert!(json.contains("\"base\""));
+        assert!(json.contains("\"target\""));
+        assert!(json.contains("\"conflicts\""));
+    }
+
+    #[test]
+    fn git_status_state_machine_only_recommends_valid_next_transitions() {
+        assert_eq!(
+            classify_git_status(false, true, None, true, true, 0, false, false, false, false,).0,
+            "read_only_following"
+        );
+        assert_eq!(
+            classify_git_status(
+                false, true, None, true, false, 0, false, false, false, false,
+            )
+            .0,
+            "read_only_pinned"
+        );
+        let dirty =
+            classify_git_status(false, true, None, false, false, 3, false, true, true, true);
+        assert_eq!(dirty.0, "workspace_locally_dirty");
+        assert_eq!(dirty.1, vec!["tl git snapshot"]);
+        assert_eq!(
+            classify_git_status(
+                false,
+                true,
+                Some("rebase_conflict"),
+                false,
+                false,
+                2,
+                false,
+                true,
+                true,
+                true,
+            )
+            .0,
+            "rebase_conflict"
+        );
+        assert_eq!(
+            classify_git_status(false, true, None, false, false, 0, false, true, true, true,).0,
+            "workspace_target_advanced"
+        );
+        assert_eq!(
+            classify_git_status(false, true, None, false, false, 0, false, false, true, true,).0,
+            "workspace_snapshotted_unpromoted"
+        );
+        assert_eq!(
+            classify_git_status(
+                false, false, None, false, false, 0, false, false, false, false,
+            )
+            .0,
+            "server_unreachable_stale_view"
+        );
+        let deleted_publish =
+            classify_git_status(true, true, None, false, true, 0, true, false, true, true);
+        assert_eq!(deleted_publish.0, "source_ref_deleted");
+        assert!(!deleted_publish.1[0].contains("rebase"));
     }
 }
