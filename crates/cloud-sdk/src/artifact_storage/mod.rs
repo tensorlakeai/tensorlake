@@ -315,17 +315,48 @@ impl ArtifactStorageClient {
         git_username: &str,
         git_token: &str,
     ) -> Result<Traced<ListReposResponse>, SdkError> {
-        let mut url = format!(
-            "{}/project/{}/repos",
-            self.git_base_url,
-            encode_path_segment(project_id)
-        );
-        if let Some(kind) = kind {
-            url.push_str(&format!("?kind={}", urlencoding::encode(kind)));
+        let mut repos = Vec::new();
+        let mut after = None::<String>;
+        loop {
+            // `form_urlencoded::Serializer` contains a non-Send callback reference. Keep it in
+            // this synchronous scope so napi/tonic callers can carry the async request future
+            // across worker threads.
+            let query = {
+                let mut params = url::form_urlencoded::Serializer::new(String::new());
+                if let Some(kind) = kind {
+                    params.append_pair("kind", kind);
+                }
+                if let Some(after) = &after {
+                    params.append_pair("after", after);
+                }
+                params.append_pair("limit", "1000");
+                params.finish()
+            };
+            let url = format!(
+                "{}/project/{}/repos?{}",
+                self.git_base_url,
+                encode_path_segment(project_id),
+                query,
+            );
+            let (request, trace_id) =
+                self.git_request_url(Method::GET, url, git_username, git_token);
+            let page: Traced<ListReposResponse> =
+                decode_json(request.send().await?, trace_id).await?;
+            let trace_id = page.trace_id.clone();
+            let page = page.into_inner();
+            repos.extend(page.repos);
+            let Some(next) = page.next_after else {
+                return Ok(Traced::new(
+                    trace_id,
+                    ListReposResponse {
+                        project: project_id.to_string(),
+                        repos,
+                        next_after: None,
+                    },
+                ));
+            };
+            after = Some(next);
         }
-        let (request, trace_id) = self.git_request_url(Method::GET, url, git_username, git_token);
-        let response = request.send().await?;
-        decode_json(response, trace_id).await
     }
 
     /// Authoritative point-read of one repo's meta (kind, default branch, status). 404 =>
@@ -497,16 +528,43 @@ impl ArtifactStorageClient {
         git_username: &str,
         git_token: &str,
     ) -> Result<Traced<ListOperationsResponse>, SdkError> {
-        let (request, trace_id) = self.git_request(
-            Method::GET,
-            project_id,
-            repo,
-            Some("admin/operations"),
-            git_username,
-            git_token,
-        )?;
-        let response = request.send().await?;
-        decode_json(response, trace_id).await
+        let mut operations = Vec::new();
+        let mut after = None::<String>;
+        loop {
+            let suffix = after.as_ref().map_or_else(
+                || "admin/operations?limit=1000".to_string(),
+                |after| {
+                    format!(
+                        "admin/operations?limit=1000&after={}",
+                        urlencoding::encode(after)
+                    )
+                },
+            );
+            let (request, trace_id) = self.git_request(
+                Method::GET,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            let page: Traced<ListOperationsResponse> =
+                decode_json(request.send().await?, trace_id).await?;
+            let trace_id = page.trace_id.clone();
+            let page = page.into_inner();
+            operations.extend(page.operations);
+            let Some(next) = page.next_after else {
+                return Ok(Traced::new(
+                    trace_id,
+                    ListOperationsResponse {
+                        repo: format!("{project_id}/{repo}"),
+                        operations,
+                        next_after: None,
+                    },
+                ));
+            };
+            after = Some(next);
+        }
     }
 
     pub async fn list_operations(

@@ -41,6 +41,13 @@ pub struct WorkspaceInfo {
     pub shared_target: Option<String>,
 }
 
+#[derive(Clone, Debug, Deserialize)]
+struct WorkspaceListPage {
+    workspaces: Vec<WorkspaceInfo>,
+    #[serde(default)]
+    next_after: Option<String>,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct CreateWorkspaceRequest {
     /// Base commit-ish (branch, full ref, tag, or commit hex). Defaults to the repo's HEAD.
@@ -669,16 +676,28 @@ impl ArtifactStorageClient {
         git_username: &str,
         git_token: &str,
     ) -> Result<Traced<Vec<WorkspaceInfo>>, SdkError> {
-        let (req, trace_id) = self.git_request(
-            Method::GET,
-            project_id,
-            repo,
-            Some("workspaces"),
-            git_username,
-            git_token,
-        )?;
-        let list = expect_json(req.send().await?).await?;
-        Ok(Traced::new(trace_id, list))
+        let mut workspaces = Vec::new();
+        let mut after = None::<String>;
+        loop {
+            let suffix = after.as_ref().map_or_else(
+                || "workspaces?limit=1000".to_string(),
+                |after| format!("workspaces?limit=1000&after={}", urlencoding::encode(after)),
+            );
+            let (req, trace_id) = self.git_request(
+                Method::GET,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            let page: WorkspaceListPage = expect_json(req.send().await?).await?;
+            workspaces.extend(page.workspaces);
+            let Some(next) = page.next_after else {
+                return Ok(Traced::new(trace_id, workspaces));
+            };
+            after = Some(next);
+        }
     }
 
     /// Re-arm the workspace's activity lease. Pinned workspaces heartbeat as a no-op.

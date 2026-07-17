@@ -86,6 +86,8 @@ impl RepoMetaInfo {
 pub struct ListReposResponse {
     pub project: String,
     pub repos: Vec<Repo>,
+    #[serde(default)]
+    pub next_after: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -160,4 +162,6 @@ pub struct Operation {
 pub struct ListOperationsResponse {
     pub repo: String,
     pub operations: Vec<Operation>,
+    #[serde(default)]
+    pub next_after: Option<String>,
 }
