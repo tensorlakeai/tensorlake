@@ -283,13 +283,13 @@ enum FsCommands {
         message: Option<String>,
     },
 
-    /// Show the save history of a filesystem
+    /// Show recent automatic history plus every named retained save
     History {
         /// Filesystem name, or a mounted directory (default: the mount containing the
         /// current directory)
         target: Option<String>,
 
-        /// Show at most N entries
+        /// Show at most N recent timeline entries (named retained saves are always included)
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
 
@@ -3356,6 +3356,16 @@ mod tests {
             }
             _ => panic!("expected fs history command"),
         }
+        let mut command = Cli::command();
+        let history = command
+            .find_subcommand_mut("fs")
+            .unwrap()
+            .find_subcommand_mut("history")
+            .unwrap();
+        let mut history_help = Vec::new();
+        history.write_long_help(&mut history_help).unwrap();
+        let history_help = String::from_utf8(history_help).unwrap();
+        assert!(history_help.contains("named retained saves are always included"));
 
         match parse_command(["tl", "fs", "name", "scratch", "abc123", "before-upgrade"]) {
             Commands::Fs(FsCommands::Name {
