@@ -7,13 +7,13 @@ description = "TensorLake CLI"
 
 [features]
 default = []
-# `tl fs mount`: the local FUSE/overlay mount stack, backed by the private gsvc-mount core.
+# `tl fs` and `tl git mount`: thin host adapters backed by the private gsvc-fs-client engine.
 # Off by default so this public crate builds with no access to the artifact_storage repo — with the
-# feature off, gsvc-mount (a resolution-only placeholder in crates/gsvc-mount) is never compiled.
+# feature off, the resolution placeholder is never compiled.
 # Do NOT build with `--features mount` directly against the placeholder; use `just build-cli-full`,
 # which swaps in the real mount core from a sibling artifact_storage checkout (see that recipe and
 # crates/VENDORED_FROM).
-mount = ["dep:gsvc-mount", "dep:libc", "dep:fuser", "dep:tracing-subscriber"]
+mount = ["dep:gsvc-fs-client"]
 # `tl git clone`: the fast-clone engine, backed by the private gsvc-codec packfile codec. Same
 # placeholder + ephemeral-vendor arrangement as `mount` (see crates/VENDORED_FROM): off by
 # default so this public crate builds with no access to the artifact_storage repo. Official
@@ -66,29 +66,11 @@ base64 = { workspace = true }
 sha2 = { workspace = true }
 hex = { workspace = true }
 rand = { workspace = true }
-redb = { workspace = true }
-shlex = { workspace = true }
 rustpython-parser = "0.3"
 gsvc-codec = { workspace = true, optional = true }
-gsvc-mount = { workspace = true, optional = true }
-libc = { version = "0.2", optional = true }
-tracing = { workspace = true }
-# Only the mount daemon installs a subscriber (writing to the state dir's daemon.log); the
-# rest of the CLI stays subscriber-free.
-tracing-subscriber = { workspace = true, optional = true }
+gsvc-fs-client = { workspace = true, optional = true }
 uuid = { workspace = true }
-xattr = { workspace = true }
 flate2 = { workspace = true }
 sha1 = { workspace = true }
 ignore = { workspace = true }
 tempfile = { workspace = true }
-filetime = { workspace = true }
-
-[dev-dependencies]
-
-# FUSE: pure-Rust /dev/fuse on Linux (always on — sandboxes are the primary mount target).
-# macOS mounts go through an FSKit extension (no kernel extension), not FUSE.
-[target.'cfg(target_os = "linux")'.dependencies]
-# abi-7-12 gates the kernel notify channel (Notifier::inval_entry/inval_inode) that the
-# mount daemon pushes refresh deltas through; FUSE 7.12 is Linux 2.6.29-era, universally safe.
-fuser = { version = "0.15", default-features = false, features = ["abi-7-12"], optional = true }

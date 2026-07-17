@@ -1,20 +1,21 @@
-Private crates from artifact_storage: NOTHING is vendored into this public repo anymore.
+Private client sources from artifact_storage: NOTHING is vendored into this public repo.
 
-crates/gsvc-mount and crates/gsvc-codec are resolution-only placeholders (compile_error! bodies)
-so the public tree builds and resolves standalone. The real sources live in the private
-tensorlakeai/artifact_storage repo and are swapped in EPHEMERALLY, only for builds that enable
-the features needing them (`mount`, `git-clone`):
+crates/gsvc-mount, crates/gsvc-codec, and crates/gsvc-fs-client are resolution-only placeholders
+(compile_error! bodies). The real sources live in the private tensorlakeai/artifact_storage repo and
+are swapped in EPHEMERALLY only for builds that enable the features needing them (`mount`,
+`git-clone`):
 
-  * locally:  just build-cli-full   — copies both crates' src/ from a sibling
+  * locally:  just build-cli-full   — copies the private client sources from a sibling
               ../artifact_storage checkout for the build, restoring the placeholders afterward
   * CI:       .github/actions/vendor-private-crates — mints a short-lived GitHub App token
-              (ARTIFACT_STORAGE_APP_ID / _PRIVATE_KEY), sparse-checks-out both crates' src/,
+              (ARTIFACT_STORAGE_APP_ID / _PRIVATE_KEY), sparse-checks-out the required sources,
               and swaps them over the placeholders for the job only
 
 The swapped source compiles against the PLACEHOLDER manifests, so each placeholder Cargo.toml's
-dependency list must mirror the real crate's (crates/gsvc-mount/Cargo.toml and
-crates/gsvc-codec/Cargo.toml in artifact_storage). If upstream dependencies change, update the
-placeholder manifests in the same change that bumps the upstream.
+dependency list must mirror the corresponding artifact_storage crate. If upstream dependencies
+change, update the placeholder manifest in the same companion change. Native filesystem SDK and
+wire behavior compile entirely inside `gsvc-fs-client`; the published `tensorlake` SDK has no native
+filesystem module.
 
 Wire-format coupling still applies even without vendoring: the fast-clone client
 (crates/cli/src/commands/git/fastclone.rs) and the ingest client

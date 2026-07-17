@@ -1,9 +1,10 @@
 name: Vendor private artifact_storage crates
 description: >
-  Swaps the private gsvc-mount mount core and gsvc-codec packfile codec into crates/ so the CLI
-  can be built with `--features mount,git-clone`. Mints a short-lived GitHub App token,
-  sparse-checks-out both crates' source from the private artifact_storage repo, and copies them
-  over the committed placeholders (keeping the placeholders' tensorlake-adapted Cargo.tomls).
+  Swaps the private filesystem client (including its native SDK), mount core, and packfile codec
+  into the public resolution placeholders so the CLI can be built with `--features
+  mount,git-clone`. Mints a
+  short-lived GitHub App token, sparse-checks-out only those sources from artifact_storage, and
+  copies them over the committed placeholders (keeping workspace-adapted Cargo.tomls).
   The source is only present on the runner for the duration of the job and is never committed
   to this public repo.
 
@@ -39,6 +40,7 @@ runs:
         sparse-checkout: |
           crates/gsvc-mount/src
           crates/gsvc-codec/src
+          crates/gsvc-fs-client/src
         sparse-checkout-cone-mode: false
         persist-credentials: false
 
@@ -46,7 +48,7 @@ runs:
       shell: bash
       run: |
         set -euo pipefail
-        for crate in gsvc-mount gsvc-codec; do
+        for crate in gsvc-mount gsvc-codec gsvc-fs-client; do
           real=".mount-core/crates/${crate}/src"
           placeholder="crates/${crate}/src"
           if [ ! -d "$real" ]; then

@@ -1359,6 +1359,54 @@ dependencies = [
 ]
 
 [[package]]
+name = "gsvc-fs-client"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "base64",
+ "blake3",
+ "bytes",
+ "chrono",
+ "comfy-table",
+ "console",
+ "dialoguer",
+ "dirs",
+ "filetime",
+ "flate2",
+ "fuser",
+ "futures",
+ "gethostname",
+ "gsvc-mount",
+ "hex",
+ "ignore",
+ "indicatif",
+ "libc",
+ "postcard",
+ "rand 0.9.4",
+ "rayon",
+ "redb",
+ "reqwest",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2",
+ "shlex",
+ "tempfile",
+ "tensorlake",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-util",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "urlencoding",
+ "uuid",
+ "xattr",
+ "zstd 0.13.3",
+]
+
+[[package]]
 name = "gsvc-mount"
 version = "0.1.0"
 dependencies = [
@@ -2154,6 +2202,15 @@ dependencies = [
  "itertools 0.11.0",
  "malachite-base",
  "malachite-nz",
+]
+
+[[package]]
+name = "matchers"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d1525a2a28c7f4fa0fc98bb91ae755d1e2d1505079e05539e35bc876b5d65ae9"
+dependencies = [
+ "regex-automata",
 ]
 
 [[package]]
@@ -3669,7 +3726,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.79"
+version = "0.5.80"
 dependencies = [
  "anyhow",
  "base64",
@@ -3721,7 +3778,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.79"
+version = "0.5.80"
 dependencies = [
  "anyhow",
  "base64",
@@ -3737,22 +3794,18 @@ dependencies = [
  "docker-credentials-config",
  "env-file-reader",
  "eventsource-stream",
- "filetime",
  "flate2",
- "fuser",
  "futures",
  "gethostname",
  "gsvc-codec",
- "gsvc-mount",
+ "gsvc-fs-client",
  "hex",
  "http-body-util",
  "ignore",
  "indicatif",
- "libc",
  "minijinja",
  "open",
  "rand 0.9.4",
- "redb",
  "reqwest",
  "rustls",
  "rustpython-parser",
@@ -3760,7 +3813,6 @@ dependencies = [
  "serde_json",
  "sha1 0.11.0",
  "sha2",
- "shlex",
  "tempfile",
  "tensorlake",
  "thiserror 2.0.18",
@@ -3768,17 +3820,14 @@ dependencies = [
  "tokio-tungstenite",
  "tokio-util",
  "toml",
- "tracing",
- "tracing-subscriber",
  "url",
  "urlencoding",
  "uuid",
- "xattr",
 ]
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.79"
+version = "0.5.80"
 dependencies = [
  "napi",
  "napi-build",
@@ -3792,7 +3841,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.79"
+version = "0.5.80"
 dependencies = [
  "futures",
  "pyo3",
@@ -4126,17 +4175,34 @@ dependencies = [
 ]
 
 [[package]]
+name = "tracing-serde"
+version = "0.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "704b1aeb7be0d0a84fc9828cae51dab5970fee5088f83d1dd7ee6f6246fc6ff1"
+dependencies = [
+ "serde",
+ "tracing-core",
+]
+
+[[package]]
 name = "tracing-subscriber"
 version = "0.3.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cb7f578e5945fb242538965c2d0b04418d38ec25c79d160cd279bf0731c8d319"
 dependencies = [
+ "matchers",
  "nu-ansi-term",
+ "once_cell",
+ "regex-automata",
+ "serde",
+ "serde_json",
  "sharded-slab",
  "smallvec",
  "thread_local",
+ "tracing",
  "tracing-core",
  "tracing-log",
+ "tracing-serde",
 ]
 
 [[package]]

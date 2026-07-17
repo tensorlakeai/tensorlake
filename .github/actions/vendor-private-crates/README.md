@@ -1,19 +1,17 @@
 # vendor-private-crates
 
-Composite action that swaps the **private** `gsvc-mount` mount core and `gsvc-codec` packfile
-codec into `crates/` so a CI job can build the CLI with `--features mount,git-clone` (the
-`tl fs mount` stack and the `tl git clone` fast-clone engine). Both crates live in the private
-`tensorlakeai/artifact_storage` repo and are **never** committed into this public tree —
-`crates/gsvc-mount` and `crates/gsvc-codec` here are only resolution placeholders (see their
-`Cargo.toml`s). This action fetches the real sources onto the runner for the duration of the job.
+Composite action that injects the private filesystem client, mount core, and packfile codec so CI
+can build the official CLI with `--features mount,git-clone`. They live in the private
+`tensorlakeai/artifact_storage` repo and are **never** committed into this public tree. The three
+directories under `crates/gsvc-*` are resolution placeholders. This action fetches the real sources
+for the duration of the job.
 
 ## What it does
 
 1. Mints a short-lived token from a GitHub App scoped to `tensorlakeai/artifact_storage`.
-2. Sparse-checks-out `crates/gsvc-mount/src` and `crates/gsvc-codec/src` from that repo into
-   `.mount-core/`.
-3. Copies the real sources over the placeholders, keeping the placeholders' tensorlake-adapted
-   `Cargo.toml`s.
+2. Sparse-checks-out the three private crate source trees into `.mount-core/`.
+3. Copies the real sources over the placeholders, keeping the placeholders' workspace-adapted
+   manifests.
 
 The calling job must run `actions/checkout` for this repo first, then call this action before the
 build step, and add `--features git-clone` (plus `mount` on mount-capable targets; or
