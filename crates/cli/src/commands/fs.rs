@@ -132,13 +132,17 @@ pub async fn history(
     map(gsvc_fs_client::history(&private_context(ctx), target, limit, json).await)
 }
 
-pub async fn set_snapshot_pin(
+pub async fn name_snapshot(
     ctx: &CliContext,
     filesystem: &str,
     version: &str,
-    pinned: bool,
+    name: &str,
 ) -> Result<()> {
-    map(gsvc_fs_client::set_snapshot_pin(&private_context(ctx), filesystem, version, pinned).await)
+    map(gsvc_fs_client::name_snapshot(&private_context(ctx), filesystem, version, name).await)
+}
+
+pub async fn delete_snapshot(ctx: &CliContext, filesystem: &str, version: &str) -> Result<()> {
+    map(gsvc_fs_client::delete_snapshot(&private_context(ctx), filesystem, version).await)
 }
 
 pub async fn mount_filesystem(

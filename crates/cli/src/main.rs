@@ -298,17 +298,21 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Keep a save indefinitely, independent of the normal retention window
-    Pin {
+    /// Name a recent automatic save and keep it until explicitly deleted
+    Name {
         /// Filesystem name
         name: String,
 
         /// Save ID or unambiguous hexadecimal prefix
         version: String,
+
+        /// Durable name for this save
+        snapshot_name: String,
     },
 
-    /// Return a pinned save to the normal retention window
-    Unpin {
+    /// Remove a durable name; the save then follows automatic retention
+    #[command(name = "delete-snapshot")]
+    DeleteSnapshot {
         /// Filesystem name
         name: String,
 
@@ -2605,11 +2609,13 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             limit,
             json,
         } => commands::fs::history(ctx, target.as_deref(), limit, json).await,
-        FsCommands::Pin { name, version } => {
-            commands::fs::set_snapshot_pin(ctx, &name, &version, true).await
-        }
-        FsCommands::Unpin { name, version } => {
-            commands::fs::set_snapshot_pin(ctx, &name, &version, false).await
+        FsCommands::Name {
+            name,
+            version,
+            snapshot_name,
+        } => commands::fs::name_snapshot(ctx, &name, &version, &snapshot_name).await,
+        FsCommands::DeleteSnapshot { name, version } => {
+            commands::fs::delete_snapshot(ctx, &name, &version).await
         }
         FsCommands::Mount {
             target,
@@ -3351,20 +3357,25 @@ mod tests {
             _ => panic!("expected fs history command"),
         }
 
-        match parse_command(["tl", "fs", "pin", "scratch", "abc123"]) {
-            Commands::Fs(FsCommands::Pin { name, version }) => {
+        match parse_command(["tl", "fs", "name", "scratch", "abc123", "before-upgrade"]) {
+            Commands::Fs(FsCommands::Name {
+                name,
+                version,
+                snapshot_name,
+            }) => {
                 assert_eq!(name, "scratch");
                 assert_eq!(version, "abc123");
+                assert_eq!(snapshot_name, "before-upgrade");
             }
-            _ => panic!("expected fs pin command"),
+            _ => panic!("expected fs name command"),
         }
 
-        match parse_command(["tl", "fs", "unpin", "scratch", "abc123"]) {
-            Commands::Fs(FsCommands::Unpin { name, version }) => {
+        match parse_command(["tl", "fs", "delete-snapshot", "scratch", "abc123"]) {
+            Commands::Fs(FsCommands::DeleteSnapshot { name, version }) => {
                 assert_eq!(name, "scratch");
                 assert_eq!(version, "abc123");
             }
-            _ => panic!("expected fs unpin command"),
+            _ => panic!("expected fs delete-snapshot command"),
         }
 
         match parse_command(["tl", "fs", "ls"]) {
