@@ -92,11 +92,7 @@ build_release:
 
 bump_version:
 	@test -n "$(VERSION)" || (echo "Usage: make bump_version VERSION=x.y.z" && exit 1)
-	@for f in pyproject.toml Cargo.toml crates/rust-cloud-sdk-py/pyproject.toml; do \
-		python3 -c "import re, pathlib; p = pathlib.Path('$$f'); p.write_text(re.sub(r'^version = \"[^\"]*\"', 'version = \"$(VERSION)\"', p.read_text(), count=1, flags=re.MULTILINE))"; \
-		echo "  Updated $$f"; \
-	done
-	@echo "Version bumped to $(VERSION)"
+	@python3 .github/scripts/bump_version.py "$(VERSION)"
 
 .PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
 

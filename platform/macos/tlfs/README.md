@@ -39,10 +39,10 @@ another local user cannot attach to the volume's backend.
 
 Frames are `u32-le length | u8 opcode | payload`; responses `u32-le length | i32-le
 errno | payload`. Strings/bytes are u32-length-prefixed; attrs are packed
-`u64 ino | u8 kind | u64 size | u16 perm | u8 upper`. Opcodes `HELLO(0)…STATFS(20)`
-mirror the overlay's op set. The canonical definition lives in the daemon at
-`crates/cli/src/commands/fs/vfsserver.rs`; keep both sides in lockstep — there is no
-version negotiation beyond the HELLO check yet.
+`u64 ino | u8 kind | u64 size | u16 perm | u8 upper | u64 mtime_sec | u32 mtime_nsec |
+u64 content_version`. Opcodes `HELLO(0)…STATFS(20)` mirror the overlay's op set. The
+canonical definition lives in the injected private `gsvc-fs-client/src/vfsserver.rs`; keep both
+sides in lockstep — version 3 is enforced by the HELLO check and has no downgrade negotiation.
 
 ## Build and install (development)
 
@@ -82,7 +82,8 @@ Settings toggle. Source builds have nothing embedded and fall back to downloadin
 release asset matching the CLI version; `--from <path-or-url>` overrides either path.
 `tl fs setup --check` diagnoses an install. Users rarely run setup by hand: `tl fs
 mount` pre-flights the extension and auto-runs the install when it is missing, stopping
-only for the Settings toggle (the one step Apple reserves for the user). Embedding (and failing that, the shared
+or when its stamped version differs from the CLI, stopping only for the Settings toggle (the one
+step Apple reserves for the user). Embedding (and failing that, the shared
 release tag) is the wire-protocol-skew defense: the VFS protocol has no version
 negotiation beyond HELLO.
 
@@ -141,6 +142,10 @@ does honor (all measured on macOS 26.5 lifs):
   pinned commit. It moves exactly when content can have changed, which is what the
   kernel's revalidation compares. (Never report `time(nil)`: constant-now mtimes defeat
   caching and still leave minutes-long stale windows.)
+- **Opaque content versions guard retained FSItems.** FSKit may keep one `FSItem` alive across
+  independent opens. The private v3 localhost wire therefore carries an identity derived from the
+  pinned snapshot (or upper inode/ctime); a new read open replaces any handle whose identity is
+  stale even when size and mtime happen to match.
 - **Directory verifier from the dir's mtime.** A constant `FSDirectoryVerifier` makes
   the kernel treat cached listing pages and resume cookies as forever-valid (`ls` shows
   deleted files, or a stale empty tail). Deriving it from the directory's wire mtime
@@ -157,6 +162,14 @@ does honor (all measured on macOS 26.5 lifs):
   adopt a new size but never refetch pages — a file that grew behind the kernel keeps a
   zero-filled tail forever otherwise), and breaks pinned negative entries with an
   `O_CREAT|O_EXCL` / `mkdir` probe that the overlay answers with `EEXIST`.
+
+## Extended attributes
+
+The native snapshot format does not currently promise general xattr persistence. The FSKit module
+advertises limited, mount-lifetime support only for macOS bookkeeping attributes (`provenance`,
+`quarantine`, and `lastuseddate`) so routine copies do not materialize transient `._*` AppleDouble
+files as filesystem content. Meaningful metadata such as resource forks, Finder info, tags, and
+comments remains unsupported; the module does not accept and silently discard it.
 
 Measured result: restore returns in ~0.1s with `open`/`read` and directory listings
 fully coherent, both directions, repeatedly. Residual caveat: a bare `stat(2)`/`lstat`
