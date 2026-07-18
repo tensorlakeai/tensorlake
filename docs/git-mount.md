@@ -40,6 +40,11 @@ workspace, including its unsnapshotted WAL, from any machine with:
 tl git mount monorepo /code --workspace WORKSPACE_ID
 ```
 
+A writable workspace has one live mount owner at a time. The mount claims it with a random local
+id, renews that claim while the daemon is healthy, and releases it on clean unmount. A second
+sandbox cannot attach the same workspace writable until the first releases it or its short claim
+lease expires; a delayed unmount from the old sandbox cannot clear the replacement claim.
+
 `--ro` creates no workspace, ref, or GC root. It records only an expiring, principal-bound presence
 row so the control plane can show live mounts; a clean unmount removes the row immediately and a
 crashed sandbox disappears at expiry.
@@ -75,7 +80,8 @@ A `--publish` workspace continuously serves its fixed target branch. Its explici
 reconciled onto that branch server-side, so `sync` refreshes the target but cannot retarget it and
 `rebase` is intentionally rejected: rebasing only the private workspace ref would make the result
 invisible in the live branch view. Create a normal workspace when explicit rebase/retarget control
-is required.
+is required. `--publish` is accepted only when the resolved source is a branch; tags and pinned
+commits are rejected before the mount starts.
 
 Before replacing a snapshotted chain, rebase retains its prior tip under a recovery ref. `log`,
 `smartlog`, and `status` expose these retained chains. They remain recoverable and GC-rooted until
