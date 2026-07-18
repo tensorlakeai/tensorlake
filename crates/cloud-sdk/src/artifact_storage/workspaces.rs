@@ -102,6 +102,18 @@ pub struct WorkspaceHeartbeat {
     pub pinned: bool,
 }
 
+/// Writable-mount presence update. This is deliberately separate from the bodyless lease
+/// heartbeat so callers must opt into changing fleet-visible attachment state.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct WorkspaceMountHeartbeatRequest {
+    /// Human-readable mount location shown by workspace listing/status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mounted_on: Option<String>,
+    /// Clear the active attachment on a clean unmount while re-arming detached retention.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unmount: bool,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PromoteWorkspaceRequest {
     /// Target branch (short name; `refs/heads/` implied).
@@ -759,6 +771,28 @@ impl ArtifactStorageClient {
         Ok(Traced::new(trace_id, hb))
     }
 
+    /// Re-arm a writable workspace lease and atomically update its fleet-visible mount presence.
+    pub async fn workspace_mount_heartbeat(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        request: &WorkspaceMountHeartbeatRequest,
+    ) -> Result<Traced<WorkspaceHeartbeat>, SdkError> {
+        let (req, trace_id) = self.git_request(
+            Method::POST,
+            project_id,
+            repo,
+            Some(&format!("workspaces/{workspace_id}/heartbeat")),
+            git_username,
+            git_token,
+        )?;
+        let hb = expect_json(req.json(request).send().await?).await?;
+        Ok(Traced::new(trace_id, hb))
+    }
+
     /// CAS-advance a real branch to the workspace's snapshot (squash by default). Merge mode
     /// (`mode: "merge"`) lands a two-parent merge commit when the target moved; its conflicts
     /// are returned as `PromoteOutcome::Conflicted`, not an error. A plain `409` (concurrent
@@ -1069,6 +1103,23 @@ impl ArtifactStorageClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mount_heartbeat_distinguishes_attach_keepalive_and_clean_unmount() {
+        let attached = serde_json::to_value(WorkspaceMountHeartbeatRequest {
+            mounted_on: Some("sandbox:/code".to_string()),
+            unmount: false,
+        })
+        .unwrap();
+        assert_eq!(attached, serde_json::json!({"mounted_on": "sandbox:/code"}));
+
+        let detached = serde_json::to_value(WorkspaceMountHeartbeatRequest {
+            mounted_on: None,
+            unmount: true,
+        })
+        .unwrap();
+        assert_eq!(detached, serde_json::json!({"unmount": true}));
+    }
 
     /// Promote responses from servers that predate merge mode decode with the new fields
     /// defaulting to false.

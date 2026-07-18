@@ -330,6 +330,10 @@ pub struct WorkspaceCheckpointChange {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WorkspaceCheckpointChangesPage {
     pub generation: u64,
+    pub checkpoint_id: String,
+    pub snapshot_tip: String,
+    pub tree: String,
+    pub materialized_generation: Option<u64>,
     pub entries: Vec<WorkspaceCheckpointChange>,
     pub truncated: bool,
     pub next_after: Option<String>,
@@ -2069,6 +2073,55 @@ impl ArtifactStorageClient {
         Ok(Traced::new(trace_id, response))
     }
 
+    /// Read one file from an exact, principal-bound workspace checkpoint revision. The revision
+    /// fields prevent a generation advancing between change pagination and byte fetch from
+    /// silently serving a different same-path body.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn workspace_checkpoint_file_bytes(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        file_path: &str,
+        generation: u64,
+        checkpoint_id: &str,
+        tree: &str,
+    ) -> Result<Traced<Vec<u8>>, SdkError> {
+        canonical_repo_path(file_path, "checkpoint file path")?;
+        let suffix = format!(
+            "workspaces/{}/checkpoint/files/{file_path}",
+            super::encode_path_segment(workspace_id)
+        );
+        let query = [
+            ("generation", generation.to_string()),
+            ("checkpoint_id", checkpoint_id.to_string()),
+            ("tree", tree.to_string()),
+        ];
+        let (bytes, trace_id) = with_transient_retries(|| async {
+            let (request, trace_id) = self.git_request(
+                Method::GET,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            let response = request.query(&query).send().await?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(SdkError::ServerError {
+                    status,
+                    message: response.text().await.unwrap_or_default(),
+                });
+            }
+            Ok((response.bytes().await?.to_vec(), trace_id))
+        })
+        .await?;
+        Ok(Traced::new(trace_id, bytes))
+    }
+
     /// Materialize one WAL generation as exactly one commit on the workspace ref. Replaying the
     /// same generation is idempotent and returns the original durable receipt byte-for-byte;
     /// `created` describes that operation, not the current HTTP attempt.
@@ -2538,9 +2591,11 @@ mod tests {
         let attempts_server = attempts.clone();
         let checkpoint_path = format!("/project/p/repos/r/workspaces/{workspace_id}/checkpoint");
         let changes_path = format!("{checkpoint_path}/changes");
+        let checkpoint_file_path = format!("{checkpoint_path}/files/src/main.rs");
         let materialize_path = format!("{checkpoint_path}/materialize");
         let checkpoint_path_server = checkpoint_path.clone();
         let changes_path_server = changes_path.clone();
+        let checkpoint_file_path_server = checkpoint_file_path.clone();
         let materialize_path_server = materialize_path.clone();
         let server = tokio::spawn({
             let workspace_id = workspace_id.clone();
@@ -2562,6 +2617,7 @@ mod tests {
                     let materialized_commit = materialized_commit.clone();
                     let checkpoint_path = checkpoint_path_server.clone();
                     let changes_path = changes_path_server.clone();
+                    let checkpoint_file_path = checkpoint_file_path_server.clone();
                     let materialize_path = materialize_path_server.clone();
                     tokio::spawn(async move {
                         let mut buffered = Vec::new();
@@ -2677,6 +2733,10 @@ mod tests {
                                     "200 OK",
                                     serde_json::json!({
                                         "generation": 7,
+                                        "checkpoint_id": "checkpoint-7",
+                                        "snapshot_tip": snapshot_tip,
+                                        "tree": checkpoint_tree,
+                                        "materialized_generation": null,
                                         "entries": [{
                                             "path": "src/main.rs",
                                             "change": "modified",
@@ -2689,6 +2749,8 @@ mod tests {
                                     })
                                     .to_string(),
                                 )
+                            } else if method == "GET" && path == checkpoint_file_path {
+                                ("200 OK", "checkpoint-body".to_string())
                             } else if method == "POST" && path == materialize_path {
                                 if attempt == 1 {
                                     (
@@ -2791,6 +2853,23 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(changes.entries[0].path, "src/main.rs");
+        assert_eq!(changes.checkpoint_id, "checkpoint-7");
+        let checkpoint_bytes = sdk
+            .workspace_checkpoint_file_bytes(
+                "p",
+                "r",
+                "u",
+                "tok",
+                &workspace_id,
+                "src/main.rs",
+                7,
+                "checkpoint-7",
+                &checkpoint_tree,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(checkpoint_bytes, b"checkpoint-body");
 
         let mut materialize = MaterializeWorkspaceCheckpointRequest::new(7, "intentional snapshot");
         materialize.author = Some(super::super::merge::Signature {
@@ -2848,6 +2927,25 @@ mod tests {
         let query: HashMap<_, _> = changes_url.query_pairs().into_owned().collect();
         assert_eq!(query.get("limit").map(String::as_str), Some("23"));
         assert_eq!(query.get("after").map(String::as_str), Some("src/lib.rs"));
+
+        let checkpoint_file_request = seen
+            .iter()
+            .find(|request| {
+                request.method == "GET" && request.target.starts_with(&checkpoint_file_path)
+            })
+            .expect("revision-bound checkpoint file GET");
+        let checkpoint_file_url =
+            reqwest::Url::parse(&format!("http://test{}", checkpoint_file_request.target)).unwrap();
+        let file_query: HashMap<_, _> = checkpoint_file_url.query_pairs().into_owned().collect();
+        assert_eq!(file_query.get("generation").map(String::as_str), Some("7"));
+        assert_eq!(
+            file_query.get("checkpoint_id").map(String::as_str),
+            Some("checkpoint-7")
+        );
+        assert_eq!(
+            file_query.get("tree").map(String::as_str),
+            Some(checkpoint_tree.as_str())
+        );
 
         let materialize_posts: Vec<_> = seen
             .iter()
