@@ -196,6 +196,28 @@ impl Default for PushOptions {
     }
 }
 
+/// Identity and ordering fields for one crash-resumable Git workspace WAL checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceCheckpointOptions {
+    /// Client-generated 40-hex workspace id. The server allocates the workspace lazily and
+    /// atomically with generation one.
+    pub workspace_id: String,
+    /// Strictly increasing generation within the workspace WAL.
+    pub generation: u64,
+    /// Stable idempotency identity journaled before upload.
+    pub checkpoint_id: String,
+    /// Canonical ref from which the lazy workspace base was resolved, for display and promote
+    /// defaults. The immutable base commit itself is [`PushOptions::base`].
+    pub base_ref: Option<String>,
+    /// Branch promoted by each explicit snapshot (`tl git mount --publish`). Autosave only
+    /// persists this policy; a checkpoint never advances the branch itself.
+    pub publish_target: Option<String>,
+    /// Writable mount fencing token and its fleet-visible location. Generation one sends both so
+    /// workspace allocation and ownership are one atomic server transaction.
+    pub mount_id: Option<String>,
+    pub mounted_on: Option<String>,
+}
+
 fn canonical_repo_path(path: &str, what: &str) -> Result<(), SdkError> {
     if path.is_empty()
         || path.starts_with('/')
@@ -212,6 +234,26 @@ fn canonical_repo_path(path: &str, what: &str) -> Result<(), SdkError> {
         )));
     }
     Ok(())
+}
+
+fn encoded_repo_path(path: &str, what: &str) -> Result<String, SdkError> {
+    canonical_repo_path(path, what)?;
+    Ok(path
+        .split('/')
+        .map(super::encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
+fn is_hex_oid(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
+fn is_lower_hex_oid(value: &str) -> bool {
+    value.len() == 40
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
 }
 
 fn apply_path_prefix(files: &mut [PushFile], prefix: Option<&str>) -> Result<(), SdkError> {
@@ -251,6 +293,141 @@ pub struct PushReport {
     /// `PushSource::StablePrefix`. Never serialized: caller-local plumbing, not wire data.
     #[serde(skip_serializing)]
     pub file_chunks: Vec<(String, Vec<([u8; 32], u32)>)>,
+    /// Internal shared-pipeline result consumed by [`ArtifactStorageClient::push_workspace_checkpoint`].
+    /// Ordinary `push_files`/`push_worktree` calls always return `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    checkpoint: Option<WorkspaceCheckpointResponse>,
+}
+
+/// Durable server acknowledgement for a Git workspace WAL checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCheckpointResponse {
+    pub format_ver: u16,
+    pub workspace_id: String,
+    pub ref_name: String,
+    pub generation: u64,
+    pub checkpoint_id: String,
+    pub base: String,
+    pub snapshot_tip: String,
+    pub tree: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub materialized_generation: Option<u64>,
+}
+
+/// Upload and durable-checkpoint outcome. The byte/chunk fields have the same meaning as
+/// [`PushReport`]; `checkpoint` is the server-authoritative WAL head.
+#[non_exhaustive]
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkspaceCheckpointPushReport {
+    pub checkpoint: WorkspaceCheckpointResponse,
+    pub files: usize,
+    pub bytes_total: u64,
+    pub chunks_total: usize,
+    pub chunks_uploaded: usize,
+    pub bytes_uploaded: u64,
+    pub file_blob_oids: Vec<(String, String)>,
+    #[serde(skip_serializing)]
+    pub file_chunks: Vec<(String, Vec<([u8; 32], u32)>)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCheckpointChange {
+    pub path: String,
+    pub change: String,
+    pub mode: u32,
+    pub size: Option<u64>,
+    pub oid: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCheckpointChangesPage {
+    pub generation: u64,
+    pub checkpoint_id: String,
+    pub snapshot_tip: String,
+    pub tree: String,
+    pub materialized_generation: Option<u64>,
+    pub entries: Vec<WorkspaceCheckpointChange>,
+    pub truncated: bool,
+    pub next_after: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct MaterializeWorkspaceCheckpointRequest {
+    pub format_ver: u16,
+    pub generation: u64,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<super::merge::Signature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub committer: Option<super::merge::Signature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
+    /// Whether materialization should also run the workspace's configured publish policy.
+    /// Full-history promotion suppresses this one squash publication, then lands the exact
+    /// materialized chain through the explicit promote transaction.
+    pub publish_configured: bool,
+}
+
+impl MaterializeWorkspaceCheckpointRequest {
+    pub fn new(generation: u64, message: impl Into<String>) -> Self {
+        Self {
+            format_ver: 1,
+            generation,
+            message: message.into(),
+            author: None,
+            committer: None,
+            mount_id: None,
+            publish_configured: true,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceCheckpointPublishStatus {
+    NotConfigured,
+    Published,
+    Conflict,
+    Failed,
+    /// Forward-compatible, but deliberately not successful: a new server outcome must not be
+    /// mistaken for a branch publication by an older client.
+    #[serde(other)]
+    Unknown,
+}
+
+impl WorkspaceCheckpointPublishStatus {
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::NotConfigured | Self::Published)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+            Self::Published => "published",
+            Self::Conflict => "conflict",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializeWorkspaceCheckpointResponse {
+    pub generation: u64,
+    pub commit: String,
+    pub tree: String,
+    pub ref_name: String,
+    pub parent: Option<String>,
+    pub created: bool,
+    /// Outcome of the separate publish-on-snapshot transition: `not_configured`, `published`,
+    /// `conflict`, or `failed`. Materialization itself succeeded whenever this response exists.
+    pub publish_status: WorkspaceCheckpointPublishStatus,
+    /// Target-branch commit written by configured publication, including idempotent replays.
+    pub published_commit: Option<String>,
+    /// Actionable configured-publication failure. The snapshot commit named by `commit` remains
+    /// durable and callers must still retire their local WAL generation.
+    pub publish_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -424,6 +601,24 @@ struct CommitWire {
     base: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     expect_oid: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceCheckpointWire<'a> {
+    format_ver: u16,
+    generation: u64,
+    checkpoint_id: &'a str,
+    base: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_ref: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    publish_target: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mounted_on: Option<&'a str>,
+    session_id: &'a str,
+    files: &'a [CommitFileWire],
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -846,10 +1041,53 @@ impl ArtifactStorageClient {
         repo: &str,
         git_username: &str,
         git_token: &str,
-        mut files: Vec<PushFile>,
+        files: Vec<PushFile>,
         opts: PushOptions,
     ) -> Result<Traced<PushReport>, SdkError> {
+        self.push_files_inner(project_id, repo, git_username, git_token, files, opts, None)
+            .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn push_files_inner(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        mut files: Vec<PushFile>,
+        opts: PushOptions,
+        workspace_checkpoint: Option<WorkspaceCheckpointOptions>,
+    ) -> Result<Traced<PushReport>, SdkError> {
         apply_path_prefix(&mut files, opts.path_prefix.as_deref())?;
+        if opts.workspace_snapshot.is_some() && workspace_checkpoint.is_some() {
+            return Err(SdkError::ClientError(
+                "workspace_snapshot and workspace_checkpoint are mutually exclusive".into(),
+            ));
+        }
+        if let Some(checkpoint) = workspace_checkpoint.as_ref() {
+            if !is_lower_hex_oid(&checkpoint.workspace_id) {
+                return Err(SdkError::ClientError(format!(
+                    "workspace checkpoint id must be a 40-character lowercase hex id, got {:?}",
+                    checkpoint.workspace_id
+                )));
+            }
+            if checkpoint.generation == 0 {
+                return Err(SdkError::ClientError(
+                    "workspace checkpoint generation must be greater than zero".into(),
+                ));
+            }
+            if checkpoint.checkpoint_id.is_empty() || checkpoint.checkpoint_id.len() > 128 {
+                return Err(SdkError::ClientError(
+                    "workspace checkpoint idempotency id must contain 1..128 bytes".into(),
+                ));
+            }
+            if !opts.base.as_deref().is_some_and(is_hex_oid) {
+                return Err(SdkError::ClientError(
+                    "workspace checkpoint requires a 40-hex base commit".into(),
+                ));
+            }
+        }
         let emit = |ev: PushEvent| {
             if let Some(p) = &opts.progress {
                 p(ev)
@@ -1522,6 +1760,76 @@ impl ArtifactStorageClient {
                 }
             })
             .collect();
+        if let Some(checkpoint) = workspace_checkpoint.as_ref() {
+            let base = opts
+                .base
+                .as_deref()
+                .expect("checkpoint base validated above");
+            let body = WorkspaceCheckpointWire {
+                format_ver: 1,
+                generation: checkpoint.generation,
+                checkpoint_id: &checkpoint.checkpoint_id,
+                base,
+                base_ref: checkpoint.base_ref.as_deref(),
+                publish_target: checkpoint.publish_target.as_deref(),
+                mount_id: checkpoint.mount_id.as_deref(),
+                mounted_on: checkpoint.mounted_on.as_deref(),
+                session_id: &session.session_id,
+                files: &commit_files,
+            };
+            let suffix = format!(
+                "workspaces/{}/checkpoint",
+                super::encode_path_segment(&checkpoint.workspace_id)
+            );
+            let (checkpoint_response, trace_id) = with_transient_retries(|| async {
+                let (request, trace_id) = self.git_request(
+                    Method::PUT,
+                    project_id,
+                    repo,
+                    Some(&suffix),
+                    git_username,
+                    git_token,
+                )?;
+                let response = request
+                    .timeout(std::time::Duration::from_secs(60))
+                    .json(&body)
+                    .send()
+                    .await?;
+                let checkpoint: WorkspaceCheckpointResponse = expect_json(response).await?;
+                Ok((checkpoint, trace_id))
+            })
+            .await?;
+            return Ok(Traced::new(
+                trace_id,
+                PushReport {
+                    // Keep the legacy report fields meaningful for internal shared plumbing:
+                    // the materialized tip is the last commit, while `tree` is the WAL head.
+                    commit: checkpoint_response.snapshot_tip.clone(),
+                    tree: checkpoint_response.tree.clone(),
+                    ref_name: checkpoint_response.ref_name.clone(),
+                    created: false,
+                    files: chunked.len(),
+                    bytes_total: total_bytes,
+                    chunks_total: distinct.len(),
+                    chunks_uploaded: uploaded_chunks,
+                    bytes_uploaded: uploaded_bytes,
+                    file_chunks: if opts.collect_file_chunks {
+                        chunked
+                            .iter()
+                            .filter(|file| !file.delete && !file.known_oid && file.cdc)
+                            .map(|file| (file.repo_path.clone(), file.chunks.clone()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    file_blob_oids: chunked
+                        .into_iter()
+                        .map(|file| (file.repo_path, file.blob_oid))
+                        .collect(),
+                    checkpoint: Some(checkpoint_response),
+                },
+            ));
+        }
         // One match keeps the submit route and the branch field coupled to the same
         // discriminant: a workspace snapshot commits on the workspace ref (no wire branch),
         // an ordinary push commits on a branch.
@@ -1700,8 +2008,292 @@ impl ArtifactStorageClient {
                     .into_iter()
                     .map(|f| (f.repo_path, f.blob_oid))
                     .collect(),
+                checkpoint: None,
             },
         ))
+    }
+
+    /// Push a prepared change list through the ordinary resumable ingest pipeline, but seal the
+    /// result as a Git workspace WAL checkpoint rather than creating a commit. This is the Git
+    /// mount autosave path; callers materialize an explicit commit separately.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn push_workspace_checkpoint(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        files: Vec<PushFile>,
+        opts: PushOptions,
+        target: WorkspaceCheckpointOptions,
+    ) -> Result<Traced<WorkspaceCheckpointPushReport>, SdkError> {
+        if opts.workspace_snapshot.is_some() {
+            return Err(SdkError::ClientError(
+                "workspace checkpoint push cannot also target a snapshot commit".into(),
+            ));
+        }
+        let report = self
+            .push_files_inner(
+                project_id,
+                repo,
+                git_username,
+                git_token,
+                files,
+                opts,
+                Some(target),
+            )
+            .await?;
+        let trace_id = report.trace_id.clone();
+        let report = report.into_inner();
+        let checkpoint = report.checkpoint.ok_or_else(|| {
+            SdkError::ClientError("checkpoint push returned a commit response".into())
+        })?;
+        Ok(Traced::new(
+            trace_id,
+            WorkspaceCheckpointPushReport {
+                checkpoint,
+                files: report.files,
+                bytes_total: report.bytes_total,
+                chunks_total: report.chunks_total,
+                chunks_uploaded: report.chunks_uploaded,
+                bytes_uploaded: report.bytes_uploaded,
+                file_blob_oids: report.file_blob_oids,
+                file_chunks: report.file_chunks,
+            },
+        ))
+    }
+
+    /// Read the current durable WAL head for one workspace.
+    pub async fn workspace_checkpoint(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+    ) -> Result<Traced<WorkspaceCheckpointResponse>, SdkError> {
+        let suffix = format!(
+            "workspaces/{}/checkpoint",
+            super::encode_path_segment(workspace_id)
+        );
+        let (response, trace_id) = with_transient_retries(|| async {
+            let (request, trace_id) = self.git_request(
+                Method::GET,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            let response = expect_json(request.send().await?).await?;
+            Ok((response, trace_id))
+        })
+        .await?;
+        Ok(Traced::new(trace_id, response))
+    }
+
+    /// Page the path changes represented by the current WAL head. Rebase/sync use this to carry
+    /// uncommitted autosave state to a new base without creating an intermediate commit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn workspace_checkpoint_changes(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Traced<WorkspaceCheckpointChangesPage>, SdkError> {
+        let suffix = format!(
+            "workspaces/{}/checkpoint/changes",
+            super::encode_path_segment(workspace_id)
+        );
+        let mut query = vec![("limit", limit.clamp(1, 1_000).to_string())];
+        if let Some(after) = after {
+            query.push(("after", after.to_string()));
+        }
+        let (response, trace_id) = with_transient_retries(|| async {
+            let (request, trace_id) = self.git_request(
+                Method::GET,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            let response = expect_json(request.query(&query).send().await?).await?;
+            Ok((response, trace_id))
+        })
+        .await?;
+        Ok(Traced::new(trace_id, response))
+    }
+
+    /// Read one file from an exact, principal-bound workspace checkpoint revision. The revision
+    /// fields prevent a generation advancing between change pagination and byte fetch from
+    /// silently serving a different same-path body.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn workspace_checkpoint_file_bytes(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        file_path: &str,
+        generation: u64,
+        checkpoint_id: &str,
+        tree: &str,
+    ) -> Result<Traced<Vec<u8>>, SdkError> {
+        let encoded_file_path = encoded_repo_path(file_path, "checkpoint file path")?;
+        let suffix = format!(
+            "workspaces/{}/checkpoint/files/{encoded_file_path}",
+            super::encode_path_segment(workspace_id)
+        );
+        let query = [
+            ("generation", generation.to_string()),
+            ("checkpoint_id", checkpoint_id.to_string()),
+            ("tree", tree.to_string()),
+        ];
+        let (bytes, trace_id) = with_transient_retries(|| async {
+            let (request, trace_id) = self.git_request(
+                Method::GET,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            let response = request.query(&query).send().await?;
+            let status = response.status();
+            if !status.is_success() {
+                return Err(SdkError::ServerError {
+                    status,
+                    message: response.text().await.unwrap_or_default(),
+                });
+            }
+            Ok((response.bytes().await?.to_vec(), trace_id))
+        })
+        .await?;
+        Ok(Traced::new(trace_id, bytes))
+    }
+
+    /// Read a bounded byte range from an exact, principal-bound workspace checkpoint revision.
+    /// The server must answer with `206 Partial Content`; accepting a full-body `200` here would
+    /// silently defeat the resume path's memory bound when talking to an incompatible server.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn workspace_checkpoint_file_range(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        file_path: &str,
+        generation: u64,
+        checkpoint_id: &str,
+        tree: &str,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Traced<Vec<u8>>, SdkError> {
+        let encoded_file_path = encoded_repo_path(file_path, "checkpoint file path")?;
+        if start > end_inclusive {
+            return Err(SdkError::ClientError(
+                "checkpoint file range start exceeds end".to_string(),
+            ));
+        }
+        let suffix = format!(
+            "workspaces/{}/checkpoint/files/{encoded_file_path}",
+            super::encode_path_segment(workspace_id)
+        );
+        let query = [
+            ("generation", generation.to_string()),
+            ("checkpoint_id", checkpoint_id.to_string()),
+            ("tree", tree.to_string()),
+        ];
+        let expected_len = end_inclusive - start + 1;
+        let range_header = format!("bytes={start}-{end_inclusive}");
+        let (bytes, trace_id) = with_transient_retries(|| async {
+            let (request, trace_id) = self.git_request(
+                Method::GET,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            let response = request
+                .query(&query)
+                .header(reqwest::header::RANGE, &range_header)
+                .send()
+                .await?;
+            let status = response.status();
+            if status != reqwest::StatusCode::PARTIAL_CONTENT {
+                if status.is_success() {
+                    return Err(SdkError::ClientError(format!(
+                        "checkpoint file range endpoint returned {status} instead of 206 Partial Content"
+                    )));
+                }
+                return Err(SdkError::ServerError {
+                    status,
+                    message: response.text().await.unwrap_or_default(),
+                });
+            }
+            let expected_content_range = format!("bytes {start}-{end_inclusive}/");
+            let content_range_matches = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with(&expected_content_range));
+            if !content_range_matches {
+                return Err(SdkError::ClientError(format!(
+                    "checkpoint file range response did not bind bytes {start}-{end_inclusive}"
+                )));
+            }
+            let bytes = response.bytes().await?.to_vec();
+            if bytes.len() as u64 != expected_len {
+                return Err(SdkError::ClientError(format!(
+                    "checkpoint file range returned {} bytes, expected {expected_len}",
+                    bytes.len()
+                )));
+            }
+            Ok((bytes, trace_id))
+        })
+        .await?;
+        Ok(Traced::new(trace_id, bytes))
+    }
+
+    /// Materialize one WAL generation as exactly one commit on the workspace ref. Replaying the
+    /// same generation is idempotent and returns the original durable receipt byte-for-byte;
+    /// `created` describes that operation, not the current HTTP attempt.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn materialize_workspace_checkpoint(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        request: &MaterializeWorkspaceCheckpointRequest,
+    ) -> Result<Traced<MaterializeWorkspaceCheckpointResponse>, SdkError> {
+        let suffix = format!(
+            "workspaces/{}/checkpoint/materialize",
+            super::encode_path_segment(workspace_id)
+        );
+        let (response, trace_id) = with_transient_retries(|| async {
+            let (http_request, trace_id) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            let response = expect_json(http_request.json(request).send().await?).await?;
+            Ok((response, trace_id))
+        })
+        .await?;
+        Ok(Traced::new(trace_id, response))
     }
 
     async fn negotiate_missing(
@@ -2004,6 +2596,41 @@ async fn expect_ok(resp: reqwest::Response) -> Result<(), SdkError> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn checkpoint_file_paths_encode_components_without_hiding_separators() {
+        assert_eq!(
+            encoded_repo_path("src/what ?#%.rs", "test path").unwrap(),
+            "src/what%20%3F%23%25.rs"
+        );
+        assert_eq!(
+            encoded_repo_path("日本語/é.rs", "test path").unwrap(),
+            "%E6%97%A5%E6%9C%AC%E8%AA%9E/%C3%A9.rs"
+        );
+        assert!(encoded_repo_path("../secret", "test path").is_err());
+    }
+
+    #[test]
+    fn unknown_publish_outcomes_fail_closed() {
+        let response: MaterializeWorkspaceCheckpointResponse =
+            serde_json::from_value(serde_json::json!({
+                "generation": 1,
+                "commit": "a".repeat(40),
+                "tree": "b".repeat(40),
+                "ref_name": "refs/workspaces/w",
+                "parent": null,
+                "created": true,
+                "publish_status": "new_server_outcome",
+                "published_commit": null,
+                "publish_error": null,
+            }))
+            .unwrap();
+        assert_eq!(
+            response.publish_status,
+            WorkspaceCheckpointPublishStatus::Unknown
+        );
+        assert!(!response.publish_status.is_success());
+    }
+
     fn cf(chunks: Vec<([u8; 32], u32)>, delete: bool, known_oid: bool) -> ChunkedFile {
         let cdc = !delete && !known_oid && !chunks.is_empty();
         ChunkedFile {
@@ -2068,6 +2695,503 @@ mod tests {
             delete: true,
         }];
         assert!(apply_path_prefix(&mut files, Some("services/auth")).is_err());
+    }
+
+    #[test]
+    fn workspace_checkpoint_wire_reuses_commit_file_declarations_without_commit_fields() {
+        let files = vec![CommitFileWire {
+            path: "src/lib.rs".to_string(),
+            chunks: vec![CommitChunkWire {
+                hash: "ab".repeat(32),
+                size: 17,
+            }],
+            content: None,
+            file_token: None,
+            oid: None,
+            delete: false,
+            mode: Some("100644".to_string()),
+        }];
+        let base = "1".repeat(40);
+        let wire = WorkspaceCheckpointWire {
+            format_ver: 1,
+            generation: 7,
+            checkpoint_id: "checkpoint-7",
+            base: &base,
+            base_ref: Some("refs/heads/main"),
+            publish_target: Some("main"),
+            mount_id: Some("mount-1"),
+            mounted_on: Some("sandbox:/code"),
+            session_id: "session-1",
+            files: &files,
+        };
+        let value = serde_json::to_value(wire).unwrap();
+        assert_eq!(value["format_ver"], 1);
+        assert_eq!(value["generation"], 7);
+        assert_eq!(value["checkpoint_id"], "checkpoint-7");
+        assert_eq!(value["base"], "1".repeat(40));
+        assert_eq!(value["base_ref"], "refs/heads/main");
+        assert_eq!(value["publish_target"], "main");
+        assert_eq!(value["mount_id"], "mount-1");
+        assert_eq!(value["mounted_on"], "sandbox:/code");
+        assert_eq!(value["session_id"], "session-1");
+        assert_eq!(value["files"][0]["path"], "src/lib.rs");
+        assert_eq!(value["files"][0]["chunks"][0]["size"], 17);
+        assert!(value.get("branch").is_none());
+        assert!(value.get("message").is_none());
+        assert!(value.get("expect_oid").is_none());
+    }
+
+    /// Pin the complete public WAL protocol, not just its private serialization structs. Both
+    /// mutations are idempotent, so a transient response must replay the identical request;
+    /// reads must retain their exact route and pagination query.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_checkpoint_endpoints_retry_and_preserve_wire() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        #[derive(Clone, Debug)]
+        struct RecordedRequest {
+            method: String,
+            target: String,
+            body: Vec<u8>,
+            range: Option<String>,
+        }
+
+        let workspace_id = "a".repeat(40);
+        let base_oid = "b".repeat(40);
+        let snapshot_tip = "c".repeat(40);
+        let checkpoint_tree = "d".repeat(40);
+        let materialized_commit = "e".repeat(40);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<RecordedRequest>>> = Arc::default();
+        let attempts: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
+        let seen_server = seen.clone();
+        let attempts_server = attempts.clone();
+        let checkpoint_path = format!("/project/p/repos/r/workspaces/{workspace_id}/checkpoint");
+        let changes_path = format!("{checkpoint_path}/changes");
+        let checkpoint_file_path = format!("{checkpoint_path}/files/src/main.rs");
+        let materialize_path = format!("{checkpoint_path}/materialize");
+        let checkpoint_path_server = checkpoint_path.clone();
+        let changes_path_server = changes_path.clone();
+        let checkpoint_file_path_server = checkpoint_file_path.clone();
+        let materialize_path_server = materialize_path.clone();
+        let server = tokio::spawn({
+            let workspace_id = workspace_id.clone();
+            let base_oid = base_oid.clone();
+            let snapshot_tip = snapshot_tip.clone();
+            let checkpoint_tree = checkpoint_tree.clone();
+            let materialized_commit = materialized_commit.clone();
+            async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let seen = seen_server.clone();
+                    let attempts = attempts_server.clone();
+                    let workspace_id = workspace_id.clone();
+                    let base_oid = base_oid.clone();
+                    let snapshot_tip = snapshot_tip.clone();
+                    let checkpoint_tree = checkpoint_tree.clone();
+                    let materialized_commit = materialized_commit.clone();
+                    let checkpoint_path = checkpoint_path_server.clone();
+                    let changes_path = changes_path_server.clone();
+                    let checkpoint_file_path = checkpoint_file_path_server.clone();
+                    let materialize_path = materialize_path_server.clone();
+                    tokio::spawn(async move {
+                        let mut buffered = Vec::new();
+                        loop {
+                            let head_end = loop {
+                                if let Some(pos) =
+                                    buffered.windows(4).position(|window| window == b"\r\n\r\n")
+                                {
+                                    break pos + 4;
+                                }
+                                let mut chunk = [0_u8; 4096];
+                                match socket.read(&mut chunk).await {
+                                    Ok(0) | Err(_) => return,
+                                    Ok(read) => buffered.extend_from_slice(&chunk[..read]),
+                                }
+                            };
+                            let head = String::from_utf8_lossy(&buffered[..head_end]).to_string();
+                            let request_line = head.lines().next().unwrap_or_default();
+                            let mut request_parts = request_line.split_whitespace();
+                            let method = request_parts.next().unwrap_or_default().to_string();
+                            let target = request_parts.next().unwrap_or_default().to_string();
+                            let content_length = head
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .and_then(|value| value.trim().parse::<usize>().ok())
+                                })
+                                .unwrap_or(0);
+                            let range = head.lines().find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("range")
+                                    .then(|| value.trim().to_string())
+                            });
+                            while buffered.len() < head_end + content_length {
+                                let mut chunk = [0_u8; 4096];
+                                match socket.read(&mut chunk).await {
+                                    Ok(0) | Err(_) => return,
+                                    Ok(read) => buffered.extend_from_slice(&chunk[..read]),
+                                }
+                            }
+                            let body = buffered[head_end..head_end + content_length].to_vec();
+                            buffered.drain(..head_end + content_length);
+                            seen.lock().unwrap().push(RecordedRequest {
+                                method: method.clone(),
+                                target: target.clone(),
+                                body,
+                                range: range.clone(),
+                            });
+
+                            let path = target.split('?').next().unwrap_or_default();
+                            let route = format!("{method} {path}");
+                            let attempt = {
+                                let mut attempts = attempts.lock().unwrap();
+                                let count = attempts.entry(route).or_default();
+                                *count += 1;
+                                *count
+                            };
+                            let (status, response_body) = if method == "GET"
+                                && path == checkpoint_file_path
+                                && range.as_deref() == Some("bytes=0-4")
+                            {
+                                ("206 Partial Content", "check".to_string())
+                            } else if path.ends_with("/ingest/sessions") {
+                                (
+                                    "200 OK",
+                                    serde_json::json!({
+                                        "session_id": "session-1",
+                                        "cdc_min_bytes": 1024,
+                                        "cdc_avg_bytes": 4096,
+                                        "cdc_max_bytes": 16384,
+                                        "max_hashes_per_query": 512,
+                                        "max_chunk_bytes": 1_048_576,
+                                        "features": ["oid_files"]
+                                    })
+                                    .to_string(),
+                                )
+                            } else if method == "PUT" && path == checkpoint_path {
+                                if attempt == 1 {
+                                    (
+                                        "503 Service Unavailable",
+                                        serde_json::json!({"message": "retry checkpoint"})
+                                            .to_string(),
+                                    )
+                                } else {
+                                    (
+                                        "201 Created",
+                                        serde_json::json!({
+                                            "format_ver": 1,
+                                            "workspace_id": workspace_id,
+                                            "ref_name": format!("refs/workspaces/{workspace_id}"),
+                                            "generation": 7,
+                                            "checkpoint_id": "checkpoint-7",
+                                            "base": base_oid,
+                                            "snapshot_tip": snapshot_tip,
+                                            "tree": checkpoint_tree,
+                                            "created_at_ms": 10,
+                                            "updated_at_ms": 11,
+                                            "materialized_generation": null
+                                        })
+                                        .to_string(),
+                                    )
+                                }
+                            } else if method == "GET" && path == checkpoint_path {
+                                (
+                                    "200 OK",
+                                    serde_json::json!({
+                                        "format_ver": 1,
+                                        "workspace_id": workspace_id,
+                                        "ref_name": format!("refs/workspaces/{workspace_id}"),
+                                        "generation": 7,
+                                        "checkpoint_id": "checkpoint-7",
+                                        "base": base_oid,
+                                        "snapshot_tip": snapshot_tip,
+                                        "tree": checkpoint_tree,
+                                        "created_at_ms": 10,
+                                        "updated_at_ms": 11,
+                                        "materialized_generation": null
+                                    })
+                                    .to_string(),
+                                )
+                            } else if method == "GET" && path == changes_path {
+                                (
+                                    "200 OK",
+                                    serde_json::json!({
+                                        "generation": 7,
+                                        "checkpoint_id": "checkpoint-7",
+                                        "snapshot_tip": snapshot_tip,
+                                        "tree": checkpoint_tree,
+                                        "materialized_generation": null,
+                                        "entries": [{
+                                            "path": "src/main.rs",
+                                            "change": "modified",
+                                            "mode": 0o100644,
+                                            "size": 12,
+                                            "oid": "f".repeat(40)
+                                        }],
+                                        "truncated": false,
+                                        "next_after": null
+                                    })
+                                    .to_string(),
+                                )
+                            } else if method == "GET" && path == checkpoint_file_path {
+                                ("200 OK", "checkpoint-body".to_string())
+                            } else if method == "POST" && path == materialize_path {
+                                if attempt == 1 {
+                                    (
+                                        "503 Service Unavailable",
+                                        serde_json::json!({"message": "retry materialize"})
+                                            .to_string(),
+                                    )
+                                } else {
+                                    (
+                                        "201 Created",
+                                        serde_json::json!({
+                                            "generation": 7,
+                                            "commit": materialized_commit,
+                                            "tree": checkpoint_tree,
+                                            "ref_name": format!("refs/workspaces/{workspace_id}"),
+                                            "parent": snapshot_tip,
+                                            "created": true,
+                                            "publish_status": "published",
+                                            "published_commit": "9".repeat(40),
+                                            "publish_error": null
+                                        })
+                                        .to_string(),
+                                    )
+                                }
+                            } else {
+                                (
+                                    "404 Not Found",
+                                    serde_json::json!({
+                                        "message": format!("unhandled test route {method} {target}")
+                                    })
+                                    .to_string(),
+                                )
+                            };
+                            let range_headers = if status == "206 Partial Content" {
+                                "content-range: bytes 0-4/15\r\naccept-ranges: bytes\r\n"
+                            } else {
+                                ""
+                            };
+                            let response = format!(
+                                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{range_headers}content-length: {}\r\n\r\n{response_body}",
+                                response_body.len()
+                            );
+                            if socket.write_all(response.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+        let base_url = format!("http://{addr}");
+        let client = crate::ClientBuilder::new(&base_url)
+            .bearer_token("dummy")
+            .build()
+            .unwrap();
+        let sdk = ArtifactStorageClient::new(client, &base_url).unwrap();
+        let checkpoint = sdk
+            .push_workspace_checkpoint(
+                "p",
+                "r",
+                "u",
+                "tok",
+                vec![PushFile {
+                    repo_path: "src/main.rs".to_string(),
+                    source: PushSource::KnownOid("f".repeat(40)),
+                    mode: Some(0o100644),
+                    delete: false,
+                }],
+                PushOptions {
+                    base: Some(base_oid.clone()),
+                    ..Default::default()
+                },
+                WorkspaceCheckpointOptions {
+                    workspace_id: workspace_id.clone(),
+                    generation: 7,
+                    checkpoint_id: "checkpoint-7".to_string(),
+                    base_ref: Some("refs/heads/main".to_string()),
+                    publish_target: Some("main".to_string()),
+                    mount_id: Some("mount-1".to_string()),
+                    mounted_on: Some("sandbox:/code".to_string()),
+                },
+            )
+            .await
+            .expect("checkpoint PUT must retry a 503")
+            .into_inner();
+        assert_eq!(checkpoint.checkpoint.tree, checkpoint_tree);
+
+        let read = sdk
+            .workspace_checkpoint("p", "r", "u", "tok", &workspace_id)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(read.generation, 7);
+
+        let changes = sdk
+            .workspace_checkpoint_changes(
+                "p",
+                "r",
+                "u",
+                "tok",
+                &workspace_id,
+                Some("src/lib.rs"),
+                23,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(changes.entries[0].path, "src/main.rs");
+        assert_eq!(changes.checkpoint_id, "checkpoint-7");
+        let checkpoint_bytes = sdk
+            .workspace_checkpoint_file_bytes(
+                "p",
+                "r",
+                "u",
+                "tok",
+                &workspace_id,
+                "src/main.rs",
+                7,
+                "checkpoint-7",
+                &checkpoint_tree,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(checkpoint_bytes, b"checkpoint-body");
+        let checkpoint_range = sdk
+            .workspace_checkpoint_file_range(
+                "p",
+                "r",
+                "u",
+                "tok",
+                &workspace_id,
+                "src/main.rs",
+                7,
+                "checkpoint-7",
+                &checkpoint_tree,
+                0,
+                4,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(checkpoint_range, b"check");
+
+        let mut materialize = MaterializeWorkspaceCheckpointRequest::new(7, "intentional snapshot");
+        materialize.author = Some(super::super::merge::Signature {
+            name: "Agent".to_string(),
+            email: "agent@example.com".to_string(),
+        });
+        let materialized = sdk
+            .materialize_workspace_checkpoint("p", "r", "u", "tok", &workspace_id, &materialize)
+            .await
+            .expect("materialize POST must retry a 503")
+            .into_inner();
+        assert_eq!(materialized.commit, materialized_commit);
+        assert_eq!(
+            materialized.publish_status,
+            WorkspaceCheckpointPublishStatus::Published
+        );
+        assert_eq!(
+            materialized.published_commit.as_deref(),
+            Some("9999999999999999999999999999999999999999")
+        );
+        assert_eq!(materialized.publish_error, None);
+        server.abort();
+
+        let seen = seen.lock().unwrap().clone();
+        let checkpoint_puts: Vec<_> = seen
+            .iter()
+            .filter(|request| request.method == "PUT" && request.target == checkpoint_path)
+            .collect();
+        assert_eq!(checkpoint_puts.len(), 2, "503 checkpoint PUT must retry");
+        assert_eq!(checkpoint_puts[0].body, checkpoint_puts[1].body);
+        let checkpoint_body: serde_json::Value =
+            serde_json::from_slice(&checkpoint_puts[0].body).unwrap();
+        assert_eq!(checkpoint_body["format_ver"], 1);
+        assert_eq!(checkpoint_body["generation"], 7);
+        assert_eq!(checkpoint_body["checkpoint_id"], "checkpoint-7");
+        assert_eq!(checkpoint_body["base"], base_oid);
+        assert_eq!(checkpoint_body["base_ref"], "refs/heads/main");
+        assert_eq!(checkpoint_body["publish_target"], "main");
+        assert_eq!(checkpoint_body["mount_id"], "mount-1");
+        assert_eq!(checkpoint_body["mounted_on"], "sandbox:/code");
+        assert_eq!(checkpoint_body["session_id"], "session-1");
+        assert_eq!(checkpoint_body["files"][0]["path"], "src/main.rs");
+        assert_eq!(checkpoint_body["files"][0]["oid"], "f".repeat(40));
+        assert_eq!(checkpoint_body["files"][0]["mode"], "100644");
+        assert!(checkpoint_body.get("branch").is_none());
+        assert!(checkpoint_body.get("message").is_none());
+
+        assert_eq!(
+            seen.iter()
+                .filter(|request| request.method == "GET" && request.target == checkpoint_path)
+                .count(),
+            1
+        );
+        let changes_request = seen
+            .iter()
+            .find(|request| request.method == "GET" && request.target.starts_with(&changes_path))
+            .expect("changes GET");
+        let changes_url =
+            reqwest::Url::parse(&format!("http://test{}", changes_request.target)).unwrap();
+        let query: HashMap<_, _> = changes_url.query_pairs().into_owned().collect();
+        assert_eq!(query.get("limit").map(String::as_str), Some("23"));
+        assert_eq!(query.get("after").map(String::as_str), Some("src/lib.rs"));
+
+        let checkpoint_file_request = seen
+            .iter()
+            .find(|request| {
+                request.method == "GET" && request.target.starts_with(&checkpoint_file_path)
+            })
+            .expect("revision-bound checkpoint file GET");
+        let checkpoint_file_url =
+            reqwest::Url::parse(&format!("http://test{}", checkpoint_file_request.target)).unwrap();
+        let file_query: HashMap<_, _> = checkpoint_file_url.query_pairs().into_owned().collect();
+        assert_eq!(file_query.get("generation").map(String::as_str), Some("7"));
+        assert_eq!(
+            file_query.get("checkpoint_id").map(String::as_str),
+            Some("checkpoint-7")
+        );
+        assert_eq!(
+            file_query.get("tree").map(String::as_str),
+            Some(checkpoint_tree.as_str())
+        );
+        assert!(seen.iter().any(|request| {
+            request.method == "GET"
+                && request.target.starts_with(&checkpoint_file_path)
+                && request.range.as_deref() == Some("bytes=0-4")
+        }));
+
+        let materialize_posts: Vec<_> = seen
+            .iter()
+            .filter(|request| request.method == "POST" && request.target == materialize_path)
+            .collect();
+        assert_eq!(
+            materialize_posts.len(),
+            2,
+            "503 materialize POST must retry"
+        );
+        assert_eq!(materialize_posts[0].body, materialize_posts[1].body);
+        let materialize_body: serde_json::Value =
+            serde_json::from_slice(&materialize_posts[0].body).unwrap();
+        assert_eq!(materialize_body["format_ver"], 1);
+        assert_eq!(materialize_body["generation"], 7);
+        assert_eq!(materialize_body["message"], "intentional snapshot");
+        assert_eq!(materialize_body["publish_configured"], true);
+        assert_eq!(materialize_body["author"]["name"], "Agent");
+        assert!(materialize_body.get("committer").is_none());
     }
 
     /// Transient failures (5xx/429/transport) retry with backoff and then succeed; 4xx

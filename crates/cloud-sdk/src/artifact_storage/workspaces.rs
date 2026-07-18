@@ -1,21 +1,46 @@
 //! Workspace client: private durable refs (`refs/workspaces/<id>`) on artifact storage.
 //!
-//! A workspace is the unit of ongoing work (artifact_storage issue #24): created from a base
-//! commit, advanced by snapshots (ordinary commits on the workspace ref, uploaded as CDC chunks
-//! through the resumable-ingest pipeline), and published by promoting a snapshot onto a real
-//! branch (squash by default). Workspaces are durable scratch pads — they survive crashes,
-//! timeouts, and unmounts, and die only by explicit deletion. All calls authenticate with a
-//! minted git credential, like the repo/commit APIs.
+//! A workspace is the unit of ongoing work: it is allocated lazily by the first write, advances a
+//! crash-safe autosave WAL without creating commits, materializes explicit snapshots as commits,
+//! and publishes only through promote (squash by default). All calls authenticate with a minted
+//! git credential, like the repo/commit APIs.
 
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
-use crate::Traced;
 use crate::error::SdkError;
+use crate::Traced;
 
-use super::ingest::expect_json;
-use super::merge::{MergeConflict, MergeReport, MergeStats, Signature, expect_json_or_conflict};
-use super::{ArtifactStorageClient, advance_pagination_cursor, decode_empty};
+use super::ingest::{expect_json, with_transient_retries};
+use super::merge::{expect_json_or_conflict, MergeConflict, MergeReport, MergeStats, Signature};
+use super::{advance_pagination_cursor, decode_empty, ArtifactStorageClient};
+
+fn encoded_git_path(path: &str, allow_empty: bool) -> Result<String, SdkError> {
+    if path.is_empty() {
+        return if allow_empty {
+            Ok(String::new())
+        } else {
+            Err(SdkError::ClientError("Git path must not be empty".into()))
+        };
+    }
+    if path.starts_with('/')
+        || path.split('/').any(|component| {
+            component.is_empty()
+                || component == "."
+                || component == ".."
+                || component.contains('\0')
+        })
+    {
+        return Err(SdkError::ClientError(format!(
+            "Git path is not canonical: {path:?}"
+        )));
+    }
+    Ok(path
+        .split('/')
+        .map(super::encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/"))
+}
 
 /// One workspace joined across its identity record, ref, and lease rows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -39,6 +64,31 @@ pub struct WorkspaceInfo {
     /// name), in server-assigned order.
     #[serde(default)]
     pub shared_target: Option<String>,
+    /// Number of explicit snapshot commits on this workspace line. Autosave checkpoints are not
+    /// commits and are deliberately excluded.
+    #[serde(default)]
+    pub snapshot_count: u64,
+    /// Newest mount heartbeat, WAL append, snapshot, or promote time.
+    #[serde(default)]
+    pub last_activity_ms: Option<u64>,
+    /// `none`, `dirty`, or `materialized`.
+    #[serde(default = "default_workspace_wal_state")]
+    pub wal_state: String,
+    /// `attached` or `detached`; `unknown` when returned by an older server.
+    #[serde(default = "default_workspace_attachment_state")]
+    pub attachment_state: String,
+    #[serde(default)]
+    pub mounted_on: Option<String>,
+    #[serde(default)]
+    pub wal_generation: Option<u64>,
+}
+
+fn default_workspace_wal_state() -> String {
+    "none".to_string()
+}
+
+fn default_workspace_attachment_state() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -79,6 +129,22 @@ pub struct WorkspaceHeartbeat {
     pub pinned: bool,
 }
 
+/// Writable-mount presence update. This is deliberately separate from the bodyless lease
+/// heartbeat so callers must opt into changing fleet-visible attachment state.
+#[derive(Clone, Debug, Default, Serialize)]
+pub struct WorkspaceMountHeartbeatRequest {
+    /// Stable random owner of this writable attachment. Attach, heartbeat, and unmount carry the
+    /// same id so a stale process cannot replace or clear another sandbox's live claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
+    /// Human-readable mount location shown by workspace listing/status.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mounted_on: Option<String>,
+    /// Clear the active attachment on a clean unmount while re-arming detached retention.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unmount: bool,
+}
+
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct PromoteWorkspaceRequest {
     /// Target branch (short name; `refs/heads/` implied).
@@ -99,6 +165,10 @@ pub struct PromoteWorkspaceRequest {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<Signature>,
+    /// Writable mount owner. Omitted callers remain compatible while the workspace is unclaimed;
+    /// once a daemon claims it the server rejects no-id mutations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -153,6 +223,8 @@ pub struct SyncWorkspaceRequest {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<Signature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -724,15 +796,48 @@ impl ArtifactStorageClient {
         git_token: &str,
         workspace_id: &str,
     ) -> Result<Traced<WorkspaceHeartbeat>, SdkError> {
-        let (req, trace_id) = self.git_request(
-            Method::POST,
-            project_id,
-            repo,
-            Some(&format!("workspaces/{workspace_id}/heartbeat")),
-            git_username,
-            git_token,
-        )?;
-        let hb = expect_json(req.send().await?).await?;
+        let suffix = format!("workspaces/{workspace_id}/heartbeat");
+        let (hb, trace_id) = with_transient_retries(|| async {
+            let (req, trace_id) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            Ok((expect_json(req.send().await?).await?, trace_id))
+        })
+        .await?;
+        Ok(Traced::new(trace_id, hb))
+    }
+
+    /// Re-arm a writable workspace lease and atomically update its fleet-visible mount presence.
+    pub async fn workspace_mount_heartbeat(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        request: &WorkspaceMountHeartbeatRequest,
+    ) -> Result<Traced<WorkspaceHeartbeat>, SdkError> {
+        let suffix = format!("workspaces/{workspace_id}/heartbeat");
+        let (hb, trace_id) = with_transient_retries(|| async {
+            let (req, trace_id) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            Ok((
+                expect_json(req.json(request).send().await?).await?,
+                trace_id,
+            ))
+        })
+        .await?;
         Ok(Traced::new(trace_id, hb))
     }
 
@@ -987,10 +1092,14 @@ impl ArtifactStorageClient {
         limit: usize,
     ) -> Result<Traced<TreePage>, SdkError> {
         let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+        let encoded_dir_path = encoded_git_path(dir_path, true)?;
         let mut suffix = if dir_path.is_empty() {
             format!("tree?version={}&limit={limit}", enc(version))
         } else {
-            format!("tree/{}?version={}&limit={limit}", dir_path, enc(version))
+            format!(
+                "tree/{encoded_dir_path}?version={}&limit={limit}",
+                enc(version)
+            )
         };
         if let Some(after) = after {
             suffix.push_str(&format!("&after={}", enc(after)));
@@ -1017,8 +1126,9 @@ impl ArtifactStorageClient {
         version: &str,
         file_path: &str,
     ) -> Result<Traced<Vec<u8>>, SdkError> {
+        let encoded_file_path = encoded_git_path(file_path, false)?;
         let suffix = format!(
-            "files/{file_path}?version={}",
+            "files/{encoded_file_path}?version={}",
             url::form_urlencoded::byte_serialize(version.as_bytes()).collect::<String>()
         );
         let (req, trace_id) = self.git_request(
@@ -1047,6 +1157,64 @@ impl ArtifactStorageClient {
 mod tests {
     use super::*;
 
+    #[test]
+    fn git_paths_are_component_encoded_and_canonical() {
+        assert_eq!(
+            encoded_git_path("src/what ?#%.rs", false).unwrap(),
+            "src/what%20%3F%23%25.rs"
+        );
+        assert_eq!(encoded_git_path("", true).unwrap(), "");
+        assert!(encoded_git_path("../secret", false).is_err());
+        assert!(encoded_git_path("a//b", false).is_err());
+    }
+
+    #[test]
+    fn mount_heartbeat_distinguishes_attach_keepalive_and_clean_unmount() {
+        let attached = serde_json::to_value(WorkspaceMountHeartbeatRequest {
+            mount_id: Some("mount-1".to_string()),
+            mounted_on: Some("sandbox:/code".to_string()),
+            unmount: false,
+        })
+        .unwrap();
+        assert_eq!(
+            attached,
+            serde_json::json!({"mount_id": "mount-1", "mounted_on": "sandbox:/code"})
+        );
+
+        let detached = serde_json::to_value(WorkspaceMountHeartbeatRequest {
+            mount_id: Some("mount-1".to_string()),
+            mounted_on: None,
+            unmount: true,
+        })
+        .unwrap();
+        assert_eq!(
+            detached,
+            serde_json::json!({"mount_id": "mount-1", "unmount": true})
+        );
+    }
+
+    #[test]
+    fn workspace_mutations_serialize_optional_mount_fence() {
+        let promote = serde_json::to_value(PromoteWorkspaceRequest {
+            branch: "main".to_string(),
+            mount_id: Some("mount-1".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(promote["mount_id"], "mount-1");
+
+        let sync = serde_json::to_value(SyncWorkspaceRequest {
+            target: Some("main".to_string()),
+            mount_id: Some("mount-1".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(sync["mount_id"], "mount-1");
+
+        let legacy = serde_json::to_value(SyncWorkspaceRequest::default()).unwrap();
+        assert!(legacy.get("mount_id").is_none());
+    }
+
     /// Promote responses from servers that predate merge mode decode with the new fields
     /// defaulting to false.
     #[test]
@@ -1056,6 +1224,34 @@ mod tests {
         assert!(resp.squashed);
         assert!(!resp.merged);
         assert!(!resp.fast_forwarded);
+    }
+
+    #[test]
+    fn workspace_info_decodes_wal_and_activity_state_with_old_server_defaults() {
+        let base = r#"{
+            "id":"aa", "ref_name":"refs/workspaces/aa", "principal":"user:u1",
+            "base":"1111111111111111111111111111111111111111",
+            "base_ref":"refs/heads/main",
+            "head":"1111111111111111111111111111111111111111",
+            "created_at_secs":1, "lease_secs":0, "lease_due_ms":null, "pinned":true
+        }"#;
+        let old: WorkspaceInfo = serde_json::from_str(base).unwrap();
+        assert_eq!(old.snapshot_count, 0);
+        assert_eq!(old.wal_state, "none");
+        assert_eq!(old.attachment_state, "unknown");
+        assert_eq!(old.wal_generation, None);
+
+        let current = base.replace(
+            "\"pinned\":true",
+            "\"pinned\":true,\"snapshot_count\":2,\"last_activity_ms\":99,\"wal_state\":\"dirty\",\"attachment_state\":\"attached\",\"mounted_on\":\"sandbox-1\",\"wal_generation\":7",
+        );
+        let current: WorkspaceInfo = serde_json::from_str(&current).unwrap();
+        assert_eq!(current.snapshot_count, 2);
+        assert_eq!(current.last_activity_ms, Some(99));
+        assert_eq!(current.wal_state, "dirty");
+        assert_eq!(current.attachment_state, "attached");
+        assert_eq!(current.mounted_on.as_deref(), Some("sandbox-1"));
+        assert_eq!(current.wal_generation, Some(7));
     }
 
     /// The fleet page decodes gsvc-server's exact wire shape (`fleet_item_json` /
