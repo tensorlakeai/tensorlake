@@ -15,6 +15,33 @@ use super::ingest::{expect_json, with_transient_retries};
 use super::merge::{MergeConflict, MergeReport, MergeStats, Signature, expect_json_or_conflict};
 use super::{ArtifactStorageClient, advance_pagination_cursor, decode_empty};
 
+fn encoded_git_path(path: &str, allow_empty: bool) -> Result<String, SdkError> {
+    if path.is_empty() {
+        return if allow_empty {
+            Ok(String::new())
+        } else {
+            Err(SdkError::ClientError("Git path must not be empty".into()))
+        };
+    }
+    if path.starts_with('/')
+        || path.split('/').any(|component| {
+            component.is_empty()
+                || component == "."
+                || component == ".."
+                || component.contains('\0')
+        })
+    {
+        return Err(SdkError::ClientError(format!(
+            "Git path is not canonical: {path:?}"
+        )));
+    }
+    Ok(path
+        .split('/')
+        .map(super::encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
 /// One workspace joined across its identity record, ref, and lease rows.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct WorkspaceInfo {
@@ -1059,10 +1086,14 @@ impl ArtifactStorageClient {
         limit: usize,
     ) -> Result<Traced<TreePage>, SdkError> {
         let enc = |s: &str| url::form_urlencoded::byte_serialize(s.as_bytes()).collect::<String>();
+        let encoded_dir_path = encoded_git_path(dir_path, true)?;
         let mut suffix = if dir_path.is_empty() {
             format!("tree?version={}&limit={limit}", enc(version))
         } else {
-            format!("tree/{}?version={}&limit={limit}", dir_path, enc(version))
+            format!(
+                "tree/{encoded_dir_path}?version={}&limit={limit}",
+                enc(version)
+            )
         };
         if let Some(after) = after {
             suffix.push_str(&format!("&after={}", enc(after)));
@@ -1089,8 +1120,9 @@ impl ArtifactStorageClient {
         version: &str,
         file_path: &str,
     ) -> Result<Traced<Vec<u8>>, SdkError> {
+        let encoded_file_path = encoded_git_path(file_path, false)?;
         let suffix = format!(
-            "files/{file_path}?version={}",
+            "files/{encoded_file_path}?version={}",
             url::form_urlencoded::byte_serialize(version.as_bytes()).collect::<String>()
         );
         let (req, trace_id) = self.git_request(
@@ -1118,6 +1150,17 @@ impl ArtifactStorageClient {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn git_paths_are_component_encoded_and_canonical() {
+        assert_eq!(
+            encoded_git_path("src/what ?#%.rs", false).unwrap(),
+            "src/what%20%3F%23%25.rs"
+        );
+        assert_eq!(encoded_git_path("", true).unwrap(), "");
+        assert!(encoded_git_path("../secret", false).is_err());
+        assert!(encoded_git_path("a//b", false).is_err());
+    }
 
     #[test]
     fn mount_heartbeat_distinguishes_attach_keepalive_and_clean_unmount() {
