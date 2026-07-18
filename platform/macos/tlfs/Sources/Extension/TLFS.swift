@@ -306,11 +306,10 @@ final class TLFSItem: FSItem {
     /// Open file handle on the daemon, when the kernel has this item open.
     var fh: UInt64?
     var fhWritable = false
-    /// The content identity last returned by lookup/getattr and the identity pinned by `fh`.
-    /// FSKit may retain an FSItem across independent open(2)s, so an old daemon handle cannot be
-    /// reused merely because the item object itself survived a followed-head advance.
+    /// The content identity last returned by lookup/getattr. FSKit's open/close callbacks describe
+    /// aggregate vnode modes, not individual descriptors: while any read mode remains, the shared
+    /// daemon handle stays pinned to its opened view and is released only with the final mode.
     var contentVersion: ContentVersion?
-    var fhContentVersion: ContentVersion?
     /// Mount-lifetime values for the deliberately limited macOS bookkeeping xattrs.
     var limitedXattrs: [String: Data] = [:]
     let stateLock = NSLock()
@@ -425,10 +424,11 @@ final class TLFSVolume: FSVolume {
     private let itemsLock = NSLock()
     private var items: [UInt64: TLFSItem] = [:]
     /// macOS attaches these operating-system bookkeeping attributes while copying/editing
-    /// ordinary files. Advertising their limited support keeps copyfile from materializing `._*`
-    /// AppleDouble sidecars solely for transient OS state. They intentionally live only for the
-    /// mounted session; meaningful xattrs such as resource forks, Finder metadata, and user tags
-    /// remain unsupported rather than being accepted and silently lost by a snapshot.
+    /// ordinary files. Accepting them prevents failures in ordinary tools, but the volume does
+    /// not advertise the FSKit "limited xattrs" capability: copyfile interprets that flag as a
+    /// reason to materialize `._*` AppleDouble sidecars even for names accepted here. The values
+    /// intentionally live only for the mounted session; meaningful xattrs such as resource forks,
+    /// Finder metadata, and user tags remain unsupported rather than being silently lost.
     private static let limitedXattrNames = [
         "com.apple.provenance",
         "com.apple.quarantine",
@@ -511,7 +511,10 @@ final class TLFSVolume: FSVolume {
         if want(.birthTime) { out.birthTime = ts }
         if want(.addedTime) { out.addedTime = ts }
         if want(.backupTime) { out.backupTime = timespec() }
-        if want(.supportsLimitedXAttrs) { out.supportsLimitedXAttrs = true }
+        // The volume conforms to the general XattrOperations protocol. Advertising *limited*
+        // support makes copyfile maintain AppleDouble fallbacks even for names our methods accept,
+        // producing transient `._*` files alongside ordinary mkdir/copy operations.
+        if want(.supportsLimitedXAttrs) { out.supportsLimitedXAttrs = false }
         return out
     }
 
@@ -530,10 +533,7 @@ final class TLFSVolume: FSVolume {
     fileprivate func ensureHandle(_ item: TLFSItem, write: Bool) throws -> UInt64 {
         item.stateLock.lock()
         defer { item.stateLock.unlock() }
-        if let fh = item.fh,
-            (item.fhWritable || !write),
-            (item.fhWritable || item.fhContentVersion == item.contentVersion)
-        {
+        if let fh = item.fh, item.fhWritable || !write {
             return fh
         }
         let fh: UInt64 = try pool.withConnection { conn in
@@ -548,7 +548,6 @@ final class TLFSVolume: FSVolume {
         }
         item.fh = fh
         item.fhWritable = write
-        item.fhContentVersion = item.contentVersion
         return fh
     }
 
@@ -575,10 +574,6 @@ extension TLFSVolume: FSVolume.PathConfOperations {
 // MARK: - Limited macOS metadata xattrs
 
 extension TLFSVolume: FSVolume.XattrOperations {
-    func supportedXattrNames(for item: FSItem) -> [FSFileName] {
-        Self.limitedXattrNames.map { FSFileName(string: $0) }
-    }
-
     func getXattr(
         named name: FSFileName,
         of item: FSItem,
@@ -1153,11 +1148,17 @@ extension TLFSVolume: FSVolume.OpenCloseOperations {
             reply(nil)
             return
         }
+        // `modes` are the aggregate modes FSKit is keeping after this close, not the modes of
+        // the descriptor being closed. Releasing while any remain invalidates sibling open
+        // descriptors and turns their next read into EIO.
+        if !modes.isEmpty {
+            reply(nil)
+            return
+        }
         item.stateLock.lock()
         let fh = item.fh
         item.fh = nil
         item.fhWritable = false
-        item.fhContentVersion = nil
         item.stateLock.unlock()
         if let fh {
             // Flush before release so close(2) durability expectations hold.
