@@ -7,6 +7,7 @@ from pathlib import Path
 DEFAULT_FILES = (
     "pyproject.toml",
     "Cargo.toml",
+    "crates/gsvc-fs-client/Cargo.toml",
     "crates/rust-cloud-sdk-py/pyproject.toml",
     "typescript/package.json",
 )

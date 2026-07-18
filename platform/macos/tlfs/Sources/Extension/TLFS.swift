@@ -47,7 +47,7 @@ enum VfsOp: UInt8 {
     case statfs = 20
 }
 
-let vfsProtocolVersion: UInt32 = 2
+let vfsProtocolVersion: UInt32 = 3
 
 struct WireWriter {
     var data = Data()
@@ -111,6 +111,8 @@ struct WireAttr {
     /// changed; the kernel compares it across getattrs to decide cache revalidation.
     let mtimeSec: UInt64
     let mtimeNsec: UInt32
+    /// Opaque daemon identity for this exact lower snapshot or upper inode version.
+    let contentVersion: UInt64
 
     init(_ r: inout WireReader) throws {
         ino = try r.u64()
@@ -120,6 +122,7 @@ struct WireAttr {
         upper = try r.u8() != 0
         mtimeSec = try r.u64()
         mtimeNsec = try r.u32()
+        contentVersion = try r.u64()
     }
 
     var itemType: FSItem.ItemType {
@@ -292,6 +295,10 @@ final class VfsPool {
 // MARK: - Items
 
 final class TLFSItem: FSItem {
+    struct ContentVersion: Equatable {
+        let token: UInt64
+    }
+
     let ino: UInt64
     var itemType: FSItem.ItemType
     /// Server-side lookup references owed; reclaim sends one FORGET with the total.
@@ -299,12 +306,29 @@ final class TLFSItem: FSItem {
     /// Open file handle on the daemon, when the kernel has this item open.
     var fh: UInt64?
     var fhWritable = false
+    /// The content identity last returned by lookup/getattr and the identity pinned by `fh`.
+    /// FSKit may retain an FSItem across independent open(2)s, so an old daemon handle cannot be
+    /// reused merely because the item object itself survived a followed-head advance.
+    var contentVersion: ContentVersion?
+    var fhContentVersion: ContentVersion?
+    /// Mount-lifetime values for the deliberately limited macOS bookkeeping xattrs.
+    var limitedXattrs: [String: Data] = [:]
     let stateLock = NSLock()
 
     init(ino: UInt64, type: FSItem.ItemType) {
         self.ino = ino
         self.itemType = type
         super.init()
+    }
+
+    func observe(_ attr: WireAttr) {
+        stateLock.lock()
+        let next = ContentVersion(token: attr.contentVersion)
+        if let current = contentVersion, current != next {
+            limitedXattrs.removeAll()
+        }
+        contentVersion = next
+        stateLock.unlock()
     }
 }
 
@@ -400,6 +424,16 @@ final class TLFSVolume: FSVolume {
     let pool: VfsPool
     private let itemsLock = NSLock()
     private var items: [UInt64: TLFSItem] = [:]
+    /// macOS attaches these operating-system bookkeeping attributes while copying/editing
+    /// ordinary files. Advertising their limited support keeps copyfile from materializing `._*`
+    /// AppleDouble sidecars solely for transient OS state. They intentionally live only for the
+    /// mounted session; meaningful xattrs such as resource forks, Finder metadata, and user tags
+    /// remain unsupported rather than being accepted and silently lost by a snapshot.
+    private static let limitedXattrNames = [
+        "com.apple.provenance",
+        "com.apple.quarantine",
+        "com.apple.lastuseddate#PS",
+    ]
     let root: TLFSItem
 
     init(pool: VfsPool, port: UInt16) {
@@ -427,6 +461,7 @@ final class TLFSVolume: FSVolume {
             item = TLFSItem(ino: attr.ino, type: attr.itemType)
             items[attr.ino] = item
         }
+        item.observe(attr)
         if countLookup {
             item.lookups += 1
         }
@@ -476,7 +511,7 @@ final class TLFSVolume: FSVolume {
         if want(.birthTime) { out.birthTime = ts }
         if want(.addedTime) { out.addedTime = ts }
         if want(.backupTime) { out.backupTime = timespec() }
-        if want(.supportsLimitedXAttrs) { out.supportsLimitedXAttrs = false }
+        if want(.supportsLimitedXAttrs) { out.supportsLimitedXAttrs = true }
         return out
     }
 
@@ -495,7 +530,10 @@ final class TLFSVolume: FSVolume {
     fileprivate func ensureHandle(_ item: TLFSItem, write: Bool) throws -> UInt64 {
         item.stateLock.lock()
         defer { item.stateLock.unlock() }
-        if let fh = item.fh, item.fhWritable || !write {
+        if let fh = item.fh,
+            (item.fhWritable || !write),
+            (item.fhWritable || item.fhContentVersion == item.contentVersion)
+        {
             return fh
         }
         let fh: UInt64 = try pool.withConnection { conn in
@@ -510,6 +548,7 @@ final class TLFSVolume: FSVolume {
         }
         item.fh = fh
         item.fhWritable = write
+        item.fhContentVersion = item.contentVersion
         return fh
     }
 
@@ -529,8 +568,92 @@ extension TLFSVolume: FSVolume.PathConfOperations {
     var maximumNameLength: Int { 255 }
     var restrictsOwnershipChanges: Bool { true }
     var truncatesLongNames: Bool { false }
-    var maximumXattrSize: Int { 0 }
+    var maximumXattrSize: Int { 64 * 1024 }
     var maximumFileSize: UInt64 { UInt64.max }
+}
+
+// MARK: - Limited macOS metadata xattrs
+
+extension TLFSVolume: FSVolume.XattrOperations {
+    func supportedXattrNames(for item: FSItem) -> [FSFileName] {
+        Self.limitedXattrNames.map { FSFileName(string: $0) }
+    }
+
+    func getXattr(
+        named name: FSFileName,
+        of item: FSItem,
+        replyHandler reply: @escaping (Data?, (any Error)?) -> Void
+    ) {
+        guard let item = item as? TLFSItem, let key = name.string,
+            Self.limitedXattrNames.contains(key)
+        else {
+            reply(nil, POSIXError(.ENOATTR))
+            return
+        }
+        item.stateLock.lock()
+        let value = item.limitedXattrs[key]
+        item.stateLock.unlock()
+        if let value {
+            reply(value, nil)
+        } else {
+            reply(nil, POSIXError(.ENOATTR))
+        }
+    }
+
+    func setXattr(
+        named name: FSFileName,
+        to value: Data?,
+        on item: FSItem,
+        policy: FSVolume.SetXattrPolicy,
+        replyHandler reply: @escaping ((any Error)?) -> Void
+    ) {
+        guard let item = item as? TLFSItem, let key = name.string,
+            Self.limitedXattrNames.contains(key)
+        else {
+            reply(POSIXError(.ENOTSUP))
+            return
+        }
+        if let value, value.count > maximumXattrSize {
+            reply(POSIXError(.E2BIG))
+            return
+        }
+        item.stateLock.lock()
+        let exists = item.limitedXattrs[key] != nil
+        var result: (any Error)?
+        switch policy {
+        case .mustCreate where exists:
+            result = POSIXError(.EEXIST)
+        case .mustReplace where !exists, .delete where !exists:
+            result = POSIXError(.ENOATTR)
+        case .delete:
+            item.limitedXattrs.removeValue(forKey: key)
+            result = nil
+        default:
+            if let value {
+                item.limitedXattrs[key] = value
+                result = nil
+            } else {
+                result = POSIXError(.EINVAL)
+            }
+        }
+        item.stateLock.unlock()
+        reply(result)
+    }
+
+    func listXattrs(
+        of item: FSItem,
+        replyHandler reply: @escaping ([FSFileName]?, (any Error)?) -> Void
+    ) {
+        guard let item = item as? TLFSItem else {
+            reply(nil, POSIXError(.EIO))
+            return
+        }
+        item.stateLock.lock()
+        let names = item.limitedXattrs.keys.sorted()
+            .map { FSFileName(string: $0) }
+        item.stateLock.unlock()
+        reply(names, nil)
+    }
 }
 
 // MARK: - Core operations
@@ -628,6 +751,7 @@ extension TLFSVolume: FSVolume.Operations {
         }
         do {
             let attr = try getattr(item.ino)
+            item.observe(attr)
             reply(attributes(attr, wanted: desiredAttributes), nil)
         } catch {
             reply(nil, error)
@@ -656,6 +780,7 @@ extension TLFSVolume: FSVolume.Operations {
                 var r = try conn.request(.setattr, w.data)
                 return try WireAttr(&r)
             }
+            item.observe(attr)
             reply(attributes(attr), nil)
         } catch {
             reply(nil, error)
@@ -1032,6 +1157,7 @@ extension TLFSVolume: FSVolume.OpenCloseOperations {
         let fh = item.fh
         item.fh = nil
         item.fhWritable = false
+        item.fhContentVersion = nil
         item.stateLock.unlock()
         if let fh {
             // Flush before release so close(2) durability expectations hold.
