@@ -294,12 +294,13 @@ enum FsCommands {
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
 
-        /// Output JSON
+        /// Output JSON with separate `snapshots` and `autosaves` arrays
         #[arg(long)]
         json: bool,
     },
 
-    /// Delete a permanent snapshot; unreferenced content is reclaimed asynchronously
+    /// Remove a permanent retention point. Referenced content remains available; unreferenced
+    /// bytes are reclaimed asynchronously
     #[command(name = "delete-snapshot")]
     DeleteSnapshot {
         /// Filesystem name
@@ -3383,6 +3384,7 @@ mod tests {
         let history_help = String::from_utf8(history_help).unwrap();
         assert!(history_help.contains("permanent snapshots are always included"));
         assert!(history_help.contains("recent ephemeral autosave WAL"));
+        assert!(history_help.contains("separate `snapshots` and `autosaves` arrays"));
 
         let mut command = Cli::command();
         let push = command
@@ -3410,6 +3412,19 @@ mod tests {
             }
             _ => panic!("expected fs delete-snapshot command"),
         }
+        let mut command = Cli::command();
+        let delete_snapshot = command
+            .find_subcommand_mut("fs")
+            .unwrap()
+            .find_subcommand_mut("delete-snapshot")
+            .unwrap();
+        let mut delete_snapshot_help = Vec::new();
+        delete_snapshot
+            .write_long_help(&mut delete_snapshot_help)
+            .unwrap();
+        let delete_snapshot_help = String::from_utf8(delete_snapshot_help).unwrap();
+        assert!(delete_snapshot_help.contains("Remove a permanent retention point"));
+        assert!(delete_snapshot_help.contains("Referenced content remains available"));
 
         match parse_command(["tl", "fs", "ls"]) {
             Commands::Fs(FsCommands::Ls {

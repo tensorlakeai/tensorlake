@@ -98,4 +98,11 @@ Filesystem snapshots are path-addressed rather than repository-style named commi
 mounted or tracked directory and defaults to the attachment containing the current directory. A
 filesystem gets its name at `tl fs create`; there is no `tl fs name` command or snapshot-name
 argument. `-m`/`--message` is descriptive metadata. Use `tl fs history [FILESYSTEM|PATH]` to see
-permanent snapshots and the recent autosave WAL.
+permanent snapshots first and the visibly ephemeral recent autosave WAL second. Its JSON output
+keeps these as distinct `snapshots` and `autosaves` arrays. `tl fs status [PATH]` reports local
+changes, the last autosave time, and the permanent snapshot count without walking filesystem
+history.
+
+Deleting a filesystem snapshot removes that permanent retention point; it does not immediately
+delete content that another snapshot, autosave, or live filesystem head still references.
+Unreferenced bytes are reclaimed asynchronously.
