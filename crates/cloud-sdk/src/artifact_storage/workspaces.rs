@@ -1,11 +1,9 @@
 //! Workspace client: private durable refs (`refs/workspaces/<id>`) on artifact storage.
 //!
-//! A workspace is the unit of ongoing work (artifact_storage issue #24): created from a base
-//! commit, advanced by snapshots (ordinary commits on the workspace ref, uploaded as CDC chunks
-//! through the resumable-ingest pipeline), and published by promoting a snapshot onto a real
-//! branch (squash by default). Workspaces are durable scratch pads — they survive crashes,
-//! timeouts, and unmounts, and die only by explicit deletion. All calls authenticate with a
-//! minted git credential, like the repo/commit APIs.
+//! A workspace is the unit of ongoing work: it is allocated lazily by the first write, advances a
+//! crash-safe autosave WAL without creating commits, materializes explicit snapshots as commits,
+//! and publishes only through promote (squash by default). All calls authenticate with a minted
+//! git credential, like the repo/commit APIs.
 
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
@@ -39,6 +37,31 @@ pub struct WorkspaceInfo {
     /// name), in server-assigned order.
     #[serde(default)]
     pub shared_target: Option<String>,
+    /// Number of explicit snapshot commits on this workspace line. Autosave checkpoints are not
+    /// commits and are deliberately excluded.
+    #[serde(default)]
+    pub snapshot_count: u64,
+    /// Newest mount heartbeat, WAL append, snapshot, or promote time.
+    #[serde(default)]
+    pub last_activity_ms: Option<u64>,
+    /// `none`, `dirty`, or `materialized`.
+    #[serde(default = "default_workspace_wal_state")]
+    pub wal_state: String,
+    /// `attached` or `detached`; `unknown` when returned by an older server.
+    #[serde(default = "default_workspace_attachment_state")]
+    pub attachment_state: String,
+    #[serde(default)]
+    pub mounted_on: Option<String>,
+    #[serde(default)]
+    pub wal_generation: Option<u64>,
+}
+
+fn default_workspace_wal_state() -> String {
+    "none".to_string()
+}
+
+fn default_workspace_attachment_state() -> String {
+    "unknown".to_string()
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -1056,6 +1079,34 @@ mod tests {
         assert!(resp.squashed);
         assert!(!resp.merged);
         assert!(!resp.fast_forwarded);
+    }
+
+    #[test]
+    fn workspace_info_decodes_wal_and_activity_state_with_old_server_defaults() {
+        let base = r#"{
+            "id":"aa", "ref_name":"refs/workspaces/aa", "principal":"user:u1",
+            "base":"1111111111111111111111111111111111111111",
+            "base_ref":"refs/heads/main",
+            "head":"1111111111111111111111111111111111111111",
+            "created_at_secs":1, "lease_secs":0, "lease_due_ms":null, "pinned":true
+        }"#;
+        let old: WorkspaceInfo = serde_json::from_str(base).unwrap();
+        assert_eq!(old.snapshot_count, 0);
+        assert_eq!(old.wal_state, "none");
+        assert_eq!(old.attachment_state, "unknown");
+        assert_eq!(old.wal_generation, None);
+
+        let current = base.replace(
+            "\"pinned\":true",
+            "\"pinned\":true,\"snapshot_count\":2,\"last_activity_ms\":99,\"wal_state\":\"dirty\",\"attachment_state\":\"attached\",\"mounted_on\":\"sandbox-1\",\"wal_generation\":7",
+        );
+        let current: WorkspaceInfo = serde_json::from_str(&current).unwrap();
+        assert_eq!(current.snapshot_count, 2);
+        assert_eq!(current.last_activity_ms, Some(99));
+        assert_eq!(current.wal_state, "dirty");
+        assert_eq!(current.attachment_state, "attached");
+        assert_eq!(current.mounted_on.as_deref(), Some("sandbox-1"));
+        assert_eq!(current.wal_generation, Some(7));
     }
 
     /// The fleet page decodes gsvc-server's exact wire shape (`fleet_item_json` /

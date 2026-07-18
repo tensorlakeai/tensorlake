@@ -122,6 +122,13 @@ pub enum PushEvent {
     },
     /// The commit published.
     Committed { commit: String, ref_name: String },
+    /// Uploaded content was sealed into a durable workspace WAL checkpoint. No commit or
+    /// branch update was created.
+    Checkpointed {
+        workspace_id: String,
+        generation: u64,
+        tree: String,
+    },
 }
 
 pub type PushProgress = Arc<dyn Fn(PushEvent) + Send + Sync>;
@@ -144,6 +151,10 @@ pub struct PushOptions {
     /// application three-ways against the declared base plus this push's exact change list
     /// (servers that predate the field ignore it and merge against the chain parent).
     pub workspace_snapshot: Option<String>,
+    /// Seal the prepared file list as a durable workspace WAL checkpoint instead of creating a
+    /// commit. This shares the complete hashing/chunk/upload pipeline with ordinary pushes; only
+    /// the final metadata submit differs. Mutually exclusive with [`Self::workspace_snapshot`].
+    pub workspace_checkpoint: Option<WorkspaceCheckpointOptions>,
     /// Return every CDC-path file's chunk list in `PushReport::file_chunks`, so the caller can
     /// hand them back as `PushSource::StablePrefix` prefixes on the next push of the same
     /// content. Off by default: the lists cost memory proportional to the push.
@@ -188,12 +199,28 @@ impl Default for PushOptions {
             upload_batch_bytes: 48 * 1024 * 1024,
             progress: None,
             workspace_snapshot: None,
+            workspace_checkpoint: None,
             collect_file_chunks: false,
             idempotency_key: None,
             on_prepared: None,
             path_prefix: None,
         }
     }
+}
+
+/// Identity and ordering fields for one crash-resumable Git workspace WAL checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkspaceCheckpointOptions {
+    /// Client-generated 40-hex workspace id. The server allocates the workspace lazily and
+    /// atomically with generation one.
+    pub workspace_id: String,
+    /// Strictly increasing generation within the workspace WAL.
+    pub generation: u64,
+    /// Stable idempotency identity journaled before upload.
+    pub checkpoint_id: String,
+    /// Canonical ref from which the lazy workspace base was resolved, for display and promote
+    /// defaults. The immutable base commit itself is [`PushOptions::base`].
+    pub base_ref: Option<String>,
 }
 
 fn canonical_repo_path(path: &str, what: &str) -> Result<(), SdkError> {
@@ -212,6 +239,10 @@ fn canonical_repo_path(path: &str, what: &str) -> Result<(), SdkError> {
         )));
     }
     Ok(())
+}
+
+fn is_hex_oid(value: &str) -> bool {
+    value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
 
 fn apply_path_prefix(files: &mut [PushFile], prefix: Option<&str>) -> Result<(), SdkError> {
@@ -251,6 +282,90 @@ pub struct PushReport {
     /// `PushSource::StablePrefix`. Never serialized: caller-local plumbing, not wire data.
     #[serde(skip_serializing)]
     pub file_chunks: Vec<(String, Vec<([u8; 32], u32)>)>,
+    /// Present when the push target was [`PushOptions::workspace_checkpoint`]. `commit` is the
+    /// current materialized snapshot tip in that case (normally the base commit), while `tree`
+    /// is the newly checkpointed uncommitted tree.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub checkpoint: Option<WorkspaceCheckpointResponse>,
+}
+
+/// Durable server acknowledgement for a Git workspace WAL checkpoint.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCheckpointResponse {
+    pub format_ver: u16,
+    pub workspace_id: String,
+    pub ref_name: String,
+    pub generation: u64,
+    pub checkpoint_id: String,
+    pub base: String,
+    pub snapshot_tip: String,
+    pub tree: String,
+    pub created_at_ms: u64,
+    pub updated_at_ms: u64,
+    pub materialized_generation: Option<u64>,
+    /// Derived from the PUT status: true when this checkpoint lazily allocated the workspace.
+    #[serde(default)]
+    pub workspace_created: bool,
+}
+
+/// Upload and durable-checkpoint outcome. The byte/chunk fields have the same meaning as
+/// [`PushReport`]; `checkpoint` is the server-authoritative WAL head.
+#[non_exhaustive]
+#[derive(Clone, Debug, Serialize)]
+pub struct WorkspaceCheckpointPushReport {
+    pub checkpoint: WorkspaceCheckpointResponse,
+    pub files: usize,
+    pub bytes_total: u64,
+    pub chunks_total: usize,
+    pub chunks_uploaded: usize,
+    pub bytes_uploaded: u64,
+    pub file_blob_oids: Vec<(String, String)>,
+    #[serde(skip_serializing)]
+    pub file_chunks: Vec<(String, Vec<([u8; 32], u32)>)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCheckpointChange {
+    pub path: String,
+    pub change: String,
+    pub mode: Option<u32>,
+    pub size: Option<u64>,
+    pub oid: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCheckpointChangesPage {
+    pub generation: u64,
+    pub entries: Vec<WorkspaceCheckpointChange>,
+    pub truncated: bool,
+    pub next_after: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCheckpointSignature {
+    pub name: String,
+    pub email: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct MaterializeWorkspaceCheckpointRequest {
+    pub format_ver: u16,
+    pub generation: u64,
+    pub message: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub author: Option<WorkspaceCheckpointSignature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub committer: Option<WorkspaceCheckpointSignature>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct MaterializeWorkspaceCheckpointResponse {
+    pub generation: u64,
+    pub commit: String,
+    pub tree: String,
+    pub ref_name: String,
+    pub parent: Option<String>,
+    pub created: bool,
 }
 
 #[derive(Deserialize)]
@@ -424,6 +539,18 @@ struct CommitWire {
     base: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     expect_oid: Option<String>,
+}
+
+#[derive(Serialize)]
+struct WorkspaceCheckpointWire<'a> {
+    format_ver: u16,
+    generation: u64,
+    checkpoint_id: &'a str,
+    base: &'a str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    base_ref: Option<&'a str>,
+    session_id: &'a str,
+    files: &'a [CommitFileWire],
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -850,6 +977,34 @@ impl ArtifactStorageClient {
         opts: PushOptions,
     ) -> Result<Traced<PushReport>, SdkError> {
         apply_path_prefix(&mut files, opts.path_prefix.as_deref())?;
+        if opts.workspace_snapshot.is_some() && opts.workspace_checkpoint.is_some() {
+            return Err(SdkError::ClientError(
+                "workspace_snapshot and workspace_checkpoint are mutually exclusive".into(),
+            ));
+        }
+        if let Some(checkpoint) = opts.workspace_checkpoint.as_ref() {
+            if !is_hex_oid(&checkpoint.workspace_id) {
+                return Err(SdkError::ClientError(format!(
+                    "workspace checkpoint id must be a 40-hex id, got {:?}",
+                    checkpoint.workspace_id
+                )));
+            }
+            if checkpoint.generation == 0 {
+                return Err(SdkError::ClientError(
+                    "workspace checkpoint generation must be greater than zero".into(),
+                ));
+            }
+            if checkpoint.checkpoint_id.is_empty() {
+                return Err(SdkError::ClientError(
+                    "workspace checkpoint idempotency id must not be empty".into(),
+                ));
+            }
+            if !opts.base.as_deref().is_some_and(is_hex_oid) {
+                return Err(SdkError::ClientError(
+                    "workspace checkpoint requires a 40-hex base commit".into(),
+                ));
+            }
+        }
         let emit = |ev: PushEvent| {
             if let Some(p) = &opts.progress {
                 p(ev)
@@ -1522,6 +1677,82 @@ impl ArtifactStorageClient {
                 }
             })
             .collect();
+        if let Some(checkpoint) = opts.workspace_checkpoint.as_ref() {
+            let base = opts
+                .base
+                .as_deref()
+                .expect("checkpoint base validated above");
+            let body = WorkspaceCheckpointWire {
+                format_ver: 1,
+                generation: checkpoint.generation,
+                checkpoint_id: &checkpoint.checkpoint_id,
+                base,
+                base_ref: checkpoint.base_ref.as_deref(),
+                session_id: &session.session_id,
+                files: &commit_files,
+            };
+            let suffix = format!(
+                "workspaces/{}/checkpoint",
+                super::encode_path_segment(&checkpoint.workspace_id)
+            );
+            let (response, trace_id) = with_transient_retries(|| async {
+                let (request, trace_id) = self.git_request(
+                    Method::PUT,
+                    project_id,
+                    repo,
+                    Some(&suffix),
+                    git_username,
+                    git_token,
+                )?;
+                let response = request
+                    .header("idempotency-key", &checkpoint.checkpoint_id)
+                    .timeout(std::time::Duration::from_secs(60))
+                    .json(&body)
+                    .send()
+                    .await?;
+                Ok((response, trace_id))
+            })
+            .await?;
+            let workspace_created = response.status() == reqwest::StatusCode::CREATED;
+            let mut checkpoint_response: WorkspaceCheckpointResponse =
+                expect_json(response).await?;
+            checkpoint_response.workspace_created = workspace_created;
+            emit(PushEvent::Checkpointed {
+                workspace_id: checkpoint_response.workspace_id.clone(),
+                generation: checkpoint_response.generation,
+                tree: checkpoint_response.tree.clone(),
+            });
+            return Ok(Traced::new(
+                trace_id,
+                PushReport {
+                    // Keep the legacy report fields meaningful for internal shared plumbing:
+                    // the materialized tip is the last commit, while `tree` is the WAL head.
+                    commit: checkpoint_response.snapshot_tip.clone(),
+                    tree: checkpoint_response.tree.clone(),
+                    ref_name: checkpoint_response.ref_name.clone(),
+                    created: workspace_created,
+                    files: chunked.len(),
+                    bytes_total: total_bytes,
+                    chunks_total: distinct.len(),
+                    chunks_uploaded: uploaded_chunks,
+                    bytes_uploaded: uploaded_bytes,
+                    file_chunks: if opts.collect_file_chunks {
+                        chunked
+                            .iter()
+                            .filter(|file| !file.delete && !file.known_oid && file.cdc)
+                            .map(|file| (file.repo_path.clone(), file.chunks.clone()))
+                            .collect()
+                    } else {
+                        Vec::new()
+                    },
+                    file_blob_oids: chunked
+                        .into_iter()
+                        .map(|file| (file.repo_path, file.blob_oid))
+                        .collect(),
+                    checkpoint: Some(checkpoint_response),
+                },
+            ));
+        }
         // One match keeps the submit route and the branch field coupled to the same
         // discriminant: a workspace snapshot commits on the workspace ref (no wire branch),
         // an ordinary push commits on a branch.
@@ -1700,8 +1931,138 @@ impl ArtifactStorageClient {
                     .into_iter()
                     .map(|f| (f.repo_path, f.blob_oid))
                     .collect(),
+                checkpoint: None,
             },
         ))
+    }
+
+    /// Push a prepared change list through the ordinary resumable ingest pipeline, but seal the
+    /// result as a Git workspace WAL checkpoint rather than creating a commit. This is the Git
+    /// mount autosave path; callers materialize an explicit commit separately.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn push_workspace_checkpoint(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        files: Vec<PushFile>,
+        mut opts: PushOptions,
+        target: WorkspaceCheckpointOptions,
+    ) -> Result<Traced<WorkspaceCheckpointPushReport>, SdkError> {
+        if opts.workspace_snapshot.is_some() || opts.workspace_checkpoint.is_some() {
+            return Err(SdkError::ClientError(
+                "workspace checkpoint push cannot also target a snapshot or checkpoint".into(),
+            ));
+        }
+        opts.workspace_checkpoint = Some(target);
+        let report = self
+            .push_files(project_id, repo, git_username, git_token, files, opts)
+            .await?;
+        let trace_id = report.trace_id.clone();
+        let report = report.into_inner();
+        let checkpoint = report.checkpoint.ok_or_else(|| {
+            SdkError::ClientError("checkpoint push returned a commit response".into())
+        })?;
+        Ok(Traced::new(
+            trace_id,
+            WorkspaceCheckpointPushReport {
+                checkpoint,
+                files: report.files,
+                bytes_total: report.bytes_total,
+                chunks_total: report.chunks_total,
+                chunks_uploaded: report.chunks_uploaded,
+                bytes_uploaded: report.bytes_uploaded,
+                file_blob_oids: report.file_blob_oids,
+                file_chunks: report.file_chunks,
+            },
+        ))
+    }
+
+    /// Read the current durable WAL head for one workspace.
+    pub async fn workspace_checkpoint(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+    ) -> Result<Traced<WorkspaceCheckpointResponse>, SdkError> {
+        let suffix = format!(
+            "workspaces/{}/checkpoint",
+            super::encode_path_segment(workspace_id)
+        );
+        let (request, trace_id) = self.git_request(
+            Method::GET,
+            project_id,
+            repo,
+            Some(&suffix),
+            git_username,
+            git_token,
+        )?;
+        let response = expect_json(request.send().await?).await?;
+        Ok(Traced::new(trace_id, response))
+    }
+
+    /// Page the path changes represented by the current WAL head. Rebase/sync use this to carry
+    /// uncommitted autosave state to a new base without creating an intermediate commit.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn workspace_checkpoint_changes(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        after: Option<&str>,
+        limit: usize,
+    ) -> Result<Traced<WorkspaceCheckpointChangesPage>, SdkError> {
+        let suffix = format!(
+            "workspaces/{}/checkpoint/changes",
+            super::encode_path_segment(workspace_id)
+        );
+        let (request, trace_id) = self.git_request(
+            Method::GET,
+            project_id,
+            repo,
+            Some(&suffix),
+            git_username,
+            git_token,
+        )?;
+        let mut query = vec![("limit", limit.clamp(1, 1_000).to_string())];
+        if let Some(after) = after {
+            query.push(("after", after.to_string()));
+        }
+        let response = expect_json(request.query(&query).send().await?).await?;
+        Ok(Traced::new(trace_id, response))
+    }
+
+    /// Materialize one WAL generation as exactly one commit on the workspace ref. Replaying the
+    /// same generation is idempotent and returns `created=false`.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn materialize_workspace_checkpoint(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        request: &MaterializeWorkspaceCheckpointRequest,
+    ) -> Result<Traced<MaterializeWorkspaceCheckpointResponse>, SdkError> {
+        let suffix = format!(
+            "workspaces/{}/checkpoint/materialize",
+            super::encode_path_segment(workspace_id)
+        );
+        let (http_request, trace_id) = self.git_request(
+            Method::POST,
+            project_id,
+            repo,
+            Some(&suffix),
+            git_username,
+            git_token,
+        )?;
+        let response = expect_json(http_request.json(request).send().await?).await?;
+        Ok(Traced::new(trace_id, response))
     }
 
     async fn negotiate_missing(
@@ -2068,6 +2429,44 @@ mod tests {
             delete: true,
         }];
         assert!(apply_path_prefix(&mut files, Some("services/auth")).is_err());
+    }
+
+    #[test]
+    fn workspace_checkpoint_wire_reuses_commit_file_declarations_without_commit_fields() {
+        let files = vec![CommitFileWire {
+            path: "src/lib.rs".to_string(),
+            chunks: vec![CommitChunkWire {
+                hash: "ab".repeat(32),
+                size: 17,
+            }],
+            content: None,
+            file_token: None,
+            oid: None,
+            delete: false,
+            mode: Some("100644".to_string()),
+        }];
+        let base = "1".repeat(40);
+        let wire = WorkspaceCheckpointWire {
+            format_ver: 1,
+            generation: 7,
+            checkpoint_id: "checkpoint-7",
+            base: &base,
+            base_ref: Some("refs/heads/main"),
+            session_id: "session-1",
+            files: &files,
+        };
+        let value = serde_json::to_value(wire).unwrap();
+        assert_eq!(value["format_ver"], 1);
+        assert_eq!(value["generation"], 7);
+        assert_eq!(value["checkpoint_id"], "checkpoint-7");
+        assert_eq!(value["base"], "1".repeat(40));
+        assert_eq!(value["base_ref"], "refs/heads/main");
+        assert_eq!(value["session_id"], "session-1");
+        assert_eq!(value["files"][0]["path"], "src/lib.rs");
+        assert_eq!(value["files"][0]["chunks"][0]["size"], 17);
+        assert!(value.get("branch").is_none());
+        assert!(value.get("message").is_none());
+        assert!(value.get("expect_oid").is_none());
     }
 
     /// Transient failures (5xx/429/transport) retry with backoff and then succeed; 4xx
