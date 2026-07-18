@@ -616,8 +616,8 @@ enum GitCommands {
         /// Operation requested by git: get, store, or erase
         operation: String,
     },
-    /// Mount a repo as a lazy working tree. Writes autosave durably into a private workspace,
-    /// but no branch changes until `tl git promote`
+    /// Mount a repo as a lazy working tree. Writes autosave durably into a private workspace.
+    /// Branches change only through `tl git promote`, or each snapshot when `--publish` is set
     Mount {
         /// `<repo>[:<ref-or-full-commit>][//<subtree>]` — selects the base view and optionally
         /// exposes one directory as the mount root; the workspace is created on first write

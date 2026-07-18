@@ -83,6 +83,11 @@ invisible in the live branch view. Create a normal workspace when explicit rebas
 is required. `--publish` is accepted only when the resolved source is a branch; tags and pinned
 commits are rejected before the mount starts.
 
+On success, `snapshot` reports both the private snapshot and the exact published branch commit. If
+the branch moved, retry with `tl git promote PATH BRANCH --merge`; do not rebase the publish
+workspace. If that server-side merge reports content conflicts, create a normal workspace on the
+branch, reapply and resolve the listed paths there, and promote that workspace.
+
 Before replacing a snapshotted chain, rebase retains its prior tip under a recovery ref. `log`,
 `smartlog`, and `status` expose these retained chains. They remain recoverable and GC-rooted until
 the workspace is explicitly deleted; deleting the workspace atomically releases its active and
