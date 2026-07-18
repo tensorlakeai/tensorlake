@@ -8,12 +8,12 @@
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
-use crate::Traced;
 use crate::error::SdkError;
+use crate::Traced;
 
 use super::ingest::{expect_json, with_transient_retries};
-use super::merge::{MergeConflict, MergeReport, MergeStats, Signature, expect_json_or_conflict};
-use super::{ArtifactStorageClient, advance_pagination_cursor, decode_empty};
+use super::merge::{expect_json_or_conflict, MergeConflict, MergeReport, MergeStats, Signature};
+use super::{advance_pagination_cursor, decode_empty, ArtifactStorageClient};
 
 fn encoded_git_path(path: &str, allow_empty: bool) -> Result<String, SdkError> {
     if path.is_empty() {
@@ -165,6 +165,10 @@ pub struct PromoteWorkspaceRequest {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<Signature>,
+    /// Writable mount owner. Omitted callers remain compatible while the workspace is unclaimed;
+    /// once a daemon claims it the server rejects no-id mutations.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -219,6 +223,8 @@ pub struct SyncWorkspaceRequest {
     pub message: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub author: Option<Signature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -1185,6 +1191,28 @@ mod tests {
             detached,
             serde_json::json!({"mount_id": "mount-1", "unmount": true})
         );
+    }
+
+    #[test]
+    fn workspace_mutations_serialize_optional_mount_fence() {
+        let promote = serde_json::to_value(PromoteWorkspaceRequest {
+            branch: "main".to_string(),
+            mount_id: Some("mount-1".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(promote["mount_id"], "mount-1");
+
+        let sync = serde_json::to_value(SyncWorkspaceRequest {
+            target: Some("main".to_string()),
+            mount_id: Some("mount-1".to_string()),
+            ..Default::default()
+        })
+        .unwrap();
+        assert_eq!(sync["mount_id"], "mount-1");
+
+        let legacy = serde_json::to_value(SyncWorkspaceRequest::default()).unwrap();
+        assert!(legacy.get("mount_id").is_none());
     }
 
     /// Promote responses from servers that predate merge mode decode with the new fields

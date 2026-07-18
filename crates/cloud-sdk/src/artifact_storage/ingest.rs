@@ -31,8 +31,8 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::Traced;
 use crate::error::SdkError;
+use crate::Traced;
 
 use super::ArtifactStorageClient;
 
@@ -212,6 +212,10 @@ pub struct WorkspaceCheckpointOptions {
     /// Branch promoted by each explicit snapshot (`tl git mount --publish`). Autosave only
     /// persists this policy; a checkpoint never advances the branch itself.
     pub publish_target: Option<String>,
+    /// Writable mount fencing token and its fleet-visible location. Generation one sends both so
+    /// workspace allocation and ownership are one atomic server transaction.
+    pub mount_id: Option<String>,
+    pub mounted_on: Option<String>,
 }
 
 fn canonical_repo_path(path: &str, what: &str) -> Result<(), SdkError> {
@@ -357,6 +361,8 @@ pub struct MaterializeWorkspaceCheckpointRequest {
     pub author: Option<super::merge::Signature>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub committer: Option<super::merge::Signature>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
 }
 
 impl MaterializeWorkspaceCheckpointRequest {
@@ -367,6 +373,7 @@ impl MaterializeWorkspaceCheckpointRequest {
             message: message.into(),
             author: None,
             committer: None,
+            mount_id: None,
         }
     }
 }
@@ -601,6 +608,10 @@ struct WorkspaceCheckpointWire<'a> {
     base_ref: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     publish_target: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mount_id: Option<&'a str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    mounted_on: Option<&'a str>,
     session_id: &'a str,
     files: &'a [CommitFileWire],
 }
@@ -1756,6 +1767,8 @@ impl ArtifactStorageClient {
                 base,
                 base_ref: checkpoint.base_ref.as_deref(),
                 publish_target: checkpoint.publish_target.as_deref(),
+                mount_id: checkpoint.mount_id.as_deref(),
+                mounted_on: checkpoint.mounted_on.as_deref(),
                 session_id: &session.session_id,
                 files: &commit_files,
             };
@@ -2701,6 +2714,8 @@ mod tests {
             base: &base,
             base_ref: Some("refs/heads/main"),
             publish_target: Some("main"),
+            mount_id: Some("mount-1"),
+            mounted_on: Some("sandbox:/code"),
             session_id: "session-1",
             files: &files,
         };
@@ -2711,6 +2726,8 @@ mod tests {
         assert_eq!(value["base"], "1".repeat(40));
         assert_eq!(value["base_ref"], "refs/heads/main");
         assert_eq!(value["publish_target"], "main");
+        assert_eq!(value["mount_id"], "mount-1");
+        assert_eq!(value["mounted_on"], "sandbox:/code");
         assert_eq!(value["session_id"], "session-1");
         assert_eq!(value["files"][0]["path"], "src/lib.rs");
         assert_eq!(value["files"][0]["chunks"][0]["size"], 17);
@@ -3000,6 +3017,8 @@ mod tests {
                     checkpoint_id: "checkpoint-7".to_string(),
                     base_ref: Some("refs/heads/main".to_string()),
                     publish_target: Some("main".to_string()),
+                    mount_id: Some("mount-1".to_string()),
+                    mounted_on: Some("sandbox:/code".to_string()),
                 },
             )
             .await
@@ -3101,6 +3120,8 @@ mod tests {
         assert_eq!(checkpoint_body["base"], base_oid);
         assert_eq!(checkpoint_body["base_ref"], "refs/heads/main");
         assert_eq!(checkpoint_body["publish_target"], "main");
+        assert_eq!(checkpoint_body["mount_id"], "mount-1");
+        assert_eq!(checkpoint_body["mounted_on"], "sandbox:/code");
         assert_eq!(checkpoint_body["session_id"], "session-1");
         assert_eq!(checkpoint_body["files"][0]["path"], "src/main.rs");
         assert_eq!(checkpoint_body["files"][0]["oid"], "f".repeat(40));
