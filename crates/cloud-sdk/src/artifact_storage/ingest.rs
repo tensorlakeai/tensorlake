@@ -2499,6 +2499,357 @@ mod tests {
         assert!(value.get("expect_oid").is_none());
     }
 
+    /// Pin the complete public WAL protocol, not just its private serialization structs. Both
+    /// mutations are idempotent, so a transient response must replay the identical request;
+    /// reads must retain their exact route and pagination query.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn workspace_checkpoint_endpoints_retry_and_preserve_wire() {
+        use std::collections::HashMap;
+        use std::sync::{Arc, Mutex};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        #[derive(Clone, Debug)]
+        struct RecordedRequest {
+            method: String,
+            target: String,
+            body: Vec<u8>,
+        }
+
+        let workspace_id = "a".repeat(40);
+        let base_oid = "b".repeat(40);
+        let snapshot_tip = "c".repeat(40);
+        let checkpoint_tree = "d".repeat(40);
+        let materialized_commit = "e".repeat(40);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        let seen: Arc<Mutex<Vec<RecordedRequest>>> = Arc::default();
+        let attempts: Arc<Mutex<HashMap<String, usize>>> = Arc::default();
+        let seen_server = seen.clone();
+        let attempts_server = attempts.clone();
+        let checkpoint_path = format!("/project/p/repos/r/workspaces/{workspace_id}/checkpoint");
+        let changes_path = format!("{checkpoint_path}/changes");
+        let materialize_path = format!("{checkpoint_path}/materialize");
+        let checkpoint_path_server = checkpoint_path.clone();
+        let changes_path_server = changes_path.clone();
+        let materialize_path_server = materialize_path.clone();
+        let server = tokio::spawn({
+            let workspace_id = workspace_id.clone();
+            let base_oid = base_oid.clone();
+            let snapshot_tip = snapshot_tip.clone();
+            let checkpoint_tree = checkpoint_tree.clone();
+            let materialized_commit = materialized_commit.clone();
+            async move {
+                loop {
+                    let Ok((mut socket, _)) = listener.accept().await else {
+                        return;
+                    };
+                    let seen = seen_server.clone();
+                    let attempts = attempts_server.clone();
+                    let workspace_id = workspace_id.clone();
+                    let base_oid = base_oid.clone();
+                    let snapshot_tip = snapshot_tip.clone();
+                    let checkpoint_tree = checkpoint_tree.clone();
+                    let materialized_commit = materialized_commit.clone();
+                    let checkpoint_path = checkpoint_path_server.clone();
+                    let changes_path = changes_path_server.clone();
+                    let materialize_path = materialize_path_server.clone();
+                    tokio::spawn(async move {
+                        let mut buffered = Vec::new();
+                        loop {
+                            let head_end = loop {
+                                if let Some(pos) =
+                                    buffered.windows(4).position(|window| window == b"\r\n\r\n")
+                                {
+                                    break pos + 4;
+                                }
+                                let mut chunk = [0_u8; 4096];
+                                match socket.read(&mut chunk).await {
+                                    Ok(0) | Err(_) => return,
+                                    Ok(read) => buffered.extend_from_slice(&chunk[..read]),
+                                }
+                            };
+                            let head = String::from_utf8_lossy(&buffered[..head_end]).to_string();
+                            let request_line = head.lines().next().unwrap_or_default();
+                            let mut request_parts = request_line.split_whitespace();
+                            let method = request_parts.next().unwrap_or_default().to_string();
+                            let target = request_parts.next().unwrap_or_default().to_string();
+                            let content_length = head
+                                .lines()
+                                .find_map(|line| {
+                                    line.to_ascii_lowercase()
+                                        .strip_prefix("content-length:")
+                                        .and_then(|value| value.trim().parse::<usize>().ok())
+                                })
+                                .unwrap_or(0);
+                            while buffered.len() < head_end + content_length {
+                                let mut chunk = [0_u8; 4096];
+                                match socket.read(&mut chunk).await {
+                                    Ok(0) | Err(_) => return,
+                                    Ok(read) => buffered.extend_from_slice(&chunk[..read]),
+                                }
+                            }
+                            let body = buffered[head_end..head_end + content_length].to_vec();
+                            buffered.drain(..head_end + content_length);
+                            seen.lock().unwrap().push(RecordedRequest {
+                                method: method.clone(),
+                                target: target.clone(),
+                                body,
+                            });
+
+                            let path = target.split('?').next().unwrap_or_default();
+                            let route = format!("{method} {path}");
+                            let attempt = {
+                                let mut attempts = attempts.lock().unwrap();
+                                let count = attempts.entry(route).or_default();
+                                *count += 1;
+                                *count
+                            };
+                            let (status, response_body) = if path.ends_with("/ingest/sessions") {
+                                (
+                                    "200 OK",
+                                    serde_json::json!({
+                                        "session_id": "session-1",
+                                        "cdc_min_bytes": 1024,
+                                        "cdc_avg_bytes": 4096,
+                                        "cdc_max_bytes": 16384,
+                                        "max_hashes_per_query": 512,
+                                        "max_chunk_bytes": 1_048_576,
+                                        "features": ["oid_files"]
+                                    })
+                                    .to_string(),
+                                )
+                            } else if method == "PUT" && path == checkpoint_path {
+                                if attempt == 1 {
+                                    (
+                                        "503 Service Unavailable",
+                                        serde_json::json!({"message": "retry checkpoint"})
+                                            .to_string(),
+                                    )
+                                } else {
+                                    (
+                                        "201 Created",
+                                        serde_json::json!({
+                                            "format_ver": 1,
+                                            "workspace_id": workspace_id,
+                                            "ref_name": format!("refs/workspaces/{workspace_id}"),
+                                            "generation": 7,
+                                            "checkpoint_id": "checkpoint-7",
+                                            "base": base_oid,
+                                            "snapshot_tip": snapshot_tip,
+                                            "tree": checkpoint_tree,
+                                            "created_at_ms": 10,
+                                            "updated_at_ms": 11,
+                                            "materialized_generation": null
+                                        })
+                                        .to_string(),
+                                    )
+                                }
+                            } else if method == "GET" && path == checkpoint_path {
+                                (
+                                    "200 OK",
+                                    serde_json::json!({
+                                        "format_ver": 1,
+                                        "workspace_id": workspace_id,
+                                        "ref_name": format!("refs/workspaces/{workspace_id}"),
+                                        "generation": 7,
+                                        "checkpoint_id": "checkpoint-7",
+                                        "base": base_oid,
+                                        "snapshot_tip": snapshot_tip,
+                                        "tree": checkpoint_tree,
+                                        "created_at_ms": 10,
+                                        "updated_at_ms": 11,
+                                        "materialized_generation": null
+                                    })
+                                    .to_string(),
+                                )
+                            } else if method == "GET" && path == changes_path {
+                                (
+                                    "200 OK",
+                                    serde_json::json!({
+                                        "generation": 7,
+                                        "entries": [{
+                                            "path": "src/main.rs",
+                                            "change": "modified",
+                                            "mode": 0o100644,
+                                            "size": 12,
+                                            "oid": "f".repeat(40)
+                                        }],
+                                        "truncated": false,
+                                        "next_after": null
+                                    })
+                                    .to_string(),
+                                )
+                            } else if method == "POST" && path == materialize_path {
+                                if attempt == 1 {
+                                    (
+                                        "503 Service Unavailable",
+                                        serde_json::json!({"message": "retry materialize"})
+                                            .to_string(),
+                                    )
+                                } else {
+                                    (
+                                        "201 Created",
+                                        serde_json::json!({
+                                            "generation": 7,
+                                            "commit": materialized_commit,
+                                            "tree": checkpoint_tree,
+                                            "ref_name": format!("refs/workspaces/{workspace_id}"),
+                                            "parent": snapshot_tip,
+                                            "created": true
+                                        })
+                                        .to_string(),
+                                    )
+                                }
+                            } else {
+                                (
+                                    "404 Not Found",
+                                    serde_json::json!({
+                                        "message": format!("unhandled test route {method} {target}")
+                                    })
+                                    .to_string(),
+                                )
+                            };
+                            let response = format!(
+                                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{response_body}",
+                                response_body.len()
+                            );
+                            if socket.write_all(response.as_bytes()).await.is_err() {
+                                return;
+                            }
+                        }
+                    });
+                }
+            }
+        });
+
+        let base_url = format!("http://{addr}");
+        let client = crate::ClientBuilder::new(&base_url)
+            .bearer_token("dummy")
+            .build()
+            .unwrap();
+        let sdk = ArtifactStorageClient::new(client, &base_url).unwrap();
+        let checkpoint = sdk
+            .push_workspace_checkpoint(
+                "p",
+                "r",
+                "u",
+                "tok",
+                vec![PushFile {
+                    repo_path: "src/main.rs".to_string(),
+                    source: PushSource::KnownOid("f".repeat(40)),
+                    mode: Some(0o100644),
+                    delete: false,
+                }],
+                PushOptions {
+                    base: Some(base_oid.clone()),
+                    ..Default::default()
+                },
+                WorkspaceCheckpointOptions {
+                    workspace_id: workspace_id.clone(),
+                    generation: 7,
+                    checkpoint_id: "checkpoint-7".to_string(),
+                    base_ref: Some("refs/heads/main".to_string()),
+                    publish_target: Some("main".to_string()),
+                },
+            )
+            .await
+            .expect("checkpoint PUT must retry a 503")
+            .into_inner();
+        assert_eq!(checkpoint.checkpoint.tree, checkpoint_tree);
+
+        let read = sdk
+            .workspace_checkpoint("p", "r", "u", "tok", &workspace_id)
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(read.generation, 7);
+
+        let changes = sdk
+            .workspace_checkpoint_changes(
+                "p",
+                "r",
+                "u",
+                "tok",
+                &workspace_id,
+                Some("src/lib.rs"),
+                23,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(changes.entries[0].path, "src/main.rs");
+
+        let mut materialize = MaterializeWorkspaceCheckpointRequest::new(7, "intentional snapshot");
+        materialize.author = Some(super::super::merge::Signature {
+            name: "Agent".to_string(),
+            email: "agent@example.com".to_string(),
+        });
+        let materialized = sdk
+            .materialize_workspace_checkpoint("p", "r", "u", "tok", &workspace_id, &materialize)
+            .await
+            .expect("materialize POST must retry a 503")
+            .into_inner();
+        assert_eq!(materialized.commit, materialized_commit);
+        server.abort();
+
+        let seen = seen.lock().unwrap().clone();
+        let checkpoint_puts: Vec<_> = seen
+            .iter()
+            .filter(|request| request.method == "PUT" && request.target == checkpoint_path)
+            .collect();
+        assert_eq!(checkpoint_puts.len(), 2, "503 checkpoint PUT must retry");
+        assert_eq!(checkpoint_puts[0].body, checkpoint_puts[1].body);
+        let checkpoint_body: serde_json::Value =
+            serde_json::from_slice(&checkpoint_puts[0].body).unwrap();
+        assert_eq!(checkpoint_body["format_ver"], 1);
+        assert_eq!(checkpoint_body["generation"], 7);
+        assert_eq!(checkpoint_body["checkpoint_id"], "checkpoint-7");
+        assert_eq!(checkpoint_body["base"], base_oid);
+        assert_eq!(checkpoint_body["base_ref"], "refs/heads/main");
+        assert_eq!(checkpoint_body["publish_target"], "main");
+        assert_eq!(checkpoint_body["session_id"], "session-1");
+        assert_eq!(checkpoint_body["files"][0]["path"], "src/main.rs");
+        assert_eq!(checkpoint_body["files"][0]["oid"], "f".repeat(40));
+        assert_eq!(checkpoint_body["files"][0]["mode"], "100644");
+        assert!(checkpoint_body.get("branch").is_none());
+        assert!(checkpoint_body.get("message").is_none());
+
+        assert_eq!(
+            seen.iter()
+                .filter(|request| request.method == "GET" && request.target == checkpoint_path)
+                .count(),
+            1
+        );
+        let changes_request = seen
+            .iter()
+            .find(|request| request.method == "GET" && request.target.starts_with(&changes_path))
+            .expect("changes GET");
+        let changes_url =
+            reqwest::Url::parse(&format!("http://test{}", changes_request.target)).unwrap();
+        let query: HashMap<_, _> = changes_url.query_pairs().into_owned().collect();
+        assert_eq!(query.get("limit").map(String::as_str), Some("23"));
+        assert_eq!(query.get("after").map(String::as_str), Some("src/lib.rs"));
+
+        let materialize_posts: Vec<_> = seen
+            .iter()
+            .filter(|request| request.method == "POST" && request.target == materialize_path)
+            .collect();
+        assert_eq!(
+            materialize_posts.len(),
+            2,
+            "503 materialize POST must retry"
+        );
+        assert_eq!(materialize_posts[0].body, materialize_posts[1].body);
+        let materialize_body: serde_json::Value =
+            serde_json::from_slice(&materialize_posts[0].body).unwrap();
+        assert_eq!(materialize_body["format_ver"], 1);
+        assert_eq!(materialize_body["generation"], 7);
+        assert_eq!(materialize_body["message"], "intentional snapshot");
+        assert_eq!(materialize_body["author"]["name"], "Agent");
+        assert!(materialize_body.get("committer").is_none());
+    }
+
     /// Transient failures (5xx/429/transport) retry with backoff and then succeed; 4xx
     /// rejections are deterministic and never retried.
     #[tokio::test(start_paused = true)]
