@@ -191,9 +191,8 @@ pub async fn list_repos(ctx: &CliContext, output_json: bool) -> Result<()> {
 }
 
 /// Stable public shape for `tl git workspaces`. The repo-scoped workspace endpoint is usable by
-/// ordinary repository credentials, unlike the operator fleet endpoint. Older servers only return
-/// the workspace identity fields, so the WAL/activity/attachment facts remain explicit `null`
-/// instead of being guessed from the snapshot tip.
+/// ordinary repository credentials, unlike the operator fleet endpoint. Optional fields remain
+/// explicit `null` against older servers instead of being guessed from the snapshot tip.
 #[derive(serde::Serialize)]
 struct GitWorkspaceListItem {
     id: String,
@@ -214,13 +213,11 @@ impl From<WorkspaceInfo> for GitWorkspaceListItem {
             base: workspace.base,
             base_ref: workspace.base_ref,
             head: workspace.head,
-            // These are intentionally unknown against the current repo-scoped list wire. A
-            // future server can enrich WorkspaceInfo without changing this command's JSON schema.
-            snapshot_count: None,
-            last_activity_ms: None,
-            wal_state: None,
-            attachment_state: None,
-            mounted_on: None,
+            snapshot_count: Some(workspace.snapshot_count),
+            last_activity_ms: workspace.last_activity_ms,
+            wal_state: Some(workspace.wal_state),
+            attachment_state: Some(workspace.attachment_state),
+            mounted_on: workspace.mounted_on,
         }
     }
 }
@@ -1040,7 +1037,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn workspace_list_json_keeps_unknown_wal_and_attachment_facts_explicit() {
+    fn workspace_list_json_renders_server_wal_and_attachment_facts() {
         let workspace: WorkspaceInfo = serde_json::from_value(serde_json::json!({
             "id": "ws-1",
             "ref_name": "refs/workspaces/ws-1",
@@ -1052,17 +1049,23 @@ mod tests {
             "lease_secs": 0,
             "lease_due_ms": null,
             "pinned": true,
-            "shared_target": null
+            "shared_target": null,
+            "snapshot_count": 2,
+            "last_activity_ms": 99,
+            "wal_state": "dirty",
+            "attachment_state": "attached",
+            "mounted_on": "sandbox-1",
+            "wal_generation": 7
         }))
         .unwrap();
         let row = GitWorkspaceListItem::from(workspace);
         let json = serde_json::to_value(row).unwrap();
         assert_eq!(json["id"], "ws-1");
-        assert!(json["snapshot_count"].is_null());
-        assert!(json["last_activity_ms"].is_null());
-        assert!(json["wal_state"].is_null());
-        assert!(json["attachment_state"].is_null());
-        assert!(json["mounted_on"].is_null());
+        assert_eq!(json["snapshot_count"], 2);
+        assert_eq!(json["last_activity_ms"], 99);
+        assert_eq!(json["wal_state"], "dirty");
+        assert_eq!(json["attachment_state"], "attached");
+        assert_eq!(json["mounted_on"], "sandbox-1");
     }
 
     #[test]
