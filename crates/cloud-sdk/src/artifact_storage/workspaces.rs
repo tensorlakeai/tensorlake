@@ -106,6 +106,10 @@ pub struct WorkspaceHeartbeat {
 /// heartbeat so callers must opt into changing fleet-visible attachment state.
 #[derive(Clone, Debug, Default, Serialize)]
 pub struct WorkspaceMountHeartbeatRequest {
+    /// Stable random owner of this writable attachment. Attach, heartbeat, and unmount carry the
+    /// same id so a stale process cannot replace or clear another sandbox's live claim.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount_id: Option<String>,
     /// Human-readable mount location shown by workspace listing/status.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mounted_on: Option<String>,
@@ -1118,18 +1122,26 @@ mod tests {
     #[test]
     fn mount_heartbeat_distinguishes_attach_keepalive_and_clean_unmount() {
         let attached = serde_json::to_value(WorkspaceMountHeartbeatRequest {
+            mount_id: Some("mount-1".to_string()),
             mounted_on: Some("sandbox:/code".to_string()),
             unmount: false,
         })
         .unwrap();
-        assert_eq!(attached, serde_json::json!({"mounted_on": "sandbox:/code"}));
+        assert_eq!(
+            attached,
+            serde_json::json!({"mount_id": "mount-1", "mounted_on": "sandbox:/code"})
+        );
 
         let detached = serde_json::to_value(WorkspaceMountHeartbeatRequest {
+            mount_id: Some("mount-1".to_string()),
             mounted_on: None,
             unmount: true,
         })
         .unwrap();
-        assert_eq!(detached, serde_json::json!({"unmount": true}));
+        assert_eq!(
+            detached,
+            serde_json::json!({"mount_id": "mount-1", "unmount": true})
+        );
     }
 
     /// Promote responses from servers that predate merge mode decode with the new fields
