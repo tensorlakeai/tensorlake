@@ -158,6 +158,11 @@ pub struct PushOptions {
     /// the commit will publish per path — the hook a crash-safe caller uses to journal its
     /// candidate state (paths, oids, modes) alongside the idempotency key.
     pub on_prepared: Option<PreparedHook>,
+    /// Optional canonical repository-relative prefix applied to every [`PushFile::repo_path`]
+    /// before hashing, journaling, and commit submission. Mounts use this to expose a subtree
+    /// as `/` locally while publishing edits back at their full repository paths. The prefix
+    /// and every input path must contain only normal, non-empty path components.
+    pub path_prefix: Option<String>,
 }
 
 pub type PreparedHook = Arc<dyn Fn(&[PreparedPush]) + Send + Sync>;
@@ -186,8 +191,39 @@ impl Default for PushOptions {
             collect_file_chunks: false,
             idempotency_key: None,
             on_prepared: None,
+            path_prefix: None,
         }
     }
+}
+
+fn canonical_repo_path(path: &str, what: &str) -> Result<(), SdkError> {
+    if path.is_empty()
+        || path.starts_with('/')
+        || path.ends_with('/')
+        || path.split('/').any(|component| {
+            component.is_empty()
+                || component == "."
+                || component == ".."
+                || component.as_bytes().contains(&0)
+        })
+    {
+        return Err(SdkError::ClientError(format!(
+            "{what} must be a canonical repository-relative path, got {path:?}"
+        )));
+    }
+    Ok(())
+}
+
+fn apply_path_prefix(files: &mut [PushFile], prefix: Option<&str>) -> Result<(), SdkError> {
+    let Some(prefix) = prefix else {
+        return Ok(());
+    };
+    canonical_repo_path(prefix, "path prefix")?;
+    for file in files {
+        canonical_repo_path(&file.repo_path, "push path")?;
+        file.repo_path = format!("{prefix}/{}", file.repo_path);
+    }
+    Ok(())
 }
 
 /// Outcome of a push.
@@ -532,7 +568,7 @@ fn is_transient(e: &SdkError) -> bool {
 /// orphans the server GC's, and commit submission reattaches through its idempotency key.
 /// Large tokened offset requests are deliberately NOT wrapped — a lost success would make the
 /// replayed offset conflict.
-async fn with_transient_retries<T, F, Fut>(mut op: F) -> Result<T, SdkError>
+pub(super) async fn with_transient_retries<T, F, Fut>(mut op: F) -> Result<T, SdkError>
 where
     F: FnMut() -> Fut,
     Fut: std::future::Future<Output = Result<T, SdkError>>,
@@ -810,9 +846,10 @@ impl ArtifactStorageClient {
         repo: &str,
         git_username: &str,
         git_token: &str,
-        files: Vec<PushFile>,
+        mut files: Vec<PushFile>,
         opts: PushOptions,
     ) -> Result<Traced<PushReport>, SdkError> {
+        apply_path_prefix(&mut files, opts.path_prefix.as_deref())?;
         let emit = |ev: PushEvent| {
             if let Some(p) = &opts.progress {
                 p(ev)
@@ -1983,6 +2020,54 @@ mod tests {
 
     fn h(b: u8) -> [u8; 32] {
         [b; 32]
+    }
+
+    #[test]
+    fn subtree_prefix_is_applied_to_every_change_kind() {
+        let mut files = vec![
+            PushFile {
+                repo_path: "src/lib.rs".to_string(),
+                source: PushSource::Bytes(b"new".to_vec()),
+                mode: Some(0o100644),
+                delete: false,
+            },
+            PushFile {
+                repo_path: "old.rs".to_string(),
+                source: PushSource::Bytes(Vec::new()),
+                mode: None,
+                delete: true,
+            },
+            PushFile {
+                repo_path: "renamed.rs".to_string(),
+                source: PushSource::KnownOid("1".repeat(40)),
+                mode: Some(0o100644),
+                delete: false,
+            },
+        ];
+        apply_path_prefix(&mut files, Some("services/auth")).unwrap();
+        assert_eq!(files[0].repo_path, "services/auth/src/lib.rs");
+        assert_eq!(files[1].repo_path, "services/auth/old.rs");
+        assert_eq!(files[2].repo_path, "services/auth/renamed.rs");
+    }
+
+    #[test]
+    fn subtree_prefix_rejects_paths_that_can_escape_or_alias() {
+        for bad in ["", "/root", "root/", "a//b", "a/./b", "a/../b"] {
+            let mut files = vec![PushFile {
+                repo_path: "file".to_string(),
+                source: PushSource::Bytes(Vec::new()),
+                mode: None,
+                delete: false,
+            }];
+            assert!(apply_path_prefix(&mut files, Some(bad)).is_err(), "{bad:?}");
+        }
+        let mut files = vec![PushFile {
+            repo_path: "../outside".to_string(),
+            source: PushSource::Bytes(Vec::new()),
+            mode: None,
+            delete: true,
+        }];
+        assert!(apply_path_prefix(&mut files, Some("services/auth")).is_err());
     }
 
     /// Transient failures (5xx/429/transport) retry with backoff and then succeed; 4xx

@@ -50,6 +50,11 @@ jobs:
       - name: Build full-feature CLI
         run: cargo build -p tensorlake-cli --features mount,git-clone
 
+      - name: Test private filesystem client engine
+        run: |
+          CARGO_TARGET_DIR="$PWD/target" cargo clippy --manifest-path crates/gsvc-fs-client/Cargo.toml --all-targets -- -D warnings
+          CARGO_TARGET_DIR="$PWD/target" cargo test --manifest-path crates/gsvc-fs-client/Cargo.toml
+
       - name: Run Rust workspace tests with customer features
         run: cargo test --workspace --features tensorlake-cli/mount,tensorlake-cli/git-clone
 

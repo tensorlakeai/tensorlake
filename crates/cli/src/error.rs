@@ -54,3 +54,23 @@ impl CliError {
 }
 
 pub type Result<T> = std::result::Result<T, CliError>;
+
+#[cfg(feature = "mount")]
+impl From<gsvc_fs_client::CliError> for CliError {
+    fn from(error: gsvc_fs_client::CliError) -> Self {
+        match error {
+            gsvc_fs_client::CliError::Usage(message) => Self::Usage(message),
+            gsvc_fs_client::CliError::Auth(message) => Self::Auth(message),
+            gsvc_fs_client::CliError::Config(message) => Self::Config(message),
+            gsvc_fs_client::CliError::Http(error) => Self::Http(error),
+            gsvc_fs_client::CliError::Io(error) => Self::Io(error),
+            gsvc_fs_client::CliError::Json(error) => Self::Json(error),
+            gsvc_fs_client::CliError::Toml(error) => Self::Toml(error),
+            gsvc_fs_client::CliError::TomlSer(error) => Self::TomlSer(error),
+            gsvc_fs_client::CliError::Sdk(error) => Self::Sdk(error),
+            gsvc_fs_client::CliError::Other(error) => Self::Other(error),
+            gsvc_fs_client::CliError::Cancelled => Self::Cancelled,
+            gsvc_fs_client::CliError::ExitCode(code) => Self::ExitCode(code),
+        }
+    }
+}

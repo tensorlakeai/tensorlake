@@ -1,7 +1,4 @@
-//! Embeds the notarized TLFS.app.zip (the macOS FSKit extension) into the binary when
-//! `TLFS_APP_ZIP` points at one at build time, so `tl fs setup` installs offline with the app
-//! and CLI in guaranteed lockstep. Official darwin release builds set it (publish_cli.yaml);
-//! source builds don't, and setup falls back to downloading the matching release asset.
+//! Embeds the notarized FSKit application into official macOS CLI builds.
 
 use std::env;
 use std::path::Path;

@@ -180,7 +180,7 @@ enum Commands {
     #[command(subcommand)]
     Secrets(SecretsCommands),
 
-    /// Manage Tensorlake workspaces (versioned file systems mounted over FUSE)
+    /// Manage versioned filesystems
     #[command(subcommand, name = "fs")]
     Fs(FsCommands),
 
@@ -229,10 +229,11 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Mount a filesystem (FUSE): reads stream lazily, saves publish to the filesystem.
+    /// Mount a filesystem: reads stream lazily, saves publish to the filesystem.
+    /// Name a retained save as `filesystem:save-id` for a fixed read-only time-travel view.
     /// Remounting a filesystem this machine has a detached session for resumes that session
     Mount {
-        /// Filesystem name (see `tl fs ls`)
+        /// Filesystem name, optionally followed by `:<save-id>` (see `tl fs history`)
         target: String,
 
         /// Mountpoint directory (created; must be empty)
@@ -268,7 +269,8 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Upload a folder into a filesystem as one save (no mount needed)
+    /// Upload a folder into a filesystem and track it for later incremental saves (no mount
+    /// needed). Interrupted attempts resume from durable local state
     Push {
         /// Local directory to upload
         dir: PathBuf,
@@ -281,19 +283,41 @@ enum FsCommands {
         message: Option<String>,
     },
 
-    /// Show the save history of a filesystem
+    /// Show recent automatic history plus every named retained save
     History {
         /// Filesystem name, or a mounted directory (default: the mount containing the
         /// current directory)
         target: Option<String>,
 
-        /// Show at most N entries
+        /// Show at most N recent timeline entries (named retained saves are always included)
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
 
         /// Output JSON
         #[arg(long)]
         json: bool,
+    },
+
+    /// Name a recent automatic save and keep it until explicitly deleted
+    Name {
+        /// Filesystem name
+        name: String,
+
+        /// Save ID or unambiguous hexadecimal prefix
+        version: String,
+
+        /// Durable name for this save
+        snapshot_name: String,
+    },
+
+    /// Remove a durable name; the save then follows automatic retention
+    #[command(name = "delete-snapshot")]
+    DeleteSnapshot {
+        /// Filesystem name
+        name: String,
+
+        /// Save ID or unambiguous hexadecimal prefix
+        version: String,
     },
 
     /// List filesystems (with a name: that filesystem's sessions and mounts)
@@ -338,11 +362,17 @@ enum FsCommands {
         /// Save message
         #[arg(short, long)]
         message: Option<String>,
+
+        /// After publishing, trim that generation's retained byte cache. Later writes and
+        /// ignored/local-only files are preserved; pending preparation completes this in background
+        #[arg(long)]
+        clear: bool,
     },
 
-    /// Show workspace, lease, and local-change status for a mount
+    /// Show mount, autosave, and local-change status
     Status {
-        /// A mounted directory (default: the mount containing the current directory)
+        /// A mounted or tracked directory (default: the attachment containing the current
+        /// directory)
         path: Option<PathBuf>,
 
         /// Print status as JSON
@@ -350,13 +380,35 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Restore a mount's tracked files to a snapshot or commit
+    /// Inspect the crash-safe local snapshot journal of a native mount or tracked directory
+    Doctor {
+        /// A mounted or tracked directory (default: the attachment containing the current
+        /// directory)
+        path: Option<PathBuf>,
+
+        /// Print the diagnostic report as JSON
+        #[arg(long)]
+        json: bool,
+
+        /// Rebuild a corrupt or missing native-mount journal from the raw local overlay.
+        /// The mount must be detached; the original journal and staging metadata are exported
+        /// before replacement, and the repair never contacts the server
+        #[arg(long)]
+        repair_journal: bool,
+
+        /// Required repair baseline when the existing journal cannot prove one. Pass a native
+        /// save ID, or `empty` only for a filesystem that has never had a save.
+        #[arg(long, value_name = "SAVE_ID|empty", requires = "repair_journal")]
+        base: Option<String>,
+    },
+
+    /// Restore a writable filesystem mount to an earlier save
     #[command(allow_missing_positional = true)]
     Restore {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
 
-        /// Snapshot/commit hex, branch, or ref to restore to
+        /// Save ID or unambiguous hexadecimal prefix
         version: String,
 
         /// Drop the local overlay to apply the restore. Destructive: unsaved changes AND
@@ -573,14 +625,14 @@ enum GitCommands {
     /// Mount a repo branch as a working tree (FUSE), without cloning: reads stream lazily,
     /// writes stay local until `tl git snapshot`
     Mount {
-        /// `<repo>[:<ref-or-commit>]` — forks a private workspace off the tip (default: the
-        /// repo's default branch)
+        /// `<repo>[:<ref-or-full-commit>][//<subtree>]` — forks a private workspace off the
+        /// selected source and optionally exposes one directory as the mount root
         target: String,
 
         /// Mountpoint directory (created; must be empty)
         path: PathBuf,
 
-        /// A live read-only view that follows the branch
+        /// A stateless read-only view (branches and tags follow; full commits stay pinned)
         #[arg(long, conflicts_with = "publish")]
         ro: bool,
 
@@ -636,11 +688,27 @@ enum GitCommands {
         clear: bool,
     },
 
-    /// Pull the branch into the mounted working tree (server-side three-way merge;
-    /// conflicts materialize as diff3 markers in your files)
+    /// Refresh the mounted view, or switch a pristine workspace to another ref or commit
     Sync {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
+
+        /// Ref or full commit to switch to (default: refresh the current source)
+        target: Option<String>,
+    },
+
+    /// Replay a snapshotted workspace onto another ref or commit on the server
+    #[command(allow_missing_positional = true)]
+    Rebase {
+        /// A mounted directory (default: the mount containing the current directory)
+        path: Option<PathBuf>,
+
+        /// Ref or full commit to rebase onto
+        target: String,
+
+        /// Report conflicts without materializing them into the workspace
+        #[arg(long)]
+        fail_on_conflict: bool,
     },
 
     /// Land the mounted working tree's checkpoint on a branch (squash by default)
@@ -662,6 +730,30 @@ enum GitCommands {
     Status {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show the active workspace snapshot chain and retained recovery chains
+    Log {
+        /// Mounted directory or repository name (default: mount containing the current directory)
+        subject: Option<String>,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show branch, tag, workspace, snapshot, and retained-chain positions
+    Smartlog {
+        /// Mounted directory or repository name (default: mount containing the current directory)
+        subject: Option<String>,
+
+        /// Show the bounded project-wide repository/workspace graph
+        #[arg(long)]
+        project: bool,
 
         /// Output JSON
         #[arg(long)]
@@ -1873,8 +1965,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     | GitCommands::Unmount { .. }
                     | GitCommands::Snapshot { .. }
                     | GitCommands::Sync { .. }
+                    | GitCommands::Rebase { .. }
                     | GitCommands::Promote { .. }
                     | GitCommands::Status { .. }
+                    | GitCommands::Log { .. }
+                    | GitCommands::Smartlog { .. }
             ) {
                 return run_git_mount_command(ctx, subcmd).await;
             }
@@ -2422,6 +2517,15 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             }
             return commands::fs::plaindir::unbind(path.clone()).await;
         }
+        if commands::fs::is_tracked_directory(&probe)? {
+            if *delete || *discard {
+                return Err(CliError::usage(
+                    "a tracked ordinary directory is your own files; unmount only stops local \
+                     tracking (--discard/--delete do not apply)",
+                ));
+            }
+            return commands::fs::unmount(ctx, &probe, false, false).await;
+        }
     }
     // Path-addressed commands default their mounted-directory argument to the mount containing
     // the CWD; resolve it up front so scope hydration and the command agree on the path.
@@ -2432,7 +2536,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             if path.is_none() {
                 commands::fs::reject_mount_like_positional(
                     version,
-                    "snapshot or ref",
+                    "save ID",
                     "tl fs restore [PATH] <VERSION>",
                 )?;
             }
@@ -2440,16 +2544,62 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         }
         FsCommands::Snapshot { path, .. }
         | FsCommands::Status { path, .. }
+        | FsCommands::Doctor { path, .. }
         | FsCommands::Unmount { path, .. } => {
             mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
         }
         _ => {}
     }
+    if let Some(path) = mount_dir.as_ref()
+        && matches!(
+            &subcmd,
+            FsCommands::Snapshot { .. }
+                | FsCommands::Status { .. }
+                | FsCommands::Restore { .. }
+                | FsCommands::Unmount { .. }
+        )
+    {
+        commands::fs::require_native_filesystem_attachment(path)?;
+    }
+    // Doctor is intentionally local-only: it must remain usable when authentication or the
+    // server is unavailable. Inspection is read-only; the explicit repair mode mutates only
+    // exported local journal artifacts and never publishes anything.
+    if let FsCommands::Doctor {
+        json,
+        repair_journal,
+        base,
+        ..
+    } = &subcmd
+    {
+        return commands::fs::doctor(
+            &mount_dir
+                .as_ref()
+                .expect("resolved for every path-addressed command"),
+            *json,
+            *repair_journal,
+            base.as_deref(),
+        )
+        .await;
+    }
+    // Human status is a local diagnostic: the private engine reads cached immutable session
+    // facts plus the local journal/control socket, so it must remain available when auth or the
+    // platform is unavailable. `--json` deliberately keeps its live server-record contract and
+    // therefore continues through the auth guard below.
+    if let FsCommands::Status { json: false, .. } = &subcmd {
+        return commands::fs::status(
+            ctx,
+            mount_dir
+                .as_ref()
+                .expect("resolved for every path-addressed command"),
+            false,
+        )
+        .await;
+    }
     // Path-addressed commands carry their scope in the mount state; resolve it from there so
     // they work from any CWD instead of triggering the interactive init flow (which, run from
     // inside a mount, would write .tensorlake/config.toml into the workspace).
     if let Some(mount_dir) = &mount_dir {
-        commands::fs::hydrate_scope_from_mount(ctx, mount_dir);
+        commands::fs::hydrate_scope_from_mount(ctx, mount_dir)?;
     }
     ensure_auth_and_project(ctx).await?;
     // Set for exactly the path-addressed commands, whose dispatch arms are the only readers.
@@ -2473,6 +2623,14 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             limit,
             json,
         } => commands::fs::history(ctx, target.as_deref(), limit, json).await,
+        FsCommands::Name {
+            name,
+            version,
+            snapshot_name,
+        } => commands::fs::name_snapshot(ctx, &name, &version, &snapshot_name).await,
+        FsCommands::DeleteSnapshot { name, version } => {
+            commands::fs::delete_snapshot(ctx, &name, &version).await
+        }
         FsCommands::Mount {
             target,
             path,
@@ -2490,10 +2648,11 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             state_dir,
             log_level,
         } => commands::fs::daemon::run(ctx, &state_dir, &log_level).await,
-        FsCommands::Snapshot { message, .. } => {
-            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), false).await
+        FsCommands::Snapshot { message, clear, .. } => {
+            commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), clear).await
         }
         FsCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
+        FsCommands::Doctor { .. } => unreachable!("handled before the auth guard"),
         FsCommands::Restore {
             version, discard, ..
         } => commands::fs::restore(ctx, &mount_dir(), &version, discard).await,
@@ -2535,16 +2694,66 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
             }
             mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
         }
+        GitCommands::Rebase { path, target, .. } => {
+            if path.is_none() {
+                commands::fs::reject_mount_like_positional(
+                    target,
+                    "rebase target",
+                    "tl git rebase [PATH] <REF-OR-COMMIT>",
+                )?;
+            }
+            mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
+        }
+        GitCommands::Sync { path, target } => {
+            // With two optional positionals clap assigns a lone argument to PATH. Reinterpret a
+            // branch/tag/commit-shaped value as TARGET; explicit/existing paths remain paths.
+            if target.is_none()
+                && let Some(candidate) = path.as_ref()
+                && !commands::fs::positional_is_mount_path(candidate)?
+            {
+                *target = Some(candidate.to_string_lossy().into_owned());
+                *path = None;
+            }
+            mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
+        }
         GitCommands::Snapshot { path, .. }
-        | GitCommands::Sync { path, .. }
         | GitCommands::Status { path, .. }
         | GitCommands::Unmount { path, .. } => {
             mount_dir = Some(commands::fs::resolve_mount_path(path.take())?);
         }
+        GitCommands::Log { subject, .. } => {
+            let candidate = subject.as_deref().map(std::path::Path::new);
+            if candidate.is_none()
+                || commands::fs::positional_is_mount_path(
+                    candidate.expect("checked Some").as_ref(),
+                )?
+            {
+                mount_dir = Some(commands::fs::resolve_mount_path(
+                    candidate.map(std::path::Path::to_path_buf),
+                )?);
+            }
+        }
+        GitCommands::Smartlog {
+            subject, project, ..
+        } => {
+            let candidate = subject.as_deref().map(std::path::Path::new);
+            let candidate_is_path = match candidate {
+                Some(path) => commands::fs::positional_is_mount_path(path)?,
+                None => false,
+            };
+            if candidate_is_path || (!*project && candidate.is_none()) {
+                mount_dir = Some(commands::fs::resolve_mount_path(
+                    candidate.map(std::path::Path::to_path_buf),
+                )?);
+            }
+        }
         _ => {}
     }
+    if let Some(path) = mount_dir.as_ref() {
+        commands::fs::require_repository_mount_attachment(path)?;
+    }
     if let Some(mount_dir) = &mount_dir {
-        commands::fs::hydrate_scope_from_mount(ctx, mount_dir);
+        commands::fs::hydrate_scope_from_mount(ctx, mount_dir)?;
     }
     ensure_auth_and_project(ctx).await?;
     let mount_dir = move || mount_dir.expect("resolved for every path-addressed command above");
@@ -2575,11 +2784,26 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
         GitCommands::Snapshot { message, clear, .. } => {
             commands::fs::snapshot(ctx, &mount_dir(), message.as_deref(), clear).await
         }
-        GitCommands::Sync { .. } => commands::fs::sync(ctx, &mount_dir(), None, false, None).await,
+        GitCommands::Sync { target, .. } => {
+            commands::fs::git_sync(ctx, &mount_dir(), target.as_deref()).await
+        }
+        GitCommands::Rebase {
+            target,
+            fail_on_conflict,
+            ..
+        } => commands::fs::git_rebase(ctx, &mount_dir(), &target, fail_on_conflict, None).await,
         GitCommands::Promote { branch, merge, .. } => {
             commands::fs::promote(ctx, &mount_dir(), &branch, false, merge, None).await
         }
-        GitCommands::Status { json, .. } => commands::fs::status(ctx, &mount_dir(), json).await,
+        GitCommands::Status { json, .. } => commands::fs::git_status(ctx, &mount_dir(), json).await,
+        GitCommands::Log { subject, json } => {
+            commands::fs::git_log(ctx, subject.as_deref(), json).await
+        }
+        GitCommands::Smartlog {
+            subject,
+            project,
+            json,
+        } => commands::fs::git_smartlog(ctx, subject.as_deref(), project, json).await,
         GitCommands::Unmount {
             delete, discard, ..
         } => commands::fs::unmount(ctx, &mount_dir(), delete, discard).await,
@@ -2613,8 +2837,11 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
         | GitCommands::Unmount { .. }
         | GitCommands::Snapshot { .. }
         | GitCommands::Sync { .. }
+        | GitCommands::Rebase { .. }
         | GitCommands::Promote { .. }
-        | GitCommands::Status { .. } => {
+        | GitCommands::Status { .. }
+        | GitCommands::Log { .. }
+        | GitCommands::Smartlog { .. } => {
             unreachable!("the mount family is routed to run_git_mount_command before auth")
         }
         GitCommands::Clone {
@@ -3143,6 +3370,37 @@ mod tests {
             }
             _ => panic!("expected fs history command"),
         }
+        let mut command = Cli::command();
+        let history = command
+            .find_subcommand_mut("fs")
+            .unwrap()
+            .find_subcommand_mut("history")
+            .unwrap();
+        let mut history_help = Vec::new();
+        history.write_long_help(&mut history_help).unwrap();
+        let history_help = String::from_utf8(history_help).unwrap();
+        assert!(history_help.contains("named retained saves are always included"));
+
+        match parse_command(["tl", "fs", "name", "scratch", "abc123", "before-upgrade"]) {
+            Commands::Fs(FsCommands::Name {
+                name,
+                version,
+                snapshot_name,
+            }) => {
+                assert_eq!(name, "scratch");
+                assert_eq!(version, "abc123");
+                assert_eq!(snapshot_name, "before-upgrade");
+            }
+            _ => panic!("expected fs name command"),
+        }
+
+        match parse_command(["tl", "fs", "delete-snapshot", "scratch", "abc123"]) {
+            Commands::Fs(FsCommands::DeleteSnapshot { name, version }) => {
+                assert_eq!(name, "scratch");
+                assert_eq!(version, "abc123");
+            }
+            _ => panic!("expected fs delete-snapshot command"),
+        }
 
         match parse_command(["tl", "fs", "ls"]) {
             Commands::Fs(FsCommands::Ls {
@@ -3181,27 +3439,55 @@ mod tests {
             Commands::Fs(FsCommands::Snapshot {
                 path: None,
                 message: None,
+                clear: false,
             }) => {}
             _ => panic!("expected fs snapshot command"),
         }
 
-        match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip"]) {
-            Commands::Fs(FsCommands::Snapshot { path, message }) => {
+        match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip", "--clear"]) {
+            Commands::Fs(FsCommands::Snapshot {
+                path,
+                message,
+                clear,
+            }) => {
                 assert_eq!(path, Some(PathBuf::from("./w")));
                 assert_eq!(message.as_deref(), Some("wip"));
+                assert!(clear);
             }
             _ => panic!("expected fs snapshot command"),
         }
 
-        // Promote, sync, diff, init, and the overlay-clearing snapshot left the fs surface
-        // entirely (promote/sync/--clear live on `tl git`; diff and init were cut — push
-        // binds a directory, unmount forgets it).
+        match parse_command([
+            "tl",
+            "fs",
+            "doctor",
+            "./w",
+            "--json",
+            "--repair-journal",
+            "--base",
+            "snapshot-1",
+        ]) {
+            Commands::Fs(FsCommands::Doctor {
+                path,
+                json,
+                repair_journal,
+                base,
+            }) => {
+                assert_eq!(path, Some(PathBuf::from("./w")));
+                assert!(json);
+                assert!(repair_journal);
+                assert_eq!(base.as_deref(), Some("snapshot-1"));
+            }
+            _ => panic!("expected fs doctor command"),
+        }
+
+        // Promote, sync, diff, and init left the fs surface entirely. Filesystem saves publish
+        // directly; push binds a directory and unmount forgets it.
         assert!(Cli::try_parse_from(["tl", "fs", "promote", "main"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "sync"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "diff"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "init"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "unbind"]).is_err());
-        assert!(Cli::try_parse_from(["tl", "fs", "snapshot", "--clear"]).is_err());
         // `tl git snapshot --clear` keeps the disk-reclaim hatch (hidden).
         match parse_command(["tl", "git", "snapshot", "--clear"]) {
             Commands::Git(GitCommands::Snapshot { clear: true, .. }) => {}
@@ -3270,8 +3556,52 @@ mod tests {
             _ => panic!("expected git promote command"),
         }
         match parse_command(["tl", "git", "sync"]) {
-            Commands::Git(GitCommands::Sync { path: None, .. }) => {}
+            Commands::Git(GitCommands::Sync {
+                path: None,
+                target: None,
+            }) => {}
             _ => panic!("expected git sync command"),
+        }
+        match parse_command(["tl", "git", "sync", "./w", "refs/tags/v2"]) {
+            Commands::Git(GitCommands::Sync { path, target }) => {
+                assert_eq!(path, Some(PathBuf::from("./w")));
+                assert_eq!(target.as_deref(), Some("refs/tags/v2"));
+            }
+            _ => panic!("expected git sync path and target"),
+        }
+        match parse_command(["tl", "git", "rebase", "main", "--fail-on-conflict"]) {
+            Commands::Git(GitCommands::Rebase {
+                path: None,
+                target,
+                fail_on_conflict: true,
+            }) => assert_eq!(target, "main"),
+            _ => panic!("expected git rebase command"),
+        }
+        match parse_command(["tl", "git", "rebase", "./w", "main"]) {
+            Commands::Git(GitCommands::Rebase { path, target, .. }) => {
+                assert_eq!(path, Some(PathBuf::from("./w")));
+                assert_eq!(target, "main");
+            }
+            _ => panic!("expected git rebase path and target"),
+        }
+        match parse_command(["tl", "git", "log", "demo", "--json"]) {
+            Commands::Git(GitCommands::Log { subject, json }) => {
+                assert_eq!(subject.as_deref(), Some("demo"));
+                assert!(json);
+            }
+            _ => panic!("expected git log command"),
+        }
+        match parse_command(["tl", "git", "smartlog", "demo", "--project", "--json"]) {
+            Commands::Git(GitCommands::Smartlog {
+                subject,
+                project,
+                json,
+            }) => {
+                assert_eq!(subject.as_deref(), Some("demo"));
+                assert!(project);
+                assert!(json);
+            }
+            _ => panic!("expected git smartlog command"),
         }
         // `tl git status` is the mount status now; repo info keeps its `url` alias only.
         match parse_command(["tl", "git", "status"]) {

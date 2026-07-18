@@ -266,3 +266,4 @@ Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), run `pip install
 
 * [Sandbox Documentation](https://docs.tensorlake.ai/sandboxes/introduction)
 * [Orchestrate Documentation](https://docs.tensorlake.ai/applications/quickstart)
+* [`tl git mount` repository and subtree workflow](docs/git-mount.md)

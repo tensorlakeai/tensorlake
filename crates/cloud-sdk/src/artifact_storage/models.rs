@@ -86,6 +86,8 @@ impl RepoMetaInfo {
 pub struct ListReposResponse {
     pub project: String,
     pub repos: Vec<Repo>,
+    #[serde(default)]
+    pub next_after: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -150,10 +152,16 @@ pub struct Operation {
     /// Elided by the server when false; absent from pre-visibility servers.
     #[serde(default)]
     pub conflicted: bool,
+    /// Native snapshot attributed to a verification or head-promotion operation. Absent on Git
+    /// operations and on servers predating the native engine.
+    #[serde(default)]
+    pub native_snapshot: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ListOperationsResponse {
     pub repo: String,
     pub operations: Vec<Operation>,
+    #[serde(default)]
+    pub next_after: Option<String>,
 }

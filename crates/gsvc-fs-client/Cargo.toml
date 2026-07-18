@@ -1,0 +1,64 @@
+# Resolution-only placeholder for the private filesystem client engine. Official builds replace
+# only `src/`, keeping this workspace-adapted dependency manifest.
+[package]
+name = "gsvc-fs-client"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Resolution placeholder for TensorLake private filesystem client code"
+publish = false
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+tensorlake = { path = "../cloud-sdk" }
+gsvc-mount = { path = "../gsvc-mount" }
+anyhow = "1"
+base64 = "0.22"
+blake3 = "1"
+bytes = "1"
+chrono = { version = "0.4", features = ["serde"] }
+comfy-table = "7"
+console = "0.16"
+dirs = "6"
+dialoguer = "0.12"
+filetime = "0.2"
+flate2 = { version = "1", features = ["zlib-rs"] }
+futures = "0.3"
+gethostname = "0.5"
+hex = "0.4"
+ignore = "0.4"
+indicatif = "0.18"
+libc = "0.2"
+postcard = { version = "1", features = ["alloc"] }
+rand = "0.9"
+rayon = "1"
+redb = "4"
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls-no-provider", "stream"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.11"
+sha2 = "0.10"
+shlex = "1"
+tempfile = "3"
+thiserror = "2"
+tokio = { version = "1", features = ["full"] }
+tokio-util = { version = "0.7", features = ["codec", "io"] }
+toml = "0.9"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+url = "2"
+urlencoding = "2"
+uuid = { version = "1", features = ["serde", "v4"] }
+xattr = "1"
+zstd = "0.13"
+
+[target.'cfg(target_os = "linux")'.dependencies]
+fuser = { version = "0.15", default-features = false, features = ["abi-7-12"] }
+
+[lints.clippy]
+large_enum_variant = "allow"
+result_large_err = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
