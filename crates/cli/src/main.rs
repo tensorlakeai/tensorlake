@@ -180,7 +180,7 @@ enum Commands {
     #[command(subcommand)]
     Secrets(SecretsCommands),
 
-    /// Manage versioned filesystems
+    /// Manage shared drives with continuous autosave and permanent snapshots
     #[command(subcommand, name = "fs")]
     Fs(FsCommands),
 
@@ -229,11 +229,11 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Mount a filesystem: reads stream lazily, saves publish to the filesystem.
-    /// Name a retained save as `filesystem:save-id` for a fixed read-only time-travel view.
+    /// Mount a filesystem: reads stream lazily and autosaves publish to the shared drive.
+    /// Use `filesystem:snapshot-id` for a fixed read-only time-travel view.
     /// Remounting a filesystem this machine has a detached session for resumes that session
     Mount {
-        /// Filesystem name, optionally followed by `:<save-id>` (see `tl fs history`)
+        /// Filesystem name, optionally followed by `:<snapshot-id>` (see `tl fs history`)
         target: String,
 
         /// Mountpoint directory (created; must be empty)
@@ -270,7 +270,8 @@ enum FsCommands {
     },
 
     /// Upload a folder into a filesystem and track it for later incremental saves (no mount
-    /// needed). Interrupted attempts resume from durable local state
+    /// needed). Without -m the upload is an automatic save; -m creates a permanent snapshot.
+    /// Interrupted attempts resume from durable local state
     Push {
         /// Local directory to upload
         dir: PathBuf,
@@ -278,18 +279,18 @@ enum FsCommands {
         /// Filesystem name
         name: String,
 
-        /// Save message
+        /// Create a permanent, billed snapshot with this message
         #[arg(short, long)]
         message: Option<String>,
     },
 
-    /// Show recent automatic history plus every named retained save
+    /// Show permanent snapshots, followed by the recent ephemeral autosave WAL
     History {
         /// Filesystem name, or a mounted directory (default: the mount containing the
         /// current directory)
         target: Option<String>,
 
-        /// Show at most N recent timeline entries (named retained saves are always included)
+        /// Show at most N recent autosaves (permanent snapshots are always included)
         #[arg(short = 'n', long, default_value_t = 20)]
         limit: usize,
 
@@ -298,25 +299,13 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Name a recent automatic save and keep it until explicitly deleted
-    Name {
-        /// Filesystem name
-        name: String,
-
-        /// Save ID or unambiguous hexadecimal prefix
-        version: String,
-
-        /// Durable name for this save
-        snapshot_name: String,
-    },
-
-    /// Remove a durable name; the save then follows automatic retention
+    /// Delete a permanent snapshot; unreferenced content is reclaimed asynchronously
     #[command(name = "delete-snapshot")]
     DeleteSnapshot {
         /// Filesystem name
         name: String,
 
-        /// Save ID or unambiguous hexadecimal prefix
+        /// Snapshot ID or unambiguous hexadecimal prefix
         version: String,
     },
 
@@ -353,13 +342,13 @@ enum FsCommands {
         log_level: String,
     },
 
-    /// Save the current state of the filesystem (a clean tree is a quiet no-op)
+    /// Create a permanent, billed snapshot of the drive (a clean tree is a quiet no-op)
     Snapshot {
         /// A mounted or pushed directory (default: the attachment containing the current
         /// directory)
         path: Option<PathBuf>,
 
-        /// Save message
+        /// Snapshot message
         #[arg(short, long)]
         message: Option<String>,
 
@@ -369,7 +358,7 @@ enum FsCommands {
         clear: bool,
     },
 
-    /// Show mount, autosave, and local-change status
+    /// Show local changes, last autosave, and permanent snapshot count
     Status {
         /// A mounted or tracked directory (default: the attachment containing the current
         /// directory)
@@ -380,7 +369,7 @@ enum FsCommands {
         json: bool,
     },
 
-    /// Inspect the crash-safe local snapshot journal of a native mount or tracked directory
+    /// Inspect the crash-safe local autosave journal of a native mount or tracked directory
     Doctor {
         /// A mounted or tracked directory (default: the attachment containing the current
         /// directory)
@@ -396,19 +385,23 @@ enum FsCommands {
         #[arg(long)]
         repair_journal: bool,
 
-        /// Required repair baseline when the existing journal cannot prove one. Pass a native
-        /// save ID, or `empty` only for a filesystem that has never had a save.
-        #[arg(long, value_name = "SAVE_ID|empty", requires = "repair_journal")]
+        /// Required repair baseline when the existing journal cannot prove one. Pass a snapshot
+        /// or recent autosave ID, or `empty` only for a filesystem that has never been saved.
+        #[arg(
+            long,
+            value_name = "SNAPSHOT_OR_AUTOSAVE_ID|empty",
+            requires = "repair_journal"
+        )]
         base: Option<String>,
     },
 
-    /// Restore a writable filesystem mount to an earlier save
+    /// Restore a writable filesystem mount to a snapshot or recent autosave
     #[command(allow_missing_positional = true)]
     Restore {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
 
-        /// Save ID or unambiguous hexadecimal prefix
+        /// Snapshot or recent autosave ID, or an unambiguous hexadecimal prefix
         version: String,
 
         /// Drop the local overlay to apply the restore. Destructive: unsaved changes AND
@@ -423,7 +416,7 @@ enum FsCommands {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
 
-        /// Also delete the server-side session (its unpublished saves become unreachable)
+        /// Also delete the detached server-side session and its unretained autosave history
         #[arg(long, hide = true)]
         delete: bool,
 
@@ -622,11 +615,11 @@ enum GitCommands {
         /// Operation requested by git: get, store, or erase
         operation: String,
     },
-    /// Mount a repo branch as a working tree (FUSE), without cloning: reads stream lazily,
-    /// writes stay local until `tl git snapshot`
+    /// Mount a repo as a lazy working tree. Writes autosave durably into a private workspace,
+    /// but no branch changes until `tl git promote`
     Mount {
-        /// `<repo>[:<ref-or-full-commit>][//<subtree>]` — forks a private workspace off the
-        /// selected source and optionally exposes one directory as the mount root
+        /// `<repo>[:<ref-or-full-commit>][//<subtree>]` — selects the base view and optionally
+        /// exposes one directory as the mount root; the workspace is created on first write
         target: String,
 
         /// Mountpoint directory (created; must be empty)
@@ -636,12 +629,12 @@ enum GitCommands {
         #[arg(long, conflicts_with = "publish")]
         ro: bool,
 
-        /// Every snapshot lands on the mounted branch automatically (server-ordered, merged,
-        /// one attributed commit per snapshot). Requires `<repo>:<branch>`
+        /// Every explicit snapshot also promotes onto the mounted branch. Autosaves never
+        /// publish. Requires `<repo>:<branch>`
         #[arg(long)]
         publish: bool,
 
-        /// Reattach an existing workspace instead of forking a new one
+        /// Resume an existing workspace, including its unsnapshotted autosave WAL
         #[arg(long, conflicts_with = "publish")]
         workspace: Option<String>,
 
@@ -658,7 +651,7 @@ enum GitCommands {
         log_level: String,
     },
 
-    /// Unmount a repo working tree; the workspace survives unless --delete
+    /// Unmount a repo working tree; its durable WAL and snapshots survive unless --delete
     Unmount {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
@@ -673,7 +666,7 @@ enum GitCommands {
         discard: bool,
     },
 
-    /// Checkpoint the mounted working tree as a commit on its private workspace line
+    /// Materialize the current autosaved state as one commit on the private workspace line
     Snapshot {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
@@ -688,7 +681,7 @@ enum GitCommands {
         clear: bool,
     },
 
-    /// Refresh the mounted view, or switch a pristine workspace to another ref or commit
+    /// Refresh or switch the base view, carrying any unsnapshotted autosave state forward
     Sync {
         /// A mounted directory (default: the mount containing the current directory)
         path: Option<PathBuf>,
@@ -697,7 +690,7 @@ enum GitCommands {
         target: Option<String>,
     },
 
-    /// Replay a snapshotted workspace onto another ref or commit on the server
+    /// Replay the workspace snapshots and unsnapshotted autosave tail onto another base
     #[command(allow_missing_positional = true)]
     Rebase {
         /// A mounted directory (default: the mount containing the current directory)
@@ -711,7 +704,7 @@ enum GitCommands {
         fail_on_conflict: bool,
     },
 
-    /// Land the mounted working tree's checkpoint on a branch (squash by default)
+    /// Autosave live changes, materialize a snapshot, then squash-land it on a branch
     #[command(allow_missing_positional = true)]
     Promote {
         /// A mounted directory (default: the mount containing the current directory)
@@ -724,6 +717,16 @@ enum GitCommands {
         /// publish nothing
         #[arg(long)]
         merge: bool,
+    },
+
+    /// List a repository's durable workspaces, autosave state, snapshots, and attachments
+    Workspaces {
+        /// Repository name
+        repo: String,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
     },
 
     /// Show workspace and local-change status for a mounted working tree
@@ -2536,7 +2539,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             if path.is_none() {
                 commands::fs::reject_mount_like_positional(
                     version,
-                    "save ID",
+                    "snapshot or autosave ID",
                     "tl fs restore [PATH] <VERSION>",
                 )?;
             }
@@ -2623,11 +2626,6 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             limit,
             json,
         } => commands::fs::history(ctx, target.as_deref(), limit, json).await,
-        FsCommands::Name {
-            name,
-            version,
-            snapshot_name,
-        } => commands::fs::name_snapshot(ctx, &name, &version, &snapshot_name).await,
         FsCommands::DeleteSnapshot { name, version } => {
             commands::fs::delete_snapshot(ctx, &name, &version).await
         }
@@ -2675,8 +2673,9 @@ async fn run_fs_command(_ctx: &mut CliContext, _subcmd: FsCommands) -> error::Re
     ))
 }
 
-/// The `tl git` mount family: the same battle-tested engine as `tl fs`, with git vocabulary
-/// and git defaults (explicit checkpointing, no autosave, no publish unless asked).
+/// The `tl git` mount family: the same journal and autosave engine as `tl fs`, with Git
+/// publication policy (autosave checkpoints are durable but only snapshots create commits,
+/// and only promote advances a branch).
 #[cfg(feature = "mount")]
 async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> error::Result<()> {
     // Path-addressed commands carry their scope in the mount state; resolve it before auth so
@@ -2860,6 +2859,9 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
             json,
         } => commands::git::create_repo(ctx, &repo, Some(&default_branch), json).await,
         GitCommands::Ls { json } => commands::git::list_repos(ctx, json).await,
+        GitCommands::Workspaces { repo, json } => {
+            commands::git::list_workspaces(ctx, &repo, json).await
+        }
         GitCommands::Rm { repo } => commands::git::delete_repo(ctx, &repo).await,
         GitCommands::Fork { repo, base_repo } => {
             commands::git::fork_repo(ctx, &repo, &base_repo).await
@@ -3379,20 +3381,27 @@ mod tests {
         let mut history_help = Vec::new();
         history.write_long_help(&mut history_help).unwrap();
         let history_help = String::from_utf8(history_help).unwrap();
-        assert!(history_help.contains("named retained saves are always included"));
+        assert!(history_help.contains("permanent snapshots are always included"));
+        assert!(history_help.contains("recent ephemeral autosave WAL"));
 
-        match parse_command(["tl", "fs", "name", "scratch", "abc123", "before-upgrade"]) {
-            Commands::Fs(FsCommands::Name {
-                name,
-                version,
-                snapshot_name,
-            }) => {
-                assert_eq!(name, "scratch");
-                assert_eq!(version, "abc123");
-                assert_eq!(snapshot_name, "before-upgrade");
-            }
-            _ => panic!("expected fs name command"),
-        }
+        let mut command = Cli::command();
+        let push = command
+            .find_subcommand_mut("fs")
+            .unwrap()
+            .find_subcommand_mut("push")
+            .unwrap();
+        let mut push_help = Vec::new();
+        push.write_long_help(&mut push_help).unwrap();
+        let push_help = String::from_utf8(push_help).unwrap();
+        assert!(push_help.contains("Without -m the upload is an automatic save"));
+        assert!(push_help.contains("permanent, billed snapshot"));
+
+        // Snapshot creation and deletion are the whole permanent-retention surface. There is
+        // no second command that promotes an autosave into a snapshot.
+        assert!(
+            Cli::try_parse_from(["tl", "fs", "name", "scratch", "abc123", "before-upgrade"])
+                .is_err()
+        );
 
         match parse_command(["tl", "fs", "delete-snapshot", "scratch", "abc123"]) {
             Commands::Fs(FsCommands::DeleteSnapshot { name, version }) => {
@@ -3555,6 +3564,17 @@ mod tests {
             }
             _ => panic!("expected git promote command"),
         }
+        let mut command = Cli::command();
+        let promote = command
+            .find_subcommand_mut("git")
+            .unwrap()
+            .find_subcommand_mut("promote")
+            .unwrap();
+        let mut promote_help = Vec::new();
+        promote.write_long_help(&mut promote_help).unwrap();
+        let promote_help = String::from_utf8(promote_help).unwrap();
+        assert!(promote_help.contains("Autosave live changes"));
+        assert!(promote_help.contains("squash-land"));
         match parse_command(["tl", "git", "sync"]) {
             Commands::Git(GitCommands::Sync {
                 path: None,
@@ -3590,6 +3610,13 @@ mod tests {
                 assert!(json);
             }
             _ => panic!("expected git log command"),
+        }
+        match parse_command(["tl", "git", "workspaces", "demo", "--json"]) {
+            Commands::Git(GitCommands::Workspaces { repo, json }) => {
+                assert_eq!(repo, "demo");
+                assert!(json);
+            }
+            _ => panic!("expected git workspaces command"),
         }
         match parse_command(["tl", "git", "smartlog", "demo", "--project", "--json"]) {
             Commands::Git(GitCommands::Smartlog {

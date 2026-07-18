@@ -17,6 +17,7 @@ use tensorlake::artifact_storage::merge::MergeRequest;
 use tensorlake::artifact_storage::models::{
     ListBranchesResponse, ListOperationsResponse, ListRefsResponse, ListReposResponse,
 };
+use tensorlake::artifact_storage::workspaces::WorkspaceInfo;
 use tensorlake::{ClientBuilder, Sdk};
 
 use crate::auth::context::CliContext;
@@ -186,6 +187,111 @@ pub async fn list_repos(ctx: &CliContext, output_json: bool) -> Result<()> {
         return Ok(());
     }
     print_repos_table(&response);
+    Ok(())
+}
+
+/// Stable public shape for `tl git workspaces`. The repo-scoped workspace endpoint is usable by
+/// ordinary repository credentials, unlike the operator fleet endpoint. Older servers only return
+/// the workspace identity fields, so the WAL/activity/attachment facts remain explicit `null`
+/// instead of being guessed from the snapshot tip.
+#[derive(serde::Serialize)]
+struct GitWorkspaceListItem {
+    id: String,
+    base: String,
+    base_ref: Option<String>,
+    head: String,
+    snapshot_count: Option<u64>,
+    last_activity_ms: Option<u64>,
+    wal_state: Option<String>,
+    attachment_state: Option<String>,
+    mounted_on: Option<String>,
+}
+
+impl From<WorkspaceInfo> for GitWorkspaceListItem {
+    fn from(workspace: WorkspaceInfo) -> Self {
+        Self {
+            id: workspace.id,
+            base: workspace.base,
+            base_ref: workspace.base_ref,
+            head: workspace.head,
+            // These are intentionally unknown against the current repo-scoped list wire. A
+            // future server can enrich WorkspaceInfo without changing this command's JSON schema.
+            snapshot_count: None,
+            last_activity_ms: None,
+            wal_state: None,
+            attachment_state: None,
+            mounted_on: None,
+        }
+    }
+}
+
+pub async fn list_workspaces(ctx: &CliContext, repo: &str, output_json: bool) -> Result<()> {
+    let project_id = project_id(ctx)?;
+    let client = artifact_storage_client(ctx)?;
+    let credential = client
+        .git_credential_for_repo(&project_id, repo)
+        .await
+        .map_err(map_sdk_error)?;
+    let mut workspaces: Vec<GitWorkspaceListItem> = client
+        .list_workspaces(
+            &project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+        )
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner()
+        .into_iter()
+        .map(Into::into)
+        .collect();
+    workspaces.sort_by(|a, b| a.id.cmp(&b.id));
+
+    if output_json {
+        return print_json(&workspaces);
+    }
+    if workspaces.is_empty() {
+        println!("no workspaces found for {repo}");
+        return Ok(());
+    }
+
+    let short = |oid: &str| oid[..oid.len().min(12)].to_string();
+    let mut table = new_table(&[
+        "Workspace",
+        "Base",
+        "Head",
+        "Snapshots",
+        "WAL",
+        "Attachment",
+        "Last activity",
+    ]);
+    for workspace in &workspaces {
+        table.add_row(vec![
+            Cell::new(&workspace.id),
+            Cell::new(short(&workspace.base)),
+            Cell::new(short(&workspace.head)),
+            Cell::new(
+                workspace
+                    .snapshot_count
+                    .map_or_else(|| "unknown".to_string(), |count| count.to_string()),
+            ),
+            Cell::new(workspace.wal_state.as_deref().unwrap_or("unknown")),
+            Cell::new(
+                workspace
+                    .mounted_on
+                    .as_deref()
+                    .or(workspace.attachment_state.as_deref())
+                    .unwrap_or("unknown"),
+            ),
+            Cell::new(
+                workspace
+                    .last_activity_ms
+                    .map_or_else(|| "unknown".to_string(), |time| time.to_string()),
+            ),
+        ]);
+    }
+    println!("{table}");
+    println!("{} workspaces", workspaces.len());
     Ok(())
 }
 
@@ -932,6 +1038,32 @@ pub async fn commit_status(ctx: &CliContext, repo: &str, job_id: &str) -> Result
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn workspace_list_json_keeps_unknown_wal_and_attachment_facts_explicit() {
+        let workspace: WorkspaceInfo = serde_json::from_value(serde_json::json!({
+            "id": "ws-1",
+            "ref_name": "refs/workspaces/ws-1",
+            "principal": "agent-1",
+            "base": "a".repeat(40),
+            "base_ref": "refs/heads/main",
+            "head": "b".repeat(40),
+            "created_at_secs": 10,
+            "lease_secs": 0,
+            "lease_due_ms": null,
+            "pinned": true,
+            "shared_target": null
+        }))
+        .unwrap();
+        let row = GitWorkspaceListItem::from(workspace);
+        let json = serde_json::to_value(row).unwrap();
+        assert_eq!(json["id"], "ws-1");
+        assert!(json["snapshot_count"].is_null());
+        assert!(json["last_activity_ms"].is_null());
+        assert!(json["wal_state"].is_null());
+        assert!(json["attachment_state"].is_null());
+        assert!(json["mounted_on"].is_null());
+    }
 
     #[test]
     fn git_worktree_root_rejects_non_git_dir() {
