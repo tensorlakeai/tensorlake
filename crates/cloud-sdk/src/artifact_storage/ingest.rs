@@ -366,6 +366,14 @@ pub struct MaterializeWorkspaceCheckpointResponse {
     pub ref_name: String,
     pub parent: Option<String>,
     pub created: bool,
+    /// Outcome of the separate publish-on-snapshot transition: `not_configured`, `published`,
+    /// `conflict`, or `failed`. Materialization itself succeeded whenever this response exists.
+    pub publish_status: String,
+    /// Target-branch commit written by configured publication, including idempotent replays.
+    pub published_commit: Option<String>,
+    /// Actionable configured-publication failure. The snapshot commit named by `commit` remains
+    /// durable and callers must still retire their local WAL generation.
+    pub publish_error: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -2062,7 +2070,8 @@ impl ArtifactStorageClient {
     }
 
     /// Materialize one WAL generation as exactly one commit on the workspace ref. Replaying the
-    /// same generation is idempotent and returns `created=false`.
+    /// same generation is idempotent and returns the original durable receipt byte-for-byte;
+    /// `created` describes that operation, not the current HTTP attempt.
     #[allow(clippy::too_many_arguments)]
     pub async fn materialize_workspace_checkpoint(
         &self,
@@ -2696,7 +2705,10 @@ mod tests {
                                             "tree": checkpoint_tree,
                                             "ref_name": format!("refs/workspaces/{workspace_id}"),
                                             "parent": snapshot_tip,
-                                            "created": true
+                                            "created": true,
+                                            "publish_status": "published",
+                                            "published_commit": "9".repeat(40),
+                                            "publish_error": null
                                         })
                                         .to_string(),
                                     )
@@ -2791,6 +2803,12 @@ mod tests {
             .expect("materialize POST must retry a 503")
             .into_inner();
         assert_eq!(materialized.commit, materialized_commit);
+        assert_eq!(materialized.publish_status, "published");
+        assert_eq!(
+            materialized.published_commit.as_deref(),
+            Some("9999999999999999999999999999999999999999")
+        );
+        assert_eq!(materialized.publish_error, None);
         server.abort();
 
         let seen = seen.lock().unwrap().clone();
