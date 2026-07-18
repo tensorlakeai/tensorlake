@@ -56,7 +56,7 @@ tl git status [/code]
 tl git snapshot [/code] --message "checkpoint"
 tl git sync [/code] [BRANCH|TAG|FULL_COMMIT]
 tl git rebase [/code] BRANCH|TAG|FULL_COMMIT
-tl git promote [/code] BRANCH [--merge | --full-history]
+tl git promote [/code] BRANCH [--merge]
 tl git log [/code|REPOSITORY]
 tl git smartlog [/code|REPOSITORY] [--project]
 ```
@@ -95,9 +95,7 @@ retained refs.
 
 `promote` autosaves outstanding edits, materializes the current state as a workspace snapshot, and
 deliberately lands it onto a real branch. The default is a squash landing; `--merge` creates a true
-merge when the branch moved and publishes nothing if conflicts remain. `--full-history` lands the
-workspace snapshot chain itself. On a `--publish` mount it suppresses that snapshot's automatic
-squash publication first, so the branch advances exactly once in the requested mode.
+merge when the branch moved and publishes nothing if conflicts remain.
 
 ## How this differs from `tl fs`
 
