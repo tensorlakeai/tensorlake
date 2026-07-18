@@ -31,8 +31,8 @@ use reqwest::Method;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::error::SdkError;
 use crate::Traced;
+use crate::error::SdkError;
 
 use super::ArtifactStorageClient;
 
@@ -363,6 +363,10 @@ pub struct MaterializeWorkspaceCheckpointRequest {
     pub committer: Option<super::merge::Signature>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mount_id: Option<String>,
+    /// Whether materialization should also run the workspace's configured publish policy.
+    /// Full-history promotion suppresses this one squash publication, then lands the exact
+    /// materialized chain through the explicit promote transaction.
+    pub publish_configured: bool,
 }
 
 impl MaterializeWorkspaceCheckpointRequest {
@@ -374,6 +378,7 @@ impl MaterializeWorkspaceCheckpointRequest {
             author: None,
             committer: None,
             mount_id: None,
+            publish_configured: true,
         }
     }
 }
@@ -3184,6 +3189,7 @@ mod tests {
         assert_eq!(materialize_body["format_ver"], 1);
         assert_eq!(materialize_body["generation"], 7);
         assert_eq!(materialize_body["message"], "intentional snapshot");
+        assert_eq!(materialize_body["publish_configured"], true);
         assert_eq!(materialize_body["author"]["name"], "Agent");
         assert!(materialize_body.get("committer").is_none());
     }
