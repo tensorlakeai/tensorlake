@@ -2211,6 +2211,11 @@ impl ArtifactStorageClient {
                 .await?;
             let status = response.status();
             if status != reqwest::StatusCode::PARTIAL_CONTENT {
+                if status.is_success() {
+                    return Err(SdkError::ClientError(format!(
+                        "checkpoint file range endpoint returned {status} instead of 206 Partial Content"
+                    )));
+                }
                 return Err(SdkError::ServerError {
                     status,
                     message: response.text().await.unwrap_or_default(),
@@ -2728,6 +2733,7 @@ mod tests {
             method: String,
             target: String,
             body: Vec<u8>,
+            range: Option<String>,
         }
 
         let workspace_id = "a".repeat(40);
@@ -2800,6 +2806,11 @@ mod tests {
                                         .and_then(|value| value.trim().parse::<usize>().ok())
                                 })
                                 .unwrap_or(0);
+                            let range = head.lines().find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("range")
+                                    .then(|| value.trim().to_string())
+                            });
                             while buffered.len() < head_end + content_length {
                                 let mut chunk = [0_u8; 4096];
                                 match socket.read(&mut chunk).await {
@@ -2813,6 +2824,7 @@ mod tests {
                                 method: method.clone(),
                                 target: target.clone(),
                                 body,
+                                range: range.clone(),
                             });
 
                             let path = target.split('?').next().unwrap_or_default();
@@ -2823,7 +2835,12 @@ mod tests {
                                 *count += 1;
                                 *count
                             };
-                            let (status, response_body) = if path.ends_with("/ingest/sessions") {
+                            let (status, response_body) = if method == "GET"
+                                && path == checkpoint_file_path
+                                && range.as_deref() == Some("bytes=0-4")
+                            {
+                                ("206 Partial Content", "check".to_string())
+                            } else if path.ends_with("/ingest/sessions") {
                                 (
                                     "200 OK",
                                     serde_json::json!({
@@ -2937,8 +2954,13 @@ mod tests {
                                     .to_string(),
                                 )
                             };
+                            let range_headers = if status == "206 Partial Content" {
+                                "content-range: bytes 0-4/15\r\naccept-ranges: bytes\r\n"
+                            } else {
+                                ""
+                            };
                             let response = format!(
-                                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\n\r\n{response_body}",
+                                "HTTP/1.1 {status}\r\ncontent-type: application/json\r\n{range_headers}content-length: {}\r\n\r\n{response_body}",
                                 response_body.len()
                             );
                             if socket.write_all(response.as_bytes()).await.is_err() {
@@ -3023,6 +3045,24 @@ mod tests {
             .unwrap()
             .into_inner();
         assert_eq!(checkpoint_bytes, b"checkpoint-body");
+        let checkpoint_range = sdk
+            .workspace_checkpoint_file_range(
+                "p",
+                "r",
+                "u",
+                "tok",
+                &workspace_id,
+                "src/main.rs",
+                7,
+                "checkpoint-7",
+                &checkpoint_tree,
+                0,
+                4,
+            )
+            .await
+            .unwrap()
+            .into_inner();
+        assert_eq!(checkpoint_range, b"check");
 
         let mut materialize = MaterializeWorkspaceCheckpointRequest::new(7, "intentional snapshot");
         materialize.author = Some(super::super::merge::Signature {
@@ -3102,6 +3142,11 @@ mod tests {
             file_query.get("tree").map(String::as_str),
             Some(checkpoint_tree.as_str())
         );
+        assert!(seen.iter().any(|request| {
+            request.method == "GET"
+                && request.target.starts_with(&checkpoint_file_path)
+                && request.range.as_deref() == Some("bytes=0-4")
+        }));
 
         let materialize_posts: Vec<_> = seen
             .iter()
