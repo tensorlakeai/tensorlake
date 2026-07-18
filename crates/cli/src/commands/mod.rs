@@ -89,10 +89,5 @@ pub(crate) fn push_event_message(ev: &PushEvent) -> String {
             }
         }
         PushEvent::Committed { ref_name, .. } => format!("committed to {ref_name}"),
-        PushEvent::Checkpointed {
-            workspace_id,
-            generation,
-            ..
-        } => format!("autosaved workspace {workspace_id} generation {generation}"),
     }
 }
