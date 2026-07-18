@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use crate::Traced;
 use crate::error::SdkError;
 
-use super::ingest::expect_json;
+use super::ingest::{expect_json, with_transient_retries};
 use super::merge::{MergeConflict, MergeReport, MergeStats, Signature, expect_json_or_conflict};
 use super::{ArtifactStorageClient, advance_pagination_cursor, decode_empty};
 
@@ -759,15 +759,19 @@ impl ArtifactStorageClient {
         git_token: &str,
         workspace_id: &str,
     ) -> Result<Traced<WorkspaceHeartbeat>, SdkError> {
-        let (req, trace_id) = self.git_request(
-            Method::POST,
-            project_id,
-            repo,
-            Some(&format!("workspaces/{workspace_id}/heartbeat")),
-            git_username,
-            git_token,
-        )?;
-        let hb = expect_json(req.send().await?).await?;
+        let suffix = format!("workspaces/{workspace_id}/heartbeat");
+        let (hb, trace_id) = with_transient_retries(|| async {
+            let (req, trace_id) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            Ok((expect_json(req.send().await?).await?, trace_id))
+        })
+        .await?;
         Ok(Traced::new(trace_id, hb))
     }
 
@@ -781,15 +785,22 @@ impl ArtifactStorageClient {
         workspace_id: &str,
         request: &WorkspaceMountHeartbeatRequest,
     ) -> Result<Traced<WorkspaceHeartbeat>, SdkError> {
-        let (req, trace_id) = self.git_request(
-            Method::POST,
-            project_id,
-            repo,
-            Some(&format!("workspaces/{workspace_id}/heartbeat")),
-            git_username,
-            git_token,
-        )?;
-        let hb = expect_json(req.json(request).send().await?).await?;
+        let suffix = format!("workspaces/{workspace_id}/heartbeat");
+        let (hb, trace_id) = with_transient_retries(|| async {
+            let (req, trace_id) = self.git_request(
+                Method::POST,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            Ok((
+                expect_json(req.json(request).send().await?).await?,
+                trace_id,
+            ))
+        })
+        .await?;
         Ok(Traced::new(trace_id, hb))
     }
 

@@ -232,6 +232,15 @@ fn canonical_repo_path(path: &str, what: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
+fn encoded_repo_path(path: &str, what: &str) -> Result<String, SdkError> {
+    canonical_repo_path(path, what)?;
+    Ok(path
+        .split('/')
+        .map(super::encode_path_segment)
+        .collect::<Vec<_>>()
+        .join("/"))
+}
+
 fn is_hex_oid(value: &str) -> bool {
     value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit())
 }
@@ -363,6 +372,35 @@ impl MaterializeWorkspaceCheckpointRequest {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WorkspaceCheckpointPublishStatus {
+    NotConfigured,
+    Published,
+    Conflict,
+    Failed,
+    /// Forward-compatible, but deliberately not successful: a new server outcome must not be
+    /// mistaken for a branch publication by an older client.
+    #[serde(other)]
+    Unknown,
+}
+
+impl WorkspaceCheckpointPublishStatus {
+    pub fn is_success(&self) -> bool {
+        matches!(self, Self::NotConfigured | Self::Published)
+    }
+
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::NotConfigured => "not_configured",
+            Self::Published => "published",
+            Self::Conflict => "conflict",
+            Self::Failed => "failed",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MaterializeWorkspaceCheckpointResponse {
     pub generation: u64,
     pub commit: String,
@@ -372,7 +410,7 @@ pub struct MaterializeWorkspaceCheckpointResponse {
     pub created: bool,
     /// Outcome of the separate publish-on-snapshot transition: `not_configured`, `published`,
     /// `conflict`, or `failed`. Materialization itself succeeded whenever this response exists.
-    pub publish_status: String,
+    pub publish_status: WorkspaceCheckpointPublishStatus,
     /// Target-branch commit written by configured publication, including idempotent replays.
     pub published_commit: Option<String>,
     /// Actionable configured-publication failure. The snapshot commit named by `commit` remains
@@ -2089,9 +2127,9 @@ impl ArtifactStorageClient {
         checkpoint_id: &str,
         tree: &str,
     ) -> Result<Traced<Vec<u8>>, SdkError> {
-        canonical_repo_path(file_path, "checkpoint file path")?;
+        let encoded_file_path = encoded_repo_path(file_path, "checkpoint file path")?;
         let suffix = format!(
-            "workspaces/{}/checkpoint/files/{file_path}",
+            "workspaces/{}/checkpoint/files/{encoded_file_path}",
             super::encode_path_segment(workspace_id)
         );
         let query = [
@@ -2117,6 +2155,86 @@ impl ArtifactStorageClient {
                 });
             }
             Ok((response.bytes().await?.to_vec(), trace_id))
+        })
+        .await?;
+        Ok(Traced::new(trace_id, bytes))
+    }
+
+    /// Read a bounded byte range from an exact, principal-bound workspace checkpoint revision.
+    /// The server must answer with `206 Partial Content`; accepting a full-body `200` here would
+    /// silently defeat the resume path's memory bound when talking to an incompatible server.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn workspace_checkpoint_file_range(
+        &self,
+        project_id: &str,
+        repo: &str,
+        git_username: &str,
+        git_token: &str,
+        workspace_id: &str,
+        file_path: &str,
+        generation: u64,
+        checkpoint_id: &str,
+        tree: &str,
+        start: u64,
+        end_inclusive: u64,
+    ) -> Result<Traced<Vec<u8>>, SdkError> {
+        let encoded_file_path = encoded_repo_path(file_path, "checkpoint file path")?;
+        if start > end_inclusive {
+            return Err(SdkError::ClientError(
+                "checkpoint file range start exceeds end".to_string(),
+            ));
+        }
+        let suffix = format!(
+            "workspaces/{}/checkpoint/files/{encoded_file_path}",
+            super::encode_path_segment(workspace_id)
+        );
+        let query = [
+            ("generation", generation.to_string()),
+            ("checkpoint_id", checkpoint_id.to_string()),
+            ("tree", tree.to_string()),
+        ];
+        let expected_len = end_inclusive - start + 1;
+        let range_header = format!("bytes={start}-{end_inclusive}");
+        let (bytes, trace_id) = with_transient_retries(|| async {
+            let (request, trace_id) = self.git_request(
+                Method::GET,
+                project_id,
+                repo,
+                Some(&suffix),
+                git_username,
+                git_token,
+            )?;
+            let response = request
+                .query(&query)
+                .header(reqwest::header::RANGE, &range_header)
+                .send()
+                .await?;
+            let status = response.status();
+            if status != reqwest::StatusCode::PARTIAL_CONTENT {
+                return Err(SdkError::ServerError {
+                    status,
+                    message: response.text().await.unwrap_or_default(),
+                });
+            }
+            let expected_content_range = format!("bytes {start}-{end_inclusive}/");
+            let content_range_matches = response
+                .headers()
+                .get(reqwest::header::CONTENT_RANGE)
+                .and_then(|value| value.to_str().ok())
+                .is_some_and(|value| value.starts_with(&expected_content_range));
+            if !content_range_matches {
+                return Err(SdkError::ClientError(format!(
+                    "checkpoint file range response did not bind bytes {start}-{end_inclusive}"
+                )));
+            }
+            let bytes = response.bytes().await?.to_vec();
+            if bytes.len() as u64 != expected_len {
+                return Err(SdkError::ClientError(format!(
+                    "checkpoint file range returned {} bytes, expected {expected_len}",
+                    bytes.len()
+                )));
+            }
+            Ok((bytes, trace_id))
         })
         .await?;
         Ok(Traced::new(trace_id, bytes))
@@ -2454,6 +2572,41 @@ async fn expect_ok(resp: reqwest::Response) -> Result<(), SdkError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_file_paths_encode_components_without_hiding_separators() {
+        assert_eq!(
+            encoded_repo_path("src/what ?#%.rs", "test path").unwrap(),
+            "src/what%20%3F%23%25.rs"
+        );
+        assert_eq!(
+            encoded_repo_path("日本語/é.rs", "test path").unwrap(),
+            "%E6%97%A5%E6%9C%AC%E8%AA%9E/%C3%A9.rs"
+        );
+        assert!(encoded_repo_path("../secret", "test path").is_err());
+    }
+
+    #[test]
+    fn unknown_publish_outcomes_fail_closed() {
+        let response: MaterializeWorkspaceCheckpointResponse =
+            serde_json::from_value(serde_json::json!({
+                "generation": 1,
+                "commit": "a".repeat(40),
+                "tree": "b".repeat(40),
+                "ref_name": "refs/workspaces/w",
+                "parent": null,
+                "created": true,
+                "publish_status": "new_server_outcome",
+                "published_commit": null,
+                "publish_error": null,
+            }))
+            .unwrap();
+        assert_eq!(
+            response.publish_status,
+            WorkspaceCheckpointPublishStatus::Unknown
+        );
+        assert!(!response.publish_status.is_success());
+    }
 
     fn cf(chunks: Vec<([u8; 32], u32)>, delete: bool, known_oid: bool) -> ChunkedFile {
         let cdc = !delete && !known_oid && !chunks.is_empty();
@@ -2882,7 +3035,10 @@ mod tests {
             .expect("materialize POST must retry a 503")
             .into_inner();
         assert_eq!(materialized.commit, materialized_commit);
-        assert_eq!(materialized.publish_status, "published");
+        assert_eq!(
+            materialized.publish_status,
+            WorkspaceCheckpointPublishStatus::Published
+        );
         assert_eq!(
             materialized.published_commit.as_deref(),
             Some("9999999999999999999999999999999999999999")

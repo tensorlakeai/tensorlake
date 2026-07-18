@@ -627,7 +627,7 @@ enum GitCommands {
         path: PathBuf,
 
         /// A stateless read-only view (branches and tags follow; full commits stay pinned)
-        #[arg(long, conflicts_with = "publish")]
+        #[arg(long, conflicts_with_all = ["publish", "workspace"])]
         ro: bool,
 
         /// Every explicit snapshot also promotes onto the mounted branch. Autosaves never
@@ -3568,6 +3568,20 @@ mod tests {
             }
             _ => panic!("expected git mount command"),
         }
+        assert!(
+            Cli::try_parse_from([
+                "tl",
+                "git",
+                "mount",
+                "demo",
+                "./w",
+                "--ro",
+                "--workspace",
+                "0123456789abcdef0123456789abcdef01234567",
+            ])
+            .is_err(),
+            "read-only workspace resume would silently omit the unmaterialized WAL"
+        );
         match parse_command(["tl", "git", "promote", "main", "--merge"]) {
             Commands::Git(GitCommands::Promote {
                 path: None,
