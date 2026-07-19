@@ -63,11 +63,8 @@ build-cli-full *ARGS:
 # Back-compat alias for the old recipe name.
 build-cli-mount *ARGS: (build-cli-full ARGS)
 
-# Build the macOS TLFS.app (FSKit extension) from the private artifact_storage checkout. The
-# Swift source is not in this repo — only the compiled, signed bundle ships (embedded into the
-# darwin CLI by CI). Dev build by default; pass flags through, e.g.
-# `just build-tlfs-app --release --notarize`. To embed the result in a local CLI build:
-# `TLFS_APP_ZIP=$(realpath ../artifact_storage/platform/macos/tlfs/build/TLFS.app.zip) just build-cli-full`
+# Build the macOS TLFS.app from the private artifact_storage checkout (see its
+# platform/macos/tlfs/README.md). Flags pass through, e.g. `just build-tlfs-app --release`.
 build-tlfs-app *ARGS:
     #!/usr/bin/env bash
     set -euo pipefail

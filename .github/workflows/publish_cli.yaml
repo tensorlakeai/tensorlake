@@ -172,17 +172,9 @@ jobs:
           name: cli-${{ matrix.target_id }}
           path: dist/*
 
-  # TLFS.app: the macOS FSKit extension `tl fs mount` needs (installed on end-user machines by
-  # `tl fs setup`). The Swift source is private: it is sparse-checked-out from
-  # tensorlakeai/artifact_storage (platform/macos/tlfs) with the same GitHub App used to vendor
-  # the private crates, and only the compiled bundle ships. Built headlessly with swiftc, signed
-  # with the Developer ID identity + Developer ID provisioning profile (FSKit Module capability,
-  # no device list), notarized, and attached to the same release so app and CLI stay in
-  # wire-protocol lockstep.
-  # Secrets (see platform/macos/tlfs/README.md in artifact_storage):
-  #   TLFS_SIGNING_CERT_P12 / TLFS_SIGNING_CERT_PASSWORD  Developer ID Application cert (.p12, base64)
-  #   TLFS_PROVISION_PROFILE                              Developer ID profile (base64)
-  #   TLFS_NOTARY_KEY / TLFS_NOTARY_KEY_ID / TLFS_NOTARY_ISSUER  App Store Connect API key (.p8 base64)
+  # Builds the signed, notarized TLFS.app that `tl fs setup` installs on macOS. The source is
+  # private; job documentation and the CI secrets it needs are described alongside it in
+  # artifact_storage (platform/macos/tlfs/README.md).
   tlfs-app:
     name: Build TLFS.app (macOS file-system extension)
     # Needs Xcode 26.x / the macOS 26 SDK (the FSKit surface tlfs uses); adjust the image if the
@@ -200,8 +192,6 @@ jobs:
           owner: tensorlakeai
           repositories: artifact_storage
 
-      # The FSKit module source is private. Check out only platform/macos/tlfs; it exists on the
-      # runner for the duration of the job and only the compiled, signed TLFS.app leaves it.
       - name: Check out private TLFS sources
         uses: actions/checkout@v4
         with:
