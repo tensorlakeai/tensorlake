@@ -202,7 +202,13 @@ fn mount_ready_timeout(configured: Option<f64>) -> Result<Duration> {
     match configured {
         None => Ok(DEFAULT_MOUNT_READY_TIMEOUT),
         Some(seconds) if seconds.is_finite() && seconds > 0.0 => {
-            Ok(Duration::from_secs_f64(seconds))
+            let timeout = Duration::try_from_secs_f64(seconds).map_err(|_| {
+                CliError::usage("--timeout is outside the supported duration range")
+            })?;
+            if timeout.is_zero() {
+                return Err(CliError::usage("--timeout must be at least one nanosecond"));
+            }
+            Ok(timeout)
         }
         Some(_) => Err(CliError::usage("--timeout must be greater than zero")),
     }
@@ -999,6 +1005,8 @@ mod tests {
         assert!(mount_ready_timeout(Some(-1.0)).is_err());
         assert!(mount_ready_timeout(Some(f64::NAN)).is_err());
         assert!(mount_ready_timeout(Some(f64::INFINITY)).is_err());
+        assert!(mount_ready_timeout(Some(f64::MAX)).is_err());
+        assert!(mount_ready_timeout(Some(f64::MIN_POSITIVE)).is_err());
         assert_eq!(
             mount_ready_timeout(Some(1.25)).unwrap(),
             Duration::from_millis(1_250)
