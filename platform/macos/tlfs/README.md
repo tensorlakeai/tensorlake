@@ -25,5 +25,5 @@ just build-tlfs-app                        # dev build (device-limited profile)
 just build-tlfs-app --release --notarize   # distribution build
 ```
 
-For a from-scratch FSKit walkthrough (registration gates, entry-point mechanics,
-fskitd gotchas), see the public prototype in `platform/macos/fskit-hello/`.
+The `fskit-hello` prototype (a from-scratch FSKit walkthrough) lives in
+artifact_storage as well, at `platform/macos/fskit-hello/`.
