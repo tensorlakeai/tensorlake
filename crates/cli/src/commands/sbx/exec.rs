@@ -1,7 +1,8 @@
 use eventsource_stream::Eventsource;
 use futures::StreamExt;
-use reqwest::header::ACCEPT;
+use reqwest::{StatusCode, header::ACCEPT};
 use serde_json::Value;
+use std::future::Future;
 use std::path::Path;
 use std::time::Duration;
 
@@ -39,7 +40,19 @@ pub struct ExecOptions<'a> {
 pub const SANDBOX_EXEC_MODE_ENV: &str = "TENSORLAKE_SANDBOX_PROCESS_MODE";
 pub const SANDBOX_EXEC_MODE_ONE_SHOT: &str = "one-shot";
 
-const DEFAULT_MOUNT_READY_TIMEOUT: Duration = Duration::from_secs(25);
+const MOUNT_READY_PROBE_WINDOW: Duration = Duration::from_secs(30);
+const MOUNT_READY_PROBE_TIMEOUT: Duration = Duration::from_secs(32);
+// The Process API timeout is enforced inside the sandbox. Bound the client side separately so a
+// lost final SSE event cannot pin startup forever; an elapsed window is retried while the mount
+// leader remains healthy.
+const MOUNT_READY_CLIENT_TIMEOUT: Duration = Duration::from_secs(35);
+const MOUNT_READY_POLL_INITIAL: Duration = Duration::from_millis(100);
+const MOUNT_READY_POLL_MAX: Duration = Duration::from_millis(500);
+// The mount daemon gives its kernel unmount helper up to ten seconds. The outer process owner must
+// leave enough margin for that handler and the status observation before resorting to SIGKILL.
+const MOUNT_GRACEFUL_STOP_TIMEOUT: Duration = Duration::from_secs(15);
+const MOUNT_STOP_POLL_INTERVAL: Duration = Duration::from_millis(100);
+const MOUNT_CONTROL_REQUEST_TIMEOUT: Duration = Duration::from_secs(3);
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct DetachedMountCommand {
@@ -72,11 +85,12 @@ pub async fn run(
     let detached_mount = (options.detach || options.protect_long_lived_mounts)
         .then(|| rewrite_direct_mount(command, args))
         .flatten();
-    // Validate the readiness deadline before creating the detached process. The direct-mount
-    // rewrite removes `timeout` from the process payload, so delaying this check until the
-    // readiness phase would leak a live mount unit for an invalid value.
+    // Validate an explicitly configured readiness deadline before creating the detached process.
+    // With no `--timeout`, wait as long as the mount leader remains alive: cross-machine Git WAL
+    // recovery downloads and installs all dirty files before attaching the mount and can
+    // legitimately take much longer than a fixed startup deadline.
     let ready_timeout = if detached_mount.is_some() && !options.detach {
-        Some(mount_ready_timeout(options.timeout)?)
+        mount_ready_timeout(options.timeout)?
     } else {
         None
     };
@@ -101,23 +115,34 @@ pub async fn run(
         }
 
         let mount = detached_mount.expect("detached mount checked above");
-        if let Err(error) = wait_for_mount_ready(
+        let readiness = wait_for_mount_ready(
             &client,
             &target,
             &mount.mountpoint,
             pid,
             options.workdir,
             options.user,
-            ready_timeout.expect("direct mounts validate a readiness timeout before spawning"),
-        )
-        .await
-        {
-            let tail = process_output_tail(&client, &target, pid).await;
+            ready_timeout,
+        );
+        if let Err(error) = mount_readiness_or_interrupt(readiness, tokio::signal::ctrl_c()).await {
+            // Preserve the process diagnostics before cleanup: the hard-delete fallback may reap
+            // the process record and its output immediately.
+            let tail = if matches!(error, CliError::Cancelled) {
+                None
+            } else {
+                process_output_tail(&client, &target, pid).await
+            };
             let cleanup = stop_process(&client, &target, pid)
                 .await
                 .err()
                 .map(|cleanup| format!("\nCleanup also failed: {cleanup}"))
                 .unwrap_or_default();
+            if matches!(error, CliError::Cancelled) {
+                if !cleanup.is_empty() {
+                    eprintln!("Mount process {pid} cleanup failed:{cleanup}");
+                }
+                return Err(CliError::Cancelled);
+            }
             let detail = tail
                 .filter(|tail| !tail.is_empty())
                 .map(|tail| format!("\nMount process output:\n  {}", tail.replace('\n', "\n  ")))
@@ -198,9 +223,9 @@ fn process_pid(process: &Value) -> Result<i64> {
         .ok_or_else(|| CliError::usage("start process response missing pid"))
 }
 
-fn mount_ready_timeout(configured: Option<f64>) -> Result<Duration> {
+fn mount_ready_timeout(configured: Option<f64>) -> Result<Option<Duration>> {
     match configured {
-        None => Ok(DEFAULT_MOUNT_READY_TIMEOUT),
+        None => Ok(None),
         Some(seconds) if seconds.is_finite() && seconds > 0.0 => {
             let timeout = Duration::try_from_secs_f64(seconds).map_err(|_| {
                 CliError::usage("--timeout is outside the supported duration range")
@@ -208,7 +233,7 @@ fn mount_ready_timeout(configured: Option<f64>) -> Result<Duration> {
             if timeout.is_zero() {
                 return Err(CliError::usage("--timeout must be at least one nanosecond"));
             }
-            Ok(timeout)
+            Ok(Some(timeout))
         }
         Some(_) => Err(CliError::usage("--timeout must be greater than zero")),
     }
@@ -333,9 +358,11 @@ fn build_mount_readiness_payload(
     pid: i64,
     workdir: Option<&str>,
     user: Option<&str>,
-    timeout: Duration,
 ) -> Value {
-    let attempts = timeout.as_millis().div_ceil(100).max(1);
+    // Keep each server-side readiness unit bounded. The client repeats these windows for an
+    // arbitrarily long healthy restore. Cancelling the local CLI stops the mount leader, which
+    // makes this helper observe `kill -0` failure and exit on its next 100ms iteration.
+    let attempts = MOUNT_READY_PROBE_WINDOW.as_millis().div_ceil(100).max(1);
     let script = "i=0; while [ \"$i\" -lt \"$2\" ]; do \
                   kill -0 \"$3\" 2>/dev/null || exit 125; \
                   mountpoint -q -- \"$1\" && exit 0; \
@@ -351,7 +378,7 @@ fn build_mount_readiness_payload(
             attempts.to_string(),
             pid.to_string(),
         ],
-        "timeout": timeout.as_secs_f64() + 2.0,
+        "timeout": MOUNT_READY_PROBE_TIMEOUT.as_secs_f64(),
     });
     if let Some(workdir) = workdir {
         body["working_dir"] = Value::String(workdir.to_string());
@@ -362,16 +389,52 @@ fn build_mount_readiness_payload(
     body
 }
 
-async fn wait_for_mount_ready(
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MountReadinessProbe {
+    Ready,
+    Waiting,
+    ProcessExited,
+}
+
+async fn probe_mount_ready(
     client: &reqwest::Client,
     target: &crate::commands::sbx::ResolvedSandboxProxyTarget,
     mountpoint: &str,
     pid: i64,
     workdir: Option<&str>,
     user: Option<&str>,
+) -> Result<MountReadinessProbe> {
+    bounded_mount_readiness_probe(
+        probe_mount_ready_request(client, target, mountpoint, pid, workdir, user),
+        MOUNT_READY_CLIENT_TIMEOUT,
+    )
+    .await
+}
+
+async fn bounded_mount_readiness_probe<F>(
+    probe: F,
     timeout: Duration,
-) -> Result<()> {
-    let body = build_mount_readiness_payload(mountpoint, pid, workdir, user, timeout);
+) -> Result<MountReadinessProbe>
+where
+    F: Future<Output = Result<MountReadinessProbe>>,
+{
+    match tokio::time::timeout(timeout, probe).await {
+        Ok(result) => result,
+        // The in-sandbox helper is independently bounded. If its terminal SSE event is lost in
+        // transit, open a new observation window instead of killing an otherwise healthy mount.
+        Err(_) => Ok(MountReadinessProbe::Waiting),
+    }
+}
+
+async fn probe_mount_ready_request(
+    client: &reqwest::Client,
+    target: &crate::commands::sbx::ResolvedSandboxProxyTarget,
+    mountpoint: &str,
+    pid: i64,
+    workdir: Option<&str>,
+    user: Option<&str>,
+) -> Result<MountReadinessProbe> {
+    let body = build_mount_readiness_payload(mountpoint, pid, workdir, user);
     let resp = with_sandbox_headers(
         client
             .post(format!("{}/api/v1/processes/run", target.proxy_base))
@@ -390,17 +453,81 @@ async fn wait_for_mount_ready(
         )));
     }
     match stream_run_events(resp).await? {
-        0 => Ok(()),
-        125 => Err(CliError::Other(anyhow::anyhow!(
-            "the detached mount process exited during startup"
-        ))),
-        124 => Err(CliError::Other(anyhow::anyhow!(
-            "the mount was not ready within {:.1}s",
-            timeout.as_secs_f64()
-        ))),
+        0 => Ok(MountReadinessProbe::Ready),
+        124 => Ok(MountReadinessProbe::Waiting),
+        125 => Ok(MountReadinessProbe::ProcessExited),
         code => Err(CliError::Other(anyhow::anyhow!(
             "mount readiness check exited with code {code}"
         ))),
+    }
+}
+
+async fn wait_for_mount_ready(
+    client: &reqwest::Client,
+    target: &crate::commands::sbx::ResolvedSandboxProxyTarget,
+    mountpoint: &str,
+    pid: i64,
+    workdir: Option<&str>,
+    user: Option<&str>,
+    timeout: Option<Duration>,
+) -> Result<()> {
+    let deadline = timeout.map(|timeout| tokio::time::Instant::now() + timeout);
+    let mut poll_interval = MOUNT_READY_POLL_INITIAL;
+    loop {
+        let probe = probe_mount_ready(client, target, mountpoint, pid, workdir, user);
+        let result = match deadline {
+            Some(deadline) => tokio::time::timeout_at(deadline, probe)
+                .await
+                .map_err(|_| mount_readiness_timeout_error(timeout))?,
+            None => probe.await,
+        }?;
+        match result {
+            MountReadinessProbe::Ready => return Ok(()),
+            MountReadinessProbe::ProcessExited => {
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "the detached mount process exited during startup"
+                )));
+            }
+            MountReadinessProbe::Waiting => {}
+        }
+
+        let sleep_for = match deadline {
+            Some(deadline) => {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                if remaining.is_zero() {
+                    return Err(mount_readiness_timeout_error(timeout));
+                }
+                poll_interval.min(remaining)
+            }
+            None => poll_interval,
+        };
+        tokio::time::sleep(sleep_for).await;
+        poll_interval = (poll_interval * 2).min(MOUNT_READY_POLL_MAX);
+    }
+}
+
+fn mount_readiness_timeout_error(timeout: Option<Duration>) -> CliError {
+    CliError::Other(anyhow::anyhow!(
+        "the mount was not ready within {:.1}s",
+        timeout
+            .expect("a readiness deadline always carries its duration")
+            .as_secs_f64()
+    ))
+}
+
+async fn mount_readiness_or_interrupt<R, I>(readiness: R, interrupt: I) -> Result<()>
+where
+    R: Future<Output = Result<()>>,
+    I: Future<Output = std::io::Result<()>>,
+{
+    tokio::pin!(readiness);
+    tokio::pin!(interrupt);
+    tokio::select! {
+        result = &mut readiness => result,
+        signal = &mut interrupt => {
+            signal.map_err(CliError::Io)?;
+            Err(CliError::Cancelled)
+        }
     }
 }
 
@@ -410,10 +537,12 @@ async fn process_output_tail(
     pid: i64,
 ) -> Option<String> {
     let response = with_sandbox_headers(
-        client.get(format!(
-            "{}/api/v1/processes/{pid}/output",
-            target.proxy_base
-        )),
+        client
+            .get(format!(
+                "{}/api/v1/processes/{pid}/output",
+                target.proxy_base
+            ))
+            .timeout(MOUNT_CONTROL_REQUEST_TIMEOUT),
         target,
     )
     .send()
@@ -443,14 +572,147 @@ async fn stop_process(
     target: &crate::commands::sbx::ResolvedSandboxProxyTarget,
     pid: i64,
 ) -> Result<()> {
+    let graceful = signal_process(client, target, pid, 15).await;
+    if graceful.is_ok() {
+        let deadline = tokio::time::Instant::now() + MOUNT_GRACEFUL_STOP_TIMEOUT;
+        loop {
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            match process_has_stopped(
+                client,
+                target,
+                pid,
+                remaining.min(MOUNT_CONTROL_REQUEST_TIMEOUT),
+            )
+            .await
+            {
+                Ok(true) => return Ok(()),
+                Ok(false) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(
+                        MOUNT_STOP_POLL_INTERVAL
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
+                }
+                Err(_) if tokio::time::Instant::now() < deadline => {
+                    // A transient status read must not turn an otherwise graceful unmount into an
+                    // immediate SIGKILL. Preserve the full grace window, then use the hard
+                    // backstop if the process still cannot be observed as stopped.
+                    tokio::time::sleep(
+                        MOUNT_STOP_POLL_INTERVAL
+                            .min(deadline.saturating_duration_since(tokio::time::Instant::now())),
+                    )
+                    .await;
+                }
+                Ok(false) | Err(_) => break,
+            }
+        }
+    }
+
+    // DELETE is the hard SIGKILL API for an unmanaged process. Use it only after SIGTERM had a
+    // chance to run the mount daemon's detach handler, or when signaling/observing the process
+    // failed and leaving a detached unit behind would be worse.
+    hard_stop_process(client, target, pid)
+        .await
+        .map_err(|hard| {
+            let graceful = graceful
+                .err()
+                .map(|error| format!("; graceful stop failed first: {error}"))
+                .unwrap_or_default();
+            CliError::Other(anyhow::anyhow!("{hard}{graceful}"))
+        })
+}
+
+async fn signal_process(
+    client: &reqwest::Client,
+    target: &crate::commands::sbx::ResolvedSandboxProxyTarget,
+    pid: i64,
+    signal: i32,
+) -> Result<()> {
     let response = with_sandbox_headers(
-        client.delete(format!("{}/api/v1/processes/{pid}", target.proxy_base)),
+        client
+            .post(format!(
+                "{}/api/v1/processes/{pid}/signal",
+                target.proxy_base
+            ))
+            .timeout(MOUNT_CONTROL_REQUEST_TIMEOUT)
+            .json(&serde_json::json!({ "signal": signal })),
         target,
     )
     .send()
     .await
     .map_err(CliError::Http)?;
+    if response.status().is_success() || response.status() == StatusCode::NOT_FOUND {
+        return Ok(());
+    }
+    let status = response.status();
+    let body = response.text().await.unwrap_or_default();
+    Err(CliError::Other(anyhow::anyhow!(
+        "failed to signal process {pid} (HTTP {status}): {body}"
+    )))
+}
+
+async fn process_has_stopped(
+    client: &reqwest::Client,
+    target: &crate::commands::sbx::ResolvedSandboxProxyTarget,
+    pid: i64,
+    request_timeout: Duration,
+) -> Result<bool> {
+    let response = with_sandbox_headers(
+        client
+            .get(format!("{}/api/v1/processes/{pid}", target.proxy_base))
+            .timeout(request_timeout),
+        target,
+    )
+    .send()
+    .await
+    .map_err(CliError::Http)?;
+    if response.status() == StatusCode::NOT_FOUND {
+        return Ok(true);
+    }
     if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to inspect process {pid} (HTTP {status}): {body}"
+        )));
+    }
+    let process: Value = response.json().await.map_err(CliError::Http)?;
+    Ok(process_status_is_terminal(&process))
+}
+
+fn process_status_is_terminal(process: &Value) -> bool {
+    matches!(
+        process.get("status").and_then(Value::as_str),
+        Some("exited" | "signaled" | "oom_killed")
+    ) || process
+        .get("ended_at")
+        .is_some_and(|ended_at| !ended_at.is_null())
+        || process.get("exit_code").is_some_and(Value::is_number)
+        || process.get("signal").is_some_and(Value::is_number)
+        || process
+            .get("oom_killed")
+            .and_then(Value::as_bool)
+            .unwrap_or(false)
+}
+
+async fn hard_stop_process(
+    client: &reqwest::Client,
+    target: &crate::commands::sbx::ResolvedSandboxProxyTarget,
+    pid: i64,
+) -> Result<()> {
+    let response = with_sandbox_headers(
+        client
+            .delete(format!("{}/api/v1/processes/{pid}", target.proxy_base))
+            .timeout(MOUNT_CONTROL_REQUEST_TIMEOUT),
+        target,
+    )
+    .send()
+    .await
+    .map_err(CliError::Http)?;
+    if !response.status().is_success() && response.status() != StatusCode::NOT_FOUND {
         let status = response.status();
         let body = response.text().await.unwrap_or_default();
         return Err(CliError::Other(anyhow::anyhow!(
@@ -720,11 +982,85 @@ fn should_skip_event(value: &serde_json::Value) -> bool {
 mod tests {
     use std::time::Duration;
 
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
     use super::{
         ExecOptions, SANDBOX_EXEC_MODE_ENV, SANDBOX_EXEC_MODE_ONE_SHOT,
-        build_mount_readiness_payload, build_process_payload, mount_ready_timeout, parse_run_event,
-        rewrite_direct_mount,
+        build_mount_readiness_payload, build_process_payload, mount_readiness_or_interrupt,
+        mount_ready_timeout, parse_run_event, process_status_is_terminal, rewrite_direct_mount,
+        stop_process,
     };
+
+    async fn serve_process_responses(
+        responses: Vec<(u16, &'static str)>,
+    ) -> (
+        crate::commands::sbx::ResolvedSandboxProxyTarget,
+        tokio::task::JoinHandle<Vec<String>>,
+    ) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::with_capacity(responses.len());
+            for (status, body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                let header_end = loop {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "client closed before sending HTTP headers");
+                    request.extend_from_slice(&buffer[..count]);
+                    if let Some(offset) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n")
+                    {
+                        break offset + 4;
+                    }
+                };
+                let headers = String::from_utf8_lossy(&request[..header_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .map(str::trim)
+                            .map(str::parse::<usize>)
+                    })
+                    .transpose()
+                    .unwrap()
+                    .unwrap_or(0);
+                while request.len() < header_end + content_length {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "client closed before sending HTTP body");
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                requests.push(String::from_utf8_lossy(&request).into_owned());
+
+                let reason = match status {
+                    200 => "OK",
+                    204 => "No Content",
+                    500 => "Internal Server Error",
+                    _ => "Test",
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+            requests
+        });
+        (
+            crate::commands::sbx::ResolvedSandboxProxyTarget {
+                sandbox_id: "sandbox-test".to_string(),
+                proxy_base: format!("http://{address}"),
+                host_override: None,
+                routing_hint: None,
+                ingress_endpoint: None,
+                sandbox_url: None,
+            },
+            server,
+        )
+    }
 
     fn options<'a>() -> ExecOptions<'a> {
         ExecOptions {
@@ -967,19 +1303,15 @@ mod tests {
 
     #[test]
     fn readiness_probe_tracks_process_liveness_and_mountpoint() {
-        let payload = build_mount_readiness_payload(
-            "relative mount",
-            4242,
-            Some("/work"),
-            Some("tl-user"),
-            Duration::from_millis(250),
-        );
+        let payload =
+            build_mount_readiness_payload("relative mount", 4242, Some("/work"), Some("tl-user"));
 
         assert_eq!(payload["working_dir"], "/work");
         assert_eq!(payload["user"], "tl-user");
         assert_eq!(payload["args"][3], "relative mount");
-        assert_eq!(payload["args"][4], "3");
+        assert_eq!(payload["args"][4], "300");
         assert_eq!(payload["args"][5], "4242");
+        assert_eq!(payload["timeout"], 32.0);
         assert!(
             payload["args"][1]
                 .as_str()
@@ -987,6 +1319,83 @@ mod tests {
                 .contains("mountpoint -q")
         );
         assert!(payload["args"][1].as_str().unwrap().contains("kill -0"));
+    }
+
+    #[tokio::test]
+    async fn readiness_interrupt_returns_cancelled() {
+        let readiness = std::future::pending::<super::Result<()>>();
+        let interrupt = std::future::ready(Ok(()));
+
+        assert!(matches!(
+            mount_readiness_or_interrupt(readiness, interrupt).await,
+            Err(super::CliError::Cancelled)
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_readiness_wins_without_interrupt() {
+        let readiness = std::future::ready(Ok(()));
+        let interrupt = std::future::pending::<std::io::Result<()>>();
+
+        mount_readiness_or_interrupt(readiness, interrupt)
+            .await
+            .unwrap();
+    }
+
+    #[test]
+    fn process_terminal_statuses_are_recognized() {
+        for status in ["exited", "signaled", "oom_killed"] {
+            assert!(process_status_is_terminal(
+                &serde_json::json!({ "status": status })
+            ));
+        }
+        assert!(!process_status_is_terminal(
+            &serde_json::json!({ "status": "running" })
+        ));
+        assert!(process_status_is_terminal(
+            &serde_json::json!({ "status": "completed", "ended_at": 123 })
+        ));
+        assert!(process_status_is_terminal(
+            &serde_json::json!({ "status": "unknown", "signal": 15 })
+        ));
+        assert!(!process_status_is_terminal(&serde_json::json!({})));
+    }
+
+    #[tokio::test]
+    async fn mount_cleanup_signals_before_observing_exit() {
+        let (target, server) = serve_process_responses(vec![
+            (200, r#"{"success":true}"#),
+            (200, r#"{"pid":4242,"status":"exited"}"#),
+        ])
+        .await;
+        let client = crate::http::client_builder().build().unwrap();
+
+        stop_process(&client, &target, 4242).await.unwrap();
+        let requests = server.await.unwrap();
+
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /api/v1/processes/4242/signal "));
+        assert!(requests[0].contains(r#"{"signal":15}"#));
+        assert!(requests[1].starts_with("GET /api/v1/processes/4242 "));
+        assert!(
+            !requests
+                .iter()
+                .any(|request| request.starts_with("DELETE "))
+        );
+    }
+
+    #[tokio::test]
+    async fn mount_cleanup_uses_hard_delete_only_after_signal_failure() {
+        let (target, server) =
+            serve_process_responses(vec![(500, "signal failed"), (204, "")]).await;
+        let client = crate::http::client_builder().build().unwrap();
+
+        stop_process(&client, &target, 4242).await.unwrap();
+        let requests = server.await.unwrap();
+
+        assert_eq!(requests.len(), 2);
+        assert!(requests[0].starts_with("POST /api/v1/processes/4242/signal "));
+        assert!(requests[1].starts_with("DELETE /api/v1/processes/4242 "));
     }
 
     #[test]
@@ -1001,6 +1410,7 @@ mod tests {
 
     #[test]
     fn mount_readiness_timeout_fails_closed_before_spawn() {
+        assert_eq!(mount_ready_timeout(None).unwrap(), None);
         assert!(mount_ready_timeout(Some(0.0)).is_err());
         assert!(mount_ready_timeout(Some(-1.0)).is_err());
         assert!(mount_ready_timeout(Some(f64::NAN)).is_err());
@@ -1009,7 +1419,7 @@ mod tests {
         assert!(mount_ready_timeout(Some(f64::MIN_POSITIVE)).is_err());
         assert_eq!(
             mount_ready_timeout(Some(1.25)).unwrap(),
-            Duration::from_millis(1_250)
+            Some(Duration::from_millis(1_250))
         );
     }
 

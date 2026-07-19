@@ -647,9 +647,11 @@ fn repo_list_query(kind: Option<&str>, after: Option<&str>) -> String {
     let mut params = url::form_urlencoded::Serializer::new(String::new());
     if let Some(kind) = kind {
         params.append_pair("kind", kind);
-        // The first filesystem page carries a synchronous cache-generation fence. Later pages use
-        // the now-current cache, avoiding one FoundationDB check per page on large projects.
-        if kind == REPO_KIND_FILESYSTEM && after.is_none() {
+        // Every filesystem page carries a synchronous cache-generation fence. Project inventory
+        // routes have no repository affinity, so consecutive requests may land on different
+        // server pods; fencing only page one could splice a fresh first page to a stale later page
+        // and omit a just-created filesystem after the first cursor.
+        if kind == REPO_KIND_FILESYSTEM {
             params.append_pair("fresh", "true");
         }
     }
@@ -797,14 +799,14 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_inventory_fences_only_the_first_page() {
+    fn filesystem_inventory_fences_every_page() {
         assert_eq!(
             repo_list_query(Some(REPO_KIND_FILESYSTEM), None),
             "kind=filesystem&fresh=true&limit=1000"
         );
         assert_eq!(
             repo_list_query(Some(REPO_KIND_FILESYSTEM), Some("project/repo")),
-            "kind=filesystem&after=project%2Frepo&limit=1000"
+            "kind=filesystem&fresh=true&after=project%2Frepo&limit=1000"
         );
         assert_eq!(
             repo_list_query(Some("repository"), None),
