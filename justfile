@@ -63,6 +63,23 @@ build-cli-full *ARGS:
 # Back-compat alias for the old recipe name.
 build-cli-mount *ARGS: (build-cli-full ARGS)
 
+# Build the macOS TLFS.app (FSKit extension) from the private artifact_storage checkout. The
+# Swift source is not in this repo — only the compiled, signed bundle ships (embedded into the
+# darwin CLI by CI). Dev build by default; pass flags through, e.g.
+# `just build-tlfs-app --release --notarize`. To embed the result in a local CLI build:
+# `TLFS_APP_ZIP=$(realpath ../artifact_storage/platform/macos/tlfs/build/TLFS.app.zip) just build-cli-full`
+build-tlfs-app *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    build_sh="{{ARTIFACT_STORAGE_DIR}}/platform/macos/tlfs/build.sh"
+    if [ ! -f "$build_sh" ]; then
+        echo "error: $build_sh not found." >&2
+        echo "Check out github.com/tensorlakeai/artifact_storage as a sibling of this repo," >&2
+        echo "or point ARTIFACT_STORAGE_DIR at an existing checkout." >&2
+        exit 1
+    fi
+    exec "$build_sh" {{ARGS}}
+
 # Run the CLI test suite with the same ephemeral private-crate swap as the official full build.
 # This is the authoritative local validation for mount/daemon code: the public placeholders are
 # deliberately unbuildable when the `mount` and `git-clone` features are enabled directly.
