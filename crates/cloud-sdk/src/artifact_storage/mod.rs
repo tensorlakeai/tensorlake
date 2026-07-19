@@ -14,8 +14,8 @@ pub mod workspaces;
 
 use models::{
     CreateRepoRequest, GitCredential, ListBranchesResponse, ListOperationsResponse,
-    ListRefsResponse, ListReposResponse, MintGitTokenRequest, RepoInfo, RepoMetaInfo,
-    REPO_KIND_FILESYSTEM,
+    ListRefsResponse, ListReposResponse, MintGitTokenRequest, REPO_KIND_FILESYSTEM, RepoInfo,
+    RepoMetaInfo,
 };
 
 #[derive(Clone)]

@@ -8,12 +8,12 @@
 use reqwest::Method;
 use serde::{Deserialize, Serialize};
 
-use crate::error::SdkError;
 use crate::Traced;
+use crate::error::SdkError;
 
 use super::ingest::{expect_json, with_transient_retries};
-use super::merge::{expect_json_or_conflict, MergeConflict, MergeReport, MergeStats, Signature};
-use super::{advance_pagination_cursor, decode_empty, ArtifactStorageClient};
+use super::merge::{MergeConflict, MergeReport, MergeStats, Signature, expect_json_or_conflict};
+use super::{ArtifactStorageClient, advance_pagination_cursor, decode_empty};
 
 fn encoded_git_path(path: &str, allow_empty: bool) -> Result<String, SdkError> {
     if path.is_empty() {
