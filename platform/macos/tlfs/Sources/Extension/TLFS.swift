@@ -306,6 +306,10 @@ final class TLFSItem: FSItem {
     /// Open file handle on the daemon, when the kernel has this item open.
     var fh: UInt64?
     var fhWritable = false
+    /// Content version served by `fh`. `contentVersion` can advance while FSKit retains the same
+    /// vnode/item across a restore; close-to-open must not then reuse a daemon handle pinned to
+    /// the prior snapshot.
+    var fhContentVersion: ContentVersion?
     /// The content identity last returned by lookup/getattr. FSKit's open/close callbacks describe
     /// aggregate vnode modes, not individual descriptors: while any read mode remains, the shared
     /// daemon handle stays pinned to its opened view and is released only with the final mode.
@@ -530,10 +534,18 @@ final class TLFSVolume: FSVolume {
 
     /// Ensure the item has an open server handle with at least the requested writability.
     /// Mirrors the passthrough sample's open-mode upgrade discipline.
-    fileprivate func ensureHandle(_ item: TLFSItem, write: Bool) throws -> UInt64 {
+    fileprivate func ensureHandle(
+        _ item: TLFSItem,
+        write: Bool,
+        refreshContent: Bool = false
+    ) throws -> UInt64 {
         item.stateLock.lock()
         defer { item.stateLock.unlock() }
-        if let fh = item.fh, item.fhWritable || !write {
+        let handleMatchesContent = item.fhContentVersion == item.contentVersion
+        if let fh = item.fh,
+            (item.fhWritable || !write),
+            (!refreshContent || handleMatchesContent)
+        {
             return fh
         }
         let fh: UInt64 = try pool.withConnection { conn in
@@ -548,6 +560,7 @@ final class TLFSVolume: FSVolume {
         }
         item.fh = fh
         item.fhWritable = write
+        item.fhContentVersion = item.contentVersion
         return fh
     }
 
@@ -821,6 +834,7 @@ extension TLFSVolume: FSVolume.Operations {
         if let fh = item.fh {
             releaseHandle(fh)
             item.fh = nil
+            item.fhContentVersion = nil
         }
         let owed = item.lookups
         if owed > 0 {
@@ -893,6 +907,7 @@ extension TLFSVolume: FSVolume.Operations {
                 created.stateLock.lock()
                 created.fh = fh
                 created.fhWritable = true
+                created.fhContentVersion = TLFSItem.ContentVersion(token: attr.contentVersion)
                 created.stateLock.unlock()
                 reply(created, name, nil)
             default:
@@ -1132,7 +1147,21 @@ extension TLFSVolume: FSVolume.OpenCloseOperations {
             return
         }
         do {
-            _ = try ensureHandle(item, write: modes.contains(.write))
+            // A source switch can retain this FSItem while its content version advances. Reads
+            // issued by descriptors already open before the switch keep using the pinned handle
+            // until another open establishes the close-to-open boundary; that new open replaces
+            // a stale-version handle. FSKit does not promise a lookup/getattr immediately before
+            // openItem, so refresh the daemon identity here rather than comparing two equally
+            // stale cached fields. This GETATTR is the close-to-open linearization point: a source
+            // move after it is observed by the next open. FSKit exposes one aggregate handle per
+            // vnode, so after the boundary sibling descriptors necessarily share the refreshed
+            // view.
+            let attr = try getattr(item.ino)
+            item.observe(attr)
+            _ = try ensureHandle(
+                item,
+                write: modes.contains(.write),
+                refreshContent: true)
             reply(nil)
         } catch {
             reply(error)
@@ -1159,6 +1188,7 @@ extension TLFSVolume: FSVolume.OpenCloseOperations {
         let fh = item.fh
         item.fh = nil
         item.fhWritable = false
+        item.fhContentVersion = nil
         item.stateLock.unlock()
         if let fh {
             // Flush before release so close(2) durability expectations hold.

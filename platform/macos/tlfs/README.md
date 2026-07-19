@@ -144,8 +144,13 @@ does honor (all measured on macOS 26.5 lifs):
   caching and still leave minutes-long stale windows.)
 - **Opaque content versions guard retained FSItems.** FSKit may keep one `FSItem` alive across
   independent opens. The private v3 localhost wire therefore carries an identity derived from the
-  pinned snapshot (or upper inode/ctime); a new read open replaces any handle whose identity is
-  stale even when size and mtime happen to match.
+  pinned snapshot (or upper inode/ctime). Each daemon handle records the identity it opened; an
+  `openItem` performs a fresh daemon `GETATTR` as its close-to-open linearization point and replaces
+  a stale-version handle before returning; it does not assume FSKit issued lookup/getattr first.
+  Reads on an already-open item do not independently force a source switch. FSKit exposes one aggregate
+  handle per vnode, so sibling descriptors share the refreshed handle after that boundary. This
+  prevents a restored 30-byte file from continuing to read through the prior 25-byte handle even
+  when FSKit retains the vnode and merely refreshes its attributes.
 - **Directory verifier from the dir's mtime.** A constant `FSDirectoryVerifier` makes
   the kernel treat cached listing pages and resume cookies as forever-valid (`ls` shows
   deleted files, or a stale empty tail). Deriving it from the directory's wire mtime
