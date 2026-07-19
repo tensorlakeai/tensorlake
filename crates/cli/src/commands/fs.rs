@@ -6,7 +6,36 @@
 use std::path::{Path, PathBuf};
 
 use crate::auth::context::CliContext;
-use crate::error::Result;
+use crate::error::{CliError, Result};
+
+fn reject_background_mount_in_one_shot_exec(foreground: bool, surface: &str) -> Result<()> {
+    validate_mount_process_mode(
+        foreground,
+        std::env::var_os(crate::commands::sbx::exec::SANDBOX_EXEC_MODE_ENV).as_deref(),
+        surface,
+    )
+}
+
+fn validate_mount_process_mode(
+    foreground: bool,
+    process_mode: Option<&std::ffi::OsStr>,
+    surface: &str,
+) -> Result<()> {
+    if !foreground
+        && process_mode
+            == Some(std::ffi::OsStr::new(
+                crate::commands::sbx::exec::SANDBOX_EXEC_MODE_ONE_SHOT,
+            ))
+    {
+        return Err(CliError::usage(format!(
+            "`tl {surface} mount` cannot background its daemon from inside a one-shot `tl sbx \
+             exec` command: the sandbox runtime reaps that command's cgroup when it exits. \
+             Launch the mount directly from the controller instead (`tl sbx exec <sandbox> -- \
+             tl {surface} mount ...`); the outer CLI will keep it as a sandbox-owned process."
+        )));
+    }
+    Ok(())
+}
 
 fn private_context(ctx: &CliContext) -> gsvc_fs_client::CliContext {
     gsvc_fs_client::CliContext {
@@ -144,6 +173,7 @@ pub async fn mount_filesystem(
     trace_ops: bool,
     log_level: &str,
 ) -> Result<()> {
+    reject_background_mount_in_one_shot_exec(foreground, "fs")?;
     map(gsvc_fs_client::mount_filesystem(
         &private_context(ctx),
         target,
@@ -168,6 +198,7 @@ pub async fn mount_repo(
     trace_ops: bool,
     log_level: &str,
 ) -> Result<()> {
+    reject_background_mount_in_one_shot_exec(foreground, "git")?;
     map(gsvc_fs_client::mount_repo(
         &private_context(ctx),
         target,
@@ -180,6 +211,30 @@ pub async fn mount_repo(
         log_level,
     )
     .await)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::ffi::OsStr;
+
+    use super::validate_mount_process_mode;
+
+    #[test]
+    fn background_mount_fails_closed_inside_one_shot_sandbox_exec() {
+        let error = validate_mount_process_mode(false, Some(OsStr::new("one-shot")), "fs")
+            .expect_err("background daemon would be reaped with the exec cgroup");
+
+        let message = error.to_string();
+        assert!(message.contains("cannot background its daemon"));
+        assert!(message.contains("tl sbx exec <sandbox>"));
+    }
+
+    #[test]
+    fn foreground_or_non_sandbox_mount_keeps_existing_behavior() {
+        validate_mount_process_mode(true, Some(OsStr::new("one-shot")), "fs").unwrap();
+        validate_mount_process_mode(false, None, "fs").unwrap();
+        validate_mount_process_mode(false, Some(OsStr::new("detached")), "fs").unwrap();
+    }
 }
 
 pub async fn snapshot(

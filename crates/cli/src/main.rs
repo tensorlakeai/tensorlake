@@ -2124,6 +2124,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 health_interval_ms,
                                 health_timeout_ms,
                                 health_failure_threshold,
+                                protect_long_lived_mounts: true,
                             },
                         )
                         .await
