@@ -33,9 +33,9 @@ pub struct ExecOptions<'a> {
     pub protect_long_lived_mounts: bool,
 }
 
-/// Runtime marker inherited by descendants of the one-shot Sandbox Process API. This is not
-/// user configuration: mount commands use it to fail closed instead of forking a daemon into an
-/// exec cgroup that will be torn down as soon as the outer command exits.
+/// Runtime marker inherited by descendants of a Sandbox Process API unit. This is not user
+/// configuration: mount commands use it to fail closed instead of forking a daemon into a process
+/// unit whose cgroup will be torn down as soon as the unit leader exits.
 pub const SANDBOX_EXEC_MODE_ENV: &str = "TENSORLAKE_SANDBOX_PROCESS_MODE";
 pub const SANDBOX_EXEC_MODE_ONE_SHOT: &str = "one-shot";
 
@@ -72,6 +72,14 @@ pub async fn run(
     let detached_mount = (options.detach || options.protect_long_lived_mounts)
         .then(|| rewrite_direct_mount(command, args))
         .flatten();
+    // Validate the readiness deadline before creating the detached process. The direct-mount
+    // rewrite removes `timeout` from the process payload, so delaying this check until the
+    // readiness phase would leak a live mount unit for an invalid value.
+    let ready_timeout = if detached_mount.is_some() && !options.detach {
+        Some(mount_ready_timeout(options.timeout)?)
+    } else {
+        None
+    };
     let effective_args = detached_mount
         .as_ref()
         .map_or(args, |mount| mount.args.as_slice());
@@ -93,7 +101,6 @@ pub async fn run(
         }
 
         let mount = detached_mount.expect("detached mount checked above");
-        let ready_timeout = mount_ready_timeout(options.timeout)?;
         if let Err(error) = wait_for_mount_ready(
             &client,
             &target,
@@ -101,19 +108,23 @@ pub async fn run(
             pid,
             options.workdir,
             options.user,
-            ready_timeout,
+            ready_timeout.expect("direct mounts validate a readiness timeout before spawning"),
         )
         .await
         {
             let tail = process_output_tail(&client, &target, pid).await;
-            stop_process(&client, &target, pid).await;
+            let cleanup = stop_process(&client, &target, pid)
+                .await
+                .err()
+                .map(|cleanup| format!("\nCleanup also failed: {cleanup}"))
+                .unwrap_or_default();
             let detail = tail
                 .filter(|tail| !tail.is_empty())
                 .map(|tail| format!("\nMount process output:\n  {}", tail.replace('\n', "\n  ")))
                 .unwrap_or_default();
             return Err(CliError::Other(anyhow::anyhow!(
-                "sandbox mount process {pid} did not make {} ready: {error}.{detail}",
-                mount.mountpoint
+                "sandbox mount process {pid} did not make {} ready: {error}.{detail}{cleanup}",
+                mount.mountpoint,
             )));
         }
 
@@ -198,12 +209,22 @@ fn mount_ready_timeout(configured: Option<f64>) -> Result<Duration> {
 }
 
 fn rewrite_direct_mount(command: &str, args: &[String]) -> Option<DetachedMountCommand> {
-    if Path::new(command).file_name()?.to_str()? != "tl" {
+    if !matches!(
+        Path::new(command).file_name()?.to_str()?,
+        "tl" | "tensorlake"
+    ) {
         return None;
     }
-    let mount_index = args
-        .windows(2)
-        .position(|pair| matches!(pair[0].as_str(), "fs" | "git") && pair[1] == "mount")?;
+    let mount_index = top_level_subcommand_index(args)?;
+    if !matches!(
+        (
+            args.get(mount_index)?.as_str(),
+            args.get(mount_index + 1)?.as_str()
+        ),
+        ("fs" | "git", "mount")
+    ) {
+        return None;
+    }
     let surface = match args[mount_index].as_str() {
         "fs" => "filesystem",
         "git" => "repository",
@@ -216,12 +237,48 @@ fn rewrite_direct_mount(command: &str, args: &[String]) -> Option<DetachedMountC
 
     let mountpoint = parse_mountpoint(&args[mount_index], mount_args)?;
     let mut detached_args = args.to_vec();
-    detached_args.push("--foreground".to_string());
+    // Insert before the mount operands (and, importantly, before a possible `--` sentinel).
+    // Appending after `--` would turn this into a third positional argument instead of a flag.
+    detached_args.insert(mount_index + 2, "--foreground".to_string());
     Some(DetachedMountCommand {
         args: detached_args,
         mountpoint,
         surface,
     })
+}
+
+/// Find the first top-level subcommand after the CLI's global options. This deliberately does not
+/// search the whole argv: operands of `tl sbx exec` (or another command) may themselves contain the
+/// words `fs mount`, and rewriting those would detach the wrong process.
+fn top_level_subcommand_index(args: &[String]) -> Option<usize> {
+    let mut index = 0;
+    while index < args.len() {
+        match args[index].as_str() {
+            "--debug" => index += 1,
+            "--api-url" | "--cloud-url" | "--api-key" | "--pat" | "--namespace"
+            | "--organization" | "--project" => {
+                if index + 1 == args.len() {
+                    return None;
+                }
+                index += 2;
+            }
+            "--" => return (index + 1 < args.len()).then_some(index + 1),
+            option
+                if option.starts_with("--api-url=")
+                    || option.starts_with("--cloud-url=")
+                    || option.starts_with("--api-key=")
+                    || option.starts_with("--pat=")
+                    || option.starts_with("--namespace=")
+                    || option.starts_with("--organization=")
+                    || option.starts_with("--project=") =>
+            {
+                index += 1;
+            }
+            option if option.starts_with('-') => return None,
+            _ => return Some(index),
+        }
+    }
+    None
 }
 
 fn parse_mountpoint(surface: &str, args: &[String]) -> Option<String> {
@@ -379,13 +436,22 @@ async fn stop_process(
     client: &reqwest::Client,
     target: &crate::commands::sbx::ResolvedSandboxProxyTarget,
     pid: i64,
-) {
-    let _ = with_sandbox_headers(
+) -> Result<()> {
+    let response = with_sandbox_headers(
         client.delete(format!("{}/api/v1/processes/{pid}", target.proxy_base)),
         target,
     )
     .send()
-    .await;
+    .await
+    .map_err(CliError::Http)?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to stop process {pid} (HTTP {status}): {body}"
+        )));
+    }
+    Ok(())
 }
 
 fn build_process_payload(
@@ -403,15 +469,17 @@ fn build_process_payload(
     }
 
     let mut env_dict = parse_env_vars(options.env)?;
-    if !options.detach {
-        let env = env_dict.get_or_insert_with(|| Value::Object(serde_json::Map::new()));
-        env.as_object_mut()
-            .expect("parse_env_vars always returns an object")
-            .insert(
-                SANDBOX_EXEC_MODE_ENV.to_string(),
-                Value::String(SANDBOX_EXEC_MODE_ONE_SHOT.to_string()),
-            );
-    }
+    // Every Process API payload owns a cgroup around its leader, including detached/managed
+    // processes. If a shell or supervisor inside that unit starts a background TLFS mount and then
+    // exits, the daemon is reaped with the unit. Mark every payload so nested mount commands fail
+    // closed unless they explicitly remain in the foreground as the unit leader.
+    let env = env_dict.get_or_insert_with(|| Value::Object(serde_json::Map::new()));
+    env.as_object_mut()
+        .expect("parse_env_vars always returns an object")
+        .insert(
+            SANDBOX_EXEC_MODE_ENV.to_string(),
+            Value::String(SANDBOX_EXEC_MODE_ONE_SHOT.to_string()),
+        );
     let mut body = serde_json::json!({ "command": command });
     if !args.is_empty() {
         body["args"] = serde_json::json!(args);
@@ -648,7 +716,7 @@ mod tests {
 
     use super::{
         ExecOptions, SANDBOX_EXEC_MODE_ENV, SANDBOX_EXEC_MODE_ONE_SHOT,
-        build_mount_readiness_payload, build_process_payload, parse_run_event,
+        build_mount_readiness_payload, build_process_payload, mount_ready_timeout, parse_run_event,
         rewrite_direct_mount,
     };
 
@@ -748,7 +816,10 @@ mod tests {
         assert_eq!(payload["health_check"]["port"], 8000);
         assert_eq!(payload["health_check"]["path"], "/health");
         assert_eq!(payload["health_check"]["interval_ms"], 5_000);
-        assert!(payload["env"].get(SANDBOX_EXEC_MODE_ENV).is_none());
+        assert_eq!(
+            payload["env"][SANDBOX_EXEC_MODE_ENV],
+            SANDBOX_EXEC_MODE_ONE_SHOT
+        );
     }
 
     #[test]
@@ -782,10 +853,7 @@ mod tests {
 
         assert_eq!(command.surface, "filesystem");
         assert_eq!(command.mountpoint, "mnt/drive");
-        assert_eq!(
-            command.args.last().map(String::as_str),
-            Some("--foreground")
-        );
+        assert_eq!(command.args[2], "--foreground");
     }
 
     #[test]
@@ -805,6 +873,66 @@ mod tests {
 
         assert_eq!(command.surface, "repository");
         assert_eq!(command.mountpoint, "/code");
+    }
+
+    #[test]
+    fn direct_mount_accepts_official_binary_and_global_options() {
+        let command = rewrite_direct_mount(
+            "/usr/local/bin/tensorlake",
+            &[
+                "--debug".to_string(),
+                "--project".to_string(),
+                "project-a".to_string(),
+                "git".to_string(),
+                "mount".to_string(),
+                "repo:main".to_string(),
+                "/code".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(command.mountpoint, "/code");
+        assert_eq!(command.args[5], "--foreground");
+    }
+
+    #[test]
+    fn nested_mount_words_do_not_rewrite_an_unrelated_command() {
+        assert!(
+            rewrite_direct_mount(
+                "tl",
+                &[
+                    "sbx".to_string(),
+                    "exec".to_string(),
+                    "sandbox".to_string(),
+                    "tl".to_string(),
+                    "fs".to_string(),
+                    "mount".to_string(),
+                    "drive".to_string(),
+                    "/mnt".to_string(),
+                ],
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn foreground_flag_stays_before_an_option_sentinel() {
+        let command = rewrite_direct_mount(
+            "tl",
+            &[
+                "fs".to_string(),
+                "mount".to_string(),
+                "--".to_string(),
+                "drive".to_string(),
+                "/mnt".to_string(),
+            ],
+        )
+        .unwrap();
+
+        assert_eq!(
+            command.args,
+            ["fs", "mount", "--foreground", "--", "drive", "/mnt"]
+        );
     }
 
     #[test]
@@ -863,6 +991,18 @@ mod tests {
         let result = build_process_payload("python", &[], opts);
 
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn mount_readiness_timeout_fails_closed_before_spawn() {
+        assert!(mount_ready_timeout(Some(0.0)).is_err());
+        assert!(mount_ready_timeout(Some(-1.0)).is_err());
+        assert!(mount_ready_timeout(Some(f64::NAN)).is_err());
+        assert!(mount_ready_timeout(Some(f64::INFINITY)).is_err());
+        assert_eq!(
+            mount_ready_timeout(Some(1.25)).unwrap(),
+            Duration::from_millis(1_250)
+        );
     }
 
     #[test]

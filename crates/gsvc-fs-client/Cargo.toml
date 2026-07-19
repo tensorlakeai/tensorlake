@@ -2,7 +2,7 @@
 # only `src/`, keeping this workspace-adapted dependency manifest.
 [package]
 name = "gsvc-fs-client"
-version = "0.5.83"
+version = "0.5.84"
 edition = "2024"
 license = "Apache-2.0"
 description = "Resolution placeholder for TensorLake private filesystem client code"
@@ -55,7 +55,7 @@ xattr = "1"
 zstd = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = { version = "0.15", default-features = false, features = ["abi-7-12"] }
+fuser = { version = "0.17", default-features = false }
 
 [lints.clippy]
 large_enum_variant = "allow"

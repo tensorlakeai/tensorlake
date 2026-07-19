@@ -643,15 +643,13 @@ impl ArtifactStorageClient {
 
 fn repo_list_query(kind: Option<&str>, after: Option<&str>) -> String {
     // `form_urlencoded::Serializer` contains a non-Send callback reference. Keep it in this
-    // synchronous helper so napi/tonic callers can carry the request future across worker threads.
+    // synchronous helper so napi/tonic callers can carry the async request future across workers.
     let mut params = url::form_urlencoded::Serializer::new(String::new());
     if let Some(kind) = kind {
         params.append_pair("kind", kind);
-        // A filesystem create/delete is immediately followed by discovery surprisingly often,
-        // and successive requests may land on different artifact-storage pods. The normal project
-        // inventory is intentionally stale-while-revalidate; the filesystem surface instead asks
-        // for an authoritative metadata page so `tl fs ls` is read-your-writes across replicas.
-        if kind == REPO_KIND_FILESYSTEM {
+        // The first filesystem page carries a synchronous cache-generation fence. Later pages use
+        // the now-current cache, avoiding one FoundationDB check per page on large projects.
+        if kind == REPO_KIND_FILESYSTEM && after.is_none() {
             params.append_pair("fresh", "true");
         }
     }
@@ -745,11 +743,11 @@ mod tests {
     use std::collections::HashSet;
 
     use super::{
-        ArtifactStorageClient, advance_pagination_cursor, encode_path_segment,
-        repo_list_query, resolve_artifact_storage_url,
+        ArtifactStorageClient, advance_pagination_cursor, encode_path_segment, repo_list_query,
+        resolve_artifact_storage_url,
     };
-    use crate::artifact_storage::models::REPO_KIND_FILESYSTEM;
     use crate::ClientBuilder;
+    use crate::artifact_storage::models::REPO_KIND_FILESYSTEM;
 
     #[test]
     fn resolves_git_url_from_api_url() {
@@ -799,10 +797,14 @@ mod tests {
     }
 
     #[test]
-    fn filesystem_inventory_requests_authoritative_pages() {
+    fn filesystem_inventory_fences_only_the_first_page() {
         assert_eq!(
-            repo_list_query(Some(REPO_KIND_FILESYSTEM), Some("project/demo")),
-            "kind=filesystem&fresh=true&after=project%2Fdemo&limit=1000"
+            repo_list_query(Some(REPO_KIND_FILESYSTEM), None),
+            "kind=filesystem&fresh=true&limit=1000"
+        );
+        assert_eq!(
+            repo_list_query(Some(REPO_KIND_FILESYSTEM), Some("project/repo")),
+            "kind=filesystem&after=project%2Frepo&limit=1000"
         );
         assert_eq!(
             repo_list_query(Some("repository"), None),

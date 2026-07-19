@@ -28,10 +28,10 @@ fn validate_mount_process_mode(
             ))
     {
         return Err(CliError::usage(format!(
-            "`tl {surface} mount` cannot background its daemon from inside a one-shot `tl sbx \
-             exec` command: the sandbox runtime reaps that command's cgroup when it exits. \
-             Launch the mount directly from the controller instead (`tl sbx exec <sandbox> -- \
-             tl {surface} mount ...`); the outer CLI will keep it as a sandbox-owned process."
+            "`tl {surface} mount` cannot background its daemon from inside a sandbox process \
+             unit: the sandbox runtime reaps that unit's cgroup when its leader exits. Launch the \
+             mount directly from the controller instead (`tl sbx exec <sandbox> -- tl {surface} \
+             mount ...`); the outer CLI will keep it as a sandbox-owned process."
         )));
     }
     Ok(())
