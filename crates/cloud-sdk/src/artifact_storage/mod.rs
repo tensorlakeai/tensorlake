@@ -15,6 +15,7 @@ pub mod workspaces;
 use models::{
     CreateRepoRequest, GitCredential, ListBranchesResponse, ListOperationsResponse,
     ListRefsResponse, ListReposResponse, MintGitTokenRequest, RepoInfo, RepoMetaInfo,
+    REPO_KIND_FILESYSTEM,
 };
 
 #[derive(Clone)]
@@ -320,20 +321,7 @@ impl ArtifactStorageClient {
         let mut after = None::<String>;
         let mut seen_after = HashSet::new();
         loop {
-            // `form_urlencoded::Serializer` contains a non-Send callback reference. Keep it in
-            // this synchronous scope so napi/tonic callers can carry the async request future
-            // across worker threads.
-            let query = {
-                let mut params = url::form_urlencoded::Serializer::new(String::new());
-                if let Some(kind) = kind {
-                    params.append_pair("kind", kind);
-                }
-                if let Some(after) = &after {
-                    params.append_pair("after", after);
-                }
-                params.append_pair("limit", "1000");
-                params.finish()
-            };
+            let query = repo_list_query(kind, after.as_deref());
             let url = format!(
                 "{}/project/{}/repos?{}",
                 self.git_base_url,
@@ -653,6 +641,27 @@ impl ArtifactStorageClient {
     }
 }
 
+fn repo_list_query(kind: Option<&str>, after: Option<&str>) -> String {
+    // `form_urlencoded::Serializer` contains a non-Send callback reference. Keep it in this
+    // synchronous helper so napi/tonic callers can carry the request future across worker threads.
+    let mut params = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(kind) = kind {
+        params.append_pair("kind", kind);
+        // A filesystem create/delete is immediately followed by discovery surprisingly often,
+        // and successive requests may land on different artifact-storage pods. The normal project
+        // inventory is intentionally stale-while-revalidate; the filesystem surface instead asks
+        // for an authoritative metadata page so `tl fs ls` is read-your-writes across replicas.
+        if kind == REPO_KIND_FILESYSTEM {
+            params.append_pair("fresh", "true");
+        }
+    }
+    if let Some(after) = after {
+        params.append_pair("after", after);
+    }
+    params.append_pair("limit", "1000");
+    params.finish()
+}
+
 pub fn resolve_artifact_storage_url(api_url: &str) -> String {
     if let Ok(parsed) = url::Url::parse(api_url) {
         let host = parsed.host_str().unwrap_or("");
@@ -737,8 +746,9 @@ mod tests {
 
     use super::{
         ArtifactStorageClient, advance_pagination_cursor, encode_path_segment,
-        resolve_artifact_storage_url,
+        repo_list_query, resolve_artifact_storage_url,
     };
+    use crate::artifact_storage::models::REPO_KIND_FILESYSTEM;
     use crate::ClientBuilder;
 
     #[test]
@@ -786,5 +796,17 @@ mod tests {
         );
         assert!(advance_pagination_cursor(&mut seen, "page-2".to_string(), "test").is_err());
         assert!(advance_pagination_cursor(&mut seen, String::new(), "test").is_err());
+    }
+
+    #[test]
+    fn filesystem_inventory_requests_authoritative_pages() {
+        assert_eq!(
+            repo_list_query(Some(REPO_KIND_FILESYSTEM), Some("project/demo")),
+            "kind=filesystem&fresh=true&after=project%2Fdemo&limit=1000"
+        );
+        assert_eq!(
+            repo_list_query(Some("repository"), None),
+            "kind=repository&limit=1000"
+        );
     }
 }
