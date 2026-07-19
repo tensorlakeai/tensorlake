@@ -116,6 +116,9 @@ pub async fn run(
             health_interval_ms: None,
             health_timeout_ms: None,
             health_failure_threshold: None,
+            // `sbx run` normally destroys the sandbox after this command. Only turn a mount
+            // into a sandbox-owned process when the caller explicitly keeps the sandbox.
+            protect_long_lived_mounts: keep,
         },
     )
     .await;

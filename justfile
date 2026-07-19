@@ -44,11 +44,39 @@ build-cli-full *ARGS:
             exit 1
         fi
     done
+    stage_macos_tlfs=false
+    tlfs_backup=""
+    if [ "$(uname -s)" = "Darwin" ]; then
+        private_tlfs="$artifact_storage/platform/macos/tlfs"
+        for directory in Sources Resources; do
+            if [ ! -d "$private_tlfs/$directory" ]; then
+                echo "error: $private_tlfs/$directory not found." >&2
+                echo "The macOS full build needs the private FSKit companion sources." >&2
+                exit 1
+            fi
+        done
+        stage_macos_tlfs=true
+        tlfs_backup="$(mktemp -d "${TMPDIR:-/tmp}/tensorlake-tlfs.XXXXXX")"
+        for directory in Sources Resources; do
+            if [ -e "platform/macos/tlfs/$directory" ]; then
+                cp -R "platform/macos/tlfs/$directory" "$tlfs_backup/"
+            fi
+        done
+    fi
     restore() {
         for crate in gsvc-mount gsvc-codec gsvc-fs-client; do
             git checkout -q -- "crates/$crate/src" 2>/dev/null || true
             git clean -fdq "crates/$crate/src" 2>/dev/null || true
         done
+        if [ "$stage_macos_tlfs" = true ]; then
+            rm -rf "platform/macos/tlfs/Sources" "platform/macos/tlfs/Resources"
+            for directory in Sources Resources; do
+                if [ -e "$tlfs_backup/$directory" ]; then
+                    cp -R "$tlfs_backup/$directory" "platform/macos/tlfs/"
+                fi
+            done
+            rm -rf "$tlfs_backup"
+        fi
         rm -f "crates/gsvc-fs-client/Cargo.lock"
     }
     trap restore EXIT
@@ -58,6 +86,13 @@ build-cli-full *ARGS:
         echo "swapping crates/$crate/src with $artifact_storage/crates/$crate/src"
         cp "$artifact_storage/crates/$crate/src"/*.rs "crates/$crate/src"/
     done
+    # macOS-only tests compile a source-level wire/coherence contract against the private FSKit
+    # bridge. Sources and resources are staged with the Rust crates and removed by the trap. The
+    # app build script stays private and is invoked directly by `build-tlfs-app`.
+    if [ "$stage_macos_tlfs" = true ]; then
+        rm -rf "platform/macos/tlfs/Sources" "platform/macos/tlfs/Resources"
+        cp -R "$private_tlfs/Sources" "$private_tlfs/Resources" "platform/macos/tlfs/"
+    fi
     cargo build -p tensorlake-cli --release --features mount,git-clone {{ARGS}}
 
 # Back-compat alias for the old recipe name.
@@ -90,11 +125,39 @@ test-cli-full *ARGS:
             exit 1
         fi
     done
+    stage_macos_tlfs=false
+    tlfs_backup=""
+    if [ "$(uname -s)" = "Darwin" ]; then
+        private_tlfs="$artifact_storage/platform/macos/tlfs"
+        for directory in Sources Resources; do
+            if [ ! -d "$private_tlfs/$directory" ]; then
+                echo "error: $private_tlfs/$directory not found." >&2
+                echo "The macOS full test needs the private FSKit companion sources." >&2
+                exit 1
+            fi
+        done
+        stage_macos_tlfs=true
+        tlfs_backup="$(mktemp -d "${TMPDIR:-/tmp}/tensorlake-tlfs.XXXXXX")"
+        for directory in Sources Resources; do
+            if [ -e "platform/macos/tlfs/$directory" ]; then
+                cp -R "platform/macos/tlfs/$directory" "$tlfs_backup/"
+            fi
+        done
+    fi
     restore() {
         for crate in gsvc-mount gsvc-codec gsvc-fs-client; do
             git checkout -q -- "crates/$crate/src" 2>/dev/null || true
             git clean -fdq "crates/$crate/src" 2>/dev/null || true
         done
+        if [ "$stage_macos_tlfs" = true ]; then
+            rm -rf "platform/macos/tlfs/Sources" "platform/macos/tlfs/Resources"
+            for directory in Sources Resources; do
+                if [ -e "$tlfs_backup/$directory" ]; then
+                    cp -R "$tlfs_backup/$directory" "platform/macos/tlfs/"
+                fi
+            done
+            rm -rf "$tlfs_backup"
+        fi
         rm -f "crates/gsvc-fs-client/Cargo.lock"
     }
     trap restore EXIT
@@ -102,6 +165,10 @@ test-cli-full *ARGS:
         rm -f "crates/$crate/src"/*.rs
         cp "$artifact_storage/crates/$crate/src"/*.rs "crates/$crate/src"/
     done
+    if [ "$stage_macos_tlfs" = true ]; then
+        rm -rf "platform/macos/tlfs/Sources" "platform/macos/tlfs/Resources"
+        cp -R "$private_tlfs/Sources" "$private_tlfs/Resources" "platform/macos/tlfs/"
+    fi
     CARGO_TARGET_DIR="$PWD/target" cargo clippy --manifest-path crates/gsvc-fs-client/Cargo.toml --all-targets -- -D warnings
     CARGO_TARGET_DIR="$PWD/target" cargo test --manifest-path crates/gsvc-fs-client/Cargo.toml {{ARGS}}
     cargo test --workspace --features tensorlake-cli/mount,tensorlake-cli/git-clone {{ARGS}}

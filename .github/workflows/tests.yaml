@@ -58,6 +58,41 @@ jobs:
       - name: Run Rust workspace tests with customer features
         run: cargo test --workspace --features tensorlake-cli/mount,tensorlake-cli/git-clone
 
+  macos_private_source_contract:
+    name: macOS private FSKit source contract
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: macos-14
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-macos-private-source
+          cache-bin: false
+
+      - name: Vendor private artifact_storage crates and FSKit companions
+        uses: ./.github/actions/vendor-private-crates
+        with:
+          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
+          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
+          include-macos-fskit: "true"
+
+      - name: Verify the CLI and FSKit source contract compile together
+        run: >-
+          CARGO_TARGET_DIR="$PWD/target"
+          cargo test --manifest-path crates/gsvc-fs-client/Cargo.toml
+          fskit_close_to_open_tracks_the_daemon_handle_content_version
+
   windows_build_smoke:
     name: Windows build smoke test
     runs-on: windows-latest

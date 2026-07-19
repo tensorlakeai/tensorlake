@@ -86,6 +86,7 @@ jobs:
         with:
           app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
           private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
+          include-macos-fskit: ${{ matrix.target_id == 'darwin-aarch64' && 'true' || 'false' }}
 
       - name: Fetch notarized TLFS.app (embedded into `tl fs setup`)
         if: matrix.target_id == 'darwin-aarch64'
