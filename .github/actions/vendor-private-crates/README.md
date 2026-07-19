@@ -12,6 +12,10 @@ for the duration of the job.
 2. Sparse-checks-out the three private crate source trees into `.mount-core/`.
 3. Copies the real sources over the placeholders, keeping the placeholders' workspace-adapted
    manifests.
+4. When `include-macos-fskit: "true"`, separately stages the private FSKit `Sources` and
+   `Resources` needed by the macOS Rust source-contract tests. Linux and Windows callers leave the
+   input disabled and do not fetch or compile Swift sources. The FSKit `build.sh` remains confined
+   to the dedicated TLFS.app release job.
 
 The calling job must run `actions/checkout` for this repo first, then call this action before the
 build step, and add `--features git-clone` (plus `mount` on mount-capable targets; or
@@ -41,4 +45,7 @@ default (no-mount) lanes still run for them, so external contributors' PRs build
 - `.github/workflows/tests.yaml` — full-feature Rust workspace tests.
 - `.github/workflows/publish_cli.yaml` — release `tensorlake` binaries (Linux + macOS).
 
-Local equivalent (no App needed, uses a sibling artifact_storage checkout): `just build-cli-mount`.
+Local equivalent (no App needed, uses a sibling artifact_storage checkout): `just build-cli-full`.
+On macOS, `build-cli-full` and `test-cli-full` stage the matching private FSKit `Sources` and
+`Resources` for the command and restore the public one-line TLFS directory afterward, including on
+failure.

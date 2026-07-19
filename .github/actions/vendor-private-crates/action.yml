@@ -18,6 +18,12 @@ inputs:
   private-key:
     description: Private key (PEM) for that GitHub App.
     required: true
+  include-macos-fskit:
+    description: >
+      Also stage the private macOS FSKit Sources and Resources needed by macOS client tests.
+      Leave disabled on Linux and Windows so those builds have no Swift source dependency.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -44,6 +50,19 @@ runs:
         sparse-checkout-cone-mode: false
         persist-credentials: false
 
+    - name: Check out private macOS FSKit companions
+      if: ${{ inputs.include-macos-fskit == 'true' }}
+      uses: actions/checkout@v4
+      with:
+        repository: tensorlakeai/artifact_storage
+        token: ${{ steps.app-token.outputs.token }}
+        path: .mount-fskit
+        sparse-checkout: |
+          platform/macos/tlfs/Sources
+          platform/macos/tlfs/Resources
+        sparse-checkout-cone-mode: false
+        persist-credentials: false
+
     - name: Swap real sources over the placeholders
       shell: bash
       run: |
@@ -62,3 +81,19 @@ runs:
           echo "Vendored ${count} ${crate} source file(s)."
         done
         echo "The CLI can now build with --features mount,git-clone."
+
+    - name: Stage private macOS FSKit companions
+      if: ${{ inputs.include-macos-fskit == 'true' }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        real=".mount-fskit/platform/macos/tlfs"
+        destination="platform/macos/tlfs"
+        if [ ! -f "$real/Sources/Extension/TLFS.swift" ] || [ ! -d "$real/Resources" ]; then
+          echo "::error::private macOS FSKit Sources/Resources are incomplete at $real"
+          exit 1
+        fi
+        mkdir -p "$destination"
+        rm -rf "$destination/Sources" "$destination/Resources"
+        cp -R "$real/Sources" "$real/Resources" "$destination/"
+        echo "Vendored the macOS FSKit source companions for this runner."
