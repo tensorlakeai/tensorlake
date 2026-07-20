@@ -60,6 +60,8 @@ export {
 export type {
   ApplicationOptions,
   FunctionOptions,
+  SimpleApplicationOptions,
+  SimpleFunctionOptions,
   RegisteredFunction,
   Schema,
   Parameter,

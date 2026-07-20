@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import type { Image } from "../image.js";
 import { FunctionError, SDKUsageError } from "./errors.js";
 import type { Parameter, ParameterValues, Schema } from "./schema.js";
-import { validateWithSchema } from "./schema.js";
+import { schema, validateWithSchema } from "./schema.js";
 import { registerDefinition } from "./registry.js";
 
 export interface Retries {
@@ -48,6 +48,18 @@ export interface ApplicationOptions<
   tags?: Record<string, string>;
   applicationRetries?: Retries;
 }
+
+/** Options available when parameter and return schemas use the JSON defaults. */
+export type SimpleFunctionOptions = Omit<
+  FunctionOptions<readonly Parameter<unknown>[], unknown>,
+  "name" | "parameters" | "returns"
+>;
+
+/** Application options available when parameter and return schemas use the JSON defaults. */
+export type SimpleApplicationOptions = Omit<
+  ApplicationOptions<readonly Parameter<unknown>[], unknown>,
+  "name" | "parameters" | "returns"
+>;
 
 export interface NormalizedFunctionOptions {
   description: string;
@@ -419,14 +431,94 @@ function register<
   return createRegisteredFunction(definition);
 }
 
+type SimpleResult<Output> = Output extends TailCall<infer Result> ? Result : Output;
+type RuntimeHandler = (...args: never[]) => Promise<unknown>;
+
+function hasExplicitSchemas(
+  value: unknown,
+): value is FunctionOptions<readonly Parameter<unknown>[], unknown> {
+  if (typeof value !== "object" || value == null) return false;
+  const hasParameters = Object.prototype.hasOwnProperty.call(value, "parameters");
+  const hasReturns = Object.prototype.hasOwnProperty.call(value, "returns");
+  if (hasParameters !== hasReturns) {
+    throw new SDKUsageError("Tensorlake registrations must specify both parameters and returns");
+  }
+  return hasParameters;
+}
+
+function inferredJSONParameters(handler: RuntimeHandler): readonly Parameter<unknown>[] {
+  return Array.from({ length: handler.length }, (_, index) =>
+    schema.parameter(handler.length === 1 ? "input" : `arg${index}`, schema.json()),
+  );
+}
+
+function registerWithDefaults(
+  name: string,
+  handler: RuntimeHandler,
+  options: SimpleFunctionOptions | SimpleApplicationOptions,
+  application: boolean,
+): RegisteredFunction<readonly unknown[], unknown> {
+  return register(
+    handler as (...args: readonly unknown[]) => Promise<unknown>,
+    {
+      ...options,
+      name,
+      parameters: inferredJSONParameters(handler),
+      returns: schema.json(),
+    },
+    application,
+  );
+}
+
 export function registerFunction<
   const P extends readonly Parameter<unknown>[],
   Result,
 >(
   handler: (...args: ParameterValues<P>) => Promise<Result | TailCall<Result>>,
   options: FunctionOptions<P, Result>,
-): RegisteredFunction<ParameterValues<P>, Result> {
-  return register(handler, options, false);
+): RegisteredFunction<ParameterValues<P>, Result>;
+
+export function registerFunction<
+  const Args extends readonly unknown[],
+  Output,
+>(
+  name: string,
+  handler: (...args: Args) => Promise<Output>,
+  options?: SimpleFunctionOptions,
+): RegisteredFunction<Args, SimpleResult<Output>>;
+export function registerFunction(
+  handlerOrName: unknown,
+  handlerOrOptions?: unknown,
+  options: SimpleFunctionOptions = {},
+): RegisteredFunction<readonly unknown[], unknown> {
+  if (typeof handlerOrName === "string") {
+    if (typeof handlerOrOptions !== "function") {
+      throw new SDKUsageError("registerFunction(name, handler) requires an async handler");
+    }
+    return registerWithDefaults(
+      handlerOrName,
+      handlerOrOptions as RuntimeHandler,
+      options,
+      false,
+    );
+  }
+  if (typeof handlerOrName !== "function") {
+    throw new SDKUsageError("registerFunction requires an async handler");
+  }
+  const handler = handlerOrName as RuntimeHandler;
+  if (typeof handlerOrOptions === "function") {
+    throw new SDKUsageError("registerFunction received an unexpected second handler");
+  }
+  if (hasExplicitSchemas(handlerOrOptions)) {
+    return register(
+      handler as (...args: readonly unknown[]) => Promise<unknown>,
+      handlerOrOptions,
+      false,
+    );
+  }
+  throw new SDKUsageError(
+    "Schema-free functions require an explicit stable name: registerFunction(name, handler)",
+  );
 }
 
 export function registerApplication<
@@ -435,6 +527,46 @@ export function registerApplication<
 >(
   handler: (...args: ParameterValues<P>) => Promise<Result | TailCall<Result>>,
   options: ApplicationOptions<P, Result>,
-): RegisteredFunction<ParameterValues<P>, Result> {
-  return register(handler, options, true);
+): RegisteredFunction<ParameterValues<P>, Result>;
+export function registerApplication<
+  const Args extends readonly unknown[],
+  Output,
+>(
+  name: string,
+  handler: (...args: Args) => Promise<Output>,
+  options?: SimpleApplicationOptions,
+): RegisteredFunction<Args, SimpleResult<Output>>;
+export function registerApplication(
+  handlerOrName: unknown,
+  handlerOrOptions?: unknown,
+  options: SimpleApplicationOptions = {},
+): RegisteredFunction<readonly unknown[], unknown> {
+  if (typeof handlerOrName === "string") {
+    if (typeof handlerOrOptions !== "function") {
+      throw new SDKUsageError("registerApplication(name, handler) requires an async handler");
+    }
+    return registerWithDefaults(
+      handlerOrName,
+      handlerOrOptions as RuntimeHandler,
+      options,
+      true,
+    );
+  }
+  if (typeof handlerOrName !== "function") {
+    throw new SDKUsageError("registerApplication requires an async handler");
+  }
+  const handler = handlerOrName as RuntimeHandler;
+  if (typeof handlerOrOptions === "function") {
+    throw new SDKUsageError("registerApplication received an unexpected second handler");
+  }
+  if (hasExplicitSchemas(handlerOrOptions)) {
+    return register(
+      handler as (...args: readonly unknown[]) => Promise<unknown>,
+      handlerOrOptions,
+      true,
+    );
+  }
+  throw new SDKUsageError(
+    "Schema-free applications require an explicit stable name: registerApplication(name, handler)",
+  );
 }

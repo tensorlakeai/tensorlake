@@ -12,6 +12,11 @@ terminal allocation result. Language-specific serialization is decoded and
 normalized before the externally observable Python and TypeScript results are
 compared.
 
+The TypeScript fixture uses schema-free JSON registrations for every applicable
+scenario, so the matrix also verifies that inferred descriptors drive the same
+executor protocol outcomes as the explicit Python definitions. The file
+scenario remains schema-rich because it crosses the protocol as raw bytes.
+
 ## Parity matrix
 
 | Scenario | Contract checked |

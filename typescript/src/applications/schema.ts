@@ -59,6 +59,8 @@ function parameter<T>(
 }
 
 export const schema = {
+  /** Any JSON-serializable value. Useful when strict runtime validation is not needed. */
+  json: <T = unknown>() => makeSchema<T>({}),
   string: (options: Omit<JSONSchema, "type"> = {}) =>
     makeSchema<string>({ type: "string", ...options }),
   number: (options: Omit<JSONSchema, "type"> = {}) =>

@@ -3,21 +3,33 @@
 The TypeScript SDK supports Tensorlake sandboxes and durable applications on Node.js 24 or newer. Application handlers are async-only and values crossing a function boundary must be JSON values or a direct `File`.
 
 ```ts
-import { registerApplication, registerFunction, schema } from "tensorlake/applications";
+import { registerApplication, registerFunction } from "tensorlake/applications";
 
 const square = registerFunction(
+  "square",
   async (value: number) => value * value,
-  {
-    parameters: [schema.parameter("value", schema.number())] as const,
-    returns: schema.number(),
-  },
 );
 
 export const squares = registerApplication(
+  "squares",
   async (values: number[]) => square.map(values),
+);
+```
+
+This concise form infers the TypeScript call signature and uses permissive JSON
+schemas. The explicit name is stable across bundling. Use the schema-rich form
+when you need runtime validation, API metadata, optional or default parameters,
+rest parameters, or `File` inputs and outputs:
+
+```ts
+import { registerApplication, schema } from "tensorlake/applications";
+
+export const validatedSquare = registerApplication(
+  async (value: number) => value * value,
   {
-    parameters: [schema.parameter("values", schema.array(schema.number()))] as const,
-    returns: schema.array(schema.number()),
+    name: "validated_square",
+    parameters: [schema.parameter("value", schema.number())] as const,
+    returns: schema.number(),
   },
 );
 ```

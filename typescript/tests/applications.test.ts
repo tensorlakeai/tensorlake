@@ -19,42 +19,62 @@ import { serializeValue } from "../src/applications/serialization.js";
 describe("TypeScript applications", () => {
   it("runs async fan-out locally across JSON boundaries", async () => {
     clearRegistryForTest();
-    const double = registerFunction(async (value: number) => value * 2, {
-      name: "double",
-      parameters: [schema.parameter("value", schema.number())] as const,
-      returns: schema.number(),
-    });
-    const app = registerApplication(async (values: number[]) => double.map(values), {
-      name: "double_all",
-      parameters: [schema.parameter("values", schema.array(schema.number()))] as const,
-      returns: schema.array(schema.number()),
-    });
+    const double = registerFunction("double", async (value: number) => value * 2);
+    const app = registerApplication(
+      "double_all",
+      async (values: number[]) => double.map(values),
+    );
 
     const request = await runLocal(app, [1, 2, 3]);
     expect(await request.output()).toEqual([2, 4, 6]);
+    expect(double.definition.parameters.map((parameter) => parameter.name)).toEqual(["input"]);
+    expect(app.definition.parameters.map((parameter) => parameter.name)).toEqual(["input"]);
+    expect(app.definition.returns.jsonSchema).toEqual({});
+    expect(createApplicationManifest(app.definition).functions.double_all).toMatchObject({
+      parameters: [{ name: "input", data_type: { title: "input" }, required: true }],
+      return_type: { title: "Return value" },
+    });
   });
 
   it("reduces sequentially from an explicit initial value and handles empty input", async () => {
     clearRegistryForTest();
-    const subtract = registerFunction(async (accumulator: number, value: number) => accumulator - value, {
-      name: "subtract",
-      parameters: [
-        schema.parameter("accumulator", schema.number()),
-        schema.parameter("value", schema.number()),
-      ] as const,
-      returns: schema.number(),
-    });
-    const app = registerApplication(async (values: number[]) => ({
-      populated: await subtract.reduce(values, 10),
-      empty: await subtract.reduce([], 10),
-    }), {
-      name: "subtract_all",
-      parameters: [schema.parameter("values", schema.array(schema.number()))] as const,
-      returns: schema.object({ populated: schema.number(), empty: schema.number() }),
-    });
+    const subtract = registerFunction(
+      "subtract",
+      async (accumulator: number, value: number) => accumulator - value,
+    );
+    const app = registerApplication(
+      "subtract_all",
+      async (values: number[]) => ({
+        populated: await subtract.reduce(values, 10),
+        empty: await subtract.reduce([], 10),
+      }),
+    );
 
     const request = await runLocal(app, [1, 2, 3]);
     expect(await request.output()).toEqual({ populated: 4, empty: 10 });
+    expect(subtract.definition.parameters.map((parameter) => parameter.name)).toEqual([
+      "arg0",
+      "arg1",
+    ]);
+  });
+
+  it("keeps runtime options and inferred types in the simple form", async () => {
+    clearRegistryForTest();
+    const increment = registerFunction(
+      "increment",
+      async (value: number) => value + 1,
+      { cpu: 2, timeout: 60 },
+    );
+    const app = registerApplication(
+      "named_application",
+      async (value: number) => increment(value),
+    );
+
+    expect(increment.definition.name).toBe("increment");
+    expect(increment.definition.options.cpu).toBe(2);
+    expect(increment.definition.options.timeout).toBe(60);
+    expect(app.definition.name).toBe("named_application");
+    await expect(runLocal(app, 41).then((request) => request.output())).resolves.toBe(42);
   });
 
   it("requires async handlers", async () => {

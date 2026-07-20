@@ -1,38 +1,23 @@
-import {
-  registerApplication,
-  registerFunction,
-  schema,
-} from "tensorlake/applications";
+import { registerApplication, registerFunction } from "tensorlake/applications";
 
 const square = registerFunction(
+  "map_reduce_square",
   async (value: number): Promise<number> => value * value,
   {
-    name: "map_reduce_square",
-    parameters: [schema.parameter("value", schema.number())] as const,
-    returns: schema.number(),
     description: "Squares one value in an isolated function sandbox",
   },
 );
 
 const add = registerFunction(
+  "map_reduce_add",
   async (total: number, value: number): Promise<number> => total + value,
   {
-    name: "map_reduce_add",
-    parameters: [
-      schema.parameter("total", schema.number()),
-      schema.parameter("value", schema.number()),
-    ] as const,
-    returns: schema.number(),
     description: "Adds one mapped value to the running total",
   },
 );
 
-const mapReduceOutput = schema.object({
-  squares: schema.array(schema.number()),
-  sumOfSquares: schema.number(),
-});
-
 export const mapReduce = registerApplication(
+  "typescript_map_reduce",
   async (values: number[]): Promise<{ squares: number[]; sumOfSquares: number }> => {
     // map fans these calls out through the function-executor protocol.
     const squares = await square.map(values);
@@ -43,9 +28,6 @@ export const mapReduce = registerApplication(
     return { squares, sumOfSquares };
   },
   {
-    name: "typescript_map_reduce",
-    parameters: [schema.parameter("values", schema.array(schema.number()))] as const,
-    returns: mapReduceOutput,
     description: "Squares values in parallel, then sums the squares sequentially",
     tags: { example: "typescript", feature: "map-reduce" },
   },

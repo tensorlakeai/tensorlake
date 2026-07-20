@@ -5,6 +5,8 @@ export {
   FunctionFuture as Future,
   type ApplicationOptions,
   type FunctionOptions,
+  type SimpleApplicationOptions,
+  type SimpleFunctionOptions,
   type RegisteredFunction,
   type TailCall,
   type WaitOptions,

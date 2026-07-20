@@ -15,6 +15,10 @@ It covers:
 - direct `File` input and output
 - `RequestError` propagation
 
+The JSON applications use the concise `registerFunction(name, handler)` and
+`registerApplication(name, handler)` forms. The file application keeps explicit
+schemas because raw `File` input and output require content-aware decoding.
+
 ## Prerequisites
 
 - Node.js 24 or newer

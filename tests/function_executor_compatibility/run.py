@@ -815,53 +815,30 @@ import {{
 }} from {json.dumps(sdk_module)};
 
 const numberParameter = [schema.parameter("value", schema.number())];
-const double = registerFunction(async (value) => value * 2, {{
-  name: {json.dumps(DOUBLE_FUNCTION)},
-  parameters: numberParameter,
-  returns: schema.number(),
-}});
-const add = registerFunction(async (accumulator, value) => accumulator + value, {{
-  name: {json.dumps(ADD_FUNCTION)},
-  parameters: [
-    schema.parameter("accumulator", schema.number()),
-    schema.parameter("value", schema.number()),
-  ],
-  returns: schema.number(),
-}});
-const failingChild = registerFunction(async (value) => {{
+const double = registerFunction(
+  {json.dumps(DOUBLE_FUNCTION)},
+  async (value) => value * 2,
+);
+const add = registerFunction(
+  {json.dumps(ADD_FUNCTION)},
+  async (accumulator, value) => accumulator + value,
+);
+const failingChild = registerFunction({json.dumps(FAILING_FUNCTION)}, async (value) => {{
   throw new Error(`child failed for ${{value}}`);
-}}, {{
-  name: {json.dumps(FAILING_FUNCTION)},
-  parameters: numberParameter,
-  returns: schema.number(),
 }});
 
-registerApplication(async (value) => ({{ value }}), {{
-  name: "parity_value",
-  parameters: numberParameter,
-  returns: schema.object({{ value: schema.number() }}),
-}});
-registerApplication(async (value) => double(value), {{
-  name: "parity_child",
-  parameters: numberParameter,
-  returns: schema.number(),
-}});
-registerApplication(async (value) => double.map([value, value + 1, value + 2]), {{
-  name: "parity_map",
-  parameters: numberParameter,
-  returns: schema.array(schema.number()),
-}});
-registerApplication(async (value) => add.reduce([value, value + 1, value + 2], 10), {{
-  name: "parity_reduce",
-  parameters: numberParameter,
-  returns: schema.number(),
-}});
-registerApplication(async (value) => double.tailCall(value), {{
-  name: "parity_tail_call",
-  parameters: numberParameter,
-  returns: schema.number(),
-}});
-registerApplication(async (value) => {{
+registerApplication("parity_value", async (value) => ({{ value }}));
+registerApplication("parity_child", async (value) => double(value));
+registerApplication(
+  "parity_map",
+  async (value) => double.map([value, value + 1, value + 2]),
+);
+registerApplication(
+  "parity_reduce",
+  async (value) => add.reduce([value, value + 1, value + 2], 10),
+);
+registerApplication("parity_tail_call", async (value) => double.tailCall(value));
+registerApplication("parity_handled_child_failure", async (value) => {{
   try {{
     await failingChild(value);
   }} catch (error) {{
@@ -869,12 +846,8 @@ registerApplication(async (value) => {{
     return "caught:function_error";
   }}
   return "unexpected:success";
-}}, {{
-  name: "parity_handled_child_failure",
-  parameters: numberParameter,
-  returns: schema.string(),
 }});
-registerApplication(async (value) => {{
+registerApplication("parity_handled_creation_failure", async (value) => {{
   try {{
     await failingChild(value);
   }} catch (error) {{
@@ -882,24 +855,12 @@ registerApplication(async (value) => {{
     return "caught:creation_error";
   }}
   return "unexpected:success";
-}}, {{
-  name: "parity_handled_creation_failure",
-  parameters: numberParameter,
-  returns: schema.string(),
 }});
-registerApplication(async (value) => {{
+registerApplication("parity_request_error", async (value) => {{
   throw new RequestError(`invalid value: ${{value}}`);
-}}, {{
-  name: "parity_request_error",
-  parameters: numberParameter,
-  returns: schema.number(),
 }});
-registerApplication(async (value) => {{
+registerApplication("parity_function_error", async (value) => {{
   throw new Error(`function failed for ${{value}}`);
-}}, {{
-  name: "parity_function_error",
-  parameters: numberParameter,
-  returns: schema.number(),
 }});
 registerApplication(async (value) => new File(
   new TextEncoder().encode(`parity-file-${{value}}`),
@@ -909,7 +870,7 @@ registerApplication(async (value) => new File(
   parameters: numberParameter,
   returns: schema.file(),
 }});
-registerApplication(async (value) => {{
+registerApplication("parity_state", async (value) => {{
   const context = RequestContext.get();
   const missing = await context.state.get("missing", {{ value: -1 }});
   await context.state.set("answer", {{ value }});
@@ -919,20 +880,8 @@ registerApplication(async (value) => {{
     attributes: {{ runtime: "shared-harness" }},
   }});
   return {{ missing, request_id: context.requestId, stored }};
-}}, {{
-  name: "parity_state",
-  parameters: numberParameter,
-  returns: schema.object({{
-    missing: schema.object({{ value: schema.number() }}),
-    request_id: schema.string(),
-    stored: schema.object({{ value: schema.number() }}),
-  }}),
 }});
-registerApplication(async (value) => double(value), {{
-  name: "parity_replay_mismatch",
-  parameters: numberParameter,
-  returns: schema.number(),
-}});
+registerApplication("parity_replay_mismatch", async (value) => double(value));
 
 export function __tensorlakeGetFunction(name) {{
   return getFunction(name);
