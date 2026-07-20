@@ -2,13 +2,38 @@
 
 use std::path::PathBuf;
 
+use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use tensorlake::artifact_storage::ArtifactStorageClient;
-use tensorlake::artifact_storage::ingest::PushOptions;
+use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
 use tensorlake::artifact_storage::merge::MergeRequest;
+use tensorlake::artifact_storage::models::REPO_KIND_FILESYSTEM;
 use tensorlake::{ClientBuilder, error::SdkError};
 
-use crate::sandbox::{TracedJson, duration_from_seconds, into_napi_error, usage_error, with_retry};
+use crate::sandbox::{
+    TracedBytes, TracedJson, duration_from_seconds, into_napi_error, usage_error, with_retry,
+};
+
+/// One file write in a filesystem push.
+#[napi(object)]
+pub struct FilesystemFileWrite {
+    /// Path inside the filesystem (forward-slash separated).
+    pub path: String,
+    pub content: Buffer,
+}
+
+/// Whether a failed request may nonetheless have been processed server-side.
+/// True for timeouts and gateway 5xx (the request was sent; the response was
+/// lost or the gateway gave up), false for connect failures (the request was
+/// never transmitted). Gates the 409/404-on-retry forgiveness in the
+/// filesystem create/delete bindings.
+fn request_may_have_executed(err: &SdkError) -> bool {
+    match err {
+        SdkError::ServerError { status, .. } => status.is_server_error(),
+        SdkError::Http(e) => e.is_timeout(),
+        _ => false,
+    }
+}
 
 #[napi]
 pub struct NativeRepositoryClient {
@@ -406,5 +431,366 @@ impl NativeRepositoryClient {
             }
         })
         .await
+    }
+
+    /// Create a filesystem (an artifact-storage repo of kind "filesystem").
+    ///
+    /// Returns JSON `{"trace_id", "default_branch"}` — the effective default
+    /// branch differs from "main" only when a lost-response retry adopted a
+    /// pre-existing filesystem.
+    #[napi]
+    pub async fn create_filesystem(&self, name: String) -> napi::Result<String> {
+        let project_id = self.project_id()?.to_string();
+        let maybe_executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        with_retry(self.client.clone(), 5, move |client| {
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let maybe_executed = maybe_executed.clone();
+            async move {
+                // Minted before the forgiveness-tracked call: a mint failure
+                // says nothing about whether a create reached the server, so
+                // it must never arm the 409 forgiveness below.
+                let credential = client.git_credential_for_project(&project_id).await?;
+                match client
+                    .create_repo_with_credential(
+                        &project_id,
+                        &name,
+                        Some("main"),
+                        Some(REPO_KIND_FILESYSTEM),
+                        &credential.git_username,
+                        &credential.token,
+                    )
+                    .await
+                {
+                    Ok(traced) => Ok(serde_json::to_string(&serde_json::json!({
+                        "trace_id": traced.trace_id,
+                        "default_branch": "main",
+                    }))?),
+                    // Forgive the conflict only when an earlier attempt may
+                    // have reached the server (timeout / gateway 5xx after
+                    // send): the 409 then means that attempt created it.
+                    // After connect failures the request was never
+                    // transmitted, so a 409 can only mean the repo
+                    // pre-existed — surface it.
+                    Err(SdkError::ServerError { status, .. })
+                        if maybe_executed.load(std::sync::atomic::Ordering::SeqCst)
+                            && status.as_u16() == 409 =>
+                    {
+                        // Even then, only accept the conflict as ours if the
+                        // existing repo really is a filesystem; a same-named
+                        // plain repository must stay an error, or later
+                        // writes would land in the wrong repo.
+                        let meta = client
+                            .repo_meta_with_credential(
+                                &project_id,
+                                &name,
+                                &credential.git_username,
+                                &credential.token,
+                            )
+                            .await?;
+                        if meta.is_filesystem() {
+                            // Report the adopted filesystem's real default
+                            // branch so the SDK handle never assumes "main".
+                            Ok(serde_json::to_string(&serde_json::json!({
+                                "trace_id": "",
+                                "default_branch": meta.default_branch,
+                            }))?)
+                        } else {
+                            Err(SdkError::ClientError(format!(
+                                "a non-filesystem repo named {name} already exists"
+                            )))
+                        }
+                    }
+                    Err(e) => {
+                        if request_may_have_executed(&e) {
+                            maybe_executed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        Err(e)
+                    }
+                }
+            }
+        })
+        .await
+    }
+
+    /// List every filesystem in the project (all pages, cache-fenced).
+    #[napi]
+    pub async fn list_filesystems(&self) -> napi::Result<TracedJson> {
+        let project_id = self.project_id()?.to_string();
+        with_retry(self.client.clone(), 5, move |client| {
+            let project_id = project_id.clone();
+            async move {
+                let traced = client
+                    .list_repos_of_kind(&project_id, Some(REPO_KIND_FILESYSTEM))
+                    .await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
+        })
+        .await
+    }
+
+    /// Point-read one filesystem's identity (name, status, kind, default branch).
+    #[napi]
+    pub async fn filesystem_meta(&self, name: String) -> napi::Result<TracedJson> {
+        let project_id = self.project_id()?.to_string();
+        with_retry(self.client.clone(), 5, move |client| {
+            let project_id = project_id.clone();
+            let name = name.clone();
+            async move {
+                // A project-scoped credential: repo-scoped mints can fail for a
+                // repo that does not exist, which would mask the 404 callers
+                // need to distinguish "no such filesystem".
+                let credential = client.git_credential_for_project(&project_id).await?;
+                let traced = client
+                    .repo_meta_with_credential(
+                        &project_id,
+                        &name,
+                        &credential.git_username,
+                        &credential.token,
+                    )
+                    .await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
+        })
+        .await
+    }
+
+    /// Delete a filesystem. Returns the trace id.
+    #[napi]
+    pub async fn delete_filesystem(&self, name: String) -> napi::Result<String> {
+        let project_id = self.project_id()?.to_string();
+        let maybe_executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        with_retry(self.client.clone(), 5, move |client| {
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let maybe_executed = maybe_executed.clone();
+            async move {
+                // Minted before the forgiveness-tracked call: a mint failure
+                // says nothing about whether a delete reached the server, so
+                // it must never arm the 404 forgiveness below.
+                let credential = client.git_credential_for_project(&project_id).await?;
+                match client
+                    .delete_repo_with_credential(
+                        &project_id,
+                        &name,
+                        &credential.git_username,
+                        &credential.token,
+                    )
+                    .await
+                {
+                    Ok(traced) => Ok(traced.trace_id),
+                    // Forgive the 404 only when an earlier attempt may have
+                    // reached the server (timeout / gateway 5xx after send):
+                    // the repo is then gone because that attempt deleted it.
+                    // After connect failures the request was never
+                    // transmitted, so the 404 means the filesystem never
+                    // existed — surface FilesystemNotFoundError.
+                    Err(SdkError::ServerError { status, .. })
+                        if maybe_executed.load(std::sync::atomic::Ordering::SeqCst)
+                            && status.as_u16() == 404 =>
+                    {
+                        Ok(String::new())
+                    }
+                    Err(e) => {
+                        if request_may_have_executed(&e) {
+                            maybe_executed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        Err(e)
+                    }
+                }
+            }
+        })
+        .await
+    }
+
+    /// One ref's head + movement generation for a filesystem branch.
+    #[napi]
+    pub async fn filesystem_ref_status(
+        &self,
+        name: String,
+        refspec: String,
+    ) -> napi::Result<TracedJson> {
+        let project_id = self.project_id()?.to_string();
+        with_retry(self.client.clone(), 5, move |client| {
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let refspec = refspec.clone();
+            async move {
+                let credential = client.git_credential_for_repo(&project_id, &name).await?;
+                let traced = client
+                    .ref_status(
+                        &project_id,
+                        &name,
+                        &credential.git_username,
+                        &credential.token,
+                        &refspec,
+                    )
+                    .await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
+        })
+        .await
+    }
+
+    /// Raw file bytes at `version` (branch, ref, or commit).
+    #[napi]
+    pub async fn read_filesystem_file(
+        &self,
+        name: String,
+        path: String,
+        version: String,
+    ) -> napi::Result<TracedBytes> {
+        let project_id = self.project_id()?.to_string();
+        with_retry(self.client.clone(), 5, move |client| {
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let path = path.clone();
+            let version = version.clone();
+            async move {
+                let credential = client.git_credential_for_repo(&project_id, &name).await?;
+                let traced = client
+                    .get_file_bytes(
+                        &project_id,
+                        &name,
+                        &credential.git_username,
+                        &credential.token,
+                        &version,
+                        &path,
+                    )
+                    .await?;
+                let trace_id = traced.trace_id.clone();
+                let data = Buffer::from(traced.into_inner());
+                Ok(TracedBytes { trace_id, data })
+            }
+        })
+        .await
+    }
+
+    /// One directory's full listing at `version` (all pages), as
+    /// `{"entries": [...]}`.
+    #[napi]
+    pub async fn list_filesystem_tree(
+        &self,
+        name: String,
+        dir_path: String,
+        version: String,
+    ) -> napi::Result<TracedJson> {
+        let project_id = self.project_id()?.to_string();
+        with_retry(self.client.clone(), 5, move |client| {
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let dir_path = dir_path.clone();
+            let version = version.clone();
+            async move {
+                let credential = client.git_credential_for_repo(&project_id, &name).await?;
+                let mut entries = Vec::new();
+                let mut after: Option<String> = None;
+                let mut seen = std::collections::HashSet::new();
+                let mut trace_id;
+                loop {
+                    let traced = client
+                        .list_tree_page(
+                            &project_id,
+                            &name,
+                            &credential.git_username,
+                            &credential.token,
+                            &version,
+                            &dir_path,
+                            after.as_deref(),
+                            1000,
+                        )
+                        .await?;
+                    trace_id = traced.trace_id.clone();
+                    let page = traced.into_inner();
+                    entries.extend(page.entries);
+                    if !page.truncated {
+                        break;
+                    }
+                    // A truncated page must carry a fresh cursor; anything else
+                    // would silently drop entries or loop forever.
+                    match page.next_after {
+                        Some(next) if !next.is_empty() && seen.insert(next.clone()) => {
+                            after = Some(next);
+                        }
+                        _ => {
+                            return Err(SdkError::ClientError(
+                                "directory listing truncated without a fresh pagination cursor"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+                let json = serde_json::to_string(&serde_json::json!({ "entries": entries }))?;
+                Ok(TracedJson { trace_id, json })
+            }
+        })
+        .await
+    }
+
+    /// Write `files` and delete `deletes` in one atomic commit on `branch`.
+    ///
+    /// `idempotency_key` must be stable for one logical write: it is what
+    /// makes a retried submit reattach to the same durable commit job.
+    #[napi]
+    pub async fn push_filesystem_files(
+        &self,
+        name: String,
+        files: Vec<FilesystemFileWrite>,
+        deletes: Vec<String>,
+        message: String,
+        branch: String,
+        idempotency_key: Option<String>,
+    ) -> napi::Result<TracedJson> {
+        let project_id = self.project_id()?.to_string();
+        // Single-shot on purpose: `push_files` already retries every step
+        // internally (idempotent chunk uploads, commit reattachment through
+        // the caller's stable idempotency key), and an outer whole-push retry
+        // would force a full deep clone of the payload per attempt.
+        let client = self.client.clone();
+        let result: Result<TracedJson, SdkError> = async move {
+            let credential = client.git_credential_for_repo(&project_id, &name).await?;
+            let push_files: Vec<PushFile> = files
+                .into_iter()
+                .map(|file| PushFile {
+                    repo_path: file.path,
+                    source: PushSource::Bytes(file.content.to_vec()),
+                    mode: None,
+                    delete: false,
+                })
+                .chain(deletes.into_iter().map(|repo_path| PushFile {
+                    repo_path,
+                    source: PushSource::Bytes(Vec::new()),
+                    mode: None,
+                    delete: true,
+                }))
+                .collect();
+            let opts = PushOptions {
+                branch,
+                message,
+                idempotency_key,
+                ..Default::default()
+            };
+            let traced = client
+                .push_files(
+                    &project_id,
+                    &name,
+                    &credential.git_username,
+                    &credential.token,
+                    push_files,
+                    opts,
+                )
+                .await?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced)?;
+            Ok(TracedJson { trace_id, json })
+        }
+        .await;
+        result.map_err(into_napi_error)
     }
 }

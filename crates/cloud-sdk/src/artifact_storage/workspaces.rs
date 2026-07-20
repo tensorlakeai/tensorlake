@@ -394,7 +394,7 @@ pub struct GitSmartlogPage {
 }
 
 /// One ref's head and movement generation — the poll target for branch/workspace following.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct RefStatus {
     pub ref_name: String,
     /// Raw ref target (hex); for annotated tags this is the tag-object oid. Absent when deleted.
@@ -408,14 +408,14 @@ pub struct RefStatus {
 }
 
 /// One directory page from the paged tree listing.
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TreePage {
     pub entries: Vec<TreeEntry>,
     pub truncated: bool,
     pub next_after: Option<String>,
 }
 
-#[derive(Clone, Debug, Deserialize)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct TreeEntry {
     pub name: String,
     pub oid: String,

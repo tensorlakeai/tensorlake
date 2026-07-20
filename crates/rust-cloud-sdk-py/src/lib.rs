@@ -21,8 +21,9 @@ use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tensorlake::artifact_storage::ArtifactStorageClient;
-use tensorlake::artifact_storage::ingest::PushOptions;
+use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
 use tensorlake::artifact_storage::merge::MergeRequest;
+use tensorlake::artifact_storage::models::REPO_KIND_FILESYSTEM;
 use tensorlake::document_ai::DocumentAiClient;
 use tensorlake::file_systems::FileSystemsClient;
 use tensorlake::file_systems::models::CreateFileSystemRequest;
@@ -53,6 +54,19 @@ const DEFAULT_HTTP_REQUEST_TIMEOUT_SEC: f64 = 300.0;
 // pyclass spawning its own.
 fn shared_runtime() -> &'static Runtime {
     pyo3_async_runtimes::tokio::get_runtime()
+}
+
+/// Whether a failed request may nonetheless have been processed server-side.
+/// True for timeouts and gateway 5xx (the request was sent; the response was
+/// lost or the gateway gave up), false for connect failures (the request was
+/// never transmitted). Gates the 409/404-on-retry forgiveness in the
+/// filesystem create/delete bindings.
+fn request_may_have_executed(err: &SdkError) -> bool {
+    match err {
+        SdkError::ServerError { status, .. } => status.is_server_error(),
+        SdkError::Http(e) => e.is_timeout(),
+        _ => false,
+    }
 }
 
 #[pyclass]
@@ -574,6 +588,378 @@ impl CloudApiClient {
                 serde_json::to_string(&*traced).map_err(SdkError::from)
             }
         })
+    }
+
+    /// Create a filesystem (an artifact-storage repo of kind "filesystem").
+    ///
+    /// Returns JSON `{"trace_id", "default_branch"}` — the effective default
+    /// branch differs from "main" only when a lost-response retry adopted a
+    /// pre-existing filesystem.
+    fn create_filesystem(&self, project_id: String, name: String) -> PyResult<String> {
+        let maybe_executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let maybe_executed = maybe_executed.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                // Minted before the forgiveness-tracked call: a mint failure
+                // says nothing about whether a create reached the server, so
+                // it must never arm the 409 forgiveness below.
+                let credential = client.git_credential_for_project(&project_id).await?;
+                match client
+                    .create_repo_with_credential(
+                        &project_id,
+                        &name,
+                        Some("main"),
+                        Some(REPO_KIND_FILESYSTEM),
+                        &credential.git_username,
+                        &credential.token,
+                    )
+                    .await
+                {
+                    Ok(traced) => serde_json::to_string(&serde_json::json!({
+                        "trace_id": traced.trace_id,
+                        "default_branch": "main",
+                    }))
+                    .map_err(SdkError::from),
+                    // Forgive the conflict only when an earlier attempt may
+                    // have reached the server (timeout / gateway 5xx after
+                    // send): the 409 then means that attempt created it.
+                    // After connect failures the request was never
+                    // transmitted, so a 409 can only mean the repo
+                    // pre-existed — surface it.
+                    Err(SdkError::ServerError { status, .. })
+                        if maybe_executed.load(std::sync::atomic::Ordering::SeqCst)
+                            && status.as_u16() == 409 =>
+                    {
+                        // Even then, only accept the conflict as ours if the
+                        // existing repo really is a filesystem; a same-named
+                        // plain repository must stay an error, or later
+                        // writes would land in the wrong repo.
+                        let meta = client
+                            .repo_meta_with_credential(
+                                &project_id,
+                                &name,
+                                &credential.git_username,
+                                &credential.token,
+                            )
+                            .await?;
+                        if meta.is_filesystem() {
+                            // Report the adopted filesystem's real default
+                            // branch so the SDK handle never assumes "main".
+                            serde_json::to_string(&serde_json::json!({
+                                "trace_id": "",
+                                "default_branch": meta.default_branch,
+                            }))
+                            .map_err(SdkError::from)
+                        } else {
+                            Err(SdkError::ClientError(format!(
+                                "a non-filesystem repo named {name} already exists"
+                            )))
+                        }
+                    }
+                    Err(e) => {
+                        if request_may_have_executed(&e) {
+                            maybe_executed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        Err(e)
+                    }
+                }
+            }
+        })
+    }
+
+    /// List every filesystem in the project (all pages, cache-fenced).
+    fn list_filesystems(&self, project_id: String) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client
+                    .list_repos_of_kind(&project_id, Some(REPO_KIND_FILESYSTEM))
+                    .await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    /// Point-read one filesystem's identity (name, status, kind, default branch).
+    fn filesystem_meta(&self, project_id: String, name: String) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let name = name.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                // A project-scoped credential: repo-scoped mints can fail for a
+                // repo that does not exist, which would mask the 404 callers
+                // need to distinguish "no such filesystem".
+                let credential = client.git_credential_for_project(&project_id).await?;
+                let traced = client
+                    .repo_meta_with_credential(
+                        &project_id,
+                        &name,
+                        &credential.git_username,
+                        &credential.token,
+                    )
+                    .await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn delete_filesystem(&self, project_id: String, name: String) -> PyResult<String> {
+        let maybe_executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let maybe_executed = maybe_executed.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                // Minted before the forgiveness-tracked call: a mint failure
+                // says nothing about whether a delete reached the server, so
+                // it must never arm the 404 forgiveness below.
+                let credential = client.git_credential_for_project(&project_id).await?;
+                match client
+                    .delete_repo_with_credential(
+                        &project_id,
+                        &name,
+                        &credential.git_username,
+                        &credential.token,
+                    )
+                    .await
+                {
+                    Ok(traced) => Ok(traced.trace_id),
+                    // Forgive the 404 only when an earlier attempt may have
+                    // reached the server (timeout / gateway 5xx after send):
+                    // the repo is then gone because that attempt deleted it.
+                    // After connect failures the request was never
+                    // transmitted, so the 404 means the filesystem never
+                    // existed — surface FilesystemNotFoundError.
+                    Err(SdkError::ServerError { status, .. })
+                        if maybe_executed.load(std::sync::atomic::Ordering::SeqCst)
+                            && status.as_u16() == 404 =>
+                    {
+                        Ok(String::new())
+                    }
+                    Err(e) => {
+                        if request_may_have_executed(&e) {
+                            maybe_executed.store(true, std::sync::atomic::Ordering::SeqCst);
+                        }
+                        Err(e)
+                    }
+                }
+            }
+        })
+    }
+
+    /// One ref's head + movement generation for a filesystem branch.
+    fn filesystem_ref_status(
+        &self,
+        project_id: String,
+        name: String,
+        refspec: String,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let refspec = refspec.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let credential = client.git_credential_for_repo(&project_id, &name).await?;
+                let traced = client
+                    .ref_status(
+                        &project_id,
+                        &name,
+                        &credential.git_username,
+                        &credential.token,
+                        &refspec,
+                    )
+                    .await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    /// Raw file bytes at `version` (branch, ref, or commit).
+    fn read_filesystem_file(
+        &self,
+        project_id: String,
+        name: String,
+        path: String,
+        version: String,
+    ) -> PyResult<Vec<u8>> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let path = path.clone();
+            let version = version.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let credential = client.git_credential_for_repo(&project_id, &name).await?;
+                let traced = client
+                    .get_file_bytes(
+                        &project_id,
+                        &name,
+                        &credential.git_username,
+                        &credential.token,
+                        &version,
+                        &path,
+                    )
+                    .await?;
+                Ok(traced.into_inner())
+            }
+        })
+    }
+
+    /// One directory's full listing at `version` (all pages), as
+    /// `{"entries": [...]}`.
+    fn list_filesystem_tree(
+        &self,
+        project_id: String,
+        name: String,
+        dir_path: String,
+        version: String,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let dir_path = dir_path.clone();
+            let version = version.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let credential = client.git_credential_for_repo(&project_id, &name).await?;
+                let mut entries = Vec::new();
+                let mut after: Option<String> = None;
+                let mut seen = std::collections::HashSet::new();
+                loop {
+                    let page = client
+                        .list_tree_page(
+                            &project_id,
+                            &name,
+                            &credential.git_username,
+                            &credential.token,
+                            &version,
+                            &dir_path,
+                            after.as_deref(),
+                            1000,
+                        )
+                        .await?
+                        .into_inner();
+                    entries.extend(page.entries);
+                    if !page.truncated {
+                        break;
+                    }
+                    // A truncated page must carry a fresh cursor; anything else
+                    // would silently drop entries or loop forever.
+                    match page.next_after {
+                        Some(next) if !next.is_empty() && seen.insert(next.clone()) => {
+                            after = Some(next);
+                        }
+                        _ => {
+                            return Err(SdkError::ClientError(
+                                "directory listing truncated without a fresh pagination cursor"
+                                    .to_string(),
+                            ));
+                        }
+                    }
+                }
+                serde_json::to_string(&serde_json::json!({ "entries": entries }))
+                    .map_err(SdkError::from)
+            }
+        })
+    }
+
+    /// Write `files` and delete `deletes` in one atomic commit on `branch`.
+    ///
+    /// `idempotency_key` must be stable for one logical write: it is what
+    /// makes a retried submit reattach to the same durable commit job.
+    #[pyo3(signature = (project_id, name, files, deletes, message, branch, idempotency_key=None))]
+    fn push_filesystem_files(
+        &self,
+        project_id: String,
+        name: String,
+        files: Vec<(String, Vec<u8>)>,
+        deletes: Vec<String>,
+        message: String,
+        branch: String,
+        idempotency_key: Option<String>,
+    ) -> PyResult<String> {
+        // Single-shot on purpose: `push_files` already retries every step
+        // internally (idempotent chunk uploads, commit reattachment through
+        // the caller's stable idempotency key), and an outer whole-push retry
+        // would force a full deep clone of the payload per attempt.
+        let api_client = self.client.clone();
+        let api_url = self.api_url.clone();
+        shared_runtime()
+            .block_on(async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let credential = client.git_credential_for_repo(&project_id, &name).await?;
+                let push_files: Vec<PushFile> = files
+                    .into_iter()
+                    .map(|(repo_path, data)| PushFile {
+                        repo_path,
+                        source: PushSource::Bytes(data),
+                        mode: None,
+                        delete: false,
+                    })
+                    .chain(deletes.into_iter().map(|repo_path| PushFile {
+                        repo_path,
+                        source: PushSource::Bytes(Vec::new()),
+                        mode: None,
+                        delete: true,
+                    }))
+                    .collect();
+                let opts = PushOptions {
+                    branch,
+                    message,
+                    idempotency_key,
+                    ..Default::default()
+                };
+                let traced = client
+                    .push_files(
+                        &project_id,
+                        &name,
+                        &credential.git_username,
+                        &credential.token,
+                        push_files,
+                        opts,
+                    )
+                    .await?;
+                serde_json::to_string(&*traced).map_err(SdkError::from)
+            })
+            .map_err(into_py_error)
     }
 
     #[pyo3(signature = (project_id, repo, ours, theirs, preflight=false, deep=false, materialize=false, message=None, base=None))]

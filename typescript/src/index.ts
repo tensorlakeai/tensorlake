@@ -19,6 +19,27 @@ export {
   listFileSystems,
   deleteFileSystem,
 } from "./file-system.js";
+export {
+  FilesystemClient,
+  Filesystem,
+  FilesystemMount,
+} from "./filesystem.js";
+export type { FilesystemClientOptions } from "./filesystem.js";
+export {
+  FilesystemError,
+  FilesystemNotFoundError,
+  FileNotFoundInFilesystemError,
+  FilesystemAPIError,
+  MountError,
+  CliNotFoundError,
+} from "./filesystem-models.js";
+export type {
+  FilesystemInfo,
+  FilesystemStatus,
+  FileEntry,
+  Snapshot,
+  MountStatus,
+} from "./filesystem-models.js";
 export { Image, dockerfileContent, ImageBuildOperationType } from "./image.js";
 export { sandboxUrlFromIngressEndpoint } from "./url.js";
 
