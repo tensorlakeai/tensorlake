@@ -10,7 +10,7 @@ from tensorlake.applications.internal_logger import InternalLogger
 
 from ..proto.function_executor_pb2 import (
     BLOB,
-    AllocationOutputBLOB,
+    AllocationOutputBlob,
 )
 from .allocation_state_wrapper import AllocationStateWrapper
 
@@ -18,7 +18,7 @@ from .allocation_state_wrapper import AllocationStateWrapper
 @dataclass
 class _OutputBLOBRequestInfo:
     # Not None once the BLOB is ready to be used.
-    blob: AllocationOutputBLOB | None
+    blob: AllocationOutputBlob | None
     # Set only once after the BLOB is set.
     blob_available: threading.Event
 
@@ -34,7 +34,7 @@ class AllocationBLOBManager:
         # BLOB ID -> _OutputBLOBRequestInfo.
         self._output_blob_requests: dict[str, _OutputBLOBRequestInfo] = {}
 
-    def deliver_output_blob(self, output_blob: AllocationOutputBLOB) -> None:
+    def deliver_output_blob(self, output_blob: AllocationOutputBlob) -> None:
         """Delivers an output blob response to the pending get_new_output_blob() call.
 
         No need for any locks because we never block here so we hold the CPython GIL non stop.
@@ -70,7 +70,7 @@ class AllocationBLOBManager:
         self._allocation_state.remove_output_blob_request(id=blob_id)
         del self._output_blob_requests[blob_id]
 
-        blob: AllocationOutputBLOB = blob_request_info.blob
+        blob: AllocationOutputBlob = blob_request_info.blob
         if blob.status.code != grpc.StatusCode.OK.value[0]:
             self._logger.error(
                 "received output blob with error status",

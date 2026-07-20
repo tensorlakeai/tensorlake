@@ -36,23 +36,25 @@ install-global:
 	@echo "  fish: fish_add_path ~/.local/bin"
 	@echo "  bash/zsh: export PATH=\"\$$HOME/.local/bin:\$$PATH\""
 
-# .proto file and generated Python files have to be in the same directory.
-# See known issue https://github.com/grpc/grpc/issues/29459.
-PROTO_DIR_PATH_INSIDE_PACKAGE=tensorlake/function_executor/proto
-PROTO_DIR_PATH=src/${PROTO_DIR_INSIDE_PACKAGE}
+# Function Executor protocol sources are shared by the Python and TypeScript
+# runtimes. Python bindings remain generated inside the Python package.
+PROTO_SOURCE_ROOT=proto
+PROTO_PACKAGE_PATH=tensorlake/function_executor/proto
+PROTO_SOURCE_DIR=${PROTO_SOURCE_ROOT}/${PROTO_PACKAGE_PATH}
+PROTO_GENERATED_DIR=src/${PROTO_PACKAGE_PATH}
 
 build_proto:
 	@poetry install
-	@cd src && poetry run python -m grpc_tools.protoc \
-		--proto_path=. \
-		--python_out=. \
-		--pyi_out=. \
-		--grpc_python_out=. \
-		${PROTO_DIR_PATH_INSIDE_PACKAGE}/status.proto \
-		${PROTO_DIR_PATH_INSIDE_PACKAGE}/function_executor.proto
+	@poetry run python -m grpc_tools.protoc \
+		--proto_path=${PROTO_SOURCE_ROOT} \
+		--python_out=src \
+		--pyi_out=src \
+		--grpc_python_out=src \
+		${PROTO_SOURCE_DIR}/status.proto \
+		${PROTO_SOURCE_DIR}/function_executor.proto
 	@#The generated proto files don't pass linter checks and need to get reformatted.
-	@poetry run black ${PROTO_DIR_PATH}
-	@poetry run isort ${PROTO_DIR_PATH} --profile black
+	@poetry run black ${PROTO_GENERATED_DIR}
+	@poetry run isort ${PROTO_GENERATED_DIR} --profile black
 
 # Build the Rust Cloud SDK PyO3 extension and install it as tensorlake._cloud_sdk
 build_cloud_sdk:
