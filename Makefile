@@ -81,6 +81,13 @@ test_sandbox:
 	@$(MAKE) build_cloud_sdk
 	cd tests/sandbox && poetry run python test_lifecycle.py -v
 
+# Launches both real function executors and drives the shared gRPC allocation
+# parity matrix through bindings generated from the shared protocol source.
+test_function_executor_compatibility:
+	@npm --prefix typescript run check:proto
+	@npm --prefix typescript run build:sdk
+	@PYTHONPATH=src poetry run python tests/function_executor_compatibility/run.py
+
 # Replicates the PyPI publish workflow locally: builds the tensorlake wheel with
 # the _cloud_sdk Rust extension, then installs into a temporary venv and verifies
 # imports and package scripts — all without touching PyPI.
@@ -96,7 +103,7 @@ bump_version:
 	@test -n "$(VERSION)" || (echo "Usage: make bump_version VERSION=x.y.z" && exit 1)
 	@python3 .github/scripts/bump_version.py "$(VERSION)"
 
-.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
+.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox test_function_executor_compatibility install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
 
 # POSIX conformance for `tl fs mount` (Linux + FUSE + working credentials). Runs the ported
 # issue-#24 battery against a real mounted workspace, in fresh and snapshot-reattached phases.
