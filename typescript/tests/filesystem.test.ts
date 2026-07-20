@@ -17,6 +17,7 @@ import {
   FilesystemNotFoundError,
   fileEntryFromWire,
   mountStatusFromRaw,
+  trimSlashes,
 } from "../src/filesystem-models.js";
 import type {
   NativeRepositoryClient,
@@ -175,6 +176,14 @@ describe("filesystem models", () => {
     const file = fileEntryFromWire({ name: "f", mode: 0o100644, size: 3 }, "");
     expect(file.isDir).toBe(false);
     expect(file.path).toBe("f");
+  });
+
+  it("trims slashes in linear time with Python strip('/') semantics", () => {
+    expect(trimSlashes("/a/b/")).toBe("a/b");
+    expect(trimSlashes("///a//b///")).toBe("a//b");
+    expect(trimSlashes("////")).toBe("");
+    expect(trimSlashes("")).toBe("");
+    expect(trimSlashes("a")).toBe("a");
   });
 
   it("maps mount status with Python-parity semantics", () => {

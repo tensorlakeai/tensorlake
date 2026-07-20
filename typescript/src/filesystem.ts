@@ -38,6 +38,7 @@ import {
   MountError,
   fileEntryFromWire,
   mountStatusFromRaw,
+  trimSlashes,
   type FileEntry,
   type FilesystemInfo,
   type FilesystemStatus,
@@ -518,7 +519,7 @@ export class Filesystem {
    * defaults to the filesystem's default branch).
    */
   async readFile(path: string, version?: string): Promise<Uint8Array> {
-    if (path.replace(/^\/+|\/+$/g, "") === "") {
+    if (trimSlashes(path) === "") {
       throw new FilesystemError("file path must not be empty");
     }
     const resolvedVersion = version || (await this.branch());

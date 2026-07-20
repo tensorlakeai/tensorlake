@@ -4,6 +4,18 @@
 const GIT_MODE_DIR = 0o40000;
 const GIT_MODE_SYMLINK = 0o120000;
 
+/**
+ * Strip leading/trailing '/' in linear time (the regex equivalent
+ * `/^\/+|\/+$/g` backtracks polynomially on adversarial many-slash input).
+ */
+export function trimSlashes(path: string): string {
+  let start = 0;
+  let end = path.length;
+  while (start < end && path.charCodeAt(start) === 0x2f) start += 1;
+  while (end > start && path.charCodeAt(end - 1) === 0x2f) end -= 1;
+  return path.slice(start, end);
+}
+
 /** One filesystem as returned by listing/point-read endpoints. */
 export interface FilesystemInfo {
   name: string;
@@ -47,7 +59,7 @@ export function fileEntryFromWire(
   dirPath: string,
 ): FileEntry {
   const mode = entry.mode ?? 0o100644;
-  const prefix = dirPath.replace(/^\/+|\/+$/g, "");
+  const prefix = trimSlashes(dirPath);
   return {
     name: entry.name,
     path: prefix ? `${prefix}/${entry.name}` : entry.name,
