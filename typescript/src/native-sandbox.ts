@@ -164,6 +164,29 @@ export interface NativeRepositoryClient {
     base?: string | null,
   ): Promise<TracedJson>;
   commitConflicts(repo: string, commit: string): Promise<TracedJson>;
+  createFilesystem(name: string): Promise<string>;
+  listFilesystems(): Promise<TracedJson>;
+  filesystemMeta(name: string): Promise<TracedJson>;
+  deleteFilesystem(name: string): Promise<string>;
+  filesystemRefStatus(name: string, refspec: string): Promise<TracedJson>;
+  readFilesystemFile(
+    name: string,
+    path: string,
+    version: string,
+  ): Promise<TracedBytes>;
+  listFilesystemTree(
+    name: string,
+    dirPath: string,
+    version: string,
+  ): Promise<TracedJson>;
+  pushFilesystemFiles(
+    name: string,
+    files: Array<{ path: string; content: Buffer }>,
+    deletes: string[],
+    message: string,
+    branch: string,
+    idempotencyKey?: string | null,
+  ): Promise<TracedJson>;
 }
 
 interface NativeSandboxClientCtor {
