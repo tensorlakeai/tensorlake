@@ -112,7 +112,7 @@ enum Commands {
     /// Deploy applications to Tensorlake Cloud
     #[command(hide = true)]
     Deploy {
-        /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
+        /// Deployment arguments; TypeScript ESM applications are bundled directly by tl
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -927,7 +927,7 @@ enum AppCommands {
 
     /// Deploy applications to Tensorlake Cloud
     Deploy {
-        /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
+        /// Deployment arguments; TypeScript ESM applications are bundled directly by tl
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },

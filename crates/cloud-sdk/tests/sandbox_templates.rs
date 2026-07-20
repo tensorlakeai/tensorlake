@@ -168,6 +168,7 @@ async fn test_create_then_delete_sandbox_image() {
                 dockerfile_path,
                 dockerfile_text: None,
                 context_dir: None,
+                context_files: Vec::new(),
             },
             |_| {},
         )

@@ -140,6 +140,7 @@ pub async fn build_sandbox_image(
         dockerfile_path: PathBuf::from(options.dockerfile_path),
         dockerfile_text: options.dockerfile_text,
         context_dir: options.context_dir.map(PathBuf::from),
+        context_files: Vec::new(),
     };
 
     let result = rust_build_sandbox_image(build_options, move |event| {
