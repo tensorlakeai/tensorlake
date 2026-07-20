@@ -1,0 +1,343 @@
+import { createHash } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
+import { fileURLToPath } from "node:url";
+import { File } from "../applications/file.js";
+import { deserializeJSON, serializeValue } from "../applications/serialization.js";
+
+export interface BlobChunk {
+  uri?: string;
+  size?: number;
+  etag?: string;
+}
+
+export interface BlobValue {
+  id?: string;
+  chunks?: BlobChunk[];
+}
+
+export interface SerializedObjectManifestValue {
+  encoding?: string | number;
+  encodingVersion?: number;
+  size?: number;
+  metadataSize?: number;
+  sha256Hash?: string;
+  contentType?: string;
+  sourceFunctionCallId?: string;
+}
+
+export interface SerializedObjectInsideBlobValue {
+  manifest?: SerializedObjectManifestValue;
+  offset?: number;
+}
+
+export interface PreparedSerializedObject {
+  object: SerializedObjectInsideBlobValue;
+  bytes: Uint8Array;
+}
+
+export type BlobLog = (message: string, fields?: Record<string, unknown>) => void;
+
+function enumIs(value: string | number | undefined, name: string, numberValue: number): boolean {
+  return value === name || value === numberValue;
+}
+
+function concatenate(parts: Uint8Array[]): Uint8Array {
+  const result = new Uint8Array(parts.reduce((total, part) => total + part.byteLength, 0));
+  let offset = 0;
+  for (const part of parts) {
+    result.set(part, offset);
+    offset += part.byteLength;
+  }
+  return result;
+}
+
+function networkURI(uri: string): string {
+  if (uri.startsWith("s3://")) return `https://${uri.slice("s3://".length)}`;
+  if (uri.startsWith("gs://")) return `https://${uri.slice("gs://".length)}`;
+  return uri;
+}
+
+class BlobHTTPError extends Error {
+  constructor(readonly status: number) {
+    super(`BLOB operation failed with HTTP ${status}`);
+  }
+}
+
+function uriKind(uri: string): string {
+  if (uri.startsWith("file://")) return "file";
+  if (uri.startsWith("s3://")) return "s3";
+  if (uri.startsWith("gs://")) return "gcs";
+  try {
+    return new URL(uri).protocol.replace(":", "") || "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
+async function fetchWithRetries(
+  uri: string,
+  init?: RequestInit,
+  log?: BlobLog,
+  fields: Record<string, unknown> = {},
+): Promise<Response> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    const startedAt = Date.now();
+    log?.("HTTP attempt starting", {
+      ...fields,
+      attempt: attempt + 1,
+      method: init?.method ?? "GET",
+      uri_kind: uriKind(uri),
+      has_range: new Headers(init?.headers).has("range"),
+    });
+    try {
+      const response = await fetch(networkURI(uri), init);
+      log?.("HTTP attempt completed", {
+        ...fields,
+        attempt: attempt + 1,
+        method: init?.method ?? "GET",
+        status_code: response.status,
+        duration_ms: Date.now() - startedAt,
+      });
+      if (response.ok) return response;
+      if ([400, 403, 404].includes(response.status) || attempt === 3) {
+        throw new BlobHTTPError(response.status);
+      }
+      lastError = new BlobHTTPError(response.status);
+    } catch (error) {
+      log?.("HTTP attempt failed", {
+        ...fields,
+        attempt: attempt + 1,
+        method: init?.method ?? "GET",
+        duration_ms: Date.now() - startedAt,
+        error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+      });
+      if (error instanceof BlobHTTPError && [400, 403, 404].includes(error.status)) throw error;
+      lastError = error;
+      if (attempt === 3) break;
+    }
+    const retryDelayMs = 100 * (2 ** attempt);
+    log?.("HTTP attempt scheduled for retry", {
+      ...fields,
+      next_attempt: attempt + 2,
+      retry_delay_ms: retryDelayMs,
+    });
+    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+  }
+  throw new Error("BLOB operation failed after retries", { cause: lastError });
+}
+
+async function readChunk(
+  chunk: BlobChunk,
+  index: number,
+  offset: number,
+  sharedURI: boolean,
+  log?: BlobLog,
+): Promise<Uint8Array> {
+  if (!chunk.uri) throw new Error("BLOB chunk has no URI");
+  const declaredSize = chunk.size ?? 0;
+  const fields = {
+    chunk_index: index,
+    chunk_offset: offset,
+    chunk_bytes: declaredSize,
+    uri_kind: uriKind(chunk.uri),
+    shared_uri: sharedURI,
+  };
+  const startedAt = Date.now();
+  log?.("download chunk starting", fields);
+  if (chunk.uri.startsWith("file://")) {
+    const file = new Uint8Array(await readFile(fileURLToPath(chunk.uri)));
+    const data = sharedURI ? file.subarray(offset, offset + declaredSize) : file;
+    log?.("download chunk completed", {
+      ...fields,
+      downloaded_bytes: data.byteLength,
+      duration_ms: Date.now() - startedAt,
+    });
+    return data;
+  }
+  const headers = sharedURI && declaredSize > 0
+    ? { range: `bytes=${offset}-${offset + declaredSize - 1}` }
+    : undefined;
+  const response = await fetchWithRetries(chunk.uri, { headers }, log, fields);
+  let data = new Uint8Array(await response.arrayBuffer());
+  // A server may ignore Range and return the complete object with HTTP 200.
+  if (sharedURI && response.status === 200) data = data.subarray(offset, offset + declaredSize);
+  log?.("download chunk completed", {
+    ...fields,
+    status_code: response.status,
+    downloaded_bytes: data.byteLength,
+    duration_ms: Date.now() - startedAt,
+  });
+  return data;
+}
+
+export async function downloadBlob(blob: BlobValue, log?: BlobLog): Promise<Uint8Array> {
+  const chunks = blob.chunks ?? [];
+  const uriCounts = new Map<string, number>();
+  for (const chunk of chunks) {
+    if (chunk.uri != null) uriCounts.set(chunk.uri, (uriCounts.get(chunk.uri) ?? 0) + 1);
+  }
+  let offset = 0;
+  const reads = chunks.map((chunk, index) => {
+    const chunkOffset = offset;
+    offset += chunk.size ?? 0;
+    return readChunk(chunk, index, chunkOffset, (uriCounts.get(chunk.uri ?? "") ?? 0) > 1, log);
+  });
+  const data = concatenate(await Promise.all(reads));
+  log?.("download blob completed", {
+    blob_id: blob.id,
+    chunk_count: chunks.length,
+    downloaded_bytes: data.byteLength,
+  });
+  return data;
+}
+
+export async function downloadSerializedObject(
+  object: SerializedObjectInsideBlobValue,
+  blob: BlobValue,
+  log?: BlobLog,
+): Promise<{ data: Uint8Array; metadata: Uint8Array; contentType?: string; encoding?: string | number }> {
+  const manifest = object.manifest;
+  if (manifest?.size == null || manifest.metadataSize == null) {
+    throw new Error("Serialized object manifest is missing size or metadata_size");
+  }
+  const all = await downloadBlob(blob, log);
+  const start = object.offset ?? 0;
+  const bytes = all.subarray(start, start + manifest.size);
+  if (bytes.byteLength !== manifest.size) throw new Error("BLOB does not contain the complete serialized object");
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  if (manifest.sha256Hash != null && hash !== manifest.sha256Hash) {
+    throw new Error(`Serialized object hash mismatch: expected ${manifest.sha256Hash}, got ${hash}`);
+  }
+  return {
+    metadata: bytes.subarray(0, manifest.metadataSize),
+    data: bytes.subarray(manifest.metadataSize),
+    contentType: manifest.contentType,
+    encoding: manifest.encoding,
+  };
+}
+
+export function deserializeValueFromProtocol(
+  value: { data: Uint8Array; contentType?: string; encoding?: string | number },
+): unknown {
+  if (enumIs(value.encoding, "SERIALIZED_OBJECT_ENCODING_RAW", 5)) {
+    if ((value.contentType ?? "").toLowerCase().includes("json")) return deserializeJSON(value.data);
+    return new File(value.data, value.contentType ?? "application/octet-stream");
+  }
+  if (enumIs(value.encoding, "SERIALIZED_OBJECT_ENCODING_UTF8_TEXT", 2)) {
+    return new TextDecoder("utf-8", { fatal: true }).decode(value.data);
+  }
+  if (
+    enumIs(value.encoding, "SERIALIZED_OBJECT_ENCODING_UTF8_JSON", 1) ||
+    value.contentType?.toLowerCase().includes("json")
+  ) {
+    return deserializeJSON(value.data);
+  }
+  throw new Error(`Unsupported serialized object encoding '${String(value.encoding)}'`);
+}
+
+export function prepareSerializedObject(
+  value: unknown,
+  offset = 0,
+  sourceFunctionCallId?: string,
+): PreparedSerializedObject {
+  const serialized = serializeValue(value);
+  const metadata = new TextEncoder().encode(JSON.stringify({
+    format: "tensorlake.typescript.value.v1",
+  }));
+  const bytes = concatenate([metadata, serialized.data]);
+  return {
+    bytes,
+    object: {
+      offset,
+      manifest: {
+        encoding: serialized.encoding === "json"
+          ? "SERIALIZED_OBJECT_ENCODING_UTF8_JSON"
+          : "SERIALIZED_OBJECT_ENCODING_RAW",
+        encodingVersion: 0,
+        size: bytes.byteLength,
+        metadataSize: metadata.byteLength,
+        sha256Hash: createHash("sha256").update(bytes).digest("hex"),
+        contentType: serialized.contentType,
+        sourceFunctionCallId,
+      },
+    },
+  };
+}
+
+export function prepareTextObject(value: string): PreparedSerializedObject {
+  const bytes = new TextEncoder().encode(value);
+  return {
+    bytes,
+    object: {
+      offset: 0,
+      manifest: {
+        encoding: "SERIALIZED_OBJECT_ENCODING_UTF8_TEXT",
+        encodingVersion: 0,
+        size: bytes.byteLength,
+        metadataSize: 0,
+        sha256Hash: createHash("sha256").update(bytes).digest("hex"),
+      },
+    },
+  };
+}
+
+async function uploadChunk(chunk: BlobChunk, data: Uint8Array, index: number, log?: BlobLog): Promise<BlobChunk> {
+  if (!chunk.uri) throw new Error("Writable BLOB chunk has no URI");
+  const fields = {
+    chunk_index: index,
+    upload_bytes: data.byteLength,
+    chunk_capacity: chunk.size ?? 0,
+    uri_kind: uriKind(chunk.uri),
+  };
+  const startedAt = Date.now();
+  log?.("upload chunk starting", fields);
+  if (chunk.uri.startsWith("file://")) {
+    await writeFile(fileURLToPath(chunk.uri), data);
+    log?.("upload chunk completed", { ...fields, duration_ms: Date.now() - startedAt });
+    return { ...chunk };
+  }
+  const response = await fetchWithRetries(chunk.uri, {
+    method: "PUT",
+    ...(data.byteLength === 0 ? {} : {
+      body: Uint8Array.from(data).buffer,
+      headers: { "content-length": String(data.byteLength) },
+    }),
+  }, log, fields);
+  const uploaded = { ...chunk, etag: response.headers.get("etag") ?? undefined };
+  log?.("upload chunk completed", {
+    ...fields,
+    status_code: response.status,
+    has_etag: uploaded.etag != null,
+    duration_ms: Date.now() - startedAt,
+  });
+  return uploaded;
+}
+
+export async function uploadBlob(blob: BlobValue, data: Uint8Array, log?: BlobLog): Promise<BlobValue> {
+  const chunks = blob.chunks ?? [];
+  const capacity = chunks.reduce((total, chunk) => total + (chunk.size ?? 0), 0);
+  if (data.byteLength > capacity) throw new Error(`BLOB capacity ${capacity} is smaller than ${data.byteLength}`);
+  let offset = 0;
+  const uploaded: BlobChunk[] = [];
+  for (const [index, chunk] of chunks.entries()) {
+    const size = Math.min(chunk.size ?? 0, data.byteLength - offset);
+    if (size <= 0) break;
+    uploaded.push(await uploadChunk(chunk, data.subarray(offset, offset + size), index, log));
+    offset += size;
+  }
+  if (data.byteLength === 0 && chunks.length > 0) {
+    uploaded.push(await uploadChunk(chunks[0], data, 0, log));
+  }
+  if (offset !== data.byteLength) throw new Error(`Only uploaded ${offset} of ${data.byteLength} bytes`);
+  log?.("upload blob completed", {
+    blob_id: blob.id,
+    chunk_count: uploaded.length,
+    uploaded_bytes: data.byteLength,
+  });
+  return { ...blob, chunks: uploaded };
+}
+
+export function joinPrepared(values: PreparedSerializedObject[]): Uint8Array {
+  return concatenate(values.map((value) => value.bytes));
+}

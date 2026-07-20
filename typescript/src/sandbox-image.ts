@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import path from "node:path";
 import os from "node:os";
 import { existsSync, mkdtempSync, rmSync } from "node:fs";
@@ -7,6 +6,7 @@ import { CloudClient } from "./cloud-client.js";
 import type { SandboxTemplate } from "./cloud-models.js";
 import { Image, ImageBuildOperationType, dockerfileContent } from "./image.js";
 import type { ImageBuildOperation } from "./image.js";
+import { loadNative } from "./native-binding.js";
 
 /**
  * Sandbox-image build engine.
@@ -126,43 +126,14 @@ interface NativeBinding {
   ): Promise<string>;
 }
 
-// `require` exists in the CJS bundle but not in ESM; declared here so the
-// runtime check below typechecks under "module": "esnext".
-declare const require: NodeRequire | undefined;
-declare const module: { exports?: unknown } | undefined;
-
 let cachedNativeBinding: NativeBinding | undefined;
 let cachedNativeBindingError: Error | undefined;
-
-function resolveRequire(): NodeRequire {
-  // tsup rewrites `import.meta.url` to `import_meta.url` (where
-  // `import_meta = {}`) in the CJS output, so `createRequire(import.meta.url)`
-  // throws if called at all in CJS. CJS bundles get the real `require`
-  // injected at runtime; prefer it. ESM bundles fall back to the createRequire
-  // path, which only runs when `import.meta.url` is a real file URL.
-  if (
-    typeof module !== "undefined" &&
-    module.exports != null &&
-    typeof require !== "undefined"
-  ) {
-    return require;
-  }
-  return createRequire(import.meta.url);
-}
 
 function loadNativeBinding(): NativeBinding {
   if (cachedNativeBinding) return cachedNativeBinding;
   if (cachedNativeBindingError) throw cachedNativeBindingError;
   try {
-    // The native binding is staged per-platform under
-    // `typescript/dist/native/<triple>/tensorlake-node.node`. Loading goes
-    // through the same helper the CLI binaries use so platform detection
-    // stays in one place (`typescript/lib/runtime.cjs`). Deferred require so
-    // the CJS bundle doesn't trip the `import.meta.url` → undefined fallback.
-    const { loadNative } = resolveRequire()("../lib/runtime.cjs") as {
-      loadNative: () => NativeBinding;
-    };
-    cachedNativeBinding = loadNative();
+    cachedNativeBinding = loadNative<NativeBinding>();
     return cachedNativeBinding;
   } catch (error) {
     cachedNativeBindingError =

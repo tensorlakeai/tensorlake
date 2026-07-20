@@ -46,6 +46,25 @@ export type {
 } from "./filesystem-models.js";
 export { Image, dockerfileContent, ImageBuildOperationType } from "./image.js";
 export { sandboxUrlFromIngressEndpoint } from "./url.js";
+export {
+  registerApplication,
+  registerFunction,
+  retries,
+  schema,
+  File,
+  RequestContext,
+  Future,
+  runLocal,
+  runRemote,
+} from "./applications/index.js";
+export type {
+  ApplicationOptions,
+  FunctionOptions,
+  RegisteredFunction,
+  Schema,
+  Parameter,
+  TailCall,
+} from "./applications/index.js";
 
 export type {
   PtyDataHandler,

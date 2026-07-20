@@ -299,7 +299,7 @@ export class HttpClient {
           headers,
           body,
           signal: combinedSignal,
-        })) as Response;
+        })) as unknown as Response;
 
         if (timeoutId != null) clearTimeout(timeoutId);
         logSdkTiming("http.request", "headers", attemptStart, {

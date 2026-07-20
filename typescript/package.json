@@ -3,45 +3,44 @@
   "version": "0.5.97",
   "description": "TensorLake SDK for applications, sandboxes, and cloud services",
   "type": "module",
-  "main": "./dist/index.cjs",
+  "main": "./dist/index.js",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
-    "tensorlake-deploy": "./bin/tensorlake-deploy.cjs",
-    "tensorlake-create-sandbox-image": "./bin/tensorlake-create-sandbox-image.cjs",
-    "tensorlake-import-sandbox-image": "./bin/tensorlake-import-sandbox-image.cjs",
-    "function-executor": "./bin/function-executor.cjs"
+    "tensorlake-create-sandbox-image": "./bin/tensorlake-create-sandbox-image.js",
+    "tensorlake-import-sandbox-image": "./bin/tensorlake-import-sandbox-image.js",
+    "function-executor": "./bin/function-executor.js"
   },
   "exports": {
     ".": {
-      "import": {
-        "types": "./dist/index.d.ts",
-        "default": "./dist/index.js"
-      },
-      "require": {
-        "types": "./dist/index.d.cts",
-        "default": "./dist/index.cjs"
-      }
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    },
+    "./applications": {
+      "types": "./dist/applications/index.d.ts",
+      "default": "./dist/applications/index.js"
     }
   },
   "files": [
     "dist",
     "bin",
-    "lib"
+    "runtime"
   ],
   "scripts": {
-    "build:sdk": "tsup",
+    "build:sdk": "tsup && node ./scripts/build-function-executor-capsule.mjs",
     "build:native": "node ./scripts/build-native.mjs",
     "build": "npm run build:sdk && npm run build:native",
+    "check:proto": "node ./scripts/check-function-executor-proto.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude tests/integration.test.ts",
+    "test:function-executor": "vitest run tests/function-executor.test.ts tests/function-executor-protocol.test.ts",
     "test:integration": "vitest run tests/integration.test.ts",
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
     "prepack": "npm run build"
   },
   "engines": {
-    "node": ">=22.0.0"
+    "node": ">=24.0.0"
   },
   "keywords": [
     "tensorlake",
@@ -57,14 +56,19 @@
   },
   "license": "Apache-2.0",
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@types/node": "^24.0.0",
     "@types/ws": "^8.18.1",
     "eslint": "^9.0.0",
     "tsup": "^8.0.0",
-    "typescript": "^5.4.0",
+    "typescript": "^5.8.0",
     "vitest": "^2.0.0"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.13.0",
+    "@grpc/proto-loader": "^0.8.0",
+    "ajv": "^8.17.1",
+    "fflate": "^0.8.2",
+    "google-proto-files": "^5.0.2",
     "nanoid": "3.3.11",
     "undici": "8.3.0",
     "ws": "^8.20.0"

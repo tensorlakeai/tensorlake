@@ -1,4 +1,3 @@
-import { createRequire } from "node:module";
 import {
   PoolInUseError,
   PoolNotFoundError,
@@ -7,6 +6,7 @@ import {
   SandboxError,
   SandboxNotFoundError,
 } from "./errors.js";
+import { loadNative } from "./native-binding.js";
 
 /**
  * Bridge to the Rust core's sandbox lifecycle + proxy clients (`napi-rs`).
@@ -260,36 +260,14 @@ export interface NativeSandboxBinding {
 
 // ---- Binding loader -------------------------------------------------------
 
-// `require` exists in the CJS bundle but not in ESM; declared here so the
-// runtime check below typechecks under "module": "esnext".
-declare const require: NodeRequire | undefined;
-declare const module: { exports?: unknown } | undefined;
-
 let cachedBinding: NativeSandboxBinding | undefined;
 let cachedBindingError: Error | undefined;
-
-function resolveRequire(): NodeRequire {
-  // tsup rewrites `import.meta.url` in the CJS output; prefer the injected
-  // real `require` there and fall back to `createRequire` for ESM. Mirrors
-  // the loader in sandbox-image.ts.
-  if (
-    typeof module !== "undefined" &&
-    module.exports != null &&
-    typeof require !== "undefined"
-  ) {
-    return require;
-  }
-  return createRequire(import.meta.url);
-}
 
 export function loadNativeSandboxBinding(): NativeSandboxBinding {
   if (cachedBinding) return cachedBinding;
   if (cachedBindingError) throw cachedBindingError;
   try {
-    const { loadNative } = resolveRequire()("../lib/runtime.cjs") as {
-      loadNative: () => NativeSandboxBinding;
-    };
-    const binding = loadNative();
+    const binding = loadNative<NativeSandboxBinding>();
     if (
       binding == null ||
       typeof binding.NativeSandboxClient !== "function" ||
