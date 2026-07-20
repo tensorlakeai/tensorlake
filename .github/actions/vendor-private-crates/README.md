@@ -10,9 +10,11 @@ for the duration of the job.
 
 1. Mints a short-lived token from a GitHub App scoped to `tensorlakeai/artifact_storage`.
 2. Sparse-checks-out the three private crate source trees into `.mount-core/`.
-3. Copies the real sources over the placeholders, keeping the placeholders' workspace-adapted
+3. Resolves that checkout to an exact commit; the optional FSKit companion checkout is pinned to
+   the same revision instead of resolving a moving branch a second time.
+4. Copies the real sources over the placeholders, keeping the placeholders' workspace-adapted
    manifests.
-4. When `include-macos-fskit: "true"`, separately stages the private FSKit `Sources` and
+5. When `include-macos-fskit: "true"`, separately stages the private FSKit `Sources` and
    `Resources` needed by the macOS Rust source-contract tests. Linux and Windows callers leave the
    input disabled and do not fetch or compile Swift sources. The FSKit `build.sh` remains confined
    to the dedicated TLFS.app release job.
@@ -20,6 +22,9 @@ for the duration of the job.
 The calling job must run `actions/checkout` for this repo first, then call this action before the
 build step, and add `--features git-clone` (plus `mount` on mount-capable targets; or
 `mount,git-clone` for official standalone CLI builds) to that build.
+Release workflows pass the `source-ref` input as one previously resolved 40-character
+`artifact_storage` commit SHA. Ordinary test workflows may omit it and resolve `main` once per
+action invocation; core and FSKit companion sources still use the same resolved commit.
 
 ## One-time setup
 

@@ -12,12 +12,50 @@ permissions:
   contents: write
 
 jobs:
+  artifact-storage-source:
+    name: Pin private artifact_storage source
+    runs-on: ubuntu-latest
+    outputs:
+      sha: ${{ steps.resolve.outputs.sha }}
+    steps:
+      - name: Mint artifact_storage access token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
+          private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
+          owner: tensorlakeai
+          repositories: artifact_storage
+
+      - name: Check out private source revision
+        uses: actions/checkout@v4
+        with:
+          repository: tensorlakeai/artifact_storage
+          token: ${{ steps.app-token.outputs.token }}
+          path: .artifact-storage-source
+          sparse-checkout: AGENTS.md
+          sparse-checkout-cone-mode: false
+          persist-credentials: false
+
+      - name: Export exact private source revision
+        id: resolve
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(git -C .artifact-storage-source rev-parse HEAD)
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::artifact_storage did not resolve to a full commit SHA"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "Pinned artifact_storage@$sha for every release job"
+
   build:
     name: Build (${{ matrix.target_id }})
     # The darwin build embeds the notarized TLFS.app.zip from tlfs-app into the binary, so
     # `tl fs setup` installs offline. tlfs-app is continue-on-error: when it produced nothing,
     # the darwin binary falls back to downloading the release asset at setup time.
-    needs: tlfs-app
+    needs: [artifact-storage-source, tlfs-app]
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -87,6 +125,7 @@ jobs:
           app-id: ${{ secrets.ARTIFACT_STORAGE_APP_ID }}
           private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
           include-macos-fskit: ${{ matrix.target_id == 'darwin-aarch64' && 'true' || 'false' }}
+          source-ref: ${{ needs.artifact-storage-source.outputs.sha }}
 
       - name: Fetch notarized TLFS.app (embedded into `tl fs setup`)
         if: matrix.target_id == 'darwin-aarch64'
@@ -181,6 +220,7 @@ jobs:
     # Needs Xcode 26.x / the macOS 26 SDK (the FSKit surface tlfs uses); adjust the image if the
     # hosted runner catalog changes.
     runs-on: macos-26
+    needs: artifact-storage-source
     steps:
       - uses: actions/checkout@v4
 
@@ -197,6 +237,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: tensorlakeai/artifact_storage
+          ref: ${{ needs.artifact-storage-source.outputs.sha }}
           token: ${{ steps.app-token.outputs.token }}
           path: .tlfs-src
           sparse-checkout: |

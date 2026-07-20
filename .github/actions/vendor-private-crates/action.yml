@@ -24,6 +24,17 @@ inputs:
       Leave disabled on Linux and Windows so those builds have no Swift source dependency.
     required: false
     default: "false"
+  source-ref:
+    description: >
+      artifact_storage Git ref to vendor. Release workflows must pass one resolved commit SHA so
+      every job consumes the same private source revision.
+    required: false
+    default: main
+
+outputs:
+  source-sha:
+    description: Exact artifact_storage commit vendored by this invocation.
+    value: ${{ steps.resolved-source.outputs.sha }}
 
 runs:
   using: composite
@@ -41,6 +52,7 @@ runs:
       uses: actions/checkout@v4
       with:
         repository: tensorlakeai/artifact_storage
+        ref: ${{ inputs.source-ref }}
         token: ${{ steps.app-token.outputs.token }}
         path: .mount-core
         sparse-checkout: |
@@ -50,11 +62,25 @@ runs:
         sparse-checkout-cone-mode: false
         persist-credentials: false
 
+    - name: Resolve private source revision
+      id: resolved-source
+      shell: bash
+      run: |
+        set -euo pipefail
+        sha=$(git -C .mount-core rev-parse HEAD)
+        if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::artifact_storage checkout did not resolve to a full commit SHA"
+          exit 1
+        fi
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        echo "Vendoring artifact_storage@$sha"
+
     - name: Check out private macOS FSKit companions
       if: ${{ inputs.include-macos-fskit == 'true' }}
       uses: actions/checkout@v4
       with:
         repository: tensorlakeai/artifact_storage
+        ref: ${{ steps.resolved-source.outputs.sha }}
         token: ${{ steps.app-token.outputs.token }}
         path: .mount-fskit
         sparse-checkout: |
