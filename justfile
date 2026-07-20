@@ -110,6 +110,16 @@ build-tlfs-app *ARGS:
         echo "or point ARTIFACT_STORAGE_DIR at an existing checkout." >&2
         exit 1
     fi
+    workspace_version="$(sed -n 's/^version = "\([^"]*\)"$/\1/p' Cargo.toml | head -n 1)"
+    if [ -z "$workspace_version" ]; then
+        echo "error: could not read [workspace.package] version from Cargo.toml" >&2
+        exit 1
+    fi
+    if [ -n "${TLFS_VERSION:-}" ] && [ "$TLFS_VERSION" != "$workspace_version" ]; then
+        echo "error: TLFS_VERSION $TLFS_VERSION does not match workspace version $workspace_version" >&2
+        exit 1
+    fi
+    export TLFS_VERSION="$workspace_version"
     exec "$build_sh" {{ARGS}}
 
 # Run the CLI test suite with the same ephemeral private-crate swap as the official full build.
