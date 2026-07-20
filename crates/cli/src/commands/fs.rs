@@ -82,6 +82,17 @@ pub mod daemon {
             .await
             .map_err(Into::into)
     }
+
+    /// Run one macOS kernel-cache convergence probe as a separate process from the mount daemon.
+    ///
+    /// The private client owns the versioned JSON stdin/stdout protocol and the filesystem work.
+    /// Keeping this adapter argument-free prevents the hidden command from becoming a second
+    /// user-facing mount surface or inheriting authentication/configuration concerns.
+    pub async fn converge() -> Result<()> {
+        gsvc_fs_client::run_kernel_convergence_helper()
+            .await
+            .map_err(Into::into)
+    }
 }
 
 pub async fn setup(from: Option<&str>, check_only: bool) -> Result<()> {

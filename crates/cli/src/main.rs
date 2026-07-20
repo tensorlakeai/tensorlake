@@ -343,6 +343,10 @@ enum FsCommands {
         log_level: String,
     },
 
+    /// (internal) Probe FSKit cache convergence outside the mount daemon process
+    #[command(hide = true)]
+    Converge,
+
     /// Create a permanent, billed snapshot of the drive (a clean tree is a quiet no-op)
     Snapshot {
         /// A mounted or pushed directory (default: the attachment containing the current
@@ -2494,11 +2498,14 @@ fn purge_credentials_on_auth_failure(result: &error::Result<()>) {
 // answers with a clear "not available" error instead of the real implementation.
 #[cfg(feature = "mount")]
 async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Result<()> {
-    // Setup installs a local app bundle; it must work before the user has logged in.
+    // Setup installs a local app bundle, and the FSKit convergence child speaks only a versioned
+    // stdin/stdout protocol with its parent daemon. Both must run before auth/project discovery:
+    // a nested CLI init would touch user state and can itself traverse the mount being repaired.
     let subcmd = match subcmd {
         FsCommands::Setup { from, check } => {
             return commands::fs::setup(from.as_deref(), check).await;
         }
+        FsCommands::Converge => return commands::fs::daemon::converge().await,
         other => other,
     };
     // Unmounting a pushed (bound) directory only removes local tracking state — the directory
@@ -2611,6 +2618,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
     let mount_dir = move || mount_dir.expect("resolved for every path-addressed command above");
     let result = match subcmd {
         FsCommands::Setup { .. } => unreachable!("handled before the auth guard"),
+        FsCommands::Converge => unreachable!("handled before the auth guard"),
         FsCommands::Create { name, json } => {
             commands::fs::create_filesystem(ctx, &name, json).await
         }
@@ -3304,6 +3312,21 @@ mod tests {
 
     #[test]
     fn fs_commands_are_filesystem_centric() {
+        // The FSKit cache prober is an internal child-process entry point. It remains parseable
+        // for the mount daemon but has no arguments or public help surface of its own.
+        match parse_command(["tl", "fs", "converge"]) {
+            Commands::Fs(FsCommands::Converge) => {}
+            _ => panic!("expected hidden fs convergence helper"),
+        }
+        assert!(Cli::try_parse_from(["tl", "fs", "converge", "./w"]).is_err());
+        let mut command = Cli::command();
+        let fs = command.find_subcommand_mut("fs").unwrap();
+        assert!(
+            fs.find_subcommand("converge")
+                .expect("internal convergence helper is registered")
+                .is_hide_set()
+        );
+
         // The filesystem surface: a bare name plus --ro. Nothing else.
         match parse_command(["tl", "fs", "mount", "scratch", "./w", "--ro"]) {
             Commands::Fs(FsCommands::Mount {
