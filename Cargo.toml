@@ -11,7 +11,7 @@ exclude = ["crates/gsvc-mount", "crates/gsvc-codec", "crates/gsvc-fs-client"]
 resolver = "3"
 
 [workspace.package]
-version = "0.5.85"
+version = "0.5.86"
 authors = ["Tensorlake Inc. <support@tensorlake.ai>"]
 edition = "2024"
 license = "Apache-2.0"

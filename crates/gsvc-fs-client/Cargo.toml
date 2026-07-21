@@ -2,7 +2,7 @@
 # only `src/`, keeping this workspace-adapted dependency manifest.
 [package]
 name = "gsvc-fs-client"
-version = "0.5.85"
+version = "0.5.86"
 edition = "2024"
 license = "Apache-2.0"
 description = "Resolution placeholder for TensorLake private filesystem client code"
