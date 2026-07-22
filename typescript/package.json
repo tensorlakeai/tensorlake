@@ -3,31 +3,45 @@
   "version": "0.5.97",
   "description": "TensorLake SDK for applications, sandboxes, and cloud services",
   "type": "module",
-  "main": "./dist/index.js",
+  "main": "./dist/index.cjs",
   "module": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "bin": {
+    "tensorlake-deploy": "./bin/tensorlake-deploy.cjs",
     "tensorlake-create-sandbox-image": "./bin/tensorlake-create-sandbox-image.js",
     "tensorlake-import-sandbox-image": "./bin/tensorlake-import-sandbox-image.js",
     "function-executor": "./bin/function-executor.js"
   },
   "exports": {
     ".": {
-      "types": "./dist/index.d.ts",
-      "default": "./dist/index.js"
+      "import": {
+        "types": "./dist/index.d.ts",
+        "default": "./dist/index.js"
+      },
+      "require": {
+        "types": "./dist/index.d.cts",
+        "default": "./dist/index.cjs"
+      }
     },
     "./applications": {
-      "types": "./dist/applications/index.d.ts",
-      "default": "./dist/applications/index.js"
+      "import": {
+        "types": "./dist/applications/index.d.ts",
+        "default": "./dist/applications/index.js"
+      },
+      "require": {
+        "types": "./dist/applications/index.d.cts",
+        "default": "./dist/applications/index.cjs"
+      }
     }
   },
   "files": [
     "dist",
     "bin",
+    "lib",
     "runtime"
   ],
   "scripts": {
-    "build:sdk": "tsup && node ./scripts/build-function-executor-capsule.mjs",
+    "build:sdk": "tsup && node ./scripts/build-function-executor-capsule.mjs && node ./scripts/check-package-compatibility.mjs",
     "build:native": "node ./scripts/build-native.mjs",
     "build": "npm run build:sdk && npm run build:native",
     "check:proto": "node ./scripts/check-function-executor-proto.mjs",
@@ -40,7 +54,7 @@
     "prepack": "npm run build"
   },
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=22.0.0"
   },
   "keywords": [
     "tensorlake",
