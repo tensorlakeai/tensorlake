@@ -178,17 +178,19 @@ export class FunctionExecutorService {
     if (typeof runtime.__tensorlakeGetFunction !== "function") {
       throw new Error("Application runtime does not export __tensorlakeGetFunction");
     }
-    this.functionRef = request.function;
-    this.definition = runtime.__tensorlakeGetFunction(functionName);
-    this.applicationDefinition = runtime.__tensorlakeGetFunction(request.function.applicationName);
-    if (this.applicationDefinition.application == null) {
+    const definition = runtime.__tensorlakeGetFunction(functionName);
+    const applicationDefinition = runtime.__tensorlakeGetFunction(request.function.applicationName);
+    if (applicationDefinition.application == null) {
       throw new Error(`'${request.function.applicationName}' is not a Tensorlake application`);
     }
+    this.functionRef = request.function;
+    this.definition = definition;
+    this.applicationDefinition = applicationDefinition;
     this.log("debug", "application function resolved", {
       ...this.functionLogFields(request.function),
       duration_ms: Date.now() - importStartedAt,
-      parameter_count: this.definition.parameters.length,
-      application_max_retries: this.applicationDefinition.application.retries.maxRetries,
+      parameter_count: definition.parameters.length,
+      application_max_retries: applicationDefinition.application.retries.maxRetries,
     });
   }
 

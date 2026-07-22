@@ -112,6 +112,7 @@ export interface WaitResult<T> {
 export interface FunctionRuntime {
   invoke<T>(definition: RegisteredDefinition, args: readonly unknown[]): Promise<T>;
   runFuture<T>(future: FunctionFuture<T>): Promise<T>;
+  reduce<T>(definition: RegisteredDefinition, items: readonly unknown[], initial: unknown): Promise<T>;
 }
 
 // The user application and function executor are separate bundles loaded into
@@ -377,8 +378,11 @@ function createRegisteredFunction<Args extends readonly unknown[], Result>(
     },
     reduce: {
       value: async (items: Iterable<Args[1]>, initial: Args[0]) => {
+        const values = [...items];
+        const runtime = currentFunctionRuntime();
+        if (runtime != null) return runtime.reduce<Result>(definition, values, initial);
         let accumulator: Result | Args[0] = initial;
-        for (const item of items) {
+        for (const item of values) {
           accumulator = await callable(...([accumulator, item] as unknown as Args));
         }
         return accumulator as Result;
@@ -446,10 +450,175 @@ function hasExplicitSchemas(
   return hasParameters;
 }
 
+function skipJavaScriptLiteral(source: string, start: number): number {
+  const quote = source[start];
+  let escaped = false;
+  for (let index = start + 1; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === quote) {
+      return index;
+    }
+  }
+  return source.length - 1;
+}
+
+function skipJavaScriptComment(source: string, start: number): number | undefined {
+  if (source[start] !== "/") return undefined;
+  if (source[start + 1] === "/") {
+    const newline = source.indexOf("\n", start + 2);
+    return newline < 0 ? source.length - 1 : newline;
+  }
+  if (source[start + 1] === "*") {
+    const end = source.indexOf("*/", start + 2);
+    return end < 0 ? source.length - 1 : end + 1;
+  }
+  return undefined;
+}
+
+function findTopLevelArrow(source: string): number {
+  let parentheses = 0;
+  let brackets = 0;
+  let braces = 0;
+  for (let index = 0; index < source.length - 1; index += 1) {
+    const character = source[index];
+    if (character === "\"" || character === "'" || character === "`") {
+      index = skipJavaScriptLiteral(source, index);
+      continue;
+    }
+    const commentEnd = skipJavaScriptComment(source, index);
+    if (commentEnd != null) {
+      index = commentEnd;
+      continue;
+    }
+    if (character === "(") parentheses += 1;
+    else if (character === ")") parentheses -= 1;
+    else if (character === "[") brackets += 1;
+    else if (character === "]") brackets -= 1;
+    else if (character === "{") braces += 1;
+    else if (character === "}") braces -= 1;
+    else if (character === "=" && source[index + 1] === ">" && parentheses === 0 && brackets === 0 && braces === 0) {
+      return index;
+    }
+  }
+  return -1;
+}
+
+function findClosingParenthesis(source: string, open: number): number {
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "\"" || character === "'" || character === "`") {
+      index = skipJavaScriptLiteral(source, index);
+      continue;
+    }
+    const commentEnd = skipJavaScriptComment(source, index);
+    if (commentEnd != null) {
+      index = commentEnd;
+      continue;
+    }
+    if (character === "(") depth += 1;
+    else if (character === ")" && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function splitTopLevelParameters(source: string): string[] {
+  if (source.trim() === "") return [];
+  const result: string[] = [];
+  let start = 0;
+  let parentheses = 0;
+  let brackets = 0;
+  let braces = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "\"" || character === "'" || character === "`") {
+      index = skipJavaScriptLiteral(source, index);
+      continue;
+    }
+    const commentEnd = skipJavaScriptComment(source, index);
+    if (commentEnd != null) {
+      index = commentEnd;
+      continue;
+    }
+    if (character === "(") parentheses += 1;
+    else if (character === ")") parentheses -= 1;
+    else if (character === "[") brackets += 1;
+    else if (character === "]") brackets -= 1;
+    else if (character === "{") braces += 1;
+    else if (character === "}") braces -= 1;
+    else if (character === "," && parentheses === 0 && brackets === 0 && braces === 0) {
+      result.push(source.slice(start, index).trim());
+      start = index + 1;
+    }
+  }
+  const final = source.slice(start).trim();
+  if (final !== "") result.push(final);
+  return result;
+}
+
+function hasTopLevelDefault(source: string): boolean {
+  let parentheses = 0;
+  let brackets = 0;
+  let braces = 0;
+  for (let index = 0; index < source.length; index += 1) {
+    const character = source[index];
+    if (character === "\"" || character === "'" || character === "`") {
+      index = skipJavaScriptLiteral(source, index);
+      continue;
+    }
+    const commentEnd = skipJavaScriptComment(source, index);
+    if (commentEnd != null) {
+      index = commentEnd;
+      continue;
+    }
+    if (character === "(") parentheses += 1;
+    else if (character === ")") parentheses -= 1;
+    else if (character === "[") brackets += 1;
+    else if (character === "]") brackets -= 1;
+    else if (character === "{") braces += 1;
+    else if (character === "}") braces -= 1;
+    else if (character === "=" && parentheses === 0 && brackets === 0 && braces === 0) return true;
+  }
+  return false;
+}
+
+function declaredHandlerParameters(handler: RuntimeHandler): string[] {
+  const source = Function.prototype.toString.call(handler).trim();
+  if (source.includes("[native code]")) {
+    throw new SDKUsageError("Schema-free registration cannot inspect a native or bound handler; specify parameters and returns");
+  }
+  const arrow = findTopLevelArrow(source);
+  if (arrow >= 0) {
+    const header = source.slice(0, arrow).trim().replace(/^async\s+/, "").trim();
+    if (!header.startsWith("(")) return [header];
+    const close = findClosingParenthesis(header, 0);
+    if (close < 0) throw new SDKUsageError("Schema-free registration could not inspect handler parameters");
+    return splitTopLevelParameters(header.slice(1, close));
+  }
+  const open = source.indexOf("(");
+  const close = open < 0 ? -1 : findClosingParenthesis(source, open);
+  if (open < 0 || close < 0) {
+    throw new SDKUsageError("Schema-free registration could not inspect handler parameters");
+  }
+  return splitTopLevelParameters(source.slice(open + 1, close));
+}
+
 function inferredJSONParameters(handler: RuntimeHandler): readonly Parameter<unknown>[] {
-  return Array.from({ length: handler.length }, (_, index) =>
-    schema.parameter(handler.length === 1 ? "input" : `arg${index}`, schema.json()),
-  );
+  const parameters = declaredHandlerParameters(handler);
+  if (parameters.some((parameter) => parameter.trimStart().startsWith("..."))) {
+    throw new SDKUsageError(
+      "Schema-free registration does not support rest parameters; specify explicit parameters and returns",
+    );
+  }
+  return parameters.map((parameter, index) => schema.parameter(
+    parameters.length === 1 ? "input" : `arg${index}`,
+    schema.json(),
+    hasTopLevelDefault(parameter) ? { optional: true } : {},
+  ));
 }
 
 function registerWithDefaults(

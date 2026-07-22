@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFile, writeFile } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { File } from "../applications/file.js";
 import { deserializeJSON, serializeValue } from "../applications/serialization.js";
@@ -127,41 +127,55 @@ async function fetchWithRetries(
   throw new Error("BLOB operation failed after retries", { cause: lastError });
 }
 
-async function readChunk(
+async function readChunkRange(
   chunk: BlobChunk,
   index: number,
-  offset: number,
+  logicalChunkOffset: number,
+  offsetWithinChunk: number,
+  size: number,
   sharedURI: boolean,
   log?: BlobLog,
 ): Promise<Uint8Array> {
   if (!chunk.uri) throw new Error("BLOB chunk has no URI");
-  const declaredSize = chunk.size ?? 0;
+  const physicalOffset = sharedURI ? logicalChunkOffset + offsetWithinChunk : offsetWithinChunk;
   const fields = {
     chunk_index: index,
-    chunk_offset: offset,
-    chunk_bytes: declaredSize,
+    chunk_offset: logicalChunkOffset,
+    read_offset: physicalOffset,
+    read_bytes: size,
     uri_kind: uriKind(chunk.uri),
     shared_uri: sharedURI,
   };
   const startedAt = Date.now();
   log?.("download chunk starting", fields);
   if (chunk.uri.startsWith("file://")) {
-    const file = new Uint8Array(await readFile(fileURLToPath(chunk.uri)));
-    const data = sharedURI ? file.subarray(offset, offset + declaredSize) : file;
-    log?.("download chunk completed", {
-      ...fields,
-      downloaded_bytes: data.byteLength,
-      duration_ms: Date.now() - startedAt,
-    });
-    return data;
+    const file = await open(fileURLToPath(chunk.uri), "r");
+    try {
+      const data = new Uint8Array(size);
+      const { bytesRead } = await file.read(data, 0, size, physicalOffset);
+      if (bytesRead !== size) {
+        throw new Error(`BLOB chunk ended after ${bytesRead} bytes; expected ${size}`);
+      }
+      log?.("download chunk completed", {
+        ...fields,
+        downloaded_bytes: data.byteLength,
+        duration_ms: Date.now() - startedAt,
+      });
+      return data;
+    } finally {
+      await file.close();
+    }
   }
-  const headers = sharedURI && declaredSize > 0
-    ? { range: `bytes=${offset}-${offset + declaredSize - 1}` }
-    : undefined;
+  const headers = { range: `bytes=${physicalOffset}-${physicalOffset + size - 1}` };
   const response = await fetchWithRetries(chunk.uri, { headers }, log, fields);
   let data = new Uint8Array(await response.arrayBuffer());
   // A server may ignore Range and return the complete object with HTTP 200.
-  if (sharedURI && response.status === 200) data = data.subarray(offset, offset + declaredSize);
+  if (response.status === 200 && (physicalOffset !== 0 || data.byteLength !== size)) {
+    data = data.subarray(physicalOffset, physicalOffset + size);
+  }
+  if (data.byteLength !== size) {
+    throw new Error(`BLOB chunk returned ${data.byteLength} bytes; expected ${size}`);
+  }
   log?.("download chunk completed", {
     ...fields,
     status_code: response.status,
@@ -171,25 +185,61 @@ async function readChunk(
   return data;
 }
 
-export async function downloadBlob(blob: BlobValue, log?: BlobLog): Promise<Uint8Array> {
+export async function downloadBlobRange(
+  blob: BlobValue,
+  offset: number,
+  size: number,
+  log?: BlobLog,
+): Promise<Uint8Array> {
+  if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(size) || size < 0) {
+    throw new Error("BLOB range offset and size must be non-negative safe integers");
+  }
   const chunks = blob.chunks ?? [];
+  const totalSize = chunks.reduce((total, chunk) => total + (chunk.size ?? 0), 0);
+  if (offset + size > totalSize) {
+    throw new Error(`BLOB range ${offset}..${offset + size} exceeds declared size ${totalSize}`);
+  }
+  if (size === 0) return new Uint8Array();
   const uriCounts = new Map<string, number>();
   for (const chunk of chunks) {
     if (chunk.uri != null) uriCounts.set(chunk.uri, (uriCounts.get(chunk.uri) ?? 0) + 1);
   }
-  let offset = 0;
-  const reads = chunks.map((chunk, index) => {
-    const chunkOffset = offset;
-    offset += chunk.size ?? 0;
-    return readChunk(chunk, index, chunkOffset, (uriCounts.get(chunk.uri ?? "") ?? 0) > 1, log);
-  });
+  const rangeEnd = offset + size;
+  let chunkOffset = 0;
+  const reads: Array<Promise<Uint8Array>> = [];
+  for (const [index, chunk] of chunks.entries()) {
+    const chunkSize = chunk.size ?? 0;
+    const chunkEnd = chunkOffset + chunkSize;
+    const overlapStart = Math.max(offset, chunkOffset);
+    const overlapEnd = Math.min(rangeEnd, chunkEnd);
+    if (overlapStart < overlapEnd) {
+      reads.push(readChunkRange(
+        chunk,
+        index,
+        chunkOffset,
+        overlapStart - chunkOffset,
+        overlapEnd - overlapStart,
+        (uriCounts.get(chunk.uri ?? "") ?? 0) > 1,
+        log,
+      ));
+    }
+    chunkOffset = chunkEnd;
+  }
   const data = concatenate(await Promise.all(reads));
+  if (data.byteLength !== size) throw new Error("BLOB does not contain the complete requested range");
   log?.("download blob completed", {
     blob_id: blob.id,
     chunk_count: chunks.length,
     downloaded_bytes: data.byteLength,
+    range_offset: offset,
+    range_size: size,
   });
   return data;
+}
+
+export async function downloadBlob(blob: BlobValue, log?: BlobLog): Promise<Uint8Array> {
+  const size = (blob.chunks ?? []).reduce((total, chunk) => total + (chunk.size ?? 0), 0);
+  return downloadBlobRange(blob, 0, size, log);
 }
 
 export async function downloadSerializedObject(
@@ -201,10 +251,8 @@ export async function downloadSerializedObject(
   if (manifest?.size == null || manifest.metadataSize == null) {
     throw new Error("Serialized object manifest is missing size or metadata_size");
   }
-  const all = await downloadBlob(blob, log);
   const start = object.offset ?? 0;
-  const bytes = all.subarray(start, start + manifest.size);
-  if (bytes.byteLength !== manifest.size) throw new Error("BLOB does not contain the complete serialized object");
+  const bytes = await downloadBlobRange(blob, start, manifest.size, log);
   const hash = createHash("sha256").update(bytes).digest("hex");
   if (manifest.sha256Hash != null && hash !== manifest.sha256Hash) {
     throw new Error(`Serialized object hash mismatch: expected ${manifest.sha256Hash}, got ${hash}`);
@@ -221,7 +269,6 @@ export function deserializeValueFromProtocol(
   value: { data: Uint8Array; contentType?: string; encoding?: string | number },
 ): unknown {
   if (enumIs(value.encoding, "SERIALIZED_OBJECT_ENCODING_RAW", 5)) {
-    if ((value.contentType ?? "").toLowerCase().includes("json")) return deserializeJSON(value.data);
     return new File(value.data, value.contentType ?? "application/octet-stream");
   }
   if (enumIs(value.encoding, "SERIALIZED_OBJECT_ENCODING_UTF8_TEXT", 2)) {
@@ -282,10 +329,17 @@ export function prepareTextObject(value: string): PreparedSerializedObject {
   };
 }
 
-async function uploadChunk(chunk: BlobChunk, data: Uint8Array, index: number, log?: BlobLog): Promise<BlobChunk> {
+async function uploadChunk(
+  chunk: BlobChunk,
+  data: Uint8Array,
+  index: number,
+  offset: number,
+  log?: BlobLog,
+): Promise<BlobChunk> {
   if (!chunk.uri) throw new Error("Writable BLOB chunk has no URI");
   const fields = {
     chunk_index: index,
+    chunk_offset: offset,
     upload_bytes: data.byteLength,
     chunk_capacity: chunk.size ?? 0,
     uri_kind: uriKind(chunk.uri),
@@ -293,9 +347,21 @@ async function uploadChunk(chunk: BlobChunk, data: Uint8Array, index: number, lo
   const startedAt = Date.now();
   log?.("upload chunk starting", fields);
   if (chunk.uri.startsWith("file://")) {
-    await writeFile(fileURLToPath(chunk.uri), data);
+    const filePath = fileURLToPath(chunk.uri);
+    let file;
+    try {
+      file = await open(filePath, "r+");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      file = await open(filePath, "w+");
+    }
+    try {
+      await file.write(data, 0, data.byteLength, offset);
+    } finally {
+      await file.close();
+    }
     log?.("upload chunk completed", { ...fields, duration_ms: Date.now() - startedAt });
-    return { ...chunk };
+    return { ...chunk, size: data.byteLength };
   }
   const response = await fetchWithRetries(chunk.uri, {
     method: "PUT",
@@ -304,7 +370,11 @@ async function uploadChunk(chunk: BlobChunk, data: Uint8Array, index: number, lo
       headers: { "content-length": String(data.byteLength) },
     }),
   }, log, fields);
-  const uploaded = { ...chunk, etag: response.headers.get("etag") ?? undefined };
+  const uploaded = {
+    ...chunk,
+    size: data.byteLength,
+    etag: response.headers.get("etag") ?? undefined,
+  };
   log?.("upload chunk completed", {
     ...fields,
     status_code: response.status,
@@ -323,11 +393,11 @@ export async function uploadBlob(blob: BlobValue, data: Uint8Array, log?: BlobLo
   for (const [index, chunk] of chunks.entries()) {
     const size = Math.min(chunk.size ?? 0, data.byteLength - offset);
     if (size <= 0) break;
-    uploaded.push(await uploadChunk(chunk, data.subarray(offset, offset + size), index, log));
+    uploaded.push(await uploadChunk(chunk, data.subarray(offset, offset + size), index, offset, log));
     offset += size;
   }
   if (data.byteLength === 0 && chunks.length > 0) {
-    uploaded.push(await uploadChunk(chunks[0], data, 0, log));
+    uploaded.push(await uploadChunk(chunks[0], data, 0, 0, log));
   }
   if (offset !== data.byteLength) throw new Error(`Only uploaded ${offset} of ${data.byteLength} bytes`);
   log?.("upload blob completed", {

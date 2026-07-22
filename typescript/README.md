@@ -1,6 +1,6 @@
 # Tensorlake TypeScript SDK
 
-The TypeScript SDK supports Tensorlake sandboxes and durable applications on Node.js 24 or newer. Application handlers are async-only and values crossing a function boundary must be JSON values or a direct `File`.
+The TypeScript SDK supports Tensorlake sandboxes on Node.js 22 or newer. Deploying and running durable TypeScript applications requires Node.js 24 or newer. Application handlers are async-only and values crossing a function boundary must be JSON values or a direct `File`.
 
 ```ts
 import { registerApplication, registerFunction } from "tensorlake/applications";
@@ -17,9 +17,10 @@ export const squares = registerApplication(
 ```
 
 This concise form infers the TypeScript call signature and uses permissive JSON
-schemas. The explicit name is stable across bundling. Use the schema-rich form
-when you need runtime validation, API metadata, optional or default parameters,
-rest parameters, or `File` inputs and outputs:
+schemas. JavaScript default parameters are inferred as optional, and the
+explicit name is stable across bundling. Use the schema-rich form when you need
+runtime validation, API metadata, optional parameters without a JavaScript
+default, rest parameters, or `File` inputs and outputs:
 
 ```ts
 import { registerApplication, schema } from "tensorlake/applications";
@@ -52,7 +53,7 @@ tl deploy app.ts
 
 The SDK build also produces a hashed executor capsule containing the Node 24 ESM executor, its protobufs, and an npm shrinkwrap derived from the checked-in SDK lockfile. During deployment, `tl` uses the capsule from the exact SDK package Rolldown resolved and adds it directly to the image-build context. This supports local dependencies such as `"tensorlake": "file:../tensorlake/typescript"`; build that SDK checkout with `npm run build:sdk` before deploying. The local Tensorlake package does not need to be published.
 
-Functions expose `future`, `map`, `reduce`, and `tailCall`. Awaiting a registered function inside a running application creates a durable remote function call. `RequestContext.get()` provides async request state, metrics, progress, headers, and an abort signal.
+Functions expose `future`, `map`, `reduce`, and `tailCall`. Awaiting a registered function inside a running application creates a durable remote function call. `RequestContext.get()` provides async request state, metrics, progress, and an abort signal.
 
 TypeScript and Python definitions cannot be mixed in one deployed application bundle. Class-based function semantics are not supported in the TypeScript runtime.
 
@@ -64,8 +65,8 @@ Run the executor transport and protocol-state regression suites with:
 npm run test:function-executor
 ```
 
-These tests use bounded fake-server event sequences to cover terminal-result cardinality, retry exhaustion, reordered and duplicate events, strict replay divergence, non-advancing event pages, tail calls, cross-bundle request errors, state reconciliation, and BLOB transport. `npm run build:sdk` additionally builds the exact executor capsule used during deployment.
+These tests use bounded fake-server event sequences to cover terminal-result cardinality, retry exhaustion, deterministic concurrent fan-out and strict replay, function-call reduce chains, malformed user input, non-advancing event pages, tail calls, cross-bundle request errors, state reconciliation, and ranged BLOB transport. `npm run build:sdk` additionally builds the exact executor capsule used during deployment.
 
 ## Live server verification
 
-The [server-verification example](examples/server-verification/README.md) uses the normal `tl deploy <PATH>` workflow to deploy eight reference applications and verify durable calls, retries and retry exhaustion, concurrent fan-out, sequential reduce, nested calls, request context, tail calls, files, and request errors against an already-running server.
+The [server-verification example](examples/server-verification/README.md) uses the normal `tl deploy <PATH>` workflow to deploy eight reference applications and verify durable calls, retries and retry exhaustion, concurrent fan-out, server-orchestrated reduce, nested calls, request context, tail calls, files, and request errors against an already-running server.

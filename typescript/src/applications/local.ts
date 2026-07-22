@@ -51,13 +51,26 @@ export class LocalRuntime implements FunctionRuntime {
     return this.execute<T>(future.definition, future.args);
   }
 
+  async reduce<T>(
+    definition: RegisteredDefinition,
+    items: readonly unknown[],
+    initial: unknown,
+  ): Promise<T> {
+    let accumulator = boundaryCopy(initial);
+    for (const item of items) {
+      accumulator = await this.execute<T>(definition, [accumulator, item]);
+    }
+    return accumulator as T;
+  }
+
   private async execute<T>(definition: RegisteredDefinition, rawArgs: readonly unknown[]): Promise<T> {
-    const args = rawArgs.map(boundaryCopy);
+    const originalArgs = rawArgs.map(boundaryCopy);
     const maxRetries = definition.options.retries?.maxRetries
       ?? this.application.application?.retries.maxRetries
       ?? 0;
     let lastError: unknown;
     for (let attempt = 0; attempt <= maxRetries; attempt += 1) {
+      const args = originalArgs.map(boundaryCopy);
       try {
         const value = await runWithFunctionRuntime(this, () =>
           runWithRequestContext(this.requestContext, () =>

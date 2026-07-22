@@ -2,7 +2,13 @@ import { createHash, randomUUID } from "node:crypto";
 import type { RegisteredDefinition, FunctionRuntime, FunctionFuture, TailCall } from "../applications/function.js";
 import { executeHandlerResult, runWithFunctionRuntime } from "../applications/function.js";
 import { File } from "../applications/file.js";
-import { FunctionError, ReplayMismatchError, RequestError, isRequestError } from "../applications/errors.js";
+import {
+  DeserializationError,
+  FunctionError,
+  ReplayMismatchError,
+  RequestError,
+  isRequestError,
+} from "../applications/errors.js";
 import type { RequestContextValue } from "../applications/context.js";
 import { runWithRequestContext } from "../applications/context.js";
 import { deserializeJSON, serializeValue } from "../applications/serialization.js";
@@ -30,6 +36,7 @@ const NOT_FOUND = 5;
 const REPLAY_STRICT = new Set(["REPLAY_MODE_STRICT", 1]);
 const OUTCOME_SUCCESS = new Set(["ALLOCATION_OUTCOME_CODE_SUCCESS", 1]);
 const WATCHER_TIMED_OUT = new Set(["FUNCTION_CALL_WATCHER_STATUS_TIMEDOUT", 2]);
+const MAX_REDUCE_CALLS_PER_PLAN = 512;
 
 function statusError(status: Message | undefined, fallback: string): Error | undefined {
   if (status == null || (status.code ?? OK) === OK) return undefined;
@@ -58,7 +65,7 @@ function parseHTTPMessage(data: Uint8Array): { headers: Record<string, string>; 
   const marker = Buffer.from("\r\n\r\n");
   const bytes = Buffer.from(data);
   const split = bytes.indexOf(marker);
-  if (split < 0) throw new Error("Invalid message/http application input");
+  if (split < 0) throw new DeserializationError("Invalid message/http application input");
   const lines = bytes.subarray(0, split).toString("utf8").split("\r\n");
   lines.shift();
   const headers: Record<string, string> = {};
@@ -69,53 +76,73 @@ function parseHTTPMessage(data: Uint8Array): { headers: Record<string, string>; 
   return { headers, body: new Uint8Array(bytes.subarray(split + marker.byteLength)) };
 }
 
-async function deserializeApplicationArguments(
+export async function deserializeApplicationArguments(
   definition: RegisteredDefinition,
   payload: { data: Uint8Array; contentType?: string; encoding?: string | number },
-): Promise<{ args: unknown[]; headers: Record<string, string> }> {
+): Promise<{ args: unknown[] }> {
   let data = payload.data;
   let contentType = payload.contentType ?? "application/json";
-  let headers: Record<string, string> = {};
   if (contentType === "message/http") {
     const parsed = parseHTTPMessage(data);
     data = parsed.body;
-    headers = parsed.headers;
-    contentType = headers["content-type"] ?? "application/json";
+    contentType = parsed.headers["content-type"] ?? "application/json";
   }
-  if (definition.parameters.length === 0) return { args: [], headers };
+  if (definition.parameters.length === 0) return { args: [] };
   if (contentType.toLowerCase().startsWith("multipart/form-data")) {
-    const form = await new Response(Uint8Array.from(data).buffer, {
-      headers: { "content-type": contentType },
-    }).formData();
+    let form: FormData;
+    try {
+      form = await new Response(Uint8Array.from(data).buffer, {
+        headers: { "content-type": contentType },
+      }).formData();
+    } catch (error) {
+      throw new DeserializationError("Failed to deserialize multipart application input", { cause: error });
+    }
     const args: unknown[] = [];
     for (const [index, parameter] of definition.parameters.entries()) {
       const part = form.get(parameter.name) ?? form.get(String(index));
       if (part == null) {
         args.push(undefined);
-      } else if (typeof part === "string") {
-        try {
-          args.push(JSON.parse(part));
-        } catch {
-          args.push(part);
-        }
+      } else if (parameter.schema._file) {
+        const bytes = typeof part === "string"
+          ? new TextEncoder().encode(part)
+          : new Uint8Array(await part.arrayBuffer());
+        const partContentType = typeof part === "string"
+          ? "application/octet-stream"
+          : part.type || "application/octet-stream";
+        args.push(new File(bytes, partContentType));
       } else {
-        args.push(new File(await part.arrayBuffer(), part.type || "application/octet-stream"));
+        try {
+          const bytes = typeof part === "string"
+            ? new TextEncoder().encode(part)
+            : new Uint8Array(await part.arrayBuffer());
+          args.push(deserializeJSON(bytes));
+        } catch (error) {
+          if (error instanceof DeserializationError) throw error;
+          throw new DeserializationError(
+            `Failed to deserialize multipart argument '${parameter.name}' as JSON`,
+            { cause: error },
+          );
+        }
       }
     }
-    return { args, headers };
+    return { args };
   }
   const firstParameter = definition.parameters[0];
-  if (firstParameter?.schema._file) return { args: [new File(data, contentType)], headers };
+  if (firstParameter?.schema._file) return { args: [new File(data, contentType)] };
   if (!contentType.toLowerCase().includes("json")) {
-    throw new Error(`Expected application/json input for '${firstParameter?.name ?? "argument"}', got ${contentType}`);
+    throw new DeserializationError(
+      `Expected application/json input for '${firstParameter?.name ?? "argument"}', got ${contentType}`,
+    );
   }
-  return { args: [deserializeJSON(data)], headers };
+  return { args: [deserializeJSON(data)] };
 }
 
 class ReplayHistory {
-  readonly ordered: Message[] = [];
+  readonly calls: Message[] = [];
+  readonly watchers: Message[] = [];
   readonly results = new Map<string, Message[]>();
-  private cursor = 0;
+  private callCursor = 0;
+  private watcherCursor = 0;
   private mismatch?: ReplayMismatchError;
 
   constructor(entries: Message[]) {
@@ -125,17 +152,22 @@ class ReplayHistory {
         const values = this.results.get(id) ?? [];
         values.push(entry.functionCallWatcherResult);
         this.results.set(id, values);
-      } else if (entry.functionCallCreated != null || entry.functionCallWatcherCreated != null) {
-        this.ordered.push(entry);
+      } else if (entry.functionCallCreated != null) {
+        this.calls.push(entry.functionCallCreated);
+      } else if (entry.functionCallWatcherCreated != null) {
+        this.watchers.push(entry.functionCallWatcherCreated);
       }
     }
   }
 
   takeOrdered(kind: "call" | "watcher", id: string): Message | undefined {
-    if (this.cursor >= this.ordered.length) return undefined;
-    const entry = this.ordered[this.cursor++];
-    const event = kind === "call" ? entry.functionCallCreated : entry.functionCallWatcherCreated;
-    if (event == null || event.functionCallId !== id) {
+    const entries = kind === "call" ? this.calls : this.watchers;
+    const cursor = kind === "call" ? this.callCursor : this.watcherCursor;
+    if (cursor >= entries.length) return undefined;
+    const event = entries[cursor];
+    if (kind === "call") this.callCursor += 1;
+    else this.watcherCursor += 1;
+    if (event.functionCallId !== id) {
       this.mismatch = new ReplayMismatchError(`Expected replay ${kind} event for ${id}`);
       throw this.mismatch;
     }
@@ -152,7 +184,7 @@ class ReplayHistory {
 
   assertConsumed(): void {
     this.assertNoMismatch();
-    if (this.cursor !== this.ordered.length) {
+    if (this.callCursor !== this.calls.length || this.watcherCursor !== this.watchers.length) {
       throw new ReplayMismatchError("Function completed before its durable event history was consumed");
     }
   }
@@ -161,6 +193,11 @@ class ReplayHistory {
 interface EventWaiter {
   predicate(event: Message): boolean;
   result: Deferred<Message>;
+}
+
+interface EmissionTurn {
+  wait: Promise<void>;
+  release(): void;
 }
 
 class AllocationProtocolError extends Error {
@@ -187,6 +224,8 @@ export class AllocationRunner implements FunctionRuntime {
   private currentRead?: { request: Message; response: Deferred<Message> };
   private replay?: ReplayHistory;
   private protocolError?: AllocationProtocolError;
+  private durableCallEmissionTail: Promise<void> = Promise.resolve();
+  private durableWatcherEmissionTail: Promise<void> = Promise.resolve();
   private lastEventClock = 0;
   private previousDurableId: string;
   private livePump?: Promise<void>;
@@ -249,11 +288,48 @@ export class AllocationRunner implements FunctionRuntime {
     return this.runChild<T>(future.definition, future.args, future.delaySeconds);
   }
 
-  private nextDurableId(definition: RegisteredDefinition): string {
+  async reduce<T>(
+    definition: RegisteredDefinition,
+    items: readonly unknown[],
+    initial: unknown,
+  ): Promise<T> {
+    if (items.length === 0) return initial as T;
+    const callTurn = this.reserveEmissionTurn("call");
+    const watcherTurn = this.reserveEmissionTurn("watcher");
+    const ids = items.map(() => this.nextDurableId(definition, "ReduceStep"));
+    const id = ids[ids.length - 1];
+    const startedAt = Date.now();
+    this.log("info", "durable reduce starting", {
+      durable_id: id,
+      target_function: definition.name,
+      collection_size: items.length,
+      plan_count: Math.ceil(items.length / MAX_REDUCE_CALLS_PER_PLAN),
+    });
+    try {
+      await this.createReduceChain(ids, definition, items, initial, callTurn);
+      await this.createWatcher(id, watcherTurn);
+    } finally {
+      callTurn.release();
+      watcherTurn.release();
+    }
+    const result = this.replay?.takeResult(id) ?? await this.waitForLiveEvent(
+      (entry) => entry.functionCallWatcherResult?.functionCallId === id,
+    ).then((entry) => entry.functionCallWatcherResult);
+    const resolved = await this.resolveWatcherResult<T>(result);
+    this.log("info", "durable reduce completed", {
+      durable_id: id,
+      target_function: definition.name,
+      collection_size: items.length,
+      duration_ms: Date.now() - startedAt,
+    });
+    return resolved;
+  }
+
+  private nextDurableId(definition: RegisteredDefinition, operation = "FunctionCall"): string {
     const id = durableHash([
       String(this.allocation.functionCallId),
       this.previousDurableId,
-      "FunctionCall",
+      operation,
       definition.name,
     ]);
     this.previousDurableId = id;
@@ -265,6 +341,8 @@ export class AllocationRunner implements FunctionRuntime {
     args: readonly unknown[],
     delaySeconds: number,
   ): Promise<T> {
+    const callTurn = this.reserveEmissionTurn("call");
+    const watcherTurn = this.reserveEmissionTurn("watcher");
     const id = this.nextDurableId(definition);
     const startedAt = Date.now();
     const maxRetries = definition.options.retries?.maxRetries
@@ -277,8 +355,13 @@ export class AllocationRunner implements FunctionRuntime {
       delay_seconds: delaySeconds,
       max_retries: maxRetries,
     });
-    await this.createChildCall(id, definition, args, delaySeconds);
-    await this.createWatcher(id);
+    try {
+      await this.createChildCall(id, definition, args, delaySeconds, callTurn);
+      await this.createWatcher(id, watcherTurn);
+    } finally {
+      callTurn.release();
+      watcherTurn.release();
+    }
     this.log("debug", "waiting for terminal durable function result", {
       durable_id: id,
       target_function: definition.name,
@@ -306,80 +389,213 @@ export class AllocationRunner implements FunctionRuntime {
     definition: RegisteredDefinition,
     args: readonly unknown[],
     delaySeconds: number,
+    turn: EmissionTurn,
   ): Promise<void> {
-    const replayed = this.replay?.takeOrdered("call", id);
-    if (replayed != null) {
-      this.log("debug", "replaying durable function creation", { durable_id: id });
-      const error = statusError(replayed.status, "Failed to start function call");
-      if (error != null) throw error;
-      return;
-    }
-    const prepared: PreparedSerializedObject[] = [];
-    let offset = 0;
-    for (const arg of args) {
-      const item = prepareSerializedObject(arg, offset);
-      prepared.push(item);
-      offset += item.bytes.byteLength;
-    }
-    let argsBlob: BlobValue | undefined;
-    if (prepared.length > 0) {
-      this.log("debug", "requesting durable function arguments blob", {
-        durable_id: id,
-        argument_count: args.length,
-        serialized_bytes: offset,
-      });
-      argsBlob = await this.requestOutputBlob(offset);
-      argsBlob = await this.uploadBlob(argsBlob, joinPrepared(prepared), "durable function arguments", {
-        durable_id: id,
-      });
-    }
-    const metadata = Buffer.from(JSON.stringify({
-      format: "tensorlake.typescript.function-call.v1",
-      id,
-      functionName: definition.name,
-      argumentCount: args.length,
-    }), "utf8");
-    const updates: Message = {
-      updates: [{ functionCall: {
+    try {
+      let turnAcquired = false;
+      if (this.replay != null) {
+        await turn.wait;
+        turnAcquired = true;
+      }
+      const replayed = this.replay?.takeOrdered("call", id);
+      if (replayed != null) {
+        this.log("debug", "replaying durable function creation", { durable_id: id });
+        const error = statusError(replayed.status, "Failed to start function call");
+        if (error != null) throw error;
+        return;
+      }
+      const prepared: PreparedSerializedObject[] = [];
+      let offset = 0;
+      for (const arg of args) {
+        const item = prepareSerializedObject(arg, offset);
+        prepared.push(item);
+        offset += item.bytes.byteLength;
+      }
+      let argsBlob: BlobValue | undefined;
+      if (prepared.length > 0) {
+        this.log("debug", "requesting durable function arguments blob", {
+          durable_id: id,
+          argument_count: args.length,
+          serialized_bytes: offset,
+        });
+        argsBlob = await this.requestOutputBlob(offset);
+        argsBlob = await this.uploadBlob(argsBlob, joinPrepared(prepared), "durable function arguments", {
+          durable_id: id,
+        });
+      }
+      const metadata = Buffer.from(JSON.stringify({
+        format: "tensorlake.typescript.function-call.v1",
         id,
-        target: {
-          namespace: this.functionRef.namespace,
-          applicationName: this.functionRef.applicationName,
-          applicationVersion: this.functionRef.applicationVersion,
-          functionName: definition.name,
-        },
-        args: prepared.map((item) => ({ value: item.object })),
-        callMetadata: metadata,
-      } }],
-      rootFunctionCallId: id,
-    };
-    if (delaySeconds > 0) updates.startAt = protocolTimestamp(new Date(Date.now() + delaySeconds * 1000));
-    this.log("debug", "queueing durable function creation event", {
-      durable_id: id,
-      target_function: definition.name,
-      delay_seconds: delaySeconds,
-    });
-    this.addBatch([{ createFunctionCall: { updates, argsBlob } }]);
-    this.log("debug", "waiting for durable function creation acknowledgement", { durable_id: id });
-    const created = await this.waitForLiveEvent((entry) => entry.functionCallCreated?.functionCallId === id);
-    const error = statusError(created.functionCallCreated?.status, "Failed to start function call");
-    if (error != null) throw error;
+        functionName: definition.name,
+        argumentCount: args.length,
+      }), "utf8");
+      const updates: Message = {
+        updates: [{ functionCall: {
+          id,
+          target: {
+            namespace: this.functionRef.namespace,
+            applicationName: this.functionRef.applicationName,
+            applicationVersion: this.functionRef.applicationVersion,
+            functionName: definition.name,
+          },
+          args: prepared.map((item) => ({ value: item.object })),
+          callMetadata: metadata,
+        } }],
+        rootFunctionCallId: id,
+      };
+      if (delaySeconds > 0) updates.startAt = protocolTimestamp(new Date(Date.now() + delaySeconds * 1000));
+      if (!turnAcquired) await turn.wait;
+      this.log("debug", "queueing durable function creation event", {
+        durable_id: id,
+        target_function: definition.name,
+        delay_seconds: delaySeconds,
+      });
+      this.addBatch([{ createFunctionCall: { updates, argsBlob } }]);
+      this.log("debug", "waiting for durable function creation acknowledgement", { durable_id: id });
+      const createdPromise = this.waitForLiveEvent((entry) => entry.functionCallCreated?.functionCallId === id);
+      turn.release();
+      const created = await createdPromise;
+      const error = statusError(created.functionCallCreated?.status, "Failed to start function call");
+      if (error != null) throw error;
+    } finally {
+      turn.release();
+    }
   }
 
-  private async createWatcher(id: string): Promise<void> {
-    const replayed = this.replay?.takeOrdered("watcher", id);
-    if (replayed != null) {
-      this.log("debug", "replaying durable function watcher creation", { durable_id: id });
-      const error = statusError(replayed.status, "Failed to create function call watcher");
-      if (error != null) throw error;
-      return;
+  private async createReduceChain(
+    ids: readonly string[],
+    definition: RegisteredDefinition,
+    items: readonly unknown[],
+    initial: unknown,
+    turn: EmissionTurn,
+  ): Promise<void> {
+    try {
+      let turnAcquired = false;
+      if (this.replay != null) {
+        await turn.wait;
+        turnAcquired = true;
+      }
+      const livePlans: Message[] = [];
+      const liveRoots: string[] = [];
+      for (let start = 0; start < items.length; start += MAX_REDUCE_CALLS_PER_PLAN) {
+        const end = Math.min(items.length, start + MAX_REDUCE_CALLS_PER_PLAN);
+        const rootId = ids[end - 1];
+        const replayed = this.replay?.takeOrdered("call", rootId);
+        if (replayed != null) {
+          this.log("debug", "replaying durable reduce plan creation", {
+            durable_id: rootId,
+            reduce_step_start: start,
+            reduce_step_end: end,
+          });
+          const error = statusError(replayed.status, "Failed to start reduce operation");
+          if (error != null) throw error;
+          continue;
+        }
+
+        const prepared: PreparedSerializedObject[] = [];
+        let offset = 0;
+        if (start === 0) {
+          const value = prepareSerializedObject(initial, offset);
+          prepared.push(value);
+          offset += value.bytes.byteLength;
+        }
+        for (let index = start; index < end; index += 1) {
+          const value = prepareSerializedObject(items[index], offset);
+          prepared.push(value);
+          offset += value.bytes.byteLength;
+        }
+        const requested = await this.requestOutputBlob(offset);
+        const argsBlob = await this.uploadBlob(
+          requested,
+          joinPrepared(prepared),
+          "durable reduce arguments",
+          { durable_id: rootId, reduce_step_start: start, reduce_step_end: end },
+        );
+        const itemOffset = start === 0 ? 1 : 0;
+        const updates = [];
+        for (let index = start; index < end; index += 1) {
+          const id = ids[index];
+          const accumulator = index === 0
+            ? { value: prepared[0].object }
+            : { functionCallId: ids[index - 1] };
+          const item = prepared[itemOffset + index - start];
+          const metadata = Buffer.from(JSON.stringify({
+            format: "tensorlake.typescript.function-call.v1",
+            id,
+            functionName: definition.name,
+            argumentCount: 2,
+            operation: "reduce",
+            reduceRootId: ids[ids.length - 1],
+            reduceStep: index,
+            reduceStepCount: items.length,
+          }), "utf8");
+          updates.push({ functionCall: {
+            id,
+            target: {
+              namespace: this.functionRef.namespace,
+              applicationName: this.functionRef.applicationName,
+              applicationVersion: this.functionRef.applicationVersion,
+              functionName: definition.name,
+            },
+            args: [accumulator, { value: item.object }],
+            callMetadata: metadata,
+          } });
+        }
+        livePlans.push({
+          createFunctionCall: {
+            updates: { updates, rootFunctionCallId: rootId },
+            argsBlob,
+          },
+        });
+        liveRoots.push(rootId);
+      }
+
+      if (livePlans.length === 0) return;
+      if (!turnAcquired) await turn.wait;
+      this.log("debug", "queueing durable reduce function-call chains", {
+        durable_id: ids[ids.length - 1],
+        target_function: definition.name,
+        reduce_step_count: items.length,
+        plan_count: livePlans.length,
+      });
+      this.addBatch(livePlans);
+      const createdPromises = liveRoots.map((rootId) => this.waitForLiveEvent(
+        (entry) => entry.functionCallCreated?.functionCallId === rootId,
+      ));
+      turn.release();
+      const createdEvents = await Promise.all(createdPromises);
+      for (const created of createdEvents) {
+        const error = statusError(created.functionCallCreated?.status, "Failed to start reduce operation");
+        if (error != null) throw error;
+      }
+    } finally {
+      turn.release();
     }
-    this.log("debug", "queueing durable function watcher event", { durable_id: id });
-    this.addBatch([{ createFunctionCallWatcher: { functionCallId: id } }]);
-    this.log("debug", "waiting for durable function watcher acknowledgement", { durable_id: id });
-    const created = await this.waitForLiveEvent((entry) => entry.functionCallWatcherCreated?.functionCallId === id);
-    const error = statusError(created.functionCallWatcherCreated?.status, "Failed to create function call watcher");
-    if (error != null) throw error;
+  }
+
+  private async createWatcher(id: string, turn: EmissionTurn): Promise<void> {
+    try {
+      await turn.wait;
+      const replayed = this.replay?.takeOrdered("watcher", id);
+      if (replayed != null) {
+        this.log("debug", "replaying durable function watcher creation", { durable_id: id });
+        const error = statusError(replayed.status, "Failed to create function call watcher");
+        if (error != null) throw error;
+        return;
+      }
+      this.log("debug", "queueing durable function watcher event", { durable_id: id });
+      this.addBatch([{ createFunctionCallWatcher: { functionCallId: id } }]);
+      this.log("debug", "waiting for durable function watcher acknowledgement", { durable_id: id });
+      const createdPromise = this.waitForLiveEvent(
+        (entry) => entry.functionCallWatcherCreated?.functionCallId === id,
+      );
+      turn.release();
+      const created = await createdPromise;
+      const error = statusError(created.functionCallWatcherCreated?.status, "Failed to create function call watcher");
+      if (error != null) throw error;
+    } finally {
+      turn.release();
+    }
   }
 
   private async resolveWatcherResult<T>(event: Message): Promise<T> {
@@ -413,19 +629,37 @@ export class AllocationRunner implements FunctionRuntime {
   }
 
   private async startTailCall(tailCall: TailCall<unknown>): Promise<string> {
+    const callTurn = this.reserveEmissionTurn("call");
     const id = this.nextDurableId(tailCall.definition);
     this.log("info", "tail call starting", {
       durable_id: id,
       target_function: tailCall.definition.name,
       argument_count: tailCall.args.length,
     });
-    await this.createChildCall(id, tailCall.definition, tailCall.args, 0);
+    await this.createChildCall(id, tailCall.definition, tailCall.args, 0, callTurn);
     return id;
+  }
+
+  private reserveEmissionTurn(kind: "call" | "watcher"): EmissionTurn {
+    const previous = kind === "call" ? this.durableCallEmissionTail : this.durableWatcherEmissionTail;
+    let signalRelease!: () => void;
+    const released = new Promise<void>((resolve) => { signalRelease = resolve; });
+    const tail = previous.then(() => released);
+    if (kind === "call") this.durableCallEmissionTail = tail;
+    else this.durableWatcherEmissionTail = tail;
+    let didRelease = false;
+    return {
+      wait: previous,
+      release: () => {
+        if (didRelease) return;
+        didRelease = true;
+        signalRelease();
+      },
+    };
   }
 
   private async run(): Promise<void> {
     let handlerArgs: unknown[];
-    let headers: Record<string, string> = {};
     this.log("info", "allocation execution started", {
       replay_mode: this.allocation.replayMode,
       function: this.functionRef.functionName,
@@ -433,16 +667,11 @@ export class AllocationRunner implements FunctionRuntime {
     this.emitLifecycleEvent("allocations_started", "Starting allocations");
     try {
       const inputs = this.allocation.inputs ?? {};
-      headers = Object.fromEntries((inputs.requestContext?.headers ?? []).map((header: Message) => [
-        String(header.name ?? "").toLowerCase(),
-        String(header.value ?? ""),
-      ]));
       const objects = inputs.args ?? [];
       const blobs = inputs.argBlobs ?? [];
       this.log("debug", "allocation inputs validated", {
         object_count: objects.length,
         blob_count: blobs.length,
-        request_header_count: Object.keys(headers).length,
         function_call_metadata_bytes: inputs.functionCallMetadata?.length ?? 0,
       });
       if (objects.length !== blobs.length) throw new Error("Function argument and BLOB counts differ");
@@ -464,12 +693,16 @@ export class AllocationRunner implements FunctionRuntime {
           content_type: values[0]?.contentType,
         });
         if (values.length !== 1) throw new Error("Application calls require exactly one input payload");
-        const parsed = await deserializeApplicationArguments(this.definition, values[0]);
-        handlerArgs = parsed.args;
-        headers = { ...headers, ...parsed.headers };
+        try {
+          const parsed = await deserializeApplicationArguments(this.definition, values[0]);
+          handlerArgs = parsed.args;
+        } catch (error) {
+          this.log("error", "application invocation input deserialization failed", {}, error);
+          await this.finishUserError(error);
+          return;
+        }
         this.log("debug", "application invocation input deserialized", {
           handler_argument_count: handlerArgs.length,
-          request_header_count: Object.keys(headers).length,
         });
       } else {
         this.log("debug", "deserializing internal function invocation inputs", {
@@ -480,7 +713,13 @@ export class AllocationRunner implements FunctionRuntime {
           throw new Error("Function call metadata was produced by a different SDK language");
         }
         if (call.argumentCount !== values.length) throw new Error("Function call metadata argument count differs");
-        handlerArgs = values.map(deserializeValueFromProtocol);
+        try {
+          handlerArgs = values.map(deserializeValueFromProtocol);
+        } catch (error) {
+          this.log("error", "internal function argument deserialization failed", {}, error);
+          await this.finishUserError(error);
+          return;
+        }
         this.log("debug", "internal function invocation inputs deserialized", {
           handler_argument_count: handlerArgs.length,
           metadata_function: call.functionName,
@@ -493,7 +732,7 @@ export class AllocationRunner implements FunctionRuntime {
       } else {
         this.log("debug", "strict replay disabled");
       }
-      const requestContext = this.createRequestContext(headers);
+      const requestContext = this.createRequestContext();
       let result: unknown | TailCall<unknown>;
       const handlerStartedAt = Date.now();
       this.log("info", "user function handler starting", {
@@ -617,10 +856,9 @@ export class AllocationRunner implements FunctionRuntime {
     });
   }
 
-  private createRequestContext(headers: Record<string, string>): RequestContextValue {
+  private createRequestContext(): RequestContextValue {
     return {
       requestId: String(this.allocation.requestId),
-      headers: Object.freeze({ ...headers }),
       signal: this.controller.signal,
       state: {
         get: async <T>(key: string, defaultValue?: T) => {

@@ -74,17 +74,6 @@ message SerializedObjectInsideBLOB {
     optional uint64 offset = 2;
 }
 
-message HttpRequestHeader {
-    optional string name = 1;
-    optional string value = 2;
-}
-
-message RequestContext {
-    // Sanitized HTTP request headers from the application invocation.
-    // Authentication, cookies, host, proxy credentials, and hop-by-hop headers are omitted.
-    repeated HttpRequestHeader headers = 1;
-}
-
 message FunctionRef {
   optional string namespace = 1;
   optional string application_name = 2;
@@ -238,7 +227,6 @@ message FunctionInputs {
     // SDK metadata for function calls created by SDK.
     // Empty byte array for application function calls.
     optional bytes function_call_metadata = 4;
-    optional RequestContext request_context = 5;
 }
 
 message FunctionArg {

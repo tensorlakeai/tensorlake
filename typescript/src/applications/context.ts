@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { SDKUsageError } from "./errors.js";
+import { deserializeJSON, serializeValue } from "./serialization.js";
 
 export interface ProgressOptions {
   message?: string;
@@ -22,7 +23,6 @@ export interface FunctionProgress {
 
 export interface RequestContextValue {
   readonly requestId: string;
-  readonly headers: Readonly<Record<string, string>>;
   readonly signal: AbortSignal;
   readonly state: RequestState;
   readonly metrics: RequestMetrics;
@@ -64,27 +64,31 @@ export function runWithRequestContext<T>(
 }
 
 export class MemoryRequestContext implements RequestContextValue {
-  readonly headers: Readonly<Record<string, string>>;
   readonly signal: AbortSignal;
-  private readonly values = new Map<string, unknown>();
+  private readonly values = new Map<string, Uint8Array>();
   private readonly counters = new Map<string, number>();
   private readonly timers = new Map<string, number[]>();
   private lastProgress?: { current: number; total: number; options?: ProgressOptions };
 
   constructor(
     readonly requestId: string,
-    options: { headers?: Record<string, string>; signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal } = {},
   ) {
-    this.headers = Object.freeze({ ...(options.headers ?? {}) });
     this.signal = options.signal ?? new AbortController().signal;
   }
 
   readonly state: RequestState = {
     set: async (key, value) => {
-      this.values.set(key, value);
+      const serialized = serializeValue(value);
+      if (serialized.encoding !== "json") {
+        throw new SDKUsageError("Request state values must be JSON values");
+      }
+      this.values.set(key, serialized.data.slice());
     },
-    get: async <T>(key: string, defaultValue?: T) =>
-      (this.values.has(key) ? this.values.get(key) : defaultValue) as T | undefined,
+    get: async <T>(key: string, defaultValue?: T) => {
+      const value = this.values.get(key);
+      return value == null ? defaultValue : deserializeJSON(value) as T;
+    },
   };
 
   readonly metrics: RequestMetrics = {
