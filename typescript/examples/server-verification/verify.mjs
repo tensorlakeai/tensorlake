@@ -89,13 +89,11 @@ async function verifyRuntime() {
     "typescript_runtime_verification",
     JSON.stringify(input),
     "application/json",
-    { "X-Tensorlake-Verification": "header-propagated" },
   );
   const metadata = await waitForRequest("typescript_runtime_verification", requestId);
   assert.equal(metadata.outcome, "success", JSON.stringify(metadata));
   const value = await (await output("typescript_runtime_verification", requestId)).json();
   assert.equal(value.requestId, requestId);
-  assert.equal(value.invocationHeader, "header-propagated");
   assert.equal(value.rememberedLabel, input.label);
   assert.deepEqual(value.doubled, [2, 4, 10]);
   assert.equal(value.delayed, 2);
@@ -225,13 +223,24 @@ async function verifyReduce() {
   const failedReducerRuns = (failureMetadata.function_runs ?? []).filter(
     (run) => run.name === "typescript_verification_reduce_sum",
   );
-  assert.equal(
-    failedReducerRuns.length,
-    2,
-    `sequential reduce must stop after the failing item: ${JSON.stringify(failureMetadata)}`,
+  assert(
+    failedReducerRuns.length >= 2 && failedReducerRuns.length <= 3,
+    `reduce must run through the failing item and cancel any dependent step: ${JSON.stringify(failureMetadata)}`,
   );
   assert.equal(failedReducerRuns.filter((run) => run.outcome === "success").length, 1);
-  assert.equal(failedReducerRuns.filter((run) => run.outcome === "failure").length, 1);
+  assert.equal(
+    failedReducerRuns.filter((run) => run.failure_reason === "function_error").length,
+    1,
+  );
+  assert.equal(
+    failedReducerRuns.filter((run) =>
+      run.outcome === "success"
+      || run.failure_reason === "function_error"
+      || run.failure_reason === "function_run_cancelled"
+    ).length,
+    failedReducerRuns.length,
+    `dependent reduce steps must be cancelled after failure: ${JSON.stringify(failureMetadata)}`,
+  );
 }
 
 try {

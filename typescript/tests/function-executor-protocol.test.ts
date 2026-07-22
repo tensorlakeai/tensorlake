@@ -228,6 +228,129 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(events.readCount).toBe(1);
   });
 
+  it("emits concurrent map calls and watchers in invocation order and replays them", async () => {
+    clearRegistryForTest();
+    const child = registerFunction("protocol_ordered_map_child", async (value: number) => value * 2);
+    const application = registerApplication("protocol_ordered_map_parent", async () => child.map([1, 2]));
+    const { directory, runner } = await createRunner(application.definition);
+    const seenBlobs = new Set<string>();
+    let firstBlob: Message | undefined;
+    let childBlobCount = 0;
+    const respond = (request: Message) => runner.deliverUpdate({
+      outputBlob: {
+        status: { code: 0 },
+        blob: {
+          id: request.id,
+          chunks: [{
+            uri: pathToFileURL(path.join(directory, `ordered-output-${request.id}`)).href,
+            size: request.size,
+          }],
+        },
+      },
+    });
+    runner.watchState({
+      write(state) {
+        for (const request of state.outputBlobRequests ?? []) {
+          if (seenBlobs.has(request.id)) continue;
+          seenBlobs.add(request.id);
+          if (childBlobCount === 0) {
+            firstBlob = request;
+          } else if (childBlobCount === 1) {
+            const delayed = firstBlob;
+            queueMicrotask(() => {
+              respond(request);
+              if (delayed != null) respond(delayed);
+            });
+          } else {
+            queueMicrotask(() => respond(request));
+          }
+          childBlobCount += 1;
+        }
+        return true;
+      },
+      end() {},
+      on() {},
+    });
+    const events = attachEventDriver(runner);
+    runner.start();
+
+    const createBatches: Message[][] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const batch = await withDeadline(runner.getExecutionBatch(), `ordered map creation ${index}`);
+      createBatches.push(batch);
+      runner.advanceExecutionBatch();
+    }
+    const durableIds = createBatches.map((batch) =>
+      String(batch[0].createFunctionCall.updates.rootFunctionCallId)
+    );
+    const callValues = await Promise.all(createBatches.map(async (batch) => {
+      const creation = batch[0].createFunctionCall;
+      const argument = creation.updates.updates[0].functionCall.args[0].value;
+      return deserializeValueFromProtocol(await downloadSerializedObject(argument, creation.argsBlob));
+    }));
+    expect(callValues).toEqual([1, 2]);
+
+    await events.respond(durableIds.map((functionCallId, index) => ({
+      clock: index + 1,
+      functionCallCreated: { functionCallId, status: { code: 0 } },
+    })), 2);
+    const watcherBatches: Message[][] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const batch = await withDeadline(runner.getExecutionBatch(), `ordered map watcher ${index}`);
+      watcherBatches.push(batch);
+      runner.advanceExecutionBatch();
+    }
+    expect(watcherBatches.map((batch) => batch[0].createFunctionCallWatcher.functionCallId)).toEqual(durableIds);
+
+    const results = await Promise.all(durableIds.map(async (durableId, index) => {
+      const prepared = prepareSerializedObject((index + 1) * 2, 0, durableId);
+      const outputPath = path.join(directory, `ordered-child-${index}`);
+      await writeFile(outputPath, prepared.bytes);
+      return {
+        functionCallId: durableId,
+        watcherStatus: "FUNCTION_CALL_WATCHER_STATUS_COMPLETED",
+        outcomeCode: "ALLOCATION_OUTCOME_CODE_SUCCESS",
+        valueOutput: prepared.object,
+        valueBlob: {
+          id: `ordered-child-${index}`,
+          chunks: [{ uri: pathToFileURL(outputPath).href, size: prepared.bytes.byteLength }],
+        },
+      };
+    }));
+    const watcherHistory = durableIds.flatMap((functionCallId, index) => [
+      {
+        clock: index * 2 + 3,
+        functionCallWatcherCreated: { functionCallId, status: { code: 0 } },
+      },
+      { clock: index * 2 + 4, functionCallWatcherResult: results[index] },
+    ]);
+    await events.respond(watcherHistory, 6);
+    const terminalBatch = await withDeadline(runner.getExecutionBatch(), "ordered map terminal batch");
+    expect(await readFinishValue(terminalBatch[0].finishAllocation)).toEqual([2, 4]);
+
+    const replay = await createRunner(application.definition, { replayMode: "REPLAY_MODE_STRICT" });
+    attachBlobResponder(replay.runner, replay.directory);
+    const replayEvents = attachEventDriver(replay.runner);
+    replay.runner.start();
+    await replayEvents.respond(durableIds.flatMap((functionCallId, index) => [
+      {
+        clock: index * 3 + 1,
+        functionCallCreated: { functionCallId, status: { code: 0 } },
+      },
+      {
+        clock: index * 3 + 2,
+        functionCallWatcherCreated: { functionCallId, status: { code: 0 } },
+      },
+      { clock: index * 3 + 3, functionCallWatcherResult: results[index] },
+    ]), 6);
+    const replayTerminal = await withDeadline(
+      replay.runner.getExecutionBatch(),
+      "ordered map replay terminal batch",
+    );
+    expect(replayTerminal).toHaveLength(1);
+    expect(await readFinishValue(replayTerminal[0].finishAllocation)).toEqual([2, 4]);
+  });
+
   it("treats one failed watcher result as terminal after the server exhausts retries", async () => {
     clearRegistryForTest();
     const child = registerFunction(async () => "unreachable", {
@@ -274,7 +397,7 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(events.readCount).toBe(1);
   });
 
-  it("executes reduce as a sequential durable-call chain and strictly replays it", async () => {
+  it("executes reduce as a function-call chain and strictly replays it", async () => {
     clearRegistryForTest();
     const add = registerFunction(async (accumulator: number, value: number) => accumulator + value, {
       name: "protocol_reduce_add",
@@ -292,66 +415,63 @@ describe("TypeScript function executor protocol conformance", () => {
     const { directory, runner } = await createRunner(application.definition);
     attachBlobResponder(runner, directory);
     const events = attachEventDriver(runner);
-    const expectedArguments = [[10, 1], [11, 2], [13, 3]];
-    const expectedResults = [11, 13, 16];
-    const history: Message[] = [];
-    const durableIds = new Set<string>();
-
     runner.start();
-    for (const [index, expected] of expectedArguments.entries()) {
-      const createBatch = await withDeadline(
-        runner.getExecutionBatch(),
-        `reduce child creation batch ${index + 1}`,
-      );
-      const creation = createBatch[0].createFunctionCall;
-      const call = creation.updates.updates[0].functionCall;
-      const durableId = String(creation.updates.rootFunctionCallId);
-      durableIds.add(durableId);
-      expect(call.target.functionName).toBe("protocol_reduce_add");
-      const args = await Promise.all(call.args.map(async (arg: Message) =>
-        deserializeValueFromProtocol(await downloadSerializedObject(arg.value, creation.argsBlob))
-      ));
-      expect(args).toEqual(expected);
-      runner.advanceExecutionBatch();
+    const createBatch = await withDeadline(runner.getExecutionBatch(), "reduce creation batch");
+    const creation = createBatch[0].createFunctionCall;
+    const calls = creation.updates.updates.map((update: Message) => update.functionCall);
+    const durableId = String(creation.updates.rootFunctionCallId);
+    expect(calls).toHaveLength(3);
+    expect(calls[2].id).toBe(durableId);
+    expect(calls.every((call: Message) => call.target.functionName === "protocol_reduce_add")).toBe(true);
+    expect(calls[1].args[0].functionCallId).toBe(calls[0].id);
+    expect(calls[2].args[0].functionCallId).toBe(calls[1].id);
+    const inlineValues = [calls[0].args[0], ...calls.map((call: Message) => call.args[1])];
+    expect(await Promise.all(inlineValues.map(async (arg: Message) =>
+      deserializeValueFromProtocol(await downloadSerializedObject(arg.value, creation.argsBlob))
+    ))).toEqual([10, 1, 2, 3]);
+    expect(JSON.parse(Buffer.from(calls[0].callMetadata).toString("utf8"))).toMatchObject({
+      format: "tensorlake.typescript.function-call.v1",
+      functionName: "protocol_reduce_add",
+      argumentCount: 2,
+      operation: "reduce",
+      reduceRootId: durableId,
+      reduceStep: 0,
+      reduceStepCount: 3,
+    });
+    expect(creation.updates.updates.every((update: Message) => update.reduce == null)).toBe(true);
+    runner.advanceExecutionBatch();
 
-      const prepared = prepareSerializedObject(expectedResults[index], 0, durableId);
-      const resultPath = path.join(directory, `reduce-result-${index}`);
-      await writeFile(resultPath, prepared.bytes);
-      const page = [
-        { clock: index * 3 + 1, functionCallCreated: { functionCallId: durableId, status: { code: 0 } } },
-        { clock: index * 3 + 2, functionCallWatcherCreated: { functionCallId: durableId, status: { code: 0 } } },
-        { clock: index * 3 + 3, functionCallWatcherResult: {
-          functionCallId: durableId,
-          watcherStatus: "FUNCTION_CALL_WATCHER_STATUS_COMPLETED",
-          outcomeCode: "ALLOCATION_OUTCOME_CODE_SUCCESS",
-          valueOutput: prepared.object,
-          valueBlob: {
-            id: `reduce-result-${index}`,
-            chunks: [{ uri: pathToFileURL(resultPath).href, size: prepared.bytes.byteLength }],
-          },
-        } },
-      ];
-      history.push(...page);
-      await events.respond(page, index * 3 + 3);
+    const prepared = prepareSerializedObject(16, 0, durableId);
+    const resultPath = path.join(directory, "reduce-result");
+    await writeFile(resultPath, prepared.bytes);
+    const history = [
+      { clock: 1, functionCallCreated: { functionCallId: durableId, status: { code: 0 } } },
+      { clock: 2, functionCallWatcherCreated: { functionCallId: durableId, status: { code: 0 } } },
+      { clock: 3, functionCallWatcherResult: {
+        functionCallId: durableId,
+        watcherStatus: "FUNCTION_CALL_WATCHER_STATUS_COMPLETED",
+        outcomeCode: "ALLOCATION_OUTCOME_CODE_SUCCESS",
+        valueOutput: prepared.object,
+        valueBlob: {
+          id: "reduce-result",
+          chunks: [{ uri: pathToFileURL(resultPath).href, size: prepared.bytes.byteLength }],
+        },
+      } },
+    ];
+    await events.respond(history, 3);
 
-      const watcherBatch = await withDeadline(
-        runner.getExecutionBatch(),
-        `reduce child watcher batch ${index + 1}`,
-      );
-      expect(watcherBatch).toEqual([{ createFunctionCallWatcher: { functionCallId: durableId } }]);
-      runner.advanceExecutionBatch();
-    }
-
-    expect(durableIds.size).toBe(3);
+    const watcherBatch = await withDeadline(runner.getExecutionBatch(), "reduce watcher batch");
+    expect(watcherBatch).toEqual([{ createFunctionCallWatcher: { functionCallId: durableId } }]);
+    runner.advanceExecutionBatch();
     const terminalBatch = await withDeadline(runner.getExecutionBatch(), "the reduce terminal batch");
     expect(await readFinishValue(terminalBatch[0].finishAllocation)).toBe(16);
-    expect(events.readCount).toBe(3);
+    expect(events.readCount).toBe(1);
 
     const replay = await createRunner(application.definition, { replayMode: "REPLAY_MODE_STRICT" });
     attachBlobResponder(replay.runner, replay.directory);
     const replayEvents = attachEventDriver(replay.runner);
     replay.runner.start();
-    await replayEvents.respond(history, 9);
+    await replayEvents.respond(history, 3);
     const replayTerminalBatch = await withDeadline(
       replay.runner.getExecutionBatch(),
       "the replayed reduce terminal batch",

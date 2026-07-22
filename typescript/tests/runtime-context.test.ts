@@ -16,7 +16,6 @@ describe.sequential("application runtime context", () => {
 
     const context: RequestContextValue = {
       requestId: "request-from-executor",
-      headers: Object.freeze({ verification: "shared" }),
       signal: new AbortController().signal,
       state: { get: async () => undefined, set: async () => undefined },
       metrics: { counter: async () => undefined, timer: async () => undefined },
@@ -25,6 +24,7 @@ describe.sequential("application runtime context", () => {
     const runtime = {
       invoke: async () => "invoked",
       runFuture: async () => "future",
+      reduce: async () => "reduced",
     } as FunctionRuntime;
 
     await executorContext.runWithRequestContext(context, async () => {

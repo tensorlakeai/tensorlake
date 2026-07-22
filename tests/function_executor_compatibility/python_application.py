@@ -1,3 +1,5 @@
+import json
+
 from tensorlake.applications import (
     File,
     FunctionError,
@@ -23,10 +25,21 @@ def parity_failing_child(value: int) -> int:
     raise RuntimeError(f"child failed for {value}")
 
 
+@function()
+def parity_identity_file(value: File) -> File:
+    return value
+
+
 @application()
 @function()
 def parity_value(value: int) -> dict[str, int]:
     return {"value": value}
+
+
+@application()
+@function()
+def parity_multipart(left: int, right: int) -> int:
+    return left * right
 
 
 @application()
@@ -89,6 +102,17 @@ def parity_function_error(value: int) -> int:
 @function()
 def parity_file(value: int) -> File:
     return File(f"parity-file-{value}".encode(), "text/plain")
+
+
+@application()
+@function()
+def parity_json_file(value: int) -> dict[str, str]:
+    content = json.dumps({"value": value}, separators=(",", ":")).encode()
+    result = parity_identity_file(File(content, "application/json"))
+    return {
+        "content": result.content.decode(),
+        "content_type": result.content_type,
+    }
 
 
 @application()

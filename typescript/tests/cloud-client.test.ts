@@ -1,6 +1,8 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as undici from "undici";
 import { CloudClient } from "../src/cloud-client.js";
+import { RemoteRequest, runRemote } from "../src/applications/remote.js";
+import { File } from "../src/applications/file.js";
 
 vi.mock("undici", async (importOriginal) => {
   const actual = await importOriginal<typeof import("undici")>();
@@ -79,6 +81,38 @@ describe("CloudClient", () => {
 
     expect(requestId).toBe("req-2");
     client.close();
+  });
+
+  it("keeps the legacy variadic name-only invocation signature", async () => {
+    mockFetch((url, init) => {
+      expect(url).toContain("/v1/namespaces/default/applications/echo");
+      expect(new TextDecoder().decode(init?.body as ArrayBuffer)).toBe('"Ada"');
+      expect((init?.headers as Record<string, string>)["Content-Type"]).toBe(
+        "application/json; charset=UTF-8",
+      );
+      return new Response(JSON.stringify({ request_id: "req-remote" }), { status: 200 });
+    });
+
+    const request = await runRemote<string>("echo", "Ada");
+
+    expect(request.id).toBe("req-remote");
+  });
+
+  it("uses a registered application's return schema for JSON MIME files", async () => {
+    const bytes = new TextEncoder().encode('{"raw":true}');
+    const client = {
+      waitOnRequestCompletion: async () => undefined,
+      requestOutput: async () => ({
+        serializedValue: bytes,
+        contentType: "application/json",
+      }),
+    };
+    const request = new RemoteRequest<File>("req-file", "file_app", client as never, true);
+
+    const output = await request.output();
+    expect(output).toBeInstanceOf(File);
+    expect(output.content).toEqual(bytes);
+    expect(output.contentType).toBe("application/json");
   });
 
   it("uploads applications as multipart form data", async () => {

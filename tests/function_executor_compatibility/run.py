@@ -71,12 +71,10 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     FunctionRef,
     GetAllocationExecutionLogBatchRequest,
     HealthCheckRequest,
-    HttpRequestHeader,
     InfoRequest,
     InitializeRequest,
     ListAllocationsRequest,
     ReadAllocationEventLogResponse,
-    RequestContext,
     SerializedObject,
     SerializedObjectEncoding,
     SerializedObjectInsideBLOB,
@@ -97,12 +95,15 @@ REQUEST_ERROR_BLOB_SIZE = 4096
 DOUBLE_FUNCTION = "parity_double"
 ADD_FUNCTION = "parity_add"
 FAILING_FUNCTION = "parity_failing_child"
+IDENTITY_FILE_FUNCTION = "parity_identity_file"
 
 FUNCTION_NAMES = (
     DOUBLE_FUNCTION,
     ADD_FUNCTION,
     FAILING_FUNCTION,
+    IDENTITY_FILE_FUNCTION,
     "parity_value",
+    "parity_multipart",
     "parity_child",
     "parity_map",
     "parity_reduce",
@@ -112,6 +113,7 @@ FUNCTION_NAMES = (
     "parity_request_error",
     "parity_function_error",
     "parity_file",
+    "parity_json_file",
     "parity_state",
     "parity_replay_mismatch",
 )
@@ -129,6 +131,7 @@ class Scenario:
     expected_progress: tuple[tuple[float, float], ...] = ()
     replay_success: bool = False
     replay_mismatch: bool = False
+    multipart: bool = False
 
     def call_counts(self, language: str) -> tuple[int, int]:
         if language == "typescript" and self.typescript_expected_calls is not None:
@@ -141,6 +144,12 @@ SCENARIOS = (
         name="parity_value",
         input=21,
         expected_terminal={"outcome": "success", "value": {"value": 21}},
+    ),
+    Scenario(
+        name="parity_multipart",
+        input=[6, 7],
+        expected_terminal={"outcome": "success", "value": 42},
+        multipart=True,
     ),
     Scenario(
         name="parity_child",
@@ -157,6 +166,7 @@ SCENARIOS = (
         behavior="map",
         expected_calls=(1, 1),
         typescript_expected_calls=(3, 3),
+        replay_success=True,
     ),
     Scenario(
         name="parity_reduce",
@@ -164,7 +174,7 @@ SCENARIOS = (
         expected_terminal={"outcome": "success", "value": 16},
         behavior="reduce",
         expected_calls=(1, 1),
-        typescript_expected_calls=(3, 3),
+        replay_success=True,
     ),
     Scenario(
         name="parity_tail_call",
@@ -219,6 +229,19 @@ SCENARIOS = (
                 }
             },
         },
+    ),
+    Scenario(
+        name="parity_json_file",
+        input=21,
+        expected_terminal={
+            "outcome": "success",
+            "value": {
+                "content": '{"value":21}',
+                "content_type": "application/json",
+            },
+        },
+        behavior="json_file",
+        expected_calls=(1, 1),
     ),
     Scenario(
         name="parity_state",
@@ -445,16 +468,29 @@ class ProtocolDriver:
 
     def _accept_child_call(self, creation) -> None:
         updates = creation.updates
-        if len(updates.updates) != 1 or not updates.updates[0].HasField(
-            "function_call"
-        ):
-            raise AssertionError("expected one function call in the creation batch")
-        call = updates.updates[0].function_call
+        if len(updates.updates) > 1:
+            self._accept_reduce_chain(creation)
+            return
+        if len(updates.updates) != 1:
+            raise AssertionError("expected one operation in the creation batch")
+        operation = updates.updates[0]
         durable_id = updates.root_function_call_id
+        if operation.HasField("function_call"):
+            call = operation.function_call
+            arguments_proto = call.args
+            call_metadata = call.call_metadata
+            logical_function = call.target.function_name
+            special = None
+        elif operation.HasField("reduce"):
+            raise AssertionError(
+                "executor emitted deprecated ReduceOp instead of a function-call chain"
+            )
+        else:
+            raise AssertionError("creation batch contains no supported operation")
         if call.id != durable_id:
-            raise AssertionError("function-call ID and root durable ID differ")
+            raise AssertionError("operation ID and root durable ID differ")
         arguments: list[Any] = []
-        for argument in call.args:
+        for argument in arguments_proto:
             if not argument.HasField("value"):
                 raise AssertionError(
                     "parity fixture unexpectedly emitted a function-call reference"
@@ -463,12 +499,13 @@ class ProtocolDriver:
                 decode_serialized_value(argument.value, creation.args_blob)
             )
 
-        metadata = decode_function_call_metadata(call.call_metadata)
-        special = None
-        logical_function = call.target.function_name
+        metadata = decode_function_call_metadata(call_metadata)
         positional = arguments
         keyword_arguments: dict[str, Any] = {}
-        if isinstance(metadata, FunctionCallMetadata):
+        if special == "reduce":
+            positional = arguments[1:]
+            keyword_arguments = {"initial": arguments[0]}
+        elif isinstance(metadata, FunctionCallMetadata):
             positional = arguments[: len(metadata.args)]
             keyword_arguments = dict(
                 zip(metadata.kwargs.keys(), arguments[len(metadata.args) :])
@@ -488,7 +525,7 @@ class ProtocolDriver:
             "special": special,
         }
         self.child_calls.append(child_call)
-        self.call_metadata[durable_id] = bytes(call.call_metadata)
+        self.call_metadata[durable_id] = bytes(call_metadata)
 
         if self.scenario.behavior == "creation_failure":
             metadata = (
@@ -516,7 +553,77 @@ class ProtocolDriver:
                     function_call_created=AllocationEventFunctionCallCreated(
                         function_call_id=durable_id,
                         status=Status(code=0),
-                        metadata=call.call_metadata,
+                        metadata=call_metadata,
+                    )
+                )
+            ]
+        )
+
+    def _accept_reduce_chain(self, creation) -> None:
+        updates = creation.updates
+        calls = []
+        for operation in updates.updates:
+            if not operation.HasField("function_call"):
+                raise AssertionError(
+                    "reduce chain contains a non-function-call operation"
+                )
+            calls.append(operation.function_call)
+        durable_id = updates.root_function_call_id
+        if calls[-1].id != durable_id:
+            raise AssertionError("reduce chain root is not its final function call")
+
+        initial = None
+        values: list[Any] = []
+        previous_id = None
+        logical_function = calls[0].target.function_name
+        for index, call in enumerate(calls):
+            if call.target.function_name != logical_function or len(call.args) != 2:
+                raise AssertionError("reduce chain has inconsistent reducer calls")
+            metadata = decode_function_call_metadata(call.call_metadata)
+            if not isinstance(metadata, dict) or metadata.get("operation") != "reduce":
+                raise AssertionError(
+                    "reduce chain is missing TypeScript reduce metadata"
+                )
+            if metadata.get("reduceStep") != index:
+                raise AssertionError("reduce chain steps are not ordered")
+            accumulator = call.args[0]
+            if index == 0:
+                if not accumulator.HasField("value"):
+                    raise AssertionError(
+                        "reduce chain initial accumulator is not inline"
+                    )
+                initial = decode_serialized_value(accumulator.value, creation.args_blob)
+            elif (
+                not accumulator.HasField("function_call_id")
+                or accumulator.function_call_id != previous_id
+            ):
+                raise AssertionError(
+                    "reduce chain accumulator does not reference the prior step"
+                )
+            if not call.args[1].HasField("value"):
+                raise AssertionError("reduce chain item is not inline")
+            values.append(
+                decode_serialized_value(call.args[1].value, creation.args_blob)
+            )
+            previous_id = call.id
+
+        child_call = {
+            "durable_id": durable_id,
+            "function": logical_function,
+            "arguments": normalize_value(values),
+            "keyword_arguments": {"initial": normalize_value(initial)},
+            "special": "reduce",
+        }
+        self.child_calls.append(child_call)
+        self.call_metadata[durable_id] = bytes(calls[-1].call_metadata)
+        self.child_results[durable_id] = self._result_for_call(child_call)
+        self._queue_events(
+            [
+                AllocationEvent(
+                    function_call_created=AllocationEventFunctionCallCreated(
+                        function_call_id=durable_id,
+                        status=Status(code=0),
+                        metadata=calls[-1].call_metadata,
                     )
                 )
             ]
@@ -541,6 +648,15 @@ class ProtocolDriver:
                     initial, values = values[0], values[1:]
                 return ChildResult(outcome="success", value=initial + sum(values))
             return ChildResult(outcome="success", value=arguments[0] + arguments[1])
+        if behavior == "json_file":
+            serialized_file = arguments[0]["file"]
+            return ChildResult(
+                outcome="success",
+                value=PythonFile(
+                    bytes.fromhex(serialized_file["content_hex"]),
+                    serialized_file["content_type"],
+                ),
+            )
         if behavior in ("double", "tail_call"):
             return ChildResult(outcome="success", value=arguments[0] * 2)
         raise AssertionError(f"unexpected child call in {self.scenario.name}: {call!r}")
@@ -826,8 +942,14 @@ const add = registerFunction(
 const failingChild = registerFunction({json.dumps(FAILING_FUNCTION)}, async (value) => {{
   throw new Error(`child failed for ${{value}}`);
 }});
+const identityFile = registerFunction(async (value) => value, {{
+  name: {json.dumps(IDENTITY_FILE_FUNCTION)},
+  parameters: [schema.parameter("value", schema.file())],
+  returns: schema.file(),
+}});
 
 registerApplication("parity_value", async (value) => ({{ value }}));
+registerApplication("parity_multipart", async (left, right) => left * right);
 registerApplication("parity_child", async (value) => double(value));
 registerApplication(
   "parity_map",
@@ -870,6 +992,14 @@ registerApplication(async (value) => new File(
   parameters: numberParameter,
   returns: schema.file(),
 }});
+registerApplication("parity_json_file", async (value) => {{
+  const content = new TextEncoder().encode(JSON.stringify({{ value }}));
+  const result = await identityFile(new File(content, "application/json"));
+  return {{
+    content: new TextDecoder().decode(result.content),
+    content_type: result.contentType,
+  }};
+}});
 registerApplication("parity_state", async (value) => {{
   const context = RequestContext.get();
   const missing = await context.state.get("missing", {{ value: -1 }});
@@ -911,7 +1041,30 @@ def build_zip(files: dict[str, bytes]) -> bytes:
 
 
 def input_for(directory: Path, scenario: Scenario) -> FunctionInputs:
-    data = json.dumps(scenario.input, separators=(",", ":")).encode()
+    content_type = "application/json"
+    encoding = SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON
+    if scenario.multipart:
+        boundary = "tensorlake-parity-boundary"
+        parts: list[bytes] = []
+        for index, value in enumerate(scenario.input):
+            parts.extend(
+                [
+                    f"--{boundary}".encode(),
+                    (
+                        f'Content-Disposition: form-data; name="{index}"; '
+                        f'filename="{index}"'
+                    ).encode(),
+                    b"Content-Type: application/json",
+                    b"",
+                    json.dumps(value, separators=(",", ":")).encode(),
+                ]
+            )
+        parts.extend([f"--{boundary}--".encode(), b""])
+        data = b"\r\n".join(parts)
+        content_type = f'multipart/form-data; boundary="{boundary}"'
+        encoding = SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_RAW
+    else:
+        data = json.dumps(scenario.input, separators=(",", ":")).encode()
     source = directory / "input"
     source.write_bytes(data)
     request_error = directory / "request-error"
@@ -920,12 +1073,12 @@ def input_for(directory: Path, scenario: Scenario) -> FunctionInputs:
         args=[
             SerializedObjectInsideBLOB(
                 manifest=SerializedObjectManifest(
-                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
+                    encoding=encoding,
                     encoding_version=0,
                     size=len(data),
                     metadata_size=0,
                     sha256_hash=hashlib.sha256(data).hexdigest(),
-                    content_type="application/json",
+                    content_type=content_type,
                 ),
                 offset=0,
             )
@@ -943,16 +1096,30 @@ def input_for(directory: Path, scenario: Scenario) -> FunctionInputs:
             ],
         ),
         function_call_metadata=b"",
-        request_context=RequestContext(
-            headers=[HttpRequestHeader(name="x-parity", value="shared")]
-        ),
     )
 
 
 def encode_value_for_language(
     language: str, value: Any, directory: Path, name: str
 ) -> tuple[SerializedObjectInsideBLOB, BLOB]:
-    if language == "python":
+    if isinstance(value, PythonFile):
+        data = value.content
+        content_type = value.content_type
+        if language == "python":
+            metadata = serialize_metadata(
+                ValueMetadata(
+                    id=name,
+                    type_hint=PythonFile,
+                    serializer_name=None,
+                    content_type=content_type,
+                )
+            )
+        else:
+            metadata = json.dumps(
+                {"format": "tensorlake.typescript.value.v1"}, separators=(",", ":")
+            ).encode()
+        encoding = SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_RAW
+    elif language == "python":
         serializer = PickleUserDataSerializer()
         metadata = serialize_metadata(
             ValueMetadata(
@@ -1045,8 +1212,6 @@ def decode_serialized_value(value: SerializedObjectInsideBLOB, blob: BLOB) -> An
     if encoding == SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON:
         return json.loads(data)
     if encoding == SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_RAW:
-        if "json" in value.manifest.content_type.lower():
-            return json.loads(data)
         return {
             "file": {
                 "content_hex": data.hex(),
@@ -1337,32 +1502,24 @@ def validate_child_calls(
             if actual != expected:
                 raise AssertionError(f"Python map protocol differs: {actual!r}")
         else:
-            values = sorted(call["arguments"][0] for call in calls)
+            values = [call["arguments"][0] for call in calls]
             if values != [1, 2, 3] or any(
                 call["function"] != DOUBLE_FUNCTION or call["special"] is not None
                 for call in calls
             ):
                 raise AssertionError(f"TypeScript map protocol differs: {calls!r}")
     elif scenario.behavior == "reduce":
-        if language == "python":
-            expected = [
-                {
-                    "function": ADD_FUNCTION,
-                    "arguments": [1, 2, 3],
-                    "keyword_arguments": {"initial": 10},
-                    "special": "reduce",
-                }
-            ]
-            actual = without_durable_ids(calls)
-            if actual != expected:
-                raise AssertionError(f"Python reduce protocol differs: {actual!r}")
-        else:
-            actual_arguments = [call["arguments"] for call in calls]
-            if actual_arguments != [[10, 1], [11, 2], [13, 3]] or any(
-                call["function"] != ADD_FUNCTION or call["special"] is not None
-                for call in calls
-            ):
-                raise AssertionError(f"TypeScript reduce protocol differs: {calls!r}")
+        expected = [
+            {
+                "function": ADD_FUNCTION,
+                "arguments": [1, 2, 3],
+                "keyword_arguments": {"initial": 10},
+                "special": "reduce",
+            }
+        ]
+        actual = without_durable_ids(calls)
+        if actual != expected:
+            raise AssertionError(f"{language} reduce protocol differs: {actual!r}")
 
 
 def validate_replay_trace(scenario: Scenario, trace: dict[str, Any]) -> None:

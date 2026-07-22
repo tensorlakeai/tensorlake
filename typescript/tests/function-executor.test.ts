@@ -9,10 +9,13 @@ import { loadSync } from "@grpc/proto-loader";
 import { getProtoPath } from "google-proto-files";
 import { zipSync } from "fflate";
 import { afterEach, describe, expect, it } from "vitest";
-import { registerApplication, retries, schema } from "../src/applications/index.js";
+import { File, registerApplication, retries, schema } from "../src/applications/index.js";
 import { registerFunction } from "../src/applications/index.js";
 import { clearRegistryForTest } from "../src/applications/registry.js";
-import { AllocationRunner } from "../src/function-executor/allocation.js";
+import {
+  AllocationRunner,
+  deserializeApplicationArguments,
+} from "../src/function-executor/allocation.js";
 import {
   deserializeValueFromProtocol,
   downloadBlob,
@@ -31,6 +34,25 @@ afterEach(async () => {
 });
 
 describe("TypeScript function executor", () => {
+  it("writes shared local-file blob chunks at their blob offsets", async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "tensorlake-blob-upload-test-"));
+    temporaryDirectories.push(directory);
+    const outputPath = path.join(directory, "output");
+    await writeFile(outputPath, new Uint8Array());
+    const uri = pathToFileURL(outputPath).href;
+
+    const uploaded = await uploadBlob({
+      id: "shared-write",
+      chunks: [{ uri, size: 4 }, { uri, size: 4 }],
+    }, new TextEncoder().encode("abcdefgh"));
+
+    expect(await readFile(outputPath, "utf8")).toBe("abcdefgh");
+    expect(uploaded.chunks).toEqual([
+      { uri, size: 4 },
+      { uri, size: 4 },
+    ]);
+  });
+
   it("downloads shared-URL blob chunks with byte ranges and uploads an empty multipart chunk", async () => {
     const source = Buffer.from("abcdefgh", "utf8");
     const ranges: Array<string | undefined> = [];
@@ -79,6 +101,23 @@ describe("TypeScript function executor", () => {
       });
       expect(Buffer.from(downloaded).toString("utf8")).toBe("abcdefgh");
       expect(ranges).toEqual(["bytes=0-3", "bytes=4-7"]);
+
+      ranges.length = 0;
+      const objectBytes = source.subarray(2, 5);
+      const object = await downloadSerializedObject({
+        offset: 2,
+        manifest: {
+          encoding: "SERIALIZED_OBJECT_ENCODING_UTF8_TEXT",
+          size: objectBytes.byteLength,
+          metadataSize: 0,
+          sha256Hash: createHash("sha256").update(objectBytes).digest("hex"),
+        },
+      }, {
+        id: "ranged-object",
+        chunks: [{ uri, size: source.byteLength }],
+      });
+      expect(new TextDecoder().decode(object.data)).toBe("cde");
+      expect(ranges).toEqual(["bytes=2-4"]);
 
       const uploaded = await uploadBlob({
         id: "empty-write",
@@ -157,6 +196,75 @@ describe("TypeScript function executor", () => {
     expect(await readFile(fileURLToPath(finish.uploadedFunctionOutputsBlob.chunks[0].uri))).not.toHaveLength(0);
   });
 
+  it("decodes multipart JSON blobs according to parameter schemas", async () => {
+    clearRegistryForTest();
+    const application = registerApplication(async (
+      count: number,
+      config: { enabled: boolean },
+      document: File,
+    ) => ({ count, config, document }), {
+      name: "multipart_inputs",
+      parameters: [
+        schema.parameter("count", schema.number()),
+        schema.parameter("config", schema.object({ enabled: schema.boolean() })),
+        schema.parameter("document", schema.file()),
+      ] as const,
+      returns: schema.json(),
+    });
+    const form = new FormData();
+    form.append("0", new Blob(["6"]), "0");
+    form.append(
+      "1",
+      new Blob(['{"enabled":true}'], { type: "application/json" }),
+      "1",
+    );
+    form.append(
+      "2",
+      new Blob(['{"raw":true}'], { type: "application/json" }),
+      "2",
+    );
+    const request = new Request("http://localhost/invoke", { method: "POST", body: form });
+    const parsed = await deserializeApplicationArguments(application.definition, {
+      data: new Uint8Array(await request.arrayBuffer()),
+      contentType: request.headers.get("content-type") ?? undefined,
+    });
+
+    expect(parsed.args.slice(0, 2)).toEqual([6, { enabled: true }]);
+    expect(parsed.args[2]).toBeInstanceOf(File);
+    expect((parsed.args[2] as File).contentType).toBe("application/json");
+    expect(new TextDecoder().decode((parsed.args[2] as File).content)).toBe('{"raw":true}');
+  });
+
+  it("rejects malformed JSON in non-file multipart parts", async () => {
+    clearRegistryForTest();
+    const application = registerApplication(async (count: number) => count, {
+      name: "malformed_multipart",
+      parameters: [schema.parameter("count", schema.number())] as const,
+      returns: schema.number(),
+    });
+    const form = new FormData();
+    form.append("count", "not-json");
+    const request = new Request("http://localhost/invoke", { method: "POST", body: form });
+
+    await expect(deserializeApplicationArguments(application.definition, {
+      data: new Uint8Array(await request.arrayBuffer()),
+      contentType: request.headers.get("content-type") ?? undefined,
+    })).rejects.toThrow("Failed to deserialize JSON value");
+  });
+
+  it("preserves JSON MIME files across protocol value boundaries", () => {
+    const content = new TextEncoder().encode('{"value":21}');
+    const value = deserializeValueFromProtocol({
+      data: content,
+      contentType: "application/json",
+      encoding: "SERIALIZED_OBJECT_ENCODING_RAW",
+    });
+
+    expect(value).toBeInstanceOf(File);
+    expect((value as File).contentType).toBe("application/json");
+    expect((value as File).content).toEqual(content);
+  });
+
   it("reports output serialization failures as function errors", async () => {
     clearRegistryForTest();
     const application = registerApplication(async () => undefined, {
@@ -196,6 +304,66 @@ describe("TypeScript function executor", () => {
       failureReason: "ALLOCATION_FAILURE_REASON_FUNCTION_ERROR",
     });
   });
+
+  it.each(["application", "internal"] as const)(
+    "reports malformed %s invocation values as function errors",
+    async (invocationKind) => {
+      clearRegistryForTest();
+      const application = registerApplication(async (value: unknown) => value, {
+        name: `malformed_${invocationKind}_input`,
+        parameters: [schema.parameter("value", schema.json())] as const,
+        returns: schema.json(),
+      });
+      const directory = await mkdtemp(path.join(os.tmpdir(), "tensorlake-malformed-input-test-"));
+      temporaryDirectories.push(directory);
+      const input = new TextEncoder().encode("not-json");
+      const inputPath = path.join(directory, "input");
+      await writeFile(inputPath, input);
+      const runner = new AllocationRunner({
+        requestId: `request-malformed-${invocationKind}`,
+        functionCallId: `call-malformed-${invocationKind}`,
+        allocationId: `allocation-malformed-${invocationKind}`,
+        replayMode: "REPLAY_MODE_NONE",
+        inputs: {
+          args: [{
+            offset: 0,
+            manifest: {
+              encoding: invocationKind === "application"
+                ? "SERIALIZED_OBJECT_ENCODING_RAW"
+                : "SERIALIZED_OBJECT_ENCODING_UTF8_JSON",
+              size: input.byteLength,
+              metadataSize: 0,
+              sha256Hash: createHash("sha256").update(input).digest("hex"),
+              contentType: "application/json",
+            },
+          }],
+          argBlobs: [{
+            id: "input",
+            chunks: [{ uri: pathToFileURL(inputPath).href, size: input.byteLength }],
+          }],
+          functionCallMetadata: invocationKind === "application"
+            ? Buffer.alloc(0)
+            : Buffer.from(JSON.stringify({
+                format: "tensorlake.typescript.function-call.v1",
+                functionName: application.definition.name,
+                argumentCount: 1,
+              })),
+        },
+      }, {
+        namespace: "default",
+        applicationName: application.definition.name,
+        applicationVersion: "v1",
+        functionName: application.definition.name,
+      }, application.definition);
+
+      runner.start();
+      const events = await runner.getExecutionBatch();
+      expect(events).toEqual([{ finishAllocation: {
+        outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
+        failureReason: "ALLOCATION_FAILURE_REASON_FUNCTION_ERROR",
+      } }]);
+    },
+  );
 
   it("finishes instead of hanging when output blob creation fails without a blob ID", async () => {
     clearRegistryForTest();
@@ -525,6 +693,62 @@ describe("TypeScript function executor", () => {
       server.forceShutdown();
     }
   }, 20_000);
+
+  it("can retry initialization after validation fails", async () => {
+    const manifest = new TextEncoder().encode(JSON.stringify({
+      format_version: 2,
+      runtime: "typescript",
+      minimum_node_major: 24,
+      module: "runtime.mjs",
+      functions: { child: { name: "child" }, app: { name: "app" } },
+    }));
+    const runtime = (application: boolean) => new TextEncoder().encode(`
+      const child = {
+        name: "child", handler: async () => null, parameters: [],
+        returns: { jsonSchema: {} }, options: {},
+      };
+      const app = {
+        ...child,
+        name: "app",
+        application: ${application ? '{ tags: {}, retries: { maxRetries: 0 }, version: "v1" }' : "undefined"},
+      };
+      export function __tensorlakeGetFunction(name) {
+        if (name === "child") return child;
+        if (name === "app") return app;
+        throw new Error("unknown function " + name);
+      }
+    `);
+    const request = (application: boolean) => ({
+      function: {
+        namespace: "default",
+        applicationName: "app",
+        applicationVersion: "v1",
+        functionName: "child",
+      },
+      applicationCode: {
+        manifest: {
+          encoding: "SERIALIZED_OBJECT_ENCODING_BINARY_ZIP",
+          size: 0,
+          metadataSize: 0,
+        },
+        data: zipSync({
+          "runtime.mjs": runtime(application),
+          ".tensorlake_code_manifest.json": manifest,
+        }),
+      },
+    });
+    const service = new FunctionExecutorService();
+    const initialize = (application: boolean) => new Promise<Record<string, any>>((resolve, reject) => {
+      const call = (service.implementation.initialize as any).bind(service.implementation);
+      call({ request: request(application) }, (error: Error | null, response: Record<string, any>) => {
+        if (error != null) reject(error);
+        else resolve(response);
+      });
+    });
+
+    expect((await initialize(false)).outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
+    expect((await initialize(true)).outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_SUCCESS");
+  });
 
   it("reconciles request state and output blobs over the gRPC transport", async () => {
     const runtime = new TextEncoder().encode(`

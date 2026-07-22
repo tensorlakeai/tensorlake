@@ -15,6 +15,7 @@ import { isRequestError } from "../src/applications/errors.js";
 import { isFile } from "../src/applications/file.js";
 import { validateWithSchema } from "../src/applications/schema.js";
 import { serializeValue } from "../src/applications/serialization.js";
+import { MemoryRequestContext } from "../src/applications/context.js";
 
 describe("TypeScript applications", () => {
   it("runs async fan-out locally across JSON boundaries", async () => {
@@ -77,6 +78,36 @@ describe("TypeScript applications", () => {
     await expect(runLocal(app, 41).then((request) => request.output())).resolves.toBe(42);
   });
 
+  it("infers optional descriptors for default parameters in schema-free registrations", async () => {
+    clearRegistryForTest();
+    const greet = registerFunction(
+      "defaulted_greeting",
+      async (name = "world", punctuation = "!") => `Hello, ${name}${punctuation}`,
+    );
+    const app = registerApplication(
+      "defaulted_application",
+      async (name = "world") => greet(name),
+    );
+
+    expect(greet.definition.parameters.map((parameter) => parameter.required)).toEqual([false, false]);
+    expect(app.definition.parameters).toHaveLength(1);
+    expect(app.definition.parameters[0].required).toBe(false);
+    await expect(greet()).resolves.toBe("Hello, world!");
+    await expect(runLocal(app).then((request) => request.output())).resolves.toBe("Hello, world!");
+  });
+
+  it("requires explicit schemas for rest-parameter handlers", () => {
+    clearRegistryForTest();
+    expect(() => registerFunction(
+      "rest_function",
+      async (...values: number[]) => values.reduce((total, value) => total + value, 0),
+    )).toThrow("does not support rest parameters");
+    expect(() => registerApplication(
+      "rest_application",
+      async (...values: number[]) => values,
+    )).toThrow("does not support rest parameters");
+  });
+
   it("requires async handlers", async () => {
     clearRegistryForTest();
     const app = registerApplication(((value: string) => value) as never, {
@@ -103,6 +134,44 @@ describe("TypeScript applications", () => {
     const request = await runLocal(app);
     await expect(request.output()).rejects.toThrow("stop");
     expect(calls).toBe(1);
+  });
+
+  it("starts every local retry with a fresh boundary copy of its arguments", async () => {
+    clearRegistryForTest();
+    let attempts = 0;
+    const app = registerApplication(async (input: { count: number }) => {
+      input.count += 1;
+      attempts += 1;
+      if (attempts === 1) throw new Error("retry me");
+      return input.count;
+    }, {
+      name: "isolated_retry_arguments",
+      parameters: [schema.parameter("input", schema.object({ count: schema.number() }))] as const,
+      returns: schema.number(),
+      applicationRetries: { maxRetries: 1 },
+    });
+    const input = { count: 0 };
+
+    const request = await runLocal(app, input);
+    await expect(request.output()).resolves.toBe(1);
+    expect(input).toEqual({ count: 0 });
+    expect(attempts).toBe(2);
+  });
+
+  it("keeps local request state behind the same JSON boundary as deployed state", async () => {
+    const context = new MemoryRequestContext("local-state");
+    const source = { nested: { value: 1 } };
+    await context.state.set("value", source);
+    source.nested.value = 2;
+
+    const first = await context.state.get<typeof source>("value");
+    expect(first).toEqual({ nested: { value: 1 } });
+    first!.nested.value = 3;
+    await expect(context.state.get("value")).resolves.toEqual({ nested: { value: 1 } });
+    await expect(context.state.set(
+      "file",
+      new File(new Uint8Array([1]), "application/octet-stream"),
+    )).rejects.toThrow("JSON values");
   });
 
   it("emits an existing-server-compatible manifest", () => {

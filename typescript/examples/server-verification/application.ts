@@ -61,7 +61,6 @@ export const runtimeVerification = registerApplication(
     await context.progress.update(3, 3, { message: "TypeScript verification completed" });
     return {
       requestId: context.requestId,
-      invocationHeader: context.headers["x-tensorlake-verification"] ?? "",
       rememberedLabel: rememberedLabel ?? "",
       doubled,
       delayed: delayedResult,

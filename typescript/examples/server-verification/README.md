@@ -10,7 +10,7 @@ It covers:
 - nested durable calls and concurrent mixed success/failure fan-out
 - terminal failure delivery after retry exhaustion
 - sequential reduce calls, empty reduce input, and reducer failure
-- request headers, request state, metrics, and progress
+- request state, metrics, and progress
 - tail calls
 - direct `File` input and output
 - `RequestError` propagation
