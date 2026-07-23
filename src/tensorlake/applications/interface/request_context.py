@@ -2,6 +2,7 @@ from typing import Any
 
 from ..request_context.contextvar import get_current_request_context
 from .exceptions import InternalError
+from .http import Headers
 
 
 class RequestState:
@@ -90,6 +91,13 @@ class RequestContext:
     def request_id(self) -> str:
         raise InternalError(
             "RequestContext subclasses must implement request_id property."
+        )
+
+    @property
+    def headers(self) -> Headers:
+        """Sanitized headers from the application invocation request."""
+        raise InternalError(
+            "RequestContext subclasses must implement headers property."
         )
 
     @property

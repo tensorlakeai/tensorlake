@@ -8,11 +8,12 @@ import pydantic
 from tensorlake.applications.function.type_hints import (
     function_parameters,
     function_signature,
-    is_file_type_hint,
+    is_http_body_type_hint,
+    is_raw_body_type_hint,
     parameter_type_hint,
     return_type_hint,
 )
-from tensorlake.applications.interface import File, InternalError
+from tensorlake.applications.interface import InternalError
 from tensorlake.applications.interface.function import (
     Function,
     _ApplicationConfiguration,
@@ -82,9 +83,10 @@ def _json_schema_with_optional_fields(
     if fields.description is not None:
         schema.description = fields.description
     if fields.has_default_value:
-        if is_file_type_hint(fields.default_value_type_hint):
-            # Just indicate that there is a default value for File type hint. The actual
-            # default value is not serialized into JSON schema because File is not JSON serializable.
+        if is_raw_body_type_hint(fields.default_value_type_hint):
+            # Just indicate that there is a default value for raw body type hints. The
+            # actual default value is not serialized into JSON schema because these SDK
+            # wrapper types are not JSON serializable.
             # This indication will help us to generate curl command.
             schema.default = True
         else:
@@ -110,16 +112,21 @@ def _json_schema(
     Raises Exception if the supplied type hint is not supported for JSON schema generation.
     """
     # Note: we only check here for exact match, i.e. we don't support Union[...] or Optional[...]
-    # to simplify our implementation for now. We have pre-deployment validation that checks for File
-    # type hints to be used without any other type hints.
-    if is_file_type_hint(type_hint):
-        # Files are never serialized to JSON, they are provided to application
-        # function as HTTP body or part of a HTTP multipart request.
+    # to simplify our implementation for now. We have pre-deployment validation that checks for raw
+    # body type hints to be used without any other type hints.
+    if is_raw_body_type_hint(type_hint):
+        # Files and HTTP bodies are never serialized to JSON, they are provided to
+        # application functions as HTTP body or part of a HTTP multipart request.
         # We're using JSON schema to generate curl commands so we have to preserve information
-        # about File parameter in it even though File is not part of JSON Schema spec.
+        # about the parameter even though these custom types are not part of JSON Schema spec.
+        schema_type = (
+            "tensorlake_http_body"
+            if is_http_body_type_hint(type_hint)
+            else "tensorlake_file"
+        )
         return _json_schema_with_optional_fields(
             JSONSchema(
-                type="tensorlake_file",  # Custom type for File, not part of JSON Schema spec
+                type=schema_type,
             ),
             fields=fields,
         )

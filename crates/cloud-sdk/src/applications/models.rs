@@ -89,6 +89,11 @@ pub struct ApplicationManifest {
     pub description: String,
     #[builder(setter(into), default)]
     pub tags: HashMap<String, String>,
+    #[serde(default)]
+    #[builder(setter(into), default)]
+    pub allow: Vec<String>,
+    #[builder(setter(into, strip_option), default)]
+    pub public_endpoint_id: Option<String>,
     #[builder(setter(into))]
     pub version: String,
     pub functions: HashMap<String, FunctionManifest>,
@@ -275,6 +280,10 @@ pub struct Application {
     #[serde(skip_deserializing, default)]
     pub namespace: String,
     pub tags: HashMap<String, String>,
+    #[serde(default)]
+    pub allow: Vec<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub public_endpoint_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tombstoned: Option<bool>,
     #[serde(skip_serializing, default)]
@@ -1416,6 +1425,27 @@ mod tests {
     use super::*;
     use chrono::Datelike;
     use serde_json::json;
+
+    #[test]
+    fn application_manifest_deserializes_without_allow() {
+        let manifest: ApplicationManifest = serde_json::from_value(json!({
+            "name": "app",
+            "description": "",
+            "tags": {},
+            "version": "v1",
+            "functions": {},
+            "entrypoint": {
+                "function_name": "app",
+                "input_serializer": "json",
+                "output_serializer": "json",
+                "output_type_hints_base64": null
+            }
+        }))
+        .expect("pre-allow application manifests should remain valid");
+
+        assert!(manifest.allow.is_empty());
+        assert!(manifest.public_endpoint_id.is_none());
+    }
 
     #[test]
     fn test_rfc3339_datetime_with_z() {
