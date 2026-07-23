@@ -70,6 +70,17 @@ message SerializedObjectInsideBLOB {
     optional uint64 offset = 2;
 }
 
+message HttpRequestHeader {
+    optional string name = 1;
+    optional string value = 2;
+}
+
+message RequestContext {
+    // Sanitized HTTP request headers from the application invocation.
+    // Authentication, cookies, host, proxy credentials, and hop-by-hop headers are omitted.
+    repeated HttpRequestHeader headers = 1;
+}
+
 message FunctionRef {
   optional string namespace = 1;
   optional string application_name = 2;
@@ -181,10 +192,7 @@ message AllocationState {
 
 // FunctionInputs contains the input data for allocation execution
 message FunctionInputs {
-    // Values for function call arguments of function calls created by SDK.
-    // For application function calls, always only one arg which is oneof:
-    // - HTTP request body (SerializedObject content_type is original content-type of the body from HTTP request header).
-    // - HTTP request in HTTP 1.1 format (SerializedObject content_type is "message/http").
+    // Values for function call arguments.
     repeated SerializedObjectInsideBLOB args = 1;
     // Each arg has a matching BLOB.
     repeated BLOB arg_blobs = 2;
@@ -193,6 +201,7 @@ message FunctionInputs {
     // SDK metadata for function calls created by SDK.
     // Empty byte array for application function calls.
     optional bytes function_call_metadata = 4;
+    optional RequestContext request_context = 5;
 }
 
 message FunctionArg {

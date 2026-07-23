@@ -1,6 +1,8 @@
+import json
 import unittest
 
 from tensorlake.applications.interface.exceptions import (
+    RemoteAPIError,
     RequestFailed,
     RequestNotFinished,
     SDKUsageError,
@@ -9,7 +11,7 @@ from tensorlake.applications.remote.api_client import (
     APIClient,
     RequestInput,
 )
-from tensorlake.cloud_client import _raise_as_tensorlake_error
+from tensorlake.cloud_client import CloudClient, _raise_as_tensorlake_error
 
 
 class _FakeRustClient:
@@ -79,7 +81,28 @@ class _FakeRustFailed(_FakeRustClient):
         return '{"id":"req-123","outcome":{"failure":"FunctionError"},"application_version":"v1","created_at":1}'
 
 
+class _FakeRustUpsert:
+    def __init__(self, existing_endpoint_id: str | None = None):
+        self.existing_endpoint_id = existing_endpoint_id
+        self.upserted_manifest = None
+
+    def application_manifest_json(self, application_name):
+        if self.existing_endpoint_id is None:
+            raise RemoteAPIError(status_code=404, message="not found")
+        return json.dumps({"public_endpoint_id": self.existing_endpoint_id})
+
+    def upsert_application(
+        self, manifest_json, code_zip, upgrade_running_requests
+    ) -> None:
+        self.upserted_manifest = json.loads(manifest_json)
+
+
 class TestAPIClientRustBackend(unittest.TestCase):
+    def _cloud_client_with_rust_backend(self, rust_client) -> CloudClient:
+        client = CloudClient.__new__(CloudClient)
+        client._client = rust_client
+        return client
+
     def test_run_request_uses_rust_backend(self):
         client = APIClient(
             api_url="http://localhost:8900", api_key="k", namespace="default"
@@ -167,6 +190,42 @@ class TestAPIClientRustBackend(unittest.TestCase):
                 )
         finally:
             cloud_client_module._RustClientError = previous
+
+    def test_public_application_upsert_generates_endpoint_id(self):
+        rust_client = _FakeRustUpsert()
+        client = self._cloud_client_with_rust_backend(rust_client)
+
+        client.upsert_application(
+            manifest_json=json.dumps(
+                {"name": "app", "allow": ["unauthenticated_requests"]}
+            ),
+            code_zip=b"zip",
+            upgrade_running_requests=False,
+        )
+
+        self.assertRegex(
+            rust_client.upserted_manifest["public_endpoint_id"],
+            r"^endpoint_[A-Za-z0-9_-]{21}$",
+        )
+
+    def test_public_application_upsert_reuses_endpoint_id(self):
+        rust_client = _FakeRustUpsert(
+            existing_endpoint_id="endpoint_0123456789abcdefghijk"
+        )
+        client = self._cloud_client_with_rust_backend(rust_client)
+
+        client.upsert_application(
+            manifest_json=json.dumps(
+                {"name": "app", "allow": ["unauthenticated_requests"]}
+            ),
+            code_zip=b"zip",
+            upgrade_running_requests=False,
+        )
+
+        self.assertEqual(
+            rust_client.upserted_manifest["public_endpoint_id"],
+            "endpoint_0123456789abcdefghijk",
+        )
 
 
 if __name__ == "__main__":

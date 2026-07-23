@@ -1,7 +1,10 @@
 import os
 from typing import List, Set
 
+from tensorlake.public_endpoint import generate_public_endpoint_id
+
 from ..applications import filter_applications
+from ..interface.exceptions import RemoteAPIError
 from ..interface.function import Function
 from ..registry import get_functions
 from ..remote.manifests.application import (
@@ -11,6 +14,43 @@ from ..remote.manifests.application import (
 from .code.ignored_code_paths import ignored_code_paths
 from .code.loader import load_code
 from .code.zip import zip_code
+
+_UNAUTHENTICATED_REQUESTS = "unauthenticated_requests"
+
+
+def _existing_public_endpoint_id(api_client, application_name: str) -> str | None:
+    try:
+        if hasattr(api_client, "application"):
+            existing_application = api_client.application(application_name)
+        elif hasattr(api_client, "application_manifest_json"):
+            existing_application = ApplicationManifest.model_validate_json(
+                api_client.application_manifest_json(application_name)
+            )
+        else:
+            return None
+    except RemoteAPIError as error:
+        if error.status_code == 404:
+            return None
+        raise
+
+    if isinstance(existing_application, dict):
+        return existing_application.get("public_endpoint_id")
+    return getattr(existing_application, "public_endpoint_id", None)
+
+
+def _ensure_public_endpoint_id(
+    api_client, application_manifest: ApplicationManifest
+) -> None:
+    if (
+        _UNAUTHENTICATED_REQUESTS not in application_manifest.allow
+        or application_manifest.public_endpoint_id is not None
+    ):
+        return
+
+    application_manifest.public_endpoint_id = (
+        _existing_public_endpoint_id(api_client, application_manifest.name)
+        or generate_public_endpoint_id()
+    )
 
 
 def deploy_applications(
@@ -63,6 +103,7 @@ def deploy_applications(
             app_manifest: ApplicationManifest = create_application_manifest(
                 application_function=application, all_functions=functions
             )
+            _ensure_public_endpoint_id(api_client, app_manifest)
             api_client.upsert_application(
                 manifest_json=app_manifest.model_dump_json(),
                 code_zip=app_code,
