@@ -2596,16 +2596,18 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
     // Human status is a local diagnostic: the private engine reads cached immutable session
     // facts plus the local journal/control socket, so it must remain available when auth or the
     // platform is unavailable. `--json` deliberately keeps its live server-record contract and
-    // therefore continues through the auth guard below.
+    // therefore continues through the auth guard below. Scope hydration is local-only (it reads
+    // the mount's cached attach-time facts, never the network), so it runs before this early
+    // return — without it, status run outside a project directory has no project ID and reports
+    // the server head as unavailable even when the server is healthy (issue
+    // tensorlakeai/artifact_storage#147 item 9). Best-effort: a mount whose state cannot
+    // hydrate a scope still gets the offline diagnostics instead of an error.
     if let FsCommands::Status { json: false, .. } = &subcmd {
-        return commands::fs::status(
-            ctx,
-            mount_dir
-                .as_ref()
-                .expect("resolved for every path-addressed command"),
-            false,
-        )
-        .await;
+        let mount_dir = mount_dir
+            .as_ref()
+            .expect("resolved for every path-addressed command");
+        let _ = commands::fs::hydrate_scope_from_mount(ctx, mount_dir);
+        return commands::fs::status(ctx, mount_dir, false).await;
     }
     // Path-addressed commands carry their scope in the mount state; resolve it from there so
     // they work from any CWD instead of triggering the interactive init flow (which, run from
