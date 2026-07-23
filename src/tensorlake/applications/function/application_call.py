@@ -4,7 +4,7 @@ from typing import Any
 
 from tensorlake.vendor.nanoid import generate as nanoid
 
-from ..interface import File, Function
+from ..interface import File, Function, HttpBody
 from ..user_data_serializer import UserDataSerializer
 from .type_hints import (
     function_parameters,
@@ -20,7 +20,7 @@ from .user_data_serializer import (
 
 @dataclass
 class ApplicationArgument:
-    value: Any | File
+    value: Any | File | HttpBody
     type_hint: Any
 
 
@@ -79,11 +79,12 @@ def deserialize_application_function_call_arguments(
     application: Function,
     serialized_args: list[SerializedApplicationArgument],
     serialized_kwargs: dict[str, SerializedApplicationArgument],
-) -> tuple[list[Any | File], dict[str, Any | File]]:
+) -> tuple[list[Any | File | HttpBody], dict[str, Any | File | HttpBody]]:
     """Deserializes the API function call args and kwargs.
 
     The supplied binary args and kwargs are deserialized using the input serializer and type hints of the API function.
-    The content type from serialized_kwargs is used as File content type when application function expects a File.
+    The content type from serialized_kwargs is used as raw body content type when
+    application function expects a File or HttpBody.
 
     raises DeserializationError if deserialization fails.
     """
@@ -92,7 +93,7 @@ def deserialize_application_function_call_arguments(
     )
     signature: inspect.Signature = function_signature(application)
 
-    deserialized_kwargs: dict[str, Any | File] = {}
+    deserialized_kwargs: dict[str, Any | File | HttpBody] = {}
     for key, serialized_kwarg in serialized_kwargs.items():
         serialized_kwarg: SerializedApplicationArgument
         if key not in signature.parameters:
@@ -113,7 +114,7 @@ def deserialize_application_function_call_arguments(
     parameters_in_definition_order: list[inspect.Parameter] = function_parameters(
         application
     )
-    deserialized_args: list[Any | File] = []
+    deserialized_args: list[Any | File | HttpBody] = []
     for i, serialized_arg in enumerate(serialized_args):
         if i >= len(parameters_in_definition_order):
             # Allow users to pass unknown args and ignore them instead of failing.
@@ -144,7 +145,7 @@ def _deserialize_application_function_call_arg(
     deserializer: UserDataSerializer,
     arg_type_hint: Any,
     serialized_arg: SerializedApplicationArgument,
-) -> Any | File:
+) -> Any | File | HttpBody:
     """Deserializes a single application function call argument.
 
     arg_type_hint is a list of possible type hints for the argument.

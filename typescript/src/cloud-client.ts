@@ -1,3 +1,5 @@
+import { nanoid } from "nanoid";
+
 import * as defaults from "./defaults.js";
 import { HttpClient } from "./http.js";
 import { fromSnakeKeys } from "./models.js";
@@ -58,6 +60,24 @@ export class CloudClient {
     codeZip: BinaryPayload,
     upgradeRunningRequests = false,
   ): Promise<void> {
+    const applicationManifest = { ...manifest };
+    let publicEndpointId = publicEndpointIdFromManifest(applicationManifest);
+    if (
+      applicationAllowsUnauthenticatedRequests(applicationManifest) &&
+      publicEndpointId === undefined
+    ) {
+      const applicationName = applicationManifest.name;
+      if (typeof applicationName === "string" && applicationName.length > 0) {
+        publicEndpointId =
+          await this.existingApplicationPublicEndpointId(applicationName);
+      }
+      publicEndpointId ??= generatePublicEndpointId();
+    }
+    if (publicEndpointId !== undefined) {
+      applicationManifest.public_endpoint_id = publicEndpointId;
+      delete applicationManifest.publicEndpointId;
+    }
+
     const form = new FormData();
     form.append(
       "code",
@@ -65,7 +85,7 @@ export class CloudClient {
       "code.zip",
     );
     form.append("code_content_type", "application/zip");
-    form.append("application", JSON.stringify(manifest));
+    form.append("application", JSON.stringify(applicationManifest));
     form.append(
       "upgrade_requests_to_latest_code",
       String(upgradeRunningRequests),
@@ -480,6 +500,23 @@ export class CloudClient {
     return `/v1/namespaces/${encodeURIComponent(this.namespace)}/${subpath.replace(/^\/+/, "")}`;
   }
 
+  private async existingApplicationPublicEndpointId(
+    applicationName: string,
+  ): Promise<string | undefined> {
+    const response = await this.http.requestResponse(
+      "GET",
+      this.namespacePath(`applications/${encodeURIComponent(applicationName)}`),
+      { allowedErrorStatusCodes: new Set([404]) },
+    );
+    if (response.status === 404) {
+      return undefined;
+    }
+
+    const application =
+      await parseJsonResponse<Record<string, unknown>>(response);
+    return publicEndpointIdFromManifest(application);
+  }
+
   private resolveScope(
     organizationId?: string,
     projectId?: string,
@@ -496,6 +533,33 @@ export class CloudClient {
       projectId: resolvedProjectId,
     };
   }
+}
+
+const UNAUTHENTICATED_REQUESTS = "unauthenticated_requests";
+
+function applicationAllowsUnauthenticatedRequests(
+  manifest: ApplicationManifest,
+): boolean {
+  return (
+    Array.isArray(manifest.allow) &&
+    manifest.allow.includes(UNAUTHENTICATED_REQUESTS)
+  );
+}
+
+function publicEndpointIdFromManifest(
+  manifest: ApplicationManifest,
+): string | undefined {
+  for (const key of ["public_endpoint_id", "publicEndpointId"]) {
+    const value = manifest[key];
+    if (typeof value === "string" && value.length > 0) {
+      return value;
+    }
+  }
+  return undefined;
+}
+
+function generatePublicEndpointId(): string {
+  return `endpoint_${nanoid()}`;
 }
 
 function createApplicationBuildForm(

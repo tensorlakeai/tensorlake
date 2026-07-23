@@ -51,6 +51,10 @@ pub struct ApplicationsClient {
     client: Client,
 }
 
+fn generate_public_endpoint_id() -> String {
+    format!("endpoint_{}", nanoid::nanoid!())
+}
+
 impl ApplicationsClient {
     pub fn new(client: Client) -> Self {
         Self { client }
@@ -93,9 +97,35 @@ impl ApplicationsClient {
         &self,
         request: &models::UpsertApplicationRequest,
     ) -> Result<Traced<()>, SdkError> {
+        let mut application_manifest = request.application_manifest.clone();
+        if application_manifest
+            .allow
+            .iter()
+            .any(|capability| capability == "unauthenticated_requests")
+            && application_manifest.public_endpoint_id.is_none()
+        {
+            application_manifest.public_endpoint_id = match self
+                .get(
+                    &models::GetApplicationRequest::builder()
+                        .namespace(request.namespace.clone())
+                        .application(application_manifest.name.clone())
+                        .build()
+                        .map_err(|error| SdkError::ClientError(error.to_string()))?,
+                )
+                .await
+            {
+                Ok(existing) => existing.public_endpoint_id.clone(),
+                Err(SdkError::ServerError { status, .. }) if status == StatusCode::NOT_FOUND => {
+                    None
+                }
+                Err(error) => return Err(error),
+            }
+            .or_else(|| Some(generate_public_endpoint_id()));
+        }
+
         let mut multipart_form = Form::new();
 
-        let manifest_json = serde_json::to_string(&request.application_manifest)?;
+        let manifest_json = serde_json::to_string(&application_manifest)?;
         multipart_form = multipart_form.text("application", manifest_json);
 
         let file_part = Part::bytes(request.code_zip.clone()).file_name("code.zip");
@@ -361,5 +391,24 @@ impl ApplicationsClient {
                 ))
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::generate_public_endpoint_id;
+
+    #[test]
+    fn public_endpoint_id_uses_prefixed_nanoid() {
+        let endpoint_id = generate_public_endpoint_id();
+        let nanoid = endpoint_id
+            .strip_prefix("endpoint_")
+            .expect("endpoint id should use the public endpoint prefix");
+        assert_eq!(nanoid.len(), 21);
+        assert!(
+            nanoid
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+        );
     }
 }

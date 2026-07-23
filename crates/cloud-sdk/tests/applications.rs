@@ -1,6 +1,12 @@
 use data_encoding::BASE64;
 use std::{collections::HashMap, io::Write, time::Duration};
-use tensorlake::{applications::models::*, images::models::BuildStatus};
+use tensorlake::{
+    ClientBuilder,
+    applications::{ApplicationsClient, models::*},
+    images::models::BuildStatus,
+};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 use tokio::time::sleep;
 
 use crate::common::random_string;
@@ -176,6 +182,106 @@ fn build_app_manifest(
         )
         .build()
         .map_err(|e| format!("failed to build app manifest: {e}"))
+}
+
+#[tokio::test]
+async fn public_application_upsert_reuses_existing_endpoint_id() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for request_number in 0..2 {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            requests.push(read_http_request(&mut socket).await);
+
+            let response_body = if request_number == 0 {
+                r#"{"description":"","entrypoint":{"function_name":"app","input_serializer":"json","output_serializer":"json","output_type_hints_base64":""},"functions":{},"name":"app","tags":{},"allow":["unauthenticated_requests"],"public_endpoint_id":"endpoint_0123456789abcdefghijk","tombstoned":false,"state":"active","version":"v1"}"#
+            } else {
+                ""
+            };
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                response_body.len(),
+                response_body
+            );
+            socket
+                .write_all(response.as_bytes())
+                .await
+                .expect("write response");
+        }
+        requests
+    });
+
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .build()
+        .expect("build client");
+    let applications = ApplicationsClient::new(client);
+    let request = UpsertApplicationRequest::builder()
+        .namespace("default")
+        .application_manifest(
+            ApplicationManifest::builder()
+                .name("app")
+                .allow(vec!["unauthenticated_requests".to_string()])
+                .version("v2")
+                .functions(HashMap::new())
+                .entrypoint(
+                    Entrypoint::builder()
+                        .function_name("app")
+                        .input_serializer("json")
+                        .output_serializer("json")
+                        .build()
+                        .expect("build entrypoint"),
+                )
+                .build()
+                .expect("build manifest"),
+        )
+        .code_zip(Vec::new())
+        .build()
+        .expect("build upsert request");
+
+    applications.upsert(&request).await.expect("upsert app");
+
+    let requests = server.await.expect("server join");
+    let get_request = String::from_utf8_lossy(&requests[0]);
+    assert!(get_request.starts_with("GET /v1/namespaces/default/applications/app HTTP/1.1\r\n"));
+    let upsert_request = String::from_utf8_lossy(&requests[1]);
+    assert!(upsert_request.starts_with("POST /v1/namespaces/default/applications HTTP/1.1\r\n"));
+    assert!(upsert_request.contains(r#""public_endpoint_id":"endpoint_0123456789abcdefghijk""#));
+}
+
+async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buf = [0_u8; 4096];
+
+    loop {
+        let read = socket.read(&mut buf).await.expect("read request");
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buf[..read]);
+
+        if let Some(headers_end) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+            let headers = String::from_utf8_lossy(&request[..headers_end + 4]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().ok())
+                        .flatten()
+                })
+                .unwrap_or(0);
+
+            if request.len() >= headers_end + 4 + content_length {
+                break;
+            }
+        }
+    }
+
+    request
 }
 
 #[tokio::test]

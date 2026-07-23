@@ -272,6 +272,14 @@ class Service(FunctionExecutorServicer):
             fn_call_id=allocation.function_call_id,
             allocation_id=allocation.allocation_id,
         )
+        request_headers = (
+            [
+                (header.name, header.value)
+                for header in allocation.inputs.request_context.headers
+            ]
+            if allocation.inputs.HasField("request_context")
+            else []
+        )
         allocation_runner: AllocationRunner = AllocationRunner(
             allocation=allocation,
             function_ref=self._function_ref,
@@ -287,6 +295,7 @@ class Service(FunctionExecutorServicer):
                 http_client=self._request_context_http_client,
                 blob_store=self._blob_store,
                 logger=allocation_logger,
+                headers=request_headers,
             ),
             logger=allocation_logger,
         )

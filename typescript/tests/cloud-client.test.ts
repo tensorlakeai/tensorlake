@@ -99,6 +99,95 @@ describe("CloudClient", () => {
     client.close();
   });
 
+  it("generates a public endpoint ID for a new public application", async () => {
+    const requested: string[] = [];
+    mockFetch(async (url, init) => {
+      requested.push(url);
+      if (init?.method === "GET") {
+        return new Response(JSON.stringify({ message: "not found" }), {
+          status: 404,
+        });
+      }
+
+      const form = init?.body as FormData;
+      const manifest = JSON.parse(
+        form.get("application") as string,
+      ) as Record<string, unknown>;
+      expect(manifest.public_endpoint_id).toMatch(
+        /^endpoint_[A-Za-z0-9_-]{21}$/,
+      );
+      return new Response("", { status: 200 });
+    });
+
+    const manifest = {
+      name: "public-webhook",
+      allow: ["unauthenticated_requests"],
+    };
+    const client = new CloudClient({ apiUrl: "http://localhost:8900" });
+    await client.upsertApplication(manifest, "zip-bytes");
+
+    expect(requested).toEqual([
+      "http://localhost:8900/v1/namespaces/default/applications/public-webhook",
+      "http://localhost:8900/v1/namespaces/default/applications",
+    ]);
+    expect(manifest).not.toHaveProperty("public_endpoint_id");
+    client.close();
+  });
+
+  it("reuses an existing public endpoint ID", async () => {
+    const endpointId = "endpoint_0123456789abcdefghijk";
+    mockFetch(async (_url, init) => {
+      if (init?.method === "GET") {
+        return new Response(
+          JSON.stringify({ public_endpoint_id: endpointId }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+
+      const form = init?.body as FormData;
+      const manifest = JSON.parse(
+        form.get("application") as string,
+      ) as Record<string, unknown>;
+      expect(manifest.public_endpoint_id).toBe(endpointId);
+      return new Response("", { status: 200 });
+    });
+
+    const client = new CloudClient({ apiUrl: "http://localhost:8900" });
+    await client.upsertApplication(
+      {
+        name: "public-webhook",
+        allow: ["unauthenticated_requests"],
+      },
+      "zip-bytes",
+    );
+    client.close();
+  });
+
+  it("preserves an endpoint ID already supplied by the caller", async () => {
+    const endpointId = "endpoint_0123456789abcdefghijk";
+    mockFetch(async (_url, init) => {
+      expect(init?.method).toBe("POST");
+      const form = init?.body as FormData;
+      const manifest = JSON.parse(
+        form.get("application") as string,
+      ) as Record<string, unknown>;
+      expect(manifest.public_endpoint_id).toBe(endpointId);
+      expect(manifest).not.toHaveProperty("publicEndpointId");
+      return new Response("", { status: 200 });
+    });
+
+    const client = new CloudClient({ apiUrl: "http://localhost:8900" });
+    await client.upsertApplication(
+      {
+        name: "public-webhook",
+        allow: ["unauthenticated_requests"],
+        publicEndpointId: endpointId,
+      },
+      "zip-bytes",
+    );
+    client.close();
+  });
+
   it("deletes sandbox images through the namespaced image route", async () => {
     mockFetch((url, init) => {
       expect(url).toBe(
