@@ -183,6 +183,15 @@ test-cli-full *ARGS:
     CARGO_TARGET_DIR="$PWD/target" cargo test --manifest-path crates/gsvc-fs-client/Cargo.toml {{ARGS}}
     cargo test --workspace --features tensorlake-cli/mount,tensorlake-cli/git-clone {{ARGS}}
 
+# Validate the server-side filesystem SDK. It deliberately has no dependency on the private mount
+# engine: reads use native HTTP routes and writes upload directly to object storage.
+test-node-filesystem-full:
+    cargo clippy -p tensorlake-rust-cloud-sdk-node --no-deps -- -D warnings
+    cargo test -p tensorlake-rust-cloud-sdk-node
+    cd typescript && npm run typecheck
+    cd typescript && npm test -- tests/filesystem.test.ts
+    cd typescript && npm run build:native
+
 # Authoritative validation for the private filesystem client integration. Run the complete
 # full-feature CLI suite so changes exercise every consumer of the private crate.
 test-fs-journal:

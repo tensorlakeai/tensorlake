@@ -2,13 +2,14 @@
  * Client for Tensorlake filesystems.
  *
  * A filesystem is a durable, versioned file tree that lives in Tensorlake
- * Cloud. Every write produces a {@link Snapshot} (a durable version), files
- * can be read at any version, and a filesystem can be mounted to a local
- * path through the `tl` CLI's FUSE/FSKit daemon.
+ * Cloud. Every write publishes a durable live version; {@link Filesystem.snapshot}
+ * retains the current version permanently. Files can be read at any retained
+ * version, and a filesystem can be mounted to a local path through the `tl`
+ * CLI's FUSE/FSKit daemon.
  *
- * Reads and writes are served by the shared Rust cloud-sdk core (the same
- * engine behind the `tl` CLI), so uploads get content-defined chunking,
- * dedup, transient retries, and idempotent commit reattachment for free.
+ * Server-side SDK writes hash complete files locally, upload missing bytes
+ * directly to checksum-bound object-store targets, and atomically publish
+ * one durable snapshot. Payload bytes never transit the API service.
  *
  * @example
  * const client = new FilesystemClient();   // env-based auth
@@ -40,10 +41,14 @@ import {
   mountStatusFromRaw,
   trimSlashes,
   type FileEntry,
+  type FilesystemFileRead,
   type FilesystemInfo,
+  type FilesystemReadOptions,
+  type FilesystemSnapshot,
+  type FilesystemSnapshotInfo,
   type FilesystemStatus,
+  type FilesystemVersion,
   type MountStatus,
-  type Snapshot,
 } from "./filesystem-models.js";
 import {
   loadNativeSandboxBinding,
@@ -307,6 +312,32 @@ export class FilesystemClient {
     );
   }
 
+  /**
+   * Fork a filesystem at its live head or an explicit retained snapshot.
+   * The server shares immutable content and publishes only metadata.
+   */
+  async fork(
+    name: string,
+    baseFilesystem: string,
+    snapshot?: string,
+  ): Promise<Filesystem> {
+    if (!name || !baseFilesystem) {
+      throw new FilesystemError(
+        "fork and base filesystem names must not be empty",
+      );
+    }
+    await callNative(
+      () =>
+        this.native.forkFilesystem(
+          name,
+          baseFilesystem,
+          snapshot ?? null,
+        ),
+      new FilesystemNotFoundError(baseFilesystem),
+    );
+    return new Filesystem(this, this.native, this.cli, name, "main");
+  }
+
   /** Return a handle to an existing filesystem (verifies it exists). */
   async get(name: string): Promise<Filesystem> {
     const traced = await callNative(
@@ -338,7 +369,6 @@ export class FilesystemClient {
     return (page.repos ?? []).map((repo) => ({
       name: String(repo.name ?? ""),
       fullName: String(repo.full_name ?? ""),
-      defaultBranch: String(repo.default_branch ?? "main"),
       status: String(repo.status ?? ""),
       kind: String(repo.kind ?? FILESYSTEM_REPO_KIND),
     }));
@@ -382,6 +412,9 @@ export class FilesystemClient {
 type FileData = Uint8Array | string;
 
 function toBuffer(data: FileData): Buffer {
+  // Copy Uint8Array inputs before crossing the async N-API boundary. Sharing
+  // the caller's backing store would let a post-call mutation change the
+  // bytes being hashed and published.
   return typeof data === "string" ? Buffer.from(data, "utf-8") : Buffer.from(data);
 }
 
@@ -432,7 +465,7 @@ export class Filesystem {
     path: string,
     data: FileData,
     message?: string,
-  ): Promise<Snapshot> {
+  ): Promise<FilesystemVersion> {
     return await this.writeFiles(new Map([[path, data]]), message);
   }
 
@@ -441,7 +474,7 @@ export class Filesystem {
     files: Map<string, FileData> | Record<string, FileData>,
     message?: string,
     deletes: string[] = [],
-  ): Promise<Snapshot> {
+  ): Promise<FilesystemVersion> {
     const entries =
       files instanceof Map ? [...files.entries()] : Object.entries(files);
     if (entries.length === 0 && deletes.length === 0) {
@@ -454,6 +487,118 @@ export class Filesystem {
     // Truthiness, not nullish: an explicit "" gets the default too (parity
     // with the Python SDK).
     const resolvedMessage = message || `write ${writes.length} file(s) via SDK`;
+    return await this.publishChanges(
+      writes,
+      deletes,
+      [],
+      [],
+      resolvedMessage,
+    );
+  }
+
+  /**
+   * Stream one local file directly to object storage in bounded parts.
+   * This is the memory-bounded API for multi-GiB files.
+   */
+  async writeFileFromPath(
+    path: string,
+    localPath: string,
+    message?: string,
+  ): Promise<FilesystemVersion> {
+    return await this.writeFilesFromPaths(
+      new Map([[path, localPath]]),
+      message,
+    );
+  }
+
+  /**
+   * Atomically publish local files without loading their complete payloads
+   * into JavaScript or Rust memory.
+   */
+  async writeFilesFromPaths(
+    files: Map<string, string> | Record<string, string>,
+    message?: string,
+  ): Promise<FilesystemVersion> {
+    const entries =
+      files instanceof Map ? [...files.entries()] : Object.entries(files);
+    if (entries.length === 0) {
+      throw new FilesystemError("nothing to write: no local files given");
+    }
+    const writes = entries.map(([path, localPath]) => ({ path, localPath }));
+    const resolvedMessage =
+      message || `write ${writes.length} local file(s) via SDK`;
+    const branch = await this.branch();
+    const traced = await callNative(
+      () =>
+        this.native.pushFilesystemPaths(
+          this.name,
+          writes,
+          resolvedMessage,
+          branch,
+          randomBytes(16).toString("hex"),
+        ),
+      new FilesystemNotFoundError(this.name),
+    );
+    const report = JSON.parse(traced.json) as {
+      version_id?: string;
+      previous_version_id?: string | null;
+    };
+    const versionId = String(report.version_id ?? "");
+    const previousVersionId =
+      report.previous_version_id == null
+        ? null
+        : String(report.previous_version_id);
+    return {
+      versionId,
+      previousVersionId,
+      created: previousVersionId !== versionId,
+      message: resolvedMessage,
+    };
+  }
+
+  /**
+   * Move a file or directory without downloading or re-uploading its bytes.
+   * The source removal and destination creation publish as one atomic snapshot.
+   */
+  async moveFile(
+    from: string,
+    to: string,
+    message?: string,
+  ): Promise<FilesystemVersion> {
+    return await this.publishChanges(
+      [],
+      [],
+      [{ from, to }],
+      [],
+      message || `move ${from} to ${to} via SDK`,
+    );
+  }
+
+  /**
+   * Copy a file or directory by reusing immutable content references. No
+   * payload bytes traverse the client, API server, or object store.
+   */
+  async copyFile(
+    from: string,
+    to: string,
+    message?: string,
+  ): Promise<FilesystemVersion> {
+    return await this.publishChanges(
+      [],
+      [],
+      [],
+      [{ from, to }],
+      message || `copy ${from} to ${to} via SDK`,
+    );
+  }
+
+  private async publishChanges(
+    writes: Array<{ path: string; content: Buffer }>,
+    deletes: string[],
+    moves: Array<{ from: string; to: string }>,
+    copies: Array<{ from: string; to: string }>,
+    message: string,
+  ): Promise<FilesystemVersion> {
     const branch = await this.branch();
     const traced = await callNative(
       () =>
@@ -461,7 +606,9 @@ export class Filesystem {
           this.name,
           writes,
           deletes,
-          resolvedMessage,
+          moves,
+          copies,
+          message,
           branch,
           // One key per logical write: a retried submit reattaches to the
           // same durable commit job instead of double-committing.
@@ -469,19 +616,25 @@ export class Filesystem {
         ),
       new FilesystemNotFoundError(this.name),
     );
-    const report = JSON.parse(traced.json) as Record<string, unknown>;
+    const report = JSON.parse(traced.json) as {
+      version_id?: string;
+      previous_version_id?: string | null;
+    };
+    const versionId = String(report.version_id ?? "");
+    const previousVersionId =
+      report.previous_version_id == null
+        ? null
+        : String(report.previous_version_id);
     return {
-      commit: String(report.commit ?? ""),
-      tree: String(report.tree ?? ""),
-      refName: String(report.ref_name ?? ""),
-      parent: null,
-      created: report.created === undefined ? true : Boolean(report.created),
-      message: resolvedMessage,
+      versionId,
+      previousVersionId,
+      created: previousVersionId !== versionId,
+      message,
     };
   }
 
-  /** Delete one file. Returns the snapshot the deletion produced. */
-  async deleteFile(path: string, message?: string): Promise<Snapshot> {
+  /** Delete one file. Returns the durable version the deletion produced. */
+  async deleteFile(path: string, message?: string): Promise<FilesystemVersion> {
     return await this.writeFiles(
       new Map(),
       message || `delete ${path} via SDK`,
@@ -492,42 +645,121 @@ export class Filesystem {
   /**
    * Return the filesystem's current version as a snapshot.
    *
-   * Writes already create snapshots implicitly; this pins the current head
-   * without changing any content.
+   * Writes publish durable live versions. This retains the current head
+   * permanently in one metadata-only server operation without changing or
+   * copying any content.
    */
-  async snapshot(message = ""): Promise<Snapshot> {
-    const status = await this.status();
-    if (!status.headCommit) {
-      throw new FilesystemError(
-        `filesystem ${this.name} is empty: write files first`,
-      );
-    }
-    return {
-      commit: status.headCommit,
-      tree: "",
-      refName: `refs/heads/${status.defaultBranch}`,
-      parent: null,
-      created: false,
-      message,
+  async snapshot(message = "snapshot via SDK"): Promise<FilesystemSnapshot> {
+    const resolvedMessage = message || "snapshot via SDK";
+    const traced = await callNative(
+      () =>
+        this.native.retainFilesystemSnapshot(
+          this.name,
+          resolvedMessage,
+          randomBytes(16).toString("hex"),
+        ),
+      new FilesystemNotFoundError(this.name),
+    );
+    const retained = JSON.parse(traced.json) as {
+      snapshot_id?: string;
+      message?: string;
     };
+    return {
+      id: String(retained.snapshot_id ?? ""),
+      message: retained.message || resolvedMessage,
+    };
+  }
+
+  /** List explicitly retained snapshots without reading filesystem contents. */
+  async listSnapshots(): Promise<FilesystemSnapshotInfo[]> {
+    const traced = await callNative(
+      () => this.native.listFilesystemSnapshots(this.name),
+      new FilesystemNotFoundError(this.name),
+    );
+    const payload = JSON.parse(traced.json) as {
+      snapshots?: Array<{
+        snapshot_id?: string;
+        created_at_ms?: number;
+        message?: string;
+      }>;
+    };
+    return (payload.snapshots ?? []).map((snapshot) => ({
+      id: String(snapshot.snapshot_id ?? ""),
+      createdAt: new Date(Number(snapshot.created_at_ms ?? 0)),
+      message: String(snapshot.message ?? ""),
+    }));
+  }
+
+  /** Delete one permanent retention point; shared/head-reachable bytes remain. */
+  async deleteSnapshot(snapshot: string): Promise<void> {
+    await callNative(
+      () => this.native.deleteFilesystemSnapshot(this.name, snapshot),
+      new FilesystemNotFoundError(this.name),
+    );
   }
 
   // -- reads --------------------------------------------------------------------
 
   /**
-   * Read a file's bytes at `version` (branch, ref, or snapshot commit;
-   * defaults to the filesystem's default branch).
+   * Read a file's bytes at `version` (the current `main` head or a retained
+   * snapshot id; defaults to the filesystem's current head).
    */
   async readFile(path: string, version?: string): Promise<Uint8Array> {
+    return (await this.readFileWithMetadata(path, { version })).data;
+  }
+
+  /**
+   * Read bytes and immutable metadata in one request. A range is executed by
+   * Artifact Storage, so callers never download the unrequested remainder.
+   */
+  async readFileWithMetadata(
+    path: string,
+    options: FilesystemReadOptions = {},
+  ): Promise<FilesystemFileRead> {
     if (trimSlashes(path) === "") {
       throw new FilesystemError("file path must not be empty");
     }
-    const resolvedVersion = version || (await this.branch());
+    const range = options.range;
+    if (
+      range !== undefined &&
+      (!Number.isSafeInteger(range.offset) ||
+        range.offset < 0 ||
+        !Number.isSafeInteger(range.length) ||
+        range.length <= 0)
+    ) {
+      throw new FilesystemError(
+        "range requires a non-negative integer offset and positive integer length",
+      );
+    }
+    const resolvedVersion = options.version || (await this.branch());
     const traced = await callNative(
-      () => this.native.readFilesystemFile(this.name, path, resolvedVersion),
+      () =>
+        this.native.readFilesystemFile(
+          this.name,
+          path,
+          resolvedVersion,
+          range?.offset,
+          range?.length,
+        ),
       new FileNotFoundInFilesystemError(this.name, path),
     );
-    return new Uint8Array(traced.data);
+    const fullSize = traced.fullSize;
+    if (
+      !traced.contentId ||
+      fullSize === undefined ||
+      !Number.isSafeInteger(fullSize) ||
+      fullSize < 0 ||
+      traced.data.byteLength > fullSize
+    ) {
+      throw new FilesystemError(
+        "filesystem read response omitted content identity or total size",
+      );
+    }
+    return {
+      data: new Uint8Array(traced.data),
+      contentId: traced.contentId,
+      size: fullSize,
+    };
   }
 
   /** Read a file as UTF-8 text at `version`. Throws on non-UTF-8 content. */
@@ -555,7 +787,7 @@ export class Filesystem {
 
   // -- status -------------------------------------------------------------------
 
-  /** Remote status: identity plus the current head snapshot. */
+  /** Remote status: identity plus the current native version. */
   async status(): Promise<FilesystemStatus> {
     const metaTraced = await callNative(
       () => this.native.filesystemMeta(this.name),
@@ -564,7 +796,7 @@ export class Filesystem {
     const meta = JSON.parse(metaTraced.json) as Record<string, unknown>;
     const defaultBranch = String(meta.default_branch || "main");
     this.defaultBranch = defaultBranch;
-    let headCommit: string | null = null;
+    let versionId: string | null = null;
     let generation: number | null = null;
     try {
       // A 404 here means "no such ref yet" (an empty filesystem), so it is
@@ -573,7 +805,7 @@ export class Filesystem {
         this.native.filesystemRefStatus(this.name, defaultBranch),
       );
       const ref = JSON.parse(refTraced.json) as Record<string, unknown>;
-      headCommit =
+      versionId =
         (ref.resolved_commit as string) || (ref.oid as string) || null;
       generation = typeof ref.generation === "number" ? ref.generation : null;
     } catch (error) {
@@ -586,8 +818,7 @@ export class Filesystem {
     return {
       name: this.name,
       status: String(meta.status ?? ""),
-      defaultBranch,
-      headCommit,
+      versionId,
       generation,
     };
   }

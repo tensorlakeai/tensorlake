@@ -17,6 +17,7 @@ serde_json = { workspace = true }
 reqwest = { workspace = true }
 napi = { workspace = true }
 napi-derive = { workspace = true }
+uuid = { workspace = true }
 
 [build-dependencies]
 napi-build = { workspace = true }

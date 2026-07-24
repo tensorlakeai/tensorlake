@@ -13,6 +13,8 @@
 # explains exactly what to do.
 #
 # Name and version MUST match the real crate for the `paths` override to apply.
+[workspace]
+
 [package]
 name = "gsvc-mount"
 version = "0.1.0"

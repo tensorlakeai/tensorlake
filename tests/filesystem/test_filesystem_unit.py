@@ -24,7 +24,7 @@ from tensorlake.filesystem import (
     FilesystemError,
     FilesystemInfo,
     FilesystemNotFoundError,
-    Snapshot,
+    FilesystemVersion,
 )
 from tensorlake.filesystem.client import mount_status_from_raw
 
@@ -77,16 +77,8 @@ class _StubNative:
         self.entries = entries or []
         self.file_bytes = file_bytes
         self.push_report = push_report or {
-            "commit": _COMMIT,
-            "tree": "t" * 40,
-            "ref_name": "refs/heads/main",
-            "created": True,
-            "files": 1,
-            "bytes_total": 1,
-            "chunks_total": 1,
-            "chunks_uploaded": 1,
-            "bytes_uploaded": 1,
-            "file_blob_oids": [],
+            "version_id": _COMMIT,
+            "previous_version_id": None,
         }
         self.errors = errors or {}
         self.calls: List[Tuple[str, tuple]] = []
@@ -103,6 +95,11 @@ class _StubNative:
         self.calls.append(("create_filesystem", (project_id, name)))
         self._maybe_fail("create_filesystem")
         return json.dumps({"trace_id": "trace-1", "default_branch": self.create_branch})
+
+    def fork_filesystem(self, project_id, name, base, snapshot=None):
+        self.calls.append(("fork_filesystem", (project_id, name, base, snapshot)))
+        self._maybe_fail("fork_filesystem")
+        return json.dumps({"trace_id": "trace-1", "default_branch": "main"})
 
     def filesystem_meta(self, project_id, name):
         self.calls.append(("filesystem_meta", (project_id, name)))
@@ -126,6 +123,53 @@ class _StubNative:
         self._maybe_fail("filesystem_ref_status")
         return json.dumps(self.ref)
 
+    def retain_filesystem_snapshot(self, project_id, name, message, request_id):
+        self.calls.append(
+            (
+                "retain_filesystem_snapshot",
+                (project_id, name, message, request_id),
+            )
+        )
+        self._maybe_fail("retain_filesystem_snapshot")
+        snapshot_id = self.ref.get("resolved_commit")
+        if not snapshot_id:
+            raise CloudApiClientError(
+                "internal", None, f"filesystem {name} is empty: write files first"
+            )
+        return json.dumps(
+            {
+                "snapshot_id": snapshot_id,
+                "snapshot_class": "permanent_snapshot",
+                "message": message,
+            }
+        )
+
+    def list_filesystem_snapshots(self, project_id, name):
+        self.calls.append(("list_filesystem_snapshots", (project_id, name)))
+        self._maybe_fail("list_filesystem_snapshots")
+        return json.dumps(
+            {
+                "snapshots": [
+                    {
+                        "snapshot_id": _COMMIT,
+                        "created_at_ms": 1_700_000_000_000,
+                        "message": "pin",
+                        "snapshot_class": "permanent_snapshot",
+                    }
+                ]
+            }
+        )
+
+    def delete_filesystem_snapshot(self, project_id, name, snapshot):
+        self.calls.append(
+            (
+                "delete_filesystem_snapshot",
+                (project_id, name, snapshot),
+            )
+        )
+        self._maybe_fail("delete_filesystem_snapshot")
+        return "trace-delete"
+
     def read_filesystem_file(self, project_id, name, path, version):
         self.calls.append(("read_filesystem_file", (project_id, name, path, version)))
         self._maybe_fail("read_filesystem_file")
@@ -139,15 +183,46 @@ class _StubNative:
         return json.dumps({"entries": self.entries})
 
     def push_filesystem_files(
-        self, project_id, name, files, deletes, message, branch, idempotency_key
+        self,
+        project_id,
+        name,
+        files,
+        deletes,
+        moves,
+        copies,
+        message,
+        branch,
+        idempotency_key,
     ):
         self.calls.append(
             (
                 "push_filesystem_files",
-                (project_id, name, files, deletes, message, branch, idempotency_key),
+                (
+                    project_id,
+                    name,
+                    files,
+                    deletes,
+                    moves,
+                    copies,
+                    message,
+                    branch,
+                    idempotency_key,
+                ),
             )
         )
         self._maybe_fail("push_filesystem_files")
+        return json.dumps(self.push_report)
+
+    def push_filesystem_paths(
+        self, project_id, name, files, message, branch, idempotency_key
+    ):
+        self.calls.append(
+            (
+                "push_filesystem_paths",
+                (project_id, name, files, message, branch, idempotency_key),
+            )
+        )
+        self._maybe_fail("push_filesystem_paths")
         return json.dumps(self.push_report)
 
 
@@ -164,9 +239,9 @@ class TestModels(unittest.TestCase):
             }
         )
         self.assertEqual(info.name, "skills")
-        entry = FileEntry.model_validate({"name": "d", "oid": "x", "mode": 0o40000})
+        entry = FileEntry(name="d", content_id="x", kind="directory")
         self.assertTrue(entry.is_dir)
-        entry = FileEntry.model_validate({"name": "f", "oid": "y", "mode": 0o100644})
+        entry = FileEntry(name="f", content_id="y", kind="file")
         self.assertFalse(entry.is_dir)
 
 
@@ -215,24 +290,67 @@ class TestFilesystemClient(unittest.TestCase):
         stub = _StubNative()
         client = _client_with_stub(stub)
         fs = client.create("my-fs")
-        snapshot = fs.write_files(
+        version = fs.write_files(
             {"a.txt": "hello", "b.bin": b"\x00\x01"}, deletes=["old.txt"]
         )
-        self.assertIsInstance(snapshot, Snapshot)
-        self.assertEqual(snapshot.commit, _COMMIT)
-        self.assertTrue(snapshot.created)
+        self.assertIsInstance(version, FilesystemVersion)
+        self.assertEqual(version.version_id, _COMMIT)
+        self.assertIsNone(version.previous_version_id)
+        self.assertTrue(version.created)
 
         method, args = stub.calls[-1]
         self.assertEqual(method, "push_filesystem_files")
-        _, name, files, deletes, _message, branch, idempotency_key = args
+        (
+            _,
+            name,
+            files,
+            deletes,
+            moves,
+            copies,
+            _message,
+            branch,
+            idempotency_key,
+        ) = args
         self.assertEqual(name, "my-fs")
         # Strings are encoded to bytes; bytes pass through.
         self.assertEqual(dict(files), {"a.txt": b"hello", "b.bin": b"\x00\x01"})
         self.assertEqual(deletes, ["old.txt"])
+        self.assertEqual(moves, [])
+        self.assertEqual(copies, [])
         self.assertEqual(branch, "main")
         # A fresh stable key per logical write (the Rust core reuses it across
         # its retries so a lost response cannot double-commit).
         self.assertRegex(idempotency_key, r"^[0-9a-f]{32}$")
+
+    def test_move_and_copy_publish_metadata_only_mutations(self):
+        stub = _StubNative()
+        fs = _client_with_stub(stub).create("my-fs")
+
+        fs.move_file("large.bin", "archive/large.bin")
+        args = stub.calls[-1][1]
+        self.assertEqual(args[2], [])
+        self.assertEqual(args[3], [])
+        self.assertEqual(args[4], [("large.bin", "archive/large.bin")])
+        self.assertEqual(args[5], [])
+
+        fs.copy_file("archive/large.bin", "copies/large.bin")
+        args = stub.calls[-1][1]
+        self.assertEqual(args[2], [])
+        self.assertEqual(args[3], [])
+        self.assertEqual(args[4], [])
+        self.assertEqual(args[5], [("archive/large.bin", "copies/large.bin")])
+
+    def test_write_files_from_paths_uses_memory_bounded_native_api(self):
+        stub = _StubNative()
+        fs = _client_with_stub(stub).create("my-fs")
+
+        version = fs.write_files_from_paths({"models/weights.bin": "/tmp/weights.bin"})
+        self.assertEqual(version.version_id, _COMMIT)
+        method, args = stub.calls[-1]
+        self.assertEqual(method, "push_filesystem_paths")
+        self.assertEqual(args[2], [("models/weights.bin", "/tmp/weights.bin")])
+        self.assertEqual(args[4], "main")
+        self.assertRegex(args[5], r"^[0-9a-f]{32}$")
 
     def test_empty_write_rejected(self):
         client = _client_with_stub(_StubNative())
@@ -267,13 +385,12 @@ class TestFilesystemClient(unittest.TestCase):
         self.assertTrue(entries[0].is_dir)
         self.assertEqual(entries[1].size, 3)
 
-    def test_status_maps_head_and_generation(self):
+    def test_status_maps_version_and_generation(self):
         client = _client_with_stub(_StubNative())
         fs = client.create("my-fs")
         status = fs.status()
-        self.assertEqual(status.head_commit, _COMMIT)
+        self.assertEqual(status.version_id, _COMMIT)
         self.assertEqual(status.generation, 3)
-        self.assertEqual(status.default_branch, "main")
 
     def test_status_of_empty_filesystem(self):
         stub = _StubNative(
@@ -286,7 +403,7 @@ class TestFilesystemClient(unittest.TestCase):
         )
         client = _client_with_stub(stub)
         fs = client.create("my-fs")
-        self.assertIsNone(fs.status().head_commit)
+        self.assertIsNone(fs.status().version_id)
         with self.assertRaises(FilesystemError):
             fs.snapshot("nothing yet")
 
@@ -296,7 +413,7 @@ class TestFilesystemClient(unittest.TestCase):
         )
         client = _client_with_stub(stub)
         fs = client.create("my-fs")
-        self.assertIsNone(fs.status().head_commit)
+        self.assertIsNone(fs.status().version_id)
 
         stub.errors["filesystem_ref_status"] = ("remote_api", 503, "unavailable")
         with self.assertRaises(FilesystemAPIError) as caught:
@@ -304,11 +421,39 @@ class TestFilesystemClient(unittest.TestCase):
         self.assertEqual(caught.exception.status_code, 503)
 
     def test_snapshot_pins_current_head(self):
-        client = _client_with_stub(_StubNative())
+        stub = _StubNative()
+        client = _client_with_stub(stub)
         fs = client.create("my-fs")
         snapshot = fs.snapshot("pin")
-        self.assertEqual(snapshot.commit, _COMMIT)
-        self.assertFalse(snapshot.created)
+        self.assertEqual(snapshot.id, _COMMIT)
+        self.assertEqual(stub.calls[-1][0], "retain_filesystem_snapshot")
+
+    def test_snapshot_list_delete_and_metadata_only_fork(self):
+        stub = _StubNative()
+        client = _client_with_stub(stub)
+        fs = client.create("my-fs")
+        snapshots = fs.list_snapshots()
+        self.assertEqual([snapshot.id for snapshot in snapshots], [_COMMIT])
+        self.assertEqual(snapshots[0].message, "pin")
+
+        fs.delete_snapshot(_COMMIT)
+        self.assertEqual(
+            stub.calls[-1],
+            (
+                "delete_filesystem_snapshot",
+                (_PROJECT, "my-fs", _COMMIT),
+            ),
+        )
+
+        fork = client.fork("forked", "my-fs", _COMMIT)
+        self.assertEqual(fork.name, "forked")
+        self.assertEqual(
+            stub.calls[-1],
+            (
+                "fork_filesystem",
+                (_PROJECT, "forked", "my-fs", _COMMIT),
+            ),
+        )
 
     def test_create_seeds_branch_reported_by_binding(self):
         stub = _StubNative()
@@ -316,8 +461,8 @@ class TestFilesystemClient(unittest.TestCase):
         client = _client_with_stub(stub)
         fs = client.create("my-fs")
         fs.write_file("a.txt", b"x")
-        # (project, name, files, deletes, message, branch, idempotency_key)
-        self.assertEqual(stub.calls[-1][1][5], "trunk")
+        # (project, name, files, deletes, moves, copies, message, branch, idempotency_key)
+        self.assertEqual(stub.calls[-1][1][7], "trunk")
 
     def test_non_main_default_branch_followed_by_writes_and_reads(self):
         stub = _StubNative()
@@ -325,8 +470,8 @@ class TestFilesystemClient(unittest.TestCase):
         client = _client_with_stub(stub)
         fs = client.get("my-fs")
         fs.write_file("a.txt", b"x")
-        # (project, name, files, deletes, message, branch, idempotency_key)
-        self.assertEqual(stub.calls[-1][1][5], "trunk")
+        # (project, name, files, deletes, moves, copies, message, branch, idempotency_key)
+        self.assertEqual(stub.calls[-1][1][7], "trunk")
         fs.read_file("a.txt")
         # (project, name, path, version)
         self.assertEqual(stub.calls[-1][1][3], "trunk")
@@ -342,7 +487,7 @@ class TestFilesystemClient(unittest.TestCase):
         fs = client.create("my-fs")
         # Explicit "" gets the default too — parity with the TypeScript SDK.
         snapshot = fs.write_file("a.txt", b"x", message="")
-        message = stub.calls[-1][1][4]
+        message = stub.calls[-1][1][6]
         self.assertEqual(message, "write 1 file(s) via SDK")
         self.assertEqual(snapshot.message, "write 1 file(s) via SDK")
 

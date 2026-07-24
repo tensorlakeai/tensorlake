@@ -76,10 +76,11 @@ impl From<&str> for ProcessRef {
     fn from(s: &str) -> Self {
         // An all-ASCII-digit string is a pid; anything else is a managed name. This mirrors
         // the daemon's route disambiguation, so a stringified pid still hits the pid branch.
-        if !s.is_empty() && s.bytes().all(|b| b.is_ascii_digit()) {
-            if let Ok(pid) = s.parse::<u64>() {
-                return ProcessRef::Pid(pid);
-            }
+        if !s.is_empty()
+            && s.bytes().all(|b| b.is_ascii_digit())
+            && let Ok(pid) = s.parse::<u64>()
+        {
+            return ProcessRef::Pid(pid);
         }
         ProcessRef::Name(s.to_string())
     }

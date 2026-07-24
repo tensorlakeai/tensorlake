@@ -16,6 +16,8 @@
 # Name and edition MUST match the real crate (artifact_storage crates/gsvc-codec), and the
 # dependency list below MUST mirror the real crate's — the swapped-in source compiles against
 # THIS manifest. If the real crate's dependencies change upstream, update this list to match.
+[workspace]
+
 [package]
 name = "gsvc-codec"
 version = "0.1.0"

@@ -37,7 +37,11 @@ export type {
   FilesystemInfo,
   FilesystemStatus,
   FileEntry,
-  Snapshot,
+  FilesystemFileRead,
+  FilesystemReadOptions,
+  FilesystemVersion,
+  FilesystemSnapshot,
+  FilesystemSnapshotInfo,
   MountStatus,
 } from "./filesystem-models.js";
 export { Image, dockerfileContent, ImageBuildOperationType } from "./image.js";

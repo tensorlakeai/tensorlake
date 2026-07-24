@@ -74,10 +74,10 @@ async fn test_repository_structural_operations() {
         cleanup_repo = None;
     }
     // Best-effort cleanup when the flow failed before its delete.
-    if let Some(repo) = cleanup_repo {
-        if let Err(e) = client.delete_repo(&project_id, &repo).await {
-            eprintln!("Cleanup failed for repo {repo}: {e}");
-        }
+    if let Some(repo) = cleanup_repo
+        && let Err(e) = client.delete_repo(&project_id, &repo).await
+    {
+        eprintln!("Cleanup failed for repo {repo}: {e}");
     }
 
     if let Err(err) = result {

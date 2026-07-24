@@ -165,3 +165,136 @@ pub struct ListOperationsResponse {
     #[serde(default)]
     pub next_after: Option<String>,
 }
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct NativeHeadResponse {
+    pub snapshot_id: Option<String>,
+    pub generation: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeFilesystemFileRead {
+    pub data: Vec<u8>,
+    pub content_id: String,
+    pub full_size: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct NativeDirectUploadLeaseResponse {
+    pub lease_id: String,
+    pub expires_at_ms: u64,
+    pub transport: String,
+    pub checksum_algorithm: String,
+    pub max_blob_bytes: u64,
+    pub max_targets_per_request: usize,
+    pub max_parts_per_file: usize,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
+pub struct NativeDirectBlobRequest {
+    pub blob_id: String,
+    pub logical_len: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NativeDirectBlobTargetsRequest {
+    pub blobs: Vec<NativeDirectBlobRequest>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct NativeDirectBlobTarget {
+    pub blob_id: String,
+    pub logical_len: u64,
+    pub already_present: bool,
+    pub url: Option<String>,
+    pub checksum_sha256: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct NativeDirectBlobTargetsResponse {
+    pub targets: Vec<NativeDirectBlobTarget>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NativeDirectUploadReceipt {
+    pub blob_id: String,
+    pub logical_len: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NativeDirectMutation {
+    Put {
+        path: String,
+        blobs: Vec<NativeDirectBlobRequest>,
+    },
+    Delete {
+        path: String,
+    },
+    Move {
+        from: String,
+        to: String,
+    },
+    Copy {
+        from: String,
+        to: String,
+    },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NativeDirectPublishRequest {
+    pub operation_id: String,
+    pub message: String,
+    pub expected_version_id: Option<String>,
+    pub lease_id: String,
+    pub uploads: Vec<NativeDirectUploadReceipt>,
+    pub mutations: Vec<NativeDirectMutation>,
+    pub retain_as_snapshot: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct NativeDirectPublishResponse {
+    pub version_id: String,
+    pub previous_version_id: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NativeFilesystemSnapshot {
+    pub snapshot_id: String,
+    pub created_at_ms: u64,
+    pub message: String,
+    pub snapshot_class: String,
+    #[serde(default)]
+    pub permanence_epoch: u64,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub struct NativeFilesystemSnapshotPage {
+    pub snapshots: Vec<NativeFilesystemSnapshot>,
+    pub next_after: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct NativeFilesystemSnapshotRetentionResponse {
+    pub snapshot_id: String,
+    pub snapshot_class: String,
+    pub message: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeDirectFileWrite {
+    pub path: String,
+    pub data: Vec<u8>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeDirectFilePathWrite {
+    pub path: String,
+    pub source_path: std::path::PathBuf,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeDirectPathTransfer {
+    pub from: String,
+    pub to: String,
+}

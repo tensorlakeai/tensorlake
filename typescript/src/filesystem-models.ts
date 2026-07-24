@@ -20,7 +20,6 @@ export function trimSlashes(path: string): string {
 export interface FilesystemInfo {
   name: string;
   fullName: string;
-  defaultBranch: string;
   status: string;
   kind: string;
 }
@@ -29,13 +28,12 @@ export interface FilesystemInfo {
 export interface FilesystemStatus {
   name: string;
   status: string;
-  defaultBranch: string;
   /**
-   * Commit hash the default branch currently points at; null for an empty
-   * filesystem that has never been written to.
+   * Current native version id; null for an empty filesystem that has never
+   * been written to.
    */
-  headCommit: string | null;
-  /** Server-side movement counter for the default branch, when reported. */
+  versionId: string | null;
+  /** Server-side movement counter for the live version, when reported. */
   generation: number | null;
 }
 
@@ -44,14 +42,32 @@ export interface FileEntry {
   name: string;
   /** Path of the entry relative to the filesystem root. */
   path: string;
-  /** Git blob/tree object id. */
-  oid: string;
-  /** Raw git mode (0o100644 file, 0o100755 executable, 0o120000 symlink, 0o40000 dir). */
-  mode: number;
+  /** Stable native content identity for the file or directory. */
+  contentId: string;
+  /** Native entry kind. */
+  kind: "file" | "directory" | "symlink";
+  /** Whether a regular file is executable. */
+  executable: boolean;
   /** Blob size in bytes when cheaply known server-side. */
   size: number | null;
   isDir: boolean;
   isSymlink: boolean;
+}
+
+/** Bytes plus immutable identity/size returned by one file request. */
+export interface FilesystemFileRead {
+  data: Uint8Array;
+  /** Stable native identity for the complete file content. */
+  contentId: string;
+  /** Size of the complete file, even when `data` is a requested range. */
+  size: number;
+}
+
+export interface FilesystemReadOptions {
+  /** Current `main` head when omitted; otherwise one retained snapshot id. */
+  version?: string;
+  /** Half-open byte selection expressed as offset + length. */
+  range?: { offset: number; length: number };
 }
 
 export function fileEntryFromWire(
@@ -63,23 +79,41 @@ export function fileEntryFromWire(
   return {
     name: entry.name,
     path: prefix ? `${prefix}/${entry.name}` : entry.name,
-    oid: entry.oid ?? "",
-    mode,
+    contentId: entry.oid ?? "",
+    kind:
+      mode === GIT_MODE_DIR
+        ? "directory"
+        : mode === GIT_MODE_SYMLINK
+          ? "symlink"
+          : "file",
+    executable: mode === 0o100755,
     size: entry.size ?? null,
     isDir: mode === GIT_MODE_DIR,
     isSymlink: mode === GIT_MODE_SYMLINK,
   };
 }
 
-/** A durable version of the filesystem (a commit). */
-export interface Snapshot {
-  /** Commit hash — pass as `version` to read the filesystem at this point. */
-  commit: string;
-  tree: string;
-  refName: string;
-  parent: string | null;
+/** The durable live version produced by one atomic filesystem publication. */
+export interface FilesystemVersion {
+  /** Native version id — pass as `version` to read the filesystem at this point. */
+  versionId: string;
+  /** Version replaced by this publication, or null for the first publication. */
+  previousVersionId: string | null;
   /** False when the write was a no-op (content identical to the parent). */
   created: boolean;
+  message: string;
+}
+
+/** One newly retained native filesystem snapshot. */
+export interface FilesystemSnapshot {
+  id: string;
+  message: string;
+}
+
+/** One explicitly retained native filesystem snapshot. */
+export interface FilesystemSnapshotInfo {
+  id: string;
+  createdAt: Date;
   message: string;
 }
 

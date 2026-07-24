@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional
+from datetime import datetime
+from typing import Any, Dict, Literal, Optional
 
 from pydantic import BaseModel, ConfigDict, Field
-
-# Git tree entry mode for a directory (0o40000 rendered by the server as an int).
-_GIT_MODE_DIR = 0o40000
-_GIT_MODE_SYMLINK = 0o120000
 
 
 class FilesystemInfo(BaseModel):
@@ -18,7 +15,6 @@ class FilesystemInfo(BaseModel):
 
     name: str
     full_name: str = ""
-    default_branch: str = "main"
     status: str = ""
     kind: str = "filesystem"
 
@@ -30,12 +26,11 @@ class FilesystemStatus(BaseModel):
 
     name: str
     status: str = ""
-    default_branch: str = "main"
-    #: Commit hash the default branch currently points at (None for an empty
-    #: filesystem that has never been written to).
-    head_commit: Optional[str] = None
-    #: Server-side movement counter for the default branch; bumps whenever the
-    #: head advances. None on servers that do not report it.
+    #: Current native version id (None for an empty filesystem that has never
+    #: been written to).
+    version_id: Optional[str] = None
+    #: Server-side movement counter for the live version; bumps whenever it
+    #: advances. None on servers that do not report it.
     generation: Optional[int] = None
 
 
@@ -45,11 +40,12 @@ class FileEntry(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     name: str
-    #: Git blob/tree object id.
-    oid: str = ""
-    #: Raw git mode (0o100644 file, 0o100755 executable, 0o120000 symlink,
-    #: 0o40000 directory).
-    mode: int = 0o100644
+    #: Stable native content identity for the file or directory.
+    content_id: str = ""
+    #: Native entry kind.
+    kind: Literal["file", "directory", "symlink"] = "file"
+    #: Whether a regular file is executable.
+    executable: bool = False
     #: Blob size in bytes when cheaply known server-side.
     size: Optional[int] = None
     #: Path of the entry relative to the filesystem root.
@@ -57,25 +53,43 @@ class FileEntry(BaseModel):
 
     @property
     def is_dir(self) -> bool:
-        return self.mode == _GIT_MODE_DIR
+        return self.kind == "directory"
 
     @property
     def is_symlink(self) -> bool:
-        return self.mode == _GIT_MODE_SYMLINK
+        return self.kind == "symlink"
 
 
-class Snapshot(BaseModel):
-    """A durable version of the filesystem (a commit)."""
+class FilesystemVersion(BaseModel):
+    """The durable live version produced by one atomic publication."""
 
     model_config = ConfigDict(extra="ignore")
 
-    #: Commit hash — pass as ``version=`` to read the filesystem at this point.
-    commit: str
-    tree: str = ""
-    ref_name: str = ""
-    parent: Optional[str] = None
+    #: Native version id — pass as ``version=`` to read this point in time.
+    version_id: str
+    #: Version replaced by this publication, or None for the first publication.
+    previous_version_id: Optional[str] = None
     #: False when the write was a no-op (content identical to the parent).
     created: bool = True
+    message: str = ""
+
+
+class FilesystemSnapshot(BaseModel):
+    """One newly retained native filesystem snapshot."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    message: str = ""
+
+
+class FilesystemSnapshotInfo(BaseModel):
+    """One explicitly retained native filesystem snapshot."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    id: str
+    created_at: datetime
     message: str = ""
 
 

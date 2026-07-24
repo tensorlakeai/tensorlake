@@ -1,11 +1,11 @@
 """Bridge to the Rust cloud-sdk core for filesystem operations.
 
-All wire-protocol work (credential minting, chunked ingest with
-content-defined chunking and dedup, commit-job polling, transient retries,
-pagination) lives in the shared Rust `ArtifactStorageClient`, exposed through
-the ``tensorlake._cloud_sdk`` native module. This bridge only builds the
-native client and translates its exceptions into the filesystem exception
-hierarchy.
+All wire-protocol work (cached repository credential minting, checksum-bound
+direct object-store uploads, atomic native publication, transient retries,
+and pagination) lives in the shared Rust ``ArtifactStorageClient``, exposed
+through the ``tensorlake._cloud_sdk`` native module. This bridge only builds
+the long-lived native client and translates its exceptions into the
+filesystem exception hierarchy.
 """
 
 from __future__ import annotations
@@ -89,6 +89,17 @@ class NativeFilesystems:
         )
         return str(json.loads(raw).get("default_branch") or "main")
 
+    def fork_filesystem(
+        self, name: str, base: str, snapshot: Optional[str] = None
+    ) -> str:
+        raw = self._call(
+            lambda: self._client.fork_filesystem(
+                self._project_id, name, base, snapshot
+            ),
+            not_found=FilesystemNotFoundError(base),
+        )
+        return str(json.loads(raw).get("default_branch") or "main")
+
     def filesystem_meta(self, name: str) -> Dict[str, Any]:
         raw = self._call(
             lambda: self._client.filesystem_meta(self._project_id, name),
@@ -119,6 +130,32 @@ class NativeFilesystems:
         )
         return json.loads(raw)
 
+    def retain_snapshot(
+        self, name: str, message: str, request_id: str
+    ) -> Dict[str, Any]:
+        raw = self._call(
+            lambda: self._client.retain_filesystem_snapshot(
+                self._project_id, name, message, request_id
+            ),
+            not_found=FilesystemNotFoundError(name),
+        )
+        return json.loads(raw)
+
+    def list_snapshots(self, name: str) -> List[Dict[str, Any]]:
+        raw = self._call(
+            lambda: self._client.list_filesystem_snapshots(self._project_id, name),
+            not_found=FilesystemNotFoundError(name),
+        )
+        return json.loads(raw).get("snapshots", [])
+
+    def delete_snapshot(self, name: str, snapshot: str) -> None:
+        self._call(
+            lambda: self._client.delete_filesystem_snapshot(
+                self._project_id, name, snapshot
+            ),
+            not_found=FilesystemNotFoundError(name),
+        )
+
     def read_file(self, name: str, path: str, version: str) -> bytes:
         return bytes(
             self._call(
@@ -143,6 +180,8 @@ class NativeFilesystems:
         name: str,
         files: List[Tuple[str, bytes]],
         deletes: List[str],
+        moves: List[Tuple[str, str]],
+        copies: List[Tuple[str, str]],
         message: str,
         idempotency_key: str,
         branch: str = "main",
@@ -153,6 +192,29 @@ class NativeFilesystems:
                 name,
                 files,
                 deletes,
+                moves,
+                copies,
+                message,
+                branch,
+                idempotency_key,
+            ),
+            not_found=FilesystemNotFoundError(name),
+        )
+        return json.loads(raw)
+
+    def push_paths(
+        self,
+        name: str,
+        files: List[Tuple[str, str]],
+        message: str,
+        idempotency_key: str,
+        branch: str = "main",
+    ) -> Dict[str, Any]:
+        raw = self._call(
+            lambda: self._client.push_filesystem_paths(
+                self._project_id,
+                name,
+                files,
                 message,
                 branch,
                 idempotency_key,

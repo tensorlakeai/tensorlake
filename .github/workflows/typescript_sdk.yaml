@@ -6,6 +6,8 @@ on:
   pull_request:
     paths:
       - "typescript/**"
+      - "crates/rust-cloud-sdk-node/**"
+      - "Cargo.lock"
       - ".github/workflows/typescript_sdk.yaml"
 
   push:
@@ -13,6 +15,8 @@ on:
       - "main"
     paths:
       - "typescript/**"
+      - "crates/rust-cloud-sdk-node/**"
+      - "Cargo.lock"
       - ".github/workflows/typescript_sdk.yaml"
 
 permissions:
@@ -105,6 +109,7 @@ jobs:
 
   integration-tests:
     name: Integration tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: prod
@@ -174,4 +179,6 @@ jobs:
         run: npm run test:integration
         env:
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
+          TENSORLAKE_ORGANIZATION_ID: ${{ vars.TENSORLAKE_ORGANIZATION_ID }}
+          TENSORLAKE_PROJECT_ID: ${{ vars.TENSORLAKE_PROJECT_ID }}
           TENSORLAKE_TEST_CLEANUP_GRACE_SECS: "60"
