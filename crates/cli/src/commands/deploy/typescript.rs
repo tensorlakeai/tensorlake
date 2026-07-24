@@ -13,7 +13,7 @@ use rolldown::plugin::{
 };
 use rolldown::{
     Bundler, BundlerOptions, BundlerTransformOptions, ChunkFilenamesOutputOption, Either,
-    InputItem, OutputFormat, Platform, SourceMapType,
+    InputItem, OutputFormat, Platform,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -38,6 +38,7 @@ const CODE_MANIFEST_FILE: &str = ".tensorlake_code_manifest.json";
 const MAX_CODE_SIZE: u64 = 5 * 1024 * 1024;
 const DEFAULT_NODE_IMAGE: &str = "node:24-bookworm-slim";
 const EXECUTOR_CAPSULE_CONTEXT_PATH: &str = ".tensorlake/function-executor-runtime.tgz";
+const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const DISCOVERY_SCRIPT: &str = r#"
 import { writeFile } from "node:fs/promises";
 
@@ -49,6 +50,10 @@ if (typeof runtime.__tensorlakeDeployment !== "function") {
 }
 const deployment = await runtime.__tensorlakeDeployment();
 await writeFile(outputPath, JSON.stringify(deployment));
+// Discovery is complete once the metadata is durable. Application modules may
+// intentionally own long-lived timers, sockets, or client pools that belong in
+// the executor process but must not keep this short-lived CLI helper alive.
+process.exit(0);
 "#;
 
 #[derive(Debug, Deserialize)]
@@ -353,7 +358,11 @@ export function __tensorlakeDeployment() {{
         chunk_filenames: Some(ChunkFilenamesOutputOption::String(
             "chunks/[name]-[hash].mjs".to_string(),
         )),
-        sourcemap: Some(SourceMapType::File),
+        // The executor does not enable Node source-map loading. Shipping maps
+        // only embeds application and dependency sources in the code ZIP and
+        // can make otherwise small third-party dependency graphs exceed the
+        // 5 MB application-code limit.
+        sourcemap: None,
         transform: Some(BundlerTransformOptions {
             target: Some(Either::Left("node24".to_string())),
             ..Default::default()
@@ -453,6 +462,14 @@ async fn validate_node_24() -> Result<()> {
 }
 
 async fn discover_deployment(runtime_path: &Path, temp_root: &Path) -> Result<DeploymentDiscovery> {
+    discover_deployment_with_timeout(runtime_path, temp_root, DISCOVERY_TIMEOUT).await
+}
+
+async fn discover_deployment_with_timeout(
+    runtime_path: &Path,
+    temp_root: &Path,
+    timeout: Duration,
+) -> Result<DeploymentDiscovery> {
     let runtime_url = Url::from_file_path(runtime_path).map_err(|_| {
         CliError::Other(anyhow::anyhow!(
             "Could not convert runtime path to a file URL: {}",
@@ -467,8 +484,16 @@ async fn discover_deployment(runtime_path: &Path, temp_root: &Path) -> Result<De
         .stdin(Stdio::null())
         .stdout(Stdio::inherit())
         .stderr(Stdio::piped())
-        .output()
+        .kill_on_drop(true)
+        .output();
+    let output = tokio::time::timeout(timeout, output)
         .await
+        .map_err(|_| {
+            CliError::Other(anyhow::anyhow!(
+                "TypeScript application initialization timed out after {:.1}s",
+                timeout.as_secs_f64()
+            ))
+        })?
         .map_err(CliError::Io)?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr);
@@ -1035,10 +1060,11 @@ fn required_string<'a>(value: &'a Value, key: &str, label: &str) -> Result<&'a s
 mod tests {
     use super::{
         SerializedImageOperation, application_dockerfile, bundle_application, canonical_entrypoint,
-        load_executor_capsule, render_image_operation,
+        discover_deployment_with_timeout, load_executor_capsule, render_image_operation,
     };
     use std::collections::BTreeMap;
     use std::path::PathBuf;
+    use std::time::Duration;
 
     fn repository_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..")
@@ -1113,6 +1139,7 @@ mod tests {
         let entry = repository_root().join("typescript/examples/hello-world.ts");
         let bundle = bundle_application(&entry).await.unwrap();
         assert!(bundle._temp.path().join("bundle/runtime.mjs").is_file());
+        assert!(!bundle._temp.path().join("bundle/runtime.mjs.map").exists());
         assert!(!bundle.code_zip.is_empty());
         assert_eq!(bundle.discovery.applications.len(), 1);
         assert_eq!(
@@ -1121,6 +1148,33 @@ mod tests {
                 .and_then(serde_json::Value::as_str),
             Some("hello_world")
         );
+    }
+
+    #[tokio::test]
+    async fn completes_application_discovery_with_live_node_handles() {
+        let directory = tempfile::tempdir().unwrap();
+        let runtime = directory.path().join("runtime.mjs");
+        std::fs::write(
+            &runtime,
+            r#"
+setInterval(() => {}, 1000);
+export function __tensorlakeDeployment() {
+  return {
+    applications: [],
+    codeManifest: {},
+    images: {},
+    sdkVersion: "test",
+  };
+}
+"#,
+        )
+        .unwrap();
+
+        let discovery =
+            discover_deployment_with_timeout(&runtime, directory.path(), Duration::from_secs(2))
+                .await
+                .unwrap();
+        assert_eq!(discovery.sdk_version, "test");
     }
 
     #[tokio::test]

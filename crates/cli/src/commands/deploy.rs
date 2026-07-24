@@ -13,10 +13,30 @@ struct TypeScriptDeployArgs {
 }
 
 fn typescript_deploy_args(remaining_args: &[String]) -> Result<Option<TypeScriptDeployArgs>> {
-    let positionals = remaining_args
-        .iter()
-        .filter(|argument| !argument.starts_with('-'))
-        .collect::<Vec<_>>();
+    let mut positionals = Vec::new();
+    let mut skip_option_value = false;
+    let mut options_ended = false;
+    for argument in remaining_args {
+        if skip_option_value {
+            skip_option_value = false;
+            continue;
+        }
+        if !options_ended && argument == "--" {
+            options_ended = true;
+            continue;
+        }
+        if !options_ended && argument == "--build-env" {
+            skip_option_value = true;
+            continue;
+        }
+        if !options_ended && argument.starts_with("--build-env=") {
+            continue;
+        }
+        if !options_ended && argument.starts_with('-') {
+            continue;
+        }
+        positionals.push(argument);
+    }
     for positional in &positionals {
         let extension = std::path::Path::new(positional.as_str())
             .extension()
@@ -314,5 +334,23 @@ mod tests {
             typescript_deploy_args(&["--build-env".into(), "A=B".into(), "app.ts".into()]).is_err()
         );
         assert!(typescript_deploy_args(&["first.ts".into(), "second.ts".into()]).is_err());
+    }
+
+    #[test]
+    fn ignores_python_build_environment_values_when_selecting_the_deployer() {
+        assert_eq!(
+            typescript_deploy_args(&[
+                "app.py".into(),
+                "--build-env".into(),
+                "WORKER=worker.js".into(),
+            ])
+            .unwrap(),
+            None,
+        );
+        assert_eq!(
+            typescript_deploy_args(&["--build-env=WORKER=worker.mjs".into(), "app.py".into(),])
+                .unwrap(),
+            None,
+        );
     }
 }

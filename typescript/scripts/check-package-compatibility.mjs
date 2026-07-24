@@ -14,6 +14,9 @@ for (const [label, module] of [
   if (typeof module.Sandbox !== "function") {
     throw new Error(`${label} does not export Sandbox`);
   }
+  if (typeof module.remoteOptions !== "function") {
+    throw new Error(`${label} does not export remoteOptions`);
+  }
 }
 
 for (const [label, module] of [
@@ -22,6 +25,12 @@ for (const [label, module] of [
 ]) {
   if (typeof module.registerApplication !== "function") {
     throw new Error(`${label} does not export registerApplication`);
+  }
+  if (typeof module.remoteOptions !== "function") {
+    throw new Error(`${label} does not export remoteOptions`);
+  }
+  if (module.remoteOptions()[Symbol.for("tensorlake.applications.remote-options.v1")] !== true) {
+    throw new Error(`${label} remoteOptions does not use the cross-bundle brand`);
   }
 }
 
