@@ -135,7 +135,16 @@ function randomSuffix(): string {
   return Math.random().toString(36).slice(2, 10);
 }
 
-describe(
+const filesystemIntegrationConfigured = Boolean(
+  process.env.TENSORLAKE_API_KEY &&
+    process.env.TENSORLAKE_ORGANIZATION_ID &&
+    process.env.TENSORLAKE_PROJECT_ID,
+);
+const describeFilesystemIntegration = filesystemIntegrationConfigured
+  ? describe
+  : describe.skip;
+
+describeFilesystemIntegration(
   "Native filesystem SDK",
   () => {
     it("creates, gets, writes, reads, lists, versions, and deletes a filesystem", async () => {
