@@ -15,6 +15,7 @@ import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   PoolInUseError,
   PoolNotFoundError,
+  FilesystemClient,
   SandboxClient,
   SandboxError,
   SandboxNotFoundError,
@@ -133,6 +134,93 @@ function sleep(ms: number): Promise<void> {
 function randomSuffix(): string {
   return Math.random().toString(36).slice(2, 10);
 }
+
+describe(
+  "Native filesystem SDK",
+  () => {
+    it("creates, gets, writes, reads, lists, versions, and deletes a filesystem", async () => {
+      const client = new FilesystemClient();
+      const name = `ts-sdk-${Date.now().toString(36)}-${randomSuffix()}`;
+      const forkName = `${name}-fork`;
+      try {
+        await client.create(name);
+        const filesystem = await client.get(name);
+
+        const first = await filesystem.writeFiles(
+          {
+            "probe.txt": "first",
+            "nested/data.bin": new Uint8Array([0, 1, 2, 255]),
+          },
+          "typescript SDK native filesystem integration",
+        );
+        expect(first.versionId).toMatch(/^[0-9a-f]{64}$/);
+        expect(await filesystem.readText("probe.txt")).toBe("first");
+        expect(await filesystem.readFile("nested/data.bin")).toEqual(
+          new Uint8Array([0, 1, 2, 255]),
+        );
+
+        const root = await filesystem.listFiles();
+        expect(root.find((entry) => entry.path === "nested")?.isDir).toBe(true);
+        expect(root.find((entry) => entry.path === "probe.txt")?.contentId).toMatch(
+          /^[0-9a-f]{64}$/,
+        );
+        expect((await filesystem.listFiles("nested"))[0]?.path).toBe(
+          "nested/data.bin",
+        );
+
+        const second = await filesystem.writeFiles(
+          { "nested/data.bin": new Uint8Array([3, 4, 5]) },
+          "replace nested data and remove probe",
+          ["probe.txt"],
+        );
+        expect(second.versionId).toMatch(/^[0-9a-f]{64}$/);
+        expect(second.versionId).not.toBe(first.versionId);
+        expect(await filesystem.readText("probe.txt", first.versionId)).toBe(
+          "first",
+        );
+        expect(await filesystem.readFile("nested/data.bin")).toEqual(
+          new Uint8Array([3, 4, 5]),
+        );
+
+        await filesystem.copyFile("nested/data.bin", "nested/copy.bin");
+        await filesystem.moveFile("nested/copy.bin", "archive/data.bin");
+        expect(await filesystem.readFile("archive/data.bin")).toEqual(
+          new Uint8Array([3, 4, 5]),
+        );
+
+        const retained = await filesystem.snapshot("integration retention");
+        expect(retained.id).toMatch(/^[0-9a-f]{64}$/);
+        expect(
+          (await filesystem.listSnapshots()).some(
+            (snapshot) => snapshot.id === retained.id,
+          ),
+        ).toBe(true);
+
+        const fork = await client.fork(forkName, name, retained.id);
+        expect(await fork.readFile("archive/data.bin")).toEqual(
+          new Uint8Array([3, 4, 5]),
+        );
+        await fork.writeFile("fork-only.txt", "fork");
+        await expect(filesystem.readFile("fork-only.txt")).rejects.toThrow();
+
+        const status = await filesystem.status();
+        expect(status.versionId).toMatch(/^[0-9a-f]{64}$/);
+        expect(status.generation).toBeGreaterThanOrEqual(2);
+
+        await filesystem.deleteSnapshot(retained.id);
+        expect(
+          (await filesystem.listSnapshots()).some(
+            (snapshot) => snapshot.id === retained.id,
+          ),
+        ).toBe(false);
+      } finally {
+        await client.delete(forkName).catch(() => undefined);
+        await client.delete(name).catch(() => undefined);
+      }
+    });
+  },
+  { timeout: 300_000 },
+);
 
 function createTestClient(): SandboxClient {
   return new SandboxClient({

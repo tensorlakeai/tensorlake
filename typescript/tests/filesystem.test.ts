@@ -74,6 +74,15 @@ class StubNative {
     });
   }
 
+  async forkFilesystem(
+    name: string,
+    base: string,
+    snapshot?: string | null,
+  ): Promise<TracedJson> {
+    this.record("forkFilesystem", [name, base, snapshot]);
+    return traced({ name, base, snapshot, default_branch: "main" });
+  }
+
   async listFilesystems(): Promise<TracedJson> {
     this.record("listFilesystems", []);
     return traced({
@@ -113,6 +122,52 @@ class StubNative {
     );
   }
 
+  async retainFilesystemSnapshot(
+    name: string,
+    message: string,
+    requestId: string,
+  ): Promise<TracedJson> {
+    this.record("retainFilesystemSnapshot", [name, message, requestId]);
+    const snapshotId =
+      this.options.ref === undefined
+        ? COMMIT
+        : (this.options.ref.resolved_commit as string | null | undefined);
+    if (!snapshotId) {
+      throw nativeError({
+        category: "internal",
+        status: null,
+        message: `filesystem ${name} is empty: write files first`,
+      });
+    }
+    return traced({
+      snapshot_id: snapshotId,
+      snapshot_class: "permanent_snapshot",
+      message,
+    });
+  }
+
+  async listFilesystemSnapshots(name: string): Promise<TracedJson> {
+    this.record("listFilesystemSnapshots", [name]);
+    return traced({
+      snapshots: [
+        {
+          snapshot_id: COMMIT,
+          created_at_ms: 1_700_000_000_000,
+          message: "pin",
+          snapshot_class: "permanent_snapshot",
+        },
+      ],
+    });
+  }
+
+  async deleteFilesystemSnapshot(
+    name: string,
+    snapshot: string,
+  ): Promise<string> {
+    this.record("deleteFilesystemSnapshot", [name, snapshot]);
+    return "trace-delete";
+  }
+
   async readFilesystemFile(
     name: string,
     path: string,
@@ -135,6 +190,8 @@ class StubNative {
     name: string,
     files: Array<{ path: string; content: Buffer }>,
     deletes: string[],
+    moves: Array<{ from: string; to: string }>,
+    copies: Array<{ from: string; to: string }>,
     message: string,
     branch: string,
     idempotencyKey?: string | null,
@@ -143,16 +200,38 @@ class StubNative {
       name,
       files,
       deletes,
+      moves,
+      copies,
       message,
       branch,
       idempotencyKey,
     ]);
     return traced(
       this.options.pushReport ?? {
-        commit: COMMIT,
-        tree: "t".repeat(40),
-        ref_name: "refs/heads/main",
-        created: true,
+        version_id: COMMIT,
+        previous_version_id: null,
+      },
+    );
+  }
+
+  async pushFilesystemPaths(
+    name: string,
+    files: Array<{ path: string; localPath: string }>,
+    message: string,
+    branch: string,
+    idempotencyKey?: string | null,
+  ): Promise<TracedJson> {
+    this.record("pushFilesystemPaths", [
+      name,
+      files,
+      message,
+      branch,
+      idempotencyKey,
+    ]);
+    return traced(
+      this.options.pushReport ?? {
+        version_id: COMMIT,
+        previous_version_id: null,
       },
     );
   }
@@ -173,9 +252,13 @@ describe("filesystem models", () => {
     const dir = fileEntryFromWire({ name: "d", oid: "x", mode: 0o40000 }, "docs");
     expect(dir.isDir).toBe(true);
     expect(dir.path).toBe("docs/d");
-    const file = fileEntryFromWire({ name: "f", mode: 0o100644, size: 3 }, "");
+    expect(dir.contentId).toBe("x");
+    expect(dir.kind).toBe("directory");
+    const file = fileEntryFromWire({ name: "f", mode: 0o100755, size: 3 }, "");
     expect(file.isDir).toBe(false);
     expect(file.path).toBe("f");
+    expect(file.kind).toBe("file");
+    expect(file.executable).toBe(true);
   });
 
   it("trims slashes in linear time with Python strip('/') semantics", () => {
@@ -256,11 +339,11 @@ describe("FilesystemClient", () => {
     );
   });
 
-  it("maps push reports to snapshots and sets a stable idempotency key", async () => {
+  it("maps native publication reports and sets a stable idempotency key", async () => {
     const stub = new StubNative();
     const client = clientWith(stub);
     const fs = await client.create("my-fs");
-    const snapshot = await fs.writeFiles(
+    const version = await fs.writeFiles(
       new Map<string, Uint8Array | string>([
         ["a.txt", "hello"],
         ["b.bin", new Uint8Array([0, 1])],
@@ -268,15 +351,18 @@ describe("FilesystemClient", () => {
       undefined,
       ["old.txt"],
     );
-    expect(snapshot.commit).toBe(COMMIT);
-    expect(snapshot.created).toBe(true);
+    expect(version.versionId).toBe(COMMIT);
+    expect(version.previousVersionId).toBeNull();
+    expect(version.created).toBe(true);
 
     const push = stub.calls.at(-1)!;
     expect(push.method).toBe("pushFilesystemFiles");
-    const [name, files, deletes, , branch, idempotencyKey] = push.args as [
+    const [name, files, deletes, moves, copies, , branch, idempotencyKey] = push.args as [
       string,
       Array<{ path: string; content: Buffer }>,
       string[],
+      Array<{ from: string; to: string }>,
+      Array<{ from: string; to: string }>,
       string,
       string,
       string,
@@ -286,10 +372,52 @@ describe("FilesystemClient", () => {
     expect(files[0].content.toString()).toBe("hello");
     expect([...files[1].content]).toEqual([0, 1]);
     expect(deletes).toEqual(["old.txt"]);
+    expect(moves).toEqual([]);
+    expect(copies).toEqual([]);
     expect(branch).toBe("main");
     // A fresh stable key per logical write (the Rust core reuses it across
     // its retries so a lost response cannot double-commit).
     expect(idempotencyKey).toMatch(/^[0-9a-f]{32}$/);
+  });
+
+  it("moves and copies by publishing metadata-only mutations", async () => {
+    const stub = new StubNative();
+    const fs = await clientWith(stub).create("my-fs");
+
+    await fs.moveFile("large.bin", "archive/large.bin");
+    let args = stub.calls.at(-1)!.args;
+    expect(args[1]).toEqual([]);
+    expect(args[2]).toEqual([]);
+    expect(args[3]).toEqual([
+      { from: "large.bin", to: "archive/large.bin" },
+    ]);
+    expect(args[4]).toEqual([]);
+
+    await fs.copyFile("archive/large.bin", "copies/large.bin");
+    args = stub.calls.at(-1)!.args;
+    expect(args[1]).toEqual([]);
+    expect(args[2]).toEqual([]);
+    expect(args[3]).toEqual([]);
+    expect(args[4]).toEqual([
+      { from: "archive/large.bin", to: "copies/large.bin" },
+    ]);
+  });
+
+  it("publishes local paths through the memory-bounded native API", async () => {
+    const stub = new StubNative();
+    const fs = await clientWith(stub).create("my-fs");
+
+    const version = await fs.writeFilesFromPaths({
+      "models/weights.bin": "/tmp/weights.bin",
+    });
+    expect(version.versionId).toBe(COMMIT);
+    const push = stub.calls.at(-1)!;
+    expect(push.method).toBe("pushFilesystemPaths");
+    expect(push.args[1]).toEqual([
+      { path: "models/weights.bin", localPath: "/tmp/weights.bin" },
+    ]);
+    expect(push.args[3]).toBe("main");
+    expect(push.args[4]).toMatch(/^[0-9a-f]{32}$/);
   });
 
   it("rejects an empty write", async () => {
@@ -342,14 +470,14 @@ describe("FilesystemClient", () => {
     const client = clientWith(new StubNative());
     const fs = await client.create("my-fs");
     const status = await fs.status();
-    expect(status.headCommit).toBe(COMMIT);
+    expect(status.versionId).toBe(COMMIT);
     expect(status.generation).toBe(3);
 
     const empty = new StubNative({
       ref: { ref_name: "refs/heads/main", oid: null, resolved_commit: null, generation: 0 },
     });
     const emptyFs = await clientWith(empty).create("my-fs");
-    expect((await emptyFs.status()).headCommit).toBeNull();
+    expect((await emptyFs.status()).versionId).toBeNull();
     await expect(emptyFs.snapshot("nothing yet")).rejects.toThrow(
       FilesystemError,
     );
@@ -362,7 +490,7 @@ describe("FilesystemClient", () => {
       },
     });
     const fs = await clientWith(notFound).create("my-fs");
-    expect((await fs.status()).headCommit).toBeNull();
+    expect((await fs.status()).versionId).toBeNull();
 
     const unavailable = new StubNative({
       errors: {
@@ -378,18 +506,47 @@ describe("FilesystemClient", () => {
   });
 
   it("pins the current head as a snapshot", async () => {
-    const fs = await clientWith(new StubNative()).create("my-fs");
+    const stub = new StubNative();
+    const fs = await clientWith(stub).create("my-fs");
     const snapshot = await fs.snapshot("pin");
-    expect(snapshot.commit).toBe(COMMIT);
-    expect(snapshot.created).toBe(false);
+    expect(snapshot.id).toBe(COMMIT);
+    expect(stub.calls.at(-1)!.method).toBe("retainFilesystemSnapshot");
+  });
+
+  it("lists and deletes retained snapshots through metadata APIs", async () => {
+    const stub = new StubNative();
+    const fs = await clientWith(stub).create("my-fs");
+    const snapshots = await fs.listSnapshots();
+    expect(snapshots).toEqual([
+      {
+        id: COMMIT,
+        createdAt: new Date(1_700_000_000_000),
+        message: "pin",
+      },
+    ]);
+    await fs.deleteSnapshot(COMMIT);
+    expect(stub.calls.at(-1)).toEqual({
+      method: "deleteFilesystemSnapshot",
+      args: ["my-fs", COMMIT],
+    });
+  });
+
+  it("forks a filesystem without copying its bytes", async () => {
+    const stub = new StubNative();
+    const fork = await clientWith(stub).fork("forked", "base", COMMIT);
+    expect(fork.name).toBe("forked");
+    expect(stub.calls.at(-1)).toEqual({
+      method: "forkFilesystem",
+      args: ["forked", "base", COMMIT],
+    });
   });
 
   it("seeds the branch reported by the create binding", async () => {
     const stub = new StubNative({ createBranch: "trunk" });
     const fs = await clientWith(stub).create("my-fs");
     await fs.writeFile("a.txt", "x");
-    // (name, files, deletes, message, branch, idempotencyKey)
-    expect(stub.calls.at(-1)!.args[4]).toBe("trunk");
+    // (name, files, deletes, moves, copies, message, branch, idempotencyKey)
+    expect(stub.calls.at(-1)!.args[6]).toBe("trunk");
   });
 
   it("follows a non-main default branch for writes and reads", async () => {
@@ -404,8 +561,8 @@ describe("FilesystemClient", () => {
     const client = clientWith(stub);
     const fs = await client.get("my-fs");
     await fs.writeFile("a.txt", "x");
-    // (name, files, deletes, message, branch, idempotencyKey)
-    expect(stub.calls.at(-1)!.args[4]).toBe("trunk");
+    // (name, files, deletes, moves, copies, message, branch, idempotencyKey)
+    expect(stub.calls.at(-1)!.args[6]).toBe("trunk");
     await fs.readFile("a.txt");
     // (name, path, version)
     expect(stub.calls.at(-1)!.args[2]).toBe("trunk");
@@ -435,7 +592,7 @@ describe("FilesystemClient", () => {
     const stub = new StubNative();
     const fs = await clientWith(stub).create("my-fs");
     const snapshot = await fs.writeFile("a.txt", "x", "");
-    const message = stub.calls.at(-1)!.args[3];
+    const message = stub.calls.at(-1)!.args[5];
     expect(message).toBe("write 1 file(s) via SDK");
     expect(snapshot.message).toBe("write 1 file(s) via SDK");
   });

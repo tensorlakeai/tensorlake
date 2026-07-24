@@ -5,9 +5,12 @@ use std::path::PathBuf;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use tensorlake::artifact_storage::ArtifactStorageClient;
-use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
+use tensorlake::artifact_storage::ingest::PushOptions;
 use tensorlake::artifact_storage::merge::MergeRequest;
 use tensorlake::artifact_storage::models::REPO_KIND_FILESYSTEM;
+use tensorlake::artifact_storage::models::{
+    NativeDirectFilePathWrite, NativeDirectFileWrite, NativeDirectPathTransfer,
+};
 use tensorlake::{ClientBuilder, error::SdkError};
 
 use crate::sandbox::{
@@ -20,6 +23,20 @@ pub struct FilesystemFileWrite {
     /// Path inside the filesystem (forward-slash separated).
     pub path: String,
     pub content: Buffer,
+}
+
+/// One metadata-only path transfer in a filesystem publication.
+#[napi(object)]
+pub struct FilesystemPathTransfer {
+    pub from: String,
+    pub to: String,
+}
+
+/// One local file streamed into a filesystem publication.
+#[napi(object)]
+pub struct FilesystemFilePathWrite {
+    pub path: String,
+    pub local_path: String,
 }
 
 /// Whether a failed request may nonetheless have been processed server-side.
@@ -513,6 +530,33 @@ impl NativeRepositoryClient {
         .await
     }
 
+    /// Create a metadata-only filesystem fork at a live head or retained snapshot.
+    #[napi]
+    pub async fn fork_filesystem(
+        &self,
+        name: String,
+        base: String,
+        snapshot: Option<String>,
+    ) -> napi::Result<TracedJson> {
+        let project_id = self.project_id()?.to_string();
+        let report = self
+            .client
+            .fork_filesystem(&project_id, &name, &base, snapshot.as_deref())
+            .await
+            .map_err(into_napi_error)?;
+        let json = serde_json::to_string(&serde_json::json!({
+            "name": name,
+            "base": base,
+            "snapshot": snapshot,
+            "default_branch": "main",
+        }))
+        .map_err(|error| into_napi_error(error.into()))?;
+        Ok(TracedJson {
+            trace_id: report.trace_id,
+            json,
+        })
+    }
+
     /// List every filesystem in the project (all pages, cache-fenced).
     #[napi]
     pub async fn list_filesystems(&self) -> napi::Result<TracedJson> {
@@ -607,38 +651,86 @@ impl NativeRepositoryClient {
         .await
     }
 
-    /// One ref's head + movement generation for a filesystem branch.
+    /// One native head + movement generation for a filesystem.
     #[napi]
     pub async fn filesystem_ref_status(
         &self,
         name: String,
         refspec: String,
     ) -> napi::Result<TracedJson> {
+        if !matches!(refspec.as_str(), "" | "main" | "refs/heads/main") {
+            return Err(usage_error(
+                "native filesystem status must target the main head".to_string(),
+            ));
+        }
         let project_id = self.project_id()?.to_string();
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
-            let refspec = refspec.clone();
             async move {
-                let credential = client.git_credential_for_repo(&project_id, &name).await?;
-                let traced = client
-                    .ref_status(
-                        &project_id,
-                        &name,
-                        &credential.git_username,
-                        &credential.token,
-                        &refspec,
-                    )
-                    .await?;
-                let trace_id = traced.trace_id.clone();
-                let json = serde_json::to_string(&*traced)?;
-                Ok(TracedJson { trace_id, json })
+                let status = client.native_filesystem_head(&project_id, &name).await?;
+                let json = serde_json::to_string(&serde_json::json!({
+                    "resolved_commit": status.snapshot_id,
+                    "generation": status.generation,
+                }))?;
+                Ok(TracedJson {
+                    trace_id: status.trace_id.clone(),
+                    json,
+                })
             }
         })
         .await
     }
 
-    /// Raw file bytes at `version` (branch, ref, or commit).
+    /// Pin the current native head as a permanent snapshot without copying content.
+    #[napi]
+    pub async fn retain_filesystem_snapshot(
+        &self,
+        name: String,
+        message: String,
+        request_id: String,
+    ) -> napi::Result<TracedJson> {
+        let project_id = self.project_id()?.to_string();
+        let report = self
+            .client
+            .retain_current_native_filesystem_snapshot(&project_id, &name, message, request_id)
+            .await
+            .map_err(into_napi_error)?;
+        let trace_id = report.trace_id.clone();
+        let json =
+            serde_json::to_string(&*report).map_err(|error| into_napi_error(error.into()))?;
+        Ok(TracedJson { trace_id, json })
+    }
+
+    #[napi]
+    pub async fn list_filesystem_snapshots(&self, name: String) -> napi::Result<TracedJson> {
+        let project_id = self.project_id()?.to_string();
+        let report = self
+            .client
+            .list_native_filesystem_snapshots(&project_id, &name)
+            .await
+            .map_err(into_napi_error)?;
+        let trace_id = report.trace_id.clone();
+        let json = serde_json::to_string(&serde_json::json!({ "snapshots": &*report }))
+            .map_err(|error| into_napi_error(error.into()))?;
+        Ok(TracedJson { trace_id, json })
+    }
+
+    #[napi]
+    pub async fn delete_filesystem_snapshot(
+        &self,
+        name: String,
+        snapshot: String,
+    ) -> napi::Result<String> {
+        let project_id = self.project_id()?.to_string();
+        self.client
+            .delete_native_filesystem_snapshot(&project_id, &name, &snapshot)
+            .await
+            .map(|report| report.trace_id)
+            .map_err(into_napi_error)
+    }
+
+    /// Raw native file bytes at the current head or one snapshot.
     #[napi]
     pub async fn read_filesystem_file(
         &self,
@@ -653,27 +745,19 @@ impl NativeRepositoryClient {
             let path = path.clone();
             let version = version.clone();
             async move {
-                let credential = client.git_credential_for_repo(&project_id, &name).await?;
-                let traced = client
-                    .get_file_bytes(
-                        &project_id,
-                        &name,
-                        &credential.git_username,
-                        &credential.token,
-                        &version,
-                        &path,
-                    )
+                let data = client
+                    .read_native_filesystem_file(&project_id, &name, &path, &version)
                     .await?;
-                let trace_id = traced.trace_id.clone();
-                let data = Buffer::from(traced.into_inner());
-                Ok(TracedBytes { trace_id, data })
+                Ok(TracedBytes {
+                    trace_id: data.trace_id.clone(),
+                    data: Buffer::from(data.into_inner()),
+                })
             }
         })
         .await
     }
 
-    /// One directory's full listing at `version` (all pages), as
-    /// `{"entries": [...]}`.
+    /// One native directory's full listing at the current head or one snapshot.
     #[napi]
     pub async fn list_filesystem_tree(
         &self,
@@ -688,32 +772,28 @@ impl NativeRepositoryClient {
             let dir_path = dir_path.clone();
             let version = version.clone();
             async move {
-                let credential = client.git_credential_for_repo(&project_id, &name).await?;
                 let mut entries = Vec::new();
-                let mut after: Option<String> = None;
+                let mut after = None;
                 let mut seen = std::collections::HashSet::new();
-                let mut trace_id;
                 loop {
-                    let traced = client
-                        .list_tree_page(
+                    let page = client
+                        .list_native_filesystem_entries_page(
                             &project_id,
                             &name,
-                            &credential.git_username,
-                            &credential.token,
-                            &version,
                             &dir_path,
+                            &version,
                             after.as_deref(),
                             1000,
                         )
                         .await?;
-                    trace_id = traced.trace_id.clone();
-                    let page = traced.into_inner();
+                    let trace_id = page.trace_id.clone();
+                    let page = page.into_inner();
                     entries.extend(page.entries);
                     if !page.truncated {
-                        break;
+                        let json =
+                            serde_json::to_string(&serde_json::json!({ "entries": entries }))?;
+                        return Ok(TracedJson { trace_id, json });
                     }
-                    // A truncated page must carry a fresh cursor; anything else
-                    // would silently drop entries or loop forever.
                     match page.next_after {
                         Some(next) if !next.is_empty() && seen.insert(next.clone()) => {
                             after = Some(next);
@@ -726,71 +806,115 @@ impl NativeRepositoryClient {
                         }
                     }
                 }
-                let json = serde_json::to_string(&serde_json::json!({ "entries": entries }))?;
-                Ok(TracedJson { trace_id, json })
             }
         })
         .await
     }
 
-    /// Write `files` and delete `deletes` in one atomic commit on `branch`.
-    ///
-    /// `idempotency_key` must be stable for one logical write: it is what
-    /// makes a retried submit reattach to the same durable commit job.
+    /// Write `files` and delete `deletes` in one native snapshot publication.
     #[napi]
+    #[allow(clippy::too_many_arguments)]
     pub async fn push_filesystem_files(
         &self,
         name: String,
         files: Vec<FilesystemFileWrite>,
         deletes: Vec<String>,
+        moves: Vec<FilesystemPathTransfer>,
+        copies: Vec<FilesystemPathTransfer>,
         message: String,
         branch: String,
         idempotency_key: Option<String>,
     ) -> napi::Result<TracedJson> {
+        if !matches!(branch.as_str(), "" | "main" | "refs/heads/main") {
+            return Err(usage_error(
+                "native filesystem writes must target the main head".to_string(),
+            ));
+        }
         let project_id = self.project_id()?.to_string();
-        // Single-shot on purpose: `push_files` already retries every step
-        // internally (idempotent chunk uploads, commit reattachment through
-        // the caller's stable idempotency key), and an outer whole-push retry
-        // would force a full deep clone of the payload per attempt.
         let client = self.client.clone();
         let result: Result<TracedJson, SdkError> = async move {
-            let credential = client.git_credential_for_repo(&project_id, &name).await?;
-            let push_files: Vec<PushFile> = files
+            let operation_id =
+                idempotency_key.unwrap_or_else(|| format!("sdk-{}", uuid::Uuid::new_v4()));
+            let writes = files
                 .into_iter()
-                .map(|file| PushFile {
-                    repo_path: file.path,
-                    source: PushSource::Bytes(file.content.to_vec()),
-                    mode: None,
-                    delete: false,
+                .map(|file| NativeDirectFileWrite {
+                    path: file.path,
+                    data: file.content.to_vec(),
                 })
-                .chain(deletes.into_iter().map(|repo_path| PushFile {
-                    repo_path,
-                    source: PushSource::Bytes(Vec::new()),
-                    mode: None,
-                    delete: true,
-                }))
                 .collect();
-            let opts = PushOptions {
-                branch,
-                message,
-                idempotency_key,
-                ..Default::default()
-            };
-            let traced = client
-                .push_files(
+            let moves = moves
+                .into_iter()
+                .map(|transfer| NativeDirectPathTransfer {
+                    from: transfer.from,
+                    to: transfer.to,
+                })
+                .collect();
+            let copies = copies
+                .into_iter()
+                .map(|transfer| NativeDirectPathTransfer {
+                    from: transfer.from,
+                    to: transfer.to,
+                })
+                .collect();
+            let report = client
+                .publish_filesystem_files(
                     &project_id,
                     &name,
-                    &credential.git_username,
-                    &credential.token,
-                    push_files,
-                    opts,
+                    writes,
+                    deletes,
+                    moves,
+                    copies,
+                    message,
+                    operation_id,
                 )
                 .await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&*traced)?;
+            let trace_id = report.trace_id.clone();
+            let json = serde_json::to_string(&serde_json::json!({
+                "version_id": report.version_id,
+                "previous_version_id": report.previous_version_id,
+            }))?;
             Ok(TracedJson { trace_id, json })
         }
         .await;
         result.map_err(into_napi_error)
+    }
+
+    /// Stream local files through bounded client-to-object-store parts.
+    #[napi]
+    pub async fn push_filesystem_paths(
+        &self,
+        name: String,
+        files: Vec<FilesystemFilePathWrite>,
+        message: String,
+        branch: String,
+        idempotency_key: Option<String>,
+    ) -> napi::Result<TracedJson> {
+        if !matches!(branch.as_str(), "" | "main" | "refs/heads/main") {
+            return Err(usage_error(
+                "native filesystem writes must target the main head".to_string(),
+            ));
+        }
+        let project_id = self.project_id()?.to_string();
+        let operation_id =
+            idempotency_key.unwrap_or_else(|| format!("sdk-{}", uuid::Uuid::new_v4()));
+        let writes = files
+            .into_iter()
+            .map(|file| NativeDirectFilePathWrite {
+                path: file.path,
+                source_path: PathBuf::from(file.local_path),
+            })
+            .collect();
+        let report = self
+            .client
+            .publish_filesystem_paths(&project_id, &name, writes, message, operation_id)
+            .await
+            .map_err(into_napi_error)?;
+        let trace_id = report.trace_id.clone();
+        let json = serde_json::to_string(&serde_json::json!({
+            "version_id": report.version_id,
+            "previous_version_id": report.previous_version_id,
+        }))
+        .map_err(|error| into_napi_error(error.into()))?;
+        Ok(TracedJson { trace_id, json })
     }
 }

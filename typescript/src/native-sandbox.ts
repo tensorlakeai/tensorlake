@@ -165,10 +165,22 @@ export interface NativeRepositoryClient {
   ): Promise<TracedJson>;
   commitConflicts(repo: string, commit: string): Promise<TracedJson>;
   createFilesystem(name: string): Promise<string>;
+  forkFilesystem(
+    name: string,
+    base: string,
+    snapshot?: string | null,
+  ): Promise<TracedJson>;
   listFilesystems(): Promise<TracedJson>;
   filesystemMeta(name: string): Promise<TracedJson>;
   deleteFilesystem(name: string): Promise<string>;
   filesystemRefStatus(name: string, refspec: string): Promise<TracedJson>;
+  retainFilesystemSnapshot(
+    name: string,
+    message: string,
+    requestId: string,
+  ): Promise<TracedJson>;
+  listFilesystemSnapshots(name: string): Promise<TracedJson>;
+  deleteFilesystemSnapshot(name: string, snapshot: string): Promise<string>;
   readFilesystemFile(
     name: string,
     path: string,
@@ -183,6 +195,15 @@ export interface NativeRepositoryClient {
     name: string,
     files: Array<{ path: string; content: Buffer }>,
     deletes: string[],
+    moves: Array<{ from: string; to: string }>,
+    copies: Array<{ from: string; to: string }>,
+    message: string,
+    branch: string,
+    idempotencyKey?: string | null,
+  ): Promise<TracedJson>;
+  pushFilesystemPaths(
+    name: string,
+    files: Array<{ path: string; localPath: string }>,
     message: string,
     branch: string,
     idempotencyKey?: string | null,

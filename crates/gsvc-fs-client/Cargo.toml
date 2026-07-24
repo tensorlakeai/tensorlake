@@ -1,5 +1,7 @@
 # Resolution-only placeholder for the private filesystem client engine. Official builds replace
 # only `src/`, keeping this workspace-adapted dependency manifest.
+[workspace]
+
 [package]
 name = "gsvc-fs-client"
 version = "0.5.88"

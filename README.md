@@ -141,6 +141,52 @@ sandbox = client.connect("stable-name")
 
 ---
 
+## Cloud Volumes
+
+`FilesystemClient` manages durable, versioned file trees without mounting them. SDK writes hash
+files locally, upload missing 64 MiB parts directly to checksum-bound object-store URLs, and then
+atomically publish metadata. File payloads do not pass through the Tensorlake API service.
+
+```ts
+import { FilesystemClient } from "tensorlake";
+
+const client = new FilesystemClient({
+  apiKey: "your-api-key",
+  organizationId: "org_...",
+  projectId: "proj_...",
+});
+const fs = await client.create("agent-artifacts");
+
+// In-memory data; all changes become visible atomically.
+await fs.writeFiles({
+  "run/config.json": JSON.stringify({ model: "gpt-5" }),
+  "run/input.txt": "hello",
+});
+
+// Multi-GiB files use bounded memory and stream directly to object storage.
+await fs.writeFileFromPath("models/weights.bin", "./weights.bin");
+
+// These reuse immutable content references and transfer no payload bytes.
+await fs.copyFile("run/input.txt", "run/input-copy.txt");
+await fs.moveFile("run/config.json", "archive/config.json");
+
+// Snapshot retention and forks are metadata-only operations.
+const snapshot = await fs.snapshot("ready for evaluation");
+const fork = await client.fork("agent-artifacts-eval", fs.name, snapshot.id);
+await fork.writeFile("results/score.txt", "0.98");
+
+await fs.deleteSnapshot(snapshot.id);
+```
+
+`writeFile()` and `writeFiles()` accept bytes already in memory. Prefer `writeFileFromPath()` or
+`writeFilesFromPaths()` for large local files so neither JavaScript nor Rust retains the complete
+payload. A successful write is durable before it returns, but only the live head is retained
+automatically; `snapshot()` pins the current head permanently in one client/server round trip.
+Deleting a snapshot releases that retention root, while bytes still reachable from a live head,
+another snapshot, a fork, or a mount remain durable.
+
+---
+
 ## Orchestrate
 
 Create orchestration APIs on a distributed runtime with automatic scaling, fan-out capabilities and built-in tracking. The orchestration APIs can be invoked using HTTP requests or using the Python SDK.

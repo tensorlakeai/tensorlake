@@ -3883,6 +3883,7 @@ dependencies = [
  "serde_json",
  "tensorlake",
  "tokio",
+ "uuid",
 ]
 
 [[package]]
@@ -3899,6 +3900,7 @@ dependencies = [
  "tensorlake",
  "tokio",
  "urlencoding",
+ "uuid",
 ]
 
 [[package]]

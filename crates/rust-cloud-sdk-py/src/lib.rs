@@ -21,9 +21,11 @@ use reqwest::multipart::{Form, Part};
 use serde::de::DeserializeOwned;
 use serde_json::Value;
 use tensorlake::artifact_storage::ArtifactStorageClient;
-use tensorlake::artifact_storage::ingest::{PushFile, PushOptions, PushSource};
+use tensorlake::artifact_storage::ingest::PushOptions;
 use tensorlake::artifact_storage::merge::MergeRequest;
-use tensorlake::artifact_storage::models::REPO_KIND_FILESYSTEM;
+use tensorlake::artifact_storage::models::{
+    NativeDirectFilePathWrite, NativeDirectFileWrite, REPO_KIND_FILESYSTEM,
+};
 use tensorlake::document_ai::DocumentAiClient;
 use tensorlake::file_systems::FileSystemsClient;
 use tensorlake::file_systems::models::CreateFileSystemRequest;
@@ -674,6 +676,37 @@ impl CloudApiClient {
         })
     }
 
+    #[pyo3(signature = (project_id, name, base, snapshot=None))]
+    fn fork_filesystem(
+        &self,
+        project_id: String,
+        name: String,
+        base: String,
+        snapshot: Option<String>,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let base = base.clone();
+            let snapshot = snapshot.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client
+                    .fork_filesystem(&project_id, &name, &base, snapshot.as_deref())
+                    .await?;
+                serde_json::to_string(&serde_json::json!({
+                    "trace_id": traced.trace_id,
+                    "default_branch": "main",
+                }))
+                .map_err(SdkError::from)
+            }
+        })
+    }
+
     /// List every filesystem in the project (all pages, cache-fenced).
     fn list_filesystems(&self, project_id: String) -> PyResult<String> {
         self.run_with_retry(5, move |api_client| {
@@ -776,27 +809,100 @@ impl CloudApiClient {
         name: String,
         refspec: String,
     ) -> PyResult<String> {
+        if !matches!(refspec.as_str(), "" | "main" | "refs/heads/main") {
+            return Err(into_py_error(SdkError::ClientError(
+                "native filesystem status must target the main head".to_string(),
+            )));
+        }
         self.run_with_retry(5, move |api_client| {
             let api_url = self.api_url.clone();
             let project_id = project_id.clone();
             let name = name.clone();
-            let refspec = refspec.clone();
             async move {
                 let client = ArtifactStorageClient::new(
                     api_client,
                     tensorlake::resolve_artifact_storage_url(&api_url),
                 )?;
-                let credential = client.git_credential_for_repo(&project_id, &name).await?;
+                let traced = client.native_filesystem_head(&project_id, &name).await?;
+                serde_json::to_string(&serde_json::json!({
+                    "resolved_commit": traced.snapshot_id,
+                    "generation": traced.generation,
+                }))
+                .map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn retain_filesystem_snapshot(
+        &self,
+        project_id: String,
+        name: String,
+        message: String,
+        request_id: String,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let message = message.clone();
+            let request_id = request_id.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
                 let traced = client
-                    .ref_status(
+                    .retain_current_native_filesystem_snapshot(
                         &project_id,
                         &name,
-                        &credential.git_username,
-                        &credential.token,
-                        &refspec,
+                        message,
+                        request_id,
                     )
                     .await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn list_filesystem_snapshots(&self, project_id: String, name: String) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let name = name.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let traced = client
+                    .list_native_filesystem_snapshots(&project_id, &name)
+                    .await?;
+                serde_json::to_string(&serde_json::json!({ "snapshots": &*traced }))
+                    .map_err(SdkError::from)
+            }
+        })
+    }
+
+    fn delete_filesystem_snapshot(
+        &self,
+        project_id: String,
+        name: String,
+        snapshot: String,
+    ) -> PyResult<String> {
+        self.run_with_retry(5, move |api_client| {
+            let api_url = self.api_url.clone();
+            let project_id = project_id.clone();
+            let name = name.clone();
+            let snapshot = snapshot.clone();
+            async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                client
+                    .delete_native_filesystem_snapshot(&project_id, &name, &snapshot)
+                    .await
+                    .map(|traced| traced.trace_id)
             }
         })
     }
@@ -820,16 +926,8 @@ impl CloudApiClient {
                     api_client,
                     tensorlake::resolve_artifact_storage_url(&api_url),
                 )?;
-                let credential = client.git_credential_for_repo(&project_id, &name).await?;
                 let traced = client
-                    .get_file_bytes(
-                        &project_id,
-                        &name,
-                        &credential.git_username,
-                        &credential.token,
-                        &version,
-                        &path,
-                    )
+                    .read_native_filesystem_file(&project_id, &name, &path, &version)
                     .await?;
                 Ok(traced.into_inner())
             }
@@ -856,19 +954,16 @@ impl CloudApiClient {
                     api_client,
                     tensorlake::resolve_artifact_storage_url(&api_url),
                 )?;
-                let credential = client.git_credential_for_repo(&project_id, &name).await?;
                 let mut entries = Vec::new();
                 let mut after: Option<String> = None;
                 let mut seen = std::collections::HashSet::new();
                 loop {
                     let page = client
-                        .list_tree_page(
+                        .list_native_filesystem_entries_page(
                             &project_id,
                             &name,
-                            &credential.git_username,
-                            &credential.token,
-                            &version,
                             &dir_path,
+                            &version,
                             after.as_deref(),
                             1000,
                         )
@@ -902,21 +997,24 @@ impl CloudApiClient {
     ///
     /// `idempotency_key` must be stable for one logical write: it is what
     /// makes a retried submit reattach to the same durable commit job.
-    #[pyo3(signature = (project_id, name, files, deletes, message, branch, idempotency_key=None))]
+    #[pyo3(signature = (project_id, name, files, deletes, moves, copies, message, branch, idempotency_key=None))]
     fn push_filesystem_files(
         &self,
         project_id: String,
         name: String,
         files: Vec<(String, Vec<u8>)>,
         deletes: Vec<String>,
+        moves: Vec<(String, String)>,
+        copies: Vec<(String, String)>,
         message: String,
         branch: String,
         idempotency_key: Option<String>,
     ) -> PyResult<String> {
-        // Single-shot on purpose: `push_files` already retries every step
-        // internally (idempotent chunk uploads, commit reattachment through
-        // the caller's stable idempotency key), and an outer whole-push retry
-        // would force a full deep clone of the payload per attempt.
+        if !matches!(branch.as_str(), "" | "main" | "refs/heads/main") {
+            return Err(into_py_error(SdkError::ClientError(
+                "native filesystem writes must target the main head".to_string(),
+            )));
+        }
         let api_client = self.client.clone();
         let api_url = self.api_url.clone();
         shared_runtime()
@@ -925,39 +1023,85 @@ impl CloudApiClient {
                     api_client,
                     tensorlake::resolve_artifact_storage_url(&api_url),
                 )?;
-                let credential = client.git_credential_for_repo(&project_id, &name).await?;
-                let push_files: Vec<PushFile> = files
+                let writes = files
                     .into_iter()
-                    .map(|(repo_path, data)| PushFile {
-                        repo_path,
-                        source: PushSource::Bytes(data),
-                        mode: None,
-                        delete: false,
-                    })
-                    .chain(deletes.into_iter().map(|repo_path| PushFile {
-                        repo_path,
-                        source: PushSource::Bytes(Vec::new()),
-                        mode: None,
-                        delete: true,
-                    }))
+                    .map(|(path, data)| NativeDirectFileWrite { path, data })
                     .collect();
-                let opts = PushOptions {
-                    branch,
-                    message,
-                    idempotency_key,
-                    ..Default::default()
-                };
-                let traced = client
-                    .push_files(
+                let moves = moves
+                    .into_iter()
+                    .map(|(from, to)| {
+                        tensorlake::artifact_storage::models::NativeDirectPathTransfer { from, to }
+                    })
+                    .collect();
+                let copies = copies
+                    .into_iter()
+                    .map(|(from, to)| {
+                        tensorlake::artifact_storage::models::NativeDirectPathTransfer { from, to }
+                    })
+                    .collect();
+                let operation_id =
+                    idempotency_key.unwrap_or_else(|| format!("sdk-{}", uuid::Uuid::new_v4()));
+                let report = client
+                    .publish_filesystem_files(
                         &project_id,
                         &name,
-                        &credential.git_username,
-                        &credential.token,
-                        push_files,
-                        opts,
+                        writes,
+                        deletes,
+                        moves,
+                        copies,
+                        message,
+                        operation_id,
                     )
                     .await?;
-                serde_json::to_string(&*traced).map_err(SdkError::from)
+                serde_json::to_string(&serde_json::json!({
+                    "version_id": report.version_id,
+                    "previous_version_id": report.previous_version_id,
+                }))
+                .map_err(SdkError::from)
+            })
+            .map_err(into_py_error)
+    }
+
+    #[pyo3(signature = (project_id, name, files, message, branch, idempotency_key=None))]
+    fn push_filesystem_paths(
+        &self,
+        project_id: String,
+        name: String,
+        files: Vec<(String, String)>,
+        message: String,
+        branch: String,
+        idempotency_key: Option<String>,
+    ) -> PyResult<String> {
+        if !matches!(branch.as_str(), "" | "main" | "refs/heads/main") {
+            return Err(into_py_error(SdkError::ClientError(
+                "native filesystem writes must target the main head".to_string(),
+            )));
+        }
+        let api_client = self.client.clone();
+        let api_url = self.api_url.clone();
+        shared_runtime()
+            .block_on(async move {
+                let client = ArtifactStorageClient::new(
+                    api_client,
+                    tensorlake::resolve_artifact_storage_url(&api_url),
+                )?;
+                let writes = files
+                    .into_iter()
+                    .map(|(path, source_path)| NativeDirectFilePathWrite {
+                        path,
+                        source_path: PathBuf::from(source_path),
+                    })
+                    .collect();
+                let operation_id =
+                    idempotency_key.unwrap_or_else(|| format!("sdk-{}", uuid::Uuid::new_v4()));
+                let report = client
+                    .publish_filesystem_paths(&project_id, &name, writes, message, operation_id)
+                    .await?;
+                serde_json::to_string(&serde_json::json!({
+                    "version_id": report.version_id,
+                    "previous_version_id": report.previous_version_id,
+                }))
+                .map_err(SdkError::from)
             })
             .map_err(into_py_error)
     }

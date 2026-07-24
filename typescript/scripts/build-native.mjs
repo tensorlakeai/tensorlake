@@ -12,6 +12,11 @@ const targetId =
   process.env.TENSORLAKE_NODE_TARGET_ID ?? `${process.platform}-${process.arch}`;
 const targetTriple = process.env.TENSORLAKE_NODE_TARGET_TRIPLE || undefined;
 const buildTool = process.env.TENSORLAKE_NODE_BUILD_TOOL ?? "cargo";
+const scriptArgs = process.argv.slice(2);
+if (scriptArgs.length > 0) {
+  console.error(`Unsupported argument(s): ${scriptArgs.join(", ")}`);
+  process.exit(1);
+}
 
 const outputDir = path.join(
   packageRoot,

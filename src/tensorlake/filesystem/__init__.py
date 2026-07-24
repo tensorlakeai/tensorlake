@@ -18,9 +18,11 @@ from .exceptions import (
 from .models import (
     FileEntry,
     FilesystemInfo,
+    FilesystemSnapshot,
+    FilesystemSnapshotInfo,
     FilesystemStatus,
+    FilesystemVersion,
     MountStatus,
-    Snapshot,
 )
 
 __all__ = [
@@ -28,9 +30,11 @@ __all__ = [
     "Filesystem",
     "Mount",
     "FilesystemInfo",
+    "FilesystemVersion",
+    "FilesystemSnapshot",
+    "FilesystemSnapshotInfo",
     "FilesystemStatus",
     "FileEntry",
-    "Snapshot",
     "MountStatus",
     "FilesystemException",
     "FilesystemError",
