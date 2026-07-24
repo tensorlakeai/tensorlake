@@ -39,10 +39,8 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, wait: bool) -> Result<()> {
 
     if is_tty {
         eprintln!("Sandbox {} is running.", sandbox_id);
-        if wait {
-            if let Ok(target) = resolve_sandbox_proxy_target(ctx, sandbox_id).await {
-                eprintln!("{}", format_post_resume_url_line(&target));
-            }
+        if wait && let Ok(target) = resolve_sandbox_proxy_target(ctx, sandbox_id).await {
+            eprintln!("{}", format_post_resume_url_line(&target));
         }
     } else {
         println!("{sandbox_id}");

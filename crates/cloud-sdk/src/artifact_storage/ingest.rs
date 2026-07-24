@@ -268,6 +268,13 @@ fn apply_path_prefix(files: &mut [PushFile], prefix: Option<&str>) -> Result<(),
     Ok(())
 }
 
+/// One content chunk's SHA-256 and logical byte length.
+pub type FileChunk = ([u8; 32], u32);
+/// Ordered chunk identities for one file.
+pub type FileChunks = Vec<FileChunk>;
+/// Per-file chunk identities collected by a push.
+pub type PushFileChunks = Vec<(String, FileChunks)>;
+
 /// Outcome of a push.
 // Fields get added (file_chunks most recently); non_exhaustive keeps external full-literal
 // construction/destructuring from breaking on this published crate's lockstep releases.
@@ -292,7 +299,7 @@ pub struct PushReport {
     /// when `PushOptions::collect_file_chunks` is set. The raw material for the next push's
     /// `PushSource::StablePrefix`. Never serialized: caller-local plumbing, not wire data.
     #[serde(skip_serializing)]
-    pub file_chunks: Vec<(String, Vec<([u8; 32], u32)>)>,
+    pub file_chunks: PushFileChunks,
     /// Internal shared-pipeline result consumed by [`ArtifactStorageClient::push_workspace_checkpoint`].
     /// Ordinary `push_files`/`push_worktree` calls always return `None`.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -328,7 +335,7 @@ pub struct WorkspaceCheckpointPushReport {
     pub bytes_uploaded: u64,
     pub file_blob_oids: Vec<(String, String)>,
     #[serde(skip_serializing)]
-    pub file_chunks: Vec<(String, Vec<([u8; 32], u32)>)>,
+    pub file_chunks: PushFileChunks,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -634,7 +641,7 @@ struct ChunkedFile {
     repo_path: String,
     source: PushSource,
     /// `(sha256, size)` in file order; empty for deletes and known-oid references.
-    chunks: Vec<([u8; 32], u32)>,
+    chunks: FileChunks,
     mode: Option<u32>,
     delete: bool,
     /// The file is a `PushSource::KnownOid` reference: commit by oid, move no bytes.
@@ -653,7 +660,7 @@ fn chunk_source(
     min: usize,
     avg: usize,
     max: usize,
-) -> Result<(Vec<([u8; 32], u32)>, String), SdkError> {
+) -> Result<(FileChunks, String), SdkError> {
     let len: u64 = match source {
         PushSource::Path(p) => std::fs::metadata(p).map_err(io_err)?.len(),
         PushSource::Bytes(b) => b.len() as u64,
@@ -688,11 +695,11 @@ fn chunk_source(
 /// read (see the variant's docs).
 fn chunk_stable_prefix(
     path: &Path,
-    stable_chunks: &[([u8; 32], u32)],
+    stable_chunks: &[FileChunk],
     min: usize,
     avg: usize,
     max: usize,
-) -> Result<Vec<([u8; 32], u32)>, SdkError> {
+) -> Result<FileChunks, SdkError> {
     use std::io::Seek as _;
     let stable_len: u64 = stable_chunks.iter().map(|(_, s)| *s as u64).sum();
     let mut file = std::fs::File::open(path).map_err(io_err)?;
@@ -788,7 +795,7 @@ where
 /// file's single upload frame. CDC buys nothing under the staged threshold — those chunks are
 /// never registered for dedup server-side — so small files skip the chunker (and, downstream,
 /// the `missing` negotiation) entirely.
-fn chunk_source_whole(source: &PushSource) -> Result<(Vec<([u8; 32], u32)>, String), SdkError> {
+fn chunk_source_whole(source: &PushSource) -> Result<(FileChunks, String), SdkError> {
     let owned: Vec<u8>;
     let data: &[u8] = match source {
         PushSource::Path(p) => {
@@ -803,13 +810,13 @@ fn chunk_source_whole(source: &PushSource) -> Result<(Vec<([u8; 32], u32)>, Stri
         }
     };
     let mut blob = BlobOidHasher::new(data.len() as u64);
-    blob.update(&data);
+    blob.update(data);
     // An empty file has an empty chunk list (like the CDC path) so it publishes as inline
     // `content` — a zero-length chunk frame is rejected by the server.
     let chunks = if data.is_empty() {
         Vec::new()
     } else {
-        let hash: [u8; 32] = Sha256::digest(&data).into();
+        let hash: [u8; 32] = Sha256::digest(data).into();
         vec![(hash, data.len() as u32)]
     };
     Ok((chunks, blob.finalize_hex()))

@@ -136,13 +136,10 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         file_systems,
     } = args;
 
-    let gpu = match gpu_count {
-        Some(count) => Some(GpuRequest {
-            count,
-            model: gpu_model.unwrap_or("A10"),
-        }),
-        None => None,
-    };
+    let gpu = gpu_count.map(|count| GpuRequest {
+        count,
+        model: gpu_model.unwrap_or("A10"),
+    });
 
     let mut body = build_create_request_body(
         cpus,
@@ -327,6 +324,7 @@ fn post_create_proxy_base_with_explicit(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn build_create_request_body(
     cpus: Option<f64>,
     memory: Option<i64>,

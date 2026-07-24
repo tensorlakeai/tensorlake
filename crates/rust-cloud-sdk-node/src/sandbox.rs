@@ -1099,6 +1099,7 @@ impl NativeSandboxProxyClient {
 /// Validate a managed-process name client-side; throws on failure. Wraps the single
 /// source-of-truth rule in the Rust cloud SDK so the TS layer need not reimplement it.
 #[napi]
+#[allow(dead_code)]
 pub fn validate_managed_name(name: String) -> napi::Result<()> {
     tensorlake::sandboxes::validate_managed_name(&name).map_err(into_napi_error)
 }

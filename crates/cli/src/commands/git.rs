@@ -101,7 +101,7 @@ pub async fn mint_token(ctx: &CliContext, repo: Option<&str>, output_json: bool)
                 .green()
         );
         println!("  {} {}", style("username:").dim(), credential.git_username);
-        println!("  {} {}", style("password:").dim(), "the token above");
+        println!("  {} the token above", style("password:").dim());
     }
     Ok(())
 }
@@ -351,8 +351,7 @@ fn normalize_repo_arg(repo: &str) -> String {
     url.path_segments()
         .into_iter()
         .flatten()
-        .filter(|s| !s.is_empty())
-        .next_back()
+        .rfind(|s| !s.is_empty())
         .map(|s| s.strip_suffix(".git").unwrap_or(s).to_string())
         .unwrap_or_else(|| repo.to_string())
 }
@@ -831,9 +830,10 @@ pub(crate) fn map_sdk_error(error: tensorlake::error::SdkError) -> CliError {
             "permission denied. set TENSORLAKE_API_KEY with required permissions, or run 'tl init'.",
         ),
         tensorlake::error::SdkError::ServerError { status, message } => {
-            if status == reqwest::StatusCode::CONFLICT {
-                CliError::usage(parse_remote_message(&message))
-            } else if status == reqwest::StatusCode::NOT_FOUND {
+            if matches!(
+                status,
+                reqwest::StatusCode::CONFLICT | reqwest::StatusCode::NOT_FOUND
+            ) {
                 CliError::usage(parse_remote_message(&message))
             } else {
                 CliError::from(tensorlake::error::SdkError::ServerError { status, message })
@@ -1019,7 +1019,7 @@ pub async fn commit_status(ctx: &CliContext, repo: &str, job_id: &str) -> Result
             if let Some(read_back) = job.read_back {
                 let done = read_back.done;
                 let total = read_back.total;
-                let pct = if total > 0 { done * 100 / total } else { 0 };
+                let pct = done.saturating_mul(100).checked_div(total).unwrap_or(0);
                 println!(
                     "{} {phase}: {done}/{total} chunks ({pct}%)",
                     console::style(state).yellow().bold(),
