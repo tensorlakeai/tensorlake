@@ -1,7 +1,7 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { randomUUID } from "node:crypto";
 import type { Image } from "../image.js";
-import { FunctionError, SDKUsageError } from "./errors.js";
+import { SDKUsageError } from "./errors.js";
 import type { Parameter, ParameterValues, Schema } from "./schema.js";
 import { schema, validateWithSchema } from "./schema.js";
 import { registerDefinition } from "./registry.js";
@@ -92,7 +92,15 @@ export interface RegisteredDefinition {
   readonly application?: ApplicationConfiguration;
 }
 
+// A string discriminator alone is valid user JSON and cannot safely identify
+// an SDK control-flow value. Symbol.for keeps the brand stable when the user
+// application and executor load separate copies of the SDK in one process.
+const TAIL_CALL_BRAND: unique symbol = Symbol.for(
+  "tensorlake.applications.tail-call.v1",
+);
+
 export interface TailCall<T> {
+  readonly [TAIL_CALL_BRAND]: true;
   readonly kind: "tensorlake-tail-call";
   readonly definition: RegisteredDefinition;
   readonly args: readonly unknown[];
@@ -112,7 +120,12 @@ export interface WaitResult<T> {
 export interface FunctionRuntime {
   invoke<T>(definition: RegisteredDefinition, args: readonly unknown[]): Promise<T>;
   runFuture<T>(future: FunctionFuture<T>): Promise<T>;
-  reduce<T>(definition: RegisteredDefinition, items: readonly unknown[], initial: unknown): Promise<T>;
+  reduce<T>(
+    definition: RegisteredDefinition,
+    items: readonly unknown[],
+    initial: unknown,
+    hasInitial: boolean,
+  ): Promise<T>;
 }
 
 // The user application and function executor are separate bundles loaded into
@@ -121,6 +134,8 @@ export interface FunctionRuntime {
 const FUNCTION_RUNTIME_STORAGE_KEY = Symbol.for(
   "tensorlake.applications.function-runtime-storage.v1",
 );
+
+let futureCompletionCounter = 0;
 
 function runtimeStorage(): AsyncLocalStorage<FunctionRuntime> {
   const target = globalThis as typeof globalThis & {
@@ -147,6 +162,7 @@ export class FunctionFuture<T> implements PromiseLike<T> {
   readonly args: readonly unknown[];
   private promise?: Promise<T>;
   private startDelaySeconds = 0;
+  private completionOrder?: number;
   exception?: unknown;
   done = false;
 
@@ -164,14 +180,23 @@ export class FunctionFuture<T> implements PromiseLike<T> {
     ).then(
       (value) => {
         this.done = true;
+        this.completionOrder = futureCompletionCounter;
+        futureCompletionCounter += 1;
         return value;
       },
       (error) => {
         this.done = true;
         this.exception = error;
+        this.completionOrder = futureCompletionCounter;
+        futureCompletionCounter += 1;
         throw error;
       },
     );
+    // A future may intentionally be started without being awaited immediately.
+    // Observe its rejection now so Node does not treat that valid usage as an
+    // unhandled rejection. Keep `this.promise` unchanged so result()/await still
+    // receive the original rejection.
+    void this.promise.catch(() => undefined);
     return this;
   }
 
@@ -207,30 +232,75 @@ export class FunctionFuture<T> implements PromiseLike<T> {
     if (options.timeout != null && (!Number.isFinite(options.timeout) || options.timeout < 0)) {
       throw new SDKUsageError("Future.wait timeout must be a non-negative finite number");
     }
+    futures.forEach((future) => {
+      if (future.promise == null) future.run();
+    });
+    const alreadyDone = futures.filter((future) => future.done);
+    if (
+      alreadyDone.length > 0
+      && (
+        returnWhen === "first_completed"
+        || (
+          returnWhen === "first_failure"
+          && alreadyDone.some((future) => future.exception != null)
+        )
+      )
+    ) {
+      return {
+        done: alreadyDone,
+        notDone: futures.filter((future) => !future.done),
+      };
+    }
     const pending = futures.filter((future) => !future.done);
     if (pending.length === 0) {
       return { done: [...futures], notDone: [] };
     }
-    pending.forEach((future) => {
-      if (future.promise == null) future.run();
-    });
-    const settled = pending.map((future) => future.result().then(
-      () => ({ future }),
-      () => ({ future }),
-    ));
-    let wait: Promise<unknown>;
+    let wait: Promise<FutureWaitOutcome<T>>;
     if (returnWhen === "all_completed") {
-      wait = Promise.all(settled);
+      wait = Promise.all(pending.map((future) => future.result().then(
+        () => undefined,
+        () => undefined,
+      ))).then(() => ({ kind: "all_completed" }));
     } else if (returnWhen === "first_completed") {
-      wait = Promise.race(settled);
+      wait = Promise.race(pending.map((future) => future.result().then(
+        () => ({ kind: "cutoff", future } as const),
+        () => ({ kind: "cutoff", future } as const),
+      )));
     } else {
-      const firstFailure = pending.map((future) => future.result().then(
-        () => new Promise<never>(() => undefined),
-        () => ({ future }),
-      ));
-      wait = Promise.race([Promise.all(settled), ...firstFailure]);
+      wait = new Promise((resolve) => {
+        let remaining = pending.length;
+        for (const future of pending) {
+          void future.result().then(
+            () => {
+              remaining -= 1;
+              if (remaining === 0) resolve({ kind: "all_completed" });
+            },
+            () => resolve({ kind: "cutoff", future }),
+          );
+        }
+      });
     }
-    await waitUntilOrTimeout(wait, options.timeout);
+    const outcome = await waitUntilOrTimeout(wait, options.timeout);
+    if (outcome.kind === "cutoff") {
+      const completionCutoff = outcome.future.completionOrder;
+      if (completionCutoff == null) {
+        throw new SDKUsageError("Future.wait winner has no completion order");
+      }
+      const doneSet = new Set(alreadyDone);
+      for (const future of pending) {
+        if (
+          future.done
+          && future.completionOrder != null
+          && future.completionOrder <= completionCutoff
+        ) {
+          doneSet.add(future);
+        }
+      }
+      return {
+        done: futures.filter((future) => doneSet.has(future)),
+        notDone: futures.filter((future) => !doneSet.has(future)),
+      };
+    }
     return {
       done: futures.filter((future) => future.done),
       notDone: futures.filter((future) => !future.done),
@@ -238,27 +308,42 @@ export class FunctionFuture<T> implements PromiseLike<T> {
   }
 }
 
-async function waitUntilOrTimeout(promise: Promise<unknown>, timeoutSeconds?: number): Promise<void> {
+type FutureWaitOutcome<T> =
+  | { kind: "all_completed" }
+  | { kind: "cutoff"; future: FunctionFuture<T> };
+
+async function waitUntilOrTimeout<T>(
+  promise: Promise<T>,
+  timeoutSeconds?: number,
+): Promise<T | { kind: "timeout" }> {
   if (timeoutSeconds == null) {
-    await promise;
-    return;
+    return promise;
   }
   let timer: NodeJS.Timeout | undefined;
-  await Promise.race([
-    promise,
-    new Promise<void>((resolve) => {
-      timer = setTimeout(resolve, timeoutSeconds * 1000);
-    }),
-  ]);
-  if (timer != null) clearTimeout(timer);
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<{ kind: "timeout" }>((resolve) => {
+        timer = setTimeout(() => resolve({ kind: "timeout" }), timeoutSeconds * 1000);
+      }),
+    ]);
+  } finally {
+    if (timer != null) clearTimeout(timer);
+  }
 }
+
+type Awaitable<T> = T | PromiseLike<T>;
+type AwaitableIterable<T> = Iterable<Awaitable<T>> | PromiseLike<Iterable<Awaitable<T>>>;
 
 export interface RegisteredFunction<Args extends readonly unknown[], Result> {
   (...args: Args): Promise<Result>;
   readonly definition: RegisteredDefinition;
   future(...args: Args): FunctionFuture<Result>;
-  map(items: Iterable<Args[0]>): Promise<Result[]>;
-  reduce(items: Iterable<Args[1]>, initial: Args[0]): Promise<Result>;
+  map(items: AwaitableIterable<Args[0]>): Promise<Result[]>;
+  reduce(
+    items: AwaitableIterable<Args[1]>,
+    initial?: Args[0],
+  ): Promise<Result>;
   tailCall(...args: Args): TailCall<Result>;
 }
 
@@ -357,7 +442,13 @@ export async function executeHandlerResult<T>(
 }
 
 export function isTailCall(value: unknown): value is TailCall<unknown> {
-  return typeof value === "object" && value != null && (value as TailCall<unknown>).kind === "tensorlake-tail-call";
+  if (typeof value !== "object" || value == null) return false;
+  const candidate = value as Partial<TailCall<unknown>>;
+  return candidate[TAIL_CALL_BRAND] === true
+    && candidate.kind === "tensorlake-tail-call"
+    && typeof candidate.definition === "object"
+    && candidate.definition != null
+    && Array.isArray(candidate.args);
 }
 
 function createRegisteredFunction<Args extends readonly unknown[], Result>(
@@ -373,15 +464,32 @@ function createRegisteredFunction<Args extends readonly unknown[], Result>(
     definition: { value: definition, enumerable: true },
     future: { value: (...args: Args) => new FunctionFuture<Result>(definition, args) },
     map: {
-      value: async (items: Iterable<Args[0]>) =>
-        Promise.all([...items].map((item) => callable(...([item] as unknown as Args)))),
+      value: async (items: AwaitableIterable<Args[0]>) =>
+        Promise.all(
+          [...(await items)].map(async (item) =>
+            callable(...([await item] as unknown as Args))
+          ),
+        ),
     },
     reduce: {
-      value: async (items: Iterable<Args[1]>, initial: Args[0]) => {
-        const values = [...items];
+      value: async (
+        items: AwaitableIterable<Args[1]>,
+        ...initialValues: [] | [Args[0]]
+      ) => {
+        let values = await Promise.all([...(await items)]);
+        const hasInitial = initialValues.length > 0;
+        let initial: unknown = initialValues[0];
         const runtime = currentFunctionRuntime();
-        if (runtime != null) return runtime.reduce<Result>(definition, values, initial);
-        let accumulator: Result | Args[0] = initial;
+        if (runtime != null) {
+          return runtime.reduce<Result>(definition, values, initial, hasInitial);
+        }
+        if (!hasInitial) {
+          if (values.length === 0) {
+            throw new SDKUsageError("reduce of empty iterable with no initial value");
+          }
+          [initial, ...values] = values;
+        }
+        let accumulator = initial as Result | Args[0];
         for (const item of values) {
           accumulator = await callable(...([accumulator, item] as unknown as Args));
         }
@@ -390,6 +498,7 @@ function createRegisteredFunction<Args extends readonly unknown[], Result>(
     },
     tailCall: {
       value: (...args: Args): TailCall<Result> => ({
+        [TAIL_CALL_BRAND]: true,
         kind: "tensorlake-tail-call",
         definition,
         args,
@@ -479,14 +588,28 @@ function skipJavaScriptComment(source: string, start: number): number | undefine
   return undefined;
 }
 
-function findTopLevelArrow(source: string): number {
-  let parentheses = 0;
-  let brackets = 0;
-  let braces = 0;
-  for (let index = 0; index < source.length - 1; index += 1) {
+const REGEX_PREFIX_KEYWORDS = new Set([
+  "await",
+  "case",
+  "delete",
+  "in",
+  "instanceof",
+  "new",
+  "return",
+  "throw",
+  "typeof",
+  "void",
+  "yield",
+]);
+
+function regexLiteralStartsAt(source: string, start: number): boolean {
+  let expectsExpression = true;
+  for (let index = 0; index < start; index += 1) {
     const character = source[index];
+    if (/\s/.test(character)) continue;
     if (character === "\"" || character === "'" || character === "`") {
       index = skipJavaScriptLiteral(source, index);
+      expectsExpression = false;
       continue;
     }
     const commentEnd = skipJavaScriptComment(source, index);
@@ -494,11 +617,105 @@ function findTopLevelArrow(source: string): number {
       index = commentEnd;
       continue;
     }
+    if (/[A-Za-z_$]/.test(character)) {
+      let tokenEnd = index + 1;
+      while (tokenEnd < start && /[A-Za-z0-9_$]/.test(source[tokenEnd])) tokenEnd += 1;
+      expectsExpression = REGEX_PREFIX_KEYWORDS.has(source.slice(index, tokenEnd));
+      index = tokenEnd - 1;
+      continue;
+    }
+    if (/[0-9]/.test(character) || (character === "." && /[0-9]/.test(source[index + 1]))) {
+      while (index + 1 < start && /[A-Za-z0-9_.]/.test(source[index + 1])) index += 1;
+      expectsExpression = false;
+      continue;
+    }
+    if (character === "/") {
+      if (expectsExpression) {
+        index = skipJavaScriptRegex(source, index);
+        expectsExpression = false;
+      } else {
+        if (source[index + 1] === "=") index += 1;
+        expectsExpression = true;
+      }
+      continue;
+    }
+    if (character === ")" || character === "]" || character === "}") {
+      expectsExpression = false;
+      continue;
+    }
+    if (character === ".") {
+      if (source.slice(index, index + 3) === "...") {
+        index += 2;
+        expectsExpression = true;
+      } else {
+        expectsExpression = false;
+      }
+      continue;
+    }
+    if ((character === "+" || character === "-") && source[index + 1] === character) {
+      index += 1;
+      continue;
+    }
+    expectsExpression = true;
+  }
+  return expectsExpression;
+}
+
+function skipJavaScriptRegex(source: string, start: number): number {
+  let escaped = false;
+  let characterClass = false;
+  for (let index = start + 1; index < source.length; index += 1) {
+    const character = source[index];
+    if (escaped) {
+      escaped = false;
+    } else if (character === "\\") {
+      escaped = true;
+    } else if (character === "[") {
+      characterClass = true;
+    } else if (character === "]") {
+      characterClass = false;
+    } else if (character === "/" && !characterClass) {
+      while (index + 1 < source.length && /[A-Za-z]/.test(source[index + 1])) index += 1;
+      return index;
+    }
+  }
+  return source.length - 1;
+}
+
+function skipJavaScriptValue(source: string, index: number): number | undefined {
+  const character = source[index];
+  if (character === "\"" || character === "'" || character === "`") {
+    return skipJavaScriptLiteral(source, index);
+  }
+  const commentEnd = skipJavaScriptComment(source, index);
+  if (commentEnd != null) return commentEnd;
+  if (character === "/" && regexLiteralStartsAt(source, index)) {
+    return skipJavaScriptRegex(source, index);
+  }
+  return undefined;
+}
+
+function findTopLevelArrow(source: string): number {
+  let parentheses = 0;
+  let brackets = 0;
+  let braces = 0;
+  for (let index = 0; index < source.length - 1; index += 1) {
+    const character = source[index];
+    const valueEnd = skipJavaScriptValue(source, index);
+    if (valueEnd != null) {
+      index = valueEnd;
+      continue;
+    }
     if (character === "(") parentheses += 1;
     else if (character === ")") parentheses -= 1;
     else if (character === "[") brackets += 1;
     else if (character === "]") brackets -= 1;
-    else if (character === "{") braces += 1;
+    else if (character === "{") {
+      // A top-level block before an arrow is a classic function or method
+      // body. Its nested arrows cannot describe the handler parameters.
+      if (parentheses === 0 && brackets === 0 && braces === 0) return -1;
+      braces += 1;
+    }
     else if (character === "}") braces -= 1;
     else if (character === "=" && source[index + 1] === ">" && parentheses === 0 && brackets === 0 && braces === 0) {
       return index;
@@ -511,17 +728,25 @@ function findClosingParenthesis(source: string, open: number): number {
   let depth = 0;
   for (let index = open; index < source.length; index += 1) {
     const character = source[index];
-    if (character === "\"" || character === "'" || character === "`") {
-      index = skipJavaScriptLiteral(source, index);
-      continue;
-    }
-    const commentEnd = skipJavaScriptComment(source, index);
-    if (commentEnd != null) {
-      index = commentEnd;
+    const valueEnd = skipJavaScriptValue(source, index);
+    if (valueEnd != null) {
+      index = valueEnd;
       continue;
     }
     if (character === "(") depth += 1;
     else if (character === ")" && --depth === 0) return index;
+  }
+  return -1;
+}
+
+function findOpeningParenthesis(source: string): number {
+  for (let index = 0; index < source.length; index += 1) {
+    const valueEnd = skipJavaScriptValue(source, index);
+    if (valueEnd != null) {
+      index = valueEnd;
+      continue;
+    }
+    if (source[index] === "(") return index;
   }
   return -1;
 }
@@ -535,13 +760,9 @@ function splitTopLevelParameters(source: string): string[] {
   let braces = 0;
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
-    if (character === "\"" || character === "'" || character === "`") {
-      index = skipJavaScriptLiteral(source, index);
-      continue;
-    }
-    const commentEnd = skipJavaScriptComment(source, index);
-    if (commentEnd != null) {
-      index = commentEnd;
+    const valueEnd = skipJavaScriptValue(source, index);
+    if (valueEnd != null) {
+      index = valueEnd;
       continue;
     }
     if (character === "(") parentheses += 1;
@@ -566,13 +787,9 @@ function hasTopLevelDefault(source: string): boolean {
   let braces = 0;
   for (let index = 0; index < source.length; index += 1) {
     const character = source[index];
-    if (character === "\"" || character === "'" || character === "`") {
-      index = skipJavaScriptLiteral(source, index);
-      continue;
-    }
-    const commentEnd = skipJavaScriptComment(source, index);
-    if (commentEnd != null) {
-      index = commentEnd;
+    const valueEnd = skipJavaScriptValue(source, index);
+    if (valueEnd != null) {
+      index = valueEnd;
       continue;
     }
     if (character === "(") parentheses += 1;
@@ -599,7 +816,7 @@ function declaredHandlerParameters(handler: RuntimeHandler): string[] {
     if (close < 0) throw new SDKUsageError("Schema-free registration could not inspect handler parameters");
     return splitTopLevelParameters(header.slice(1, close));
   }
-  const open = source.indexOf("(");
+  const open = findOpeningParenthesis(source);
   const close = open < 0 ? -1 : findClosingParenthesis(source, open);
   if (open < 0 || close < 0) {
     throw new SDKUsageError("Schema-free registration could not inspect handler parameters");
@@ -609,7 +826,16 @@ function declaredHandlerParameters(handler: RuntimeHandler): string[] {
 
 function inferredJSONParameters(handler: RuntimeHandler): readonly Parameter<unknown>[] {
   const parameters = declaredHandlerParameters(handler);
-  if (parameters.some((parameter) => parameter.trimStart().startsWith("..."))) {
+  if (parameters.some((parameter) => {
+    let index = 0;
+    while (index < parameter.length) {
+      while (index < parameter.length && /\s/.test(parameter[index])) index += 1;
+      const commentEnd = skipJavaScriptComment(parameter, index);
+      if (commentEnd == null) break;
+      index = commentEnd + 1;
+    }
+    return parameter.slice(index).startsWith("...");
+  })) {
     throw new SDKUsageError(
       "Schema-free registration does not support rest parameters; specify explicit parameters and returns",
     );

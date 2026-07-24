@@ -18,7 +18,12 @@ export { Image } from "../image.js";
 export { SDK_VERSION } from "../defaults.js";
 export { RequestContext, type RequestContextValue } from "./context.js";
 export { runLocal, LocalRequest } from "./local.js";
-export { runRemote, RemoteRequest } from "./remote.js";
+export {
+  runRemote,
+  remoteOptions,
+  RemoteRequest,
+  type RemoteOptions,
+} from "./remote.js";
 export {
   TensorlakeApplicationError,
   SDKUsageError,

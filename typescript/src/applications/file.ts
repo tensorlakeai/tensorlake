@@ -7,6 +7,13 @@ export class File {
   readonly content: Uint8Array;
   readonly contentType: string;
 
+  static [Symbol.hasInstance](value: unknown): boolean {
+    if (this !== File) {
+      return Function.prototype[Symbol.hasInstance].call(this, value);
+    }
+    return isFile(value);
+  }
+
   constructor(content: Uint8Array | ArrayBuffer, contentType: string) {
     if (!contentType.trim()) {
       throw new SDKUsageError("File contentType cannot be empty");
@@ -21,7 +28,8 @@ export class File {
  *
  * Deployed application code and the function executor are separate bundles
  * loaded into one Node process, so their `File` constructors are not
- * referentially equal and `instanceof File` cannot cross that boundary.
+ * referentially equal. The shared brand and `Symbol.hasInstance` keep
+ * `instanceof File` useful across that boundary.
  */
 export function isFile(value: unknown): value is File {
   if (typeof value !== "object" || value == null) return false;

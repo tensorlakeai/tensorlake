@@ -63,6 +63,25 @@ export function runWithRequestContext<T>(
   return requestContextStorage().run(context, callback);
 }
 
+export async function waitWithAbortSignal<T>(
+  value: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) throw signal.reason;
+  let onAbort: (() => void) | undefined;
+  try {
+    return await Promise.race([
+      value,
+      new Promise<never>((_resolve, reject) => {
+        onAbort = () => reject(signal.reason);
+        signal.addEventListener("abort", onAbort, { once: true });
+      }),
+    ]);
+  } finally {
+    if (onAbort != null) signal.removeEventListener("abort", onAbort);
+  }
+}
+
 export class MemoryRequestContext implements RequestContextValue {
   readonly signal: AbortSignal;
   private readonly values = new Map<string, Uint8Array>();

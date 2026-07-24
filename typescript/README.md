@@ -44,6 +44,26 @@ const request = await runLocal(squares, [1, 2, 3]);
 console.log(await request.output());
 ```
 
+Use `runRemote` for a deployed application. Plain client options remain the
+last argument when every application argument is supplied. Wrap options with
+`remoteOptions` when omitting JavaScript default arguments so an object input
+can never be mistaken for client configuration:
+
+```ts
+import { registerApplication, remoteOptions, runRemote } from "tensorlake/applications";
+
+const greeting = registerApplication(
+  "greeting",
+  async (name = "world") => `Hello, ${name}!`,
+);
+
+const request = await runRemote(
+  greeting,
+  remoteOptions({ apiKey: process.env.TENSORLAKE_API_KEY }),
+);
+console.log(await request.output());
+```
+
 ```bash
 npm install tensorlake
 tl deploy app.ts
@@ -53,7 +73,14 @@ tl deploy app.ts
 
 The SDK build also produces a hashed executor capsule containing the Node 24 ESM executor, its protobufs, and an npm shrinkwrap derived from the checked-in SDK lockfile. During deployment, `tl` uses the capsule from the exact SDK package Rolldown resolved and adds it directly to the image-build context. This supports local dependencies such as `"tensorlake": "file:../tensorlake/typescript"`; build that SDK checkout with `npm run build:sdk` before deploying. The local Tensorlake package does not need to be published.
 
-Functions expose `future`, `map`, `reduce`, and `tailCall`. Awaiting a registered function inside a running application creates a durable remote function call. `RequestContext.get()` provides async request state, metrics, progress, and an abort signal.
+Functions expose `future`, `map`, `reduce`, and `tailCall`. `map` and `reduce`
+accept either an iterable or a Promise/Future that produces one, and their
+iterables may contain Promise/Future values. A reduce initial value is optional;
+without one, the first item becomes the accumulator and an empty collection is
+an error. Awaiting a registered function inside a running application creates a
+durable remote function call. `RequestContext.get()` provides async request
+state, metrics, progress, and an abort signal. Local requests expose `cancel()`,
+which aborts that signal and rejects `output()`.
 
 TypeScript and Python definitions cannot be mixed in one deployed application bundle. Class-based function semantics are not supported in the TypeScript runtime.
 

@@ -8,15 +8,27 @@ import {
   runWithFunctionRuntime,
 } from "./function.js";
 import { FunctionError, SDKUsageError, isRequestError } from "./errors.js";
-import { MemoryRequestContext, runWithRequestContext } from "./context.js";
+import {
+  MemoryRequestContext,
+  runWithRequestContext,
+  waitWithAbortSignal,
+} from "./context.js";
 import { File, isFile } from "./file.js";
 import { jsonRoundTrip } from "./serialization.js";
 
 export class LocalRequest<T> {
-  constructor(readonly id: string, private readonly value: Promise<T>) {}
+  constructor(
+    readonly id: string,
+    private readonly value: Promise<T>,
+    private readonly cancelRequest: (reason?: unknown) => void,
+  ) {}
 
   output(): Promise<T> {
     return this.value;
+  }
+
+  cancel(reason?: unknown): void {
+    this.cancelRequest(reason);
   }
 }
 
@@ -28,10 +40,17 @@ function boundaryCopy<T>(value: T): T {
 export class LocalRuntime implements FunctionRuntime {
   readonly requestContext: MemoryRequestContext;
   private readonly application: RegisteredDefinition;
+  private readonly controller = new AbortController();
 
   constructor(application: RegisteredDefinition, requestId = `local-${randomUUID()}`) {
     this.application = application;
-    this.requestContext = new MemoryRequestContext(requestId);
+    this.requestContext = new MemoryRequestContext(requestId, {
+      signal: this.controller.signal,
+    });
+  }
+
+  cancel(reason: unknown = new FunctionError("Local request was cancelled")): void {
+    if (!this.controller.signal.aborted) this.controller.abort(reason);
   }
 
   invoke<T>(definition: RegisteredDefinition, args: readonly unknown[]): Promise<T> {
@@ -40,13 +59,17 @@ export class LocalRuntime implements FunctionRuntime {
 
   async runFuture<T>(future: FunctionFuture<T>): Promise<T> {
     if (future.delaySeconds > 0) {
-      await new Promise<void>((resolve, reject) => {
-        const timer = setTimeout(resolve, future.delaySeconds * 1000);
-        this.requestContext.signal.addEventListener("abort", () => {
-          clearTimeout(timer);
-          reject(this.requestContext.signal.reason);
-        }, { once: true });
-      });
+      let timer: NodeJS.Timeout | undefined;
+      try {
+        await waitWithAbortSignal(
+          new Promise<void>((resolve) => {
+            timer = setTimeout(resolve, future.delaySeconds * 1000);
+          }),
+          this.requestContext.signal,
+        );
+      } finally {
+        if (timer != null) clearTimeout(timer);
+      }
     }
     return this.execute<T>(future.definition, future.args);
   }
@@ -55,9 +78,18 @@ export class LocalRuntime implements FunctionRuntime {
     definition: RegisteredDefinition,
     items: readonly unknown[],
     initial: unknown,
+    hasInitial: boolean,
   ): Promise<T> {
-    let accumulator = boundaryCopy(initial);
-    for (const item of items) {
+    let reduceItems = items;
+    let reduceInitial = initial;
+    if (!hasInitial) {
+      if (items.length === 0) {
+        throw new SDKUsageError("reduce of empty iterable with no initial value");
+      }
+      [reduceInitial, ...reduceItems] = items;
+    }
+    let accumulator = boundaryCopy(reduceInitial);
+    for (const item of reduceItems) {
       accumulator = await this.execute<T>(definition, [accumulator, item]);
     }
     return accumulator as T;
@@ -74,12 +106,16 @@ export class LocalRuntime implements FunctionRuntime {
       try {
         const value = await runWithFunctionRuntime(this, () =>
           runWithRequestContext(this.requestContext, () =>
-            this.withTimeout(executeHandler<T>(definition, args), definition.options.timeout),
+            waitWithAbortSignal(
+              this.withTimeout(executeHandler<T>(definition, args), definition.options.timeout),
+              this.controller.signal,
+            ),
           ),
         );
         return boundaryCopy(value);
       } catch (error) {
         if (isRequestError(error)) throw error;
+        if (this.controller.signal.aborted) throw this.controller.signal.reason;
         lastError = error;
       }
     }
@@ -115,5 +151,9 @@ export async function runLocal<Args extends readonly unknown[], Result>(
   }
   const runtime = new LocalRuntime(application.definition);
   const output = runtime.invoke<Result>(application.definition, args);
-  return new LocalRequest(runtime.requestContext.requestId, output);
+  return new LocalRequest(
+    runtime.requestContext.requestId,
+    output,
+    (reason) => runtime.cancel(reason),
+  );
 }

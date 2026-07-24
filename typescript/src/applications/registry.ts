@@ -6,6 +6,11 @@ interface RegistryState {
   applications: Map<string, RegisteredDefinition>;
 }
 
+export interface RegistrySnapshot {
+  functions: Map<string, RegisteredDefinition>;
+  applications: Map<string, RegisteredDefinition>;
+}
+
 const REGISTRY_KEY = Symbol.for("tensorlake.applications.registry.v1");
 
 function registry(): RegistryState {
@@ -42,6 +47,22 @@ export function getFunctions(): RegisteredDefinition[] {
 
 export function getApplications(): RegisteredDefinition[] {
   return [...registry().applications.values()];
+}
+
+export function snapshotRegistry(): RegistrySnapshot {
+  const state = registry();
+  return {
+    functions: new Map(state.functions),
+    applications: new Map(state.applications),
+  };
+}
+
+export function restoreRegistry(snapshot: RegistrySnapshot): void {
+  const state = registry();
+  state.functions.clear();
+  state.applications.clear();
+  for (const [name, definition] of snapshot.functions) state.functions.set(name, definition);
+  for (const [name, definition] of snapshot.applications) state.applications.set(name, definition);
 }
 
 export function clearRegistryForTest(): void {

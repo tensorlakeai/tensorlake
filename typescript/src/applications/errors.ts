@@ -33,6 +33,9 @@ export class FunctionError extends TensorlakeApplicationError {
   readonly [FUNCTION_ERROR_BRAND] = true;
 
   static [Symbol.hasInstance](value: unknown): boolean {
+    if (this !== FunctionError) {
+      return Function.prototype[Symbol.hasInstance].call(this, value);
+    }
     return isFunctionError(value);
   }
 
@@ -51,6 +54,13 @@ function isFunctionError(value: unknown): value is FunctionError {
 
 export class RequestError extends TensorlakeApplicationError {
   readonly [REQUEST_ERROR_BRAND] = true;
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    if (this !== RequestError) {
+      return Function.prototype[Symbol.hasInstance].call(this, value);
+    }
+    return isRequestError(value);
+  }
 
   constructor(message: string, options?: { cause?: unknown }) {
     super(message, options);

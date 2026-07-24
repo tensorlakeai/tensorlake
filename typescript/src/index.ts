@@ -56,6 +56,7 @@ export {
   Future,
   runLocal,
   runRemote,
+  remoteOptions,
 } from "./applications/index.js";
 export type {
   ApplicationOptions,
@@ -65,6 +66,7 @@ export type {
   RegisteredFunction,
   Schema,
   Parameter,
+  RemoteOptions,
   TailCall,
 } from "./applications/index.js";
 
