@@ -9,6 +9,7 @@ import json
 import os
 import pickle
 import queue
+import signal
 import socket
 import subprocess
 import sys
@@ -18,6 +19,7 @@ import time
 import zipfile
 from collections import Counter
 from dataclasses import dataclass
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Iterator
 
@@ -47,6 +49,8 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     ALLOCATION_OUTCOME_CODE_SUCCESS,
     BLOB,
     FUNCTION_CALL_WATCHER_STATUS_COMPLETED,
+    INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
+    INITIALIZATION_OUTCOME_CODE_FAILURE,
     INITIALIZATION_OUTCOME_CODE_SUCCESS,
     REPLAY_MODE_NONE,
     REPLAY_MODE_STRICT,
@@ -95,21 +99,32 @@ REQUEST_ERROR_BLOB_SIZE = 4096
 DOUBLE_FUNCTION = "parity_double"
 ADD_FUNCTION = "parity_add"
 FAILING_FUNCTION = "parity_failing_child"
+REQUEST_FAILING_FUNCTION = "parity_request_failing_child"
 IDENTITY_FILE_FUNCTION = "parity_identity_file"
+MISSING_FUNCTION = "parity_missing_after_import"
 
 FUNCTION_NAMES = (
     DOUBLE_FUNCTION,
     ADD_FUNCTION,
     FAILING_FUNCTION,
+    REQUEST_FAILING_FUNCTION,
     IDENTITY_FILE_FUNCTION,
     "parity_value",
     "parity_multipart",
     "parity_child",
+    "parity_wait_first_failure_after_success",
+    "parity_wait_first_failure_after_success_and_failure",
+    "parity_wait_causal_replay",
+    "parity_wait_batched_results",
     "parity_map",
     "parity_reduce",
+    "parity_reduce_no_initial",
+    "parity_map_reduce",
     "parity_tail_call",
     "parity_handled_child_failure",
+    "parity_handled_child_request_error",
     "parity_handled_creation_failure",
+    "parity_watcher_creation_failure",
     "parity_request_error",
     "parity_function_error",
     "parity_file",
@@ -160,6 +175,59 @@ SCENARIOS = (
         replay_success=True,
     ),
     Scenario(
+        name="parity_wait_first_failure_after_success",
+        input=21,
+        expected_terminal={
+            "outcome": "success",
+            "value": {"done": 2, "not_done": 0},
+        },
+        behavior="wait_first_failure",
+        expected_calls=(2, 2),
+        replay_success=True,
+    ),
+    Scenario(
+        name="parity_wait_first_failure_after_success_and_failure",
+        input=21,
+        expected_terminal={
+            "outcome": "success",
+            "value": {"done": 2, "not_done": 0},
+        },
+        behavior="wait_first_failure_with_failure",
+        expected_calls=(2, 2),
+        replay_success=True,
+    ),
+    Scenario(
+        name="parity_wait_causal_replay",
+        input=21,
+        expected_terminal={
+            "outcome": "success",
+            "value": {
+                "done": 1,
+                "not_done": 1,
+                "marker": 46,
+                "results": [42, 44],
+            },
+        },
+        behavior="wait_causal_replay",
+        expected_calls=(3, 3),
+        replay_success=True,
+    ),
+    Scenario(
+        name="parity_wait_batched_results",
+        input=21,
+        expected_terminal={
+            "outcome": "success",
+            "value": {
+                "done": 1,
+                "not_done": 1,
+                "results": [42, 44],
+            },
+        },
+        behavior="wait_batched_results",
+        expected_calls=(2, 2),
+        replay_success=True,
+    ),
+    Scenario(
         name="parity_map",
         input=1,
         expected_terminal={"outcome": "success", "value": [2, 4, 6]},
@@ -174,6 +242,23 @@ SCENARIOS = (
         expected_terminal={"outcome": "success", "value": 16},
         behavior="reduce",
         expected_calls=(1, 1),
+        replay_success=True,
+    ),
+    Scenario(
+        name="parity_reduce_no_initial",
+        input=1,
+        expected_terminal={"outcome": "success", "value": 6},
+        behavior="reduce_no_initial",
+        expected_calls=(1, 1),
+        replay_success=True,
+    ),
+    Scenario(
+        name="parity_map_reduce",
+        input=1,
+        expected_terminal={"outcome": "success", "value": 12},
+        behavior="map_reduce",
+        expected_calls=(2, 2),
+        typescript_expected_calls=(4, 4),
         replay_success=True,
     ),
     Scenario(
@@ -194,11 +279,29 @@ SCENARIOS = (
         expected_calls=(1, 1),
     ),
     Scenario(
+        name="parity_handled_child_request_error",
+        input=21,
+        expected_terminal={"outcome": "success", "value": "caught:request_error"},
+        behavior="watcher_request_error",
+        expected_calls=(1, 1),
+    ),
+    Scenario(
         name="parity_handled_creation_failure",
         input=21,
         expected_terminal={"outcome": "success", "value": "caught:creation_error"},
         behavior="creation_failure",
         expected_calls=(1, 0),
+    ),
+    Scenario(
+        name="parity_watcher_creation_failure",
+        input=21,
+        expected_terminal={
+            "outcome": "failure",
+            "failure_reason": "function_error",
+        },
+        behavior="watcher_creation_failure",
+        expected_calls=(1, 1),
+        replay_success=True,
     ),
     Scenario(
         name="parity_request_error",
@@ -238,6 +341,7 @@ SCENARIOS = (
             "value": {
                 "content": '{"value":21}',
                 "content_type": "application/json",
+                "is_file": True,
             },
         },
         behavior="json_file",
@@ -280,6 +384,7 @@ class ExecutorSpec:
     language: str
     command: tuple[str, ...]
     application_archive: bytes
+    failed_initialization_archive: bytes
 
 
 @dataclass(frozen=True)
@@ -340,6 +445,58 @@ class ExecutorProcess:
                 self._process.kill()
                 self._process.wait(timeout=5)
 
+    def terminate_gracefully(
+        self, *, pending_operation: str, timeout: float = 5
+    ) -> dict[str, Any]:
+        if self._process.poll() is not None:
+            raise AssertionError(
+                f"{self.spec.language} executor exited before shutdown was requested:\n"
+                f"{self.logs()}"
+            )
+        self._process.terminate()
+        try:
+            self._process.wait(timeout=timeout)
+        except subprocess.TimeoutExpired as error:
+            logs = self.logs()
+            self._process.kill()
+            self._process.wait(timeout=5)
+            raise AssertionError(
+                f"{self.spec.language} executor did not stop within {timeout}s "
+                f"while {pending_operation} was pending:\n{logs}"
+            ) from error
+        return_code = self._process.returncode
+        logs = self.logs()
+        if self.spec.language == "typescript":
+            if return_code != 0:
+                raise AssertionError(
+                    "TypeScript executor did not complete graceful shutdown "
+                    f"while {pending_operation} was pending (exit={return_code}):\n"
+                    f"{logs}"
+                )
+            if '"message":"stopped TypeScript function executor"' not in logs:
+                raise AssertionError(
+                    "TypeScript executor exited without logging completed graceful "
+                    f"shutdown while {pending_operation} was pending:\n{logs}"
+                )
+            if (
+                '"message":"forcing TypeScript function executor shutdown after grace period"'
+                in logs
+            ):
+                raise AssertionError(
+                    "TypeScript executor forced shutdown while "
+                    f"{pending_operation} was pending:\n{logs}"
+                )
+            return {"exit_mode": "graceful", "exit_code": return_code}
+
+        expected_return_code = -signal.SIGTERM
+        if return_code != expected_return_code:
+            raise AssertionError(
+                "Python executor did not terminate with SIGTERM "
+                f"while {pending_operation} was pending "
+                f"(expected={expected_return_code}, actual={return_code}):\n{logs}"
+            )
+        return {"exit_mode": "signal", "exit_code": return_code}
+
     def logs(self) -> str:
         self._log.flush()
         self._log.seek(0)
@@ -382,6 +539,7 @@ class ProtocolDriver:
         self.event_history: list[AllocationEvent] = []
         self.child_calls: list[dict[str, Any]] = []
         self.child_results: dict[str, ChildResult] = {}
+        self.delayed_watcher_results: list[AllocationEvent] = []
         self.call_metadata: dict[str, bytes] = {}
         self.batch_kinds: list[list[str]] = []
         self.terminal_count = 0
@@ -634,13 +792,28 @@ class ProtocolDriver:
         arguments = call["arguments"]
         if behavior == "watcher_failure":
             return ChildResult(outcome="failure")
-        if behavior == "map":
+        if behavior == "watcher_request_error":
+            return ChildResult(
+                outcome="failure",
+                request_error=f"child request failed for {arguments[0]}",
+            )
+        if behavior == "wait_first_failure_with_failure":
+            if call["function"] == FAILING_FUNCTION:
+                return ChildResult(outcome="failure")
+            return ChildResult(outcome="success", value=arguments[0] * 2)
+        if behavior in ("map", "map_reduce"):
+            if call["function"] == ADD_FUNCTION:
+                initial = call["keyword_arguments"].get("initial")
+                values = list(arguments)
+                if initial is None:
+                    initial, values = values[0], values[1:]
+                return ChildResult(outcome="success", value=initial + sum(values))
             if call["special"] == "map":
                 return ChildResult(
                     outcome="success", value=[value * 2 for value in arguments]
                 )
             return ChildResult(outcome="success", value=arguments[0] * 2)
-        if behavior == "reduce":
+        if behavior in ("reduce", "reduce_no_initial"):
             if call["special"] == "reduce":
                 initial = call["keyword_arguments"].get("initial")
                 values = list(arguments)
@@ -657,7 +830,14 @@ class ProtocolDriver:
                     serialized_file["content_type"],
                 ),
             )
-        if behavior in ("double", "tail_call"):
+        if behavior in (
+            "double",
+            "tail_call",
+            "wait_first_failure",
+            "wait_causal_replay",
+            "wait_batched_results",
+            "watcher_creation_failure",
+        ):
             return ChildResult(outcome="success", value=arguments[0] * 2)
         raise AssertionError(f"unexpected child call in {self.scenario.name}: {call!r}")
 
@@ -665,15 +845,28 @@ class ProtocolDriver:
         durable_id = watcher.function_call_id
         if durable_id not in self.child_results:
             raise AssertionError(f"watcher references unknown child call {durable_id}")
-        self._queue_events(
-            [
-                AllocationEvent(
-                    function_call_watcher_created=AllocationEventFunctionCallWatcherCreated(
-                        function_call_id=durable_id,
-                        status=Status(code=0),
+        if self.scenario.behavior == "watcher_creation_failure":
+            self._queue_events(
+                [
+                    AllocationEvent(
+                        function_call_watcher_created=(
+                            AllocationEventFunctionCallWatcherCreated(
+                                function_call_id=durable_id,
+                                status=Status(
+                                    code=grpc.StatusCode.INTERNAL.value[0],
+                                    message="watcher creation failed",
+                                ),
+                            )
+                        )
                     )
-                )
-            ]
+                ]
+            )
+            return
+        watcher_created = AllocationEvent(
+            function_call_watcher_created=AllocationEventFunctionCallWatcherCreated(
+                function_call_id=durable_id,
+                status=Status(code=0),
+            )
         )
         result = self.child_results[durable_id]
         watcher_result = AllocationEventFunctionCallWatcherResult(
@@ -701,9 +894,52 @@ class ProtocolDriver:
             watcher_result.request_error_blob.CopyFrom(blob)
         else:
             watcher_result.outcome_code = ALLOCATION_OUTCOME_CODE_FAILURE
-        self._queue_events(
-            [AllocationEvent(function_call_watcher_result=watcher_result)]
+        watcher_result_event = AllocationEvent(
+            function_call_watcher_result=watcher_result
         )
+
+        if self.scenario.behavior == "wait_causal_replay":
+            call_index = next(
+                index
+                for index, call in enumerate(self.child_calls)
+                if call["durable_id"] == durable_id
+            )
+            if call_index == 1:
+                self._queue_events([watcher_created])
+                self.delayed_watcher_results.append(watcher_result_event)
+                return
+            if call_index == 2:
+                self._queue_events(
+                    [
+                        watcher_created,
+                        watcher_result_event,
+                        *self.delayed_watcher_results,
+                    ]
+                )
+                self.delayed_watcher_results.clear()
+                return
+        if self.scenario.behavior == "wait_batched_results":
+            call_index = next(
+                index
+                for index, call in enumerate(self.child_calls)
+                if call["durable_id"] == durable_id
+            )
+            if call_index == 0:
+                self._queue_events([watcher_created])
+                self.delayed_watcher_results.append(watcher_result_event)
+                return
+            self._queue_events(
+                [
+                    watcher_created,
+                    *self.delayed_watcher_results,
+                    watcher_result_event,
+                ]
+            )
+            self.delayed_watcher_results.clear()
+            return
+
+        self._queue_events([watcher_created])
+        self._queue_events([watcher_result_event])
 
     def _queue_events(self, events: list[AllocationEvent]) -> None:
         history_events: list[AllocationEvent] = []
@@ -897,31 +1133,51 @@ def available_port() -> int:
         return int(sock.getsockname()[1])
 
 
-def build_python_archive() -> bytes:
+def build_python_archive(*, stale: bool = False) -> bytes:
     manifest = {
         "functions": {
             name: {"name": name, "module_import_name": "python_application"}
-            for name in FUNCTION_NAMES
+            for name in (*FUNCTION_NAMES, MISSING_FUNCTION)
         }
     }
+    source = (FIXTURE_ROOT / "python_application.py").read_bytes()
+    if stale:
+        stale_definitions = []
+        for name in FUNCTION_NAMES:
+            parameters = "left, right" if name == "parity_multipart" else "value"
+            stale_definitions.append(
+                "\n".join(
+                    [
+                        "@application()",
+                        "@function()",
+                        f"def {name}({parameters}):",
+                        f'    return {{"stale_archive": "{name}"}}',
+                    ]
+                )
+            )
+        source += (
+            "\n\n# Definitions used only by the failed-initialization retry probe.\n"
+            + "\n\n".join(stale_definitions)
+            + "\n"
+        ).encode()
     return build_zip(
         {
             ".tensorlake_code_manifest.json": json.dumps(manifest).encode(),
-            "python_application.py": (
-                FIXTURE_ROOT / "python_application.py"
-            ).read_bytes(),
+            "python_application.py": source,
         }
     )
 
 
-def build_typescript_archive() -> bytes:
+def build_typescript_archive(*, stale: bool = False) -> bytes:
     sdk_module = (
         REPOSITORY_ROOT / "typescript" / "dist" / "applications" / "index.js"
     ).as_uri()
     runtime = f"""
+// Initialization retry archive variant: {"stale" if stale else "current"}.
 import {{
   File,
   FunctionError,
+  Future,
   RequestContext,
   RequestError,
   getFunction,
@@ -942,6 +1198,12 @@ const add = registerFunction(
 const failingChild = registerFunction({json.dumps(FAILING_FUNCTION)}, async (value) => {{
   throw new Error(`child failed for ${{value}}`);
 }});
+const requestFailingChild = registerFunction(
+  {json.dumps(REQUEST_FAILING_FUNCTION)},
+  async (value) => {{
+    throw new RequestError(`child request failed for ${{value}}`);
+  }},
+);
 const identityFile = registerFunction(async (value) => value, {{
   name: {json.dumps(IDENTITY_FILE_FUNCTION)},
   parameters: [schema.parameter("value", schema.file())],
@@ -951,6 +1213,53 @@ const identityFile = registerFunction(async (value) => value, {{
 registerApplication("parity_value", async (value) => ({{ value }}));
 registerApplication("parity_multipart", async (left, right) => left * right);
 registerApplication("parity_child", async (value) => double(value));
+registerApplication("parity_wait_first_failure_after_success", async (value) => {{
+  const completed = double.future(value).run();
+  await completed.result();
+  const pending = double.future(value + 1);
+  const waited = await Future.wait([completed, pending], {{
+    returnWhen: "first_failure",
+  }});
+  return {{ done: waited.done.length, not_done: waited.notDone.length }};
+}});
+registerApplication(
+  "parity_wait_first_failure_after_success_and_failure",
+  async (value) => {{
+    const completed = double.future(value).run();
+    await completed.result();
+    const failing = failingChild.future(value + 1);
+    const waited = await Future.wait([completed, failing], {{
+      returnWhen: "first_failure",
+    }});
+    return {{ done: waited.done.length, not_done: waited.notDone.length }};
+  }},
+);
+registerApplication("parity_wait_causal_replay", async (value) => {{
+  const first = double.future(value).run();
+  const second = double.future(value + 1).run();
+  const waited = await Future.wait([first, second], {{
+    returnWhen: "first_completed",
+  }});
+  const marker = await double(value + 2);
+  return {{
+    done: waited.done.length,
+    not_done: waited.notDone.length,
+    marker,
+    results: [await first, await second],
+  }};
+}});
+registerApplication("parity_wait_batched_results", async (value) => {{
+  const first = double.future(value).run();
+  const second = double.future(value + 1).run();
+  const waited = await Future.wait([first, second], {{
+    returnWhen: "first_completed",
+  }});
+  return {{
+    done: waited.done.length,
+    not_done: waited.notDone.length,
+    results: [await first, await second],
+  }};
+}});
 registerApplication(
   "parity_map",
   async (value) => double.map([value, value + 1, value + 2]),
@@ -959,6 +1268,14 @@ registerApplication(
   "parity_reduce",
   async (value) => add.reduce([value, value + 1, value + 2], 10),
 );
+registerApplication(
+  "parity_reduce_no_initial",
+  async (value) => add.reduce([value, value + 1, value + 2]),
+);
+registerApplication(
+  "parity_map_reduce",
+  async (value) => add.reduce(double.map([value, value + 1, value + 2]), 0),
+);
 registerApplication("parity_tail_call", async (value) => double.tailCall(value));
 registerApplication("parity_handled_child_failure", async (value) => {{
   try {{
@@ -966,6 +1283,15 @@ registerApplication("parity_handled_child_failure", async (value) => {{
   }} catch (error) {{
     if (!(error instanceof FunctionError)) throw error;
     return "caught:function_error";
+  }}
+  return "unexpected:success";
+}});
+registerApplication("parity_handled_child_request_error", async (value) => {{
+  try {{
+    await requestFailingChild(value);
+  }} catch (error) {{
+    if (!(error instanceof RequestError)) throw error;
+    return "caught:request_error";
   }}
   return "unexpected:success";
 }});
@@ -978,6 +1304,10 @@ registerApplication("parity_handled_creation_failure", async (value) => {{
   }}
   return "unexpected:success";
 }});
+registerApplication(
+  "parity_watcher_creation_failure",
+  async (value) => double(value),
+);
 registerApplication("parity_request_error", async (value) => {{
   throw new RequestError(`invalid value: ${{value}}`);
 }});
@@ -998,6 +1328,7 @@ registerApplication("parity_json_file", async (value) => {{
   return {{
     content: new TextDecoder().decode(result.content),
     content_type: result.contentType,
+    is_file: result instanceof File,
   }};
 }});
 registerApplication("parity_state", async (value) => {{
@@ -1022,7 +1353,9 @@ export function __tensorlakeGetFunction(name) {{
         "runtime": "typescript",
         "minimum_node_major": 24,
         "module": "runtime.mjs",
-        "functions": {name: {"name": name} for name in FUNCTION_NAMES},
+        "functions": {
+            name: {"name": name} for name in (*FUNCTION_NAMES, MISSING_FUNCTION)
+        },
     }
     return build_zip(
         {
@@ -1271,6 +1604,43 @@ def read_blob(blob: BLOB, offset: int, size: int) -> bytes:
     return bytes(output)
 
 
+def assert_structured_initialization_rejection(
+    executor: ExecutorProcess,
+    request: InitializeRequest,
+    description: str,
+) -> dict[str, Any]:
+    try:
+        response = executor.stub.initialize(request, timeout=RPC_TIMEOUT_SECONDS)
+    except grpc.RpcError as error:
+        raise AssertionError(
+            f"{executor.spec.language} rejected {description} with gRPC "
+            f"{error.code().name} instead of InitializeResponse"
+        ) from error
+    if response.outcome_code != INITIALIZATION_OUTCOME_CODE_FAILURE:
+        raise AssertionError(
+            f"{executor.spec.language} accepted {description}: {response!r}"
+        )
+    if (
+        not response.HasField("failure_reason")
+        or response.failure_reason != INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR
+    ):
+        raise AssertionError(
+            f"{executor.spec.language} returned the wrong failure reason for "
+            f"{description}: {response!r}"
+        )
+    if not response.HasField("error_message") or not response.error_message:
+        raise AssertionError(
+            f"{executor.spec.language} omitted the initialization error message "
+            f"for {description}"
+        )
+    return {
+        "transport": "initialize_response",
+        "outcome": "failure",
+        "failure_reason": "function_error",
+        "has_error_message": True,
+    }
+
+
 def initialize_executor(
     executor: ExecutorProcess, scenario: Scenario
 ) -> dict[str, Any]:
@@ -1279,27 +1649,96 @@ def initialize_executor(
         raise AssertionError(
             f"expected {executor.spec.language} GetInfo language, got {info.sdk_language}"
         )
-    initialized = executor.stub.initialize(
-        InitializeRequest(
+
+    preinitialization_allocation = CreateAllocationRequest(
+        allocation=Allocation(
+            request_id="compatibility-preinitialization-request",
+            function_call_id="compatibility-preinitialization-call",
+            allocation_id="compatibility-preinitialization-allocation",
+            inputs=FunctionInputs(
+                args=[],
+                arg_blobs=[],
+                request_error_blob=BLOB(id="unused-request-error"),
+            ),
+        )
+    )
+    try:
+        executor.stub.create_allocation(
+            preinitialization_allocation,
+            timeout=RPC_TIMEOUT_SECONDS,
+        )
+    except grpc.RpcError as error:
+        if error.code() != grpc.StatusCode.FAILED_PRECONDITION:
+            raise AssertionError(
+                f"{executor.spec.language} rejected a pre-initialization "
+                f"allocation with {error.code().name}, expected FAILED_PRECONDITION"
+            ) from error
+        if error.details() != "Function Executor is not initialized":
+            raise AssertionError(
+                f"{executor.spec.language} returned an unexpected "
+                f"pre-initialization error: {error.details()!r}"
+            ) from error
+    else:
+        raise AssertionError(
+            f"{executor.spec.language} accepted an allocation before initialization"
+        )
+
+    def initialization_request(
+        archive: bytes,
+        sha256_hash: str | None = None,
+        size: int | None = None,
+        function_name: str = scenario.name,
+    ) -> InitializeRequest:
+        if sha256_hash is None:
+            sha256_hash = hashlib.sha256(archive).hexdigest()
+        if size is None:
+            size = len(archive)
+        return InitializeRequest(
             function=FunctionRef(
                 namespace="compatibility",
                 application_name=scenario.name,
                 application_version=APPLICATION_VERSION,
-                function_name=scenario.name,
+                function_name=function_name,
             ),
             application_code=SerializedObject(
                 manifest=SerializedObjectManifest(
                     encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
                     encoding_version=0,
-                    size=len(executor.spec.application_archive),
+                    size=size,
                     metadata_size=0,
-                    sha256_hash=hashlib.sha256(
-                        executor.spec.application_archive
-                    ).hexdigest(),
+                    sha256_hash=sha256_hash,
                 ),
-                data=executor.spec.application_archive,
+                data=archive,
             ),
+        )
+
+    integrity_rejection = assert_structured_initialization_rejection(
+        executor,
+        initialization_request(
+            executor.spec.application_archive,
+            sha256_hash="0" * 64,
         ),
+        "application code with a false SHA-256",
+    )
+    size_rejection = assert_structured_initialization_rejection(
+        executor,
+        initialization_request(
+            executor.spec.application_archive,
+            size=len(executor.spec.application_archive) + 1,
+        ),
+        "application code with a false size",
+    )
+    post_import_rejection = assert_structured_initialization_rejection(
+        executor,
+        initialization_request(
+            executor.spec.failed_initialization_archive,
+            function_name=MISSING_FUNCTION,
+        ),
+        "an application function absent after module import",
+    )
+
+    initialized = executor.stub.initialize(
+        initialization_request(executor.spec.application_archive),
         timeout=RPC_TIMEOUT_SECONDS,
     )
     if initialized.outcome_code != INITIALIZATION_OUTCOME_CODE_SUCCESS:
@@ -1315,9 +1754,184 @@ def initialize_executor(
         raise AssertionError(f"{executor.spec.language} executor is not healthy")
     return {
         "protocol_version": info.version,
+        "initialization_integrity_rejected": integrity_rejection,
+        "initialization_size_rejected": size_rejection,
+        "initialization_post_import_rejected": post_import_rejection,
+        "initialization_changed_archive_retry": (
+            executor.spec.failed_initialization_archive
+            != executor.spec.application_archive
+        ),
+        "preinitialization_allocation_status": "FAILED_PRECONDITION",
         "initialized": True,
         "healthy": True,
     }
+
+
+def validate_malformed_allocations(
+    executor: ExecutorProcess,
+) -> dict[str, str]:
+    malformed_requests = (
+        (
+            "argument_blob_count",
+            CreateAllocationRequest(
+                allocation=Allocation(
+                    request_id="compatibility-malformed-count-request",
+                    function_call_id="compatibility-malformed-count-call",
+                    allocation_id="compatibility-malformed-count-allocation",
+                    inputs=FunctionInputs(
+                        args=[
+                            SerializedObjectInsideBLOB(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
+                                    encoding_version=0,
+                                    size=0,
+                                    metadata_size=0,
+                                    sha256_hash=hashlib.sha256(b"").hexdigest(),
+                                    content_type="application/json",
+                                ),
+                                offset=0,
+                            )
+                        ],
+                        arg_blobs=[],
+                        request_error_blob=BLOB(id="unused-request-error"),
+                    ),
+                )
+            ),
+        ),
+        (
+            "missing_request_error_blob",
+            CreateAllocationRequest(
+                allocation=Allocation(
+                    request_id="compatibility-missing-error-request",
+                    function_call_id="compatibility-missing-error-call",
+                    allocation_id="compatibility-missing-error-allocation",
+                    inputs=FunctionInputs(args=[], arg_blobs=[]),
+                )
+            ),
+        ),
+        (
+            "missing_argument_manifest",
+            CreateAllocationRequest(
+                allocation=Allocation(
+                    request_id="compatibility-missing-manifest-request",
+                    function_call_id="compatibility-missing-manifest-call",
+                    allocation_id="compatibility-missing-manifest-allocation",
+                    inputs=FunctionInputs(
+                        args=[SerializedObjectInsideBLOB(offset=0)],
+                        arg_blobs=[BLOB(id="unused-input")],
+                        request_error_blob=BLOB(id="unused-request-error"),
+                    ),
+                )
+            ),
+        ),
+        (
+            "missing_blob_chunk_uri",
+            CreateAllocationRequest(
+                allocation=Allocation(
+                    request_id="compatibility-missing-uri-request",
+                    function_call_id="compatibility-missing-uri-call",
+                    allocation_id="compatibility-missing-uri-allocation",
+                    inputs=FunctionInputs(
+                        args=[
+                            SerializedObjectInsideBLOB(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
+                                    encoding_version=0,
+                                    size=0,
+                                    metadata_size=0,
+                                    sha256_hash=hashlib.sha256(b"").hexdigest(),
+                                    content_type="application/json",
+                                ),
+                                offset=0,
+                            )
+                        ],
+                        arg_blobs=[
+                            BLOB(id="invalid-input", chunks=[BLOBChunk(size=0)])
+                        ],
+                        request_error_blob=BLOB(id="unused-request-error"),
+                    ),
+                )
+            ),
+        ),
+        (
+            "missing_metadata_size",
+            CreateAllocationRequest(
+                allocation=Allocation(
+                    request_id="compatibility-missing-metadata-request",
+                    function_call_id="compatibility-missing-metadata-call",
+                    allocation_id="compatibility-missing-metadata-allocation",
+                    inputs=FunctionInputs(
+                        args=[
+                            SerializedObjectInsideBLOB(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
+                                    encoding_version=0,
+                                    size=0,
+                                    sha256_hash=hashlib.sha256(b"").hexdigest(),
+                                    content_type="application/json",
+                                ),
+                                offset=0,
+                            )
+                        ],
+                        arg_blobs=[BLOB(id="unused-input")],
+                        request_error_blob=BLOB(id="unused-request-error"),
+                    ),
+                )
+            ),
+        ),
+        (
+            "oversized_metadata",
+            CreateAllocationRequest(
+                allocation=Allocation(
+                    request_id="compatibility-oversized-metadata-request",
+                    function_call_id="compatibility-oversized-metadata-call",
+                    allocation_id="compatibility-oversized-metadata-allocation",
+                    inputs=FunctionInputs(
+                        args=[
+                            SerializedObjectInsideBLOB(
+                                manifest=SerializedObjectManifest(
+                                    encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_UTF8_JSON,
+                                    encoding_version=0,
+                                    size=0,
+                                    metadata_size=1,
+                                    sha256_hash=hashlib.sha256(b"").hexdigest(),
+                                    content_type="application/json",
+                                ),
+                                offset=0,
+                            )
+                        ],
+                        arg_blobs=[BLOB(id="unused-input")],
+                        request_error_blob=BLOB(id="unused-request-error"),
+                    ),
+                )
+            ),
+        ),
+    )
+    rejection_statuses = {}
+    for name, request in malformed_requests:
+        try:
+            executor.stub.create_allocation(request, timeout=RPC_TIMEOUT_SECONDS)
+        except grpc.RpcError as error:
+            if error.code() != grpc.StatusCode.INVALID_ARGUMENT:
+                raise AssertionError(
+                    f"{executor.spec.language} rejected malformed allocation "
+                    f"{request.allocation.allocation_id} with "
+                    f"{error.code().name}, expected INVALID_ARGUMENT"
+                ) from error
+            rejection_statuses[name] = error.code().name.lower()
+            continue
+        raise AssertionError(
+            f"{executor.spec.language} accepted malformed allocation "
+            f"{request.allocation.allocation_id}"
+        )
+    listed = executor.stub.list_allocations(
+        ListAllocationsRequest(), timeout=RPC_TIMEOUT_SECONDS
+    )
+    if listed.allocations:
+        raise AssertionError(
+            f"{executor.spec.language} retained a rejected malformed allocation"
+        )
+    return rejection_statuses
 
 
 def drive_allocation(
@@ -1376,6 +1990,7 @@ def run_scenario(spec: ExecutorSpec, scenario: Scenario) -> dict[str, Any]:
         directory = Path(temporary)
         with ExecutorProcess(spec) as executor:
             lifecycle = initialize_executor(executor, scenario)
+            malformed_allocations = validate_malformed_allocations(executor)
             replay_events = None
             replay_mode = REPLAY_MODE_NONE
             if scenario.replay_mismatch:
@@ -1400,6 +2015,7 @@ def run_scenario(spec: ExecutorSpec, scenario: Scenario) -> dict[str, Any]:
             validate_trace(spec.language, scenario, trace)
             result: dict[str, Any] = {
                 **lifecycle,
+                "malformed_allocations": malformed_allocations,
                 "terminal": trace["terminal"],
                 "event_counts": trace["event_counts"],
                 "state_operations": trace["state_operations"],
@@ -1424,6 +2040,223 @@ def run_scenario(spec: ExecutorSpec, scenario: Scenario) -> dict[str, Any]:
                     "event_counts": replay_trace["event_counts"],
                 }
             return result
+
+
+def validate_shutdown_execution_batch(
+    spec: ExecutorSpec, batch_future: Any
+) -> dict[str, Any]:
+    try:
+        response = batch_future.result(timeout=RPC_TIMEOUT_SECONDS)
+    except grpc.RpcError as error:
+        if spec.language != "python":
+            raise AssertionError(
+                "TypeScript executor closed the execution-log RPC without "
+                "delivering a terminal allocation event"
+            ) from error
+        if error.code() != grpc.StatusCode.UNAVAILABLE:
+            raise AssertionError(
+                "Python executor shutdown returned an unexpected execution-log "
+                f"RPC status: {error.code().name}"
+            ) from error
+        return {
+            "terminal_delivery": "connection_closed",
+            "terminal_rpc_status": error.code().name,
+        }
+
+    if spec.language == "python":
+        raise AssertionError(
+            "Python executor unexpectedly returned an execution-log batch after "
+            f"SIGTERM: {response!r}"
+        )
+    if len(response.events) != 1:
+        raise AssertionError(
+            "TypeScript executor must deliver exactly one terminal event during "
+            f"shutdown, got {len(response.events)}"
+        )
+    event = response.events[0]
+    if event.WhichOneof("event") != "finish_allocation":
+        raise AssertionError(
+            "TypeScript executor returned a non-terminal execution event during "
+            f"shutdown: {event!r}"
+        )
+    finish = event.finish_allocation
+    if (
+        finish.outcome_code != ALLOCATION_OUTCOME_CODE_FAILURE
+        or finish.failure_reason
+        != AllocationFailureReason.Value("ALLOCATION_FAILURE_REASON_FUNCTION_ERROR")
+    ):
+        raise AssertionError(
+            "TypeScript executor shutdown terminal event is not a function-error "
+            f"failure: {finish!r}"
+        )
+    return {
+        "terminal_delivery": "function_error",
+        "terminal_event_count": 1,
+    }
+
+
+def run_shutdown_during_input_probe(
+    spec: ExecutorSpec, scenario: Scenario
+) -> dict[str, Any]:
+    request_started = threading.Event()
+    release_request = threading.Event()
+
+    class BlockingBLOBHandler(BaseHTTPRequestHandler):
+        def do_GET(self) -> None:
+            request_started.set()
+            release_request.wait(timeout=10)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BlockingBLOBHandler)
+    server.daemon_threads = True
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=f"tensorlake-fe-shutdown-{spec.language}-"
+        ) as temporary:
+            directory = Path(temporary)
+            with ExecutorProcess(spec) as executor:
+                initialize_executor(executor, scenario)
+                allocation_id = f"compatibility-shutdown-{spec.language}-allocation"
+                inputs = input_for(directory, scenario)
+                if len(inputs.arg_blobs) != 1 or len(inputs.arg_blobs[0].chunks) != 1:
+                    raise AssertionError("shutdown probe requires one input BLOB chunk")
+                inputs.arg_blobs[0].chunks[
+                    0
+                ].uri = f"http://127.0.0.1:{server.server_port}/blocked-input"
+                executor.stub.create_allocation(
+                    CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id=f"compatibility-shutdown-{spec.language}-request",
+                            function_call_id=f"compatibility-shutdown-{spec.language}-call",
+                            allocation_id=allocation_id,
+                            inputs=inputs,
+                            replay_mode=REPLAY_MODE_NONE,
+                        )
+                    ),
+                    timeout=RPC_TIMEOUT_SECONDS,
+                )
+                if not request_started.wait(timeout=RPC_TIMEOUT_SECONDS):
+                    raise AssertionError(
+                        f"{spec.language} executor did not start the blocking "
+                        f"input BLOB request:\n{executor.logs()}"
+                    )
+                batch_future = executor.stub.get_allocation_execution_log_batch.future(
+                    GetAllocationExecutionLogBatchRequest(allocation_id=allocation_id),
+                    timeout=RPC_TIMEOUT_SECONDS,
+                )
+                process_result = executor.terminate_gracefully(
+                    pending_operation="input BLOB download"
+                )
+                return {
+                    **process_result,
+                    **validate_shutdown_execution_batch(spec, batch_future),
+                }
+    finally:
+        release_request.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1)
+
+
+def run_shutdown_during_output_probe(
+    spec: ExecutorSpec, scenario: Scenario
+) -> dict[str, Any]:
+    request_started = threading.Event()
+    release_request = threading.Event()
+
+    class BlockingBLOBHandler(BaseHTTPRequestHandler):
+        def do_PUT(self) -> None:
+            request_started.set()
+            release_request.wait(timeout=10)
+
+        def log_message(self, format: str, *args: Any) -> None:
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BlockingBLOBHandler)
+    server.daemon_threads = True
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    try:
+        with tempfile.TemporaryDirectory(
+            prefix=f"tensorlake-fe-output-shutdown-{spec.language}-"
+        ) as temporary:
+            directory = Path(temporary)
+            with ExecutorProcess(spec) as executor:
+                initialize_executor(executor, scenario)
+                allocation_id = (
+                    f"compatibility-output-shutdown-{spec.language}-allocation"
+                )
+                executor.stub.create_allocation(
+                    CreateAllocationRequest(
+                        allocation=Allocation(
+                            request_id=f"compatibility-output-shutdown-{spec.language}-request",
+                            function_call_id=f"compatibility-output-shutdown-{spec.language}-call",
+                            allocation_id=allocation_id,
+                            inputs=input_for(directory, scenario),
+                            replay_mode=REPLAY_MODE_NONE,
+                        )
+                    ),
+                    timeout=RPC_TIMEOUT_SECONDS,
+                )
+                state_stream = executor.stub.watch_allocation_state(
+                    WatchAllocationStateRequest(allocation_id=allocation_id),
+                    timeout=RPC_TIMEOUT_SECONDS,
+                )
+                output_request = None
+                for state in state_stream:
+                    if state.output_blob_requests:
+                        output_request = state.output_blob_requests[0]
+                        break
+                if output_request is None:
+                    raise AssertionError(
+                        f"{spec.language} executor did not request an output BLOB"
+                    )
+                executor.stub.send_allocation_update(
+                    AllocationUpdate(
+                        allocation_id=allocation_id,
+                        output_blob=AllocationOutputBlob(
+                            status=Status(code=0),
+                            blob=BLOB(
+                                id=output_request.id,
+                                chunks=[
+                                    BLOBChunk(
+                                        uri=(
+                                            f"http://127.0.0.1:{server.server_port}"
+                                            "/blocked-output"
+                                        ),
+                                        size=output_request.size,
+                                    )
+                                ],
+                            ),
+                        ),
+                    ),
+                    timeout=RPC_TIMEOUT_SECONDS,
+                )
+                if not request_started.wait(timeout=RPC_TIMEOUT_SECONDS):
+                    raise AssertionError(
+                        f"{spec.language} executor did not start the blocking "
+                        f"output BLOB request:\n{executor.logs()}"
+                    )
+                batch_future = executor.stub.get_allocation_execution_log_batch.future(
+                    GetAllocationExecutionLogBatchRequest(allocation_id=allocation_id),
+                    timeout=RPC_TIMEOUT_SECONDS,
+                )
+                process_result = executor.terminate_gracefully(
+                    pending_operation="output BLOB upload"
+                )
+                return {
+                    **process_result,
+                    **validate_shutdown_execution_batch(spec, batch_future),
+                }
+    finally:
+        release_request.set()
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=1)
 
 
 def validate_trace(language: str, scenario: Scenario, trace: dict[str, Any]) -> None:
@@ -1471,19 +2304,52 @@ def validate_child_calls(
     if scenario.behavior in (
         "double",
         "tail_call",
+        "wait_first_failure",
+        "wait_first_failure_with_failure",
+        "wait_causal_replay",
+        "wait_batched_results",
         "watcher_failure",
+        "watcher_request_error",
         "creation_failure",
+        "watcher_creation_failure",
     ):
-        expected_function = (
-            FAILING_FUNCTION
-            if scenario.behavior in ("watcher_failure", "creation_failure")
-            else DOUBLE_FUNCTION
+        expected_functions = (
+            [DOUBLE_FUNCTION, FAILING_FUNCTION]
+            if scenario.behavior == "wait_first_failure_with_failure"
+            else [
+                (
+                    REQUEST_FAILING_FUNCTION
+                    if scenario.behavior == "watcher_request_error"
+                    else (
+                        FAILING_FUNCTION
+                        if scenario.behavior in ("watcher_failure", "creation_failure")
+                        else DOUBLE_FUNCTION
+                    )
+                )
+            ]
+            * len(calls)
         )
-        if any(
-            call["function"] != expected_function
-            or call["arguments"] != [scenario.input]
-            or call["special"] is not None
-            for call in calls
+        expected_arguments = (
+            [
+                [scenario.input],
+                [scenario.input + 1],
+                [scenario.input + 2],
+            ]
+            if scenario.behavior == "wait_causal_replay"
+            else (
+                [[scenario.input], [scenario.input + 1]]
+                if scenario.behavior
+                in (
+                    "wait_first_failure",
+                    "wait_first_failure_with_failure",
+                    "wait_batched_results",
+                )
+                else [[scenario.input]] * len(calls)
+            )
+        )
+        if [call["arguments"] for call in calls] != expected_arguments or any(
+            call["function"] != expected_function or call["special"] is not None
+            for call, expected_function in zip(calls, expected_functions)
         ):
             raise AssertionError(
                 f"{language} {scenario.name} child-call arguments differ: {calls!r}"
@@ -1508,18 +2374,74 @@ def validate_child_calls(
                 for call in calls
             ):
                 raise AssertionError(f"TypeScript map protocol differs: {calls!r}")
-    elif scenario.behavior == "reduce":
-        expected = [
-            {
-                "function": ADD_FUNCTION,
-                "arguments": [1, 2, 3],
-                "keyword_arguments": {"initial": 10},
-                "special": "reduce",
-            }
-        ]
+    elif scenario.behavior in ("reduce", "reduce_no_initial"):
+        if scenario.behavior == "reduce":
+            expected = [
+                {
+                    "function": ADD_FUNCTION,
+                    "arguments": [1, 2, 3],
+                    "keyword_arguments": {"initial": 10},
+                    "special": "reduce",
+                }
+            ]
+        elif language == "python":
+            expected = [
+                {
+                    "function": ADD_FUNCTION,
+                    "arguments": [1, 2, 3],
+                    "keyword_arguments": {},
+                    "special": "reduce",
+                }
+            ]
+        else:
+            expected = [
+                {
+                    "function": ADD_FUNCTION,
+                    "arguments": [2, 3],
+                    "keyword_arguments": {"initial": 1},
+                    "special": "reduce",
+                }
+            ]
         actual = without_durable_ids(calls)
         if actual != expected:
             raise AssertionError(f"{language} reduce protocol differs: {actual!r}")
+    elif scenario.behavior == "map_reduce":
+        if language == "python":
+            expected = [
+                {
+                    "function": DOUBLE_FUNCTION,
+                    "arguments": [1, 2, 3],
+                    "keyword_arguments": {},
+                    "special": "map",
+                },
+                {
+                    "function": ADD_FUNCTION,
+                    "arguments": [2, 4, 6],
+                    "keyword_arguments": {"initial": 0},
+                    "special": "reduce",
+                },
+            ]
+        else:
+            expected = [
+                {
+                    "function": DOUBLE_FUNCTION,
+                    "arguments": [value],
+                    "keyword_arguments": {},
+                    "special": None,
+                }
+                for value in (1, 2, 3)
+            ]
+            expected.append(
+                {
+                    "function": ADD_FUNCTION,
+                    "arguments": [2, 4, 6],
+                    "keyword_arguments": {"initial": 0},
+                    "special": "reduce",
+                }
+            )
+        actual = without_durable_ids(calls)
+        if actual != expected:
+            raise AssertionError(f"{language} map/reduce protocol differs: {actual!r}")
 
 
 def validate_replay_trace(scenario: Scenario, trace: dict[str, Any]) -> None:
@@ -1556,8 +2478,19 @@ def enum_suffix(value: str, prefix: str) -> str:
 def comparable_result(result: dict[str, Any]) -> dict[str, Any]:
     comparable = {
         "protocol_version": result["protocol_version"],
+        "initialization_integrity_rejected": result[
+            "initialization_integrity_rejected"
+        ],
+        "initialization_size_rejected": result["initialization_size_rejected"],
+        "initialization_post_import_rejected": result[
+            "initialization_post_import_rejected"
+        ],
+        "initialization_changed_archive_retry": result[
+            "initialization_changed_archive_retry"
+        ],
         "initialized": result["initialized"],
         "healthy": result["healthy"],
+        "malformed_allocations": result["malformed_allocations"],
         "terminal": result["terminal"],
         "state_operations": result["state_operations"],
         "progress": result["progress"],
@@ -1604,13 +2537,35 @@ def main() -> None:
             language="python",
             command=(sys.executable, "-m", "tensorlake.function_executor.main"),
             application_archive=build_python_archive(),
+            failed_initialization_archive=build_python_archive(stale=True),
         ),
         ExecutorSpec(
             language="typescript",
             command=("node", str(typescript_entrypoint)),
             application_archive=build_typescript_archive(),
+            failed_initialization_archive=build_typescript_archive(stale=True),
         ),
     ]
+    shutdown_results = {}
+    for spec in specs:
+        shutdown_results[spec.language] = {
+            "input_blob": run_shutdown_during_input_probe(spec, SCENARIOS[0]),
+            "output_blob": run_shutdown_during_output_probe(spec, SCENARIOS[0]),
+        }
+        if (
+            shutdown_results[spec.language]["input_blob"]
+            != shutdown_results[spec.language]["output_blob"]
+        ):
+            raise AssertionError(
+                f"{spec.language} executor shutdown differs between blocked "
+                f"input and output BLOB I/O: {shutdown_results[spec.language]!r}"
+            )
+    print(
+        "executor_shutdown_during_blob_io: "
+        f"{json.dumps(shutdown_results, sort_keys=True)}",
+        flush=True,
+    )
+
     results: dict[str, dict[str, Any]] = {}
     for scenario in selected:
         language_results = {

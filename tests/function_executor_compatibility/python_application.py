@@ -1,8 +1,10 @@
 import json
 
 from tensorlake.applications import (
+    RETURN_WHEN,
     File,
     FunctionError,
+    Future,
     RequestContext,
     RequestError,
     application,
@@ -23,6 +25,11 @@ def parity_add(accumulator: int, value: int) -> int:
 @function()
 def parity_failing_child(value: int) -> int:
     raise RuntimeError(f"child failed for {value}")
+
+
+@function()
+def parity_request_failing_child(value: int) -> int:
+    raise RequestError(f"child request failed for {value}")
 
 
 @function()
@@ -50,6 +57,68 @@ def parity_child(value: int) -> int:
 
 @application()
 @function()
+def parity_wait_first_failure_after_success(value: int) -> dict[str, int]:
+    completed = parity_double.future(value).run()
+    completed.result()
+    pending = parity_double.future(value + 1)
+    done, not_done = Future.wait(
+        [completed, pending],
+        return_when=RETURN_WHEN.FIRST_FAILURE,
+    )
+    return {"done": len(done), "not_done": len(not_done)}
+
+
+@application()
+@function()
+def parity_wait_first_failure_after_success_and_failure(
+    value: int,
+) -> dict[str, int]:
+    completed = parity_double.future(value).run()
+    completed.result()
+    failing = parity_failing_child.future(value + 1)
+    done, not_done = Future.wait(
+        [completed, failing],
+        return_when=RETURN_WHEN.FIRST_FAILURE,
+    )
+    return {"done": len(done), "not_done": len(not_done)}
+
+
+@application()
+@function()
+def parity_wait_causal_replay(value: int) -> dict[str, object]:
+    first = parity_double.future(value).run()
+    second = parity_double.future(value + 1).run()
+    done, not_done = Future.wait(
+        [first, second],
+        return_when=RETURN_WHEN.FIRST_COMPLETED,
+    )
+    marker = parity_double(value + 2)
+    return {
+        "done": len(done),
+        "not_done": len(not_done),
+        "marker": marker,
+        "results": [first.result(), second.result()],
+    }
+
+
+@application()
+@function()
+def parity_wait_batched_results(value: int) -> dict[str, object]:
+    first = parity_double.future(value).run()
+    second = parity_double.future(value + 1).run()
+    done, not_done = Future.wait(
+        [first, second],
+        return_when=RETURN_WHEN.FIRST_COMPLETED,
+    )
+    return {
+        "done": len(done),
+        "not_done": len(not_done),
+        "results": [first.result(), second.result()],
+    }
+
+
+@application()
+@function()
 def parity_map(value: int) -> list[int]:
     return parity_double.map([value, value + 1, value + 2])
 
@@ -58,6 +127,19 @@ def parity_map(value: int) -> list[int]:
 @function()
 def parity_reduce(value: int) -> int:
     return parity_add.reduce([value, value + 1, value + 2], 10)
+
+
+@application()
+@function()
+def parity_reduce_no_initial(value: int) -> int:
+    return parity_add.reduce([value, value + 1, value + 2])
+
+
+@application()
+@function()
+def parity_map_reduce(value: int) -> int:
+    mapped = parity_double.map([value, value + 1, value + 2])
+    return parity_add.reduce(mapped, 0)
 
 
 @application()
@@ -78,12 +160,28 @@ def parity_handled_child_failure(value: int) -> str:
 
 @application()
 @function()
+def parity_handled_child_request_error(value: int) -> str:
+    try:
+        parity_request_failing_child(value)
+    except RequestError:
+        return "caught:request_error"
+    return "unexpected:success"
+
+
+@application()
+@function()
 def parity_handled_creation_failure(value: int) -> str:
     try:
         parity_failing_child(value)
     except FunctionError:
         return "caught:creation_error"
     return "unexpected:success"
+
+
+@application()
+@function()
+def parity_watcher_creation_failure(value: int) -> int:
+    return parity_double(value)
 
 
 @application()
@@ -106,12 +204,13 @@ def parity_file(value: int) -> File:
 
 @application()
 @function()
-def parity_json_file(value: int) -> dict[str, str]:
+def parity_json_file(value: int) -> dict:
     content = json.dumps({"value": value}, separators=(",", ":")).encode()
     result = parity_identity_file(File(content, "application/json"))
     return {
         "content": result.content.decode(),
         "content_type": result.content_type,
+        "is_file": isinstance(result, File),
     }
 
 
