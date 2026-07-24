@@ -367,7 +367,6 @@ export async function createSandboxImage(
 
   try {
     if (effectiveName === DEFAULT_IMAGE_NAME) {
-      // eslint-disable-next-line no-console
       console.warn(
         `Building sandbox image with the default name "${DEFAULT_IMAGE_NAME}". ` +
           "Pass `registeredName` or `Image({ name })` to avoid collisions " +
@@ -469,7 +468,6 @@ export async function importSandboxImage(
     options.registeredName ?? defaultRegisteredNameFromImage(reference);
 
   if (effectiveName === DEFAULT_IMAGE_NAME) {
-    // eslint-disable-next-line no-console
     console.warn(
       `Importing sandbox image with the default name "${DEFAULT_IMAGE_NAME}". ` +
         "Pass `registeredName` to avoid collisions with other default-named " +
