@@ -172,9 +172,26 @@ class StubNative {
     name: string,
     path: string,
     version: string,
+    offset?: number,
+    length?: number,
   ): Promise<TracedBytes> {
-    this.record("readFilesystemFile", [name, path, version]);
-    return { traceId: "trace-1", data: this.options.fileBytes ?? Buffer.alloc(0) };
+    this.record("readFilesystemFile", [
+      name,
+      path,
+      version,
+      ...(offset !== undefined ? [offset, length] : []),
+    ]);
+    const full = this.options.fileBytes ?? Buffer.alloc(0);
+    const data =
+      offset !== undefined && length !== undefined
+        ? full.subarray(offset, offset + length)
+        : full;
+    return {
+      traceId: "trace-1",
+      data,
+      contentId: COMMIT,
+      fullSize: full.byteLength,
+    };
   }
 
   async listFilesystemTree(
@@ -449,6 +466,26 @@ describe("FilesystemClient", () => {
       FileNotFoundInFilesystemError,
     );
     await expect(failingFs.readFile("//")).rejects.toThrow(FilesystemError);
+  });
+
+  it("reads a server-side range with identity and full size in one request", async () => {
+    const stub = new StubNative({ fileBytes: Buffer.from("0123456789") });
+    const fs = await clientWith(stub).create("my-fs");
+
+    const read = await fs.readFileWithMetadata("data.bin", {
+      range: { offset: 3, length: 4 },
+    });
+
+    expect(Buffer.from(read.data).toString()).toBe("3456");
+    expect(read.contentId).toBe(COMMIT);
+    expect(read.size).toBe(10);
+    expect(stub.calls.at(-1)!.args).toEqual([
+      "my-fs",
+      "data.bin",
+      "main",
+      3,
+      4,
+    ]);
   });
 
   it("lists files with paths and modes", async () => {

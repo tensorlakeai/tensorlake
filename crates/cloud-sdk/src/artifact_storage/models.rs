@@ -172,6 +172,13 @@ pub struct NativeHeadResponse {
     pub generation: u64,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct NativeFilesystemFileRead {
+    pub data: Vec<u8>,
+    pub content_id: String,
+    pub full_size: u64,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct NativeDirectUploadLeaseResponse {
     pub lease_id: String,

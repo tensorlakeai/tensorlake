@@ -1,11 +1,11 @@
 """Bridge to the Rust cloud-sdk core for filesystem operations.
 
-All wire-protocol work (credential minting, chunked ingest with
-content-defined chunking and dedup, commit-job polling, transient retries,
-pagination) lives in the shared Rust `ArtifactStorageClient`, exposed through
-the ``tensorlake._cloud_sdk`` native module. This bridge only builds the
-native client and translates its exceptions into the filesystem exception
-hierarchy.
+All wire-protocol work (cached repository credential minting, checksum-bound
+direct object-store uploads, atomic native publication, transient retries,
+and pagination) lives in the shared Rust ``ArtifactStorageClient``, exposed
+through the ``tensorlake._cloud_sdk`` native module. This bridge only builds
+the long-lived native client and translates its exceptions into the
+filesystem exception hierarchy.
 """
 
 from __future__ import annotations

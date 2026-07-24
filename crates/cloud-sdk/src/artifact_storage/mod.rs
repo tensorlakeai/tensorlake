@@ -19,9 +19,9 @@ use models::{
     NativeDirectBlobTargetsRequest, NativeDirectBlobTargetsResponse, NativeDirectFilePathWrite,
     NativeDirectFileWrite, NativeDirectMutation, NativeDirectPathTransfer,
     NativeDirectPublishRequest, NativeDirectPublishResponse, NativeDirectUploadLeaseResponse,
-    NativeDirectUploadReceipt, NativeFilesystemSnapshot, NativeFilesystemSnapshotPage,
-    NativeFilesystemSnapshotRetentionResponse, NativeHeadResponse, REPO_KIND_FILESYSTEM, RepoInfo,
-    RepoMetaInfo,
+    NativeDirectUploadReceipt, NativeFilesystemFileRead, NativeFilesystemSnapshot,
+    NativeFilesystemSnapshotPage, NativeFilesystemSnapshotRetentionResponse, NativeHeadResponse,
+    REPO_KIND_FILESYSTEM, RepoInfo, RepoMetaInfo,
 };
 
 #[derive(Clone)]
@@ -131,7 +131,20 @@ impl ArtifactStorageClient {
         if let Some(credential) = Self::git_credential_from_env() {
             return Ok(credential);
         }
-        Ok(self.mint_token(project_id).await?.into_inner())
+        let key = (project_id.to_string(), "*".to_string());
+        if let Some(credential) = self.repo_credentials.lock().await.get(&key).cloned()
+            && git_credential_is_fresh(&credential)
+        {
+            return Ok(credential);
+        }
+        let credential = self.mint_token(project_id).await?.into_inner();
+        if git_credential_is_fresh(&credential) {
+            self.repo_credentials
+                .lock()
+                .await
+                .insert(key, credential.clone());
+        }
+        Ok(credential)
     }
 
     pub async fn create_repo(
@@ -657,6 +670,19 @@ impl ArtifactStorageClient {
         path: &str,
         version: &str,
     ) -> Result<Traced<Vec<u8>>, SdkError> {
+        self.read_native_filesystem_file_with_metadata(project_id, filesystem, path, version, None)
+            .await
+            .map(|read| read.map(|read| read.data))
+    }
+
+    pub async fn read_native_filesystem_file_with_metadata(
+        &self,
+        project_id: &str,
+        filesystem: &str,
+        path: &str,
+        version: &str,
+        range: Option<(u64, u64)>,
+    ) -> Result<Traced<NativeFilesystemFileRead>, SdkError> {
         let snapshot = native_snapshot_id(version)?;
         let path = encode_native_path(path)?;
         let suffix = match snapshot {
@@ -672,8 +698,52 @@ impl ArtifactStorageClient {
             &credential.git_username,
             &credential.token,
         )?;
+        let request = match range {
+            Some((offset, length)) => {
+                if length == 0 {
+                    return Err(SdkError::ClientError(
+                        "filesystem read range length must be positive".to_string(),
+                    ));
+                }
+                let end = offset.checked_add(length - 1).ok_or_else(|| {
+                    SdkError::ClientError("filesystem read range overflow".to_string())
+                })?;
+                request.header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
+            }
+            None => request,
+        };
         let response = handle_response(send_idempotent(request).await?).await?;
-        Ok(Traced::new(trace_id, response.bytes().await?.to_vec()))
+        let content_id = response
+            .headers()
+            .get("x-tensorlake-content-id")
+            .and_then(|value| value.to_str().ok())
+            .filter(|value| !value.is_empty())
+            .ok_or_else(|| {
+                SdkError::ClientError(
+                    "filesystem read response omitted content identity".to_string(),
+                )
+            })?
+            .to_string();
+        let full_size = match response.headers().get(reqwest::header::CONTENT_RANGE) {
+            Some(value) => value
+                .to_str()
+                .ok()
+                .and_then(|value| value.rsplit_once('/'))
+                .and_then(|(_, total)| total.parse::<u64>().ok()),
+            None => response.content_length(),
+        }
+        .ok_or_else(|| {
+            SdkError::ClientError("filesystem read response omitted total size".to_string())
+        })?;
+        let data = response.bytes().await?.to_vec();
+        Ok(Traced::new(
+            trace_id,
+            NativeFilesystemFileRead {
+                data,
+                content_id,
+                full_size,
+            },
+        ))
     }
 
     pub async fn list_native_filesystem_entries_page(
@@ -1064,6 +1134,7 @@ impl ArtifactStorageClient {
         for result in target_results {
             targets.targets.extend(result?.targets);
         }
+        validate_native_direct_targets(&blob_requests, &targets.targets)?;
 
         let mut receipts = Vec::new();
         let mut uploads = Vec::new();
@@ -1375,6 +1446,74 @@ fn validate_native_direct_path(path: &str) -> Result<(), SdkError> {
     Ok(())
 }
 
+fn validate_native_direct_targets(
+    requested: &[NativeDirectBlobRequest],
+    targets: &[models::NativeDirectBlobTarget],
+) -> Result<(), SdkError> {
+    use base64::Engine;
+
+    let expected = requested
+        .iter()
+        .map(|blob| (blob.blob_id.as_str(), blob.logical_len))
+        .collect::<std::collections::HashMap<_, _>>();
+    let mut seen = std::collections::HashSet::with_capacity(targets.len());
+    for target in targets {
+        let Some(expected_len) = expected.get(target.blob_id.as_str()) else {
+            return Err(SdkError::ClientError(format!(
+                "server returned an unrequested native blob target {}",
+                target.blob_id
+            )));
+        };
+        if !seen.insert(target.blob_id.as_str()) {
+            return Err(SdkError::ClientError(format!(
+                "server returned native blob target {} more than once",
+                target.blob_id
+            )));
+        }
+        if target.logical_len != *expected_len {
+            return Err(SdkError::ClientError(format!(
+                "server returned native blob target {} with length {}, expected {}",
+                target.blob_id, target.logical_len, expected_len
+            )));
+        }
+        if !target.already_present {
+            let checksum = target.checksum_sha256.as_deref().ok_or_else(|| {
+                SdkError::ClientError("direct upload target omitted SHA-256 header".to_string())
+            })?;
+            let digest = hex::decode(&target.blob_id).map_err(|error| {
+                SdkError::ClientError(format!(
+                    "server returned invalid native blob identity {}: {error}",
+                    target.blob_id
+                ))
+            })?;
+            let expected_checksum = base64::engine::general_purpose::STANDARD.encode(digest);
+            if checksum != expected_checksum {
+                return Err(SdkError::ClientError(format!(
+                    "server returned a checksum that does not match native blob target {}",
+                    target.blob_id
+                )));
+            }
+            if target.url.is_none() {
+                return Err(SdkError::ClientError(
+                    "direct upload target omitted URL".to_string(),
+                ));
+            }
+        }
+    }
+    if seen.len() != expected.len() {
+        let missing = expected
+            .keys()
+            .filter(|blob_id| !seen.contains(**blob_id))
+            .copied()
+            .collect::<Vec<_>>();
+        return Err(SdkError::ClientError(format!(
+            "server omitted native blob target(s): {}",
+            missing.join(", ")
+        )));
+    }
+    Ok(())
+}
+
 fn encode_native_path(path: &str) -> Result<String, SdkError> {
     validate_native_direct_path(path)?;
     Ok(path
@@ -1510,7 +1649,11 @@ async fn native_direct_request_body(
 
             let mut file = tokio::fs::File::open(path.as_ref()).await?;
             file.seek(std::io::SeekFrom::Start(*offset)).await?;
-            let stream = tokio_util::io::ReaderStream::new(file.take(*logical_len));
+            // ReaderStream's small default allocation creates excessive body frames for 64 MiB
+            // parts. A 1 MiB transport buffer keeps eight concurrent uploads memory-bounded while
+            // reaching object-store line rate with far less scheduler and HTTP framing overhead.
+            let stream =
+                tokio_util::io::ReaderStream::with_capacity(file.take(*logical_len), 1024 * 1024);
             Ok(reqwest::Body::wrap_stream(stream))
         }
     }
@@ -1616,12 +1759,12 @@ mod tests {
     use super::{
         ArtifactStorageClient, advance_pagination_cursor, encode_path_segment,
         git_credential_is_fresh, prepare_native_direct_publication, repo_list_query,
-        resolve_artifact_storage_url,
+        resolve_artifact_storage_url, validate_native_direct_targets,
     };
     use crate::ClientBuilder;
     use crate::artifact_storage::models::{
-        GitCredential, NativeDirectFilePathWrite, NativeDirectFileWrite, NativeDirectMutation,
-        REPO_KIND_FILESYSTEM,
+        GitCredential, NativeDirectBlobRequest, NativeDirectBlobTarget, NativeDirectFilePathWrite,
+        NativeDirectFileWrite, NativeDirectMutation, REPO_KIND_FILESYSTEM,
     };
 
     #[test]
@@ -1685,6 +1828,53 @@ mod tests {
     }
 
     #[test]
+    fn direct_upload_targets_must_exactly_match_the_request() {
+        use base64::Engine;
+
+        let blob_id = hex::encode(Sha256::digest(b"payload"));
+        let checksum = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(b"payload"));
+        let request = NativeDirectBlobRequest {
+            blob_id: blob_id.clone(),
+            logical_len: 7,
+        };
+        let target = NativeDirectBlobTarget {
+            blob_id: blob_id.clone(),
+            logical_len: 7,
+            already_present: false,
+            url: Some("https://objects.example/upload".to_string()),
+            checksum_sha256: Some(checksum),
+        };
+        assert!(
+            validate_native_direct_targets(
+                std::slice::from_ref(&request),
+                std::slice::from_ref(&target)
+            )
+            .is_ok()
+        );
+
+        let mut wrong_len = target.clone();
+        wrong_len.logical_len += 1;
+        assert!(
+            validate_native_direct_targets(std::slice::from_ref(&request), &[wrong_len]).is_err()
+        );
+        assert!(
+            validate_native_direct_targets(
+                std::slice::from_ref(&request),
+                &[target.clone(), target.clone()]
+            )
+            .is_err()
+        );
+        assert!(validate_native_direct_targets(std::slice::from_ref(&request), &[]).is_err());
+
+        let mut wrong_checksum = target;
+        wrong_checksum.checksum_sha256 = Some("not-the-content-digest".to_string());
+        assert!(
+            validate_native_direct_targets(std::slice::from_ref(&request), &[wrong_checksum])
+                .is_err()
+        );
+    }
+
+    #[test]
     fn git_repo_url_uses_git_root_project_repo_shape() {
         let api_client = ClientBuilder::new("https://api.tensorlake.ai")
             .bearer_token("token")
@@ -1728,6 +1918,31 @@ mod tests {
         assert!(!git_credential_is_fresh(&credential(String::new())));
     }
 
+    #[tokio::test]
+    async fn project_credential_reuses_the_shared_expiry_checked_cache() {
+        let api_client = ClientBuilder::new("http://127.0.0.1:1").build().unwrap();
+        let client = ArtifactStorageClient::new(api_client, "http://127.0.0.1:1").unwrap();
+        let cached = GitCredential {
+            token: "cached-project-token".to_string(),
+            token_type: "bearer".to_string(),
+            expires_at: (chrono::Utc::now() + chrono::Duration::minutes(5)).to_rfc3339(),
+            git_username: "project-user".to_string(),
+            repo_pattern: "*".to_string(),
+            scopes: vec!["project:admin".to_string()],
+        };
+        client
+            .repo_credentials
+            .lock()
+            .await
+            .insert(("project".to_string(), "*".to_string()), cached.clone());
+
+        assert_eq!(
+            client.git_credential_for_project("project").await.unwrap(),
+            cached,
+            "a cached project credential must avoid another control-plane mint"
+        );
+    }
+
     #[test]
     fn filesystem_inventory_fences_every_page() {
         assert_eq!(
@@ -1757,7 +1972,7 @@ mod tests {
         let server_blob_id = blob_id.clone();
         let server_payload = payload.clone();
         let server = tokio::spawn(async move {
-            for _ in 0..12 {
+            for _ in 0..13 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut bytes = Vec::new();
                 let header_end = loop {
@@ -1778,6 +1993,11 @@ mod tests {
                             .then(|| value.trim().parse::<usize>().unwrap())
                     })
                     .unwrap_or(0);
+                let range_header = headers.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("range")
+                        .then(|| value.trim().to_string())
+                });
                 while bytes.len() < header_end + content_len {
                     let mut chunk = [0u8; 4096];
                     let read = stream.read(&mut chunk).await.unwrap();
@@ -1881,7 +2101,11 @@ mod tests {
                         "/project/project/repos/filesystem/fs/snapshots/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?expected_permanence_epoch=7",
                     ) => Vec::new(),
                     ("GET", "/project/project/repos/filesystem/fs/files/data/probe.bin") => {
-                        server_payload.clone()
+                        if range_header.as_deref() == Some("bytes=8-14") {
+                            server_payload[8..15].to_vec()
+                        } else {
+                            server_payload.clone()
+                        }
                     }
                     ("GET", path) if path.starts_with(
                         "/project/project/repos/filesystem/fs/entries?path=data&limit=1000",
@@ -1898,9 +2122,26 @@ mod tests {
                     .unwrap(),
                     other => panic!("unexpected request: {other:?}"),
                 };
+                let native_file_headers = if path
+                    == "/project/project/repos/filesystem/fs/files/data/probe.bin"
+                {
+                    let content_range = range_header
+                        .as_ref()
+                        .map(|_| format!("Content-Range: bytes 8-14/{}\r\n", server_payload.len()))
+                        .unwrap_or_default();
+                    format!("x-tensorlake-content-id: {server_blob_id}\r\n{content_range}")
+                } else {
+                    String::new()
+                };
+                let response_status = if range_header.is_some() {
+                    "206 Partial Content"
+                } else {
+                    "200 OK"
+                };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-                    response_body.len()
+                    "HTTP/1.1 {response_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
+                    response_body.len(),
+                    native_file_headers,
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
                 stream.write_all(&response_body).await.unwrap();
@@ -1943,6 +2184,19 @@ mod tests {
                 .into_inner(),
             payload
         );
+        let ranged = client
+            .read_native_filesystem_file_with_metadata(
+                "project",
+                "filesystem",
+                "data/probe.bin",
+                "main",
+                Some((8, 7)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ranged.data, b"goes st");
+        assert_eq!(ranged.content_id, blob_id);
+        assert_eq!(ranged.full_size, payload.len() as u64);
         let entries = client
             .list_native_filesystem_entries_page(
                 "project",

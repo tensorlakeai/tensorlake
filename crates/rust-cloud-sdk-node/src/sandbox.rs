@@ -48,6 +48,8 @@ pub struct TracedJson {
 pub struct TracedBytes {
     pub trace_id: String,
     pub data: Buffer,
+    pub content_id: Option<String>,
+    pub full_size: Option<f64>,
 }
 
 /// A list of JSON-encoded events paired with the request's W3C trace id.
@@ -1000,6 +1002,8 @@ impl NativeSandboxProxyClient {
         Ok(TracedBytes {
             trace_id,
             data: data.into(),
+            content_id: None,
+            full_size: None,
         })
     }
 

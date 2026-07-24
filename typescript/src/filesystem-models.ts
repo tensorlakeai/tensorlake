@@ -54,6 +54,22 @@ export interface FileEntry {
   isSymlink: boolean;
 }
 
+/** Bytes plus immutable identity/size returned by one file request. */
+export interface FilesystemFileRead {
+  data: Uint8Array;
+  /** Stable native identity for the complete file content. */
+  contentId: string;
+  /** Size of the complete file, even when `data` is a requested range. */
+  size: number;
+}
+
+export interface FilesystemReadOptions {
+  /** Current `main` head when omitted; otherwise one retained snapshot id. */
+  version?: string;
+  /** Half-open byte selection expressed as offset + length. */
+  range?: { offset: number; length: number };
+}
+
 export function fileEntryFromWire(
   entry: { name: string; oid?: string; mode?: number; size?: number | null },
   dirPath: string,

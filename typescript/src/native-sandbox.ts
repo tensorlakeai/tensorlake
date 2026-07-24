@@ -33,6 +33,8 @@ export interface TracedJson {
 export interface TracedBytes {
   traceId: string;
   data: Buffer;
+  contentId?: string;
+  fullSize?: number;
 }
 
 export interface TracedEvents {
@@ -185,6 +187,8 @@ export interface NativeRepositoryClient {
     name: string,
     path: string,
     version: string,
+    offset?: number,
+    length?: number,
   ): Promise<TracedBytes>;
   listFilesystemTree(
     name: string,

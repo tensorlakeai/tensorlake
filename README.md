@@ -170,6 +170,11 @@ await fs.writeFileFromPath("models/weights.bin", "./weights.bin");
 await fs.copyFile("run/input.txt", "run/input-copy.txt");
 await fs.moveFile("run/config.json", "archive/config.json");
 
+// One request returns only the selected bytes plus full-file identity/size.
+const read = await fs.readFileWithMetadata("models/weights.bin", {
+  range: { offset: 0, length: 1024 * 1024 },
+});
+
 // Snapshot retention and forks are metadata-only operations.
 const snapshot = await fs.snapshot("ready for evaluation");
 const fork = await client.fork("agent-artifacts-eval", fs.name, snapshot.id);
@@ -182,6 +187,8 @@ await fs.deleteSnapshot(snapshot.id);
 `writeFilesFromPaths()` for large local files so neither JavaScript nor Rust retains the complete
 payload. A successful write is durable before it returns, but only the live head is retained
 automatically; `snapshot()` pins the current head permanently in one client/server round trip.
+`readFileWithMetadata()` returns immutable content identity and total size with the bytes; its
+optional range is executed server-side rather than downloading and slicing the complete file.
 Deleting a snapshot releases that retention root, while bytes still reachable from a live head,
 another snapshot, a fork, or a mount remain durable.
 

@@ -41,7 +41,9 @@ import {
   mountStatusFromRaw,
   trimSlashes,
   type FileEntry,
+  type FilesystemFileRead,
   type FilesystemInfo,
+  type FilesystemReadOptions,
   type FilesystemSnapshot,
   type FilesystemSnapshotInfo,
   type FilesystemStatus,
@@ -410,6 +412,9 @@ export class FilesystemClient {
 type FileData = Uint8Array | string;
 
 function toBuffer(data: FileData): Buffer {
+  // Copy Uint8Array inputs before crossing the async N-API boundary. Sharing
+  // the caller's backing store would let a post-call mutation change the
+  // bytes being hashed and published.
   return typeof data === "string" ? Buffer.from(data, "utf-8") : Buffer.from(data);
 }
 
@@ -696,19 +701,65 @@ export class Filesystem {
   // -- reads --------------------------------------------------------------------
 
   /**
-   * Read a file's bytes at `version` (branch, ref, or snapshot commit;
-   * defaults to the filesystem's default branch).
+   * Read a file's bytes at `version` (the current `main` head or a retained
+   * snapshot id; defaults to the filesystem's current head).
    */
   async readFile(path: string, version?: string): Promise<Uint8Array> {
+    return (await this.readFileWithMetadata(path, { version })).data;
+  }
+
+  /**
+   * Read bytes and immutable metadata in one request. A range is executed by
+   * Artifact Storage, so callers never download the unrequested remainder.
+   */
+  async readFileWithMetadata(
+    path: string,
+    options: FilesystemReadOptions = {},
+  ): Promise<FilesystemFileRead> {
     if (trimSlashes(path) === "") {
       throw new FilesystemError("file path must not be empty");
     }
-    const resolvedVersion = version || (await this.branch());
+    const range = options.range;
+    if (
+      range !== undefined &&
+      (!Number.isSafeInteger(range.offset) ||
+        range.offset < 0 ||
+        !Number.isSafeInteger(range.length) ||
+        range.length <= 0)
+    ) {
+      throw new FilesystemError(
+        "range requires a non-negative integer offset and positive integer length",
+      );
+    }
+    const resolvedVersion = options.version || (await this.branch());
     const traced = await callNative(
-      () => this.native.readFilesystemFile(this.name, path, resolvedVersion),
+      () =>
+        this.native.readFilesystemFile(
+          this.name,
+          path,
+          resolvedVersion,
+          range?.offset,
+          range?.length,
+        ),
       new FileNotFoundInFilesystemError(this.name, path),
     );
-    return new Uint8Array(traced.data);
+    const fullSize = traced.fullSize;
+    if (
+      !traced.contentId ||
+      fullSize === undefined ||
+      !Number.isSafeInteger(fullSize) ||
+      fullSize < 0 ||
+      traced.data.byteLength > fullSize
+    ) {
+      throw new FilesystemError(
+        "filesystem read response omitted content identity or total size",
+      );
+    }
+    return {
+      data: new Uint8Array(traced.data),
+      contentId: traced.contentId,
+      size: fullSize,
+    };
   }
 
   /** Read a file as UTF-8 text at `version`. Throws on non-UTF-8 content. */

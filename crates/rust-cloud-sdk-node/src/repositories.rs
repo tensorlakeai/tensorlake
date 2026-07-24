@@ -737,7 +737,30 @@ impl NativeRepositoryClient {
         name: String,
         path: String,
         version: String,
+        offset: Option<f64>,
+        length: Option<f64>,
     ) -> napi::Result<TracedBytes> {
+        let range = match (offset, length) {
+            (None, None) => None,
+            (Some(offset), Some(length))
+                if offset.is_finite()
+                    && length.is_finite()
+                    && offset >= 0.0
+                    && length > 0.0
+                    && offset.fract() == 0.0
+                    && length.fract() == 0.0
+                    && offset <= u64::MAX as f64
+                    && length <= u64::MAX as f64 =>
+            {
+                Some((offset as u64, length as u64))
+            }
+            _ => {
+                return Err(usage_error(
+                    "filesystem range requires a non-negative integer offset and positive integer length"
+                        .to_string(),
+                ));
+            }
+        };
         let project_id = self.project_id()?.to_string();
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
@@ -745,12 +768,22 @@ impl NativeRepositoryClient {
             let path = path.clone();
             let version = version.clone();
             async move {
-                let data = client
-                    .read_native_filesystem_file(&project_id, &name, &path, &version)
+                let read = client
+                    .read_native_filesystem_file_with_metadata(
+                        &project_id,
+                        &name,
+                        &path,
+                        &version,
+                        range,
+                    )
                     .await?;
+                let trace_id = read.trace_id.clone();
+                let read = read.into_inner();
                 Ok(TracedBytes {
-                    trace_id: data.trace_id.clone(),
-                    data: Buffer::from(data.into_inner()),
+                    trace_id,
+                    data: Buffer::from(read.data),
+                    content_id: Some(read.content_id),
+                    full_size: Some(read.full_size as f64),
                 })
             }
         })

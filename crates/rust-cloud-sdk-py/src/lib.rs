@@ -74,6 +74,7 @@ fn request_may_have_executed(err: &SdkError) -> bool {
 #[pyclass]
 pub struct CloudApiClient {
     client: Client,
+    artifact_storage: ArtifactStorageClient,
     api_url: String,
     namespace: String,
 }
@@ -106,9 +107,15 @@ impl CloudApiClient {
         }
 
         let client = builder.build().map_err(into_py_error)?;
+        let artifact_storage = ArtifactStorageClient::new(
+            client.clone(),
+            tensorlake::resolve_artifact_storage_url(&api_url),
+        )
+        .map_err(into_py_error)?;
 
         Ok(Self {
             client,
+            artifact_storage,
             api_url,
             namespace: namespace.unwrap_or_else(|| "default".to_string()),
         })
@@ -283,7 +290,7 @@ impl CloudApiClient {
     }
 
     fn git_repo_url(&self, project_id: String, repo: String) -> PyResult<String> {
-        let client = self.artifact_storage_client().map_err(into_py_error)?;
+        let client = self.artifact_storage_client();
         Ok(client.git_repo_url(&project_id, &repo))
     }
 
@@ -599,16 +606,11 @@ impl CloudApiClient {
     /// pre-existing filesystem.
     fn create_filesystem(&self, project_id: String, name: String) -> PyResult<String> {
         let maybe_executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
             let maybe_executed = maybe_executed.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 // Minted before the forgiveness-tracked call: a mint failure
                 // says nothing about whether a create reached the server, so
                 // it must never arm the 409 forgiveness below.
@@ -684,17 +686,12 @@ impl CloudApiClient {
         base: String,
         snapshot: Option<String>,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
             let base = base.clone();
             let snapshot = snapshot.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client
                     .fork_filesystem(&project_id, &name, &base, snapshot.as_deref())
                     .await?;
@@ -709,14 +706,9 @@ impl CloudApiClient {
 
     /// List every filesystem in the project (all pages, cache-fenced).
     fn list_filesystems(&self, project_id: String) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client
                     .list_repos_of_kind(&project_id, Some(REPO_KIND_FILESYSTEM))
                     .await?;
@@ -727,15 +719,10 @@ impl CloudApiClient {
 
     /// Point-read one filesystem's identity (name, status, kind, default branch).
     fn filesystem_meta(&self, project_id: String, name: String) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 // A project-scoped credential: repo-scoped mints can fail for a
                 // repo that does not exist, which would mask the 404 callers
                 // need to distinguish "no such filesystem".
@@ -755,16 +742,11 @@ impl CloudApiClient {
 
     fn delete_filesystem(&self, project_id: String, name: String) -> PyResult<String> {
         let maybe_executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
             let maybe_executed = maybe_executed.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 // Minted before the forgiveness-tracked call: a mint failure
                 // says nothing about whether a delete reached the server, so
                 // it must never arm the 404 forgiveness below.
@@ -814,15 +796,10 @@ impl CloudApiClient {
                 "native filesystem status must target the main head".to_string(),
             )));
         }
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client.native_filesystem_head(&project_id, &name).await?;
                 serde_json::to_string(&serde_json::json!({
                     "resolved_commit": traced.snapshot_id,
@@ -840,17 +817,12 @@ impl CloudApiClient {
         message: String,
         request_id: String,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
             let message = message.clone();
             let request_id = request_id.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client
                     .retain_current_native_filesystem_snapshot(
                         &project_id,
@@ -865,15 +837,10 @@ impl CloudApiClient {
     }
 
     fn list_filesystem_snapshots(&self, project_id: String, name: String) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client
                     .list_native_filesystem_snapshots(&project_id, &name)
                     .await?;
@@ -889,16 +856,11 @@ impl CloudApiClient {
         name: String,
         snapshot: String,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
             let snapshot = snapshot.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 client
                     .delete_native_filesystem_snapshot(&project_id, &name, &snapshot)
                     .await
@@ -915,17 +877,12 @@ impl CloudApiClient {
         path: String,
         version: String,
     ) -> PyResult<Vec<u8>> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
             let path = path.clone();
             let version = version.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client
                     .read_native_filesystem_file(&project_id, &name, &path, &version)
                     .await?;
@@ -943,17 +900,12 @@ impl CloudApiClient {
         dir_path: String,
         version: String,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
             let dir_path = dir_path.clone();
             let version = version.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let mut entries = Vec::new();
                 let mut after: Option<String> = None;
                 let mut seen = std::collections::HashSet::new();
@@ -1015,14 +967,9 @@ impl CloudApiClient {
                 "native filesystem writes must target the main head".to_string(),
             )));
         }
-        let api_client = self.client.clone();
-        let api_url = self.api_url.clone();
+        let client = self.artifact_storage.clone();
         shared_runtime()
             .block_on(async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let writes = files
                     .into_iter()
                     .map(|(path, data)| NativeDirectFileWrite { path, data })
@@ -1077,14 +1024,9 @@ impl CloudApiClient {
                 "native filesystem writes must target the main head".to_string(),
             )));
         }
-        let api_client = self.client.clone();
-        let api_url = self.api_url.clone();
+        let client = self.artifact_storage.clone();
         shared_runtime()
             .block_on(async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let writes = files
                     .into_iter()
                     .map(|(path, source_path)| NativeDirectFilePathWrite {
@@ -3528,11 +3470,8 @@ where
 }
 
 impl CloudApiClient {
-    fn artifact_storage_client(&self) -> Result<ArtifactStorageClient, SdkError> {
-        ArtifactStorageClient::new(
-            self.client.clone(),
-            tensorlake::resolve_artifact_storage_url(&self.api_url),
-        )
+    fn artifact_storage_client(&self) -> ArtifactStorageClient {
+        self.artifact_storage.clone()
     }
 
     fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
@@ -3544,6 +3483,20 @@ impl CloudApiClient {
             self.client.clone(),
             max_retries,
             "rust cloud API request",
+            into_py_error,
+            operation,
+        )
+    }
+
+    fn run_artifact_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
+    where
+        F: FnMut(ArtifactStorageClient) -> Fut,
+        Fut: Future<Output = Result<T, SdkError>>,
+    {
+        run_with_retry_blocking(
+            self.artifact_storage.clone(),
+            max_retries,
+            "artifact storage request",
             into_py_error,
             operation,
         )

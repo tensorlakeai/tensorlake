@@ -37,6 +37,8 @@ export type {
   FilesystemInfo,
   FilesystemStatus,
   FileEntry,
+  FilesystemFileRead,
+  FilesystemReadOptions,
   FilesystemVersion,
   FilesystemSnapshot,
   FilesystemSnapshotInfo,

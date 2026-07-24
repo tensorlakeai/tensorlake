@@ -6,9 +6,10 @@ Cloud. Every write produces a
 at any version, and a filesystem can
 be mounted to a local path through the ``tl`` CLI's FUSE/FSKit daemon.
 
-Reads and writes are served by the shared Rust cloud-sdk core (the same
-engine behind the ``tl`` CLI), so uploads get content-defined chunking,
-dedup, transient retries, and idempotent commit reattachment for free.
+Reads and writes are served by the shared Rust cloud-sdk core. Writes split
+large files into bounded checksum-addressed parts, upload missing bytes
+directly to object storage, and atomically publish the resulting metadata.
+Payload bytes never pass through the Tensorlake API service.
 
 Example::
 
@@ -371,8 +372,8 @@ class Filesystem:
     # -- reads ------------------------------------------------------------------
 
     def read_file(self, path: str, version: Optional[str] = None) -> bytes:
-        """Read a file's bytes at ``version`` (branch, ref, or snapshot
-        commit; defaults to the filesystem's default branch)."""
+        """Read a file's bytes at ``version`` (the current ``main`` head or
+        a retained snapshot id); defaults to the filesystem's current head."""
         if not path.strip("/"):
             raise FilesystemError("file path must not be empty")
         return self._native.read_file(self._name, path, version or self._branch())
