@@ -26,7 +26,8 @@ message SerializedObjectManifest {
     optional uint64 encoding_version = 2;
     // Includes data and metadata.
     optional uint64 size = 3;
-    // Metadata is stored before the actual data.
+    // Metadata is stored before the actual data. This field is required when
+    // the manifest describes a SerializedObjectInsideBLOB.
     optional uint64 metadata_size = 4;
     // Includes data and metadata.
     optional string sha256_hash = 5;
@@ -218,6 +219,8 @@ message AllocationState {
 
 // FunctionInputs contains the input data for allocation execution
 message FunctionInputs {
+    reserved 5;
+    reserved "request_context";
     // Values for function call arguments.
     repeated SerializedObjectInsideBLOB args = 1;
     // Each arg has a matching BLOB.

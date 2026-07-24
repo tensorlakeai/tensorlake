@@ -1,6 +1,6 @@
 import unittest
 
-from tensorlake.applications import InternalError, RequestContext
+from tensorlake.applications import RETURN_WHEN, Future, InternalError, RequestContext
 from tensorlake.applications.interface.exceptions import TensorlakeError
 from tensorlake.applications.interface.function import (
     Function,
@@ -429,7 +429,7 @@ class TestEventLoopWaitFutures(unittest.TestCase):
         self.assertIsInstance(watcher_cmd, OutputEventCreateFunctionCallWatcher)
 
     def test_wait_future_failure(self):
-        """InputEventFunctionCallWatcherCreated with failure sets exception on future."""
+        """A failed watcher result sets the exception on the future."""
         child_func = _make_test_function("child_func", fn=lambda x: x)
         register_function("child_func", child_func)
         captured = {}
@@ -471,6 +471,158 @@ class TestEventLoopWaitFutures(unittest.TestCase):
         self.assertIsNone(output.user_exception)
         self.assertIn("exception", captured)
         self.assertIsInstance(captured["exception"], InternalError)
+
+    def test_watcher_creation_failure_completes_future(self):
+        """A rejected watcher is terminal and does not wait for a result event."""
+        child_func = _make_test_function("child_func", fn=lambda x: x)
+        register_function("child_func", child_func)
+        captured = {}
+
+        def user_code():
+            future = child_func.future(1)
+            future.run()
+            try:
+                future.result()
+            except TensorlakeError as error:
+                captured["exception"] = error
+
+        func = _make_test_function("my_func", fn=user_code)
+        loop = _make_test_event_loop(func)
+        driver = _EventLoopDriver(loop)
+
+        def result_callback(cmd):
+            if isinstance(cmd, OutputEventCreateFunctionCall):
+                return InputEventFunctionCallCreated(
+                    durable_id=cmd.durable_id,
+                    exception=None,
+                )
+            if isinstance(cmd, OutputEventCreateFunctionCallWatcher):
+                return InputEventFunctionCallWatcherCreated(
+                    durable_id=cmd.function_call_durable_id,
+                    exception=InternalError("watcher creation failed"),
+                )
+            return []
+
+        driver.result_callback = result_callback
+        output = driver.run([], {})
+
+        self.assertIsNone(output.user_exception)
+        self.assertIsInstance(captured["exception"], InternalError)
+        self.assertEqual(str(captured["exception"]), "watcher creation failed")
+        self.assertEqual(len(driver.command_batches), 3)
+
+    def test_first_failure_keeps_future_completed_before_wait_in_done(self):
+        child_func = _make_test_function("child_func", fn=lambda x: x)
+        register_function("child_func", child_func)
+        captured = {}
+        futures = []
+
+        def user_code():
+            completed = child_func.future(1).run()
+            completed.result()
+            failing = child_func.future(2)
+            futures.extend([completed, failing])
+            done, not_done = Future.wait(
+                futures,
+                return_when=RETURN_WHEN.FIRST_FAILURE,
+            )
+            captured["done"] = done
+            captured["not_done"] = not_done
+
+        func = _make_test_function("my_func", fn=user_code)
+        loop = _make_test_event_loop(func)
+        driver = _EventLoopDriver(loop)
+        arguments_by_durable_id = {}
+
+        def result_callback(cmd):
+            if isinstance(cmd, OutputEventCreateFunctionCall):
+                arguments_by_durable_id[cmd.durable_id] = cmd.args[0]
+                return InputEventFunctionCallCreated(
+                    durable_id=cmd.durable_id,
+                    exception=None,
+                )
+            if isinstance(cmd, OutputEventCreateFunctionCallWatcher):
+                argument = arguments_by_durable_id[cmd.function_call_durable_id]
+                return [
+                    InputEventFunctionCallWatcherCreated(
+                        durable_id=cmd.function_call_durable_id,
+                        exception=None,
+                    ),
+                    InputEventFunctionCallWatcherResult(
+                        function_call_durable_id=cmd.function_call_durable_id,
+                        output=argument,
+                        exception=(
+                            None
+                            if argument == 1
+                            else InternalError("expected child failure")
+                        ),
+                    ),
+                ]
+            return []
+
+        driver.result_callback = result_callback
+        output = driver.run([], {})
+
+        self.assertIsNone(output.user_exception)
+        self.assertEqual(captured["done"], futures)
+        self.assertEqual(captured["not_done"], [])
+
+    def test_first_failure_excludes_completions_after_winning_failure(self):
+        child_func = _make_test_function("child_func", fn=lambda x: x)
+        register_function("child_func", child_func)
+        captured = {}
+        futures = []
+
+        def user_code():
+            completed = child_func.future(1).run()
+            completed.result()
+            failing = child_func.future(2)
+            trailing = child_func.future(3)
+            futures.extend([completed, failing, trailing])
+            done, not_done = Future.wait(
+                futures,
+                return_when=RETURN_WHEN.FIRST_FAILURE,
+            )
+            captured["done"] = done
+            captured["not_done"] = not_done
+
+        func = _make_test_function("my_func", fn=user_code)
+        loop = _make_test_event_loop(func)
+        driver = _EventLoopDriver(loop)
+        arguments_by_durable_id = {}
+
+        def result_callback(cmd):
+            if isinstance(cmd, OutputEventCreateFunctionCall):
+                arguments_by_durable_id[cmd.durable_id] = cmd.args[0]
+                return InputEventFunctionCallCreated(
+                    durable_id=cmd.durable_id,
+                    exception=None,
+                )
+            if isinstance(cmd, OutputEventCreateFunctionCallWatcher):
+                argument = arguments_by_durable_id[cmd.function_call_durable_id]
+                return [
+                    InputEventFunctionCallWatcherCreated(
+                        durable_id=cmd.function_call_durable_id,
+                        exception=None,
+                    ),
+                    InputEventFunctionCallWatcherResult(
+                        function_call_durable_id=cmd.function_call_durable_id,
+                        output=argument,
+                        exception=(
+                            InternalError("expected child failure")
+                            if argument == 2
+                            else None
+                        ),
+                    ),
+                ]
+            return []
+
+        driver.result_callback = result_callback
+        output = driver.run([], {})
+
+        self.assertIsNone(output.user_exception)
+        self.assertEqual(captured["done"], futures[:2])
+        self.assertEqual(captured["not_done"], futures[2:])
 
 
 class TestEventLoopMapOperation(unittest.TestCase):

@@ -1,11 +1,13 @@
 import importlib
 import json
+import os
 import sys
 import tempfile
 import threading
 import time
 import zipfile
-from typing import Any, Dict, Generator, List
+from types import ModuleType
+from typing import Any, Callable, Dict, Generator, List
 
 import grpc
 
@@ -20,7 +22,13 @@ from tensorlake.applications.blob_store import BLOBStore
 from tensorlake.applications.function.function_call import create_self_instance
 from tensorlake.applications.internal_logger import InternalLogger
 from tensorlake.applications.multiprocessing import setup_multiprocessing
-from tensorlake.applications.registry import get_function, get_functions, has_function
+from tensorlake.applications.registry import (
+    get_function,
+    get_functions,
+    has_function,
+    restore_registry,
+    snapshot_registry,
+)
 from tensorlake.applications.remote.code.zip import (
     CODE_ZIP_MANIFEST_FILE_NAME,
     CodeZIPManifest,
@@ -36,6 +44,11 @@ from tensorlake.applications.request_context.http_server.server import (
     RequestContextHTTPServer,
 )
 from tensorlake.applications.runtime_hooks import (
+    clear_await_future_hook,
+    clear_coroutine_to_future_hook,
+    clear_register_coroutine_hook,
+    clear_run_future_hook,
+    clear_wait_futures_hook,
     set_await_future_hook,
     set_coroutine_to_future_hook,
     set_register_coroutine_hook,
@@ -86,6 +99,32 @@ from .user_events import (
 )
 
 
+def _module_was_loaded_from_archive(module: ModuleType, archive_path: str) -> bool:
+    archive_prefix = f"{archive_path}{os.sep}"
+    spec = getattr(module, "__spec__", None)
+    for origin in (getattr(module, "__file__", None), getattr(spec, "origin", None)):
+        if isinstance(origin, str) and (
+            origin == archive_path or origin.startswith(archive_prefix)
+        ):
+            return True
+    return False
+
+
+def _restore_modules_after_failed_import(
+    modules_before: dict[str, ModuleType], archive_path: str
+) -> None:
+    for name, module in list(sys.modules.items()):
+        if not isinstance(module, ModuleType):
+            continue
+        if not _module_was_loaded_from_archive(module, archive_path):
+            continue
+        previous = modules_before.get(name)
+        if previous is None:
+            sys.modules.pop(name, None)
+        else:
+            sys.modules[name] = previous
+
+
 class Service(FunctionExecutorServicer):
     def __init__(self, logger: InternalLogger):
         # All the fields are set during the initialization call.
@@ -100,6 +139,10 @@ class Service(FunctionExecutorServicer):
         self._request_context_http_server_thread: threading.Thread | None = None
         self._request_context_http_client: RequestContextHTTPTransport | None = None
         self._health_check_handler: HealthCheckHandler | None = None
+        self._initialization_lock = threading.Lock()
+        self._initialization_condition = threading.Condition()
+        self._initialization_in_progress = False
+        self._initialization_attempted = False
         # Tracks all existing allocations.
         # Added by create_allocation RPC, removed by delete_allocation RPC.
         self._allocation_infos: Dict[str, AllocationInfo] = {}
@@ -107,10 +150,44 @@ class Service(FunctionExecutorServicer):
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
     ) -> InitializeResponse:
+        with self._initialization_lock:
+            if self._function is not None:
+                return self._initialize(request, context)
+            with self._initialization_condition:
+                self._initialization_attempted = True
+                self._initialization_in_progress = True
+            try:
+                return self._initialize(request, context)
+            finally:
+                with self._initialization_condition:
+                    self._initialization_in_progress = False
+                    self._initialization_condition.notify_all()
+
+    def _initialize(
+        self, request: InitializeRequest, context: grpc.ServicerContext
+    ) -> InitializeResponse:
         start_time: float = time.monotonic()
         self._logger.info("initializing function executor service")
+        if self._function is not None:
+            return InitializeResponse(
+                outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_FAILURE,
+                failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
+                error_message="Function Executor is already initialized",
+            )
 
-        InitializeRequestValidator(request).check()
+        try:
+            InitializeRequestValidator(request).check()
+        except BaseException as e:
+            self._logger.error(
+                "function executor service initialization failed",
+                reason="invalid initialization request",
+                duration_sec=f"{time.monotonic() - start_time:.3f}",
+            )
+            return InitializeResponse(
+                outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_FAILURE,
+                failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
+                error_message=f"{type(e).__name__}: {e}",
+            )
 
         event_details: InitializationEventDetails = InitializationEventDetails(
             namespace=request.function.namespace,
@@ -120,30 +197,41 @@ class Service(FunctionExecutorServicer):
         )
         log_user_event_initialization_started(event_details)
 
-        self._function_ref = request.function
+        logger_before = self._logger
         self._logger = self._logger.bind(
             namespace=request.function.namespace,
             app=request.function.application_name,
             app_version=request.function.application_version,
             fn=request.function.function_name,
         )
-        set_run_future_hook(self._run_future_runtime_hook)
-        set_await_future_hook(self._await_future_runtime_hook)
-        set_wait_futures_hook(self._wait_futures_runtime_hook)
-        set_register_coroutine_hook(self._register_coroutine_runtime_hook)
-        set_coroutine_to_future_hook(self._coroutine_to_future_runtime_hook)
-        setup_multiprocessing()
-
-        app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
-        with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
-            graph_modules_zip_file.write(request.application_code.data)
-        sys.path.insert(
-            0, app_modules_zip_path
-        )  # Add as the first entry so user modules have highest priority
+        registry_before = snapshot_registry()
+        modules_before = dict(sys.modules)
+        app_modules_zip_path: str | None = None
+        app_modules_path_installed = False
+        blob_store: BLOBStore | None = None
+        request_context_http_server: RequestContextHTTPServer | None = None
+        request_context_http_server_thread: threading.Thread | None = None
+        request_context_http_server_thread_started = False
+        request_context_http_client: RequestContextHTTPTransport | None = None
+        installed_hook_clearers: list[Callable[[], None]] = []
+        failure_reason = (
+            InitializationFailureReason.INITIALIZATION_FAILURE_REASON_INTERNAL_ERROR
+        )
 
         try:
+            app_modules_zip_fd, app_modules_zip_path = tempfile.mkstemp(suffix=".zip")
+            with open(app_modules_zip_fd, "wb") as graph_modules_zip_file:
+                graph_modules_zip_file.write(request.application_code.data)
+            sys.path.insert(
+                0, app_modules_zip_path
+            )  # Add as the first entry so user modules have highest priority
+            app_modules_path_installed = True
+
             # Process user controlled input in a try-except block to not treat errors here as our
             # internal platform errors.
+            failure_reason = (
+                InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR
+            )
             with zipfile.ZipFile(app_modules_zip_path, "r") as zf:
                 with zf.open(CODE_ZIP_MANIFEST_FILE_NAME) as code_zip_manifest_file:
                     code_zip_manifest: CodeZIPManifest = CodeZIPManifest.model_validate(
@@ -173,51 +261,136 @@ class Service(FunctionExecutorServicer):
                     )
                 )
 
-            self._function = get_function(request.function.function_name)
+            function = get_function(request.function.function_name)
             # The function is only loaded once per Function Executor. It's important to use a single
             # loaded function so all the allocations when executed are sharing the same memory. This allows
             # implementing smart caching in customer code. E.g. load a model into GPU only once and
             # share the model's file descriptor between all allocs or download function configuration
             # only once.
-            if self._function._function_config.class_name is not None:
-                self._function_instance_arg = create_self_instance(
-                    self._function._function_config.class_name
+            function_instance_arg: Any | None = None
+            if function._function_config.class_name is not None:
+                function_instance_arg = create_self_instance(
+                    function._function_config.class_name
                 )
+
+            failure_reason = (
+                InitializationFailureReason.INITIALIZATION_FAILURE_REASON_INTERNAL_ERROR
+            )
+            available_cpu_count: int = int(function._function_config.cpu)
+            blob_store = BLOBStore(available_cpu_count=available_cpu_count)
+            request_context_http_server = RequestContextHTTPServer(
+                server_router_class=RequestContextHTTPHandlerFactory(
+                    allocation_infos=self._allocation_infos,
+                    logger=self._logger,
+                ),
+            )
+            request_context_http_client = RequestContextHTTPClient.create_http_client(
+                server_base_url=request_context_http_server.base_url
+            )
+            health_check_handler = HealthCheckHandler(self._logger)
+
+            # Install process-global runtime hooks only after all fallible
+            # runtime resources have been created. Track each hook so partial
+            # installation can be rolled back without disturbing older hooks.
+            setup_multiprocessing()
+            set_run_future_hook(self._run_future_runtime_hook)
+            installed_hook_clearers.append(clear_run_future_hook)
+            set_await_future_hook(self._await_future_runtime_hook)
+            installed_hook_clearers.append(clear_await_future_hook)
+            set_wait_futures_hook(self._wait_futures_runtime_hook)
+            installed_hook_clearers.append(clear_wait_futures_hook)
+            set_register_coroutine_hook(self._register_coroutine_runtime_hook)
+            installed_hook_clearers.append(clear_register_coroutine_hook)
+            set_coroutine_to_future_hook(self._coroutine_to_future_runtime_hook)
+            installed_hook_clearers.append(clear_coroutine_to_future_hook)
+
+            request_context_http_server_thread = threading.Thread(
+                target=request_context_http_server.start,
+                name="FunctionExecutorRequestContextHTTPServerThread",
+                daemon=True,
+            )
+            request_context_http_server_thread.start()
+            request_context_http_server_thread_started = True
+
+            self._function_ref = request.function
+            self._function = function
+            self._function_instance_arg = function_instance_arg
+            self._blob_store = blob_store
+            self._request_context_http_server = request_context_http_server
+            self._request_context_http_server_thread = (
+                request_context_http_server_thread
+            )
+            self._request_context_http_client = request_context_http_client
+            # Only pass health checks if FE was initialized successfully.
+            self._health_check_handler = health_check_handler
         except BaseException as e:
+            for clear_hook in reversed(installed_hook_clearers):
+                clear_hook()
+            if request_context_http_client is not None:
+                try:
+                    request_context_http_client.close()
+                except BaseException:
+                    pass
+            if request_context_http_server is not None:
+                try:
+                    request_context_http_server.stop()
+                except BaseException:
+                    pass
+            if (
+                request_context_http_server_thread_started
+                and request_context_http_server_thread is not None
+            ):
+                try:
+                    request_context_http_server_thread.join(timeout=1)
+                except BaseException:
+                    pass
+            if blob_store is not None:
+                try:
+                    blob_store.close()
+                except BaseException:
+                    pass
+            restore_registry(registry_before)
+            if app_modules_zip_path is not None:
+                _restore_modules_after_failed_import(
+                    modules_before=modules_before,
+                    archive_path=app_modules_zip_path,
+                )
+                if app_modules_path_installed:
+                    try:
+                        sys.path.remove(app_modules_zip_path)
+                    except ValueError:
+                        pass
+                try:
+                    os.unlink(app_modules_zip_path)
+                except FileNotFoundError:
+                    pass
+            self._function_ref = None
+            self._function = None
+            self._function_instance_arg = None
+            self._blob_store = None
+            self._request_context_http_server = None
+            self._request_context_http_server_thread = None
+            self._request_context_http_client = None
+            self._health_check_handler = None
             self._logger.error(
                 "function executor service initialization failed",
-                reason="failed to load customer function",
+                reason=(
+                    "failed to load customer function"
+                    if failure_reason
+                    == InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR
+                    else "failed to initialize runtime resources"
+                ),
                 duration_sec=f"{time.monotonic() - start_time:.3f}",
                 # Don't log the exception to FE log as it contains customer data
             )
             log_user_event_initialization_failed(event_details, error=e)
+            self._logger = logger_before
             return InitializeResponse(
                 outcome_code=InitializationOutcomeCode.INITIALIZATION_OUTCOME_CODE_FAILURE,
-                failure_reason=InitializationFailureReason.INITIALIZATION_FAILURE_REASON_FUNCTION_ERROR,
+                failure_reason=failure_reason,
                 error_message=f"{type(e).__name__}: {e}",
             )
 
-        available_cpu_count: int = int(self._function._function_config.cpu)
-        self._blob_store = BLOBStore(available_cpu_count=available_cpu_count)
-
-        self._request_context_http_server = RequestContextHTTPServer(
-            server_router_class=RequestContextHTTPHandlerFactory(
-                allocation_infos=self._allocation_infos,
-                logger=self._logger,
-            ),
-        )
-        self._request_context_http_server_thread = threading.Thread(
-            target=self._request_context_http_server.start,
-            name="FunctionExecutorRequestContextHTTPServerThread",
-            daemon=True,
-        )
-        self._request_context_http_server_thread.start()
-        self._request_context_http_client = RequestContextHTTPClient.create_http_client(
-            server_base_url=self._request_context_http_server.base_url
-        )
-
-        # Only pass health checks if FE was initialized successfully.
-        self._health_check_handler = HealthCheckHandler(self._logger)
         self._logger.info(
             "initialized function executor service",
             duration_sec=f"{time.monotonic() - start_time:.3f}",
@@ -256,10 +429,14 @@ class Service(FunctionExecutorServicer):
     def create_allocation(
         self, request: CreateAllocationRequest, context: grpc.ServicerContext
     ) -> Empty:
-        # No need to lock self._allocation_infos because we're not blocking here so we
-        # hold GIL non stop.
+        # Admission may block while initialization is in progress. Once ready,
+        # allocation registration itself does not release the GIL.
+        self._wait_for_initialization(context)
         allocation: Allocation = request.allocation
-        validate_new_allocation(allocation)
+        try:
+            validate_new_allocation(allocation)
+        except ValueError as e:
+            context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
 
         if allocation.allocation_id in self._allocation_infos:
             context.abort(
@@ -267,6 +444,7 @@ class Service(FunctionExecutorServicer):
                 f"Allocation {allocation.allocation_id} already exists",
             )
 
+        self._abort_if_allocation_call_inactive(context)
         allocation_logger: InternalLogger = self._logger.bind(
             request_id=allocation.request_id,
             fn_call_id=allocation.function_call_id,
@@ -306,6 +484,82 @@ class Service(FunctionExecutorServicer):
         allocation_runner.run()
 
         return Empty()
+
+    def _wait_for_initialization(self, context: grpc.ServicerContext) -> None:
+        waiting_logged = False
+        with self._initialization_condition:
+            while self._initialization_in_progress:
+                if not waiting_logged:
+                    self._logger.info(
+                        "create allocation RPC waiting for initialization"
+                    )
+                    waiting_logged = True
+
+                remaining = context.time_remaining()
+                if isinstance(remaining, (int, float)):
+                    if remaining <= 0:
+                        context.abort(
+                            grpc.StatusCode.DEADLINE_EXCEEDED,
+                            "Initialization did not finish before the allocation deadline",
+                        )
+                    wait_timeout = min(remaining, 0.1)
+                else:
+                    wait_timeout = 0.1
+
+                is_active = context.is_active()
+                if isinstance(is_active, bool) and not is_active:
+                    context.abort(
+                        grpc.StatusCode.CANCELLED,
+                        "Create allocation RPC was cancelled during initialization",
+                    )
+                self._initialization_condition.wait(timeout=wait_timeout)
+
+            self._abort_if_allocation_call_inactive(
+                context,
+                deadline_message=(
+                    "Initialization did not finish before the allocation deadline"
+                ),
+                cancellation_message=(
+                    "Create allocation RPC was cancelled during initialization"
+                ),
+            )
+            initialized = (
+                self._function_ref is not None
+                and self._function is not None
+                and self._blob_store is not None
+                and self._request_context_http_server is not None
+                and self._request_context_http_client is not None
+            )
+            initialization_attempted = self._initialization_attempted
+
+        if waiting_logged:
+            self._logger.info(
+                "create allocation RPC resumed after initialization",
+                initialized=initialized,
+            )
+        if not initialized:
+            message = (
+                "Function Executor initialization failed"
+                if initialization_attempted
+                else "Function Executor is not initialized"
+            )
+            context.abort(grpc.StatusCode.FAILED_PRECONDITION, message)
+
+    def _abort_if_allocation_call_inactive(
+        self,
+        context: grpc.ServicerContext,
+        *,
+        deadline_message: str = "Create allocation RPC deadline exceeded",
+        cancellation_message: str = (
+            "Create allocation RPC was cancelled before allocation start"
+        ),
+    ) -> None:
+        remaining = context.time_remaining()
+        if isinstance(remaining, (int, float)) and remaining <= 0:
+            context.abort(grpc.StatusCode.DEADLINE_EXCEEDED, deadline_message)
+        is_active = context.is_active()
+        if isinstance(is_active, bool) and not is_active:
+            context.abort(grpc.StatusCode.CANCELLED, cancellation_message)
 
     def watch_allocation_state(
         self, request: WatchAllocationStateRequest, context: grpc.ServicerContext

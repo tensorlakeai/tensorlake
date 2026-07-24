@@ -1,10 +1,18 @@
 import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { afterEach, describe, expect, it } from "vitest";
-import { registerApplication, registerFunction, retries, schema } from "../src/applications/index.js";
+import {
+  Future,
+  RequestContext,
+  registerApplication,
+  registerFunction,
+  retries,
+  schema,
+} from "../src/applications/index.js";
 import type { RegisteredDefinition } from "../src/applications/function.js";
 import { clearRegistryForTest } from "../src/applications/registry.js";
 import { AllocationRunner } from "../src/function-executor/allocation.js";
@@ -17,6 +25,19 @@ import {
 type Message = Record<string, any>;
 
 const temporaryDirectories: string[] = [];
+
+function testDurableHash(values: string[]): string {
+  const hash = createHash("sha256");
+  for (const value of values) {
+    const bytes = Buffer.from(value, "utf8");
+    const length = Buffer.alloc(8);
+    length.writeBigUInt64BE(BigInt(bytes.byteLength));
+    hash.update(length);
+    hash.update(bytes);
+    hash.update("|");
+  }
+  return hash.digest("hex");
+}
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
@@ -172,6 +193,106 @@ async function readFinishValue(finish: Message): Promise<unknown> {
 }
 
 describe("TypeScript function executor protocol conformance", () => {
+  it("aborts a running handler and emits one terminal failure", async () => {
+    clearRegistryForTest();
+    let handlerStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      handlerStarted = resolve;
+    });
+    let observedSignal: AbortSignal | undefined;
+    const application = registerApplication("protocol_cancellable_parent", async () => {
+      observedSignal = RequestContext.get().signal;
+      handlerStarted();
+      await new Promise<never>(() => undefined);
+    });
+    const { runner } = await createRunner(application.definition);
+
+    runner.start();
+    await withDeadline(started, "the cancellable handler to start");
+    const reason = new Error("executor shutdown");
+    runner.cancel(reason);
+
+    const terminalBatch = await withDeadline(runner.getExecutionBatch(), "the cancellation terminal batch");
+    expect(terminalBatch).toEqual([{
+      finishAllocation: {
+        outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
+        failureReason: "ALLOCATION_FAILURE_REASON_FUNCTION_ERROR",
+      },
+    }]);
+    expect(observedSignal?.aborted).toBe(true);
+    expect(observedSignal?.reason).toBe(reason);
+    runner.advanceExecutionBatch();
+    expect(await runner.getExecutionBatch()).toEqual([]);
+  });
+
+  it("aborts an in-flight output upload instead of reporting success", async () => {
+    clearRegistryForTest();
+    const application = registerApplication("protocol_cancellable_upload", async () => "finished");
+    const { runner } = await createRunner(application.definition);
+    let uploadStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      uploadStarted = resolve;
+    });
+    const server = createServer((request) => {
+      request.on("error", () => undefined);
+      request.resume();
+      uploadStarted();
+    });
+    const port = await new Promise<number>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (typeof address === "object" && address != null) resolve(address.port);
+        else reject(new Error("test HTTP server did not bind to a TCP port"));
+      });
+      server.once("error", reject);
+    });
+    let outputDelivered = false;
+    runner.watchState({
+      write(state) {
+        for (const request of state.outputBlobRequests ?? []) {
+          if (outputDelivered) continue;
+          outputDelivered = true;
+          queueMicrotask(() => runner.deliverUpdate({
+            outputBlob: {
+              status: { code: 0 },
+              blob: {
+                id: request.id,
+                chunks: [{
+                  uri: `http://127.0.0.1:${port}/blocked-output`,
+                  size: request.size,
+                }],
+              },
+            },
+          }));
+        }
+        return true;
+      },
+      end() {},
+      on() {},
+    });
+    try {
+      runner.start();
+      await withDeadline(started, "the output upload to start");
+      runner.cancel(new Error("executor shutdown"));
+      await withDeadline(runner.waitForCompletion(), "the cancelled allocation to finish");
+
+      const terminalBatch = await withDeadline(runner.getExecutionBatch(), "the upload cancellation terminal batch");
+      expect(terminalBatch).toEqual([{
+        finishAllocation: {
+          outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
+          failureReason: "ALLOCATION_FAILURE_REASON_FUNCTION_ERROR",
+        },
+      }]);
+      runner.advanceExecutionBatch();
+      expect(await runner.getExecutionBatch()).toEqual([]);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => error == null ? resolve() : reject(error))
+      );
+    }
+  });
+
   it("consumes reordered and duplicate durable events and emits exactly one terminal batch", async () => {
     clearRegistryForTest();
     const child = registerFunction(async (value: number) => value * 2, {
@@ -351,6 +472,140 @@ describe("TypeScript function executor protocol conformance", () => {
     expect(await readFinishValue(replayTerminal[0].finishAllocation)).toEqual([2, 4]);
   });
 
+  it("does not reveal watcher results before their original replay position", async () => {
+    clearRegistryForTest();
+    const child = registerFunction("protocol_causal_replay_child", async (value: number) => value * 2);
+    const application = registerApplication("protocol_causal_replay_parent", async () => {
+      const first = child.future(1).run();
+      const second = child.future(2).run();
+      const waited = await Future.wait([first, second], { returnWhen: "first_completed" });
+      const marker = await child(3);
+      return {
+        done: waited.done.length,
+        marker,
+        results: [await first, await second],
+      };
+    });
+    const live = await createRunner(application.definition);
+    attachBlobResponder(live.runner, live.directory);
+    const liveEvents = attachEventDriver(live.runner);
+    live.runner.start();
+
+    const creationBatches: Message[][] = [];
+    for (let index = 0; index < 2; index += 1) {
+      const batch = await withDeadline(
+        live.runner.getExecutionBatch(),
+        `causal replay child creation ${index}`,
+      );
+      creationBatches.push(batch);
+      live.runner.advanceExecutionBatch();
+    }
+    const childIds = creationBatches.map((batch) =>
+      String(batch[0].createFunctionCall.updates.rootFunctionCallId)
+    );
+    const history: Message[] = childIds.map((functionCallId, index) => ({
+      clock: index + 1,
+      functionCallCreated: { functionCallId, status: { code: 0 } },
+    }));
+    await liveEvents.respond(history, 2);
+
+    for (let index = 0; index < 2; index += 1) {
+      const batch = await withDeadline(
+        live.runner.getExecutionBatch(),
+        `causal replay child watcher ${index}`,
+      );
+      expect(batch[0].createFunctionCallWatcher.functionCallId).toBe(childIds[index]);
+      live.runner.advanceExecutionBatch();
+    }
+
+    const resultFor = async (durableId: string, value: number, name: string) => {
+      const prepared = prepareSerializedObject(value, 0, durableId);
+      const outputPath = path.join(live.directory, name);
+      await writeFile(outputPath, prepared.bytes);
+      return {
+        functionCallId: durableId,
+        watcherStatus: "FUNCTION_CALL_WATCHER_STATUS_COMPLETED",
+        outcomeCode: "ALLOCATION_OUTCOME_CODE_SUCCESS",
+        valueOutput: prepared.object,
+        valueBlob: {
+          id: name,
+          chunks: [{ uri: pathToFileURL(outputPath).href, size: prepared.bytes.byteLength }],
+        },
+      };
+    };
+    const firstResult = await resultFor(childIds[0], 2, "causal-first");
+    const secondResult = await resultFor(childIds[1], 4, "causal-second");
+    const initialWatcherHistory = [
+      {
+        clock: 3,
+        functionCallWatcherCreated: { functionCallId: childIds[0], status: { code: 0 } },
+      },
+      {
+        clock: 4,
+        functionCallWatcherCreated: { functionCallId: childIds[1], status: { code: 0 } },
+      },
+      { clock: 5, functionCallWatcherResult: firstResult },
+    ];
+    history.push(...initialWatcherHistory);
+    await liveEvents.respond(initialWatcherHistory, 5);
+
+    const markerCreation = await withDeadline(
+      live.runner.getExecutionBatch(),
+      "the causal replay marker creation",
+    );
+    const markerId = String(markerCreation[0].createFunctionCall.updates.rootFunctionCallId);
+    live.runner.advanceExecutionBatch();
+    const markerCreated = {
+      clock: 6,
+      functionCallCreated: { functionCallId: markerId, status: { code: 0 } },
+    };
+    history.push(markerCreated);
+    await liveEvents.respond([markerCreated], 6);
+
+    const markerWatcher = await withDeadline(
+      live.runner.getExecutionBatch(),
+      "the causal replay marker watcher",
+    );
+    expect(markerWatcher[0].createFunctionCallWatcher.functionCallId).toBe(markerId);
+    live.runner.advanceExecutionBatch();
+    const markerResult = await resultFor(markerId, 6, "causal-marker");
+    const finalHistory = [
+      {
+        clock: 7,
+        functionCallWatcherCreated: { functionCallId: markerId, status: { code: 0 } },
+      },
+      { clock: 8, functionCallWatcherResult: markerResult },
+      { clock: 9, functionCallWatcherResult: secondResult },
+    ];
+    history.push(...finalHistory);
+    await liveEvents.respond(finalHistory, 9);
+
+    const liveTerminal = await withDeadline(
+      live.runner.getExecutionBatch(),
+      "the causal live terminal batch",
+    );
+    expect(await readFinishValue(liveTerminal[0].finishAllocation)).toEqual({
+      done: 1,
+      marker: 6,
+      results: [2, 4],
+    });
+
+    const replay = await createRunner(application.definition, { replayMode: "REPLAY_MODE_STRICT" });
+    attachBlobResponder(replay.runner, replay.directory);
+    const replayEvents = attachEventDriver(replay.runner);
+    replay.runner.start();
+    await replayEvents.respond(history, 9);
+    const replayTerminal = await withDeadline(
+      replay.runner.getExecutionBatch(),
+      "the causal replay terminal batch",
+    );
+    expect(await readFinishValue(replayTerminal[0].finishAllocation)).toEqual({
+      done: 1,
+      marker: 6,
+      results: [2, 4],
+    });
+  });
+
   it("treats one failed watcher result as terminal after the server exhausts retries", async () => {
     clearRegistryForTest();
     const child = registerFunction(async () => "unreachable", {
@@ -512,6 +767,54 @@ describe("TypeScript function executor protocol conformance", () => {
       status: { code: 0 },
     } }], 1);
     const terminalBatch = await withDeadline(runner.getExecutionBatch(), "the replay mismatch terminal batch");
+    expect(terminalBatch).toEqual([{ finishAllocation: {
+      outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
+      failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",
+    } }]);
+  });
+
+  it("reports a blocked cross-kind replay boundary as a mismatch", async () => {
+    clearRegistryForTest();
+    const child = registerFunction("protocol_cross_kind_child", async (value: number) => value);
+    const application = registerApplication("protocol_cross_kind_parent", async () => {
+      const first = child.future(1).run();
+      await first;
+      return child.tailCall(2);
+    });
+    const { runner } = await createRunner(application.definition, {
+      replayMode: "REPLAY_MODE_STRICT",
+    });
+    const events = attachEventDriver(runner);
+    const rootId = `call-${application.definition.name}`;
+    const firstId = testDurableHash([
+      rootId,
+      rootId,
+      "FunctionCall",
+      child.definition.name,
+    ]);
+    const secondId = testDurableHash([
+      rootId,
+      firstId,
+      "FunctionCall",
+      child.definition.name,
+    ]);
+
+    runner.start();
+    await events.respond([
+      {
+        clock: 1,
+        functionCallCreated: { functionCallId: firstId, status: { code: 0 } },
+      },
+      {
+        clock: 2,
+        functionCallCreated: { functionCallId: secondId, status: { code: 0 } },
+      },
+    ], 2);
+
+    const terminalBatch = await withDeadline(
+      runner.getExecutionBatch(),
+      "the cross-kind replay mismatch terminal batch",
+    );
     expect(terminalBatch).toEqual([{ finishAllocation: {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH",

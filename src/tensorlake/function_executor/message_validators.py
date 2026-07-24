@@ -1,3 +1,5 @@
+import hashlib
+
 from .proto.function_executor_pb2 import (
     Allocation,
     FunctionRef,
@@ -72,4 +74,22 @@ class InitializeRequestValidator:
         ):
             raise ValueError(
                 f"Invalid application code encoding: {SerializedObjectEncoding.Name(application_code.manifest.encoding)}. Expected: BINARY_ZIP"
+            )
+        if application_code.manifest.size != len(application_code.data):
+            raise ValueError(
+                "Application code size mismatch: "
+                f"manifest declares {application_code.manifest.size} bytes, "
+                f"received {len(application_code.data)}"
+            )
+        if (
+            application_code.manifest.HasField("metadata_size")
+            and application_code.manifest.metadata_size != 0
+        ):
+            raise ValueError("Application code metadata is not supported")
+        actual_hash = hashlib.sha256(application_code.data).hexdigest()
+        if application_code.manifest.sha256_hash.lower() != actual_hash:
+            raise ValueError(
+                "Application code SHA-256 mismatch: "
+                f"expected {application_code.manifest.sha256_hash}, "
+                f"received {actual_hash}"
             )

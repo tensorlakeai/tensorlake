@@ -1,16 +1,17 @@
 import { createHash, randomUUID } from "node:crypto";
 import type { RegisteredDefinition, FunctionRuntime, FunctionFuture, TailCall } from "../applications/function.js";
-import { executeHandlerResult, runWithFunctionRuntime } from "../applications/function.js";
+import { executeHandlerResult, isTailCall, runWithFunctionRuntime } from "../applications/function.js";
 import { File } from "../applications/file.js";
 import {
   DeserializationError,
   FunctionError,
   ReplayMismatchError,
   RequestError,
+  SDKUsageError,
   isRequestError,
 } from "../applications/errors.js";
 import type { RequestContextValue } from "../applications/context.js";
-import { runWithRequestContext } from "../applications/context.js";
+import { runWithRequestContext, waitWithAbortSignal } from "../applications/context.js";
 import { deserializeJSON, serializeValue } from "../applications/serialization.js";
 import { deferred, type Deferred } from "./async-queue.js";
 import {
@@ -82,10 +83,13 @@ export async function deserializeApplicationArguments(
 ): Promise<{ args: unknown[] }> {
   let data = payload.data;
   let contentType = payload.contentType ?? "application/json";
-  if (contentType === "message/http") {
+  let hasExplicitContentType = payload.contentType != null;
+  if (contentType.toLowerCase().startsWith("message/http")) {
     const parsed = parseHTTPMessage(data);
     data = parsed.body;
-    contentType = parsed.headers["content-type"] ?? "application/json";
+    const bodyContentType = parsed.headers["content-type"];
+    hasExplicitContentType = bodyContentType != null;
+    contentType = bodyContentType ?? "application/json";
   }
   if (definition.parameters.length === 0) return { args: [] };
   if (contentType.toLowerCase().startsWith("multipart/form-data")) {
@@ -128,6 +132,13 @@ export async function deserializeApplicationArguments(
     return { args };
   }
   const firstParameter = definition.parameters[0];
+  // An invocation without a request body supplies no arguments. This lets the
+  // normal argument validator apply JavaScript defaults (or report a required
+  // argument) instead of attempting to parse an empty JSON document. An
+  // explicitly typed empty file remains a real File input.
+  if (data.byteLength === 0 && (!firstParameter?.schema._file || !hasExplicitContentType)) {
+    return { args: [] };
+  }
   if (firstParameter?.schema._file) return { args: [new File(data, contentType)] };
   if (!contentType.toLowerCase().includes("json")) {
     throw new DeserializationError(
@@ -137,45 +148,126 @@ export async function deserializeApplicationArguments(
   return { args: [deserializeJSON(data)] };
 }
 
+type ReplayEntryKind = "call" | "watcher" | "result" | "unknown";
+
+interface ReplayEntry {
+  readonly kind: ReplayEntryKind;
+  readonly event: Message;
+  consumed: boolean;
+}
+
 class ReplayHistory {
-  readonly calls: Message[] = [];
-  readonly watchers: Message[] = [];
-  readonly results = new Map<string, Message[]>();
+  private readonly entries: ReplayEntry[];
+  private readonly calls: ReplayEntry[] = [];
+  private readonly watchers: ReplayEntry[] = [];
+  private readonly availableResults = new Map<string, Message[]>();
+  private readonly resultWaiters = new Map<string, Deferred<Message | undefined>[]>();
+  private readonly endWaiters: Deferred<void>[] = [];
+  private readonly createdWatcherIds = new Set<string>();
+  private readonly expectedWatcherIds = new Set<string>();
   private callCursor = 0;
   private watcherCursor = 0;
+  private prefixCursor = 0;
   private mismatch?: ReplayMismatchError;
 
   constructor(entries: Message[]) {
-    for (const entry of entries) {
+    this.entries = entries.map((entry) => {
       if (entry.functionCallWatcherResult != null) {
-        const id = String(entry.functionCallWatcherResult.functionCallId ?? "");
-        const values = this.results.get(id) ?? [];
-        values.push(entry.functionCallWatcherResult);
-        this.results.set(id, values);
-      } else if (entry.functionCallCreated != null) {
-        this.calls.push(entry.functionCallCreated);
-      } else if (entry.functionCallWatcherCreated != null) {
-        this.watchers.push(entry.functionCallWatcherCreated);
+        return { kind: "result", event: entry.functionCallWatcherResult, consumed: false };
       }
-    }
+      if (entry.functionCallCreated != null) {
+        const replayEntry: ReplayEntry = {
+          kind: "call",
+          event: entry.functionCallCreated,
+          consumed: false,
+        };
+        this.calls.push(replayEntry);
+        return replayEntry;
+      }
+      if (entry.functionCallWatcherCreated != null) {
+        const replayEntry: ReplayEntry = {
+          kind: "watcher",
+          event: entry.functionCallWatcherCreated,
+          consumed: false,
+        };
+        this.watchers.push(replayEntry);
+        return replayEntry;
+      }
+      return { kind: "unknown", event: entry, consumed: false };
+    });
   }
 
-  takeOrdered(kind: "call" | "watcher", id: string): Message | undefined {
+  async takeOrdered(kind: "call" | "watcher", id: string): Promise<Message | undefined> {
+    this.advancePrefix();
     const entries = kind === "call" ? this.calls : this.watchers;
     const cursor = kind === "call" ? this.callCursor : this.watcherCursor;
-    if (cursor >= entries.length) return undefined;
-    const event = entries[cursor];
+    if (cursor >= entries.length) {
+      if (kind === "watcher") this.expectedWatcherIds.delete(id);
+      if (this.prefixCursor === this.entries.length) return undefined;
+      const blocked = this.entries[this.prefixCursor];
+      // A new call may reach the live boundary before the watcher belonging to
+      // an already-replayed call has finished being created. That watcher is a
+      // known producer of replay progress, so wait for it without imposing a
+      // wall-clock deadline. Every other cross-kind boundary is impossible for
+      // the current execution order and must fail instead of hanging forever.
+      if (
+        kind !== "call"
+        || blocked.kind !== "watcher"
+        || !this.expectedWatcherIds.has(String(blocked.event.functionCallId ?? ""))
+      ) {
+        this.fail(
+          `Unexpected ${kind} event for ${id} before replay ${blocked.kind}`
+          + ` event ${String(blocked.event.functionCallId ?? "")}`,
+        );
+      }
+      const waiter = deferred<void>();
+      this.endWaiters.push(waiter);
+      await waiter.promise;
+      this.assertNoMismatch();
+      return undefined;
+    }
+    const entry = entries[cursor];
     if (kind === "call") this.callCursor += 1;
     else this.watcherCursor += 1;
-    if (event.functionCallId !== id) {
-      this.mismatch = new ReplayMismatchError(`Expected replay ${kind} event for ${id}`);
-      throw this.mismatch;
+    if (entry.event.functionCallId !== id) {
+      this.fail(`Expected replay ${kind} event for ${id}`);
     }
-    return event;
+    entry.consumed = true;
+    if (kind === "watcher") {
+      this.expectedWatcherIds.delete(id);
+      this.createdWatcherIds.add(id);
+    }
+    this.advancePrefix();
+    return entry.event;
   }
 
-  takeResult(id: string): Message | undefined {
-    return this.results.get(id)?.shift();
+  async takeResult(id: string): Promise<Message | undefined> {
+    this.advancePrefix();
+    const available = this.availableResults.get(id);
+    if (available != null && available.length > 0) return available.shift();
+    if (this.prefixCursor === this.entries.length) return undefined;
+    const waiter = deferred<Message | undefined>();
+    const waiters = this.resultWaiters.get(id) ?? [];
+    waiters.push(waiter);
+    this.resultWaiters.set(id, waiters);
+    return waiter.promise;
+  }
+
+  expectWatcher(id: string): void {
+    this.expectedWatcherIds.add(id);
+  }
+
+  abandonWatcher(id: string): void {
+    this.expectedWatcherIds.delete(id);
+    if (this.prefixCursor >= this.entries.length || this.endWaiters.length === 0) return;
+    const blocked = this.entries[this.prefixCursor];
+    if (blocked.kind === "watcher" && blocked.event.functionCallId === id) {
+      this.fail(`Replay watcher event for ${id} can no longer be created`);
+    }
+  }
+
+  hasAvailableResult(id: string): boolean {
+    return (this.availableResults.get(id)?.length ?? 0) > 0;
   }
 
   assertNoMismatch(): void {
@@ -184,9 +276,59 @@ class ReplayHistory {
 
   assertConsumed(): void {
     this.assertNoMismatch();
-    if (this.callCursor !== this.calls.length || this.watcherCursor !== this.watchers.length) {
+    this.advancePrefix();
+    if (this.prefixCursor !== this.entries.length) {
       throw new ReplayMismatchError("Function completed before its durable event history was consumed");
     }
+  }
+
+  private advancePrefix(): void {
+    this.assertNoMismatch();
+    while (this.prefixCursor < this.entries.length) {
+      const entry = this.entries[this.prefixCursor];
+      if (entry.kind === "unknown") {
+        this.fail("Replay history contains an unknown allocation event");
+      }
+      if (entry.kind === "call" || entry.kind === "watcher") {
+        if (!entry.consumed) return;
+        this.prefixCursor += 1;
+        continue;
+      }
+      entry.consumed = true;
+      this.prefixCursor += 1;
+      this.releaseResult(entry.event);
+    }
+    for (const waiter of this.endWaiters.splice(0)) waiter.resolve();
+    for (const waiters of this.resultWaiters.values()) {
+      for (const waiter of waiters) waiter.resolve(undefined);
+    }
+    this.resultWaiters.clear();
+  }
+
+  private releaseResult(event: Message): void {
+    const id = String(event.functionCallId ?? "");
+    if (!this.createdWatcherIds.has(id)) {
+      this.fail(`Replay watcher result for ${id} appeared before its watcher was created`);
+    }
+    const waiter = this.resultWaiters.get(id)?.shift();
+    if (waiter != null) {
+      waiter.resolve(event);
+      if (this.resultWaiters.get(id)?.length === 0) this.resultWaiters.delete(id);
+      return;
+    }
+    const available = this.availableResults.get(id) ?? [];
+    available.push(event);
+    this.availableResults.set(id, available);
+  }
+
+  private fail(message: string): never {
+    this.mismatch ??= new ReplayMismatchError(message);
+    for (const waiter of this.endWaiters.splice(0)) waiter.reject(this.mismatch);
+    for (const waiters of this.resultWaiters.values()) {
+      for (const waiter of waiters) waiter.reject(this.mismatch);
+    }
+    this.resultWaiters.clear();
+    throw this.mismatch;
   }
 }
 
@@ -229,6 +371,7 @@ export class AllocationRunner implements FunctionRuntime {
   private lastEventClock = 0;
   private previousDurableId: string;
   private livePump?: Promise<void>;
+  private completion?: Promise<void>;
   private started = false;
   private terminalBatchQueued = false;
   private finished = false;
@@ -261,7 +404,7 @@ export class AllocationRunner implements FunctionRuntime {
     }
     this.started = true;
     this.log("info", "allocation runner scheduled");
-    void this.run().catch((error) => {
+    this.completion = this.run().catch((error) => {
       this.log("error", "allocation runner promise rejected", {}, error);
       this.queueTerminalBatch({
         outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
@@ -269,6 +412,23 @@ export class AllocationRunner implements FunctionRuntime {
       });
       this.finish();
     });
+  }
+
+  waitForCompletion(): Promise<void> {
+    return this.completion ?? Promise.resolve();
+  }
+
+  cancel(reason: unknown = new FunctionError("Allocation was cancelled")): void {
+    if (this.controller.signal.aborted) return;
+    this.log("info", "allocation cancellation requested", {
+      reason: reason instanceof Error ? reason.message : String(reason),
+    });
+    this.controller.abort(reason);
+    for (const request of this.outputBlobRequests.values()) request.reject(reason);
+    for (const request of this.stateOperationRequests.values()) request.reject(reason);
+    for (const waiter of this.liveWaiters.splice(0)) waiter.result.reject(reason);
+    this.currentRead?.response.reject(reason);
+    this.currentRead = undefined;
   }
 
   async invoke<T>(definition: RegisteredDefinition, args: readonly unknown[]): Promise<T> {
@@ -292,34 +452,50 @@ export class AllocationRunner implements FunctionRuntime {
     definition: RegisteredDefinition,
     items: readonly unknown[],
     initial: unknown,
+    hasInitial: boolean,
   ): Promise<T> {
-    if (items.length === 0) return initial as T;
+    let reduceItems = items;
+    let reduceInitial = initial;
+    if (!hasInitial) {
+      if (items.length === 0) {
+        throw new SDKUsageError("reduce of empty iterable with no initial value");
+      }
+      [reduceInitial, ...reduceItems] = items;
+    }
+    if (reduceItems.length === 0) return reduceInitial as T;
     const callTurn = this.reserveEmissionTurn("call");
     const watcherTurn = this.reserveEmissionTurn("watcher");
-    const ids = items.map(() => this.nextDurableId(definition, "ReduceStep"));
+    const ids = reduceItems.map(() => this.nextDurableId(definition, "ReduceStep"));
     const id = ids[ids.length - 1];
     const startedAt = Date.now();
     this.log("info", "durable reduce starting", {
       durable_id: id,
       target_function: definition.name,
-      collection_size: items.length,
-      plan_count: Math.ceil(items.length / MAX_REDUCE_CALLS_PER_PLAN),
+      collection_size: reduceItems.length,
+      plan_count: Math.ceil(reduceItems.length / MAX_REDUCE_CALLS_PER_PLAN),
     });
+    this.replay?.expectWatcher(id);
     try {
-      await this.createReduceChain(ids, definition, items, initial, callTurn);
+      try {
+        await this.createReduceChain(ids, definition, reduceItems, reduceInitial, callTurn);
+      } catch (error) {
+        this.replay?.abandonWatcher(id);
+        throw error;
+      }
       await this.createWatcher(id, watcherTurn);
     } finally {
       callTurn.release();
       watcherTurn.release();
     }
-    const result = this.replay?.takeResult(id) ?? await this.waitForLiveEvent(
+    const replayedResult = this.replay == null ? undefined : await this.replay.takeResult(id);
+    const result = replayedResult ?? await this.waitForLiveEvent(
       (entry) => entry.functionCallWatcherResult?.functionCallId === id,
     ).then((entry) => entry.functionCallWatcherResult);
     const resolved = await this.resolveWatcherResult<T>(result);
     this.log("info", "durable reduce completed", {
       durable_id: id,
       target_function: definition.name,
-      collection_size: items.length,
+      collection_size: reduceItems.length,
       duration_ms: Date.now() - startedAt,
     });
     return resolved;
@@ -355,8 +531,14 @@ export class AllocationRunner implements FunctionRuntime {
       delay_seconds: delaySeconds,
       max_retries: maxRetries,
     });
+    this.replay?.expectWatcher(id);
     try {
-      await this.createChildCall(id, definition, args, delaySeconds, callTurn);
+      try {
+        await this.createChildCall(id, definition, args, delaySeconds, callTurn);
+      } catch (error) {
+        this.replay?.abandonWatcher(id);
+        throw error;
+      }
       await this.createWatcher(id, watcherTurn);
     } finally {
       callTurn.release();
@@ -366,12 +548,13 @@ export class AllocationRunner implements FunctionRuntime {
       durable_id: id,
       target_function: definition.name,
       max_retries: maxRetries,
-      replay_result_available: (this.replay?.results.get(id)?.length ?? 0) > 0,
+      replay_result_available: this.replay?.hasAvailableResult(id) ?? false,
     });
     // The server owns allocation retry policy and retains the watcher route
     // across retryable attempt failures. It emits exactly one result here:
     // the eventual success or terminal failure.
-    const result = this.replay?.takeResult(id) ?? await this.waitForLiveEvent(
+    const replayedResult = this.replay == null ? undefined : await this.replay.takeResult(id);
+    const result = replayedResult ?? await this.waitForLiveEvent(
       (entry) => entry.functionCallWatcherResult?.functionCallId === id,
     ).then((entry) => entry.functionCallWatcherResult);
     const resolved = await this.resolveWatcherResult<T>(result);
@@ -397,7 +580,7 @@ export class AllocationRunner implements FunctionRuntime {
         await turn.wait;
         turnAcquired = true;
       }
-      const replayed = this.replay?.takeOrdered("call", id);
+      const replayed = await this.replay?.takeOrdered("call", id);
       if (replayed != null) {
         this.log("debug", "replaying durable function creation", { durable_id: id });
         const error = statusError(replayed.status, "Failed to start function call");
@@ -480,7 +663,7 @@ export class AllocationRunner implements FunctionRuntime {
       for (let start = 0; start < items.length; start += MAX_REDUCE_CALLS_PER_PLAN) {
         const end = Math.min(items.length, start + MAX_REDUCE_CALLS_PER_PLAN);
         const rootId = ids[end - 1];
-        const replayed = this.replay?.takeOrdered("call", rootId);
+        const replayed = await this.replay?.takeOrdered("call", rootId);
         if (replayed != null) {
           this.log("debug", "replaying durable reduce plan creation", {
             durable_id: rootId,
@@ -576,7 +759,7 @@ export class AllocationRunner implements FunctionRuntime {
   private async createWatcher(id: string, turn: EmissionTurn): Promise<void> {
     try {
       await turn.wait;
-      const replayed = this.replay?.takeOrdered("watcher", id);
+      const replayed = await this.replay?.takeOrdered("watcher", id);
       if (replayed != null) {
         this.log("debug", "replaying durable function watcher creation", { durable_id: id });
         const error = statusError(replayed.status, "Failed to create function call watcher");
@@ -740,7 +923,10 @@ export class AllocationRunner implements FunctionRuntime {
       });
       try {
         result = await runWithRequestContext(requestContext, () =>
-          runWithFunctionRuntime(this, () => executeHandlerResult(this.definition, handlerArgs)),
+          runWithFunctionRuntime(this, () => waitWithAbortSignal(
+            executeHandlerResult(this.definition, handlerArgs),
+            this.controller.signal,
+          )),
         );
       } catch (error) {
         if (error instanceof ReplayMismatchError || error instanceof AllocationProtocolError) {
@@ -754,16 +940,17 @@ export class AllocationRunner implements FunctionRuntime {
       }
       this.log("info", "user function handler completed", {
         duration_ms: Date.now() - handlerStartedAt,
-        result_kind: typeof result === "object" && result != null && (result as TailCall<unknown>).kind === "tensorlake-tail-call"
+        result_kind: isTailCall(result)
           ? "tail_call"
           : "value",
         result_type: result == null ? String(result) : typeof result,
       });
       if (this.protocolError != null) throw this.protocolError;
       this.replay?.assertNoMismatch();
-      if (typeof result === "object" && result != null && (result as TailCall<unknown>).kind === "tensorlake-tail-call") {
-        const id = await this.startTailCall(result as TailCall<unknown>);
+      if (isTailCall(result)) {
+        const id = await this.startTailCall(result);
         this.replay?.assertConsumed();
+        this.controller.signal.throwIfAborted();
         this.log("info", "queueing successful tail-call allocation finish", { tail_call_durable_id: id });
         this.queueTerminalBatch({
           outcomeCode: "ALLOCATION_OUTCOME_CODE_SUCCESS",
@@ -786,6 +973,7 @@ export class AllocationRunner implements FunctionRuntime {
         });
         let outputBlob = await this.requestOutputBlob(prepared.bytes.byteLength);
         outputBlob = await this.uploadBlob(outputBlob, prepared.bytes, "function output");
+        this.controller.signal.throwIfAborted();
         this.log("info", "queueing successful value allocation finish", {
           output_blob_id: outputBlob.id,
           output_bytes: prepared.bytes.byteLength,
@@ -798,10 +986,22 @@ export class AllocationRunner implements FunctionRuntime {
       }
     } catch (error) {
       const replayMismatch = error instanceof ReplayMismatchError;
-      this.log("error", replayMismatch ? "durable replay mismatch" : "allocation internal failure", {}, error);
+      const cancelled = this.controller.signal.aborted;
+      this.log(
+        cancelled ? "info" : "error",
+        cancelled
+          ? "allocation stopped after cancellation"
+          : replayMismatch
+            ? "durable replay mismatch"
+            : "allocation internal failure",
+        {},
+        error,
+      );
       this.queueTerminalBatch({
         outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
-        failureReason: replayMismatch
+        failureReason: cancelled
+          ? "ALLOCATION_FAILURE_REASON_FUNCTION_ERROR"
+          : replayMismatch
           ? "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH"
           : "ALLOCATION_FAILURE_REASON_INTERNAL_ERROR",
       });
@@ -1421,7 +1621,7 @@ export class AllocationRunner implements FunctionRuntime {
       return;
     }
     this.finished = true;
-    this.controller.abort();
+    if (!this.controller.signal.aborted) this.controller.abort();
     this.log("info", "allocation runner finished", {
       duration_ms: Date.now() - this.startedAt,
       queued_execution_batches: this.executionBatches.length,
@@ -1462,11 +1662,15 @@ export class AllocationRunner implements FunctionRuntime {
       ...this.blobLogFields(blob),
     });
     try {
-      const data = await downloadBlobData(blob, (message, details) => this.log("debug", `blob ${message}`, {
-        purpose,
-        ...fields,
-        ...details,
-      }));
+      const data = await downloadBlobData(
+        blob,
+        (message, details) => this.log("debug", `blob ${message}`, {
+          purpose,
+          ...fields,
+          ...details,
+        }),
+        this.controller.signal,
+      );
       this.log("debug", "blob download completed", {
         purpose,
         ...fields,
@@ -1506,11 +1710,16 @@ export class AllocationRunner implements FunctionRuntime {
       encoding: object.manifest?.encoding,
     });
     try {
-      const value = await downloadSerializedObjectData(object, blob, (message, details) => this.log(
-        "debug",
-        `blob ${message}`,
-        { purpose, ...fields, ...details },
-      ));
+      const value = await downloadSerializedObjectData(
+        object,
+        blob,
+        (message, details) => this.log(
+          "debug",
+          `blob ${message}`,
+          { purpose, ...fields, ...details },
+        ),
+        this.controller.signal,
+      );
       this.log("debug", "serialized object download completed", {
         purpose,
         ...fields,
@@ -1547,11 +1756,16 @@ export class AllocationRunner implements FunctionRuntime {
       upload_bytes: data.byteLength,
     });
     try {
-      const uploaded = await uploadBlobData(blob, data, (message, details) => this.log("debug", `blob ${message}`, {
-        purpose,
-        ...fields,
-        ...details,
-      }));
+      const uploaded = await uploadBlobData(
+        blob,
+        data,
+        (message, details) => this.log("debug", `blob ${message}`, {
+          purpose,
+          ...fields,
+          ...details,
+        }),
+        this.controller.signal,
+      );
       this.log("debug", "blob upload completed", {
         purpose,
         ...fields,

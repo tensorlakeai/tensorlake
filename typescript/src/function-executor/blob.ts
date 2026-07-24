@@ -74,14 +74,39 @@ function uriKind(uri: string): string {
   }
 }
 
+function throwIfAborted(signal?: AbortSignal): void {
+  signal?.throwIfAborted();
+}
+
+async function abortableDelay(delayMs: number, signal?: AbortSignal): Promise<void> {
+  throwIfAborted(signal);
+  if (signal == null) {
+    await new Promise((resolve) => setTimeout(resolve, delayMs));
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(signal.reason);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
 async function fetchWithRetries(
   uri: string,
   init?: RequestInit,
   log?: BlobLog,
   fields: Record<string, unknown> = {},
+  signal?: AbortSignal,
 ): Promise<Response> {
   let lastError: unknown;
   for (let attempt = 0; attempt < 4; attempt += 1) {
+    throwIfAborted(signal);
     const startedAt = Date.now();
     log?.("HTTP attempt starting", {
       ...fields,
@@ -91,7 +116,10 @@ async function fetchWithRetries(
       has_range: new Headers(init?.headers).has("range"),
     });
     try {
-      const response = await fetch(networkURI(uri), init);
+      const response = await fetch(networkURI(uri), {
+        ...init,
+        signal,
+      });
       log?.("HTTP attempt completed", {
         ...fields,
         attempt: attempt + 1,
@@ -99,6 +127,7 @@ async function fetchWithRetries(
         status_code: response.status,
         duration_ms: Date.now() - startedAt,
       });
+      throwIfAborted(signal);
       if (response.ok) return response;
       if ([400, 403, 404].includes(response.status) || attempt === 3) {
         throw new BlobHTTPError(response.status);
@@ -112,6 +141,7 @@ async function fetchWithRetries(
         duration_ms: Date.now() - startedAt,
         error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
       });
+      throwIfAborted(signal);
       if (error instanceof BlobHTTPError && [400, 403, 404].includes(error.status)) throw error;
       lastError = error;
       if (attempt === 3) break;
@@ -122,7 +152,7 @@ async function fetchWithRetries(
       next_attempt: attempt + 2,
       retry_delay_ms: retryDelayMs,
     });
-    await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+    await abortableDelay(retryDelayMs, signal);
   }
   throw new Error("BLOB operation failed after retries", { cause: lastError });
 }
@@ -135,7 +165,9 @@ async function readChunkRange(
   size: number,
   sharedURI: boolean,
   log?: BlobLog,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
+  throwIfAborted(signal);
   if (!chunk.uri) throw new Error("BLOB chunk has no URI");
   const physicalOffset = sharedURI ? logicalChunkOffset + offsetWithinChunk : offsetWithinChunk;
   const fields = {
@@ -151,8 +183,10 @@ async function readChunkRange(
   if (chunk.uri.startsWith("file://")) {
     const file = await open(fileURLToPath(chunk.uri), "r");
     try {
+      throwIfAborted(signal);
       const data = new Uint8Array(size);
       const { bytesRead } = await file.read(data, 0, size, physicalOffset);
+      throwIfAborted(signal);
       if (bytesRead !== size) {
         throw new Error(`BLOB chunk ended after ${bytesRead} bytes; expected ${size}`);
       }
@@ -167,8 +201,9 @@ async function readChunkRange(
     }
   }
   const headers = { range: `bytes=${physicalOffset}-${physicalOffset + size - 1}` };
-  const response = await fetchWithRetries(chunk.uri, { headers }, log, fields);
+  const response = await fetchWithRetries(chunk.uri, { headers }, log, fields, signal);
   let data = new Uint8Array(await response.arrayBuffer());
+  throwIfAborted(signal);
   // A server may ignore Range and return the complete object with HTTP 200.
   if (response.status === 200 && (physicalOffset !== 0 || data.byteLength !== size)) {
     data = data.subarray(physicalOffset, physicalOffset + size);
@@ -190,7 +225,9 @@ export async function downloadBlobRange(
   offset: number,
   size: number,
   log?: BlobLog,
+  signal?: AbortSignal,
 ): Promise<Uint8Array> {
+  throwIfAborted(signal);
   if (!Number.isSafeInteger(offset) || offset < 0 || !Number.isSafeInteger(size) || size < 0) {
     throw new Error("BLOB range offset and size must be non-negative safe integers");
   }
@@ -221,11 +258,13 @@ export async function downloadBlobRange(
         overlapEnd - overlapStart,
         (uriCounts.get(chunk.uri ?? "") ?? 0) > 1,
         log,
+        signal,
       ));
     }
     chunkOffset = chunkEnd;
   }
   const data = concatenate(await Promise.all(reads));
+  throwIfAborted(signal);
   if (data.byteLength !== size) throw new Error("BLOB does not contain the complete requested range");
   log?.("download blob completed", {
     blob_id: blob.id,
@@ -237,22 +276,29 @@ export async function downloadBlobRange(
   return data;
 }
 
-export async function downloadBlob(blob: BlobValue, log?: BlobLog): Promise<Uint8Array> {
+export async function downloadBlob(
+  blob: BlobValue,
+  log?: BlobLog,
+  signal?: AbortSignal,
+): Promise<Uint8Array> {
   const size = (blob.chunks ?? []).reduce((total, chunk) => total + (chunk.size ?? 0), 0);
-  return downloadBlobRange(blob, 0, size, log);
+  return downloadBlobRange(blob, 0, size, log, signal);
 }
 
 export async function downloadSerializedObject(
   object: SerializedObjectInsideBlobValue,
   blob: BlobValue,
   log?: BlobLog,
+  signal?: AbortSignal,
 ): Promise<{ data: Uint8Array; metadata: Uint8Array; contentType?: string; encoding?: string | number }> {
+  throwIfAborted(signal);
   const manifest = object.manifest;
   if (manifest?.size == null || manifest.metadataSize == null) {
     throw new Error("Serialized object manifest is missing size or metadata_size");
   }
   const start = object.offset ?? 0;
-  const bytes = await downloadBlobRange(blob, start, manifest.size, log);
+  const bytes = await downloadBlobRange(blob, start, manifest.size, log, signal);
+  throwIfAborted(signal);
   const hash = createHash("sha256").update(bytes).digest("hex");
   if (manifest.sha256Hash != null && hash !== manifest.sha256Hash) {
     throw new Error(`Serialized object hash mismatch: expected ${manifest.sha256Hash}, got ${hash}`);
@@ -335,7 +381,9 @@ async function uploadChunk(
   index: number,
   offset: number,
   log?: BlobLog,
+  signal?: AbortSignal,
 ): Promise<BlobChunk> {
+  throwIfAborted(signal);
   if (!chunk.uri) throw new Error("Writable BLOB chunk has no URI");
   const fields = {
     chunk_index: index,
@@ -356,7 +404,9 @@ async function uploadChunk(
       file = await open(filePath, "w+");
     }
     try {
+      throwIfAborted(signal);
       await file.write(data, 0, data.byteLength, offset);
+      throwIfAborted(signal);
     } finally {
       await file.close();
     }
@@ -367,9 +417,9 @@ async function uploadChunk(
     method: "PUT",
     ...(data.byteLength === 0 ? {} : {
       body: Uint8Array.from(data).buffer,
-      headers: { "content-length": String(data.byteLength) },
     }),
-  }, log, fields);
+  }, log, fields, signal);
+  throwIfAborted(signal);
   const uploaded = {
     ...chunk,
     size: data.byteLength,
@@ -384,7 +434,13 @@ async function uploadChunk(
   return uploaded;
 }
 
-export async function uploadBlob(blob: BlobValue, data: Uint8Array, log?: BlobLog): Promise<BlobValue> {
+export async function uploadBlob(
+  blob: BlobValue,
+  data: Uint8Array,
+  log?: BlobLog,
+  signal?: AbortSignal,
+): Promise<BlobValue> {
+  throwIfAborted(signal);
   const chunks = blob.chunks ?? [];
   const capacity = chunks.reduce((total, chunk) => total + (chunk.size ?? 0), 0);
   if (data.byteLength > capacity) throw new Error(`BLOB capacity ${capacity} is smaller than ${data.byteLength}`);
@@ -393,12 +449,20 @@ export async function uploadBlob(blob: BlobValue, data: Uint8Array, log?: BlobLo
   for (const [index, chunk] of chunks.entries()) {
     const size = Math.min(chunk.size ?? 0, data.byteLength - offset);
     if (size <= 0) break;
-    uploaded.push(await uploadChunk(chunk, data.subarray(offset, offset + size), index, offset, log));
+    uploaded.push(await uploadChunk(
+      chunk,
+      data.subarray(offset, offset + size),
+      index,
+      offset,
+      log,
+      signal,
+    ));
     offset += size;
   }
   if (data.byteLength === 0 && chunks.length > 0) {
-    uploaded.push(await uploadChunk(chunks[0], data, 0, 0, log));
+    uploaded.push(await uploadChunk(chunks[0], data, 0, 0, log, signal));
   }
+  throwIfAborted(signal);
   if (offset !== data.byteLength) throw new Error(`Only uploaded ${offset} of ${data.byteLength} bytes`);
   log?.("upload blob completed", {
     blob_id: blob.id,

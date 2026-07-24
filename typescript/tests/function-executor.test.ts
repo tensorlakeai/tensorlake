@@ -8,7 +8,7 @@ import * as grpc from "@grpc/grpc-js";
 import { loadSync } from "@grpc/proto-loader";
 import { getProtoPath } from "google-proto-files";
 import { zipSync } from "fflate";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { File, registerApplication, retries, schema } from "../src/applications/index.js";
 import { registerFunction } from "../src/applications/index.js";
 import { clearRegistryForTest } from "../src/applications/registry.js";
@@ -26,6 +26,20 @@ import {
 import { FunctionExecutorService } from "../src/function-executor/service.js";
 
 const temporaryDirectories: string[] = [];
+
+async function withDeadline<T>(promise: Promise<T>, description: string): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`Timed out waiting for ${description}`)), 1_500);
+      }),
+    ]);
+  } finally {
+    if (timer != null) clearTimeout(timer);
+  }
+}
 
 afterEach(async () => {
   await Promise.all(temporaryDirectories.splice(0).map((directory) =>
@@ -127,6 +141,59 @@ describe("TypeScript function executor", () => {
       expect(uploaded.chunks).toEqual([expect.objectContaining({ etag: '"empty-etag"' })]);
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error == null ? resolve() : reject(error)));
+    }
+  });
+
+  it("aborts in-flight remote BLOB downloads and uploads", async () => {
+    const pendingMethods: string[] = [];
+    const methodWaiters: Array<(method: string) => void> = [];
+    const server = createServer((request) => {
+      request.on("error", () => undefined);
+      request.resume();
+      const method = request.method ?? "UNKNOWN";
+      const waiter = methodWaiters.shift();
+      if (waiter == null) pendingMethods.push(method);
+      else waiter(method);
+    });
+    const port = await new Promise<number>((resolve, reject) => {
+      server.listen(0, "127.0.0.1", () => {
+        const address = server.address();
+        if (typeof address === "object" && address != null) resolve(address.port);
+        else reject(new Error("test HTTP server did not bind to a TCP port"));
+      });
+      server.once("error", reject);
+    });
+    const nextMethod = (): Promise<string> => {
+      const method = pendingMethods.shift();
+      if (method != null) return Promise.resolve(method);
+      return new Promise((resolve) => methodWaiters.push(resolve));
+    };
+    const uri = `http://127.0.0.1:${port}/blocked`;
+    try {
+      const downloadController = new AbortController();
+      const download = downloadBlob({
+        id: "blocked-download",
+        chunks: [{ uri, size: 1 }],
+      }, undefined, downloadController.signal);
+      expect(await withDeadline(nextMethod(), "the download request")).toBe("GET");
+      const downloadReason = new Error("cancel download");
+      downloadController.abort(downloadReason);
+      await expect(withDeadline(download, "the download to abort")).rejects.toBe(downloadReason);
+
+      const uploadController = new AbortController();
+      const upload = uploadBlob({
+        id: "blocked-upload",
+        chunks: [{ uri, size: 1 }],
+      }, new Uint8Array([1]), undefined, uploadController.signal);
+      expect(await withDeadline(nextMethod(), "the upload request")).toBe("PUT");
+      const uploadReason = new Error("cancel upload");
+      uploadController.abort(uploadReason);
+      await expect(withDeadline(upload, "the upload to abort")).rejects.toBe(uploadReason);
+    } finally {
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) =>
+        server.close((error) => error == null ? resolve() : reject(error))
+      );
     }
   });
 
@@ -250,6 +317,43 @@ describe("TypeScript function executor", () => {
       data: new Uint8Array(await request.arrayBuffer()),
       contentType: request.headers.get("content-type") ?? undefined,
     })).rejects.toThrow("Failed to deserialize JSON value");
+  });
+
+  it("treats an empty remote request as zero arguments so defaults can apply", async () => {
+    clearRegistryForTest();
+    const application = registerApplication(
+      "defaulted_remote_input",
+      async (name = "world") => `Hello, ${name}!`,
+    );
+    const httpRequest = new TextEncoder().encode(
+      "POST / HTTP/1.1\r\nHost: localhost\r\n\r\n",
+    );
+
+    await expect(deserializeApplicationArguments(application.definition, {
+      data: httpRequest,
+      contentType: "message/http; msgtype=request",
+    })).resolves.toEqual({ args: [] });
+    await expect(deserializeApplicationArguments(application.definition, {
+      data: new Uint8Array(),
+    })).resolves.toEqual({ args: [] });
+  });
+
+  it("preserves an explicitly typed empty file application argument", async () => {
+    clearRegistryForTest();
+    const application = registerApplication(async (document: File) => document, {
+      name: "empty_file_input",
+      parameters: [schema.parameter("document", schema.file())] as const,
+      returns: schema.file(),
+    });
+
+    const parsed = await deserializeApplicationArguments(application.definition, {
+      data: new Uint8Array(),
+      contentType: "text/plain",
+    });
+    expect(parsed.args).toHaveLength(1);
+    expect(parsed.args[0]).toBeInstanceOf(File);
+    expect((parsed.args[0] as File).content).toHaveLength(0);
+    expect((parsed.args[0] as File).contentType).toBe("text/plain");
   });
 
   it("preserves JSON MIME files across protocol value boundaries", () => {
@@ -680,8 +784,10 @@ describe("TypeScript function executor", () => {
         applicationCode: {
           manifest: {
             encoding: "SERIALIZED_OBJECT_ENCODING_BINARY_ZIP",
+            encodingVersion: 0,
             size: codeZip.byteLength,
             metadataSize: 0,
+            sha256Hash: createHash("sha256").update(codeZip).digest("hex"),
           },
           data: codeZip,
         },
@@ -695,6 +801,7 @@ describe("TypeScript function executor", () => {
   }, 20_000);
 
   it("can retry initialization after validation fails", async () => {
+    clearRegistryForTest();
     const manifest = new TextEncoder().encode(JSON.stringify({
       format_version: 2,
       runtime: "typescript",
@@ -703,6 +810,19 @@ describe("TypeScript function executor", () => {
       functions: { child: { name: "child" }, app: { name: "app" } },
     }));
     const runtime = (application: boolean) => new TextEncoder().encode(`
+      const registryKey = Symbol.for("tensorlake.applications.registry.v1");
+      const registry = globalThis[registryKey] ??= {
+        functions: new Map(),
+        applications: new Map(),
+      };
+      function register(definition, isApplication) {
+        const existing = registry.functions.get(definition.name);
+        if (existing != null && existing !== definition) {
+          throw new Error("duplicate function " + definition.name);
+        }
+        registry.functions.set(definition.name, definition);
+        if (isApplication) registry.applications.set(definition.name, definition);
+      }
       const child = {
         name: "child", handler: async () => null, parameters: [],
         returns: { jsonSchema: {} }, options: {},
@@ -712,42 +832,269 @@ describe("TypeScript function executor", () => {
         name: "app",
         application: ${application ? '{ tags: {}, retries: { maxRetries: 0 }, version: "v1" }' : "undefined"},
       };
+      register(child, false);
+      register(app, ${application});
       export function __tensorlakeGetFunction(name) {
-        if (name === "child") return child;
-        if (name === "app") return app;
-        throw new Error("unknown function " + name);
+        const definition = registry.functions.get(name);
+        if (definition == null) throw new Error("unknown function " + name);
+        return definition;
       }
     `);
-    const request = (application: boolean) => ({
-      function: {
-        namespace: "default",
-        applicationName: "app",
-        applicationVersion: "v1",
-        functionName: "child",
-      },
-      applicationCode: {
-        manifest: {
-          encoding: "SERIALIZED_OBJECT_ENCODING_BINARY_ZIP",
-          size: 0,
-          metadataSize: 0,
+    const request = (application: boolean) => {
+      const codeZip = zipSync({
+        "runtime.mjs": runtime(application),
+        ".tensorlake_code_manifest.json": manifest,
+      });
+      return {
+        function: {
+          namespace: "default",
+          applicationName: "app",
+          applicationVersion: "v1",
+          functionName: "child",
         },
-        data: zipSync({
-          "runtime.mjs": runtime(application),
-          ".tensorlake_code_manifest.json": manifest,
-        }),
-      },
-    });
+        applicationCode: {
+          manifest: {
+            encoding: "SERIALIZED_OBJECT_ENCODING_BINARY_ZIP",
+            encodingVersion: 0,
+            size: codeZip.byteLength,
+            metadataSize: 0,
+            sha256Hash: createHash("sha256").update(codeZip).digest("hex"),
+          },
+          data: codeZip,
+        },
+      };
+    };
     const service = new FunctionExecutorService();
-    const initialize = (application: boolean) => new Promise<Record<string, any>>((resolve, reject) => {
+    const initializeRequest = (initializationRequest: Record<string, any>) => new Promise<Record<string, any>>((resolve, reject) => {
       const call = (service.implementation.initialize as any).bind(service.implementation);
-      call({ request: request(application) }, (error: Error | null, response: Record<string, any>) => {
+      call({ request: initializationRequest }, (error: Error | null, response: Record<string, any>) => {
         if (error != null) reject(error);
         else resolve(response);
       });
     });
+    const malformed = request(true);
+    delete malformed.function.namespace;
+    const wrongEncoding = request(true);
+    wrongEncoding.applicationCode.manifest.encoding = "SERIALIZED_OBJECT_ENCODING_RAW";
+    const wrongSize = request(true);
+    wrongSize.applicationCode.manifest.size += 1;
+    const wrongHash = request(true);
+    wrongHash.applicationCode.manifest.sha256Hash = "0".repeat(64);
 
-    expect((await initialize(false)).outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
-    expect((await initialize(true)).outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_SUCCESS");
+    try {
+      const protocolFailure = await initializeRequest(malformed);
+      expect(protocolFailure.outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
+      expect(protocolFailure.errorMessage).toContain("function.namespace is required");
+      const encodingFailure = await initializeRequest(wrongEncoding);
+      expect(encodingFailure.outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
+      expect(encodingFailure.errorMessage).toContain("Expected: BINARY_ZIP");
+      const sizeFailure = await initializeRequest(wrongSize);
+      expect(sizeFailure.outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
+      expect(sizeFailure.errorMessage).toContain("size mismatch");
+      const hashFailure = await initializeRequest(wrongHash);
+      expect(hashFailure.outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
+      expect(hashFailure.errorMessage).toContain("SHA-256 mismatch");
+      expect((await initializeRequest(request(false))).outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
+      expect((await initializeRequest(request(true))).outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_SUCCESS");
+    } finally {
+      clearRegistryForTest();
+    }
+  });
+
+  it("holds an allocation while initialization is in progress", async () => {
+    clearRegistryForTest();
+    const controlKey = Symbol.for("tensorlake.tests.slow-initialization");
+    let markEntered!: () => void;
+    const entered = new Promise<void>((resolve) => {
+      markEntered = resolve;
+    });
+    let releaseInitialization!: () => void;
+    const release = new Promise<void>((resolve) => {
+      releaseInitialization = resolve;
+    });
+    (globalThis as Record<PropertyKey, unknown>)[controlKey] = {
+      entered: markEntered,
+      release,
+    };
+    const runtime = new TextEncoder().encode(`
+      const control = globalThis[Symbol.for("tensorlake.tests.slow-initialization")];
+      control.entered();
+      await control.release;
+      const definition = {
+        name: "slow_application",
+        handler: async () => "ready",
+        parameters: [],
+        returns: { jsonSchema: {} },
+        options: {},
+        application: { tags: {}, retries: { maxRetries: 0 }, version: "v1" },
+      };
+      export function __tensorlakeGetFunction(name) {
+        if (name !== definition.name) throw new Error("unknown function " + name);
+        return definition;
+      }
+    `);
+    const manifest = new TextEncoder().encode(JSON.stringify({
+      format_version: 2,
+      runtime: "typescript",
+      minimum_node_major: 24,
+      module: "runtime.mjs",
+      functions: { slow_application: { name: "slow_application" } },
+    }));
+    const codeZip = zipSync({
+      "runtime.mjs": runtime,
+      ".tensorlake_code_manifest.json": manifest,
+    });
+    const directory = await mkdtemp(path.join(os.tmpdir(), "tensorlake-slow-init-test-"));
+    temporaryDirectories.push(directory);
+    const input = new TextEncoder().encode("{}");
+    const inputPath = path.join(directory, "input");
+    await writeFile(inputPath, input);
+    const service = new FunctionExecutorService();
+    const unary = (method: "initialize" | "createAllocation", request: Record<string, unknown>) =>
+      new Promise<Record<string, any>>((resolve, reject) => {
+        const handler = service.implementation[method] as any;
+        handler({ request }, (error: Error | null, response: Record<string, any>) => {
+          if (error != null) reject(error);
+          else resolve(response);
+        });
+      });
+
+    try {
+      const initialization = unary("initialize", {
+        function: {
+          namespace: "default",
+          applicationName: "slow_application",
+          applicationVersion: "v1",
+          functionName: "slow_application",
+        },
+        applicationCode: {
+          manifest: {
+            encoding: "SERIALIZED_OBJECT_ENCODING_BINARY_ZIP",
+            encodingVersion: 0,
+            size: codeZip.byteLength,
+            metadataSize: 0,
+            sha256Hash: createHash("sha256").update(codeZip).digest("hex"),
+          },
+          data: codeZip,
+        },
+      });
+      await withDeadline(entered, "the application module to begin importing");
+
+      let allocationSettled = false;
+      const allocation = unary("createAllocation", {
+        allocation: {
+          requestId: "request-during-initialization",
+          functionCallId: "call-during-initialization",
+          allocationId: "allocation-during-initialization",
+          replayMode: "REPLAY_MODE_NONE",
+          inputs: {
+            args: [{
+              offset: 0,
+              manifest: {
+                encoding: "SERIALIZED_OBJECT_ENCODING_RAW",
+                encodingVersion: 0,
+                size: input.byteLength,
+                metadataSize: 0,
+                sha256Hash: createHash("sha256").update(input).digest("hex"),
+                contentType: "application/json",
+              },
+            }],
+            argBlobs: [{
+              id: "input",
+              chunks: [{ uri: pathToFileURL(inputPath).href, size: input.byteLength }],
+            }],
+            requestErrorBlob: { id: "request-error", chunks: [] },
+          },
+        },
+      }).finally(() => {
+        allocationSettled = true;
+      });
+      await Promise.resolve();
+      expect(allocationSettled).toBe(false);
+
+      releaseInitialization();
+      expect((await initialization).outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_SUCCESS");
+      await allocation;
+    } finally {
+      releaseInitialization();
+      await service.shutdown(new Error("test complete"));
+      delete (globalThis as Record<PropertyKey, unknown>)[controlKey];
+      clearRegistryForTest();
+    }
+  });
+
+  it("rechecks cancellation and deadlines when initialization completes", async () => {
+    const service = new FunctionExecutorService();
+    let releaseCancellation!: () => void;
+    const cancellationInitialization = new Promise<void>((resolve) => {
+      releaseCancellation = resolve;
+    });
+    let cancelled = false;
+    const cancelledCall = {
+      get cancelled() {
+        return cancelled;
+      },
+      getDeadline: () => Infinity,
+      once: () => cancelledCall,
+      off: () => cancelledCall,
+    };
+    const cancelledWait = (service as any).waitForInitialization(
+      cancelledCall,
+      cancellationInitialization,
+    );
+    cancelled = true;
+    releaseCancellation();
+    await expect(cancelledWait).rejects.toMatchObject({
+      code: grpc.status.CANCELLED,
+    });
+
+    let releaseDeadline!: () => void;
+    const deadlineInitialization = new Promise<void>((resolve) => {
+      releaseDeadline = resolve;
+    });
+    let now = 1_000;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
+    try {
+      const deadlineCall = {
+        cancelled: false,
+        getDeadline: () => 1_500,
+        once: () => deadlineCall,
+        off: () => deadlineCall,
+      };
+      const deadlineWait = (service as any).waitForInitialization(
+        deadlineCall,
+        deadlineInitialization,
+      );
+      now = 1_500;
+      releaseDeadline();
+      await expect(deadlineWait).rejects.toMatchObject({
+        code: grpc.status.DEADLINE_EXCEEDED,
+      });
+    } finally {
+      dateNow.mockRestore();
+    }
+  });
+
+  it("rejects new initialization and allocations after shutdown begins", async () => {
+    const service = new FunctionExecutorService();
+    const unary = (method: "initialize" | "createAllocation", request: Record<string, unknown>) =>
+      new Promise<Record<string, any>>((resolve, reject) => {
+        const handler = service.implementation[method] as any;
+        handler({ request }, (error: Error | null, response: Record<string, any>) => {
+          if (error != null) reject(error);
+          else resolve(response);
+        });
+      });
+
+    const shutdown = service.shutdown(new Error("test shutdown"));
+
+    await expect(unary("initialize", {})).rejects.toMatchObject({
+      code: grpc.status.UNAVAILABLE,
+    });
+    await expect(unary("createAllocation", {})).rejects.toMatchObject({
+      code: grpc.status.UNAVAILABLE,
+    });
+    await shutdown;
   });
 
   it("reconciles request state and output blobs over the gRPC transport", async () => {
@@ -815,6 +1162,7 @@ describe("TypeScript function executor", () => {
     const input = new TextEncoder().encode(JSON.stringify({ label: "transport-ok" }));
     const inputPath = path.join(directory, "input");
     await writeFile(inputPath, input);
+    const requestErrorPath = path.join(directory, "request-error");
     const allocationId = "allocation-stateful";
     const seenOperations = new Set<string>();
     const seenBlobs = new Set<string>();
@@ -831,12 +1179,72 @@ describe("TypeScript function executor", () => {
         applicationCode: {
           manifest: {
             encoding: "SERIALIZED_OBJECT_ENCODING_BINARY_ZIP",
+            encodingVersion: 0,
             size: codeZip.byteLength,
             metadataSize: 0,
+            sha256Hash: createHash("sha256").update(codeZip).digest("hex"),
           },
           data: codeZip,
         },
       })).outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_SUCCESS");
+      await expect(unary("createAllocation", {
+        allocation: {
+          requestId: "request-malformed-counts",
+          functionCallId: "call-malformed-counts",
+          allocationId: "allocation-malformed-counts",
+          inputs: {
+            args: [],
+            argBlobs: [{ id: "unexpected", chunks: [] }],
+            requestErrorBlob: { id: "request-error", chunks: [] },
+          },
+        },
+      })).rejects.toMatchObject({ code: grpc.status.INVALID_ARGUMENT });
+      await expect(unary("createAllocation", {
+        allocation: {
+          requestId: "request-missing-error-blob",
+          functionCallId: "call-missing-error-blob",
+          allocationId: "allocation-missing-error-blob",
+          inputs: { args: [], argBlobs: [] },
+        },
+      })).rejects.toMatchObject({ code: grpc.status.INVALID_ARGUMENT });
+      const malformedManifestAllocation = (
+        malformedAllocationId: string,
+        argumentManifest: Record<string, unknown>,
+      ) => ({
+        allocation: {
+          requestId: `request-${malformedAllocationId}`,
+          functionCallId: `call-${malformedAllocationId}`,
+          allocationId: malformedAllocationId,
+          inputs: {
+            args: [{ offset: 0, manifest: argumentManifest }],
+            argBlobs: [{ id: "input", chunks: [] }],
+            requestErrorBlob: { id: "request-error", chunks: [] },
+          },
+        },
+      });
+      const manifestWithoutMetadata = {
+        encoding: "SERIALIZED_OBJECT_ENCODING_RAW",
+        encodingVersion: 0,
+        size: input.byteLength,
+        sha256Hash: createHash("sha256").update(input).digest("hex"),
+      };
+      await expect(unary(
+        "createAllocation",
+        malformedManifestAllocation(
+          "allocation-missing-metadata-size",
+          manifestWithoutMetadata,
+        ),
+      )).rejects.toMatchObject({ code: grpc.status.INVALID_ARGUMENT });
+      await expect(unary(
+        "createAllocation",
+        malformedManifestAllocation(
+          "allocation-oversized-metadata",
+          {
+            ...manifestWithoutMetadata,
+            metadataSize: input.byteLength + 1,
+          },
+        ),
+      )).rejects.toMatchObject({ code: grpc.status.INVALID_ARGUMENT });
       await unary("createAllocation", {
         allocation: {
           requestId: "request-stateful",
@@ -848,6 +1256,7 @@ describe("TypeScript function executor", () => {
               offset: 0,
               manifest: {
                 encoding: "SERIALIZED_OBJECT_ENCODING_RAW",
+                encodingVersion: 0,
                 size: input.byteLength,
                 metadataSize: 0,
                 sha256Hash: createHash("sha256").update(input).digest("hex"),
@@ -858,6 +1267,10 @@ describe("TypeScript function executor", () => {
               id: "input",
               chunks: [{ uri: pathToFileURL(inputPath).href, size: input.byteLength }],
             }],
+            requestErrorBlob: {
+              id: "request-error",
+              chunks: [{ uri: pathToFileURL(requestErrorPath).href, size: 1024 }],
+            },
             functionCallMetadata: Buffer.alloc(0),
           },
         },

@@ -12,6 +12,8 @@ interface Arguments {
   functionExecutorId: string;
 }
 
+const SHUTDOWN_GRACE_PERIOD_MS = 10_000;
+
 function parseArguments(argv: string[]): Arguments {
   const result: Arguments = { functionExecutorId: "" };
   for (let index = 0; index < argv.length; index += 1) {
@@ -101,7 +103,10 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
     fn_executor_id: args.functionExecutorId,
     node_version: process.versions.node,
   })}\n`);
+  let stopping = false;
   const shutdown = (signal: string) => {
+    if (stopping) return;
+    stopping = true;
     process.stderr.write(`${JSON.stringify({
       timestamp: new Date().toISOString(),
       level: "info",
@@ -112,18 +117,60 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       fn_executor_id: args.functionExecutorId,
       pid: process.pid,
     })}\n`);
-    server.tryShutdown(() => {
+    const forceShutdownTimer = setTimeout(() => {
       process.stderr.write(`${JSON.stringify({
         timestamp: new Date().toISOString(),
-        level: "info",
+        level: "error",
         component: "typescript_function_executor_main",
-        message: "stopped TypeScript function executor",
+        message: "forcing TypeScript function executor shutdown after grace period",
         signal,
         executor_id: args.executorId,
         fn_executor_id: args.functionExecutorId,
         pid: process.pid,
+        grace_period_ms: SHUTDOWN_GRACE_PERIOD_MS,
       })}\n`);
+      server.forceShutdown();
+      process.exit(1);
+    }, SHUTDOWN_GRACE_PERIOD_MS);
+    const serviceShutdown = service.shutdown(new Error(`Function executor received ${signal}`));
+    const serverShutdown = new Promise<void>((resolve, reject) => {
+      server.tryShutdown((error) => {
+        if (error != null) reject(error);
+        else resolve();
+      });
     });
+    void Promise.all([serviceShutdown, serverShutdown]).then(
+      () => {
+        clearTimeout(forceShutdownTimer);
+        process.stderr.write(`${JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "info",
+          component: "typescript_function_executor_main",
+          message: "stopped TypeScript function executor",
+          signal,
+          executor_id: args.executorId,
+          fn_executor_id: args.functionExecutorId,
+          pid: process.pid,
+        })}\n`);
+        process.exit(0);
+      },
+      (error: unknown) => {
+        clearTimeout(forceShutdownTimer);
+        process.stderr.write(`${JSON.stringify({
+          timestamp: new Date().toISOString(),
+          level: "error",
+          component: "typescript_function_executor_main",
+          message: "TypeScript function executor shutdown failed",
+          signal,
+          executor_id: args.executorId,
+          fn_executor_id: args.functionExecutorId,
+          pid: process.pid,
+          error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
+        })}\n`);
+        server.forceShutdown();
+        process.exit(1);
+      },
+    );
   };
   process.once("SIGINT", () => shutdown("SIGINT"));
   process.once("SIGTERM", () => shutdown("SIGTERM"));

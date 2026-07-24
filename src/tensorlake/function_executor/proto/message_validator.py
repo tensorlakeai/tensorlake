@@ -111,18 +111,25 @@ class MessageValidator:
 
 def _validate_serialized_object_inside_blob(so: SerializedObjectInsideBLOB) -> None:
     MessageValidator(so).required_field("manifest").required_field("offset")
-    _validate_serialized_object_manifest(so.manifest)
+    _validate_serialized_object_manifest(so.manifest, require_metadata_size=True)
 
 
-def _validate_serialized_object_manifest(manifest: SerializedObjectManifest) -> None:
-    (
+def _validate_serialized_object_manifest(
+    manifest: SerializedObjectManifest, *, require_metadata_size: bool = False
+) -> None:
+    validator = (
         MessageValidator(manifest)
         .required_field("encoding")
         .required_field("encoding_version")
         .required_field("size")
         .required_field("sha256_hash")
     )
-    # metadata_size is optional
+    if require_metadata_size:
+        validator.required_field("metadata_size")
+    if manifest.HasField("metadata_size") and manifest.metadata_size > manifest.size:
+        raise ValueError(
+            "Field 'metadata_size' cannot exceed 'size' in SerializedObjectManifest"
+        )
     # content_type is optional
 
 
