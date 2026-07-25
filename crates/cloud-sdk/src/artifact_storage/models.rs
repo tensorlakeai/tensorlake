@@ -252,6 +252,21 @@ pub struct NativeDirectPublishRequest {
     pub retain_as_snapshot: bool,
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum NativeMetadataMutation {
+    Delete { path: String },
+    Move { from: String, to: String },
+    Copy { from: String, to: String },
+}
+
+#[derive(Clone, Debug, PartialEq, Serialize)]
+pub struct NativeMetadataPublishRequest {
+    pub operation_id: String,
+    pub message: String,
+    pub mutations: Vec<NativeMetadataMutation>,
+}
+
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct NativeDirectPublishResponse {
     pub version_id: String,

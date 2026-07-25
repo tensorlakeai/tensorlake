@@ -21,7 +21,8 @@ use models::{
     NativeDirectPublishRequest, NativeDirectPublishResponse, NativeDirectUploadLeaseResponse,
     NativeDirectUploadReceipt, NativeFilesystemFileRead, NativeFilesystemSnapshot,
     NativeFilesystemSnapshotPage, NativeFilesystemSnapshotRetentionResponse, NativeHeadResponse,
-    REPO_KIND_FILESYSTEM, RepoInfo, RepoMetaInfo,
+    NativeMetadataMutation, NativeMetadataPublishRequest, REPO_KIND_FILESYSTEM, RepoInfo,
+    RepoMetaInfo,
 };
 
 #[derive(Clone)]
@@ -985,6 +986,44 @@ impl ArtifactStorageClient {
             validate_native_direct_path(&transfer.from)?;
             validate_native_direct_path(&transfer.to)?;
         }
+        if files.is_empty() && path_files.is_empty() {
+            let mut mutations = Vec::with_capacity(deletes.len() + moves.len() + copies.len());
+            mutations.extend(
+                deletes
+                    .into_iter()
+                    .map(|path| NativeMetadataMutation::Delete { path }),
+            );
+            mutations.extend(
+                moves
+                    .into_iter()
+                    .map(|transfer| NativeMetadataMutation::Move {
+                        from: transfer.from,
+                        to: transfer.to,
+                    }),
+            );
+            mutations.extend(
+                copies
+                    .into_iter()
+                    .map(|transfer| NativeMetadataMutation::Copy {
+                        from: transfer.from,
+                        to: transfer.to,
+                    }),
+            );
+            let publish = NativeMetadataPublishRequest {
+                operation_id,
+                message,
+                mutations,
+            };
+            let (request, trace_id) = self.git_request(
+                Method::POST,
+                project_id,
+                filesystem,
+                Some("fs/mutations"),
+                git_username,
+                git_token,
+            )?;
+            return decode_json(send_idempotent(request.json(&publish)).await?, trace_id).await;
+        }
         const DIRECT_PART_BYTES: usize = 64 * 1024 * 1024;
         let prepare = tokio::task::spawn_blocking(move || {
             prepare_native_direct_publication(
@@ -1764,7 +1803,8 @@ mod tests {
     use crate::ClientBuilder;
     use crate::artifact_storage::models::{
         GitCredential, NativeDirectBlobRequest, NativeDirectBlobTarget, NativeDirectFilePathWrite,
-        NativeDirectFileWrite, NativeDirectMutation, REPO_KIND_FILESYSTEM,
+        NativeDirectFileWrite, NativeDirectMutation, NativeDirectPathTransfer,
+        REPO_KIND_FILESYSTEM,
     };
 
     #[test]
@@ -2282,5 +2322,98 @@ mod tests {
             1,
             "the repository credential should be reused across write and reads"
         );
+    }
+
+    #[tokio::test]
+    async fn metadata_only_publication_is_one_data_plane_request_without_a_lease() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0u8; 4096];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "request ended before its headers");
+                bytes.extend_from_slice(&chunk[..read]);
+                if let Some(offset) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break offset + 4;
+                }
+            };
+            let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+            let content_len = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            while bytes.len() < header_end + content_len {
+                let mut chunk = [0u8; 4096];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "request ended before its body");
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            assert_eq!(
+                headers.lines().next().unwrap(),
+                "POST /project/project/repos/filesystem/fs/mutations HTTP/1.1"
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes[header_end..header_end + content_len]).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "operation_id": "metadata-1",
+                    "message": "rearrange paths",
+                    "mutations": [
+                        {"type": "delete", "path": "old.txt"},
+                        {"type": "move", "from": "data.bin", "to": "archive/data.bin"},
+                        {"type": "copy", "from": "archive/data.bin", "to": "copies/data.bin"},
+                    ],
+                })
+            );
+            let response_body = serde_json::to_vec(&serde_json::json!({
+                "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "previous_version_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            }))
+            .unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len(),
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&response_body).await.unwrap();
+        });
+
+        let api_client = ClientBuilder::new(&base).build().unwrap();
+        let client = ArtifactStorageClient::new(api_client, &base).unwrap();
+        let published = client
+            .push_native_files_direct_with_credential(
+                "project",
+                "filesystem",
+                Vec::new(),
+                Vec::new(),
+                vec!["old.txt".into()],
+                vec![NativeDirectPathTransfer {
+                    from: "data.bin".into(),
+                    to: "archive/data.bin".into(),
+                }],
+                vec![NativeDirectPathTransfer {
+                    from: "archive/data.bin".into(),
+                    to: "copies/data.bin".into(),
+                }],
+                "rearrange paths".into(),
+                "metadata-1".into(),
+                "repo-user",
+                "repo-token",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            published.version_id,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        server.await.unwrap();
     }
 }
