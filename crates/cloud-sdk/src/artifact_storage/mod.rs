@@ -2369,7 +2369,7 @@ mod tests {
                     "mutations": [
                         {"type": "delete", "path": "old.txt"},
                         {"type": "move", "from": "data.bin", "to": "archive/data.bin"},
-                        {"type": "copy", "from": "archive/data.bin", "to": "copies/data.bin"},
+                        {"type": "copy", "from": "model.bin", "to": "copies/model.bin"},
                     ],
                 })
             );
@@ -2400,8 +2400,8 @@ mod tests {
                     to: "archive/data.bin".into(),
                 }],
                 vec![NativeDirectPathTransfer {
-                    from: "archive/data.bin".into(),
-                    to: "copies/data.bin".into(),
+                    from: "model.bin".into(),
+                    to: "copies/model.bin".into(),
                 }],
                 "rearrange paths".into(),
                 "metadata-1".into(),
