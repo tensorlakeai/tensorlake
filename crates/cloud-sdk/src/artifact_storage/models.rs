@@ -180,6 +180,28 @@ pub struct NativeFilesystemFileRead {
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
+pub(crate) struct NativeReadPlanPage {
+    pub inline_base64: Option<String>,
+    pub parts: Vec<NativeReadPart>,
+    pub logical_len: u64,
+    pub content_id: Option<String>,
+    pub hash_algorithm: Option<String>,
+    pub next_offset: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
+pub(crate) struct NativeReadPart {
+    pub offset: u64,
+    pub stored_len: u64,
+    pub logical_len: u64,
+    pub compression: String,
+    pub content_id: String,
+    pub hash_algorithm: String,
+    pub stored_checksum_sha256: Option<String>,
+    pub url: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct NativeDirectUploadLeaseResponse {
     pub lease_id: String,
     pub expires_at_ms: u64,
