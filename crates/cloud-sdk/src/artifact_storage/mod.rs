@@ -1009,6 +1009,12 @@ impl ArtifactStorageClient {
                         to: transfer.to,
                     }),
             );
+            if mutations.len() > 128 {
+                return Err(SdkError::ClientError(format!(
+                    "metadata-only publication contains {} mutations; the low-latency limit is 128",
+                    mutations.len()
+                )));
+            }
             let publish = NativeMetadataPublishRequest {
                 operation_id,
                 message,
@@ -2415,5 +2421,32 @@ mod tests {
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metadata_only_publication_rejects_oversized_batches_before_network_io() {
+        let api_client = ClientBuilder::new("http://127.0.0.1:1").build().unwrap();
+        let client = ArtifactStorageClient::new(api_client, "http://127.0.0.1:1").unwrap();
+        let error = client
+            .push_native_files_direct_with_credential(
+                "project",
+                "filesystem",
+                Vec::new(),
+                Vec::new(),
+                (0..129).map(|index| format!("old-{index}.txt")).collect(),
+                Vec::new(),
+                Vec::new(),
+                "oversized metadata batch".into(),
+                "metadata-oversized".into(),
+                "repo-user",
+                "repo-token",
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("129 mutations") && error.contains("128"),
+            "{error}"
+        );
     }
 }
