@@ -21,6 +21,7 @@ use models::{
     NativeDirectPublishRequest, NativeDirectPublishResponse, NativeDirectUploadLeaseResponse,
     NativeDirectUploadReceipt, NativeFilesystemFileRead, NativeFilesystemSnapshot,
     NativeFilesystemSnapshotPage, NativeFilesystemSnapshotRetentionResponse, NativeHeadResponse,
+    NativeMetadataMutation, NativeMetadataPublishRequest, NativeReadPart, NativeReadPlanPage,
     REPO_KIND_FILESYSTEM, RepoInfo, RepoMetaInfo,
 };
 
@@ -29,7 +30,26 @@ pub struct ArtifactStorageClient {
     api_client: Client,
     git_client: reqwest::Client,
     git_base_url: String,
-    repo_credentials: Arc<tokio::sync::Mutex<HashMap<(String, String), GitCredential>>>,
+    git_credentials: Arc<tokio::sync::Mutex<HashMap<(String, Option<String>), GitCredential>>>,
+}
+
+#[derive(Clone)]
+struct NativeReadIdentity {
+    logical_len: u64,
+    content_id: String,
+    hash_algorithm: String,
+}
+
+struct NativeReadPlan {
+    identity: NativeReadIdentity,
+    inline: Option<Vec<u8>>,
+    parts: Vec<NativeReadPart>,
+    trace_id: String,
+}
+
+enum NativeReadResolution {
+    Direct(Traced<NativeFilesystemFileRead>),
+    Proxy(NativeReadIdentity),
 }
 
 impl ArtifactStorageClient {
@@ -40,7 +60,7 @@ impl ArtifactStorageClient {
                 .user_agent(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")))
                 .build()?,
             git_base_url: trim_base_url(git_base_url.into()),
-            repo_credentials: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            git_credentials: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
         })
     }
 
@@ -105,8 +125,8 @@ impl ArtifactStorageClient {
         if let Some(credential) = Self::git_credential_from_env() {
             return Ok(credential);
         }
-        let key = (project_id.to_string(), repo.to_string());
-        if let Some(credential) = self.repo_credentials.lock().await.get(&key).cloned()
+        let key = (project_id.to_string(), Some(repo.to_string()));
+        if let Some(credential) = self.git_credentials.lock().await.get(&key).cloned()
             && git_credential_is_fresh(&credential)
         {
             return Ok(credential);
@@ -116,7 +136,7 @@ impl ArtifactStorageClient {
             .await?
             .into_inner();
         if git_credential_is_fresh(&credential) {
-            self.repo_credentials
+            self.git_credentials
                 .lock()
                 .await
                 .insert(key, credential.clone());
@@ -131,15 +151,15 @@ impl ArtifactStorageClient {
         if let Some(credential) = Self::git_credential_from_env() {
             return Ok(credential);
         }
-        let key = (project_id.to_string(), "*".to_string());
-        if let Some(credential) = self.repo_credentials.lock().await.get(&key).cloned()
+        let key = (project_id.to_string(), None);
+        if let Some(credential) = self.git_credentials.lock().await.get(&key).cloned()
             && git_credential_is_fresh(&credential)
         {
             return Ok(credential);
         }
         let credential = self.mint_token(project_id).await?.into_inner();
         if git_credential_is_fresh(&credential) {
-            self.repo_credentials
+            self.git_credentials
                 .lock()
                 .await
                 .insert(key, credential.clone());
@@ -683,13 +703,60 @@ impl ArtifactStorageClient {
         version: &str,
         range: Option<(u64, u64)>,
     ) -> Result<Traced<NativeFilesystemFileRead>, SdkError> {
+        if let Some((offset, length)) = range {
+            if length == 0 {
+                return Err(SdkError::ClientError(
+                    "filesystem read range length must be positive".to_string(),
+                ));
+            }
+            offset.checked_add(length - 1).ok_or_else(|| {
+                SdkError::ClientError("filesystem read range overflow".to_string())
+            })?;
+        }
         let snapshot = native_snapshot_id(version)?;
         let path = encode_native_path(path)?;
-        let suffix = match snapshot {
-            Some(snapshot) => format!("fs/files/{path}?snapshot={snapshot}"),
-            None => format!("fs/files/{path}"),
-        };
         let credential = self.git_credential_for_repo(project_id, filesystem).await?;
+        let resolution = self
+            .read_native_filesystem_file_direct(
+                project_id,
+                filesystem,
+                &path,
+                snapshot,
+                range,
+                &credential,
+            )
+            .await?;
+        match resolution {
+            NativeReadResolution::Direct(read) => Ok(read),
+            NativeReadResolution::Proxy(identity) => {
+                self.read_native_filesystem_file_via_server(
+                    project_id,
+                    filesystem,
+                    &path,
+                    snapshot,
+                    range,
+                    &credential,
+                    identity,
+                )
+                .await
+            }
+        }
+    }
+
+    async fn read_native_filesystem_file_via_server(
+        &self,
+        project_id: &str,
+        filesystem: &str,
+        encoded_path: &str,
+        snapshot: Option<&str>,
+        range: Option<(u64, u64)>,
+        credential: &GitCredential,
+        identity: NativeReadIdentity,
+    ) -> Result<Traced<NativeFilesystemFileRead>, SdkError> {
+        let suffix = match snapshot {
+            Some(snapshot) => format!("fs/files/{encoded_path}?snapshot={snapshot}"),
+            None => format!("fs/files/{encoded_path}"),
+        };
         let (request, trace_id) = self.git_request(
             Method::GET,
             project_id,
@@ -699,31 +766,38 @@ impl ArtifactStorageClient {
             &credential.token,
         )?;
         let request = match range {
-            Some((offset, length)) => {
-                if length == 0 {
-                    return Err(SdkError::ClientError(
-                        "filesystem read range length must be positive".to_string(),
-                    ));
-                }
-                let end = offset.checked_add(length - 1).ok_or_else(|| {
-                    SdkError::ClientError("filesystem read range overflow".to_string())
-                })?;
-                request.header(reqwest::header::RANGE, format!("bytes={offset}-{end}"))
-            }
+            Some((offset, length)) => request.header(
+                reqwest::header::RANGE,
+                format!("bytes={offset}-{}", offset + length - 1),
+            ),
             None => request,
         };
         let response = handle_response(send_idempotent(request).await?).await?;
-        let content_id = response
+        let response_content_id = response
             .headers()
             .get("x-tensorlake-content-id")
             .and_then(|value| value.to_str().ok())
             .filter(|value| !value.is_empty())
             .ok_or_else(|| {
-                SdkError::ClientError(
-                    "filesystem read response omitted content identity".to_string(),
-                )
-            })?
-            .to_string();
+                native_read_protocol_error("filesystem proxy omitted content identity")
+            })?;
+        if response_content_id != identity.content_id {
+            return Err(native_read_protocol_error(
+                "filesystem proxy changed the read-plan content identity",
+            ));
+        }
+        let response_hash_algorithm = response
+            .headers()
+            .get("x-tensorlake-content-hash-algorithm")
+            .and_then(|value| value.to_str().ok())
+            .ok_or_else(|| {
+                native_read_protocol_error("filesystem proxy omitted its content hash algorithm")
+            })?;
+        if response_hash_algorithm != identity.hash_algorithm {
+            return Err(native_read_protocol_error(
+                "filesystem proxy changed the read-plan hash algorithm",
+            ));
+        }
         let full_size = match response.headers().get(reqwest::header::CONTENT_RANGE) {
             Some(value) => value
                 .to_str()
@@ -732,18 +806,327 @@ impl ArtifactStorageClient {
                 .and_then(|(_, total)| total.parse::<u64>().ok()),
             None => response.content_length(),
         }
-        .ok_or_else(|| {
-            SdkError::ClientError("filesystem read response omitted total size".to_string())
-        })?;
-        let data = response.bytes().await?.to_vec();
+        .ok_or_else(|| native_read_protocol_error("filesystem proxy omitted total size"))?;
+        if full_size != identity.logical_len {
+            return Err(native_read_protocol_error(
+                "filesystem proxy changed the read-plan logical length",
+            ));
+        }
+        let expected_len = match range {
+            Some((offset, length)) => length.min(full_size.saturating_sub(offset)),
+            None => full_size,
+        };
+        let data = read_response_body_exact(response, expected_len)
+            .await
+            .ok_or_else(|| {
+                native_read_protocol_error(
+                    "filesystem proxy body did not match the requested logical length",
+                )
+            })?;
+        if range.is_none() {
+            verify_native_logical_content(
+                &data,
+                identity.logical_len,
+                &identity.content_id,
+                &identity.hash_algorithm,
+            )?;
+        }
         Ok(Traced::new(
             trace_id,
             NativeFilesystemFileRead {
                 data,
-                content_id,
+                content_id: identity.content_id,
                 full_size,
             },
         ))
+    }
+
+    /// Resolve immutable content locations through the authenticated service, then fetch only
+    /// overlapping payload records straight from the object store. Signed URLs are transport
+    /// capabilities: Tensorlake credentials are never attached to those requests.
+    async fn read_native_filesystem_file_direct(
+        &self,
+        project_id: &str,
+        filesystem: &str,
+        encoded_path: &str,
+        snapshot: Option<&str>,
+        range: Option<(u64, u64)>,
+        credential: &GitCredential,
+    ) -> Result<NativeReadResolution, SdkError> {
+        use base64::Engine as _;
+        use futures::StreamExt as _;
+
+        const PAGE_LIMIT: usize = 4096;
+        const MAX_PARTS: usize = 1_000_000;
+        const DOWNLOAD_CONCURRENCY: usize = 8;
+
+        let mut after_offset = 0u64;
+        let mut parts = Vec::new();
+        let mut inline = None;
+        let mut identity: Option<(u64, Option<String>, Option<String>)> = None;
+        let mut trace_id = None;
+        loop {
+            let suffix = native_read_plan_suffix(encoded_path, snapshot, after_offset, PAGE_LIMIT);
+            let (request, request_trace_id) = self.git_request(
+                Method::GET,
+                project_id,
+                filesystem,
+                Some(&suffix),
+                &credential.git_username,
+                &credential.token,
+            )?;
+            trace_id.get_or_insert(request_trace_id.clone());
+            let page = decode_json::<NativeReadPlanPage>(
+                send_idempotent(request).await?,
+                request_trace_id,
+            )
+            .await?
+            .into_inner();
+            let page_identity = (
+                page.logical_len,
+                page.content_id.clone(),
+                page.hash_algorithm.clone(),
+            );
+            if identity
+                .as_ref()
+                .is_some_and(|prior| prior != &page_identity)
+            {
+                return Err(native_read_protocol_error(
+                    "read-plan identity changed between immutable pages",
+                ));
+            }
+            identity.get_or_insert(page_identity);
+
+            if let Some(encoded) = page.inline_base64 {
+                if after_offset != 0
+                    || page.next_offset.is_some()
+                    || !page.parts.is_empty()
+                    || inline.is_some()
+                {
+                    return Err(native_read_protocol_error(
+                        "inline read-plan mixed inline bytes with parts or pagination",
+                    ));
+                }
+                let bytes = base64::engine::general_purpose::STANDARD
+                    .decode(encoded)
+                    .map_err(|error| {
+                        native_read_protocol_error(format!(
+                            "invalid inline filesystem content: {error}"
+                        ))
+                    })?;
+                verify_native_leaf_content(
+                    &bytes,
+                    page.logical_len,
+                    page.content_id.as_deref(),
+                    page.hash_algorithm.as_deref(),
+                )?;
+                inline = Some(bytes);
+            }
+
+            let page_logical_len = page.parts.iter().try_fold(0u64, |total, part| {
+                if part.logical_len == 0 || part.stored_len == 0 {
+                    return None;
+                }
+                total.checked_add(part.logical_len)
+            });
+            let Some(page_logical_len) = page_logical_len else {
+                return Err(native_read_protocol_error(
+                    "read-plan contains an empty or overflowing part",
+                ));
+            };
+            let described_offset = after_offset
+                .checked_add(page_logical_len)
+                .ok_or_else(|| native_read_protocol_error("read-plan logical offset overflowed"))?;
+            if parts.len().saturating_add(page.parts.len()) > MAX_PARTS {
+                return Err(native_read_protocol_error(format!(
+                    "read-plan exceeds the {MAX_PARTS} part SDK safety limit"
+                )));
+            }
+            parts.extend(page.parts);
+            let Some(next_offset) = page.next_offset else {
+                break;
+            };
+            if next_offset != described_offset || next_offset <= after_offset {
+                return Err(native_read_protocol_error(
+                    "read-plan pagination cursor did not match its described bytes",
+                ));
+            }
+            after_offset = next_offset;
+        }
+
+        let (logical_len, content_id, hash_algorithm) = identity.ok_or_else(|| {
+            native_read_protocol_error("read-plan did not describe filesystem content")
+        })?;
+        let plan = NativeReadPlan {
+            identity: NativeReadIdentity {
+                logical_len,
+                content_id: content_id
+                    .ok_or_else(|| native_read_protocol_error("content ID is missing"))?,
+                hash_algorithm: hash_algorithm
+                    .ok_or_else(|| native_read_protocol_error("hash algorithm is missing"))?,
+            },
+            inline,
+            parts,
+            trace_id: trace_id.unwrap_or_default(),
+        };
+        let requested = match range {
+            Some((offset, length)) if offset < plan.identity.logical_len => {
+                offset..offset.saturating_add(length).min(plan.identity.logical_len)
+            }
+            Some(_) => return Ok(NativeReadResolution::Proxy(plan.identity)),
+            None => 0..plan.identity.logical_len,
+        };
+
+        if let Some(bytes) = plan.inline {
+            if !plan.parts.is_empty() || bytes.len() as u64 != plan.identity.logical_len {
+                return Err(native_read_protocol_error(
+                    "inline read-plan did not exactly cover the file",
+                ));
+            }
+            let start = usize::try_from(requested.start)
+                .map_err(|_| native_read_protocol_error("read range exceeds address space"))?;
+            let end = usize::try_from(requested.end)
+                .map_err(|_| native_read_protocol_error("read range exceeds address space"))?;
+            return Ok(NativeReadResolution::Direct(Traced::new(
+                plan.trace_id,
+                NativeFilesystemFileRead {
+                    data: bytes[start..end].to_vec(),
+                    content_id: plan.identity.content_id,
+                    full_size: plan.identity.logical_len,
+                },
+            )));
+        }
+
+        let mut logical_offset = 0u64;
+        let mut selected = Vec::new();
+        for part in plan.parts {
+            let part_start = logical_offset;
+            let part_end = part_start
+                .checked_add(part.logical_len)
+                .ok_or_else(|| native_read_protocol_error("read-plan logical length overflowed"))?;
+            if part_end > requested.start && part_start < requested.end {
+                selected.push((part_start, part));
+            }
+            logical_offset = part_end;
+        }
+        if logical_offset != plan.identity.logical_len {
+            return Err(native_read_protocol_error(
+                "read-plan parts do not cover the complete file",
+            ));
+        }
+        if selected.iter().any(|(_, part)| part.url.is_none()) {
+            return Ok(NativeReadResolution::Proxy(plan.identity));
+        }
+
+        let capacity = usize::try_from(requested.end - requested.start)
+            .map_err(|_| native_read_protocol_error("read range exceeds address space"))?;
+        let mut output = Vec::new();
+        output.try_reserve_exact(capacity).map_err(|_| {
+            native_read_protocol_error("filesystem read is too large to materialize")
+        })?;
+        let mut downloads = futures::stream::iter(selected.into_iter().map(
+            |(logical_start, part)| async move {
+                self.download_native_read_part(part)
+                    .await
+                    .map(|bytes| bytes.map(|bytes| (logical_start, bytes)))
+            },
+        ))
+        .buffered(DOWNLOAD_CONCURRENCY);
+        while let Some(result) = downloads.next().await {
+            let Some((logical_start, bytes)) = result? else {
+                return Ok(NativeReadResolution::Proxy(plan.identity));
+            };
+            let logical_end = logical_start + bytes.len() as u64;
+            let start = usize::try_from(requested.start.saturating_sub(logical_start))
+                .unwrap_or(usize::MAX)
+                .min(bytes.len());
+            let end = usize::try_from(requested.end.min(logical_end) - logical_start)
+                .unwrap_or(usize::MAX)
+                .min(bytes.len());
+            output.extend_from_slice(&bytes[start..end]);
+        }
+        if output.len() != capacity {
+            return Err(native_read_protocol_error(format!(
+                "direct filesystem read returned {} bytes, expected {capacity}",
+                output.len()
+            )));
+        }
+        if requested.start == 0 && requested.end == plan.identity.logical_len {
+            verify_native_logical_content(
+                &output,
+                plan.identity.logical_len,
+                &plan.identity.content_id,
+                &plan.identity.hash_algorithm,
+            )?;
+        }
+        Ok(NativeReadResolution::Direct(Traced::new(
+            plan.trace_id,
+            NativeFilesystemFileRead {
+                data: output,
+                content_id: plan.identity.content_id,
+                full_size: plan.identity.logical_len,
+            },
+        )))
+    }
+
+    /// `Ok(None)` selects the authenticated service proxy. Malformed ranges, decompression bombs,
+    /// and checksum mismatches fail closed instead of silently trusting the fallback.
+    async fn download_native_read_part(
+        &self,
+        part: NativeReadPart,
+    ) -> Result<Option<Vec<u8>>, SdkError> {
+        let url = part
+            .url
+            .as_deref()
+            .expect("caller checked every read-plan URL");
+        validate_signed_blob_url(url)?;
+        let end = part
+            .offset
+            .checked_add(part.stored_len)
+            .and_then(|end| end.checked_sub(1))
+            .ok_or_else(|| {
+                native_read_protocol_error("read-plan returned an invalid byte range")
+            })?;
+        let response = match send_signed_read(self.git_client.get(url).header(
+            reqwest::header::RANGE,
+            format!("bytes={}-{end}", part.offset),
+        ))
+        .await
+        {
+            Some(response) => response,
+            None => return Ok(None),
+        };
+        let whole_object = response.status() == StatusCode::OK;
+        if whole_object
+            && (part.offset != 0
+                || response
+                    .content_length()
+                    .is_some_and(|length| length != part.stored_len))
+        {
+            return Ok(None);
+        }
+        if !whole_object && response.status() != StatusCode::PARTIAL_CONTENT {
+            return Ok(None);
+        }
+        let stored = match read_response_body_exact(response, part.stored_len).await {
+            Some(bytes) => bytes,
+            None => return Ok(None),
+        };
+        if let Some(expected) = part.stored_checksum_sha256.as_deref()
+            && sha256_hex(&stored) != expected
+        {
+            return Err(native_read_protocol_error(
+                "stored filesystem content checksum mismatch",
+            ));
+        }
+        let logical = decode_native_read_part(&part, stored).await?;
+        verify_native_leaf_content(
+            &logical,
+            part.logical_len,
+            Some(&part.content_id),
+            Some(&part.hash_algorithm),
+        )?;
+        Ok(Some(logical))
     }
 
     pub async fn list_native_filesystem_entries_page(
@@ -984,6 +1367,50 @@ impl ArtifactStorageClient {
         for transfer in moves.iter().chain(&copies) {
             validate_native_direct_path(&transfer.from)?;
             validate_native_direct_path(&transfer.to)?;
+        }
+        if files.is_empty() && path_files.is_empty() {
+            let mut mutations = Vec::with_capacity(deletes.len() + moves.len() + copies.len());
+            mutations.extend(
+                deletes
+                    .into_iter()
+                    .map(|path| NativeMetadataMutation::Delete { path }),
+            );
+            mutations.extend(
+                moves
+                    .into_iter()
+                    .map(|transfer| NativeMetadataMutation::Move {
+                        from: transfer.from,
+                        to: transfer.to,
+                    }),
+            );
+            mutations.extend(
+                copies
+                    .into_iter()
+                    .map(|transfer| NativeMetadataMutation::Copy {
+                        from: transfer.from,
+                        to: transfer.to,
+                    }),
+            );
+            if mutations.len() > 128 {
+                return Err(SdkError::ClientError(format!(
+                    "metadata-only publication contains {} mutations; the low-latency limit is 128",
+                    mutations.len()
+                )));
+            }
+            let publish = NativeMetadataPublishRequest {
+                operation_id,
+                message,
+                mutations,
+            };
+            let (request, trace_id) = self.git_request(
+                Method::POST,
+                project_id,
+                filesystem,
+                Some("fs/mutations"),
+                git_username,
+                git_token,
+            )?;
+            return decode_json(send_idempotent(request.json(&publish)).await?, trace_id).await;
         }
         const DIRECT_PART_BYTES: usize = 64 * 1024 * 1024;
         let prepare = tokio::task::spawn_blocking(move || {
@@ -1429,6 +1856,186 @@ fn prepare_native_direct_publication(
     Ok((mutations, unique_blobs))
 }
 
+fn native_read_protocol_error(message: impl Into<String>) -> SdkError {
+    SdkError::ClientError(format!(
+        "invalid native filesystem read response: {}",
+        message.into()
+    ))
+}
+
+fn validate_signed_blob_url(url: &str) -> Result<(), SdkError> {
+    let parsed = url::Url::parse(url)
+        .map_err(|_| native_read_protocol_error("server returned an invalid signed blob URL"))?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return Err(native_read_protocol_error(
+            "server returned an unsupported signed blob URL",
+        ));
+    }
+    Ok(())
+}
+
+fn sha256_hex(bytes: &[u8]) -> String {
+    use sha2::Digest as _;
+    hex::encode(sha2::Sha256::digest(bytes))
+}
+
+fn native_file_content_id(bytes: &[u8]) -> String {
+    let mut hasher = blake3::Hasher::new();
+    hasher.update(b"tensorlake.fs.file-content.v1\0");
+    hasher.update(bytes);
+    hex::encode(hasher.finalize().as_bytes())
+}
+
+fn verify_native_logical_content(
+    bytes: &[u8],
+    logical_len: u64,
+    content_id: &str,
+    hash_algorithm: &str,
+) -> Result<(), SdkError> {
+    if bytes.len() as u64 != logical_len {
+        return Err(native_read_protocol_error(format!(
+            "logical content is {} bytes, expected {logical_len}",
+            bytes.len()
+        )));
+    }
+    let actual = match hash_algorithm {
+        "blake3" => native_file_content_id(bytes),
+        "sha256" => sha256_hex(bytes),
+        // A recipe root commits to the ordered, individually verified leaves rather than the
+        // concatenated bytes. Every downloaded leaf has already been checked.
+        "native-merkle-v1" => return Ok(()),
+        other => {
+            return Err(native_read_protocol_error(format!(
+                "unsupported content hash algorithm {other:?}"
+            )));
+        }
+    };
+    if actual != content_id {
+        return Err(native_read_protocol_error(
+            "logical filesystem content checksum mismatch",
+        ));
+    }
+    Ok(())
+}
+
+fn verify_native_leaf_content(
+    bytes: &[u8],
+    logical_len: u64,
+    content_id: Option<&str>,
+    hash_algorithm: Option<&str>,
+) -> Result<(), SdkError> {
+    let content_id =
+        content_id.ok_or_else(|| native_read_protocol_error("content ID is missing"))?;
+    let hash_algorithm =
+        hash_algorithm.ok_or_else(|| native_read_protocol_error("hash algorithm is missing"))?;
+    if hash_algorithm == "native-merkle-v1" {
+        return Err(native_read_protocol_error(
+            "a leaf read-plan entry used a recipe-root hash algorithm",
+        ));
+    }
+    verify_native_logical_content(bytes, logical_len, content_id, hash_algorithm)
+}
+
+async fn decode_native_read_part(
+    part: &NativeReadPart,
+    stored: Vec<u8>,
+) -> Result<Vec<u8>, SdkError> {
+    match part.compression.as_str() {
+        "raw" => Ok(stored),
+        "zstd" => {
+            let logical_len = part.logical_len;
+            tokio::task::spawn_blocking(move || {
+                use std::io::Read as _;
+
+                let decoder =
+                    zstd::stream::read::Decoder::new(stored.as_slice()).map_err(|error| {
+                        native_read_protocol_error(format!(
+                            "invalid zstd filesystem content: {error}"
+                        ))
+                    })?;
+                let limit = logical_len.checked_add(1).ok_or_else(|| {
+                    native_read_protocol_error("decompressed length limit overflowed")
+                })?;
+                let mut logical = Vec::with_capacity(
+                    usize::try_from(logical_len)
+                        .unwrap_or(usize::MAX)
+                        .min(8 * 1024 * 1024),
+                );
+                decoder
+                    .take(limit)
+                    .read_to_end(&mut logical)
+                    .map_err(|error| {
+                        native_read_protocol_error(format!(
+                            "failed to decompress filesystem content: {error}"
+                        ))
+                    })?;
+                if logical.len() as u64 != logical_len {
+                    return Err(native_read_protocol_error(format!(
+                        "zstd filesystem content expands to {} bytes, expected {logical_len}",
+                        logical.len()
+                    )));
+                }
+                Ok(logical)
+            })
+            .await
+            .map_err(|error| {
+                native_read_protocol_error(format!(
+                    "filesystem decompression worker failed: {error}"
+                ))
+            })?
+        }
+        other => Err(native_read_protocol_error(format!(
+            "unsupported filesystem compression {other:?}"
+        ))),
+    }
+}
+
+async fn send_signed_read(request: reqwest::RequestBuilder) -> Option<reqwest::Response> {
+    const ATTEMPTS: usize = 3;
+    for attempt in 0..ATTEMPTS {
+        let current = request.try_clone()?;
+        match current.send().await {
+            Ok(response)
+                if attempt + 1 < ATTEMPTS
+                    && (response.status().is_server_error()
+                        || response.status() == StatusCode::TOO_MANY_REQUESTS) => {}
+            Ok(response) if response.status().is_success() => return Some(response),
+            Ok(_) => return None,
+            Err(_) if attempt + 1 < ATTEMPTS => {}
+            Err(_) => return None,
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25 << attempt)).await;
+    }
+    None
+}
+
+async fn read_response_body_exact(
+    response: reqwest::Response,
+    expected_len: u64,
+) -> Option<Vec<u8>> {
+    use futures::StreamExt as _;
+
+    if response
+        .content_length()
+        .is_some_and(|length| length != expected_len)
+    {
+        return None;
+    }
+    let capacity = usize::try_from(expected_len).ok()?;
+    let mut body = Vec::new();
+    body.try_reserve_exact(capacity).ok()?;
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        let chunk = chunk.ok()?;
+        let next_len = body.len().checked_add(chunk.len())?;
+        if next_len > capacity {
+            return None;
+        }
+        body.extend_from_slice(&chunk);
+    }
+    (body.len() == capacity).then_some(body)
+}
+
 fn validate_native_direct_path(path: &str) -> Result<(), SdkError> {
     if path.is_empty()
         || path.starts_with('/')
@@ -1493,11 +2100,10 @@ fn validate_native_direct_targets(
                     target.blob_id
                 )));
             }
-            if target.url.is_none() {
-                return Err(SdkError::ClientError(
-                    "direct upload target omitted URL".to_string(),
-                ));
-            }
+            let url = target.url.as_deref().ok_or_else(|| {
+                SdkError::ClientError("direct upload target omitted URL".to_string())
+            })?;
+            validate_signed_blob_url(url)?;
         }
     }
     if seen.len() != expected.len() {
@@ -1553,6 +2159,23 @@ fn native_entries_suffix(
     }
     query.append_pair("limit", &limit.clamp(1, 10_000).to_string());
     format!("fs/entries?{}", query.finish())
+}
+
+fn native_read_plan_suffix(
+    encoded_path: &str,
+    snapshot: Option<&str>,
+    after_offset: u64,
+    limit: usize,
+) -> String {
+    // Keep the non-Send form serializer inside this synchronous helper so native-binding futures
+    // never retain it across an await.
+    let mut query = url::form_urlencoded::Serializer::new(String::new());
+    if let Some(snapshot) = snapshot {
+        query.append_pair("snapshot", snapshot);
+    }
+    query.append_pair("after_offset", &after_offset.to_string());
+    query.append_pair("limit", &limit.clamp(1, 4096).to_string());
+    format!("fs/read-plan/{encoded_path}?{}", query.finish())
 }
 
 fn repo_list_query(kind: Option<&str>, after: Option<&str>) -> String {
@@ -1758,13 +2381,15 @@ mod tests {
 
     use super::{
         ArtifactStorageClient, advance_pagination_cursor, encode_path_segment,
-        git_credential_is_fresh, prepare_native_direct_publication, repo_list_query,
-        resolve_artifact_storage_url, validate_native_direct_targets,
+        git_credential_is_fresh, native_file_content_id, prepare_native_direct_publication,
+        repo_list_query, resolve_artifact_storage_url, sha256_hex, validate_native_direct_targets,
+        validate_signed_blob_url, verify_native_leaf_content,
     };
     use crate::ClientBuilder;
     use crate::artifact_storage::models::{
         GitCredential, NativeDirectBlobRequest, NativeDirectBlobTarget, NativeDirectFilePathWrite,
-        NativeDirectFileWrite, NativeDirectMutation, REPO_KIND_FILESYSTEM,
+        NativeDirectFileWrite, NativeDirectMutation, NativeDirectPathTransfer,
+        REPO_KIND_FILESYSTEM,
     };
 
     #[test]
@@ -1787,6 +2412,55 @@ mod tests {
     fn encodes_path_segments() {
         assert_eq!(encode_path_segment("project_123"), "project_123");
         assert_eq!(encode_path_segment("repo/name"), "repo%2Fname");
+    }
+
+    #[test]
+    fn signed_blob_urls_are_http_urls_with_hosts() {
+        assert!(validate_signed_blob_url("https://store.example/object?signature=x").is_ok());
+        assert!(validate_signed_blob_url("http://127.0.0.1:9000/object").is_ok());
+        assert!(validate_signed_blob_url("file:///tmp/object").is_err());
+        assert!(validate_signed_blob_url("https:///").is_err());
+    }
+
+    #[test]
+    fn native_read_leaf_hashes_fail_closed() {
+        let bytes = b"verified filesystem bytes";
+        assert!(
+            verify_native_leaf_content(
+                bytes,
+                bytes.len() as u64,
+                Some(&sha256_hex(bytes)),
+                Some("sha256"),
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_native_leaf_content(
+                bytes,
+                bytes.len() as u64,
+                Some(&native_file_content_id(bytes)),
+                Some("blake3"),
+            )
+            .is_ok()
+        );
+        assert!(
+            verify_native_leaf_content(
+                bytes,
+                bytes.len() as u64,
+                Some(&sha256_hex(b"different")),
+                Some("sha256"),
+            )
+            .is_err()
+        );
+        assert!(
+            verify_native_leaf_content(
+                bytes,
+                bytes.len() as u64,
+                Some(&native_file_content_id(bytes)),
+                Some("native-merkle-v1"),
+            )
+            .is_err()
+        );
     }
 
     #[test]
@@ -1931,10 +2605,10 @@ mod tests {
             scopes: vec!["project:admin".to_string()],
         };
         client
-            .repo_credentials
+            .git_credentials
             .lock()
             .await
-            .insert(("project".to_string(), "*".to_string()), cached.clone());
+            .insert(("project".to_string(), None), cached.clone());
 
         assert_eq!(
             client.git_credential_for_project("project").await.unwrap(),
@@ -1960,6 +2634,154 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn native_reads_download_signed_ranges_without_forwarding_credentials() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let payload = b"signed object-store bytes for a direct filesystem read".to_vec();
+        let content_id = sha256_hex(&payload);
+        let requests = Arc::new(Mutex::new(Vec::<(String, String, String)>::new()));
+        let captured = requests.clone();
+        let server_base = base.clone();
+        let server_payload = payload.clone();
+        let server_content_id = content_id.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "request ended before its headers");
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if let Some(offset) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break offset + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                let request_line = headers.lines().next().unwrap();
+                let mut request_parts = request_line.split_whitespace();
+                let method = request_parts.next().unwrap().to_string();
+                let path = request_parts.next().unwrap().to_string();
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), path.clone(), headers.clone()));
+
+                let response_body = match (method.as_str(), path.as_str()) {
+                    ("POST", "/artifact-storage/v1/token") => {
+                        serde_json::to_vec(&serde_json::json!({
+                            "token": "repo-token",
+                            "tokenType": "bearer",
+                            "expiresAt": "2099-01-01T00:00:00Z",
+                            "gitUsername": "repo-user",
+                            "repoPattern": "filesystem",
+                            "scopes": ["fs:read"],
+                        }))
+                        .unwrap()
+                    }
+                    (
+                        "GET",
+                        "/project/project/repos/filesystem/fs/read-plan/data.bin?after_offset=0&limit=4096",
+                    ) => serde_json::to_vec(&serde_json::json!({
+                        "inline_base64": null,
+                        "parts": [{
+                            "segment_id": server_content_id,
+                            "offset": 0,
+                            "stored_len": server_payload.len(),
+                            "logical_len": server_payload.len(),
+                            "compression": "raw",
+                            "content_id": server_content_id,
+                            "hash_algorithm": "sha256",
+                            "stored_checksum_sha256": server_content_id,
+                            "url": format!("{server_base}/object-store/data"),
+                        }],
+                        "logical_len": server_payload.len(),
+                        "content_id": server_content_id,
+                        "hash_algorithm": "sha256",
+                        "next_offset": null,
+                        "proxy_path": "/project/project/repos/filesystem/fs/files/data.bin",
+                    }))
+                    .unwrap(),
+                    ("GET", "/object-store/data") => server_payload.clone(),
+                    other => panic!("unexpected request: {other:?}"),
+                };
+                let status = if path == "/object-store/data" {
+                    "206 Partial Content"
+                } else {
+                    "200 OK"
+                };
+                let content_type = if path == "/object-store/data" {
+                    "application/octet-stream"
+                } else {
+                    "application/json"
+                };
+                let response = format!(
+                    "HTTP/1.1 {status}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(&response_body).await.unwrap();
+            }
+        });
+
+        let api_client = ClientBuilder::new(&base).build().unwrap();
+        let client = ArtifactStorageClient::new(api_client, &base).unwrap();
+        let full = client
+            .read_native_filesystem_file_with_metadata(
+                "project",
+                "filesystem",
+                "data.bin",
+                "main",
+                None,
+            )
+            .await
+            .unwrap();
+        assert_eq!(full.data, payload);
+        assert_eq!(full.content_id, content_id);
+        assert_eq!(full.full_size, payload.len() as u64);
+
+        let ranged = client
+            .read_native_filesystem_file_with_metadata(
+                "project",
+                "filesystem",
+                "data.bin",
+                "main",
+                Some((7, 12)),
+            )
+            .await
+            .unwrap();
+        assert_eq!(ranged.data, payload[7..19]);
+        assert_eq!(ranged.content_id, content_id);
+        assert_eq!(ranged.full_size, payload.len() as u64);
+        server.await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(
+            requests
+                .iter()
+                .filter(|(_, path, _)| path == "/artifact-storage/v1/token")
+                .count(),
+            1,
+            "the repo credential should be reused between direct reads"
+        );
+        for (_, path, headers) in requests
+            .iter()
+            .filter(|(_, path, _)| path == "/object-store/data")
+        {
+            assert!(
+                !headers.to_ascii_lowercase().contains("authorization:"),
+                "Tensorlake credentials leaked to signed blob URL {path}"
+            );
+            assert!(
+                headers
+                    .to_ascii_lowercase()
+                    .contains(&format!("range: bytes=0-{}", payload.len() - 1)),
+                "SDK did not request the exact stored range"
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn direct_native_push_uploads_payload_only_to_the_presigned_target() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let base = format!("http://{}", listener.local_addr().unwrap());
@@ -1972,7 +2794,7 @@ mod tests {
         let server_blob_id = blob_id.clone();
         let server_payload = payload.clone();
         let server = tokio::spawn(async move {
-            for _ in 0..13 {
+            for _ in 0..11 {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut bytes = Vec::new();
                 let header_end = loop {
@@ -1993,11 +2815,6 @@ mod tests {
                             .then(|| value.trim().parse::<usize>().unwrap())
                     })
                     .unwrap_or(0);
-                let range_header = headers.lines().find_map(|line| {
-                    let (name, value) = line.split_once(':')?;
-                    name.eq_ignore_ascii_case("range")
-                        .then(|| value.trim().to_string())
-                });
                 while bytes.len() < header_end + content_len {
                     let mut chunk = [0u8; 4096];
                     let read = stream.read(&mut chunk).await.unwrap();
@@ -2100,13 +2917,6 @@ mod tests {
                         "DELETE",
                         "/project/project/repos/filesystem/fs/snapshots/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa?expected_permanence_epoch=7",
                     ) => Vec::new(),
-                    ("GET", "/project/project/repos/filesystem/fs/files/data/probe.bin") => {
-                        if range_header.as_deref() == Some("bytes=8-14") {
-                            server_payload[8..15].to_vec()
-                        } else {
-                            server_payload.clone()
-                        }
-                    }
                     ("GET", path) if path.starts_with(
                         "/project/project/repos/filesystem/fs/entries?path=data&limit=1000",
                     ) => serde_json::to_vec(&serde_json::json!({
@@ -2122,26 +2932,9 @@ mod tests {
                     .unwrap(),
                     other => panic!("unexpected request: {other:?}"),
                 };
-                let native_file_headers = if path
-                    == "/project/project/repos/filesystem/fs/files/data/probe.bin"
-                {
-                    let content_range = range_header
-                        .as_ref()
-                        .map(|_| format!("Content-Range: bytes 8-14/{}\r\n", server_payload.len()))
-                        .unwrap_or_default();
-                    format!("x-tensorlake-content-id: {server_blob_id}\r\n{content_range}")
-                } else {
-                    String::new()
-                };
-                let response_status = if range_header.is_some() {
-                    "206 Partial Content"
-                } else {
-                    "200 OK"
-                };
                 let response = format!(
-                    "HTTP/1.1 {response_status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\n{}Connection: close\r\n\r\n",
-                    response_body.len(),
-                    native_file_headers,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
                 stream.write_all(&response_body).await.unwrap();
@@ -2176,27 +2969,6 @@ mod tests {
             result.version_id,
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
         );
-        assert_eq!(
-            client
-                .read_native_filesystem_file("project", "filesystem", "data/probe.bin", "main")
-                .await
-                .unwrap()
-                .into_inner(),
-            payload
-        );
-        let ranged = client
-            .read_native_filesystem_file_with_metadata(
-                "project",
-                "filesystem",
-                "data/probe.bin",
-                "main",
-                Some((8, 7)),
-            )
-            .await
-            .unwrap();
-        assert_eq!(ranged.data, b"goes st");
-        assert_eq!(ranged.content_id, blob_id);
-        assert_eq!(ranged.full_size, payload.len() as u64);
         let entries = client
             .list_native_filesystem_entries_page(
                 "project",
@@ -2281,6 +3053,126 @@ mod tests {
                 .count(),
             1,
             "the repository credential should be reused across write and reads"
+        );
+    }
+
+    #[tokio::test]
+    async fn metadata_only_publication_is_one_data_plane_request_without_a_lease() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0u8; 4096];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "request ended before its headers");
+                bytes.extend_from_slice(&chunk[..read]);
+                if let Some(offset) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                    break offset + 4;
+                }
+            };
+            let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+            let content_len = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().unwrap())
+                })
+                .unwrap();
+            while bytes.len() < header_end + content_len {
+                let mut chunk = [0u8; 4096];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "request ended before its body");
+                bytes.extend_from_slice(&chunk[..read]);
+            }
+            assert_eq!(
+                headers.lines().next().unwrap(),
+                "POST /project/project/repos/filesystem/fs/mutations HTTP/1.1"
+            );
+            let body: serde_json::Value =
+                serde_json::from_slice(&bytes[header_end..header_end + content_len]).unwrap();
+            assert_eq!(
+                body,
+                serde_json::json!({
+                    "operation_id": "metadata-1",
+                    "message": "rearrange paths",
+                    "mutations": [
+                        {"type": "delete", "path": "old.txt"},
+                        {"type": "move", "from": "data.bin", "to": "archive/data.bin"},
+                        {"type": "copy", "from": "model.bin", "to": "copies/model.bin"},
+                    ],
+                })
+            );
+            let response_body = serde_json::to_vec(&serde_json::json!({
+                "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "previous_version_id": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            }))
+            .unwrap();
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                response_body.len(),
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.write_all(&response_body).await.unwrap();
+        });
+
+        let api_client = ClientBuilder::new(&base).build().unwrap();
+        let client = ArtifactStorageClient::new(api_client, &base).unwrap();
+        let published = client
+            .push_native_files_direct_with_credential(
+                "project",
+                "filesystem",
+                Vec::new(),
+                Vec::new(),
+                vec!["old.txt".into()],
+                vec![NativeDirectPathTransfer {
+                    from: "data.bin".into(),
+                    to: "archive/data.bin".into(),
+                }],
+                vec![NativeDirectPathTransfer {
+                    from: "model.bin".into(),
+                    to: "copies/model.bin".into(),
+                }],
+                "rearrange paths".into(),
+                "metadata-1".into(),
+                "repo-user",
+                "repo-token",
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            published.version_id,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn metadata_only_publication_rejects_oversized_batches_before_network_io() {
+        let api_client = ClientBuilder::new("http://127.0.0.1:1").build().unwrap();
+        let client = ArtifactStorageClient::new(api_client, "http://127.0.0.1:1").unwrap();
+        let error = client
+            .push_native_files_direct_with_credential(
+                "project",
+                "filesystem",
+                Vec::new(),
+                Vec::new(),
+                (0..129).map(|index| format!("old-{index}.txt")).collect(),
+                Vec::new(),
+                Vec::new(),
+                "oversized metadata batch".into(),
+                "metadata-oversized".into(),
+                "repo-user",
+                "repo-token",
+            )
+            .await
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains("129 mutations") && error.contains("128"),
+            "{error}"
         );
     }
 }

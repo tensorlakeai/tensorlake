@@ -145,7 +145,9 @@ sandbox = client.connect("stable-name")
 
 `FilesystemClient` manages durable, versioned file trees without mounting them. SDK writes hash
 files locally, upload missing 64 MiB parts directly to checksum-bound object-store URLs, and then
-atomically publish metadata. File payloads do not pass through the Tensorlake API service.
+atomically publish metadata. Reads resolve an authenticated immutable plan and fetch the selected
+records directly from signed object-store URLs. File payloads normally do not pass through the
+Tensorlake API service.
 
 ```ts
 import { FilesystemClient } from "tensorlake";
@@ -188,7 +190,9 @@ await fs.deleteSnapshot(snapshot.id);
 payload. A successful write is durable before it returns, but only the live head is retained
 automatically; `snapshot()` pins the current head permanently in one client/server round trip.
 `readFileWithMetadata()` returns immutable content identity and total size with the bytes; its
-optional range is executed server-side rather than downloading and slicing the complete file.
+optional range downloads only overlapping immutable records. The SDK bounds every response,
+verifies stored and logical content checksums, and falls back to the authenticated service only
+when the object store cannot honor the signed range.
 Deleting a snapshot releases that retention root, while bytes still reachable from a live head,
 another snapshot, a fork, or a mount remain durable.
 
