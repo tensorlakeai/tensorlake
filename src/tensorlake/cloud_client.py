@@ -5,8 +5,10 @@ should use CloudClient. The Rust SDK handles HTTP, auth, and serialization.
 """
 
 import importlib
+import json
 
 from tensorlake._tracing import USER_AGENT
+from tensorlake.public_endpoint import generate_public_endpoint_id
 
 _IMPORT_ERROR: Exception | None = None
 _RustClient = None
@@ -105,6 +107,7 @@ class CloudClient:
                 f"Build/install it with `make build_rust_py_client`.{details}"
             )
         try:
+            self.namespace = namespace or "default"
             self._client = _RustClient(
                 api_url=api_url,
                 api_key=api_key,
@@ -133,6 +136,23 @@ class CloudClient:
         code_zip: bytes,
         upgrade_running_requests: bool,
     ) -> None:
+        manifest = json.loads(manifest_json)
+        if "unauthenticated_requests" in manifest.get("allow", []) and not manifest.get(
+            "public_endpoint_id"
+        ):
+            from tensorlake.applications.interface.exceptions import RemoteAPIError
+
+            try:
+                existing = json.loads(self.application_manifest_json(manifest["name"]))
+            except RemoteAPIError as error:
+                if error.status_code != 404:
+                    raise
+                existing = {}
+            manifest["public_endpoint_id"] = (
+                existing.get("public_endpoint_id") or generate_public_endpoint_id()
+            )
+            manifest_json = json.dumps(manifest)
+
         try:
             self._client.upsert_application(
                 manifest_json=manifest_json,

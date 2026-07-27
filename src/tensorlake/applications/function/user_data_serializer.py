@@ -1,6 +1,6 @@
 from typing import Any
 
-from ..interface import DeserializationError, File, Function
+from ..interface import DeserializationError, File, Function, HttpBody
 from ..metadata import ValueMetadata
 from ..user_data_serializer import (
     APPLICATION_FUNCTION_CALL_SERIALIZER_NAME,
@@ -8,6 +8,7 @@ from ..user_data_serializer import (
     UserDataSerializer,
     serializer_by_name,
 )
+from .type_hints import is_file_type_hint, is_http_body_type_hint
 
 
 def function_input_serializer(function: Function, app_call: bool) -> UserDataSerializer:
@@ -59,8 +60,14 @@ def serialize_value(
     data: bytes = None
     if isinstance(value, File):
         data = value.content
-        metadata.content_type = value.content_type
+        metadata.content_type = value.content_type or ""
+        # Preserve the established File behavior: serialized File subclasses
+        # deserialize as the public SDK File wrapper.
         metadata.type_hint = File
+    elif isinstance(value, HttpBody):
+        data = value.content
+        metadata.content_type = value.content_type or ""
+        metadata.type_hint = HttpBody
     else:
         data = serializer.serialize(value, type_hint=type_hint)
         metadata.content_type = serializer.content_type
@@ -73,13 +80,13 @@ def serialize_value(
 def deserialize_value_with_metadata(
     serialized_value: bytes | bytearray | memoryview,
     metadata: ValueMetadata,
-) -> Any | File:
+) -> Any | File | HttpBody:
     """Deserializes the given value using the provided serializer and metadata.
 
     Raises DeserializationError if deserialization fails.
     Raises InternalError if serializer in the metadata is unknown.
     """
-    # metadata.serializer_name is None for Files in some cases.
+    # metadata.serializer_name is None for raw SDK wrappers.
     # Pass a placeholder serializer then, it's not going to be used anyway.
     serializer: UserDataSerializer = (
         serializer_by_name(SDK_FUNCTION_CALL_SERIALIZER_NAME)
@@ -99,18 +106,19 @@ def deserialize_value(
     serializer: UserDataSerializer,
     content_type: str | None,
     type_hint: Any,
-) -> Any | File:
+) -> Any | File | HttpBody:
     """Deserializes the given value using the provided serializer and information.
 
-    If type_hint is File, deserializes to File using the provided content_type.
+    If type_hint is File or HttpBody, deserializes to that type using the provided content_type.
     Otherwise, deserializes to the type hinted by type_hint using the provided serializer.
 
     Raises DeserializationError if deserialization fails.
     """
-    if type_hint is File:
+    if is_file_type_hint(type_hint) or is_http_body_type_hint(type_hint):
         if content_type is None:
             raise DeserializationError(
-                "Deserializing to File requires a content type, but None was provided."
+                f"Deserializing to {type_hint.__name__} requires a content type, "
+                "but None was provided."
             )
         # Don't pass memoryview or bytearray to users at a cost of memory copy.
         # This is because bytes have much more capabilities than bytearray or memoryview.
@@ -121,6 +129,6 @@ def deserialize_value(
             if isinstance(serialized_value, (memoryview, bytearray))
             else serialized_value
         )
-        return File(content=serialized_value, content_type=content_type)
+        return type_hint(content=serialized_value, content_type=content_type)
     else:
         return serializer.deserialize(serialized_value, type_hint)

@@ -2,7 +2,7 @@ import inspect
 import pickle
 from typing import Any
 
-from ..interface import File, Function
+from ..interface import File, Function, HttpBody
 from ..interface.futures import Future
 
 
@@ -43,6 +43,16 @@ def function_signature(function: Function) -> inspect.Signature:
 def is_file_type_hint(type_hint: Any) -> bool:
     """Returns True if the provided type hint is for an SDK File."""
     return inspect.isclass(type_hint) and issubclass(type_hint, File)
+
+
+def is_http_body_type_hint(type_hint: Any) -> bool:
+    """Returns True if the provided type hint is for an SDK HttpBody."""
+    return inspect.isclass(type_hint) and issubclass(type_hint, HttpBody)
+
+
+def is_raw_body_type_hint(type_hint: Any) -> bool:
+    """Returns True for SDK types that receive raw request body bytes."""
+    return is_file_type_hint(type_hint) or is_http_body_type_hint(type_hint)
 
 
 def is_future_type_hint(type_hint: Any) -> bool:
