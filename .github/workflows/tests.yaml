@@ -49,7 +49,7 @@ jobs:
           # This stacked PR removes redb and the legacy mount sources in artifact_storage#173.
           # Pin its exact code commit only for this head branch; main and every other PR continue
           # integrating against artifact_storage/main.
-          source-ref: ${{ github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-dependencies' && '01bb90c03fb76b293ece15cb1f9ecc9136bd763e' || 'main' }}
+          source-ref: ${{ github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-dependencies' && '70be9e2771d6e74ed4af55bb89b77951b3348fb3' || 'main' }}
 
       - name: Build full-feature CLI
         run: cargo build -p tensorlake-cli --features mount,git-clone
@@ -91,7 +91,7 @@ jobs:
           private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
           include-macos-fskit: "true"
           # Keep the private Rust and FSKit sources on the same stacked revision as the Linux job.
-          source-ref: ${{ github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-dependencies' && '01bb90c03fb76b293ece15cb1f9ecc9136bd763e' || 'main' }}
+          source-ref: ${{ github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-dependencies' && '70be9e2771d6e74ed4af55bb89b77951b3348fb3' || 'main' }}
 
       - name: Verify the CLI and FSKit source contract compile together
         run: >-
