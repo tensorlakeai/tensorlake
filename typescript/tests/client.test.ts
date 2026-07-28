@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SandboxClient } from "../src/client.js";
-import { SandboxStatus, SnapshotStatus } from "../src/models.js";
+import {
+  type NetworkConfig,
+  SandboxStatus,
+  SnapshotStatus,
+  type UpdatePoolOptions,
+} from "../src/models.js";
 import { clearNativeStub, installNativeStub } from "./native-stub.js";
 
 /** Build the native error a non-2xx HTTP response now surfaces from Rust. */
@@ -1108,6 +1113,11 @@ describe("SandboxClient", () => {
             const body = JSON.parse(json);
             expect(body.image).toBe("node:20");
             expect(body.max_containers).toBe(5);
+            expect(body.network).toEqual({
+              allow_internet_access: false,
+              allow_out: ["10.0.0.0/8"],
+              deny_out: ["192.0.2.0/24"],
+            });
             return {
               traceId: "t",
               json: JSON.stringify({ pool_id: "pool-1", namespace: "default" }),
@@ -1120,6 +1130,11 @@ describe("SandboxClient", () => {
       const result = await client.createPool({
         image: "node:20",
         maxContainers: 5,
+        network: {
+          allowInternetAccess: false,
+          allowOut: ["10.0.0.0/8"],
+          denyOut: ["192.0.2.0/24"],
+        },
       });
       expect(result.poolId).toBe("pool-1");
       client.close();
@@ -1136,6 +1151,11 @@ describe("SandboxClient", () => {
               image: "node:20",
               resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
               timeout_secs: 0,
+              network_policy: {
+                allow_internet_access: false,
+                allow_out: ["10.0.0.0/8"],
+                deny_out: ["192.0.2.0/24"],
+              },
             }),
           })),
         },
@@ -1145,6 +1165,11 @@ describe("SandboxClient", () => {
       const info = await client.getPool("pool-1");
       expect(info.poolId).toBe("pool-1");
       expect(info.image).toBe("node:20");
+      expect(info.networkPolicy).toEqual({
+        allowInternetAccess: false,
+        allowOut: ["10.0.0.0/8"],
+        denyOut: ["192.0.2.0/24"],
+      });
       expect(stub.client.getPool).toHaveBeenCalledWith("pool-1");
       client.close();
     });
@@ -1164,6 +1189,27 @@ describe("SandboxClient", () => {
       expect(Array.isArray(pools)).toBe(true);
       expect(typeof pools.traceId).toBe("string");
       expect(pools.traceId.length).toBeGreaterThan(0);
+      client.close();
+    });
+
+    it("rejects a network policy on pool update", async () => {
+      const updatePool = vi.fn();
+      installNativeStub({ client: { updatePool } });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(
+        client.updatePool("pool-1", {
+          image: "node:20",
+          network: {
+            allowInternetAccess: true,
+            allowOut: [],
+            denyOut: [],
+          },
+        } as UpdatePoolOptions & { network: NetworkConfig }),
+      ).rejects.toThrow(
+        "Network policy updates are not supported. Create a new pool to change the network policy.",
+      );
+      expect(updatePool).not.toHaveBeenCalled();
       client.close();
     });
   });

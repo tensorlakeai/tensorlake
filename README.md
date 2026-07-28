@@ -124,10 +124,13 @@ with client.create_and_connect(snapshot_id=snapshot.snapshot_id) as sandbox:
 Pre-warm containers for fast startup:
 
 ```python
-# Create a pool with warm containers
+from tensorlake.sandbox import NetworkConfig
+
+# Create a pool with warm containers and no internet access
 pool = client.create_pool(
     image="tensorlake/ubuntu-minimal",
     warm_containers=3,
+    network=NetworkConfig(allow_internet_access=False),
 )
 
 # Claim a sandbox instantly from the pool
@@ -138,6 +141,9 @@ sandbox = client.connect(resp.sandbox_id)
 named = client.create(image="tensorlake/ubuntu-minimal", name="stable-name")
 sandbox = client.connect("stable-name")
 ```
+
+Set the pool network policy when you create the pool. Create a new pool to use a
+different network policy.
 
 ---
 

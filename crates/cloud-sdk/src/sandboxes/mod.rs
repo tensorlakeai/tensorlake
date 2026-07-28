@@ -22,12 +22,12 @@ pub use desktop::SandboxDesktopClient;
 
 use models::{
     ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CopySandboxResponse,
-    CreateSandboxPoolResponse, CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest,
-    CreateSnapshotResponse, DaemonInfo, DetachFileSystemRequest, FileSystemMount,
-    GetSandboxLogsRequest, HealthResponse, ListArchivedSandboxesParams,
-    ListArchivedSandboxesResponse, ListDirectoryResponse, ListProcessesResponse,
-    ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse, OutputEvent,
-    OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxLogsResponse,
+    CreateSandboxPoolRequest, CreateSandboxPoolResponse, CreateSandboxRequest,
+    CreateSandboxResponse, CreateSnapshotRequest, CreateSnapshotResponse, DaemonInfo,
+    DetachFileSystemRequest, FileSystemMount, GetSandboxLogsRequest, HealthResponse,
+    ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
+    ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
+    OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxLogsResponse,
     SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse,
     SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
 };
@@ -557,6 +557,18 @@ impl SandboxesClient {
         &self,
         request: &SandboxPoolRequest,
     ) -> Result<Traced<CreateSandboxPoolResponse>, SdkError> {
+        self.create_pool_with_network(&CreateSandboxPoolRequest {
+            pool: request.clone(),
+            network: None,
+        })
+        .await
+    }
+
+    /// Creates a pool with an optional network policy for each container.
+    pub async fn create_pool_with_network(
+        &self,
+        request: &CreateSandboxPoolRequest,
+    ) -> Result<Traced<CreateSandboxPoolResponse>, SdkError> {
         let uri = self.endpoint("sandbox-pools");
         let req = self
             .client
@@ -585,10 +597,16 @@ impl SandboxesClient {
         pool_id: &str,
         request: &SandboxPoolRequest,
     ) -> Result<Traced<SandboxPoolInfo>, SdkError> {
+        let current = self.get_pool(pool_id).await?;
+        let request = CreateSandboxPoolRequest {
+            pool: request.clone(),
+            network: current.network_policy.clone(),
+        };
+
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}"));
         let req = self
             .client
-            .build_post_json_request(Method::PUT, &uri, request)?;
+            .build_post_json_request(Method::PUT, &uri, &request)?;
         self.client.execute_json(req).await
     }
 

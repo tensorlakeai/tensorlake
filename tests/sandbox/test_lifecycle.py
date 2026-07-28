@@ -22,6 +22,7 @@ from tensorlake.image.sandbox_builder import (
     delete_sandbox_image,
 )
 from tensorlake.sandbox import (
+    NetworkConfig,
     PoolContainerInfo,
     PoolInUseError,
     PoolNotFoundError,
@@ -446,6 +447,7 @@ class TestPoolLifecycle(BaseSandboxTest):
             memory_mb=_SANDBOX_MEMORY_MB,
             ephemeral_disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
+            network=NetworkConfig(allow_internet_access=False),
         )
         self.assertIsNotNone(resp.pool_id)
         self.__class__.pool_id = resp.pool_id
@@ -457,12 +459,21 @@ class TestPoolLifecycle(BaseSandboxTest):
         self.assertEqual(info.image, _SANDBOX_IMAGE)
         self.assertAlmostEqual(info.resources.cpus, _SANDBOX_CPUS, places=2)
         self.assertEqual(info.resources.memory_mb, _SANDBOX_MEMORY_MB)
+        self.assertEqual(
+            info.network_policy,
+            NetworkConfig(allow_internet_access=False),
+        )
 
     def test_3_list_pools(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
         pools = self.client.list_pools()
         ids = [p.pool_id for p in pools]
         self.assertIn(self.__class__.pool_id, ids)
+        pool = next(p for p in pools if p.pool_id == self.__class__.pool_id)
+        self.assertEqual(
+            pool.network_policy,
+            NetworkConfig(allow_internet_access=False),
+        )
 
     def test_4_update_pool(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")
@@ -476,6 +487,10 @@ class TestPoolLifecycle(BaseSandboxTest):
         )
         self.assertEqual(updated.resources.memory_mb, 2048)
         self.assertEqual(updated.warm_containers, 1)
+        self.assertEqual(
+            updated.network_policy,
+            NetworkConfig(allow_internet_access=False),
+        )
 
     def test_5_delete_pool(self):
         self.assertIsNotNone(self.__class__.pool_id, "Depends on test_1")

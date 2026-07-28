@@ -1165,6 +1165,7 @@ class SandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
+        network: NetworkConfig | None = None,
     ) -> Traced[CreateSandboxPoolResponse]:
         """Create a new sandbox pool.
 
@@ -1178,6 +1179,7 @@ class SandboxClient:
             entrypoint: Custom entrypoint command (optional)
             max_containers: Maximum number of containers in pool
             warm_containers: Number of warm containers to maintain
+            network: Network policy for each container in the pool
 
         Returns:
             CreateSandboxPoolResponse with pool_id and namespace
@@ -1195,6 +1197,7 @@ class SandboxClient:
             entrypoint=entrypoint,
             max_containers=max_containers,
             warm_containers=warm_containers,
+            network=network,
         )
 
         try:
@@ -1259,6 +1262,9 @@ class SandboxClient:
         warm_containers: int | None = None,
     ) -> Traced[SandboxPoolInfo]:
         """Update a sandbox pool configuration.
+
+        This operation keeps the current network policy. Create a new pool to
+        use a different network policy.
 
         Args:
             pool_id: ID of the pool to update

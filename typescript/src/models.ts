@@ -322,6 +322,8 @@ export interface CreatePoolOptions {
   entrypoint?: string[];
   maxContainers?: number;
   warmContainers?: number;
+  /** Network policy for each container. Create a new pool to change this policy. */
+  network?: NetworkConfig;
 }
 
 export interface UpdatePoolOptions {
@@ -358,6 +360,8 @@ export interface SandboxPoolInfo {
   entrypoint?: string[];
   maxContainers?: number;
   warmContainers?: number;
+  /** The network policy that applies to each container in the pool. */
+  networkPolicy?: NetworkConfig;
   containers?: PoolContainerInfo[];
   createdAt?: Date;
   updatedAt?: Date;

@@ -36,6 +36,7 @@ import {
   type UpdatePoolOptions,
   type UpdateSandboxOptions,
   fromSnakeKeys,
+  toSnakeKeys,
 } from "./models.js";
 import { Sandbox } from "./sandbox.js";
 import { nowMs, logSdkTimingEvent, logSdkTiming } from "./sdk-timings.js";
@@ -607,6 +608,7 @@ export class SandboxClient {
     if (options.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options.maxContainers != null) body.max_containers = options.maxContainers;
     if (options.warmContainers != null) body.warm_containers = options.warmContainers;
+    if (options.network != null) body.network = toSnakeKeys(options.network);
 
     return this.plainJson<CreateSandboxPoolResponse>(
       () => this.native.createPool(JSON.stringify(body)),
@@ -633,11 +635,17 @@ export class SandboxClient {
     return Object.assign(pools, { traceId });
   }
 
-  /** Replace the configuration of an existing sandbox pool. */
+  /** Replace a pool configuration and keep its current network policy. */
   async updatePool(
     poolId: string,
     options: UpdatePoolOptions,
   ): Promise<SandboxPoolInfo> {
+    if ((options as UpdatePoolOptions & { network?: unknown }).network != null) {
+      throw new SandboxError(
+        "Network policy updates are not supported. Create a new pool to change the network policy.",
+      );
+    }
+
     const body: Record<string, unknown> = {
       image: options.image,
       resources: {
