@@ -544,11 +544,6 @@ describe(
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
-        network: {
-          allowInternetAccess: false,
-          allowOut: [],
-          denyOut: [],
-        },
         warmContainers: 1,
       });
       poolId = pool.poolId;
@@ -745,6 +740,11 @@ describe(
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
+        network: {
+          allowInternetAccess: false,
+          allowOut: [],
+          denyOut: [],
+        },
       });
       expect(resp.poolId).toBeTruthy();
       poolId = resp.poolId;
