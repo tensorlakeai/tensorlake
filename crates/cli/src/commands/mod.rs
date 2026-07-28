@@ -2,8 +2,8 @@ pub mod applications;
 pub mod build_images;
 pub mod cron;
 pub mod deploy;
-// Local FUSE/overlay mount stack — depends on the private gsvc-mount core, so it is only
-// compiled into official `--features mount` release builds. See crates/cli/Cargo.toml.
+// Logical-v1 FUSE/FSKit mount stack — private implementation sources are swapped into official
+// `--features mount` release builds. See crates/cli/Cargo.toml.
 #[cfg(feature = "mount")]
 pub mod fs;
 pub mod git;

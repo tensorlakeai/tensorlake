@@ -55,22 +55,6 @@ fn map<T>(result: gsvc_fs_client::Result<T>) -> Result<T> {
     result.map_err(Into::into)
 }
 
-pub mod plaindir {
-    use std::path::PathBuf;
-
-    use crate::error::Result;
-
-    pub fn binding_for_lenient(path: &std::path::Path) -> Option<(String, PathBuf)> {
-        gsvc_fs_client::plaindir::binding_for_lenient(path)
-    }
-
-    pub async fn unbind(path: Option<PathBuf>) -> Result<()> {
-        gsvc_fs_client::plaindir::unbind(path)
-            .await
-            .map_err(Into::into)
-    }
-}
-
 pub mod daemon {
     use std::path::Path;
 
@@ -82,25 +66,10 @@ pub mod daemon {
             .await
             .map_err(Into::into)
     }
-
-    /// Run one macOS kernel-cache convergence probe as a separate process from the mount daemon.
-    ///
-    /// The private client owns the versioned JSON stdin/stdout protocol and the filesystem work.
-    /// Keeping this adapter argument-free prevents the hidden command from becoming a second
-    /// user-facing mount surface or inheriting authentication/configuration concerns.
-    pub async fn converge() -> Result<()> {
-        gsvc_fs_client::run_kernel_convergence_helper()
-            .await
-            .map_err(Into::into)
-    }
 }
 
 pub async fn setup(from: Option<&str>, check_only: bool) -> Result<()> {
     map(gsvc_fs_client::setup(from, check_only).await)
-}
-
-pub fn is_tracked_directory(path: &Path) -> Result<bool> {
-    map(gsvc_fs_client::is_tracked_directory(path))
 }
 
 pub fn require_native_filesystem_attachment(path: &Path) -> Result<()> {
@@ -179,7 +148,6 @@ pub async fn mount_filesystem(
     ctx: &CliContext,
     target: &str,
     path: &Path,
-    ro: bool,
     foreground: bool,
     trace_ops: bool,
     log_level: &str,
@@ -189,7 +157,6 @@ pub async fn mount_filesystem(
         &private_context(ctx),
         target,
         path,
-        ro,
         foreground,
         trace_ops,
         log_level,
@@ -203,7 +170,6 @@ pub async fn mount_repo(
     target: &str,
     workspace: Option<&str>,
     path: &Path,
-    ro: bool,
     publish: bool,
     foreground: bool,
     trace_ops: bool,
@@ -215,7 +181,6 @@ pub async fn mount_repo(
         target,
         workspace,
         path,
-        ro,
         publish,
         foreground,
         trace_ops,
@@ -248,30 +213,16 @@ mod tests {
     }
 }
 
-pub async fn snapshot(
-    ctx: &CliContext,
-    path: &Path,
-    message: Option<&str>,
-    clear: bool,
-) -> Result<()> {
-    map(gsvc_fs_client::snapshot(&private_context(ctx), path, message, clear).await)
+pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> Result<()> {
+    map(gsvc_fs_client::snapshot(&private_context(ctx), path, message).await)
 }
 
 pub async fn status(ctx: &CliContext, path: &Path, json: bool) -> Result<()> {
     map(gsvc_fs_client::status(&private_context(ctx), path, json).await)
 }
 
-pub async fn doctor(
-    path: &Path,
-    json: bool,
-    repair_journal: bool,
-    repair_base: Option<&str>,
-) -> Result<()> {
-    map(gsvc_fs_client::doctor(path, json, repair_journal, repair_base).await)
-}
-
-pub async fn restore(ctx: &CliContext, path: &Path, version: &str, discard: bool) -> Result<()> {
-    map(gsvc_fs_client::restore(&private_context(ctx), path, version, discard).await)
+pub async fn doctor(path: &Path, json: bool) -> Result<()> {
+    map(gsvc_fs_client::doctor(path, json).await)
 }
 
 pub async fn unmount(ctx: &CliContext, path: &Path, delete: bool, discard: bool) -> Result<()> {
@@ -316,21 +267,4 @@ pub async fn promote(
         message,
     )
     .await)
-}
-
-pub async fn git_status(ctx: &CliContext, path: &Path, json: bool) -> Result<()> {
-    map(gsvc_fs_client::git_status(&private_context(ctx), path, json).await)
-}
-
-pub async fn git_log(ctx: &CliContext, subject: Option<&str>, json: bool) -> Result<()> {
-    map(gsvc_fs_client::git_log(&private_context(ctx), subject, json).await)
-}
-
-pub async fn git_smartlog(
-    ctx: &CliContext,
-    subject: Option<&str>,
-    project: bool,
-    json: bool,
-) -> Result<()> {
-    map(gsvc_fs_client::git_smartlog(&private_context(ctx), subject, project, json).await)
 }

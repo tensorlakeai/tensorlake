@@ -28,7 +28,8 @@ pub struct ExecOptions<'a> {
     pub health_interval_ms: Option<u64>,
     pub health_timeout_ms: Option<u64>,
     pub health_failure_threshold: Option<u32>,
-    /// Promote a directly-invoked `tl fs mount` or `tl git mount` to a detached sandbox process.
+    /// Promote a directly-invoked `tl fs mount` or logical-v1 `tl git mount` to a detached
+    /// sandbox process.
     /// The mount daemon must be the process-unit leader: a daemon forked by `/processes/run`
     /// remains in that one-shot unit's cgroup and is reaped when the unit finishes.
     pub protect_long_lived_mounts: bool,
@@ -266,7 +267,7 @@ fn rewrite_direct_mount(command: &str, args: &[String]) -> Option<DetachedMountC
         return None;
     }
 
-    let mountpoint = parse_mountpoint(&args[mount_index], mount_args)?;
+    let mountpoint = parse_mountpoint(surface, mount_args)?;
     let mut detached_args = args.to_vec();
     // Insert before the mount operands (and, importantly, before a possible `--` sentinel).
     // Appending after `--` would turn this into a third positional argument instead of a flag.
@@ -318,15 +319,15 @@ fn parse_mountpoint(surface: &str, args: &[String]) -> Option<String> {
     while index < args.len() {
         let arg = &args[index];
         match arg.as_str() {
-            "--ro" | "--trace-ops" => index += 1,
-            "--publish" if surface == "git" => index += 1,
+            "--trace-ops" => index += 1,
+            "--publish" if surface == "repository" => index += 1,
             "--log-level" => {
                 if index + 1 == args.len() {
                     return None;
                 }
                 index += 2;
             }
-            "--workspace" if surface == "git" => {
+            "--workspace" if surface == "repository" => {
                 if index + 1 == args.len() {
                     return None;
                 }
@@ -337,7 +338,7 @@ fn parse_mountpoint(surface: &str, args: &[String]) -> Option<String> {
                 break;
             }
             _ if arg.starts_with("--log-level=")
-                || (surface == "git" && arg.starts_with("--workspace=")) =>
+                || (surface == "repository" && arg.starts_with("--workspace=")) =>
             {
                 index += 1;
             }
@@ -1187,7 +1188,6 @@ mod tests {
                 "mount".to_string(),
                 "drive".to_string(),
                 "mnt/drive".to_string(),
-                "--ro".to_string(),
                 "--log-level=debug".to_string(),
             ],
         )
@@ -1199,7 +1199,7 @@ mod tests {
     }
 
     #[test]
-    fn direct_git_mount_parses_workspace_option() {
+    fn direct_logical_git_mount_parses_workspace_option() {
         let command = rewrite_direct_mount(
             "tl",
             &[
@@ -1207,7 +1207,7 @@ mod tests {
                 "mount".to_string(),
                 "repo:main".to_string(),
                 "--workspace".to_string(),
-                "workspace-1".to_string(),
+                "0123456789012345678901234567890123456789".to_string(),
                 "/code".to_string(),
             ],
         )
@@ -1215,6 +1215,7 @@ mod tests {
 
         assert_eq!(command.surface, "repository");
         assert_eq!(command.mountpoint, "/code");
+        assert!(command.args.iter().any(|arg| arg == "--foreground"));
     }
 
     #[test]
@@ -1225,9 +1226,9 @@ mod tests {
                 "--debug".to_string(),
                 "--project".to_string(),
                 "project-a".to_string(),
-                "git".to_string(),
+                "fs".to_string(),
                 "mount".to_string(),
-                "repo:main".to_string(),
+                "drive".to_string(),
                 "/code".to_string(),
             ],
         )
