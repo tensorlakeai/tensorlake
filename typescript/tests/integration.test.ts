@@ -740,6 +740,11 @@ describe(
         memoryMb: SANDBOX_MEMORY_MB,
         ephemeralDiskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
+        network: {
+          allowInternetAccess: false,
+          allowOut: [],
+          denyOut: [],
+        },
       });
       expect(resp.poolId).toBeTruthy();
       poolId = resp.poolId;
@@ -750,12 +755,22 @@ describe(
       expect(info.poolId).toBe(poolId);
       expect(info.image).toBe(sandboxImage);
       expect(info.resources.memoryMb).toBe(SANDBOX_MEMORY_MB);
+      expect(info.networkPolicy).toEqual({
+        allowInternetAccess: false,
+        allowOut: [],
+        denyOut: [],
+      });
     });
 
     it("lists pools", async () => {
       const pools = await client.listPools();
       const ids = pools.map((p) => p.poolId);
       expect(ids).toContain(poolId);
+      expect(pools.find((p) => p.poolId === poolId)?.networkPolicy).toEqual({
+        allowInternetAccess: false,
+        allowOut: [],
+        denyOut: [],
+      });
     });
 
     it("updates a pool", async () => {
@@ -768,6 +783,11 @@ describe(
       });
       expect(updated.resources.memoryMb).toBe(2048);
       expect(updated.warmContainers).toBe(1);
+      expect(updated.networkPolicy).toEqual({
+        allowInternetAccess: false,
+        allowOut: [],
+        denyOut: [],
+      });
     });
 
     it("deletes a pool", async () => {

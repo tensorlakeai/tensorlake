@@ -700,7 +700,13 @@ class AsyncSandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
+        network: NetworkConfig | None = None,
     ) -> Traced[CreateSandboxPoolResponse]:
+        """Create a sandbox pool.
+
+        Set ``network`` to apply a network policy to each pool container. Create
+        a new pool to use a different network policy.
+        """
         request_model = SandboxPoolRequest(
             image=image,
             resources=ContainerResourcesInfo(
@@ -710,6 +716,7 @@ class AsyncSandboxClient:
             entrypoint=entrypoint,
             max_containers=max_containers,
             warm_containers=warm_containers,
+            network=network,
         )
         try:
             trace_id, response_json = await self._rust_client.create_pool_async(
@@ -752,6 +759,7 @@ class AsyncSandboxClient:
         max_containers: int | None = None,
         warm_containers: int | None = None,
     ) -> Traced[SandboxPoolInfo]:
+        """Update a pool and keep its current network policy."""
         request_model = SandboxPoolRequest(
             image=image,
             resources=ContainerResourcesInfo(

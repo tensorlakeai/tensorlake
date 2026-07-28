@@ -211,6 +211,15 @@ pub struct SandboxPoolRequest {
     pub warm_containers: Option<i64>,
 }
 
+/// A pool creation request with an optional container network policy.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CreateSandboxPoolRequest {
+    #[serde(flatten)]
+    pub pool: SandboxPoolRequest,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub network: Option<NetworkConfig>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxResponse {
     pub sandbox_id: String,
@@ -354,6 +363,8 @@ pub struct SandboxPoolInfo {
     pub max_containers: Option<i64>,
     #[serde(default)]
     pub warm_containers: Option<i64>,
+    #[serde(default)]
+    pub network_policy: Option<NetworkConfig>,
     #[serde(default)]
     pub containers: Option<Vec<PoolContainerInfo>>,
     #[serde(default)]
@@ -672,6 +683,35 @@ pub struct MultipartHint {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn create_pool_request_deserializes_flat_network_policy() {
+        let request: CreateSandboxPoolRequest = serde_json::from_value(serde_json::json!({
+            "image": "alpine",
+            "resources": {
+                "cpus": 1.0,
+                "memory_mb": 1024,
+                "ephemeral_disk_mb": 1024
+            },
+            "timeout_secs": 0,
+            "network": {
+                "allow_internet_access": false,
+                "allow_out": [],
+                "deny_out": []
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(request.pool.image.as_deref(), Some("alpine"));
+        assert_eq!(
+            request.network,
+            Some(NetworkConfig {
+                allow_internet_access: false,
+                allow_out: vec![],
+                deny_out: vec![],
+            })
+        );
+    }
 
     #[test]
     fn snapshot_type_serializes_as_snake_case() {

@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from tensorlake.sandbox import (
+    NetworkConfig,
     PoolInUseError,
     SandboxNotFoundError,
     SnapshotStatus,
@@ -1205,6 +1206,64 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                 client.delete_pool("pool-1")
         finally:
             sandbox_client_module.RustCloudSandboxClientError = previous
+
+    def test_pool_network_policy_is_sent_and_returned(self):
+        captured: dict[str, str] = {}
+
+        class _PoolRustClient:
+            def close(self):
+                return None
+
+            def create_pool(self, request_json):
+                captured["request_json"] = request_json
+                return (
+                    "trace-create",
+                    '{"pool_id":"pool-1","namespace":"default"}',
+                )
+
+            def get_pool_json(self, pool_id):
+                return (
+                    "trace-get",
+                    json.dumps(
+                        {
+                            "pool_id": pool_id,
+                            "namespace": "default",
+                            "image": "alpine",
+                            "resources": {
+                                "cpus": 1.0,
+                                "memory_mb": 1024,
+                                "ephemeral_disk_mb": 1024,
+                            },
+                            "network_policy": {
+                                "allow_internet_access": False,
+                                "allow_out": ["10.0.0.0/8"],
+                                "deny_out": ["192.0.2.0/24"],
+                            },
+                        }
+                    ),
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _PoolRustClient()
+        policy = NetworkConfig(
+            allow_internet_access=False,
+            allow_out=["10.0.0.0/8"],
+            deny_out=["192.0.2.0/24"],
+        )
+
+        client.create_pool(image="alpine", network=policy)
+        request = json.loads(captured["request_json"])
+        self.assertEqual(
+            request["network"],
+            {
+                "allow_internet_access": False,
+                "allow_out": ["10.0.0.0/8"],
+                "deny_out": ["192.0.2.0/24"],
+            },
+        )
+
+        pool = client.get_pool("pool-1")
+        self.assertEqual(pool.network_policy, policy)
 
     def test_snapshot_threads_snapshot_type_to_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
