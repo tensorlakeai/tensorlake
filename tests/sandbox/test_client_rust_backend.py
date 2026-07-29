@@ -1266,6 +1266,14 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         pool = client.get_pool("pool-1")
         self.assertEqual(pool.network_policy, policy)
 
+    def test_clear_sentinel_is_rejected_on_pool_create(self):
+        # Clearing is only meaningful against an existing pool; creating one
+        # without a policy is just omitting the argument.
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        with self.assertRaises(ValueError) as ctx:
+            client.create_pool(image="alpine", network=CLEAR_NETWORK_POLICY)
+        self.assertIn("only applies to update_pool", str(ctx.exception))
+
     def test_pool_network_policy_update_is_sent(self):
         captured: dict[str, str] = {}
 

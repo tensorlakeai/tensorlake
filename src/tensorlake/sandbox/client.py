@@ -1183,7 +1183,7 @@ class SandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
-        network: NetworkConfig | None = None,
+        network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[CreateSandboxPoolResponse]:
         """Create a new sandbox pool.
 
@@ -1206,6 +1206,12 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
+        if network is CLEAR_NETWORK_POLICY:
+            raise ValueError(
+                "CLEAR_NETWORK_POLICY only applies to update_pool; omit network "
+                "to create a pool without a policy."
+            )
+
         request_model = SandboxPoolRequest(
             image=image,
             resources=ContainerResourcesInfo(

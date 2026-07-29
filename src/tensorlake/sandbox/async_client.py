@@ -718,13 +718,19 @@ class AsyncSandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
-        network: NetworkConfig | None = None,
+        network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[CreateSandboxPoolResponse]:
         """Create a sandbox pool.
 
         Set ``network`` to apply a network policy to each pool container. The
         policy can be replaced later with ``update_pool``.
         """
+        if network is CLEAR_NETWORK_POLICY:
+            raise ValueError(
+                "CLEAR_NETWORK_POLICY only applies to update_pool; omit network "
+                "to create a pool without a policy."
+            )
+
         request_model = SandboxPoolRequest(
             image=image,
             resources=ContainerResourcesInfo(
