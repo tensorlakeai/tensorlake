@@ -5,26 +5,36 @@ use std::fs;
 use std::process::Command;
 
 #[test]
-fn human_fs_status_hydrates_mount_scope_and_remains_offline_safe() {
+fn human_fs_status_reads_strict_logical_v1_state_and_remains_offline_safe() {
     let temp = tempfile::tempdir().expect("temporary test root");
     let home = temp.path().join("home");
     let mountpoint = temp.path().join("mounted-drive");
     let state_dir = temp.path().join("mount-state");
     fs::create_dir_all(home.join(".config/tensorlake")).expect("config directory");
     fs::create_dir_all(&mountpoint).expect("mountpoint");
-    fs::create_dir_all(state_dir.join("upper")).expect("upper directory");
-    fs::create_dir_all(state_dir.join("wh")).expect("whiteout directory");
+    fs::create_dir_all(&state_dir).expect("logical-v1 state directory");
 
     let state = serde_json::json!({
+        "format_version": 1,
         "project_id": "project-from-mount",
         "organization_id": "organization-from-mount",
+        "owner_uid": 501,
+        "owner_gid": 20,
         "repo": "drive-from-mount",
-        "native_filesystem": true,
         "workspace_id": "workspace-from-mount",
-        "ref_name": "refs/workspaces/workspace-from-mount",
+        "store_uuid": "0dc6f553-6ef4-4b58-a99f-94d4d7509285",
         "mountpoint": mountpoint,
+        "source": {
+            "surface": "native_filesystem",
+            "start_snapshot": "0000000000000000000000000000000000000000000000000000000000000000"
+        },
         "created_at_secs": 1_700_000_000_u64,
     });
+    fs::write(
+        state_dir.join("mount-engine.format-v1"),
+        b"tensorlake-mount-engine:logical-v1\n",
+    )
+    .expect("write logical-v1 engine marker");
     fs::write(
         state_dir.join("state.json"),
         serde_json::to_vec_pretty(&state).expect("serialize mount state"),
@@ -73,14 +83,10 @@ fn human_fs_status_hydrates_mount_scope_and_remains_offline_safe() {
         stdout.contains("filesystem: drive-from-mount"),
         "local mount facts must still render\nstdout:\n{stdout}"
     );
+    assert!(stdout.contains("engine: logical-v1"), "stdout:\n{stdout}");
     assert!(
-        !stdout.contains("missing project ID"),
-        "status must hydrate the project ID from mount state before reading the server head\n\
-         stdout:\n{stdout}"
-    );
-    assert!(
-        stdout.contains("last autosave: unknown ("),
-        "the unreachable test server should degrade the server summary without failing local status\n\
+        stdout.contains("publication: unavailable ("),
+        "a missing local daemon must degrade without network access or a legacy-state fallback\n\
          stdout:\n{stdout}"
     );
 }
