@@ -4,6 +4,7 @@ import unittest
 from unittest.mock import patch
 
 from tensorlake.sandbox import (
+    CLEAR_NETWORK_POLICY,
     NetworkConfig,
     PoolInUseError,
     SandboxNotFoundError,
@@ -1219,6 +1220,57 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                 await client.delete_pool("pool-1")
         finally:
             sandbox_client_module.RustCloudSandboxClientError = previous
+
+    async def test_pool_network_policy_update_is_sent(self):
+        captured: dict[str, str] = {}
+
+        class _PoolRustClient:
+            def close(self):
+                return None
+
+            async def update_pool_async(self, pool_id, request_json):
+                captured["pool_id"] = pool_id
+                captured["request_json"] = request_json
+                return (
+                    "trace-update",
+                    json.dumps(
+                        {
+                            "pool_id": "pool-1",
+                            "namespace": "default",
+                            "image": "alpine",
+                            "resources": {
+                                "cpus": 1.0,
+                                "memory_mb": 1024,
+                                "ephemeral_disk_mb": 1024,
+                            },
+                        }
+                    ),
+                )
+
+        client = AsyncSandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _PoolRustClient()
+
+        await client.update_pool(
+            pool_id="pool-1",
+            image="alpine",
+            network=NetworkConfig(
+                allow_internet_access=False, allow_out=[], deny_out=[]
+            ),
+        )
+        request = json.loads(captured["request_json"])
+        self.assertEqual(captured["pool_id"], "pool-1")
+        self.assertEqual(request["network"]["allow_internet_access"], False)
+
+        # Omitted keeps the current policy; the sentinel clears it.
+        await client.update_pool(pool_id="pool-1", image="alpine")
+        self.assertNotIn("network", json.loads(captured["request_json"]))
+
+        await client.update_pool(
+            pool_id="pool-1", image="alpine", network=CLEAR_NETWORK_POLICY
+        )
+        request = json.loads(captured["request_json"])
+        self.assertIn("network", request)
+        self.assertIsNone(request["network"])
 
     async def test_pool_network_policy_is_sent_and_returned(self):
         captured: dict[str, str] = {}

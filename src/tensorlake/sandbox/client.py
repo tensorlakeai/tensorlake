@@ -21,7 +21,9 @@ from .exceptions import (
     SandboxNotFoundError,
 )
 from .models import (
+    CLEAR_NETWORK_POLICY,
     ArchivedSandboxInfo,
+    ClearNetworkPolicy,
     ContainerResourcesInfo,
     CopySandboxResponse,
     CreateSandboxPoolResponse,
@@ -234,6 +236,22 @@ def _startup_failure_message(
     if termination_reason:
         return f"{prefix}: termination reason: {termination_reason}"
     return prefix
+
+
+def _pool_update_request_json(
+    request_model: SandboxPoolRequest,
+    network: NetworkConfig | ClearNetworkPolicy | None,
+) -> str:
+    """Serialize a pool update, preserving the tri-state ``network`` contract.
+
+    ``exclude_none`` drops an unset policy so the service keeps the pool's
+    current one, while :data:`CLEAR_NETWORK_POLICY` has to reach the wire as an
+    explicit JSON ``null`` to remove it.
+    """
+    payload = json.loads(request_model.model_dump_json(exclude_none=True))
+    if network is CLEAR_NETWORK_POLICY:
+        payload["network"] = None
+    return json.dumps(payload)
 
 
 class SandboxClient:
@@ -1165,7 +1183,7 @@ class SandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
-        network: NetworkConfig | None = None,
+        network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[CreateSandboxPoolResponse]:
         """Create a new sandbox pool.
 
@@ -1188,6 +1206,12 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
+        if network is CLEAR_NETWORK_POLICY:
+            raise ValueError(
+                "CLEAR_NETWORK_POLICY only applies to update_pool; omit network "
+                "to create a pool without a policy."
+            )
+
         request_model = SandboxPoolRequest(
             image=image,
             resources=ContainerResourcesInfo(
@@ -1260,11 +1284,15 @@ class SandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
+        network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxPoolInfo]:
         """Update a sandbox pool configuration.
 
-        This operation keeps the current network policy. Create a new pool to
-        use a different network policy.
+        Omit ``network`` to keep the pool's current network policy, set it to
+        replace the policy, or pass :data:`CLEAR_NETWORK_POLICY` to remove the
+        policy entirely. On a change the service recycles the pool's unclaimed
+        warm containers onto the new policy, while containers already claimed
+        by sandboxes keep the policy they booted with.
 
         Args:
             pool_id: ID of the pool to update
@@ -1277,6 +1305,9 @@ class SandboxClient:
             entrypoint: Custom entrypoint command (optional)
             max_containers: Maximum number of containers in pool
             warm_containers: Number of warm containers to maintain
+            network: Replacement network policy for each container in the
+                pool. Omit to keep the current policy, or pass
+                ``CLEAR_NETWORK_POLICY`` to remove it.
 
         Returns:
             SandboxPoolInfo with updated pool details
@@ -1295,12 +1326,13 @@ class SandboxClient:
             entrypoint=entrypoint,
             max_containers=max_containers,
             warm_containers=warm_containers,
+            network=None if network is CLEAR_NETWORK_POLICY else network,
         )
 
         try:
             trace_id, response_json = self._rust_client.update_pool(
                 pool_id=pool_id,
-                request_json=request_model.model_dump_json(exclude_none=True),
+                request_json=_pool_update_request_json(request_model, network),
             )
             return Traced(trace_id, SandboxPoolInfo.model_validate_json(response_json))
         except Exception as e:

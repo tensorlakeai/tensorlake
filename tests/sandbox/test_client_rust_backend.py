@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from tensorlake.sandbox import (
+    CLEAR_NETWORK_POLICY,
     NetworkConfig,
     PoolInUseError,
     SandboxNotFoundError,
@@ -1264,6 +1265,78 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
         pool = client.get_pool("pool-1")
         self.assertEqual(pool.network_policy, policy)
+
+    def test_clear_sentinel_is_rejected_on_pool_create(self):
+        # Clearing is only meaningful against an existing pool; creating one
+        # without a policy is just omitting the argument.
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        with self.assertRaises(ValueError) as ctx:
+            client.create_pool(image="alpine", network=CLEAR_NETWORK_POLICY)
+        self.assertIn("only applies to update_pool", str(ctx.exception))
+
+    def test_pool_network_policy_update_is_sent(self):
+        captured: dict[str, str] = {}
+
+        class _PoolRustClient:
+            def close(self):
+                return None
+
+            def update_pool(self, pool_id, request_json):
+                captured["pool_id"] = pool_id
+                captured["request_json"] = request_json
+                return (
+                    "trace-update",
+                    json.dumps(
+                        {
+                            "pool_id": "pool-1",
+                            "namespace": "default",
+                            "image": "alpine",
+                            "resources": {
+                                "cpus": 1.0,
+                                "memory_mb": 1024,
+                                "ephemeral_disk_mb": 1024,
+                            },
+                        }
+                    ),
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _PoolRustClient()
+
+        client.update_pool(
+            pool_id="pool-1",
+            image="alpine",
+            network=NetworkConfig(
+                allow_internet_access=False,
+                allow_out=[],
+                deny_out=["192.0.2.0/24"],
+            ),
+        )
+        request = json.loads(captured["request_json"])
+        self.assertEqual(captured["pool_id"], "pool-1")
+        self.assertEqual(
+            request["network"],
+            {
+                "allow_internet_access": False,
+                "allow_out": [],
+                "deny_out": ["192.0.2.0/24"],
+            },
+        )
+
+        # Omitting the policy must omit the key entirely so the service keeps
+        # the pool's current policy.
+        client.update_pool(pool_id="pool-1", image="alpine")
+        request = json.loads(captured["request_json"])
+        self.assertNotIn("network", request)
+
+        # CLEAR_NETWORK_POLICY must reach the wire as an explicit null so the
+        # service removes the policy instead of keeping it.
+        client.update_pool(
+            pool_id="pool-1", image="alpine", network=CLEAR_NETWORK_POLICY
+        )
+        request = json.loads(captured["request_json"])
+        self.assertIn("network", request)
+        self.assertIsNone(request["network"])
 
     def test_snapshot_threads_snapshot_type_to_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")

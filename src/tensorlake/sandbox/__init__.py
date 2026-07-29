@@ -19,8 +19,10 @@ from .file_system import (
     list_file_systems,
 )
 from .models import (
+    CLEAR_NETWORK_POLICY,
     ArchivedSandboxInfo,
     CheckpointType,
+    ClearNetworkPolicy,
     CommandResult,
     ContainerResourcesInfo,
     CopiedSandboxResponse,
@@ -95,6 +97,8 @@ __all__ = [
     "CreateSandboxPoolResponse",
     "ContainerResourcesInfo",
     "GPUResources",
+    "CLEAR_NETWORK_POLICY",
+    "ClearNetworkPolicy",
     "NetworkConfig",
     "ArchivedSandboxInfo",
     "ListArchivedSandboxesResponse",

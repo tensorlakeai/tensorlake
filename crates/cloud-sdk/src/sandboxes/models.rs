@@ -220,6 +220,65 @@ pub struct CreateSandboxPoolRequest {
     pub network: Option<NetworkConfig>,
 }
 
+/// What a pool update should do with the pool's network policy.
+///
+/// A pool update replaces the pool record wholesale, so the three states are
+/// distinct on the wire: the field is omitted to keep the current policy,
+/// sent as `null` to clear it, or sent as an object to replace it.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub enum NetworkPolicyUpdate {
+    /// Leave the pool's current network policy in place.
+    #[default]
+    Keep,
+    /// Remove the pool's network policy, leaving containers unrestricted.
+    Clear,
+    /// Replace the pool's network policy.
+    Set(NetworkConfig),
+}
+
+impl NetworkPolicyUpdate {
+    pub fn is_keep(&self) -> bool {
+        matches!(self, Self::Keep)
+    }
+}
+
+impl Serialize for NetworkPolicyUpdate {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            // `Keep` is normally skipped by `skip_serializing_if`; if a caller
+            // serializes it directly, `null` is the closest wire meaning.
+            Self::Keep | Self::Clear => serializer.serialize_none(),
+            Self::Set(policy) => serializer.serialize_some(policy),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for NetworkPolicyUpdate {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        // Only reached when the key is present, so an absent field falls back
+        // to `Default` (`Keep`) via `serde(default)` on the field.
+        Ok(match Option::<NetworkConfig>::deserialize(deserializer)? {
+            None => Self::Clear,
+            Some(policy) => Self::Set(policy),
+        })
+    }
+}
+
+/// A pool update request carrying a tri-state network policy instruction.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct UpdateSandboxPoolRequest {
+    #[serde(flatten)]
+    pub pool: SandboxPoolRequest,
+    #[serde(default, skip_serializing_if = "NetworkPolicyUpdate::is_keep")]
+    pub network: NetworkPolicyUpdate,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxResponse {
     pub sandbox_id: String,
