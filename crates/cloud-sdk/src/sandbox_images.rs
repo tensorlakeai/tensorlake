@@ -669,6 +669,7 @@ where
                 // object operations with the Platform build capability.
                 if prepared.snapshot_rel_path.is_some() {
                     sign_prepared_parent_download(&proxy, &prepared, &mut prepared_spec).await?;
+                    sign_prepared_local_image_downloads(&proxy, &mut prepared_spec).await?;
                 }
                 None
             } else if let Some(rel_path) = prepared.snapshot_rel_path.clone() {
@@ -692,6 +693,7 @@ where
                 let snapshot_uri = splice_signed_upload(&mut prepared_spec, signed)?;
 
                 sign_prepared_parent_download(&proxy, &prepared, &mut prepared_spec).await?;
+                sign_prepared_local_image_downloads(&proxy, &mut prepared_spec).await?;
 
                 Some(snapshot_uri)
             } else {
@@ -1488,6 +1490,67 @@ async fn sign_prepared_parent_download(
         .and_then(Value::as_object_mut)
         .ok_or_else(|| SandboxImageBuildError::other("prepared parent is not a JSON object"))?
         .insert("download".to_string(), signed);
+    Ok(())
+}
+
+/// Entries in `additionalLocalImages` that need a signed download URL, as
+/// `(index, snapshot_uri)`.
+///
+/// CAS entries are builder-local `file://` paths the in-sandbox builder reads
+/// directly, so they are skipped; anything already carrying a `download` block
+/// is left alone.
+fn local_image_sign_targets(prepared_spec: &Value) -> Vec<(usize, String)> {
+    prepared_spec
+        .get("additionalLocalImages")
+        .and_then(Value::as_array)
+        .map(|entries| {
+            entries
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, entry)| {
+                    if entry.get("download").is_some() {
+                        return None;
+                    }
+                    let uri = entry.get("snapshotUri")?.as_str()?;
+                    (!uri.starts_with("file://")).then(|| (idx, uri.to_string()))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// Sign a read-only download URL for every durable additional local image
+/// (`COPY --from=<registered image>`).
+///
+/// platform-api no longer presigns these — it never could for non-S3 stores —
+/// so the CLI mints them through the dataplane exactly as it does the parent
+/// manifest. Without this, a multi-stage build referencing a `gs://`-backed
+/// image has no way to fetch its bytes.
+async fn sign_prepared_local_image_downloads(
+    proxy: &SandboxProxyClient,
+    prepared_spec: &mut Value,
+) -> Result<()> {
+    for (idx, uri) in local_image_sign_targets(prepared_spec) {
+        let signed = proxy
+            .sign_blob(&SignBlobRequest {
+                target: SignBlobTarget::Blob { uri },
+                op: SignBlobOp::GetBlob,
+            })
+            .await
+            .map_err(SandboxImageBuildError::Sdk)?
+            .into_inner();
+        prepared_spec
+            .get_mut("additionalLocalImages")
+            .and_then(Value::as_array_mut)
+            .and_then(|entries| entries.get_mut(idx))
+            .and_then(Value::as_object_mut)
+            .ok_or_else(|| {
+                SandboxImageBuildError::other(
+                    "prepared additionalLocalImages entry is not a JSON object",
+                )
+            })?
+            .insert("download".to_string(), signed);
+    }
     Ok(())
 }
 
@@ -3707,6 +3770,49 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
     fn rootfs_disk_bytes_to_mb_rounds_up() {
         assert_eq!(rootfs_disk_bytes_to_mb(1024 * 1024).unwrap(), 1);
         assert_eq!(rootfs_disk_bytes_to_mb((1024 * 1024) + 1).unwrap(), 2);
+    }
+
+    #[test]
+    fn local_image_sign_targets_selects_durable_remote_entries() {
+        let spec = json!({
+            "additionalLocalImages": [
+                {"reference": "a", "snapshotUri": "gs://bucket/a.tlsnap"},
+                {"reference": "b", "snapshotUri": "s3://bucket/b.tlsnap"},
+            ]
+        });
+        assert_eq!(
+            super::local_image_sign_targets(&spec),
+            vec![
+                (0, "gs://bucket/a.tlsnap".to_string()),
+                (1, "s3://bucket/b.tlsnap".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn local_image_sign_targets_skips_cas_and_already_signed_entries() {
+        let spec = json!({
+            "additionalLocalImages": [
+                // CAS simulation: builder-local path, nothing to sign.
+                {"reference": "cas", "snapshotUri": "file:///var/lib/builder/cas.tlsnap"},
+                // Already carries a download block.
+                {"reference": "signed", "snapshotUri": "gs://bucket/s.tlsnap",
+                 "download": {"kind": "single_get"}},
+                // No identity to sign against.
+                {"reference": "bare"},
+                {"reference": "durable", "snapshotUri": "gs://bucket/d.tlsnap"},
+            ]
+        });
+        assert_eq!(
+            super::local_image_sign_targets(&spec),
+            vec![(3, "gs://bucket/d.tlsnap".to_string())]
+        );
+    }
+
+    #[test]
+    fn local_image_sign_targets_tolerates_missing_or_empty_list() {
+        assert!(super::local_image_sign_targets(&json!({})).is_empty());
+        assert!(super::local_image_sign_targets(&json!({"additionalLocalImages": []})).is_empty());
     }
 
     #[test]
