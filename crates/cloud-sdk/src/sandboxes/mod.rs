@@ -27,9 +27,10 @@ use models::{
     DetachFileSystemRequest, FileSystemMount, GetSandboxLogsRequest, HealthResponse,
     ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
     ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
-    OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo, SandboxLogsResponse,
-    SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse,
-    SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxRequest,
+    NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo,
+    SandboxLogsResponse, SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse,
+    SendSignalResponse, SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxPoolRequest,
+    UpdateSandboxRequest,
 };
 
 pub const DEFAULT_SANDBOX_PROXY_URL: &str = "https://sandbox.tensorlake.ai";
@@ -601,35 +602,36 @@ impl SandboxesClient {
     ) -> Result<Traced<SandboxPoolInfo>, SdkError> {
         self.update_pool_with_network(
             pool_id,
-            &CreateSandboxPoolRequest {
+            &UpdateSandboxPoolRequest {
                 pool: request.clone(),
-                network: None,
+                network: NetworkPolicyUpdate::Keep,
             },
         )
         .await
     }
 
-    /// Replace a pool configuration, optionally replacing its network policy.
+    /// Replace a pool configuration, optionally changing its network policy.
     ///
-    /// `network: None` keeps the pool's current policy. `network: Some(..)`
-    /// replaces it: the service recycles the pool's unclaimed warm containers
-    /// onto the new policy, while containers already claimed by sandboxes keep
-    /// the policy they booted with.
+    /// [`NetworkPolicyUpdate::Keep`] leaves the current policy in place;
+    /// [`NetworkPolicyUpdate::Clear`] removes it; [`NetworkPolicyUpdate::Set`]
+    /// replaces it. On a change the service recycles the pool's unclaimed warm
+    /// containers onto the new policy, while containers already claimed by
+    /// sandboxes keep the policy they booted with.
     pub async fn update_pool_with_network(
         &self,
         pool_id: &str,
-        request: &CreateSandboxPoolRequest,
+        request: &UpdateSandboxPoolRequest,
     ) -> Result<Traced<SandboxPoolInfo>, SdkError> {
-        let network = match &request.network {
-            Some(network) => Some(network.clone()),
-            // The service replaces the pool wholesale, so an absent policy
-            // would clear it; echo the current policy to keep it.
-            None => self.get_pool(pool_id).await?.network_policy.clone(),
-        };
-        let request = CreateSandboxPoolRequest {
-            pool: request.pool.clone(),
-            network,
-        };
+        let mut request = request.clone();
+        // Newer services keep the current policy when the field is absent, but
+        // older ones clear it, so resolve `Keep` into the current policy here.
+        // Sending the unchanged policy is a no-op for the service: the pool's
+        // boot config does not change, so no warm containers are recycled.
+        if request.network.is_keep()
+            && let Some(current) = self.get_pool(pool_id).await?.network_policy.clone()
+        {
+            request.network = NetworkPolicyUpdate::Set(current);
+        }
 
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}"));
         let req = self

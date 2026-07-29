@@ -27,7 +27,7 @@ use serde_json::Value;
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, CreateSandboxPoolRequest, CreateSandboxRequest,
     GetSandboxLogsRequest, ListArchivedSandboxesParams, SandboxPoolRequest, SnapshotType,
-    UpdateSandboxRequest,
+    UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     SandboxProxyClient, SandboxesClient, resolve_sandbox_proxy_target, select_sandbox_proxy_url,
@@ -681,7 +681,7 @@ impl NativeSandboxClient {
         pool_id: String,
         request_json: String,
     ) -> napi::Result<TracedJson> {
-        let request: CreateSandboxPoolRequest = parse_json_payload(&request_json)?;
+        let request: UpdateSandboxPoolRequest = parse_json_payload(&request_json)?;
         with_retry(self.client.clone(), 5, move |c| {
             let pool_id = pool_id.clone();
             let request = request.clone();

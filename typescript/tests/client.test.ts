@@ -1,11 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SandboxClient } from "../src/client.js";
-import {
-  type NetworkConfig,
-  SandboxStatus,
-  SnapshotStatus,
-  type UpdatePoolOptions,
-} from "../src/models.js";
+import { SandboxStatus, SnapshotStatus } from "../src/models.js";
 import { clearNativeStub, installNativeStub } from "./native-stub.js";
 
 /** Build the native error a non-2xx HTTP response now surfaces from Rust. */
@@ -1281,6 +1276,25 @@ describe("SandboxClient", () => {
         allowOut: ["10.0.0.0/8"],
         denyOut: [],
       });
+      client.close();
+    });
+
+    it("sends an explicit null to clear the network policy on update", async () => {
+      const updatePool = vi.fn(async () => ({
+        traceId: "t",
+        json: JSON.stringify({ pool_id: "pool-1", namespace: "default" }),
+      }));
+      installNativeStub({ client: { updatePool } });
+
+      const client = SandboxClient.forLocalhost();
+      await client.updatePool("pool-1", { image: "node:20", network: null });
+      const [, bodyJson] = updatePool.mock.calls[0] as unknown as [
+        string,
+        string,
+      ];
+      const body = JSON.parse(bodyJson) as Record<string, unknown>;
+      expect(body).toHaveProperty("network");
+      expect(body.network).toBeNull();
       client.close();
     });
 

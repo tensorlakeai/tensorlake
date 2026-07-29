@@ -36,7 +36,7 @@ use tensorlake::sandbox_templates::SandboxTemplatesClient;
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, CreateSandboxPoolRequest, CreateSandboxRequest,
     GetSandboxLogsRequest, ListArchivedSandboxesParams, SandboxPoolRequest, SnapshotType,
-    UpdateSandboxRequest,
+    UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
@@ -1876,7 +1876,7 @@ impl CloudSandboxClient {
     }
 
     fn update_pool(&self, pool_id: String, request_json: String) -> PyResult<(String, String)> {
-        let request: CreateSandboxPoolRequest = parse_json_payload(&request_json)?;
+        let request: UpdateSandboxPoolRequest = parse_json_payload(&request_json)?;
         self.run_with_retry(5, move |client| {
             let pool_id = pool_id.clone();
             let request = request.clone();
@@ -2323,7 +2323,7 @@ impl CloudSandboxClient {
         pool_id: String,
         request_json: String,
     ) -> PyResult<Bound<'py, PyAny>> {
-        let request: CreateSandboxPoolRequest = parse_json_payload(&request_json)?;
+        let request: UpdateSandboxPoolRequest = parse_json_payload(&request_json)?;
         let client = self.client.clone();
         future_into_py(py, async move {
             let traced = retry_async_op(client, 5, move |c| {

@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import patch
 
 from tensorlake.sandbox import (
+    CLEAR_NETWORK_POLICY,
     NetworkConfig,
     PoolInUseError,
     SandboxNotFoundError,
@@ -1314,11 +1315,20 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             },
         )
 
-        # Omitting the policy must omit the key entirely so the Rust layer
-        # keeps the pool's current policy.
+        # Omitting the policy must omit the key entirely so the service keeps
+        # the pool's current policy.
         client.update_pool(pool_id="pool-1", image="alpine")
         request = json.loads(captured["request_json"])
         self.assertNotIn("network", request)
+
+        # CLEAR_NETWORK_POLICY must reach the wire as an explicit null so the
+        # service removes the policy instead of keeping it.
+        client.update_pool(
+            pool_id="pool-1", image="alpine", network=CLEAR_NETWORK_POLICY
+        )
+        request = json.loads(captured["request_json"])
+        self.assertIn("network", request)
+        self.assertIsNone(request["network"])
 
     def test_snapshot_threads_snapshot_type_to_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")

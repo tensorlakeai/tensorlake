@@ -42,7 +42,9 @@ from .exceptions import (
     SandboxNotFoundError,
 )
 from .models import (
+    CLEAR_NETWORK_POLICY,
     ArchivedSandboxInfo,
+    ClearNetworkPolicy,
     ContainerResourcesInfo,
     CopySandboxResponse,
     CreateSandboxPoolResponse,
@@ -71,6 +73,22 @@ from .models import (
     UpdateSandboxRequest,
     snapshot_satisfies_wait_condition,
 )
+
+
+def _pool_update_request_json(
+    request_model: SandboxPoolRequest,
+    network: NetworkConfig | ClearNetworkPolicy | None,
+) -> str:
+    """Serialize a pool update, preserving the tri-state ``network`` contract.
+
+    ``exclude_none`` drops an unset policy so the service keeps the pool's
+    current one, while :data:`CLEAR_NETWORK_POLICY` has to reach the wire as an
+    explicit JSON ``null`` to remove it.
+    """
+    payload = json.loads(request_model.model_dump_json(exclude_none=True))
+    if network is CLEAR_NETWORK_POLICY:
+        payload["network"] = None
+    return json.dumps(payload)
 
 
 class AsyncSandboxClient:
@@ -758,14 +776,15 @@ class AsyncSandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
-        network: NetworkConfig | None = None,
+        network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxPoolInfo]:
         """Update a sandbox pool configuration.
 
-        Omit ``network`` to keep the pool's current network policy. Set it to
-        replace the policy: the service recycles the pool's unclaimed warm
-        containers onto the new policy, while containers already claimed by
-        sandboxes keep the policy they booted with.
+        Omit ``network`` to keep the pool's current network policy, set it to
+        replace the policy, or pass :data:`CLEAR_NETWORK_POLICY` to remove the
+        policy entirely. On a change the service recycles the pool's unclaimed
+        warm containers onto the new policy, while containers already claimed
+        by sandboxes keep the policy they booted with.
         """
         request_model = SandboxPoolRequest(
             image=image,
@@ -776,12 +795,12 @@ class AsyncSandboxClient:
             entrypoint=entrypoint,
             max_containers=max_containers,
             warm_containers=warm_containers,
-            network=network,
+            network=None if network is CLEAR_NETWORK_POLICY else network,
         )
         try:
             trace_id, response_json = await self._rust_client.update_pool_async(
                 pool_id=pool_id,
-                request_json=request_model.model_dump_json(exclude_none=True),
+                request_json=_pool_update_request_json(request_model, network),
             )
             return Traced(trace_id, SandboxPoolInfo.model_validate_json(response_json))
         except Exception as e:

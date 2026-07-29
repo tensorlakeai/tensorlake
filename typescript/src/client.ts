@@ -684,9 +684,10 @@ export class SandboxClient {
 
   /**
    * Replace a pool configuration. Omit `network` to keep the pool's current
-   * network policy; set it to replace the policy — the service recycles the
-   * pool's unclaimed warm containers onto the new policy, while containers
-   * already claimed by sandboxes keep the policy they booted with.
+   * network policy, set it to replace the policy, or pass `null` to remove the
+   * policy entirely. On a change the service recycles the pool's unclaimed
+   * warm containers onto the new policy, while containers already claimed by
+   * sandboxes keep the policy they booted with.
    */
   async updatePool(
     poolId: string,
@@ -707,7 +708,12 @@ export class SandboxClient {
       body.max_containers = options.maxContainers;
     if (options.warmContainers != null)
       body.warm_containers = options.warmContainers;
-    if (options.network != null) body.network = toSnakeKeys(options.network);
+    // Tri-state: omit to keep the current policy, `null` to clear it, an
+    // object to replace it.
+    if (options.network !== undefined) {
+      body.network =
+        options.network === null ? null : toSnakeKeys(options.network);
+    }
 
     return this.plainJson<SandboxPoolInfo>(
       () => this.native.updatePool(poolId, JSON.stringify(body)),

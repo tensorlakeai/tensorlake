@@ -323,11 +323,11 @@ export interface CreatePoolOptions {
 
 export interface UpdatePoolOptions {
   /**
-   * Network policy for each container. Omit to keep the pool's current
-   * policy; set to replace it (unclaimed warm containers are recycled onto
-   * the new policy).
+   * Network policy for each container. Omit to keep the pool's current policy,
+   * set to replace it, or pass `null` to remove it (unclaimed warm containers
+   * are recycled onto the new policy).
    */
-  network?: NetworkConfig;
+  network?: NetworkConfig | null;
   /** Sandbox image name, such as `tensorlake/ubuntu-minimal` or a registered Sandbox Image. */
   image: string;
   cpus?: number;

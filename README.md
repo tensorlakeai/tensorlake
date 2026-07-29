@@ -142,10 +142,11 @@ named = client.create(image="tensorlake/ubuntu-minimal", name="stable-name")
 sandbox = client.connect("stable-name")
 ```
 
-Set the pool network policy when you create the pool, or replace it later with
-a pool update: the service recycles the pool's unclaimed warm containers onto
-the new policy, while containers already claimed by sandboxes keep the policy
-they booted with.
+Set the pool network policy when you create the pool, replace it later with a
+pool update, or pass `CLEAR_NETWORK_POLICY` (Python) / `null` (TypeScript) to
+remove it. On a change the service recycles the pool's unclaimed warm
+containers onto the new policy, while containers already claimed by sandboxes
+keep the policy they booted with.
 
 ---
 
