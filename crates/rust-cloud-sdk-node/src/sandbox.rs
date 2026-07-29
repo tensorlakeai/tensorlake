@@ -681,12 +681,12 @@ impl NativeSandboxClient {
         pool_id: String,
         request_json: String,
     ) -> napi::Result<TracedJson> {
-        let request: SandboxPoolRequest = parse_json_payload(&request_json)?;
+        let request: CreateSandboxPoolRequest = parse_json_payload(&request_json)?;
         with_retry(self.client.clone(), 5, move |c| {
             let pool_id = pool_id.clone();
             let request = request.clone();
             async move {
-                let traced = c.update_pool(&pool_id, &request).await?;
+                let traced = c.update_pool_with_network(&pool_id, &request).await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced)?;
                 Ok(TracedJson { trace_id, json })

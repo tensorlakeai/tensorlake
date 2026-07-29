@@ -208,6 +208,83 @@ async fn pool_network_policy_is_sent_and_preserved_on_update() {
     assert!(update_text.contains(r#""network":{"allow_internet_access":false"#));
 }
 
+#[tokio::test]
+async fn update_pool_with_network_replaces_policy_without_get() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+
+    // Exactly one request is served: an explicit replacement policy must be
+    // sent as-is, with no current-policy GET beforehand.
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept update");
+        let update = read_http_request(&mut socket).await;
+        write_json_response(
+            &mut socket,
+            r#"{
+                "pool_id":"pool-1",
+                "namespace":"default",
+                "image":"alpine",
+                "resources":{"cpus":1.0,"memory_mb":1024,"ephemeral_disk_mb":1024},
+                "network_policy":{
+                    "allow_internet_access":true,
+                    "allow_out":[],
+                    "deny_out":["198.51.100.0/24"]
+                }
+            }"#,
+        )
+        .await;
+        update
+    });
+
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", false);
+
+    let info = sandboxes
+        .update_pool_with_network(
+            "pool-1",
+            &CreateSandboxPoolRequest {
+                pool: SandboxPoolRequest {
+                    image: Some("alpine".to_string()),
+                    resources: ContainerResourcesInfo {
+                        cpus: 1.0,
+                        memory_mb: 1024,
+                        ephemeral_disk_mb: 1024,
+                    },
+                    timeout_secs: 0,
+                    entrypoint: None,
+                    max_containers: None,
+                    warm_containers: Some(1),
+                },
+                network: Some(NetworkConfig {
+                    allow_internet_access: true,
+                    allow_out: vec![],
+                    deny_out: vec!["198.51.100.0/24".to_string()],
+                }),
+            },
+        )
+        .await
+        .expect("update pool with network");
+
+    let update = server.await.expect("server join");
+    let update_text = String::from_utf8_lossy(&update);
+    assert!(update_text.starts_with("PUT /sandbox-pools/pool-1 HTTP/1.1\r\n"));
+    assert!(update_text.contains(
+        r#""network":{"allow_internet_access":true,"allow_out":[],"deny_out":["198.51.100.0/24"]}"#
+    ));
+    assert_eq!(
+        info.network_policy,
+        Some(NetworkConfig {
+            allow_internet_access: true,
+            allow_out: vec![],
+            deny_out: vec!["198.51.100.0/24".to_string()],
+        })
+    );
+}
+
 async fn read_http_request(socket: &mut TcpStream) -> Vec<u8> {
     let mut request = Vec::new();
     let mut buf = [0_u8; 4096];

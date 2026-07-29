@@ -10,9 +10,7 @@ import { clearNativeStub, installNativeStub } from "./native-stub.js";
 
 /** Build the native error a non-2xx HTTP response now surfaces from Rust. */
 function nativeError(status: number, message: string): Error {
-  return new Error(
-    JSON.stringify({ category: "remote_api", status, message }),
-  );
+  return new Error(JSON.stringify({ category: "remote_api", status, message }));
 }
 
 describe("SandboxClient", () => {
@@ -72,7 +70,10 @@ describe("SandboxClient", () => {
             expect(body.resources.gpus).toEqual([{ count: 1, model: "A10" }]);
             return {
               traceId: "t",
-              json: JSON.stringify({ sandbox_id: "sbx-gpu", status: "pending" }),
+              json: JSON.stringify({
+                sandbox_id: "sbx-gpu",
+                status: "pending",
+              }),
             };
           }),
         },
@@ -92,7 +93,10 @@ describe("SandboxClient", () => {
             expect(body.resources.gpus).toBeUndefined();
             return {
               traceId: "t",
-              json: JSON.stringify({ sandbox_id: "sbx-cpu", status: "pending" }),
+              json: JSON.stringify({
+                sandbox_id: "sbx-cpu",
+                status: "pending",
+              }),
             };
           }),
         },
@@ -112,9 +116,9 @@ describe("SandboxClient", () => {
       });
 
       const client = SandboxClient.forLocalhost();
-      await expect(client.create({ gpus: 1, gpuModel: "H100" })).rejects.toThrow(
-        "only A10",
-      );
+      await expect(
+        client.create({ gpus: 1, gpuModel: "H100" }),
+      ).rejects.toThrow("only A10");
       client.close();
     });
 
@@ -162,7 +166,10 @@ describe("SandboxClient", () => {
             expect(body.name).toBe("my-sandbox");
             return {
               traceId: "t",
-              json: JSON.stringify({ sandbox_id: "sbx-named", status: "pending" }),
+              json: JSON.stringify({
+                sandbox_id: "sbx-named",
+                status: "pending",
+              }),
             };
           }),
         },
@@ -219,7 +226,6 @@ describe("SandboxClient", () => {
       expect(createSandbox).toHaveBeenCalledOnce();
       client.close();
     });
-
   });
 
   describe("get", () => {
@@ -293,7 +299,9 @@ describe("SandboxClient", () => {
       const info = await client.get("sbx-ports");
       expect(info.allowUnauthenticatedAccess).toBe(true);
       expect(info.exposedPorts).toEqual([8080, 3000]);
-      expect(info.ingressEndpoint).toBe("https://sandbox.us-east-1.aws.tensorlake.ai");
+      expect(info.ingressEndpoint).toBe(
+        "https://sandbox.us-east-1.aws.tensorlake.ai",
+      );
       expect(info.sandboxUrl).toBe("https://sbx-ports.sandbox.tensorlake.ai");
       client.close();
     });
@@ -332,7 +340,11 @@ describe("SandboxClient", () => {
                   id: "sbx-1",
                   namespace: "default",
                   status: "running",
-                  resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+                  resources: {
+                    cpus: 1,
+                    memory_mb: 1024,
+                    ephemeral_disk_mb: 1024,
+                  },
                 },
               ],
             }),
@@ -379,7 +391,11 @@ describe("SandboxClient", () => {
                 id: "sbx-1",
                 namespace: "default",
                 status: "running",
-                resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+                resources: {
+                  cpus: 1,
+                  memory_mb: 1024,
+                  ephemeral_disk_mb: 1024,
+                },
                 name: "my-new-name",
               }),
             };
@@ -409,7 +425,11 @@ describe("SandboxClient", () => {
                 id: "sbx-1",
                 namespace: "default",
                 status: "running",
-                resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+                resources: {
+                  cpus: 1,
+                  memory_mb: 1024,
+                  ephemeral_disk_mb: 1024,
+                },
                 allow_unauthenticated_access: true,
                 exposed_ports: [8080, 8081],
               }),
@@ -462,7 +482,9 @@ describe("SandboxClient", () => {
       const access = await client.getPortAccess("sbx-1");
       expect(access.allowUnauthenticatedAccess).toBe(false);
       expect(access.exposedPorts).toEqual([8080]);
-      expect(access.ingressEndpoint).toBe("https://sandbox.us-east-1.aws.tensorlake.ai");
+      expect(access.ingressEndpoint).toBe(
+        "https://sandbox.us-east-1.aws.tensorlake.ai",
+      );
       expect(access.sandboxUrl).toBe("https://sbx-1.sandbox.tensorlake.ai");
       client.close();
     });
@@ -491,7 +513,11 @@ describe("SandboxClient", () => {
                 id: "sbx-1",
                 namespace: "default",
                 status: "running",
-                resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+                resources: {
+                  cpus: 1,
+                  memory_mb: 1024,
+                  ephemeral_disk_mb: 1024,
+                },
                 allow_unauthenticated_access: true,
                 exposed_ports: [8080, 8081],
               }),
@@ -532,7 +558,11 @@ describe("SandboxClient", () => {
                 id: "sbx-1",
                 namespace: "default",
                 status: "running",
-                resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+                resources: {
+                  cpus: 1,
+                  memory_mb: 1024,
+                  ephemeral_disk_mb: 1024,
+                },
                 allow_unauthenticated_access: false,
                 exposed_ports: [],
               }),
@@ -573,7 +603,9 @@ describe("SandboxClient", () => {
       const stub = installNativeStub();
 
       const client = SandboxClient.forLocalhost();
-      await expect(client.suspend("sbx-1", { wait: false })).resolves.toBeUndefined();
+      await expect(
+        client.suspend("sbx-1", { wait: false }),
+      ).resolves.toBeUndefined();
       expect(stub.client.suspendSandbox).toHaveBeenCalledWith("sbx-1");
       client.close();
     });
@@ -606,7 +638,9 @@ describe("SandboxClient", () => {
       const stub = installNativeStub();
 
       const client = SandboxClient.forLocalhost();
-      await expect(client.resume("sbx-1", { wait: false })).resolves.toBeUndefined();
+      await expect(
+        client.resume("sbx-1", { wait: false }),
+      ).resolves.toBeUndefined();
       expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1");
       client.close();
     });
@@ -900,7 +934,10 @@ describe("SandboxClient", () => {
         client: {
           createSandbox: vi.fn(async () => ({
             traceId: "t",
-            json: JSON.stringify({ sandbox_id: "sbx-timeout", status: "timeout" }),
+            json: JSON.stringify({
+              sandbox_id: "sbx-timeout",
+              status: "timeout",
+            }),
           })),
           deleteSandbox,
         },
@@ -928,7 +965,9 @@ describe("SandboxClient", () => {
               namespace: "default",
               status: "terminated",
               resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
-              error_details: { message: "failed to pull image tensorlake/missing-image" },
+              error_details: {
+                message: "failed to pull image tensorlake/missing-image",
+              },
             }),
           })),
         },
@@ -950,7 +989,10 @@ describe("SandboxClient", () => {
         client: {
           createSnapshot: vi.fn(async () => ({
             traceId: "t",
-            json: JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }),
+            json: JSON.stringify({
+              snapshot_id: "snap-1",
+              status: "in_progress",
+            }),
           })),
         },
       });
@@ -1029,7 +1071,10 @@ describe("SandboxClient", () => {
         client: {
           createSnapshot: vi.fn(async () => ({
             traceId: "t",
-            json: JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }),
+            json: JSON.stringify({
+              snapshot_id: "snap-1",
+              status: "in_progress",
+            }),
           })),
           getSnapshot: vi.fn(async () => ({
             traceId: "t",
@@ -1057,7 +1102,10 @@ describe("SandboxClient", () => {
         client: {
           createSnapshot: vi.fn(async () => ({
             traceId: "t",
-            json: JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }),
+            json: JSON.stringify({
+              snapshot_id: "snap-1",
+              status: "in_progress",
+            }),
           })),
           getSnapshot: vi.fn(async () => {
             getCalls += 1;
@@ -1192,24 +1240,65 @@ describe("SandboxClient", () => {
       client.close();
     });
 
-    it("rejects a network policy on pool update", async () => {
-      const updatePool = vi.fn();
+    it("sends a replacement network policy on pool update", async () => {
+      const updatePool = vi.fn(async () => ({
+        traceId: "t",
+        json: JSON.stringify({
+          pool_id: "pool-1",
+          namespace: "default",
+          image: "node:20",
+          network_policy: {
+            allow_internet_access: false,
+            allow_out: ["10.0.0.0/8"],
+            deny_out: [],
+          },
+        }),
+      }));
       installNativeStub({ client: { updatePool } });
 
       const client = SandboxClient.forLocalhost();
-      await expect(
-        client.updatePool("pool-1", {
-          image: "node:20",
-          network: {
-            allowInternetAccess: true,
-            allowOut: [],
-            denyOut: [],
-          },
-        } as UpdatePoolOptions & { network: NetworkConfig }),
-      ).rejects.toThrow(
-        "Network policy updates are not supported. Create a new pool to change the network policy.",
-      );
-      expect(updatePool).not.toHaveBeenCalled();
+      const info = await client.updatePool("pool-1", {
+        image: "node:20",
+        network: {
+          allowInternetAccess: false,
+          allowOut: ["10.0.0.0/8"],
+          denyOut: [],
+        },
+      });
+      expect(updatePool).toHaveBeenCalledTimes(1);
+      const [, bodyJson] = updatePool.mock.calls[0] as unknown as [
+        string,
+        string,
+      ];
+      const body = JSON.parse(bodyJson) as Record<string, unknown>;
+      expect(body.network).toEqual({
+        allow_internet_access: false,
+        allow_out: ["10.0.0.0/8"],
+        deny_out: [],
+      });
+      expect(info.networkPolicy).toEqual({
+        allowInternetAccess: false,
+        allowOut: ["10.0.0.0/8"],
+        denyOut: [],
+      });
+      client.close();
+    });
+
+    it("omits network from the update body when not provided", async () => {
+      const updatePool = vi.fn(async () => ({
+        traceId: "t",
+        json: JSON.stringify({ pool_id: "pool-1", namespace: "default" }),
+      }));
+      installNativeStub({ client: { updatePool } });
+
+      const client = SandboxClient.forLocalhost();
+      await client.updatePool("pool-1", { image: "node:20" });
+      const [, bodyJson] = updatePool.mock.calls[0] as unknown as [
+        string,
+        string,
+      ];
+      const body = JSON.parse(bodyJson) as Record<string, unknown>;
+      expect(body).not.toHaveProperty("network");
       client.close();
     });
   });

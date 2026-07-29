@@ -138,7 +138,9 @@ export class SandboxClient {
     // The native client releases its connection pool on GC; nothing to do.
   }
 
-  private withRequestTimeout(requestTimeout: number | undefined): SandboxClient {
+  private withRequestTimeout(
+    requestTimeout: number | undefined,
+  ): SandboxClient {
     if (requestTimeout == null) {
       return this;
     }
@@ -146,14 +148,17 @@ export class SandboxClient {
     if (timeoutMs === this.requestTimeoutMs) {
       return this;
     }
-    return new SandboxClient({
-      apiUrl: this.apiUrl,
-      apiKey: this.apiKey,
-      organizationId: this.organizationId,
-      projectId: this.projectId,
-      namespace: this.namespace,
-      timeoutMs,
-    }, /* _internal */ true);
+    return new SandboxClient(
+      {
+        apiUrl: this.apiUrl,
+        apiKey: this.apiKey,
+        organizationId: this.organizationId,
+        projectId: this.projectId,
+        namespace: this.namespace,
+        timeoutMs,
+      },
+      /* _internal */ true,
+    );
   }
 
   // --- Native marshalling helpers ---
@@ -183,7 +188,9 @@ export class SandboxClient {
   // --- Sandbox CRUD ---
 
   /** Create a new sandbox. Returns immediately; the sandbox may still be starting. Use `createAndConnect()` for a blocking, ready-to-use handle. */
-  async create(options?: CreateSandboxOptions): Promise<Traced<CreateSandboxResponse>> {
+  async create(
+    options?: CreateSandboxOptions,
+  ): Promise<Traced<CreateSandboxResponse>> {
     const gpuResources = gpuRequest(options?.gpus, options?.gpuModel);
     const body: Record<string, unknown> = {
       resources: {
@@ -199,10 +206,7 @@ export class SandboxClient {
     if (options?.entrypoint != null) body.entrypoint = options.entrypoint;
     if (options?.snapshotId != null) body.snapshot_id = options.snapshotId;
     if (options?.name != null) body.name = options.name;
-    if (
-      options?.fileSystems != null &&
-      options.fileSystems.length > 0
-    ) {
+    if (options?.fileSystems != null && options.fileSystems.length > 0) {
       body.file_systems = options.fileSystems.map((fs) => ({
         file_system_id: fs.fileSystemId,
         mount_path: fs.mountPath,
@@ -238,8 +242,12 @@ export class SandboxClient {
 
   /** List all sandboxes in the namespace. */
   async list(): Promise<Traced<SandboxInfo[]>> {
-    const { traceId, json } = await callNative(() => this.native.listSandboxes());
-    const parsed = JSON.parse(json) as { sandboxes?: Record<string, unknown>[] };
+    const { traceId, json } = await callNative(() =>
+      this.native.listSandboxes(),
+    );
+    const parsed = JSON.parse(json) as {
+      sandboxes?: Record<string, unknown>[];
+    };
     const sandboxes = (parsed.sandboxes ?? []).map(
       (s) => fromSnakeKeys(s, "sandboxId") as SandboxInfo,
     );
@@ -322,7 +330,10 @@ export class SandboxClient {
   }
 
   /** Update sandbox properties such as name, exposed ports, and proxy auth settings. */
-  async update(sandboxId: string, options: UpdateSandboxOptions): Promise<Traced<SandboxInfo>> {
+  async update(
+    sandboxId: string,
+    options: UpdateSandboxOptions,
+  ): Promise<Traced<SandboxInfo>> {
     const body: Record<string, unknown> = {};
     if (options.name != null) body.name = options.name;
     if (options.allowUnauthenticatedAccess != null) {
@@ -332,7 +343,9 @@ export class SandboxClient {
       body.exposed_ports = normalizeUserPorts(options.exposedPorts);
     }
     if (Object.keys(body).length === 0) {
-      throw new SandboxError("At least one sandbox update field must be provided.");
+      throw new SandboxError(
+        "At least one sandbox update field must be provided.",
+      );
     }
     return this.tracedJson<SandboxInfo>(
       () => this.native.updateSandbox(sandboxId, JSON.stringify(body)),
@@ -380,7 +393,9 @@ export class SandboxClient {
     const requestedPorts = normalizeUserPorts(ports);
     const current = await this.getPortAccess(sandboxId);
     const toRemove = new Set(requestedPorts);
-    const desiredPorts = current.exposedPorts.filter((port) => !toRemove.has(port));
+    const desiredPorts = current.exposedPorts.filter(
+      (port) => !toRemove.has(port),
+    );
     return this.update(sandboxId, {
       allowUnauthenticatedAccess: desiredPorts.length
         ? current.allowUnauthenticatedAccess
@@ -391,7 +406,10 @@ export class SandboxClient {
 
   /** Terminate and delete a sandbox. */
   async delete(sandboxId: string): Promise<void> {
-    await callNative(() => this.native.deleteSandbox(sandboxId), { sandboxId, notFoundKind: "sandbox" });
+    await callNative(() => this.native.deleteSandbox(sandboxId), {
+      sandboxId,
+      notFoundKind: "sandbox",
+    });
   }
 
   /**
@@ -402,8 +420,14 @@ export class SandboxClient {
    * `{ wait: false }` to return immediately after the request is sent
    * (fire-and-return); the server processes the suspend asynchronously.
    */
-  async suspend(sandboxId: string, options?: SuspendResumeOptions): Promise<void> {
-    await callNative(() => this.native.suspendSandbox(sandboxId), { sandboxId, notFoundKind: "sandbox" });
+  async suspend(
+    sandboxId: string,
+    options?: SuspendResumeOptions,
+  ): Promise<void> {
+    await callNative(() => this.native.suspendSandbox(sandboxId), {
+      sandboxId,
+      notFoundKind: "sandbox",
+    });
     if (options?.wait === false) return;
     const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
@@ -412,11 +436,15 @@ export class SandboxClient {
       const info = await this.get(sandboxId);
       if (info.status === SandboxStatus.SUSPENDED) return;
       if (info.status === SandboxStatus.TERMINATED) {
-        throw new SandboxError(`Sandbox ${sandboxId} terminated while waiting for suspend`);
+        throw new SandboxError(
+          `Sandbox ${sandboxId} terminated while waiting for suspend`,
+        );
       }
       await sleep(pollInterval * 1000);
     }
-    throw new SandboxError(`Sandbox ${sandboxId} did not suspend within ${timeout}s`);
+    throw new SandboxError(
+      `Sandbox ${sandboxId} did not suspend within ${timeout}s`,
+    );
   }
 
   /**
@@ -426,8 +454,14 @@ export class SandboxClient {
    * `{ wait: false }` to return immediately after the request is sent
    * (fire-and-return); the server processes the resume asynchronously.
    */
-  async resume(sandboxId: string, options?: SuspendResumeOptions): Promise<void> {
-    await callNative(() => this.native.resumeSandbox(sandboxId), { sandboxId, notFoundKind: "sandbox" });
+  async resume(
+    sandboxId: string,
+    options?: SuspendResumeOptions,
+  ): Promise<void> {
+    await callNative(() => this.native.resumeSandbox(sandboxId), {
+      sandboxId,
+      notFoundKind: "sandbox",
+    });
     if (options?.wait === false) return;
     const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
@@ -436,11 +470,15 @@ export class SandboxClient {
       const info = await this.get(sandboxId);
       if (info.status === SandboxStatus.RUNNING) return;
       if (info.status === SandboxStatus.TERMINATED) {
-        throw new SandboxError(`Sandbox ${sandboxId} terminated while waiting for resume`);
+        throw new SandboxError(
+          `Sandbox ${sandboxId} terminated while waiting for resume`,
+        );
       }
       await sleep(pollInterval * 1000);
     }
-    throw new SandboxError(`Sandbox ${sandboxId} did not resume within ${timeout}s`);
+    throw new SandboxError(
+      `Sandbox ${sandboxId} did not resume within ${timeout}s`,
+    );
   }
 
   /**
@@ -455,8 +493,7 @@ export class SandboxClient {
     mountPath: string,
   ): Promise<Traced<SandboxInfo>> {
     return this.tracedJson<SandboxInfo>(
-      () =>
-        this.native.attachFileSystem(sandboxId, fileSystemId, mountPath),
+      () => this.native.attachFileSystem(sandboxId, fileSystemId, mountPath),
       "sandboxId",
       { sandboxId, notFoundKind: "sandbox" },
     );
@@ -526,7 +563,8 @@ export class SandboxClient {
     options?: SnapshotOptions,
   ): Promise<CreateSnapshotResponse> {
     return this.plainJson<CreateSnapshotResponse>(
-      () => this.native.createSnapshot(sandboxId, options?.snapshotType ?? null),
+      () =>
+        this.native.createSnapshot(sandboxId, options?.snapshotType ?? null),
       "snapshotId",
       { sandboxId, notFoundKind: "sandbox" },
     );
@@ -542,8 +580,12 @@ export class SandboxClient {
 
   /** List all snapshots in the namespace. */
   async listSnapshots(): Promise<Traced<SnapshotInfo[]>> {
-    const { traceId, json } = await callNative(() => this.native.listSnapshots());
-    const parsed = JSON.parse(json) as { snapshots?: Record<string, unknown>[] };
+    const { traceId, json } = await callNative(() =>
+      this.native.listSnapshots(),
+    );
+    const parsed = JSON.parse(json) as {
+      snapshots?: Record<string, unknown>[];
+    };
     const snapshots = (parsed.snapshots ?? []).map(
       (s) => fromSnakeKeys(s, "snapshotId") as SnapshotInfo,
     );
@@ -577,7 +619,8 @@ export class SandboxClient {
 
     while (Date.now() < deadline) {
       const info = await this.getSnapshot(result.snapshotId);
-      if (snapshotStatusSatisfiesWaitCondition(info.status, waitUntil)) return info;
+      if (snapshotStatusSatisfiesWaitCondition(info.status, waitUntil))
+        return info;
       if (info.status === SnapshotStatus.FAILED) {
         throw new SandboxError(
           `Snapshot ${result.snapshotId} failed: ${info.error}`,
@@ -594,7 +637,9 @@ export class SandboxClient {
   // --- Pools ---
 
   /** Create a new sandbox pool with warm pre-booted containers. */
-  async createPool(options: CreatePoolOptions): Promise<CreateSandboxPoolResponse> {
+  async createPool(
+    options: CreatePoolOptions,
+  ): Promise<CreateSandboxPoolResponse> {
     const body: Record<string, unknown> = {
       image: options.image,
       resources: {
@@ -606,8 +651,10 @@ export class SandboxClient {
     };
 
     if (options.entrypoint != null) body.entrypoint = options.entrypoint;
-    if (options.maxContainers != null) body.max_containers = options.maxContainers;
-    if (options.warmContainers != null) body.warm_containers = options.warmContainers;
+    if (options.maxContainers != null)
+      body.max_containers = options.maxContainers;
+    if (options.warmContainers != null)
+      body.warm_containers = options.warmContainers;
     if (options.network != null) body.network = toSnakeKeys(options.network);
 
     return this.plainJson<CreateSandboxPoolResponse>(
@@ -635,17 +682,16 @@ export class SandboxClient {
     return Object.assign(pools, { traceId });
   }
 
-  /** Replace a pool configuration and keep its current network policy. */
+  /**
+   * Replace a pool configuration. Omit `network` to keep the pool's current
+   * network policy; set it to replace the policy — the service recycles the
+   * pool's unclaimed warm containers onto the new policy, while containers
+   * already claimed by sandboxes keep the policy they booted with.
+   */
   async updatePool(
     poolId: string,
     options: UpdatePoolOptions,
   ): Promise<SandboxPoolInfo> {
-    if ((options as UpdatePoolOptions & { network?: unknown }).network != null) {
-      throw new SandboxError(
-        "Network policy updates are not supported. Create a new pool to change the network policy.",
-      );
-    }
-
     const body: Record<string, unknown> = {
       image: options.image,
       resources: {
@@ -657,8 +703,11 @@ export class SandboxClient {
     };
 
     if (options.entrypoint != null) body.entrypoint = options.entrypoint;
-    if (options.maxContainers != null) body.max_containers = options.maxContainers;
-    if (options.warmContainers != null) body.warm_containers = options.warmContainers;
+    if (options.maxContainers != null)
+      body.max_containers = options.maxContainers;
+    if (options.warmContainers != null)
+      body.warm_containers = options.warmContainers;
+    if (options.network != null) body.network = toSnakeKeys(options.network);
 
     return this.plainJson<SandboxPoolInfo>(
       () => this.native.updatePool(poolId, JSON.stringify(body)),
@@ -669,7 +718,10 @@ export class SandboxClient {
 
   /** Delete a sandbox pool. Fails if the pool has active containers. */
   async deletePool(poolId: string): Promise<void> {
-    await callNative(() => this.native.deletePool(poolId), { poolId, notFoundKind: "pool" });
+    await callNative(() => this.native.deletePool(poolId), {
+      poolId,
+      notFoundKind: "pool",
+    });
   }
 
   // --- Connect ---
@@ -684,8 +736,8 @@ export class SandboxClient {
   ): Sandbox {
     const explicitProxyUrlProvided = arguments.length >= 5;
     const resolvedExplicitProxyUrl = explicitProxyUrlProvided
-      ? explicitProxyUrl ?? undefined
-      : proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
+      ? (explicitProxyUrl ?? undefined)
+      : (proxyUrl ?? explicitProxyUrlOverride() ?? undefined);
     return new Sandbox({
       sandboxId: identifier,
       proxyUrl,
@@ -694,7 +746,8 @@ export class SandboxClient {
       organizationId: this.organizationId,
       projectId: this.projectId,
       routingHint,
-      resolveProxyInfo: async (currentIdentifier) => this.get(currentIdentifier),
+      resolveProxyInfo: async (currentIdentifier) =>
+        this.get(currentIdentifier),
       requestTimeout,
       nativeClient: this.native,
     });
@@ -706,9 +759,7 @@ export class SandboxClient {
    * Blocks until the sandbox is ready or `requestTimeout` elapses. The returned
    * `Sandbox` auto-terminates when `terminate()` is called.
    */
-  async createAndConnect(
-    options?: CreateAndConnectOptions,
-  ): Promise<Sandbox> {
+  async createAndConnect(options?: CreateAndConnectOptions): Promise<Sandbox> {
     const opStart = nowMs();
     const requestTimeout =
       options?.requestTimeout ??
@@ -724,15 +775,22 @@ export class SandboxClient {
     // claim() never sends options.name to the server, so only create() should fall
     // back to it locally when the server response omits a name.
     const createStart = nowMs();
-    const result = options?.poolId != null
-      ? await requestClient.claim(options.poolId)
-      : await requestClient.create(options);
-    logSdkTiming("sandbox.create", options?.poolId != null ? "claim_response" : "create_response", createStart, {
-      sandbox_id: result.sandboxId,
-      status: result.status,
-      server_trace_id: result.traceId,
-    });
-    const requestedName = options?.poolId != null ? null : options?.name ?? null;
+    const result =
+      options?.poolId != null
+        ? await requestClient.claim(options.poolId)
+        : await requestClient.create(options);
+    logSdkTiming(
+      "sandbox.create",
+      options?.poolId != null ? "claim_response" : "create_response",
+      createStart,
+      {
+        sandbox_id: result.sandboxId,
+        status: result.status,
+        server_trace_id: result.traceId,
+      },
+    );
+    const requestedName =
+      options?.poolId != null ? null : (options?.name ?? null);
 
     const finishConnect = (
       sandboxId: string,
@@ -741,7 +799,8 @@ export class SandboxClient {
       ingressEndpoint: string | undefined,
       sandboxUrl: string | undefined,
     ) => {
-      const explicitProxyUrl = options?.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
+      const explicitProxyUrl =
+        options?.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
       const selectedProxyUrl = this.native.selectSandboxProxyUrl(
         sandboxId,
         sandboxUrl ?? null,
@@ -849,9 +908,10 @@ export class SandboxClient {
   }
 }
 
-function resolveRequestTimeoutMs(
-  options?: { requestTimeout?: number; timeoutMs?: number },
-): number {
+function resolveRequestTimeoutMs(options?: {
+  requestTimeout?: number;
+  timeoutMs?: number;
+}): number {
   if (options?.requestTimeout != null) {
     return secondsToMillis(options.requestTimeout);
   }
@@ -864,14 +924,18 @@ function resolveRequestTimeoutMs(
 
 function secondsToMillis(seconds: number): number {
   if (!Number.isFinite(seconds) || seconds <= 0) {
-    throw new SandboxError("requestTimeout must be a positive number of seconds");
+    throw new SandboxError(
+      "requestTimeout must be a positive number of seconds",
+    );
   }
   return Math.ceil(seconds * 1000);
 }
 
 function validateTimeoutMs(timeoutMs: number): void {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new SandboxError("timeoutMs must be a positive number of milliseconds");
+    throw new SandboxError(
+      "timeoutMs must be a positive number of milliseconds",
+    );
   }
 }
 
@@ -884,7 +948,10 @@ function snapshotStatusSatisfiesWaitCondition(
   waitUntil: SnapshotWaitCondition,
 ): boolean {
   if (waitUntil === "local_ready") {
-    return status === SnapshotStatus.LOCAL_READY || status === SnapshotStatus.COMPLETED;
+    return (
+      status === SnapshotStatus.LOCAL_READY ||
+      status === SnapshotStatus.COMPLETED
+    );
   }
   return status === SnapshotStatus.COMPLETED;
 }
@@ -897,9 +964,10 @@ function formatStartupFailureMessage(
     terminationReason?: string;
   },
 ): string {
-  const prefix = status === SandboxStatus.TERMINATED
-    ? `Sandbox ${sandboxId} terminated during startup`
-    : `Sandbox ${sandboxId} became ${status} during startup`;
+  const prefix =
+    status === SandboxStatus.TERMINATED
+      ? `Sandbox ${sandboxId} terminated during startup`
+      : `Sandbox ${sandboxId} became ${status} during startup`;
   const detail = formatErrorDetails(options.errorDetails);
   if (detail) {
     return `${prefix}: ${detail}`;

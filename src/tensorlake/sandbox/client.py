@@ -1260,11 +1260,14 @@ class SandboxClient:
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
         warm_containers: int | None = None,
+        network: NetworkConfig | None = None,
     ) -> Traced[SandboxPoolInfo]:
         """Update a sandbox pool configuration.
 
-        This operation keeps the current network policy. Create a new pool to
-        use a different network policy.
+        Omit ``network`` to keep the pool's current network policy. Set it to
+        replace the policy: the service recycles the pool's unclaimed warm
+        containers onto the new policy, while containers already claimed by
+        sandboxes keep the policy they booted with.
 
         Args:
             pool_id: ID of the pool to update
@@ -1277,6 +1280,8 @@ class SandboxClient:
             entrypoint: Custom entrypoint command (optional)
             max_containers: Maximum number of containers in pool
             warm_containers: Number of warm containers to maintain
+            network: Replacement network policy for each container in the
+                pool. Omit to keep the current policy.
 
         Returns:
             SandboxPoolInfo with updated pool details
@@ -1295,6 +1300,7 @@ class SandboxClient:
             entrypoint=entrypoint,
             max_containers=max_containers,
             warm_containers=warm_containers,
+            network=network,
         )
 
         try:

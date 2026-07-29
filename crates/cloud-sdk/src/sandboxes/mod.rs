@@ -592,15 +592,43 @@ impl SandboxesClient {
             .map(|r| r.pools))
     }
 
+    /// Replace a pool configuration, keeping its current network policy.
+    /// Use [`Self::update_pool_with_network`] to replace the policy too.
     pub async fn update_pool(
         &self,
         pool_id: &str,
         request: &SandboxPoolRequest,
     ) -> Result<Traced<SandboxPoolInfo>, SdkError> {
-        let current = self.get_pool(pool_id).await?;
+        self.update_pool_with_network(
+            pool_id,
+            &CreateSandboxPoolRequest {
+                pool: request.clone(),
+                network: None,
+            },
+        )
+        .await
+    }
+
+    /// Replace a pool configuration, optionally replacing its network policy.
+    ///
+    /// `network: None` keeps the pool's current policy. `network: Some(..)`
+    /// replaces it: the service recycles the pool's unclaimed warm containers
+    /// onto the new policy, while containers already claimed by sandboxes keep
+    /// the policy they booted with.
+    pub async fn update_pool_with_network(
+        &self,
+        pool_id: &str,
+        request: &CreateSandboxPoolRequest,
+    ) -> Result<Traced<SandboxPoolInfo>, SdkError> {
+        let network = match &request.network {
+            Some(network) => Some(network.clone()),
+            // The service replaces the pool wholesale, so an absent policy
+            // would clear it; echo the current policy to keep it.
+            None => self.get_pool(pool_id).await?.network_policy.clone(),
+        };
         let request = CreateSandboxPoolRequest {
-            pool: request.clone(),
-            network: current.network_policy.clone(),
+            pool: request.pool.clone(),
+            network,
         };
 
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}"));

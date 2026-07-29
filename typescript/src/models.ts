@@ -259,12 +259,7 @@ export interface SnapshotAndWaitOptions extends SnapshotOptions {
 // --- Persisted sandbox logs ---
 
 export type SandboxLogLevel =
-  | "trace"
-  | "debug"
-  | "info"
-  | "warn"
-  | "error"
-  | "fatal";
+  "trace" | "debug" | "info" | "warn" | "error" | "fatal";
 
 export interface GetSandboxLogsOptions {
   levels?: SandboxLogLevel[];
@@ -322,11 +317,17 @@ export interface CreatePoolOptions {
   entrypoint?: string[];
   maxContainers?: number;
   warmContainers?: number;
-  /** Network policy for each container. Create a new pool to change this policy. */
+  /** Network policy for each container. Can be replaced later via updatePool. */
   network?: NetworkConfig;
 }
 
 export interface UpdatePoolOptions {
+  /**
+   * Network policy for each container. Omit to keep the pool's current
+   * policy; set to replace it (unclaimed warm containers are recycled onto
+   * the new policy).
+   */
+  network?: NetworkConfig;
   /** Sandbox image name, such as `tensorlake/ubuntu-minimal` or a registered Sandbox Image. */
   image: string;
   cpus?: number;
@@ -399,16 +400,10 @@ export interface ProcessHealthCheck {
 }
 
 export type ManagedProcessStatus =
-  | "starting"
-  | "running"
-  | "backing_off"
-  | "stopped";
+  "starting" | "running" | "backing_off" | "stopped";
 
 export type ManagedProcessHealthStatus =
-  | "disabled"
-  | "starting"
-  | "healthy"
-  | "unhealthy";
+  "disabled" | "starting" | "healthy" | "unhealthy";
 
 export interface ManagedProcessExit {
   exitCode?: number;
@@ -676,11 +671,9 @@ export function parseTimestamp(v: unknown): Date | undefined {
  * Recursively convert all object keys from snake_case to camelCase,
  * with special handling for `id` → contextual name and timestamp parsing.
  */
-export function fromSnakeKeys(
-  obj: unknown,
-  idField?: string,
-): unknown {
-  if (Array.isArray(obj)) return obj.map((item) => fromSnakeKeys(item, idField));
+export function fromSnakeKeys(obj: unknown, idField?: string): unknown {
+  if (Array.isArray(obj))
+    return obj.map((item) => fromSnakeKeys(item, idField));
   if (obj !== null && typeof obj === "object" && !(obj instanceof Date)) {
     const result: Record<string, unknown> = {};
     for (const [k, v] of Object.entries(obj as Record<string, unknown>)) {
