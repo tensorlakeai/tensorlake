@@ -1476,6 +1476,10 @@ enum ImageCommands {
         #[arg(long, hide = true)]
         cas: bool,
 
+        /// Dockerfile build arg, KEY=VALUE. Repeatable. CAS builds only.
+        #[arg(long = "build-arg")]
+        build_arg: Vec<String>,
+
         /// Print the sandbox image result JSON to stdout
         #[arg(long = "json", hide = true)]
         json: bool,
@@ -2247,6 +2251,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             public,
                             docker_compat,
                             cas,
+                            build_arg,
                             json,
                         } => {
                             let disk_mb = if let Some(value) = disk_mb {
@@ -2271,6 +2276,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 public,
                                 docker_compat,
                                 cas,
+                                &build_arg,
                                 json,
                             )
                             .await

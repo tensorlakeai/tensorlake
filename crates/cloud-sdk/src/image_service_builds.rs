@@ -55,6 +55,7 @@ const BUILD_POLL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 pub(crate) async fn run_image_service_build<F>(
     plan: DockerfileBuildPlan,
     dockerfile_path: Option<&Path>,
+    build_args: Vec<(String, String)>,
     options: CommonBuildOptions,
     mut emit: F,
 ) -> Result<Value>
@@ -113,6 +114,10 @@ where
                 "kind": "dockerfile",
                 "dockerfile_path": dockerfile_in_context,
                 "parents": parents,
+                "build_args": build_args
+                    .iter()
+                    .cloned()
+                    .collect::<std::collections::BTreeMap<String, String>>(),
                 "name": plan.registered_name,
                 "project": project,
             }),

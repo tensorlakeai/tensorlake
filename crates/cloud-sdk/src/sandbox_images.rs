@@ -233,6 +233,12 @@ pub struct SandboxImageBuildOptions {
     pub dockerfile_path: PathBuf,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<PathBuf>,
+    /// Dockerfile build args (`--build-arg KEY=VALUE`), forwarded to
+    /// BuildKit inside the builder. CAS builds only: the legacy platform
+    /// rootfs builder has no build-arg channel, so a non-CAS build with
+    /// build args is rejected up front. Build args never participate in
+    /// parent-reference resolution.
+    pub build_args: Vec<(String, String)>,
 }
 
 /// Options for importing a registry image directly into a rootfs (no
@@ -427,10 +433,17 @@ where
         return crate::image_service_builds::run_image_service_build(
             plan,
             Some(&options.dockerfile_path),
+            options.build_args,
             options.common,
             emit,
         )
         .await;
+    }
+    if !options.build_args.is_empty() {
+        return Err(SandboxImageBuildError::usage(
+            "build args are only supported for CAS image builds; the platform rootfs builder \
+             has no build-arg channel",
+        ));
     }
     run_build_plan(plan, options.common, emit).await
 }
@@ -457,6 +470,7 @@ where
         return crate::image_service_builds::run_image_service_build(
             plan,
             None,
+            Vec::new(),
             options.common,
             emit,
         )
