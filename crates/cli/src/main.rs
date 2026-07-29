@@ -1469,9 +1469,10 @@ enum ImageCommands {
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
-        /// Build a CAS (content-addressed streaming) image (non-default). CAS
-        /// images cold-boot by faulting content on demand instead of
-        /// localizing a monolithic snapshot.
+        /// Build a CAS (content-addressed streaming) image through the Image
+        /// Service build plane (non-default). CAS images cold-boot by
+        /// faulting content on demand instead of localizing a monolithic
+        /// snapshot. Requires TENSORLAKE_IMAGE_SERVICE_URL.
         #[arg(long, hide = true)]
         cas: bool,
 
@@ -1516,9 +1517,10 @@ enum ImageCommands {
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
-        /// Import as a CAS (content-addressed streaming) image (non-default).
-        /// CAS images cold-boot by faulting content on demand instead of
-        /// localizing a monolithic snapshot.
+        /// Import as a CAS (content-addressed streaming) image through the
+        /// Image Service build plane (non-default). CAS images cold-boot by
+        /// faulting content on demand instead of localizing a monolithic
+        /// snapshot. Requires TENSORLAKE_IMAGE_SERVICE_URL.
         #[arg(long, hide = true)]
         cas: bool,
 

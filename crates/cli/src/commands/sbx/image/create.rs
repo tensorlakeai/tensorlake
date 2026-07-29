@@ -57,10 +57,8 @@ pub async fn run(
         .map_err(|error| CliError::Other(error.into()))?;
 
     if output_json || cas {
-        // Simulation: --cas must expose the unregistered, builder-local CAS
-        // receipt even when --json was not requested.
-        // Final implementation: this prints the normal registered Platform
-        // image response, while --json remains the durable-path opt-in.
+        // --cas prints the published Image Service image record; --json
+        // remains the opt-in for the legacy platform path.
         println!("{}", serde_json::to_string_pretty(&registered)?);
     }
 
