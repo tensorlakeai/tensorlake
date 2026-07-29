@@ -20,7 +20,7 @@ use crate::{
     Client,
     sandbox_images::{
         CommonBuildOptions, DockerfileBuildPlan, SandboxImageBuildError, SandboxImageBuildEvent,
-        client_builder, collect_dir_files, resolve_build_context,
+        client_builder, collect_dir_files, resolve_build_context, resolved_docker_config_json,
     },
 };
 
@@ -63,6 +63,16 @@ where
 {
     let image_service_url = image_service_url()?;
     warn_ignored_options(&options, &mut emit);
+    // Forward the local `docker login` state for the guest's registry pulls,
+    // the same source the legacy path ships into its builder. The service
+    // stages it write-only and the reconciler hands the guest a short-lived
+    // fetch URL; the document never enters the catalog.
+    let registry_credentials_json = resolved_docker_config_json().await?;
+    if registry_credentials_json.is_some() {
+        emit(SandboxImageBuildEvent::Status(
+            "Forwarding local registry credentials to the build".to_string(),
+        ));
+    }
     let ctx = resolve_build_context(options).await?;
     let project = ctx.project_id.clone();
     let client = client_builder(
@@ -78,12 +88,15 @@ where
     if let Some(import_reference) = plan.import_image_reference.clone() {
         let created = create_build(
             &client,
-            json!({
-                "kind": "import",
-                "image_ref": import_reference,
-                "name": plan.registered_name,
-                "project": project,
-            }),
+            with_registry_credentials(
+                json!({
+                    "kind": "import",
+                    "image_ref": import_reference,
+                    "name": plan.registered_name,
+                    "project": project,
+                }),
+                registry_credentials_json,
+            ),
             &mut emit,
         )
         .await?;
@@ -95,13 +108,16 @@ where
     let (dockerfile_in_context, injected_dockerfile) = context_dockerfile(&plan, dockerfile_path)?;
     let created = create_build(
         &client,
-        json!({
-            "kind": "dockerfile",
-            "dockerfile_path": dockerfile_in_context,
-            "parents": parents,
-            "name": plan.registered_name,
-            "project": project,
-        }),
+        with_registry_credentials(
+            json!({
+                "kind": "dockerfile",
+                "dockerfile_path": dockerfile_in_context,
+                "parents": parents,
+                "name": plan.registered_name,
+                "project": project,
+            }),
+            registry_credentials_json,
+        ),
         &mut emit,
     )
     .await?;
@@ -137,6 +153,18 @@ fn image_service_url() -> Result<String> {
                  its base URL"
             ))
         })
+}
+
+/// Attach the forwarded docker config to a build-creation body. The field is
+/// write-only on the service side; it is never echoed back.
+fn with_registry_credentials(mut body: Value, registry_credentials_json: Option<String>) -> Value {
+    if let (Some(credentials), Some(object)) = (registry_credentials_json, body.as_object_mut()) {
+        object.insert(
+            "registry_credentials_json".to_string(),
+            Value::String(credentials),
+        );
+    }
+    body
 }
 
 /// Builder resource and visibility knobs belong to the legacy platform-api
@@ -591,6 +619,17 @@ mod tests {
     use std::io::Read as _;
 
     use super::*;
+
+    #[test]
+    fn registry_credentials_attach_only_when_present() {
+        let body = with_registry_credentials(
+            serde_json::json!({ "kind": "import" }),
+            Some(r#"{"auths":{}}"#.to_string()),
+        );
+        assert_eq!(body["registry_credentials_json"], r#"{"auths":{}}"#);
+        let body = with_registry_credentials(serde_json::json!({ "kind": "import" }), None);
+        assert!(body.get("registry_credentials_json").is_none());
+    }
 
     #[test]
     fn direct_pins_accept_only_lowercase_hex_ids() {

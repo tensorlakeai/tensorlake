@@ -1433,7 +1433,7 @@ const MULTIPART_PART_SIZE_BYTES: u64 = MULTIPART_PART_SIZE_MB * 1024 * 1024;
 /// `indexify/crates/dataplane/src/sign_blob.rs`); keep these in sync.
 const MULTIPART_MAX_PARTS: u32 = 10_000;
 
-async fn resolved_docker_config_json() -> Result<Option<String>> {
+pub(crate) async fn resolved_docker_config_json() -> Result<Option<String>> {
     let docker_config = DockerConfig::load().await.map_err(|error| {
         SandboxImageBuildError::other(format!("Failed to load Docker config: {error}"))
     })?;
