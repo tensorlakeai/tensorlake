@@ -68,6 +68,14 @@ pub mod daemon {
     }
 }
 
+pub async fn run_macos_kernel_refresh_helper(
+    state_dir: &Path,
+    through: &str,
+    batch: u64,
+) -> Result<()> {
+    map(gsvc_fs_client::run_macos_kernel_refresh_helper(state_dir, through, batch).await)
+}
+
 pub async fn setup(from: Option<&str>, check_only: bool) -> Result<()> {
     map(gsvc_fs_client::setup(from, check_only).await)
 }

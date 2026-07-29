@@ -339,6 +339,19 @@ enum FsCommands {
         log_level: String,
     },
 
+    /// (internal) Refresh one committed logical head through FSKit's kernel caches
+    #[command(hide = true)]
+    KernelRefresh {
+        #[arg(long)]
+        state_dir: PathBuf,
+
+        #[arg(long)]
+        through: String,
+
+        #[arg(long)]
+        batch: u64,
+    },
+
     /// Create a permanent, billed snapshot of the drive (a clean tree is a quiet no-op)
     Snapshot {
         /// A mounted directory (default: the attachment containing the current directory)
@@ -2387,10 +2400,20 @@ fn purge_credentials_on_auth_failure(result: &error::Result<()>) {
 // with a clear "not available" error.
 #[cfg(feature = "mount")]
 async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Result<()> {
-    // Setup installs a local app bundle and does not require project authentication.
+    // Setup and the daemon-owned FSKit refresh helper are local operations and do not require
+    // project authentication. The latter receives only a state path plus immutable head token;
+    // it fetches exact path facts from the already-authenticated local daemon.
     let subcmd = match subcmd {
         FsCommands::Setup { from, check } => {
             return commands::fs::setup(from.as_deref(), check).await;
+        }
+        FsCommands::KernelRefresh {
+            state_dir,
+            through,
+            batch,
+        } => {
+            return commands::fs::run_macos_kernel_refresh_helper(&state_dir, &through, batch)
+                .await;
         }
         other => other,
     };
@@ -2453,6 +2476,9 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
     let mount_dir = move || mount_dir.expect("resolved for every path-addressed command above");
     let result = match subcmd {
         FsCommands::Setup { .. } => unreachable!("handled before the auth guard"),
+        FsCommands::KernelRefresh { .. } => {
+            unreachable!("handled before the auth guard")
+        }
         FsCommands::Create { name, json } => {
             commands::fs::create_filesystem(ctx, &name, json).await
         }
@@ -3125,6 +3151,29 @@ mod tests {
     #[test]
     fn logical_git_mount_and_fs_commands_are_surface_centric() {
         assert!(Cli::try_parse_from(["tl", "fs", "converge"]).is_err());
+
+        match parse_command([
+            "tl",
+            "fs",
+            "kernel-refresh",
+            "--state-dir",
+            "/tmp/tlfs-state",
+            "--through",
+            "11",
+            "--batch",
+            "7",
+        ]) {
+            Commands::Fs(FsCommands::KernelRefresh {
+                state_dir,
+                through,
+                batch,
+            }) => {
+                assert_eq!(state_dir, PathBuf::from("/tmp/tlfs-state"));
+                assert_eq!(through, "11");
+                assert_eq!(batch, 7);
+            }
+            _ => panic!("expected internal FSKit kernel refresh command"),
+        }
 
         // The filesystem surface is writable logical-v1 only: a bare name and mountpoint.
         match parse_command(["tl", "fs", "mount", "scratch", "./w"]) {
