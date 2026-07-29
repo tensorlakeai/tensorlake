@@ -35,8 +35,8 @@ use tensorlake::sandbox_images::SandboxImageBuildEvent;
 use tensorlake::sandbox_templates::SandboxTemplatesClient;
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, CreateSandboxPoolRequest, CreateSandboxRequest,
-    GetSandboxLogsRequest, ListArchivedSandboxesParams, SandboxPoolRequest, SnapshotType,
-    UpdateSandboxPoolRequest, UpdateSandboxRequest,
+    GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType, UpdateSandboxPoolRequest,
+    UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
