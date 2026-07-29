@@ -25,12 +25,14 @@ use models::{
     REPO_KIND_FILESYSTEM, RepoInfo, RepoMetaInfo,
 };
 
+type GitCredentialCache = HashMap<(String, Option<String>), GitCredential>;
+
 #[derive(Clone)]
 pub struct ArtifactStorageClient {
     api_client: Client,
     git_client: reqwest::Client,
     git_base_url: String,
-    git_credentials: Arc<tokio::sync::Mutex<HashMap<(String, Option<String>), GitCredential>>>,
+    git_credentials: Arc<tokio::sync::Mutex<GitCredentialCache>>,
 }
 
 #[derive(Clone)]
