@@ -26,8 +26,8 @@ use serde_json::Value;
 
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, CreateSandboxPoolRequest, CreateSandboxRequest,
-    GetSandboxLogsRequest, ListArchivedSandboxesParams, SandboxPoolRequest, SnapshotType,
-    UpdateSandboxPoolRequest, UpdateSandboxRequest,
+    GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType, UpdateSandboxPoolRequest,
+    UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     SandboxProxyClient, SandboxesClient, resolve_sandbox_proxy_target, select_sandbox_proxy_url,
