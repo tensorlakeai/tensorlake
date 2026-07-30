@@ -239,6 +239,10 @@ enum FsCommands {
         /// Mountpoint directory (created; must be empty)
         path: PathBuf,
 
+        /// Download and verify the complete filesystem before this command returns
+        #[arg(long, conflicts_with = "foreground")]
+        prefetch: bool,
+
         /// Run the mount daemon in the foreground (debugging)
         #[arg(long, hide = true)]
         foreground: bool,
@@ -253,6 +257,14 @@ enum FsCommands {
         /// the CLI's `mount timing` phase lines.
         #[arg(long, default_value = "info", hide = true)]
         log_level: String,
+    },
+
+    /// Download and verify every file below a mounted path for network-free reads
+    ///
+    /// Requires enough local disk for the selected working set.
+    Prefetch {
+        /// File or directory inside a mount (default: the current directory)
+        path: Option<PathBuf>,
     },
 
     /// Mint the scoped credential a sandbox needs to attach one filesystem
@@ -608,6 +620,13 @@ enum GitCommands {
         /// Daemon + CLI log level
         #[arg(long, default_value = "info", hide = true)]
         log_level: String,
+    },
+    /// Download and verify every file below a mounted repository path for network-free reads
+    ///
+    /// Requires enough local disk for the selected working set.
+    Prefetch {
+        /// File or directory inside a repository mount (default: the current directory)
+        path: Option<PathBuf>,
     },
     /// Unmount a logical-v1 repository working tree
     Unmount {
@@ -1874,6 +1893,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             if matches!(
                 subcmd,
                 GitCommands::Mount { .. }
+                    | GitCommands::Prefetch { .. }
                     | GitCommands::Unmount { .. }
                     | GitCommands::Snapshot { .. }
                     | GitCommands::Sync { .. }
@@ -2415,6 +2435,9 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             return commands::fs::run_macos_kernel_refresh_helper(&state_dir, &through, batch)
                 .await;
         }
+        FsCommands::Prefetch { path } => {
+            return commands::fs::prefetch_filesystem(path).await;
+        }
         other => other,
     };
     // Path-addressed commands default their mounted-directory argument to the mount containing
@@ -2479,6 +2502,7 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         FsCommands::KernelRefresh { .. } => {
             unreachable!("handled before the auth guard")
         }
+        FsCommands::Prefetch { .. } => unreachable!("handled before the auth guard"),
         FsCommands::Create { name, json } => {
             commands::fs::create_filesystem(ctx, &name, json).await
         }
@@ -2502,12 +2526,18 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
         FsCommands::Mount {
             target,
             path,
+            prefetch,
             foreground,
             trace_ops,
             log_level,
         } => {
             commands::fs::mount_filesystem(ctx, &target, &path, foreground, trace_ops, &log_level)
-                .await
+                .await?;
+            if prefetch {
+                commands::fs::prefetch_filesystem(Some(path)).await
+            } else {
+                Ok(())
+            }
         }
         FsCommands::Daemon {
             state_dir,
@@ -2538,7 +2568,13 @@ async fn run_fs_command(_ctx: &mut CliContext, _subcmd: FsCommands) -> error::Re
 }
 
 #[cfg(feature = "mount")]
-async fn run_git_mount_command(ctx: &mut CliContext, mut subcmd: GitCommands) -> error::Result<()> {
+async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> error::Result<()> {
+    let mut subcmd = match subcmd {
+        GitCommands::Prefetch { path } => {
+            return commands::fs::prefetch_repository(path).await;
+        }
+        other => other,
+    };
     let mount_dir = match &mut subcmd {
         GitCommands::Snapshot { path, .. }
         | GitCommands::Status { path, .. }
@@ -2685,6 +2721,7 @@ async fn run_ssh_keys_command(ctx: &CliContext, subcmd: SshKeysCommands) -> erro
 async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result<()> {
     match subcmd {
         GitCommands::Mount { .. }
+        | GitCommands::Prefetch { .. }
         | GitCommands::Unmount { .. }
         | GitCommands::Snapshot { .. }
         | GitCommands::Sync { .. }
@@ -3149,6 +3186,36 @@ mod tests {
     }
 
     #[test]
+    fn prefetch_mount_flag_parses_and_rejects_foreground_mode() {
+        match parse_command(["tl", "fs", "mount", "scratch", "./w", "--prefetch"]) {
+            Commands::Fs(FsCommands::Mount {
+                target,
+                path,
+                prefetch: true,
+                foreground: false,
+                ..
+            }) => {
+                assert_eq!(target, "scratch");
+                assert_eq!(path, PathBuf::from("./w"));
+            }
+            _ => panic!("expected prefetching fs mount command"),
+        }
+        assert!(
+            Cli::try_parse_from([
+                "tl",
+                "fs",
+                "mount",
+                "scratch",
+                "./w",
+                "--prefetch",
+                "--foreground",
+            ])
+            .is_err(),
+            "foreground mount never returns to run the post-mount prefetch"
+        );
+    }
+
+    #[test]
     fn logical_git_mount_and_fs_commands_are_surface_centric() {
         assert!(Cli::try_parse_from(["tl", "fs", "converge"]).is_err());
 
@@ -3180,17 +3247,23 @@ mod tests {
             Commands::Fs(FsCommands::Mount {
                 target,
                 path,
+                prefetch,
                 foreground,
                 trace_ops,
                 log_level,
             }) => {
                 assert_eq!(target, "scratch");
                 assert_eq!(path, PathBuf::from("./w"));
+                assert!(!prefetch);
                 assert!(!foreground);
                 assert!(!trace_ops);
                 assert_eq!(log_level, "info");
             }
             _ => panic!("expected fs mount command"),
+        }
+        match parse_command(["tl", "fs", "mount", "scratch", "./w", "--prefetch"]) {
+            Commands::Fs(FsCommands::Mount { prefetch: true, .. }) => {}
+            _ => panic!("expected prefetching fs mount command"),
         }
         // The pre-split flags are gone, not hidden.
         for legacy in [
@@ -3336,6 +3409,16 @@ mod tests {
             }) => {}
             _ => panic!("expected fs snapshot command"),
         }
+        match parse_command(["tl", "fs", "prefetch", "./w/DerivedData"]) {
+            Commands::Fs(FsCommands::Prefetch { path }) => {
+                assert_eq!(path, Some(PathBuf::from("./w/DerivedData")));
+            }
+            _ => panic!("expected fs prefetch command"),
+        }
+        match parse_command(["tl", "fs", "prefetch"]) {
+            Commands::Fs(FsCommands::Prefetch { path: None }) => {}
+            _ => panic!("expected cwd-defaulting fs prefetch command"),
+        }
 
         match parse_command(["tl", "fs", "snapshot", "./w", "-m", "wip"]) {
             Commands::Fs(FsCommands::Snapshot { path, message }) => {
@@ -3401,6 +3484,12 @@ mod tests {
                 assert_eq!(log_level, "info");
             }
             _ => panic!("expected logical-v1 git mount command"),
+        }
+        match parse_command(["tl", "git", "prefetch", "./w/build"]) {
+            Commands::Git(GitCommands::Prefetch { path }) => {
+                assert_eq!(path, Some(PathBuf::from("./w/build")));
+            }
+            _ => panic!("expected git prefetch command"),
         }
         match parse_command(["tl", "git", "mount", "demo:main", "./w", "--publish"]) {
             Commands::Git(GitCommands::Mount { publish: true, .. }) => {}

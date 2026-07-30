@@ -229,6 +229,14 @@ pub async fn status(ctx: &CliContext, path: &Path, json: bool) -> Result<()> {
     map(gsvc_fs_client::status(&private_context(ctx), path, json).await)
 }
 
+pub async fn prefetch_filesystem(path: Option<PathBuf>) -> Result<()> {
+    map(gsvc_fs_client::prefetch_filesystem(path).await)
+}
+
+pub async fn prefetch_repository(path: Option<PathBuf>) -> Result<()> {
+    map(gsvc_fs_client::prefetch_repository(path).await)
+}
+
 pub async fn doctor(path: &Path, json: bool) -> Result<()> {
     map(gsvc_fs_client::doctor(path, json).await)
 }
