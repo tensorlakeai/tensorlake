@@ -936,6 +936,13 @@ enum AppCommands {
     #[command(subcommand)]
     Cron(CronCommands),
 
+    /// Show detailed information for an application
+    #[command(alias = "info")]
+    Describe {
+        /// Application name
+        application: String,
+    },
+
     /// List applications
     #[command(name = "ls")]
     Applications(ApplicationsArgs),
@@ -2346,6 +2353,10 @@ async fn run_app_command(ctx: &mut CliContext, subcmd: AppCommands) -> error::Re
         AppCommands::New { name, force } => commands::new::run(&name, force),
         AppCommands::Deploy { args } => run_deploy_command(ctx, &args).await,
         AppCommands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
+        AppCommands::Describe { application } => {
+            ensure_auth_and_project(ctx).await?;
+            commands::applications::describe(ctx, &application).await
+        }
         AppCommands::Applications(app_args) => run_applications_command(ctx, app_args).await,
     }
 }
@@ -2914,6 +2925,18 @@ mod tests {
         match parse_command(["tl", "app", "ls"]) {
             Commands::App(AppCommands::Applications(ApplicationsArgs { command: None })) => {}
             _ => panic!("expected app ls command"),
+        }
+        match parse_command(["tl", "app", "describe", "hello_world"]) {
+            Commands::App(AppCommands::Describe { application }) => {
+                assert_eq!(application, "hello_world");
+            }
+            _ => panic!("expected app describe command"),
+        }
+        match parse_command(["tl", "app", "info", "hello_world"]) {
+            Commands::App(AppCommands::Describe { application }) => {
+                assert_eq!(application, "hello_world");
+            }
+            _ => panic!("expected app info alias"),
         }
     }
 
