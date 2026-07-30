@@ -2,14 +2,16 @@ import http.server
 
 from .router import Router
 
+_IPV4_LOOPBACK_ADDRESS = "127.0.0.1"
+
 
 class RequestContextHTTPServer:
-    """HTTP server for handling request context operations."""
+    """HTTP server for handling request context operations over IPv4 loopback."""
 
     def __init__(self, server_router_class: type[Router]):
-        """Initializes the HTTP server to listen on localhost."""
+        """Initializes the HTTP server to listen on IPv4 loopback."""
         self._httpd: http.server.ThreadingHTTPServer = http.server.ThreadingHTTPServer(
-            ("localhost", 0), server_router_class
+            (_IPV4_LOOPBACK_ADDRESS, 0), server_router_class
         )
         self._running: bool = False
 
@@ -17,7 +19,7 @@ class RequestContextHTTPServer:
     def base_url(self) -> str:
         """Returns the base URL of the server."""
         port: int = self._httpd.server_address[1]
-        return f"http://localhost:{port}"
+        return f"http://{_IPV4_LOOPBACK_ADDRESS}:{port}"
 
     def start(self):
         """Starts the HTTP server in the current thread.
