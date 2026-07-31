@@ -69,7 +69,10 @@ jobs:
       - name: Test private filesystem client engine
         run: |
           CARGO_TARGET_DIR="$PWD/target" cargo clippy --manifest-path crates/gsvc-fs-client/Cargo.toml --all-targets -- -D warnings
-          CARGO_TARGET_DIR="$PWD/target" cargo test --manifest-path crates/gsvc-fs-client/Cargo.toml
+          # Several tests compare live filesystem accounting. Keep them serial so
+          # another test cannot allocate a block between the implementation and
+          # reference statvfs calls.
+          CARGO_TARGET_DIR="$PWD/target" cargo test --manifest-path crates/gsvc-fs-client/Cargo.toml -- --test-threads=1
 
       - name: Run Rust workspace tests with customer features
         run: cargo test --workspace --features tensorlake-cli/mount,tensorlake-cli/git-clone
