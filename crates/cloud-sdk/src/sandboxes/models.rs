@@ -212,12 +212,81 @@ pub struct SandboxPoolRequest {
 }
 
 /// A pool creation request with an optional container network policy.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct CreateSandboxPoolRequest {
-    #[serde(flatten)]
     pub pool: SandboxPoolRequest,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkConfig>,
+}
+
+// These pool request wrappers intentionally implement their flat wire shape
+// without `serde(flatten)`. When another workspace dependency enables
+// serde_json's `arbitrary_precision` feature, flatten's intermediate content
+// representation serializes nested floating-point values as private Number
+// maps instead of JSON numbers.
+impl Serialize for CreateSandboxPoolRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            image: Option<&'a str>,
+            resources: &'a ContainerResourcesInfo,
+            timeout_secs: i64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            entrypoint: Option<&'a Vec<String>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_containers: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            warm_containers: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            network: Option<&'a NetworkConfig>,
+        }
+
+        Wire {
+            image: self.pool.image.as_deref(),
+            resources: &self.pool.resources,
+            timeout_secs: self.pool.timeout_secs,
+            entrypoint: self.pool.entrypoint.as_ref(),
+            max_containers: self.pool.max_containers,
+            warm_containers: self.pool.warm_containers,
+            network: self.network.as_ref(),
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for CreateSandboxPoolRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            image: Option<String>,
+            resources: ContainerResourcesInfo,
+            #[serde(default)]
+            timeout_secs: i64,
+            entrypoint: Option<Vec<String>>,
+            max_containers: Option<i64>,
+            warm_containers: Option<i64>,
+            network: Option<NetworkConfig>,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            pool: SandboxPoolRequest {
+                image: wire.image,
+                resources: wire.resources,
+                timeout_secs: wire.timeout_secs,
+                entrypoint: wire.entrypoint,
+                max_containers: wire.max_containers,
+                warm_containers: wire.warm_containers,
+            },
+            network: wire.network,
+        })
+    }
 }
 
 /// What a pool update should do with the pool's network policy.
@@ -271,12 +340,81 @@ impl<'de> Deserialize<'de> for NetworkPolicyUpdate {
 }
 
 /// A pool update request carrying a tri-state network policy instruction.
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct UpdateSandboxPoolRequest {
-    #[serde(flatten)]
     pub pool: SandboxPoolRequest,
-    #[serde(default, skip_serializing_if = "NetworkPolicyUpdate::is_keep")]
     pub network: NetworkPolicyUpdate,
+}
+
+impl Serialize for UpdateSandboxPoolRequest {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        #[derive(Serialize)]
+        struct Wire<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            image: Option<&'a str>,
+            resources: &'a ContainerResourcesInfo,
+            timeout_secs: i64,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            entrypoint: Option<&'a Vec<String>>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            max_containers: Option<i64>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            warm_containers: Option<i64>,
+            #[serde(skip_serializing_if = "network_policy_update_ref_is_keep")]
+            network: &'a NetworkPolicyUpdate,
+        }
+
+        fn network_policy_update_ref_is_keep(value: &&NetworkPolicyUpdate) -> bool {
+            value.is_keep()
+        }
+
+        Wire {
+            image: self.pool.image.as_deref(),
+            resources: &self.pool.resources,
+            timeout_secs: self.pool.timeout_secs,
+            entrypoint: self.pool.entrypoint.as_ref(),
+            max_containers: self.pool.max_containers,
+            warm_containers: self.pool.warm_containers,
+            network: &self.network,
+        }
+        .serialize(serializer)
+    }
+}
+
+impl<'de> Deserialize<'de> for UpdateSandboxPoolRequest {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        struct Wire {
+            image: Option<String>,
+            resources: ContainerResourcesInfo,
+            #[serde(default)]
+            timeout_secs: i64,
+            entrypoint: Option<Vec<String>>,
+            max_containers: Option<i64>,
+            warm_containers: Option<i64>,
+            #[serde(default)]
+            network: NetworkPolicyUpdate,
+        }
+
+        let wire = Wire::deserialize(deserializer)?;
+        Ok(Self {
+            pool: SandboxPoolRequest {
+                image: wire.image,
+                resources: wire.resources,
+                timeout_secs: wire.timeout_secs,
+                entrypoint: wire.entrypoint,
+                max_containers: wire.max_containers,
+                warm_containers: wire.warm_containers,
+            },
+            network: wire.network,
+        })
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
