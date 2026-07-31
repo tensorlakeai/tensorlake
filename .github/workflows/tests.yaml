@@ -35,11 +35,24 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust-full-feature
           cache-bin: false
+
+      - name: Build TypeScript SDK runtime capsule
+        working-directory: typescript
+        run: |
+          npm ci
+          npm run build:sdk
 
       - name: Vendor private artifact_storage crates
         uses: ./.github/actions/vendor-private-crates
