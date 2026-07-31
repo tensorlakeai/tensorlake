@@ -3,6 +3,7 @@ export {
   registerFunction,
   retries,
   FunctionFuture as Future,
+  type ApplicationCapability,
   type ApplicationOptions,
   type FunctionOptions,
   type SimpleApplicationOptions,
@@ -14,6 +15,8 @@ export {
 } from "./function.js";
 export { schema, type Schema, type Parameter, type Infer, type ParameterValues } from "./schema.js";
 export { File } from "./file.js";
+export { HttpBody } from "./http-body.js";
+export { Headers, type HeadersInit } from "./headers.js";
 export { Image } from "../image.js";
 export { SDK_VERSION } from "../defaults.js";
 export { RequestContext, type RequestContextValue } from "./context.js";
@@ -30,6 +33,7 @@ export {
   SerializationError,
   DeserializationError,
   FunctionError,
+  TimeoutError,
   RequestError,
   ReplayMismatchError,
 } from "./errors.js";

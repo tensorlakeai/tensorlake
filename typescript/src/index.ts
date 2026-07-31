@@ -52,6 +52,8 @@ export {
   retries,
   schema,
   File,
+  HttpBody,
+  Headers,
   RequestContext,
   Future,
   runLocal,
@@ -59,6 +61,7 @@ export {
   remoteOptions,
 } from "./applications/index.js";
 export type {
+  ApplicationCapability,
   ApplicationOptions,
   FunctionOptions,
   SimpleApplicationOptions,
@@ -66,6 +69,7 @@ export type {
   RegisteredFunction,
   Schema,
   Parameter,
+  HeadersInit,
   RemoteOptions,
   TailCall,
 } from "./applications/index.js";

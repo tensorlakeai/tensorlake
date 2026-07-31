@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { DeserializationError, SerializationError } from "./errors.js";
 import { isFile } from "./file.js";
+import { isHttpBody } from "./http-body.js";
 
 const textEncoder = new TextEncoder();
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -23,13 +24,23 @@ function assertJSONValue(value: unknown, path: string, seen: Set<object>): void 
   if (isFile(value)) {
     throw new SerializationError(`${path} contains a nested File; File is only supported as a direct value`);
   }
+  if (isHttpBody(value)) {
+    throw new SerializationError(
+      `${path} contains a nested HttpBody; HttpBody is only supported as a direct value`,
+    );
+  }
   if (seen.has(value)) throw new SerializationError(`${path} contains a cycle`);
   if (Object.getPrototypeOf(value) !== Object.prototype && !Array.isArray(value)) {
     throw new SerializationError(`${path} contains unsupported ${value.constructor?.name ?? "object"}`);
   }
   seen.add(value);
   if (Array.isArray(value)) {
-    value.forEach((item, index) => assertJSONValue(item, `${path}[${index}]`, seen));
+    for (let index = 0; index < value.length; index += 1) {
+      if (!Object.prototype.hasOwnProperty.call(value, index)) {
+        throw new SerializationError(`${path} contains a sparse array entry at index ${index}`);
+      }
+      assertJSONValue(value[index], `${path}[${index}]`, seen);
+    }
   } else {
     for (const [key, item] of Object.entries(value)) {
       assertJSONValue(item, `${path}.${key}`, seen);
@@ -41,6 +52,13 @@ function assertJSONValue(value: unknown, path: string, seen: Set<object>): void 
 export function serializeValue(value: unknown): SerializedValue {
   if (isFile(value)) {
     return { data: value.content, contentType: value.contentType, encoding: "raw" };
+  }
+  if (isHttpBody(value)) {
+    return {
+      data: value.content,
+      contentType: value.contentType ?? "",
+      encoding: "raw",
+    };
   }
   try {
     assertJSONValue(value, "value", new Set());

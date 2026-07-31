@@ -2,7 +2,10 @@ import { Buffer } from "node:buffer";
 import type { JSONSchema, Parameter } from "./schema.js";
 import { parameterJSONSchema } from "./schema.js";
 import { getApplications, getFunctions } from "./registry.js";
-import type { RegisteredDefinition } from "./function.js";
+import type {
+  ApplicationCapability,
+  RegisteredDefinition,
+} from "./function.js";
 import { SDKUsageError } from "./errors.js";
 
 export const TYPESCRIPT_DESCRIPTOR_FORMAT = "tensorlake.typescript.json-schema.v1";
@@ -49,6 +52,8 @@ export interface ApplicationManifest {
   name: string;
   description: string;
   tags: Record<string, string>;
+  allow: ApplicationCapability[];
+  public_endpoint_id?: string;
   version: string;
   functions: Record<string, FunctionManifest>;
   entrypoint: {
@@ -145,6 +150,7 @@ export function createApplicationManifest(application: RegisteredDefinition): Ap
     name: application.name,
     description: application.options.description,
     tags: { ...application.application.tags },
+    allow: [...application.application.allow],
     version: application.application.version,
     functions,
     entrypoint: {

@@ -1,5 +1,6 @@
 import { AsyncLocalStorage } from "node:async_hooks";
 import { SDKUsageError } from "./errors.js";
+import { Headers, type HeadersInit } from "./headers.js";
 import { deserializeJSON, serializeValue } from "./serialization.js";
 
 export interface ProgressOptions {
@@ -21,8 +22,80 @@ export interface FunctionProgress {
   update(current: number, total: number, options?: ProgressOptions): Promise<void>;
 }
 
+export function validateRequestStateKey(key: unknown): asserts key is string {
+  if (typeof key !== "string") {
+    throw new SDKUsageError(`State key must be a string, got: ${String(key)}`);
+  }
+}
+
+export function serializeRequestStateValue(value: unknown): Uint8Array {
+  const serialized = serializeValue(value);
+  if (serialized.encoding !== "json") {
+    throw new SDKUsageError("Request state values must be JSON values");
+  }
+  return serialized.data;
+}
+
+export function validateCounterMetric(name: unknown, value: unknown): void {
+  if (typeof name !== "string") {
+    throw new SDKUsageError(`Counter name must be a string, got: ${String(name)}`);
+  }
+  if (typeof value !== "number" || !Number.isInteger(value)) {
+    throw new SDKUsageError(`Counter value must be an int, got: ${String(value)}`);
+  }
+  if (!Number.isSafeInteger(value)) {
+    throw new SDKUsageError(`Counter value must be a safe int, got: ${String(value)}`);
+  }
+}
+
+export function validateTimerMetric(name: unknown, value: unknown): void {
+  if (typeof name !== "string") {
+    throw new SDKUsageError(`Timer name must be a string, got: ${String(name)}`);
+  }
+  if (typeof value !== "number" || !Number.isFinite(value)) {
+    throw new SDKUsageError(`Timer value must be a finite number, got: ${String(value)}`);
+  }
+}
+
+function isPlainRecord(value: unknown): value is Record<PropertyKey, unknown> {
+  if (value == null || typeof value !== "object" || Array.isArray(value)) return false;
+  const prototype = Object.getPrototypeOf(value);
+  return prototype === Object.prototype || prototype === null;
+}
+
+export function validateProgressUpdate(
+  current: number,
+  total: number,
+  options?: ProgressOptions,
+): void {
+  if (!Number.isFinite(current) || !Number.isFinite(total) || total < 0 || current < 0) {
+    throw new SDKUsageError("Progress current and total must be non-negative finite numbers");
+  }
+  if (options != null && !isPlainRecord(options)) {
+    throw new SDKUsageError("Progress options must be an object");
+  }
+  if (options?.message != null && typeof options.message !== "string") {
+    throw new SDKUsageError("Progress message must be a string");
+  }
+  if (options?.attributes != null) {
+    if (!isPlainRecord(options.attributes)) {
+      throw new SDKUsageError("Progress attributes must be an object of string key/value pairs");
+    }
+    for (const key of Reflect.ownKeys(options.attributes)) {
+      if (typeof key !== "string") {
+        throw new SDKUsageError("Progress attributes must contain only string keys and values");
+      }
+      const value = options.attributes[key];
+      if (typeof value !== "string") {
+        throw new SDKUsageError("Progress attributes must contain only string keys and values");
+      }
+    }
+  }
+}
+
 export interface RequestContextValue {
   readonly requestId: string;
+  readonly headers: Headers;
   readonly signal: AbortSignal;
   readonly state: RequestState;
   readonly metrics: RequestMetrics;
@@ -83,6 +156,7 @@ export async function waitWithAbortSignal<T>(
 }
 
 export class MemoryRequestContext implements RequestContextValue {
+  readonly headers: Headers;
   readonly signal: AbortSignal;
   private readonly values = new Map<string, Uint8Array>();
   private readonly counters = new Map<string, number>();
@@ -91,20 +165,19 @@ export class MemoryRequestContext implements RequestContextValue {
 
   constructor(
     readonly requestId: string,
-    options: { signal?: AbortSignal } = {},
+    options: { signal?: AbortSignal; headers?: HeadersInit } = {},
   ) {
+    this.headers = new Headers(options.headers);
     this.signal = options.signal ?? new AbortController().signal;
   }
 
   readonly state: RequestState = {
     set: async (key, value) => {
-      const serialized = serializeValue(value);
-      if (serialized.encoding !== "json") {
-        throw new SDKUsageError("Request state values must be JSON values");
-      }
-      this.values.set(key, serialized.data.slice());
+      validateRequestStateKey(key);
+      this.values.set(key, serializeRequestStateValue(value).slice());
     },
     get: async <T>(key: string, defaultValue?: T) => {
+      validateRequestStateKey(key);
       const value = this.values.get(key);
       return value == null ? defaultValue : deserializeJSON(value) as T;
     },
@@ -112,9 +185,11 @@ export class MemoryRequestContext implements RequestContextValue {
 
   readonly metrics: RequestMetrics = {
     counter: async (name, value = 1) => {
+      validateCounterMetric(name, value);
       this.counters.set(name, (this.counters.get(name) ?? 0) + value);
     },
     timer: async (name, value) => {
+      validateTimerMetric(name, value);
       const values = this.timers.get(name) ?? [];
       values.push(value);
       this.timers.set(name, values);
@@ -123,16 +198,7 @@ export class MemoryRequestContext implements RequestContextValue {
 
   readonly progress: FunctionProgress = {
     update: async (current, total, options) => {
-      if (!Number.isFinite(current) || !Number.isFinite(total) || total < 0 || current < 0) {
-        throw new SDKUsageError("Progress current and total must be non-negative finite numbers");
-      }
-      if (options?.attributes != null) {
-        for (const [key, value] of Object.entries(options.attributes)) {
-          if (typeof key !== "string" || typeof value !== "string") {
-            throw new SDKUsageError("Progress attributes must contain only string keys and values");
-          }
-        }
-      }
+      validateProgressUpdate(current, total, options);
       this.lastProgress = { current, total, options };
     },
   };

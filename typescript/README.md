@@ -1,6 +1,6 @@
 # Tensorlake TypeScript SDK
 
-The TypeScript SDK supports Tensorlake sandboxes on Node.js 22 or newer. Deploying and running durable TypeScript applications requires Node.js 24 or newer. Application handlers are async-only and values crossing a function boundary must be JSON values or a direct `File`.
+The TypeScript SDK supports Tensorlake sandboxes on Node.js 22 or newer. Deploying and running durable TypeScript applications requires Node.js 24 or newer. Application handlers are async-only and values crossing a function boundary must be JSON values or a direct `File`. Application entrypoints can also receive an exact raw request body with `HttpBody`.
 
 ```ts
 import { registerApplication, registerFunction } from "tensorlake/applications";
@@ -20,7 +20,7 @@ This concise form infers the TypeScript call signature and uses permissive JSON
 schemas. JavaScript default parameters are inferred as optional, and the
 explicit name is stable across bundling. Use the schema-rich form when you need
 runtime validation, API metadata, optional parameters without a JavaScript
-default, rest parameters, or `File` inputs and outputs:
+default, rest parameters, `File` inputs and outputs, or an `HttpBody` input:
 
 ```ts
 import { registerApplication, schema } from "tensorlake/applications";
@@ -83,6 +83,20 @@ state, metrics, progress, and an abort signal. Local requests expose `cancel()`,
 which aborts that signal and rejects `output()`.
 
 TypeScript and Python definitions cannot be mixed in one deployed application bundle. Class-based function semantics are not supported in the TypeScript runtime.
+
+For a raw request body, declare a direct application parameter with
+`schema.httpBody()`. `HttpBody.content` contains the unchanged bytes,
+`contentType` preserves the request MIME type, and `text()` / `json()` provide
+explicit decoding helpers. `RequestContext.get().headers` exposes sanitized,
+case-insensitive invocation headers and preserves duplicate values through
+`getAll()`. `HttpBody` is not supported in nested schemas, durable function
+parameters, or return values. See the
+[raw webhook example](examples/http-body/README.md).
+
+Applications that accept public HTTP requests can set
+`allow: ["unauthenticated_requests"]` in their registration options. The
+capability is emitted in the deployment manifest, and deployments preserve the
+application's stable public endpoint identifier across updates.
 
 ## Function executor correctness
 

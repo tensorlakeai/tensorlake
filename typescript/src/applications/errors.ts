@@ -1,5 +1,7 @@
+const SDK_USAGE_ERROR_BRAND = Symbol.for("tensorlake.applications.sdk-usage-error.v1");
 const REQUEST_ERROR_BRAND = Symbol.for("tensorlake.applications.request-error.v1");
 const FUNCTION_ERROR_BRAND = Symbol.for("tensorlake.applications.function-error.v1");
+const TIMEOUT_ERROR_BRAND = Symbol.for("tensorlake.applications.timeout-error.v1");
 
 export class TensorlakeApplicationError extends Error {
   constructor(message: string, options?: { cause?: unknown }) {
@@ -9,10 +11,26 @@ export class TensorlakeApplicationError extends Error {
 }
 
 export class SDKUsageError extends TensorlakeApplicationError {
+  readonly [SDK_USAGE_ERROR_BRAND] = true;
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    if (this !== SDKUsageError) {
+      return Function.prototype[Symbol.hasInstance].call(this, value);
+    }
+    return isSDKUsageError(value);
+  }
+
   constructor(message: string) {
     super(message);
     this.name = "SDKUsageError";
   }
+}
+
+/** Recognizes SDKUsageError instances thrown by independently bundled SDK copies. */
+function isSDKUsageError(value: unknown): value is SDKUsageError {
+  if (typeof value !== "object" || value == null) return false;
+  const candidate = value as Record<PropertyKey, unknown>;
+  return candidate[SDK_USAGE_ERROR_BRAND] === true && typeof candidate.message === "string";
 }
 
 export class SerializationError extends TensorlakeApplicationError {
@@ -43,6 +61,29 @@ export class FunctionError extends TensorlakeApplicationError {
     super(message, options);
     this.name = "FunctionError";
   }
+}
+
+export class TimeoutError extends TensorlakeApplicationError {
+  readonly [TIMEOUT_ERROR_BRAND] = true;
+
+  static [Symbol.hasInstance](value: unknown): boolean {
+    if (this !== TimeoutError) {
+      return Function.prototype[Symbol.hasInstance].call(this, value);
+    }
+    return isTimeoutError(value);
+  }
+
+  constructor() {
+    super("Timed out.");
+    this.name = "TimeoutError";
+  }
+}
+
+/** Recognizes TimeoutError instances thrown by independently bundled SDK copies. */
+function isTimeoutError(value: unknown): value is TimeoutError {
+  if (typeof value !== "object" || value == null) return false;
+  const candidate = value as Record<PropertyKey, unknown>;
+  return candidate[TIMEOUT_ERROR_BRAND] === true && typeof candidate.message === "string";
 }
 
 /** Recognizes FunctionError instances thrown by independently bundled SDK copies. */

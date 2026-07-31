@@ -7,13 +7,19 @@ import {
   type RegisteredFunction,
   runWithFunctionRuntime,
 } from "./function.js";
-import { FunctionError, SDKUsageError, isRequestError } from "./errors.js";
+import {
+  FunctionError,
+  SDKUsageError,
+  TimeoutError,
+  isRequestError,
+} from "./errors.js";
 import {
   MemoryRequestContext,
   runWithRequestContext,
   waitWithAbortSignal,
 } from "./context.js";
 import { File, isFile } from "./file.js";
+import { HttpBody, isHttpBody } from "./http-body.js";
 import { jsonRoundTrip } from "./serialization.js";
 
 export class LocalRequest<T> {
@@ -33,7 +39,12 @@ export class LocalRequest<T> {
 }
 
 function boundaryCopy<T>(value: T): T {
-  if (isFile(value)) return new File(value.content.slice(), value.contentType) as T;
+  if (isFile(value)) {
+    return new File(new Uint8Array(value.content), value.contentType) as T;
+  }
+  if (isHttpBody(value)) {
+    return new HttpBody(new Uint8Array(value.content), value.contentType) as T;
+  }
   return jsonRoundTrip(value);
 }
 
@@ -131,7 +142,7 @@ export class LocalRuntime implements FunctionRuntime {
         promise,
         new Promise<never>((_, reject) => {
           timer = setTimeout(
-            () => reject(new FunctionError(`Function timed out after ${timeoutSeconds} seconds`)),
+            () => reject(new TimeoutError()),
             timeoutSeconds * 1000,
           );
         }),
