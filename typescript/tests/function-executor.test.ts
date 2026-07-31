@@ -9,7 +9,14 @@ import { loadSync } from "@grpc/proto-loader";
 import { getProtoPath } from "google-proto-files";
 import { zipSync } from "fflate";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { File, registerApplication, retries, schema } from "../src/applications/index.js";
+import {
+  File,
+  HttpBody,
+  TimeoutError,
+  registerApplication,
+  retries,
+  schema,
+} from "../src/applications/index.js";
 import { registerFunction } from "../src/applications/index.js";
 import { clearRegistryForTest } from "../src/applications/registry.js";
 import {
@@ -23,6 +30,7 @@ import {
   prepareSerializedObject,
   uploadBlob,
 } from "../src/function-executor/blob.js";
+import { functionExecutorBindAddress } from "../src/function-executor/main.js";
 import { FunctionExecutorService } from "../src/function-executor/service.js";
 
 const temporaryDirectories: string[] = [];
@@ -48,6 +56,42 @@ afterEach(async () => {
 });
 
 describe("TypeScript function executor", () => {
+  it("uses the IPv4 loopback literal instead of resolving localhost", () => {
+    expect(functionExecutorBindAddress("localhost:5000")).toBe("127.0.0.1:5000");
+    expect(functionExecutorBindAddress("localhost")).toBe("127.0.0.1");
+    expect(functionExecutorBindAddress("0.0.0.0:5000")).toBe("0.0.0.0:5000");
+    expect(functionExecutorBindAddress("unix:/tmp/executor.sock")).toBe(
+      "unix:/tmp/executor.sock",
+    );
+  });
+
+  it("rejects allocation updates without a supported protocol payload", async () => {
+    const service = new FunctionExecutorService();
+    const deliverUpdate = vi.fn();
+    (
+      service as unknown as {
+        allocations: Map<string, {
+          isFinished: boolean;
+          deliverUpdate(update: Record<string, unknown>): void;
+        }>;
+      }
+    ).allocations.set("allocation-invalid-update", {
+      isFinished: false,
+      deliverUpdate,
+    });
+    const error = await new Promise<grpc.ServiceError | null>((resolve) => {
+      const handler = service.implementation.sendAllocationUpdate as grpc.UntypedHandleCall;
+      (handler as grpc.handleUnaryCall<Record<string, unknown>, Record<string, unknown>>)({
+        request: { allocationId: "allocation-invalid-update" },
+      } as grpc.ServerUnaryCall<Record<string, unknown>, Record<string, unknown>>, (rpcError) => {
+        resolve(rpcError);
+      });
+    });
+
+    expect(error).toMatchObject({ code: grpc.status.INVALID_ARGUMENT });
+    expect(deliverUpdate).not.toHaveBeenCalled();
+  });
+
   it("writes shared local-file blob chunks at their blob offsets", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "tensorlake-blob-upload-test-"));
     temporaryDirectories.push(directory);
@@ -142,6 +186,26 @@ describe("TypeScript function executor", () => {
     } finally {
       await new Promise<void>((resolve, reject) => server.close((error) => error == null ? resolve() : reject(error)));
     }
+  });
+
+  it("rejects malformed serialized-object manifests before reading their data", async () => {
+    const data = new TextEncoder().encode("abc");
+    const blob = { id: "malformed-object", chunks: [] };
+    const baseManifest = {
+      encoding: "SERIALIZED_OBJECT_ENCODING_UTF8_TEXT",
+      size: data.byteLength,
+      metadataSize: 0,
+      sha256Hash: createHash("sha256").update(data).digest("hex"),
+    };
+
+    await expect(downloadSerializedObject({
+      offset: 0,
+      manifest: { ...baseManifest, metadataSize: data.byteLength + 1 },
+    }, blob)).rejects.toThrow("metadata_size cannot exceed size");
+    await expect(downloadSerializedObject({
+      offset: 0,
+      manifest: { ...baseManifest, sha256Hash: undefined },
+    }, blob)).rejects.toThrow("missing sha256_hash");
   });
 
   it("aborts in-flight remote BLOB downloads and uploads", async () => {
@@ -356,6 +420,104 @@ describe("TypeScript function executor", () => {
     expect((parsed.args[0] as File).contentType).toBe("text/plain");
   });
 
+  it("preserves HttpBody bytes and content type instead of JSON decoding", async () => {
+    clearRegistryForTest();
+    const application = registerApplication(async (body: HttpBody) => body.text(), {
+      name: "raw_http_body_input",
+      parameters: [
+        schema.parameter("body", schema.httpBody()),
+      ] as const,
+      returns: schema.string(),
+    });
+    const content = new TextEncoder().encode(' { "event": "created" }\n');
+
+    const parsed = await deserializeApplicationArguments(application.definition, {
+      data: content,
+      contentType: "application/cloudevents+json; charset=utf-8",
+      encoding: "SERIALIZED_OBJECT_ENCODING_RAW",
+    });
+
+    expect(parsed.args).toHaveLength(1);
+    expect(parsed.args[0]).toBeInstanceOf(HttpBody);
+    expect((parsed.args[0] as HttpBody).content).toEqual(content);
+    expect((parsed.args[0] as HttpBody).contentType).toBe(
+      "application/cloudevents+json; charset=utf-8",
+    );
+  });
+
+  it("deserializes HttpBody as a raw multipart argument", async () => {
+    clearRegistryForTest();
+    const application = registerApplication(async (
+      body: HttpBody,
+      metadata: { source: string },
+    ) => ({ size: body.content.byteLength, source: metadata.source }), {
+      name: "multipart_http_body_input",
+      parameters: [
+        schema.parameter("body", schema.httpBody()),
+        schema.parameter("metadata", schema.object({
+          source: schema.string(),
+        })),
+      ] as const,
+      returns: schema.object({
+        size: schema.integer(),
+        source: schema.string(),
+      }),
+    });
+    const form = new FormData();
+    form.append(
+      "body",
+      new Blob([new Uint8Array([0, 1, 2, 255])], {
+        type: "application/vnd.tensorlake.binary-event",
+      }),
+      "event.bin",
+    );
+    form.append(
+      "metadata",
+      new Blob(['{"source":"partner"}'], { type: "application/json" }),
+      "metadata.json",
+    );
+    const request = new Request("http://localhost/invoke", {
+      method: "POST",
+      body: form,
+    });
+
+    const parsed = await deserializeApplicationArguments(application.definition, {
+      data: new Uint8Array(await request.arrayBuffer()),
+      contentType: request.headers.get("content-type") ?? undefined,
+    });
+
+    expect(parsed.args).toHaveLength(2);
+    expect(parsed.args[0]).toBeInstanceOf(HttpBody);
+    expect((parsed.args[0] as HttpBody).content).toEqual(
+      new Uint8Array([0, 1, 2, 255]),
+    );
+    expect((parsed.args[0] as HttpBody).contentType).toBe(
+      "application/vnd.tensorlake.binary-event",
+    );
+    expect(parsed.args[1]).toEqual({ source: "partner" });
+  });
+
+  it("preserves an empty HttpBody without an explicit content type", async () => {
+    clearRegistryForTest();
+    const application = registerApplication(async (body: HttpBody) =>
+      body.content.byteLength, {
+      name: "empty_http_body_input",
+      parameters: [
+        schema.parameter("body", schema.httpBody()),
+      ] as const,
+      returns: schema.integer(),
+    });
+
+    const parsed = await deserializeApplicationArguments(application.definition, {
+      data: new Uint8Array(),
+    });
+
+    expect(parsed.args).toHaveLength(1);
+    expect(parsed.args[0]).toBeInstanceOf(HttpBody);
+    expect((parsed.args[0] as HttpBody).content).toHaveLength(0);
+    expect((parsed.args[0] as HttpBody).contentType).toBeUndefined();
+  });
+
   it("preserves JSON MIME files across protocol value boundaries", () => {
     const content = new TextEncoder().encode('{"value":21}');
     const value = deserializeValueFromProtocol({
@@ -367,6 +529,23 @@ describe("TypeScript function executor", () => {
     expect(value).toBeInstanceOf(File);
     expect((value as File).contentType).toBe("application/json");
     expect((value as File).content).toEqual(content);
+  });
+
+  it("only publishes content types for raw protocol values", () => {
+    const json = prepareSerializedObject({ value: 21 });
+    expect(json.object.manifest).toMatchObject({
+      encoding: "SERIALIZED_OBJECT_ENCODING_UTF8_JSON",
+    });
+    expect(json.object.manifest?.contentType).toBeUndefined();
+
+    const file = prepareSerializedObject(new File(
+      new TextEncoder().encode('{"value":21}'),
+      "application/json",
+    ));
+    expect(file.object.manifest).toMatchObject({
+      encoding: "SERIALIZED_OBJECT_ENCODING_RAW",
+      contentType: "application/json",
+    });
   });
 
   it("reports output serialization failures as function errors", async () => {
@@ -388,6 +567,7 @@ describe("TypeScript function executor", () => {
             encoding: "SERIALIZED_OBJECT_ENCODING_RAW",
             size: 0,
             metadataSize: 0,
+            sha256Hash: createHash("sha256").update("").digest("hex"),
             contentType: "application/json",
           },
         }],
@@ -407,6 +587,165 @@ describe("TypeScript function executor", () => {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_FUNCTION_ERROR",
     });
+  });
+
+  it("validates deployed progress updates before publishing allocation state", async () => {
+    clearRegistryForTest();
+    const application = registerApplication("invalid_progress", async () => null);
+    const runner = new AllocationRunner({
+      requestId: "request-invalid-progress",
+      functionCallId: "call-invalid-progress",
+      allocationId: "allocation-invalid-progress",
+      replayMode: "REPLAY_MODE_NONE",
+    }, {
+      namespace: "default",
+      applicationName: application.definition.name,
+      applicationVersion: "v1",
+      functionName: application.definition.name,
+    }, application.definition);
+    const context = (runner as unknown as {
+      createRequestContext(): {
+        progress: {
+          update(
+            current: number,
+            total: number,
+            options?: { attributes?: Record<string, string> },
+          ): Promise<void>;
+        };
+      };
+    }).createRequestContext();
+
+    await expect(context.progress.update(Number.NaN, 1))
+      .rejects.toThrow("non-negative finite numbers");
+    await expect(context.progress.update(-1, 1))
+      .rejects.toThrow("non-negative finite numbers");
+    await expect(context.progress.update(
+      1,
+      1,
+      { attributes: { invalid: 42 as unknown as string } },
+    )).rejects.toThrow("only string keys and values");
+    await expect(context.progress.update(
+      1,
+      1,
+      { message: 42 as unknown as string },
+    )).rejects.toThrow("message must be a string");
+    await expect(context.progress.update(
+      1,
+      1,
+      { attributes: ["invalid"] as unknown as Record<string, string> },
+    )).rejects.toThrow("attributes must be an object");
+    await expect(context.progress.update(
+      1,
+      1,
+      { attributes: new Date() as unknown as Record<string, string> },
+    )).rejects.toThrow("attributes must be an object");
+    await expect(context.progress.update(
+      1,
+      1,
+      new Map() as unknown as { message?: string },
+    )).rejects.toThrow("options must be an object");
+    const symbolAttributes = { valid: "value", [Symbol("hidden")]: "value" };
+    await expect(context.progress.update(
+      1,
+      1,
+      { attributes: symbolAttributes as unknown as Record<string, string> },
+    )).rejects.toThrow("only string keys and values");
+    await expect(context.progress.update(
+      1,
+      1,
+      "invalid" as unknown as { message?: string },
+    )).rejects.toThrow("options must be an object");
+  });
+
+  it("validates deployed request state and metrics before publishing operations", async () => {
+    clearRegistryForTest();
+    const application = registerApplication("invalid_context_operations", async () => null);
+    const runner = new AllocationRunner({
+      requestId: "request-invalid-context",
+      functionCallId: "call-invalid-context",
+      allocationId: "allocation-invalid-context",
+      replayMode: "REPLAY_MODE_NONE",
+    }, {
+      namespace: "default",
+      applicationName: application.definition.name,
+      applicationVersion: "v1",
+      functionName: application.definition.name,
+    }, application.definition);
+    const context = (runner as unknown as {
+      createRequestContext(): {
+        state: {
+          get(key: string): Promise<unknown>;
+          set(key: string, value: unknown): Promise<void>;
+        };
+        metrics: {
+          counter(name: string, value?: number): Promise<void>;
+          timer(name: string, value: number): Promise<void>;
+        };
+      };
+    }).createRequestContext();
+
+    await expect(context.state.get(42 as unknown as string))
+      .rejects.toThrow("State key must be a string");
+    await expect(context.state.set(42 as unknown as string, "value"))
+      .rejects.toThrow("State key must be a string");
+    await expect(context.state.set(
+      "file",
+      new File(new Uint8Array([1]), "application/octet-stream"),
+    )).rejects.toThrow("Request state values must be JSON values");
+    await expect(context.metrics.counter(42 as unknown as string))
+      .rejects.toThrow("Counter name must be a string");
+    await expect(context.metrics.counter("counter", 1.5))
+      .rejects.toThrow("Counter value must be an int");
+    await expect(context.metrics.counter("counter", true as unknown as number))
+      .rejects.toThrow("Counter value must be an int");
+    await expect(context.metrics.counter("counter", Number.MAX_SAFE_INTEGER + 1))
+      .rejects.toThrow("Counter value must be a safe int");
+    await expect(context.metrics.timer(42 as unknown as string, 1))
+      .rejects.toThrow("Timer name must be a string");
+    await expect(context.metrics.timer("timer", "invalid" as unknown as number))
+      .rejects.toThrow("Timer value must be a finite number");
+    await expect(context.metrics.timer("timer", true as unknown as number))
+      .rejects.toThrow("Timer value must be a finite number");
+    await expect(context.metrics.timer("timer", Number.POSITIVE_INFINITY))
+      .rejects.toThrow("Timer value must be a finite number");
+  });
+
+  it("exposes sanitized allocation request headers in deployed context", () => {
+    clearRegistryForTest();
+    const application = registerApplication("request_headers", async () => null);
+    const runner = new AllocationRunner({
+      requestId: "request-headers",
+      functionCallId: "call-headers",
+      allocationId: "allocation-headers",
+      replayMode: "REPLAY_MODE_NONE",
+      inputs: {
+        requestContext: {
+          headers: [
+            { name: "X-Tensorlake-Test", value: "first" },
+            { name: "x-tensorlake-test", value: "second" },
+          ],
+        },
+      },
+    }, {
+      namespace: "default",
+      applicationName: application.definition.name,
+      applicationVersion: "v1",
+      functionName: application.definition.name,
+    }, application.definition);
+    const context = (runner as unknown as {
+      createRequestContext(): {
+        headers: {
+          get(name: string): string | undefined;
+          getAll(name: string): readonly string[];
+        };
+      };
+    }).createRequestContext();
+
+    expect(context.headers.get("X-TENSORLAKE-TEST")).toBe("second");
+    expect(context.headers.getAll("x-tensorlake-test")).toEqual([
+      "first",
+      "second",
+    ]);
   });
 
   it.each(["application", "internal"] as const)(
@@ -529,6 +868,214 @@ describe("TypeScript function executor", () => {
       outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
       failureReason: "ALLOCATION_FAILURE_REASON_INTERNAL_ERROR",
     });
+  });
+
+  it("finishes after a matched output blob when state republication fails", async () => {
+    clearRegistryForTest();
+    const application = registerApplication(
+      "blob_state_republication_failure",
+      async () => "result",
+    );
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "tensorlake-blob-state-republication-test-"),
+    );
+    temporaryDirectories.push(directory);
+    const inputPath = path.join(directory, "input");
+    await writeFile(inputPath, "{}");
+    const runner = new AllocationRunner({
+      requestId: "request-blob-state-republication",
+      functionCallId: "call-blob-state-republication",
+      allocationId: "allocation-blob-state-republication",
+      replayMode: "REPLAY_MODE_NONE",
+      inputs: {
+        args: [{
+          offset: 0,
+          manifest: {
+            encoding: "SERIALIZED_OBJECT_ENCODING_RAW",
+            size: 2,
+            metadataSize: 0,
+            sha256Hash: createHash("sha256").update("{}").digest("hex"),
+            contentType: "application/json",
+          },
+        }],
+        argBlobs: [{
+          id: "input",
+          chunks: [{ uri: pathToFileURL(inputPath).href, size: 2 }],
+        }],
+        functionCallMetadata: Buffer.alloc(0),
+      },
+    }, {
+      namespace: "default",
+      applicationName: "blob_state_republication_failure",
+      applicationVersion: "v1",
+      functionName: "blob_state_republication_failure",
+    }, application.definition);
+    let outputDelivered = false;
+    let deliveryError: unknown;
+    runner.watchState({
+      write(state) {
+        const request = state.outputBlobRequests?.[0];
+        if (request != null && !outputDelivered) {
+          outputDelivered = true;
+          queueMicrotask(() => {
+            try {
+              runner.deliverUpdate({
+                outputBlob: {
+                  status: { code: 0 },
+                  blob: {
+                    id: request.id,
+                    chunks: [{
+                      uri: pathToFileURL(path.join(directory, "output")).href,
+                      size: request.size,
+                    }],
+                  },
+                },
+              });
+            } catch (error) {
+              deliveryError = error;
+            }
+          });
+        } else if (outputDelivered) {
+          throw new Error("state stream write failed");
+        }
+        return true;
+      },
+      end() {},
+      on() {},
+    });
+    runner.start();
+
+    const events = await withDeadline(
+      runner.getExecutionBatch(),
+      "the state-republication failure terminal batch",
+    );
+    expect(events[0].finishAllocation).toMatchObject({
+      outcomeCode: "ALLOCATION_OUTCOME_CODE_SUCCESS",
+    });
+    expect(deliveryError).toBeUndefined();
+  });
+
+  it("publishes stable allocation state snapshots", async () => {
+    clearRegistryForTest();
+    const application = registerApplication(
+      "stable_state_snapshots",
+      async () => null,
+    );
+    const runner = new AllocationRunner({
+      requestId: "request-stable-state",
+      functionCallId: "call-stable-state",
+      allocationId: "allocation-stable-state",
+      replayMode: "REPLAY_MODE_NONE",
+    }, {
+      namespace: "default",
+      applicationName: application.definition.name,
+      applicationVersion: "v1",
+      functionName: application.definition.name,
+    }, application.definition);
+    const states: Array<Record<string, any>> = [];
+    runner.watchState({
+      write(state) {
+        states.push(state);
+        return true;
+      },
+      end() {},
+      on() {},
+    });
+
+    const output = (runner as unknown as {
+      requestOutputBlob(size: number): Promise<Record<string, any>>;
+    }).requestOutputBlob(3);
+    const blobId = states[1].outputBlobRequests[0].id as string;
+    expect(states[0].outputBlobRequests).toEqual([]);
+    expect(states[1].outputBlobRequests).toEqual([{ id: blobId, size: 3 }]);
+
+    runner.deliverUpdate({
+      outputBlob: {
+        status: { code: 0 },
+        blob: { id: blobId, chunks: [] },
+      },
+    });
+    await output;
+
+    expect(states[0].outputBlobRequests).toEqual([]);
+    expect(states[1].outputBlobRequests).toEqual([{ id: blobId, size: 3 }]);
+    expect(states[2].outputBlobRequests).toEqual([]);
+    expect(new Set(states).size).toBe(states.length);
+  });
+
+  it("coalesces allocation state while a watcher is backpressured", () => {
+    clearRegistryForTest();
+    const application = registerApplication(
+      "backpressured_state_snapshots",
+      async () => null,
+    );
+    const runner = new AllocationRunner({
+      requestId: "request-backpressured-state",
+      functionCallId: "call-backpressured-state",
+      allocationId: "allocation-backpressured-state",
+    }, {
+      namespace: "default",
+      applicationName: application.definition.name,
+      applicationVersion: "v1",
+      functionName: application.definition.name,
+    }, application.definition);
+    const states: Array<Record<string, any>> = [];
+    const listeners = new Map<string, () => void>();
+    runner.watchState({
+      write(state) {
+        states.push(state);
+        return states.length !== 1;
+      },
+      end() {},
+      on(event, listener) {
+        listeners.set(event, listener);
+      },
+    });
+    const internals = runner as unknown as {
+      state: Record<string, any>;
+      publishState(): void;
+    };
+
+    for (let current = 1; current <= 3; current += 1) {
+      internals.state.progress = { current, total: 3 };
+      internals.publishState();
+    }
+    expect(states).toHaveLength(1);
+
+    listeners.get("drain")?.();
+    expect(states).toHaveLength(2);
+    expect(states[1].progress).toEqual({ current: 3, total: 3 });
+  });
+
+  it("rejects unknown watcher outcomes as protocol failures and types timeouts", async () => {
+    clearRegistryForTest();
+    const application = registerApplication(
+      "watcher_outcome_validation",
+      async () => null,
+    );
+    const runner = new AllocationRunner({
+      requestId: "request-watcher-outcome",
+      functionCallId: "call-watcher-outcome",
+      allocationId: "allocation-watcher-outcome",
+    }, {
+      namespace: "default",
+      applicationName: application.definition.name,
+      applicationVersion: "v1",
+      functionName: application.definition.name,
+    }, application.definition);
+    const resolveWatcherResult = (event: Record<string, unknown>) =>
+      (runner as unknown as {
+        resolveWatcherResult(value: Record<string, unknown>): Promise<unknown>;
+      }).resolveWatcherResult(event);
+
+    await expect(resolveWatcherResult({
+      watcherStatus: "FUNCTION_CALL_WATCHER_STATUS_COMPLETED",
+      outcomeCode: "ALLOCATION_OUTCOME_CODE_UNKNOWN",
+    })).rejects.toThrow("Unexpected function call watcher outcome");
+    await expect(resolveWatcherResult({
+      watcherStatus: "FUNCTION_CALL_WATCHER_STATUS_TIMEDOUT",
+      outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
+    })).rejects.toBeInstanceOf(TimeoutError);
   });
 
   it("creates durable child calls and strictly replays their result", async () => {
@@ -799,6 +1346,74 @@ describe("TypeScript function executor", () => {
       server.forceShutdown();
     }
   }, 20_000);
+
+  it("rejects runtime definitions whose names do not match the initialization request", async () => {
+    clearRegistryForTest();
+    const manifest = new TextEncoder().encode(JSON.stringify({
+      format_version: 2,
+      runtime: "typescript",
+      minimum_node_major: 24,
+      module: "runtime.mjs",
+      functions: { target: { name: "target" } },
+    }));
+    const request = (runtime: string) => {
+      const codeZip = zipSync({
+        "runtime.mjs": new TextEncoder().encode(runtime),
+        ".tensorlake_code_manifest.json": manifest,
+      });
+      return {
+        function: {
+          namespace: "default",
+          applicationName: "app",
+          applicationVersion: "v1",
+          functionName: "target",
+        },
+        applicationCode: {
+          manifest: {
+            encoding: "SERIALIZED_OBJECT_ENCODING_BINARY_ZIP",
+            encodingVersion: 0,
+            size: codeZip.byteLength,
+            metadataSize: 0,
+            sha256Hash: createHash("sha256").update(codeZip).digest("hex"),
+          },
+          data: codeZip,
+        },
+      };
+    };
+    const definitionSource = `
+      const target = {
+        name: "target", handler: async () => null, parameters: [],
+        returns: { jsonSchema: {} }, options: {},
+      };
+      const app = {
+        ...target,
+        name: "app",
+        application: { tags: {}, retries: { maxRetries: 0 }, version: "v1" },
+      };
+    `;
+    const service = new FunctionExecutorService();
+
+    try {
+      await expect((service as any).initializeAttempt(request(`
+        ${definitionSource}
+        export function __tensorlakeGetFunction() {
+          return { ...app, name: "wrong-function" };
+        }
+      `))).rejects.toThrow(
+        "Application runtime resolved function 'target' as 'wrong-function'",
+      );
+      await expect((service as any).initializeAttempt(request(`
+        ${definitionSource}
+        export function __tensorlakeGetFunction(name) {
+          return name === "target" ? target : { ...app, name: "wrong-application" };
+        }
+      `))).rejects.toThrow(
+        "Application runtime resolved application 'app' as 'wrong-application'",
+      );
+    } finally {
+      clearRegistryForTest();
+    }
+  });
 
   it("can retry initialization after validation fails", async () => {
     clearRegistryForTest();

@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import * as grpc from "@grpc/grpc-js";
 import { loadSync } from "@grpc/proto-loader";
 import { getProtoPath } from "google-proto-files";
+import { writeStructuredOutput } from "./safe-output.js";
 import { FunctionExecutorService } from "./service.js";
 
 interface Arguments {
@@ -13,6 +14,15 @@ interface Arguments {
 }
 
 const SHUTDOWN_GRACE_PERIOD_MS = 10_000;
+const IPV4_LOOPBACK_ADDRESS = "127.0.0.1";
+
+export function functionExecutorBindAddress(address: string): string {
+  if (address === "localhost") return IPV4_LOOPBACK_ADDRESS;
+  if (address.startsWith("localhost:")) {
+    return `${IPV4_LOOPBACK_ADDRESS}${address.slice("localhost".length)}`;
+  }
+  return address;
+}
 
 function parseArguments(argv: string[]): Arguments {
   const result: Arguments = { functionExecutorId: "" };
@@ -67,18 +77,19 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const args = parseArguments(argv);
   if (!args.address) throw new Error("--address argument is required");
   if (!args.executorId) throw new Error("--executor-id argument is required");
+  const address = functionExecutorBindAddress(args.address);
 
-  process.stderr.write(`${JSON.stringify({
+  writeStructuredOutput("stderr", () => ({
     timestamp: new Date().toISOString(),
     level: "info",
     component: "typescript_function_executor_main",
     message: "starting TypeScript function executor",
-    address: args.address,
+    address,
     executor_id: args.executorId,
     fn_executor_id: args.functionExecutorId,
     node_version: process.versions.node,
     pid: process.pid,
-  })}\n`);
+  }));
 
   const server = new grpc.Server({
     "grpc.max_receive_message_length": -1,
@@ -88,26 +99,26 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
   const service = new FunctionExecutorService();
   server.addService(serviceDefinition(), service.implementation);
   await new Promise<void>((resolve, reject) => {
-    server.bindAsync(args.address as string, grpc.ServerCredentials.createInsecure(), (error) => {
+    server.bindAsync(address, grpc.ServerCredentials.createInsecure(), (error) => {
       if (error != null) reject(error);
       else resolve();
     });
   });
-  process.stderr.write(`${JSON.stringify({
+  writeStructuredOutput("stderr", () => ({
     timestamp: new Date().toISOString(),
     level: "info",
     component: "typescript_function_executor_main",
     message: "started TypeScript function executor",
-    address: args.address,
+    address,
     executor_id: args.executorId,
     fn_executor_id: args.functionExecutorId,
     node_version: process.versions.node,
-  })}\n`);
+  }));
   let stopping = false;
   const shutdown = (signal: string) => {
     if (stopping) return;
     stopping = true;
-    process.stderr.write(`${JSON.stringify({
+    writeStructuredOutput("stderr", () => ({
       timestamp: new Date().toISOString(),
       level: "info",
       component: "typescript_function_executor_main",
@@ -116,9 +127,9 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
       executor_id: args.executorId,
       fn_executor_id: args.functionExecutorId,
       pid: process.pid,
-    })}\n`);
+    }));
     const forceShutdownTimer = setTimeout(() => {
-      process.stderr.write(`${JSON.stringify({
+      writeStructuredOutput("stderr", () => ({
         timestamp: new Date().toISOString(),
         level: "error",
         component: "typescript_function_executor_main",
@@ -128,21 +139,22 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
         fn_executor_id: args.functionExecutorId,
         pid: process.pid,
         grace_period_ms: SHUTDOWN_GRACE_PERIOD_MS,
-      })}\n`);
+      }));
       server.forceShutdown();
       process.exit(1);
     }, SHUTDOWN_GRACE_PERIOD_MS);
-    const serviceShutdown = service.shutdown(new Error(`Function executor received ${signal}`));
-    const serverShutdown = new Promise<void>((resolve, reject) => {
-      server.tryShutdown((error) => {
-        if (error != null) reject(error);
-        else resolve();
-      });
-    });
-    void Promise.all([serviceShutdown, serverShutdown]).then(
+    const gracefulShutdown = service
+      .shutdown(new Error(`Function executor received ${signal}`))
+      .then(() => new Promise<void>((resolve, reject) => {
+        server.tryShutdown((error) => {
+          if (error != null) reject(error);
+          else resolve();
+        });
+      }));
+    void gracefulShutdown.then(
       () => {
         clearTimeout(forceShutdownTimer);
-        process.stderr.write(`${JSON.stringify({
+        writeStructuredOutput("stderr", () => ({
           timestamp: new Date().toISOString(),
           level: "info",
           component: "typescript_function_executor_main",
@@ -151,12 +163,12 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
           executor_id: args.executorId,
           fn_executor_id: args.functionExecutorId,
           pid: process.pid,
-        })}\n`);
+        }));
         process.exit(0);
       },
       (error: unknown) => {
         clearTimeout(forceShutdownTimer);
-        process.stderr.write(`${JSON.stringify({
+        writeStructuredOutput("stderr", () => ({
           timestamp: new Date().toISOString(),
           level: "error",
           component: "typescript_function_executor_main",
@@ -166,7 +178,7 @@ export async function main(argv = process.argv.slice(2)): Promise<void> {
           fn_executor_id: args.functionExecutorId,
           pid: process.pid,
           error: error instanceof Error ? `${error.name}: ${error.message}` : String(error),
-        })}\n`);
+        }));
         server.forceShutdown();
         process.exit(1);
       },

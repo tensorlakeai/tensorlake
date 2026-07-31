@@ -1,18 +1,40 @@
+import { AsyncResource, createHook, executionAsyncId } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
 import type { RegisteredDefinition, FunctionRuntime, FunctionFuture, TailCall } from "../applications/function.js";
-import { executeHandlerResult, isTailCall, runWithFunctionRuntime } from "../applications/function.js";
+import {
+  DURABLE_PROMISE_INTERNAL_THEN,
+  DURABLE_PROMISE_OBSERVER,
+  executeHandlerResult,
+  installPromiseInstrumentation,
+  isDetachedDurableThenable,
+  isTailCall,
+  registerDurableAssimilation,
+  registerDurableThenable,
+  runWithFunctionRuntime,
+} from "../applications/function.js";
 import { File } from "../applications/file.js";
+import { Headers } from "../applications/headers.js";
+import { HttpBody } from "../applications/http-body.js";
 import {
   DeserializationError,
   FunctionError,
   ReplayMismatchError,
   RequestError,
   SDKUsageError,
+  TimeoutError,
   isRequestError,
 } from "../applications/errors.js";
 import type { RequestContextValue } from "../applications/context.js";
-import { runWithRequestContext, waitWithAbortSignal } from "../applications/context.js";
-import { deserializeJSON, serializeValue } from "../applications/serialization.js";
+import {
+  runWithRequestContext,
+  serializeRequestStateValue,
+  validateCounterMetric,
+  validateProgressUpdate,
+  validateRequestStateKey,
+  validateTimerMetric,
+  waitWithAbortSignal,
+} from "../applications/context.js";
+import { deserializeJSON } from "../applications/serialization.js";
 import { deferred, type Deferred } from "./async-queue.js";
 import {
   deserializeValueFromProtocol,
@@ -26,7 +48,13 @@ import {
   type PreparedSerializedObject,
   type SerializedObjectInsideBlobValue,
 } from "./blob.js";
+import { writeStructuredOutput } from "./safe-output.js";
 import { printCloudEvent } from "./user-events.js";
+
+// The executor imports this module before deployed application modules and
+// their dependencies, so module-level captures retain the instrumented
+// Promise implementations used during allocation execution.
+installPromiseInstrumentation();
 
 type Message = Record<string, any>;
 type StreamCall = { write(value: Message): boolean; end(): void; on(event: string, listener: () => void): void };
@@ -36,12 +64,79 @@ const OK = 0;
 const NOT_FOUND = 5;
 const REPLAY_STRICT = new Set(["REPLAY_MODE_STRICT", 1]);
 const OUTCOME_SUCCESS = new Set(["ALLOCATION_OUTCOME_CODE_SUCCESS", 1]);
+const OUTCOME_FAILURE = new Set(["ALLOCATION_OUTCOME_CODE_FAILURE", 2]);
 const WATCHER_TIMED_OUT = new Set(["FUNCTION_CALL_WATCHER_STATUS_TIMEDOUT", 2]);
 const MAX_REDUCE_CALLS_PER_PLAN = 512;
+const nativeStructuredClone = globalThis.structuredClone;
 
 function statusError(status: Message | undefined, fallback: string): Error | undefined {
   if (status == null || (status.code ?? OK) === OK) return undefined;
   return new FunctionError(status.message || fallback);
+}
+
+function validatedEventLogClock<E extends Error>(
+  response: Message,
+  requestedAfterClock: number,
+  createError: (message: string) => E,
+): number {
+  if (response.entries != null && !Array.isArray(response.entries)) {
+    throw createError("Allocation event log returned a non-array entries field");
+  }
+  const responseClock = Number(response.lastClock ?? requestedAfterClock);
+  if (
+    !Number.isFinite(responseClock)
+    || !Number.isSafeInteger(responseClock)
+    || responseClock < 0
+  ) {
+    throw createError(
+      `Allocation event log returned invalid clock '${String(response.lastClock)}'`,
+    );
+  }
+  if (responseClock < requestedAfterClock) {
+    throw createError(
+      `Allocation event log moved backwards from clock ${requestedAfterClock} to ${responseClock}`,
+    );
+  }
+  if (response.hasMore && responseClock === requestedAfterClock) {
+    throw createError(
+      `Allocation event log reported more entries without advancing clock ${requestedAfterClock}`,
+    );
+  }
+  if ((response.entries?.length ?? 0) > 0 && responseClock === requestedAfterClock) {
+    throw createError(
+      `Allocation event log returned entries without advancing clock ${requestedAfterClock}`,
+    );
+  }
+  const eventFields = [
+    "functionCallCreated",
+    "functionCallWatcherCreated",
+    "functionCallWatcherResult",
+  ];
+  let previousEntryClock = requestedAfterClock;
+  for (const [index, entry] of (response.entries ?? []).entries()) {
+    if (entry == null || typeof entry !== "object") {
+      throw createError(`Allocation event log entry ${index} is not an object`);
+    }
+    const presentFields = eventFields.filter((field) => entry[field] != null);
+    if (presentFields.length !== 1) {
+      throw createError(
+        `Allocation event log entry ${index} has ${presentFields.length} recognized payloads; expected exactly one`,
+      );
+    }
+    const entryClock = Number(entry.clock);
+    if (
+      !Number.isSafeInteger(entryClock)
+      || entryClock <= previousEntryClock
+      || entryClock > responseClock
+    ) {
+      throw createError(
+        `Allocation event log entry ${index} has invalid clock '${String(entry.clock)}'`
+        + ` after ${previousEntryClock} with page clock ${responseClock}`,
+      );
+    }
+    previousEntryClock = entryClock;
+  }
+  return responseClock;
 }
 
 function durableHash(values: string[]): string {
@@ -82,16 +177,24 @@ export async function deserializeApplicationArguments(
   payload: { data: Uint8Array; contentType?: string; encoding?: string | number },
 ): Promise<{ args: unknown[] }> {
   let data = payload.data;
-  let contentType = payload.contentType ?? "application/json";
+  let suppliedContentType = payload.contentType;
   let hasExplicitContentType = payload.contentType != null;
-  if (contentType.toLowerCase().startsWith("message/http")) {
+  if (suppliedContentType?.toLowerCase().startsWith("message/http")) {
     const parsed = parseHTTPMessage(data);
     data = parsed.body;
     const bodyContentType = parsed.headers["content-type"];
     hasExplicitContentType = bodyContentType != null;
-    contentType = bodyContentType ?? "application/json";
+    suppliedContentType = bodyContentType;
   }
   if (definition.parameters.length === 0) return { args: [] };
+  const firstParameter = definition.parameters[0];
+  if (
+    definition.parameters.length === 1
+    && firstParameter?.schema._httpBody
+  ) {
+    return { args: [new HttpBody(data, suppliedContentType)] };
+  }
+  const contentType = suppliedContentType ?? "application/json";
   if (contentType.toLowerCase().startsWith("multipart/form-data")) {
     let form: FormData;
     try {
@@ -106,14 +209,16 @@ export async function deserializeApplicationArguments(
       const part = form.get(parameter.name) ?? form.get(String(index));
       if (part == null) {
         args.push(undefined);
-      } else if (parameter.schema._file) {
+      } else if (parameter.schema._file || parameter.schema._httpBody) {
         const bytes = typeof part === "string"
           ? new TextEncoder().encode(part)
           : new Uint8Array(await part.arrayBuffer());
         const partContentType = typeof part === "string"
           ? "application/octet-stream"
           : part.type || "application/octet-stream";
-        args.push(new File(bytes, partContentType));
+        args.push(parameter.schema._httpBody
+          ? new HttpBody(bytes, partContentType)
+          : new File(bytes, partContentType));
       } else {
         try {
           const bytes = typeof part === "string"
@@ -131,7 +236,6 @@ export async function deserializeApplicationArguments(
     }
     return { args };
   }
-  const firstParameter = definition.parameters[0];
   // An invocation without a request body supplies no arguments. This lets the
   // normal argument validator apply JavaScript defaults (or report a required
   // argument) instead of attempting to parse an empty JSON document. An
@@ -156,6 +260,529 @@ interface ReplayEntry {
   consumed: boolean;
 }
 
+// Handles that can remain alive without representing a pending callback which
+// could resume application code. Request resources, timers, immediates, and
+// promises are deliberately not in this set.
+const PASSIVE_ASYNC_RESOURCE_TYPES = new Set([
+  "PIPEWRAP",
+  "PIPESERVERWRAP",
+  "SIGNALWRAP",
+  "TCPSERVERWRAP",
+  "TCPWRAP",
+  "TLSWRAP",
+  "TTYWRAP",
+  "UDPWRAP",
+]);
+
+interface TrackedAsyncResource {
+  readonly type: string;
+  readonly triggerAsyncId: number;
+  // Promise destroy hooks are GC-driven. A strong reference here would keep
+  // every Promise alive until the allocation ends and prevent that cleanup
+  // hook from ever running.
+  readonly promise?: WeakRef<object>;
+  pending: boolean;
+}
+
+/**
+ * Tracks asynchronous work which is causally capable of producing the next
+ * durable event during strict replay.
+ *
+ * Promise frames created by async functions are not producers by themselves:
+ * they can be waiting on another durable result and form a replay cycle.
+ * Timers and I/O request resources are producers. Promise ownership is still
+ * propagated when one promise is resolved by a causal continuation, which
+ * carries causality through Promise.all/race and pre-created await reactions.
+ */
+export class ReplayCausality {
+  private readonly hook: ReturnType<typeof createHook>;
+  private readonly children = new Map<number, Set<number>>();
+  private readonly resources = new Map<number, TrackedAsyncResource>();
+  private readonly owners = new Map<number, Set<number>>();
+  private readonly provenance = new Map<number, Set<number>>();
+  private readonly tokenResources = new Map<number, Set<number>>();
+  private readonly tokenProducers = new Map<number, Set<number>>();
+  private readonly promiseIds = new WeakMap<object, number>();
+  private readonly excludedRoots = new Set<number>();
+  private readonly durableAssimilations = new Map<number, number>();
+  private readonly nativeDurableAssimilations = new Set<number>();
+  private readonly explicitDurableAssimilations = new Set<number>();
+  private readonly promiseAggregateAssimilationScopes: Set<number>[] = [];
+  private readonly promiseSettlementObservers = new Map<number, Set<() => void>>();
+  private readonly mixedPromiseProducerGroups = new Set<Set<number>>();
+  private nextToken = 1;
+  private checkScheduled = false;
+  private checkHandle?: NodeJS.Immediate;
+  private suppressOwnership = false;
+  private stopped = false;
+
+  constructor(private readonly onQuiescent: () => void) {
+    this.hook = createHook({
+      init: (asyncId, type, triggerAsyncId, resource) => {
+        if (this.stopped) return;
+        const triggerPromise = this.resources.get(triggerAsyncId)?.promise?.deref();
+        const resumesDetachedDurable =
+          type === "PROMISE"
+          && triggerPromise != null
+          && isDetachedDurableThenable(triggerPromise);
+        const children = this.children.get(triggerAsyncId) ?? new Set<number>();
+        children.add(asyncId);
+        this.children.set(triggerAsyncId, children);
+        if (type === "PROMISE" && typeof resource === "object" && resource != null) {
+          this.promiseIds.set(resource, asyncId);
+        }
+        const triggerOwners = new Set(this.owners.get(triggerAsyncId) ?? []);
+        this.resources.set(asyncId, {
+          type,
+          triggerAsyncId,
+          promise: type === "PROMISE" && typeof resource === "object" && resource != null
+            ? new WeakRef(resource)
+            : undefined,
+          pending: true,
+        });
+        if (resumesDetachedDurable) {
+          this.nativeDurableAssimilations.add(asyncId);
+          this.promiseAggregateAssimilationScopes.at(-1)?.add(asyncId);
+          this.suspendDurableAssimilation(asyncId);
+        }
+        if (this.suppressOwnership) return;
+        const inherited = new Set([
+          ...(this.owners.get(executionAsyncId()) ?? []),
+          ...triggerOwners,
+        ]);
+        for (const token of inherited) this.addTokenToSubtree(asyncId, token);
+      },
+      promiseResolve: (asyncId) => {
+        if (this.stopped) return;
+        this.notifyPromiseSettlement(asyncId);
+        if (this.nativeDurableAssimilations.delete(asyncId)) {
+          this.resumeDurableAssimilation(asyncId);
+        }
+        if (this.explicitDurableAssimilations.delete(asyncId)) {
+          this.resumeDurableAssimilation(asyncId);
+        }
+        this.settleMixedPromiseProducerGroups(asyncId);
+        const currentOwners = this.owners.get(executionAsyncId());
+        if (currentOwners != null) {
+          for (const token of currentOwners) this.addTokenToSubtree(asyncId, token);
+        }
+        this.setResourcePending(asyncId, false);
+        this.scheduleCheck();
+      },
+      destroy: (asyncId) => {
+        if (this.stopped) return;
+        this.notifyPromiseSettlement(asyncId);
+        if (this.nativeDurableAssimilations.delete(asyncId)) {
+          this.detachDurableAssimilation(asyncId);
+        }
+        if (this.explicitDurableAssimilations.delete(asyncId)) {
+          this.detachDurableAssimilation(asyncId);
+        }
+        this.settleMixedPromiseProducerGroups(asyncId);
+        this.setResourcePending(asyncId, false);
+        this.releaseDestroyedResource(asyncId);
+        this.scheduleCheck();
+      },
+    });
+    this.hook.enable();
+  }
+
+  runRoot<T>(callback: () => Promise<T>): Promise<T> {
+    const resource = new AsyncResource("TensorlakeReplayCausality");
+    let result!: Promise<T>;
+    resource.runInAsyncScope(() => {
+      this.beginCurrentContinuation();
+      result = callback();
+      // The async handler's own result promise is pending for the handler's
+      // entire lifetime, so it cannot prove that application code can advance
+      // replay. Concrete promises created by the handler remain tracked.
+      this.excludePromise(result);
+    });
+    resource.emitDestroy();
+    return result;
+  }
+
+  beginCurrentContinuation(): void {
+    if (this.stopped) return;
+    const asyncId = executionAsyncId();
+    this.excludedRoots.delete(asyncId);
+    this.addTokenToSubtree(asyncId, this.nextToken);
+    this.nextToken += 1;
+    this.scheduleCheck();
+  }
+
+  excludePromise(promise: Promise<unknown>): void {
+    const asyncId = this.promiseIds.get(promise);
+    if (asyncId == null) return;
+    this.excludedRoots.add(asyncId);
+    this.removeOwnersFromSubtree(asyncId);
+    this.scheduleCheck();
+  }
+
+  suspendDurableAssimilation(asyncId: number): boolean {
+    if (this.stopped) return false;
+    const count = this.durableAssimilations.get(asyncId) ?? 0;
+    this.durableAssimilations.set(asyncId, count + 1);
+    if (count === 0) {
+      this.excludedRoots.add(asyncId);
+      this.removeOwnersFromSubtree(asyncId);
+    }
+    this.scheduleCheck();
+    return true;
+  }
+
+  resumeDurableAssimilation(asyncId: number): void {
+    if (this.stopped) return;
+    const count = this.durableAssimilations.get(asyncId);
+    if (count == null) return;
+    if (count > 1) {
+      this.durableAssimilations.set(asyncId, count - 1);
+      return;
+    }
+    this.durableAssimilations.delete(asyncId);
+    this.excludedRoots.delete(asyncId);
+    const currentOwners = this.owners.get(executionAsyncId());
+    if (currentOwners != null) {
+      for (const token of currentOwners) this.addTokenToSubtree(asyncId, token);
+    }
+  }
+
+  detachDurableAssimilation(asyncId: number): void {
+    if (this.stopped) return;
+    const count = this.durableAssimilations.get(asyncId);
+    if (count == null) return;
+    if (count > 1) {
+      this.durableAssimilations.set(asyncId, count - 1);
+      return;
+    }
+    this.durableAssimilations.delete(asyncId);
+    this.excludedRoots.delete(asyncId);
+    // This reaction belongs to aggregate construction rather than an
+    // application-level await. Do not restore its old ownership: a pending
+    // durable input would otherwise mask a genuinely blocked durable await
+    // created when user code later consumes the aggregate.
+    this.scheduleCheck();
+  }
+
+  hasPendingDurableAssimilation(): boolean {
+    return this.durableAssimilations.size > 0;
+  }
+
+  hasPendingProducer(): boolean {
+    if (this.mixedPromiseProducerGroups.size > 0) return true;
+    for (const producers of this.tokenProducers.values()) {
+      if (producers.size > 0) return true;
+    }
+    return false;
+  }
+
+  requestCheck(): void {
+    this.scheduleCheck();
+  }
+
+  trackMixedPromiseRace(
+    promise: Promise<unknown>,
+    producers: readonly Promise<unknown>[] = [promise],
+  ): void {
+    if (this.stopped) return;
+    const producerIds = new Set<number>();
+    for (const producer of producers) {
+      const asyncId = this.promiseIds.get(producer);
+      if (asyncId == null) continue;
+      // A producer in this race has already settled, so the "first producer
+      // settles" lifetime has already ended and the other producers must not
+      // keep replay alive.
+      if (this.resources.get(asyncId)?.pending !== true) {
+        this.scheduleCheck();
+        return;
+      }
+      producerIds.add(asyncId);
+    }
+    if (producerIds.size > 0) this.mixedPromiseProducerGroups.add(producerIds);
+    this.scheduleCheck();
+  }
+
+  trackPromiseSettlement(
+    promise: Promise<unknown>,
+    onSettled: () => void,
+  ): boolean {
+    if (this.stopped) return false;
+    const asyncId = this.promiseIds.get(promise);
+    if (asyncId == null) return false;
+    if (this.resources.get(asyncId)?.pending !== true) {
+      onSettled();
+      return true;
+    }
+    const observers = this.promiseSettlementObservers.get(asyncId) ?? new Set<() => void>();
+    observers.add(onSettled);
+    this.promiseSettlementObservers.set(asyncId, observers);
+    return true;
+  }
+
+  trackDurablePromiseConsumption(promise: Promise<unknown>): void {
+    if (this.stopped) return;
+    const asyncId = this.promiseIds.get(promise);
+    if (
+      asyncId == null
+      || this.resources.get(asyncId)?.pending !== true
+      || this.nativeDurableAssimilations.has(asyncId)
+      || this.explicitDurableAssimilations.has(asyncId)
+    ) {
+      return;
+    }
+    this.explicitDurableAssimilations.add(asyncId);
+    this.promiseAggregateAssimilationScopes.at(-1)?.add(asyncId);
+    this.suspendDurableAssimilation(asyncId);
+  }
+
+  runPromiseAggregateConstruction<T>(callback: () => T): T {
+    const aggregateAssimilations = new Set<number>();
+    this.promiseAggregateAssimilationScopes.push(aggregateAssimilations);
+    try {
+      return callback();
+    } finally {
+      this.promiseAggregateAssimilationScopes.pop();
+      // Promise combinators install internal reactions while constructing the
+      // aggregate. Those reactions do not prove that application code awaits
+      // the aggregate; a later user reaction on the returned promise does.
+      this.detachPromiseAggregateAssimilations(aggregateAssimilations);
+    }
+  }
+
+  runWithoutOwnership<T>(callback: () => T): T {
+    if (this.stopped) return callback();
+    const previous = this.suppressOwnership;
+    this.suppressOwnership = true;
+    try {
+      return callback();
+    } finally {
+      this.suppressOwnership = previous;
+    }
+  }
+
+  stop(): void {
+    if (this.stopped) return;
+    this.stopped = true;
+    this.hook.disable();
+    if (this.checkHandle != null) clearImmediate(this.checkHandle);
+    this.checkHandle = undefined;
+    this.children.clear();
+    this.resources.clear();
+    this.owners.clear();
+    this.provenance.clear();
+    this.tokenResources.clear();
+    this.tokenProducers.clear();
+    this.durableAssimilations.clear();
+    this.nativeDurableAssimilations.clear();
+    this.explicitDurableAssimilations.clear();
+    this.promiseAggregateAssimilationScopes.length = 0;
+    this.promiseSettlementObservers.clear();
+    this.mixedPromiseProducerGroups.clear();
+  }
+
+  private notifyPromiseSettlement(asyncId: number): void {
+    const observers = this.promiseSettlementObservers.get(asyncId);
+    if (observers == null) return;
+    this.promiseSettlementObservers.delete(asyncId);
+    for (const observer of observers) observer();
+  }
+
+  private settleMixedPromiseProducerGroups(asyncId: number): void {
+    for (const group of [...this.mixedPromiseProducerGroups]) {
+      if (group.has(asyncId)) this.mixedPromiseProducerGroups.delete(group);
+    }
+  }
+
+  private detachPromiseAggregateAssimilations(assimilations: Set<number>): void {
+    for (const asyncId of assimilations) {
+      if (this.nativeDurableAssimilations.delete(asyncId)) {
+        this.detachDurableAssimilation(asyncId);
+      }
+      if (this.explicitDurableAssimilations.delete(asyncId)) {
+        this.detachDurableAssimilation(asyncId);
+      }
+    }
+    assimilations.clear();
+  }
+
+  private addTokenToSubtree(asyncId: number, token: number): void {
+    if (this.excludedRoots.has(asyncId)) return;
+    const owners = this.owners.get(asyncId) ?? new Set<number>();
+    if (!owners.has(token)) {
+      owners.add(token);
+      this.owners.set(asyncId, owners);
+      const provenance = this.provenance.get(asyncId) ?? new Set<number>();
+      provenance.add(token);
+      this.provenance.set(asyncId, provenance);
+      const tokenResources = this.tokenResources.get(token) ?? new Set<number>();
+      tokenResources.add(asyncId);
+      this.tokenResources.set(token, tokenResources);
+      const resource = this.resources.get(asyncId);
+      if (resource?.pending && this.isProducer(resource, token)) {
+        const producers = this.tokenProducers.get(token) ?? new Set<number>();
+        producers.add(asyncId);
+        this.tokenProducers.set(token, producers);
+      }
+    }
+    for (const child of this.children.get(asyncId) ?? []) {
+      this.addTokenToSubtree(child, token);
+    }
+  }
+
+  private isProducer(resource: TrackedAsyncResource, token: number): boolean {
+    if (resource.type === "PROMISE") {
+      return !(this.provenance.get(resource.triggerAsyncId)?.has(token) ?? false);
+    }
+    return !PASSIVE_ASYNC_RESOURCE_TYPES.has(resource.type);
+  }
+
+  private setResourcePending(asyncId: number, pending: boolean): void {
+    const resource = this.resources.get(asyncId);
+    if (resource == null || resource.pending === pending) return;
+    resource.pending = pending;
+    for (const token of this.owners.get(asyncId) ?? []) {
+      const producers = this.tokenProducers.get(token);
+      if (pending && this.isProducer(resource, token)) {
+        const next = producers ?? new Set<number>();
+        next.add(asyncId);
+        this.tokenProducers.set(token, next);
+      } else {
+        producers?.delete(asyncId);
+      }
+    }
+  }
+
+  private removeOwnersFromSubtree(asyncId: number): void {
+    this.removeResourceOwnership(asyncId);
+    for (const child of this.children.get(asyncId) ?? []) {
+      this.removeOwnersFromSubtree(child);
+    }
+  }
+
+  private removeResourceOwnership(asyncId: number): void {
+    const owners = this.owners.get(asyncId);
+    if (owners == null) return;
+    for (const token of owners) {
+      const resources = this.tokenResources.get(token);
+      resources?.delete(asyncId);
+      if (resources?.size === 0) this.tokenResources.delete(token);
+      const producers = this.tokenProducers.get(token);
+      producers?.delete(asyncId);
+      if (producers?.size === 0) this.tokenProducers.delete(token);
+    }
+    this.owners.delete(asyncId);
+  }
+
+  private releaseDestroyedResource(asyncId: number): void {
+    const resource = this.resources.get(asyncId);
+    if (resource == null) return;
+    this.resources.delete(asyncId);
+    this.excludedRoots.delete(asyncId);
+    this.removeResourceOwnership(asyncId);
+    this.provenance.delete(asyncId);
+    const siblings = this.children.get(resource.triggerAsyncId);
+    siblings?.delete(asyncId);
+    if (siblings?.size === 0) this.children.delete(resource.triggerAsyncId);
+    // A destroy hook is Node's guarantee that this resource cannot create
+    // further descendants. Existing children already own independent copies
+    // of their provenance and ownership sets.
+    this.children.delete(asyncId);
+  }
+
+  private scheduleCheck(): void {
+    if (this.stopped || this.checkScheduled) return;
+    this.checkScheduled = true;
+    const previous = this.suppressOwnership;
+    this.suppressOwnership = true;
+    try {
+      this.checkHandle = setImmediate(() => {
+        this.checkScheduled = false;
+        this.checkHandle = undefined;
+        this.onQuiescent();
+      });
+    } finally {
+      this.suppressOwnership = previous;
+    }
+  }
+}
+
+class ReplayAwarePromise<T> extends Promise<T> {
+  private readonly causality: ReplayCausality;
+
+  constructor(source: Promise<T>, causality: ReplayCausality) {
+    let bridge: Promise<void> | undefined;
+    super((resolve, reject) => {
+      bridge = source.then(resolve, reject);
+    });
+    this.causality = causality;
+    registerDurableThenable(this);
+    causality.excludePromise(source);
+    causality.excludePromise(this);
+    if (bridge != null) causality.excludePromise(bridge);
+  }
+
+  static get [Symbol.species](): PromiseConstructor {
+    return Promise;
+  }
+
+  override then<TResult1 = T, TResult2 = never>(
+    onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+  ): Promise<TResult1 | TResult2> {
+    const assimilationId = executionAsyncId();
+    const assimilationSuspended =
+      this.causality.suspendDurableAssimilation(assimilationId);
+    let assimilationDetached = false;
+    const aggregateAssimilation = registerDurableAssimilation(this, () => {
+      if (!assimilationSuspended || assimilationDetached) return;
+      assimilationDetached = true;
+      this.causality.detachDurableAssimilation(assimilationId);
+    });
+    const continuation = super.then(
+      (value) => {
+        this.causality.beginCurrentContinuation();
+        aggregateAssimilation.finish();
+        if (assimilationSuspended && !assimilationDetached) {
+          this.causality.resumeDurableAssimilation(assimilationId);
+        }
+        if (onfulfilled == null) return value as unknown as TResult1;
+        return onfulfilled(value);
+      },
+      (reason) => {
+        this.causality.beginCurrentContinuation();
+        aggregateAssimilation.finish();
+        if (assimilationSuspended && !assimilationDetached) {
+          this.causality.resumeDurableAssimilation(assimilationId);
+        }
+        if (onrejected == null) throw reason;
+        return onrejected(reason);
+      },
+    );
+    aggregateAssimilation.link(continuation);
+    this.causality.excludePromise(continuation);
+    return continuation;
+  }
+
+  [DURABLE_PROMISE_INTERNAL_THEN]<TResult1 = T, TResult2 = never>(
+    onfulfilled?: ((value: T) => TResult1 | PromiseLike<TResult1>) | null,
+    onrejected?: ((reason: unknown) => TResult2 | PromiseLike<TResult2>) | null,
+  ): Promise<TResult1 | TResult2> {
+    const continuation = super.then(onfulfilled, onrejected);
+    registerDurableThenable(continuation, this);
+    this.causality.excludePromise(continuation);
+    return continuation;
+  }
+
+  [DURABLE_PROMISE_OBSERVER](
+    onfulfilled: (value: T) => void,
+    onrejected: (reason: unknown) => void,
+  ): void {
+    const observation = super.then(onfulfilled, onrejected);
+    this.causality.excludePromise(observation);
+    void observation.catch(() => undefined);
+  }
+}
+
 class ReplayHistory {
   private readonly entries: ReplayEntry[];
   private readonly calls: ReplayEntry[] = [];
@@ -164,13 +791,19 @@ class ReplayHistory {
   private readonly resultWaiters = new Map<string, Deferred<Message | undefined>[]>();
   private readonly endWaiters: Deferred<void>[] = [];
   private readonly createdWatcherIds = new Set<string>();
+  private readonly releasedResultIds = new Set<string>();
+  private readonly expectedCallIds = new Set<string>();
   private readonly expectedWatcherIds = new Set<string>();
+  private readonly causality: ReplayCausality;
+  // A replayed result may still be downloading before it can resume user code.
+  private activeResultResolutions = 0;
   private callCursor = 0;
   private watcherCursor = 0;
   private prefixCursor = 0;
   private mismatch?: ReplayMismatchError;
 
   constructor(entries: Message[]) {
+    this.causality = new ReplayCausality(() => this.failBlockedResultWithoutProducer());
     this.entries = entries.map((entry) => {
       if (entry.functionCallWatcherResult != null) {
         return { kind: "result", event: entry.functionCallWatcherResult, consumed: false };
@@ -201,8 +834,9 @@ class ReplayHistory {
     this.advancePrefix();
     const entries = kind === "call" ? this.calls : this.watchers;
     const cursor = kind === "call" ? this.callCursor : this.watcherCursor;
+    const expectedIds = kind === "call" ? this.expectedCallIds : this.expectedWatcherIds;
     if (cursor >= entries.length) {
-      if (kind === "watcher") this.expectedWatcherIds.delete(id);
+      expectedIds.delete(id);
       if (this.prefixCursor === this.entries.length) return undefined;
       const blocked = this.entries[this.prefixCursor];
       // A new call may reach the live boundary before the watcher belonging to
@@ -232,9 +866,9 @@ class ReplayHistory {
     if (entry.event.functionCallId !== id) {
       this.fail(`Expected replay ${kind} event for ${id}`);
     }
+    expectedIds.delete(id);
     entry.consumed = true;
     if (kind === "watcher") {
-      this.expectedWatcherIds.delete(id);
       this.createdWatcherIds.add(id);
     }
     this.advancePrefix();
@@ -244,25 +878,124 @@ class ReplayHistory {
   async takeResult(id: string): Promise<Message | undefined> {
     this.advancePrefix();
     const available = this.availableResults.get(id);
-    if (available != null && available.length > 0) return available.shift();
+    if (available != null && available.length > 0) {
+      const result = available.shift();
+      if (result != null) this.activeResultResolutions += 1;
+      return result;
+    }
     if (this.prefixCursor === this.entries.length) return undefined;
+    const blocked = this.entries[this.prefixCursor];
+    const blockedId = String(blocked.event.functionCallId ?? "");
+    const hasProducer = blocked.kind === "call"
+      ? this.expectedCallIds.has(blockedId)
+      : blocked.kind === "watcher"
+        ? this.expectedWatcherIds.has(blockedId)
+        : false;
     const waiter = deferred<Message | undefined>();
     const waiters = this.resultWaiters.get(id) ?? [];
     waiters.push(waiter);
     this.resultWaiters.set(id, waiters);
-    return waiter.promise;
+    if (!hasProducer) this.causality.requestCheck();
+    const result = await waiter.promise;
+    if (result != null) this.activeResultResolutions += 1;
+    return result;
+  }
+
+  completeResultResolution(): void {
+    if (this.activeResultResolutions === 0) return;
+    this.activeResultResolutions -= 1;
+    this.causality.requestCheck();
+  }
+
+  runCausalHandler<T>(callback: () => Promise<T>): Promise<T> {
+    return this.causality.runRoot(callback);
+  }
+
+  wrapDurableResult<T>(source: Promise<T>): Promise<T> {
+    return new ReplayAwarePromise(source, this.causality);
+  }
+
+  trackMixedPromiseRace(
+    promise: Promise<unknown>,
+    producers?: readonly Promise<unknown>[],
+  ): void {
+    this.causality.trackMixedPromiseRace(promise, producers);
+  }
+
+  trackPromiseSettlement(
+    promise: Promise<unknown>,
+    onSettled: () => void,
+  ): boolean {
+    return this.causality.trackPromiseSettlement(promise, onSettled);
+  }
+
+  trackDurablePromiseConsumption(promise: Promise<unknown>): void {
+    this.causality.trackDurablePromiseConsumption(promise);
+  }
+
+  runPromiseAggregateConstruction<T>(callback: () => T): T {
+    return this.causality.runPromiseAggregateConstruction(callback);
+  }
+
+  runWithoutCausalOwnership<T>(callback: () => T): T {
+    return this.causality.runWithoutOwnership(callback);
+  }
+
+  dispose(): void {
+    this.causality.stop();
+  }
+
+  expectCall(id: string): void {
+    this.expectedCallIds.add(id);
   }
 
   expectWatcher(id: string): void {
     this.expectedWatcherIds.add(id);
   }
 
+  abandonCall(id: string): void {
+    this.abandonOrdered("call", id);
+  }
+
   abandonWatcher(id: string): void {
-    this.expectedWatcherIds.delete(id);
-    if (this.prefixCursor >= this.entries.length || this.endWaiters.length === 0) return;
+    this.abandonOrdered("watcher", id);
+  }
+
+  private abandonOrdered(kind: "call" | "watcher", id: string): void {
+    const expectedIds = kind === "call" ? this.expectedCallIds : this.expectedWatcherIds;
+    expectedIds.delete(id);
+    const hasWaiters = this.endWaiters.length > 0
+      || [...this.resultWaiters.values()].some((waiters) => waiters.length > 0);
+    if (this.prefixCursor >= this.entries.length || !hasWaiters) return;
     const blocked = this.entries[this.prefixCursor];
-    if (blocked.kind === "watcher" && blocked.event.functionCallId === id) {
-      this.fail(`Replay watcher event for ${id} can no longer be created`);
+    if (blocked.kind === kind && blocked.event.functionCallId === id) {
+      this.fail(`Replay ${kind} event for ${id} can no longer be created`);
+    }
+  }
+
+  private failBlockedResultWithoutProducer(): void {
+    if (this.activeResultResolutions > 0) return;
+    // Quiescence is only evidence of a replay cycle while application code is
+    // actually assimilating a durable result. Outside that state the handler
+    // may legitimately be waiting for a callback owned by a module-initialized
+    // timer, socket, or client which predates this allocation and is therefore
+    // absent from the causal async-resource tree.
+    if (!this.causality.hasPendingDurableAssimilation()) return;
+    if (this.causality.hasPendingProducer()) return;
+    if (this.prefixCursor >= this.entries.length) return;
+    if (![...this.resultWaiters.values()].some((waiters) => waiters.length > 0)) return;
+    const blocked = this.entries[this.prefixCursor];
+    const blockedId = String(blocked.event.functionCallId ?? "");
+    const hasProducer = blocked.kind === "call"
+      ? this.expectedCallIds.has(blockedId)
+      : blocked.kind === "watcher"
+        ? this.expectedWatcherIds.has(blockedId)
+        : false;
+    if (!hasProducer) {
+      this.recordMismatch(
+        `Replay result is blocked behind unreachable ${blocked.kind}`
+        + ` event ${blockedId}`,
+      );
     }
   }
 
@@ -310,6 +1043,10 @@ class ReplayHistory {
     if (!this.createdWatcherIds.has(id)) {
       this.fail(`Replay watcher result for ${id} appeared before its watcher was created`);
     }
+    if (this.releasedResultIds.has(id)) {
+      this.fail(`Replay history contains duplicate watcher results for ${id}`);
+    }
+    this.releasedResultIds.add(id);
     const waiter = this.resultWaiters.get(id)?.shift();
     if (waiter != null) {
       waiter.resolve(event);
@@ -322,13 +1059,18 @@ class ReplayHistory {
   }
 
   private fail(message: string): never {
+    throw this.recordMismatch(message);
+  }
+
+  private recordMismatch(message: string): ReplayMismatchError {
     this.mismatch ??= new ReplayMismatchError(message);
+    this.causality.stop();
     for (const waiter of this.endWaiters.splice(0)) waiter.reject(this.mismatch);
     for (const waiters of this.resultWaiters.values()) {
       for (const waiter of waiters) waiter.reject(this.mismatch);
     }
     this.resultWaiters.clear();
-    throw this.mismatch;
+    return this.mismatch;
   }
 }
 
@@ -342,9 +1084,14 @@ interface EmissionTurn {
   release(): void;
 }
 
+interface StateStreamFlow {
+  backpressured: boolean;
+  pending?: Message;
+}
+
 class AllocationProtocolError extends Error {
-  constructor(message: string) {
-    super(message);
+  constructor(message: string, options?: { cause?: unknown }) {
+    super(message, options);
     this.name = "AllocationProtocolError";
   }
 }
@@ -355,6 +1102,7 @@ export class AllocationRunner implements FunctionRuntime {
   private readonly definition: RegisteredDefinition;
   private readonly applicationDefinition: RegisteredDefinition;
   private readonly stateStreams = new Set<StreamCall>();
+  private readonly stateStreamFlows = new Map<StreamCall, StateStreamFlow>();
   private readonly eventReadStreams = new Set<StreamCall>();
   private readonly outputBlobRequests = new Map<string, Deferred<Message>>();
   private readonly stateOperationRequests = new Map<string, Deferred<Message>>();
@@ -374,6 +1122,8 @@ export class AllocationRunner implements FunctionRuntime {
   private completion?: Promise<void>;
   private started = false;
   private terminalBatchQueued = false;
+  private terminalBatchObserved = false;
+  private readonly terminalBatchObservedWaiters: Array<() => void> = [];
   private finished = false;
   private state: Message = { outputBlobRequests: [], requestStateOperations: [] };
   private readonly startedAt = Date.now();
@@ -418,37 +1168,121 @@ export class AllocationRunner implements FunctionRuntime {
     return this.completion ?? Promise.resolve();
   }
 
+  async waitForTerminalBatchObserved(timeoutMs: number): Promise<boolean> {
+    if (this.terminalBatchObserved) return true;
+    return new Promise<boolean>((resolve) => {
+      let settled = false;
+      const observed = () => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(true);
+      };
+      const timer = setTimeout(() => {
+        if (settled) return;
+        settled = true;
+        const index = this.terminalBatchObservedWaiters.indexOf(observed);
+        if (index >= 0) this.terminalBatchObservedWaiters.splice(index, 1);
+        resolve(false);
+      }, Math.max(timeoutMs, 0));
+      this.terminalBatchObservedWaiters.push(observed);
+      // Close the race where observation happens between the first check and
+      // registering this waiter.
+      if (this.terminalBatchObserved) observed();
+    });
+  }
+
   cancel(reason: unknown = new FunctionError("Allocation was cancelled")): void {
     if (this.controller.signal.aborted) return;
     this.log("info", "allocation cancellation requested", {
       reason: reason instanceof Error ? reason.message : String(reason),
     });
-    this.controller.abort(reason);
-    for (const request of this.outputBlobRequests.values()) request.reject(reason);
-    for (const request of this.stateOperationRequests.values()) request.reject(reason);
-    for (const waiter of this.liveWaiters.splice(0)) waiter.result.reject(reason);
-    this.currentRead?.response.reject(reason);
-    this.currentRead = undefined;
+    this.abortExecution(reason);
   }
 
-  async invoke<T>(definition: RegisteredDefinition, args: readonly unknown[]): Promise<T> {
+  private abortExecution(reason: unknown): void {
+    if (!this.controller.signal.aborted) this.controller.abort(reason);
+    const rejection = this.controller.signal.reason ?? reason;
+    const outputBlobRequestCount = this.outputBlobRequests.size;
+    const stateOperationRequestCount = this.stateOperationRequests.size;
+    const liveWaiterCount = this.liveWaiters.length;
+    const liveBacklogCount = this.liveBacklog.length;
+    const hadCurrentRead = this.currentRead != null;
+    for (const request of this.outputBlobRequests.values()) request.reject(rejection);
+    for (const request of this.stateOperationRequests.values()) request.reject(rejection);
+    for (const waiter of this.liveWaiters.splice(0)) waiter.result.reject(rejection);
+    this.currentRead?.response.reject(rejection);
+    this.outputBlobRequests.clear();
+    this.stateOperationRequests.clear();
+    this.liveBacklog.splice(0);
+    this.currentRead = undefined;
+    this.state.outputBlobRequests = [];
+    this.state.requestStateOperations = [];
+    this.log("debug", "pending allocation protocol work settled", {
+      output_blob_requests: outputBlobRequestCount,
+      state_operation_requests: stateOperationRequestCount,
+      durable_event_waiters: liveWaiterCount,
+      durable_event_backlog_entries: liveBacklogCount,
+      event_log_read: hadCurrentRead,
+    });
+  }
+
+  invoke<T>(definition: RegisteredDefinition, args: readonly unknown[]): Promise<T> {
     this.log("debug", "durable function invocation requested", {
       target_function: definition.name,
       argument_count: args.length,
     });
-    return this.runChild<T>(definition, args, 0);
+    const result = this.runChild<T>(definition, args, 0);
+    return this.replay?.wrapDurableResult(result) ?? result;
   }
 
-  async runFuture<T>(future: FunctionFuture<T>): Promise<T> {
+  runFuture<T>(future: FunctionFuture<T>): Promise<T> {
     this.log("debug", "durable future execution requested", {
       target_function: future.definition.name,
       argument_count: future.args.length,
       delay_seconds: future.delaySeconds,
     });
-    return this.runChild<T>(future.definition, future.args, future.delaySeconds);
+    const result = this.runChild<T>(future.definition, future.args, future.delaySeconds);
+    return this.replay?.wrapDurableResult(result) ?? result;
   }
 
-  async reduce<T>(
+  wrapFutureWait<T>(promise: Promise<T>): Promise<T> {
+    return this.replay?.wrapDurableResult(promise) ?? promise;
+  }
+
+  trackMixedPromiseRace(
+    promise: Promise<unknown>,
+    producers?: readonly Promise<unknown>[],
+  ): void {
+    this.replay?.trackMixedPromiseRace(promise, producers);
+  }
+
+  trackPromiseSettlement(
+    promise: Promise<unknown>,
+    onSettled: () => void,
+  ): boolean {
+    return this.replay?.trackPromiseSettlement(promise, onSettled) ?? false;
+  }
+
+  trackDurablePromiseConsumption(promise: Promise<unknown>): void {
+    this.replay?.trackDurablePromiseConsumption(promise);
+  }
+
+  runPromiseAggregateConstruction<T>(callback: () => T): T {
+    return this.replay?.runPromiseAggregateConstruction(callback) ?? callback();
+  }
+
+  reduce<T>(
+    definition: RegisteredDefinition,
+    items: readonly unknown[],
+    initial: unknown,
+    hasInitial: boolean,
+  ): Promise<T> {
+    const result = this.runReduce<T>(definition, items, initial, hasInitial);
+    return this.replay?.wrapDurableResult(result) ?? result;
+  }
+
+  private async runReduce<T>(
     definition: RegisteredDefinition,
     items: readonly unknown[],
     initial: unknown,
@@ -474,11 +1308,16 @@ export class AllocationRunner implements FunctionRuntime {
       collection_size: reduceItems.length,
       plan_count: Math.ceil(reduceItems.length / MAX_REDUCE_CALLS_PER_PLAN),
     });
+    const replayCallIds = ids.filter((_id, index) =>
+      (index + 1) % MAX_REDUCE_CALLS_PER_PLAN === 0 || index === ids.length - 1
+    );
+    for (const replayCallId of replayCallIds) this.replay?.expectCall(replayCallId);
     this.replay?.expectWatcher(id);
     try {
       try {
         await this.createReduceChain(ids, definition, reduceItems, reduceInitial, callTurn);
       } catch (error) {
+        for (const replayCallId of replayCallIds) this.replay?.abandonCall(replayCallId);
         this.replay?.abandonWatcher(id);
         throw error;
       }
@@ -491,7 +1330,12 @@ export class AllocationRunner implements FunctionRuntime {
     const result = replayedResult ?? await this.waitForLiveEvent(
       (entry) => entry.functionCallWatcherResult?.functionCallId === id,
     ).then((entry) => entry.functionCallWatcherResult);
-    const resolved = await this.resolveWatcherResult<T>(result);
+    let resolved: T;
+    try {
+      resolved = await this.resolveWatcherResult<T>(result);
+    } finally {
+      if (replayedResult != null) this.replay?.completeResultResolution();
+    }
     this.log("info", "durable reduce completed", {
       durable_id: id,
       target_function: definition.name,
@@ -531,11 +1375,13 @@ export class AllocationRunner implements FunctionRuntime {
       delay_seconds: delaySeconds,
       max_retries: maxRetries,
     });
+    this.replay?.expectCall(id);
     this.replay?.expectWatcher(id);
     try {
       try {
         await this.createChildCall(id, definition, args, delaySeconds, callTurn);
       } catch (error) {
+        this.replay?.abandonCall(id);
         this.replay?.abandonWatcher(id);
         throw error;
       }
@@ -557,7 +1403,12 @@ export class AllocationRunner implements FunctionRuntime {
     const result = replayedResult ?? await this.waitForLiveEvent(
       (entry) => entry.functionCallWatcherResult?.functionCallId === id,
     ).then((entry) => entry.functionCallWatcherResult);
-    const resolved = await this.resolveWatcherResult<T>(result);
+    let resolved: T;
+    try {
+      resolved = await this.resolveWatcherResult<T>(result);
+    } finally {
+      if (replayedResult != null) this.replay?.completeResultResolution();
+    }
     this.log("info", "durable function call completed", {
       durable_id: id,
       target_function: definition.name,
@@ -601,10 +1452,21 @@ export class AllocationRunner implements FunctionRuntime {
           argument_count: args.length,
           serialized_bytes: offset,
         });
-        argsBlob = await this.requestOutputBlob(offset);
-        argsBlob = await this.uploadBlob(argsBlob, joinPrepared(prepared), "durable function arguments", {
-          durable_id: id,
-        });
+        try {
+          argsBlob = await this.requestOutputBlob(offset);
+          argsBlob = await this.uploadBlob(
+            argsBlob,
+            joinPrepared(prepared),
+            "durable function arguments",
+            { durable_id: id },
+          );
+        } catch (error) {
+          if (this.controller.signal.aborted) throw this.controller.signal.reason;
+          throw this.latchProtocolError(
+            `Failed to materialize durable function arguments for '${id}'`,
+            error,
+          );
+        }
       }
       const metadata = Buffer.from(JSON.stringify({
         format: "tensorlake.typescript.function-call.v1",
@@ -687,13 +1549,22 @@ export class AllocationRunner implements FunctionRuntime {
           prepared.push(value);
           offset += value.bytes.byteLength;
         }
-        const requested = await this.requestOutputBlob(offset);
-        const argsBlob = await this.uploadBlob(
-          requested,
-          joinPrepared(prepared),
-          "durable reduce arguments",
-          { durable_id: rootId, reduce_step_start: start, reduce_step_end: end },
-        );
+        let argsBlob: BlobValue;
+        try {
+          const requested = await this.requestOutputBlob(offset);
+          argsBlob = await this.uploadBlob(
+            requested,
+            joinPrepared(prepared),
+            "durable reduce arguments",
+            { durable_id: rootId, reduce_step_start: start, reduce_step_end: end },
+          );
+        } catch (error) {
+          if (this.controller.signal.aborted) throw this.controller.signal.reason;
+          throw this.latchProtocolError(
+            `Failed to materialize durable reduce arguments for '${rootId}'`,
+            error,
+          );
+        }
         const itemOffset = start === 0 ? 1 : 0;
         const updates = [];
         for (let index = start; index < end; index += 1) {
@@ -742,14 +1613,36 @@ export class AllocationRunner implements FunctionRuntime {
         plan_count: livePlans.length,
       });
       this.addBatch(livePlans);
-      const createdPromises = liveRoots.map((rootId) => this.waitForLiveEvent(
-        (entry) => entry.functionCallCreated?.functionCallId === rootId,
-      ));
-      turn.release();
-      const createdEvents = await Promise.all(createdPromises);
-      for (const created of createdEvents) {
-        const error = statusError(created.functionCallCreated?.status, "Failed to start reduce operation");
+      const creationWaiters = liveRoots.map((rootId) => {
+        const predicate = (entry: Message) =>
+          entry.functionCallCreated?.functionCallId === rootId;
+        return {
+          predicate,
+          promise: this.waitForLiveEvent(predicate),
+        };
+      });
+      const createdPromises = creationWaiters.map(async ({ promise }) => {
+        const created = await promise;
+        const error = statusError(
+          created.functionCallCreated?.status,
+          "Failed to start reduce operation",
+        );
         if (error != null) throw error;
+      });
+      turn.release();
+      try {
+        await Promise.all(createdPromises);
+      } catch (error) {
+        // One failed plan is terminal for the whole reduce. Remove and reject
+        // sibling plan waiters immediately: the server is not required to
+        // acknowledge plans after it has rejected the batch.
+        for (const { predicate } of creationWaiters) {
+          const index = this.liveWaiters.findIndex(
+            (waiter) => waiter.predicate === predicate,
+          );
+          if (index >= 0) this.liveWaiters.splice(index, 1)[0].result.reject(error);
+        }
+        throw error;
       }
     } finally {
       turn.release();
@@ -789,26 +1682,69 @@ export class AllocationRunner implements FunctionRuntime {
       has_value_output: event.valueOutput != null,
       has_request_error_output: event.requestErrorOutput != null,
     });
-    if (WATCHER_TIMED_OUT.has(event.watcherStatus)) throw new FunctionError("Function call watcher timed out");
+    if (WATCHER_TIMED_OUT.has(event.watcherStatus)) throw new TimeoutError();
     if (OUTCOME_SUCCESS.has(event.outcomeCode)) {
-      const downloaded = await this.downloadSerializedObject(
-        event.valueOutput,
-        event.valueBlob,
-        "durable function result",
-        { durable_id: event.functionCallId },
-      );
-      return deserializeValueFromProtocol(downloaded) as T;
+      try {
+        const downloaded = await this.downloadSerializedObject(
+          event.valueOutput,
+          event.valueBlob,
+          "durable function result",
+          { durable_id: event.functionCallId },
+        );
+        return deserializeValueFromProtocol(downloaded) as T;
+      } catch (error) {
+        if (this.controller.signal.aborted) throw this.controller.signal.reason;
+        throw this.latchProtocolError(
+          `Invalid successful function call watcher payload for '${String(event.functionCallId)}'`,
+          error,
+        );
+      }
     }
-    if (event.requestErrorOutput != null) {
-      const downloaded = await this.downloadSerializedObject(
-        event.requestErrorOutput,
-        event.requestErrorBlob,
-        "durable function request error",
-        { durable_id: event.functionCallId },
-      );
-      throw new RequestError(new TextDecoder("utf-8", { fatal: true }).decode(downloaded.data));
+    if (OUTCOME_FAILURE.has(event.outcomeCode)) {
+      if (event.requestErrorOutput != null) {
+        let message: string;
+        try {
+          const downloaded = await this.downloadSerializedObject(
+            event.requestErrorOutput,
+            event.requestErrorBlob,
+            "durable function request error",
+            { durable_id: event.functionCallId },
+          );
+          message = new TextDecoder("utf-8", { fatal: true }).decode(downloaded.data);
+        } catch (error) {
+          if (this.controller.signal.aborted) throw this.controller.signal.reason;
+          throw this.latchProtocolError(
+            `Invalid request-error function call watcher payload for '${String(event.functionCallId)}'`,
+            error,
+          );
+        }
+        throw new RequestError(message);
+      }
+      throw new FunctionError("Function call failed");
     }
-    throw new FunctionError("Function call failed");
+    throw this.latchProtocolError(
+      `Unexpected function call watcher outcome '${String(event.outcomeCode)}'`,
+    );
+  }
+
+  private latchProtocolError(
+    message: string | AllocationProtocolError,
+    cause?: unknown,
+  ): AllocationProtocolError {
+    const protocolError = this.protocolError
+      ?? (message instanceof AllocationProtocolError
+        ? message
+        : new AllocationProtocolError(
+          message,
+          cause === undefined ? undefined : { cause },
+        ));
+    // Protocol failures are executor invariants, not child-function failures.
+    // Latch the first one so application code cannot turn corrupt event data
+    // into a successful allocation or hang indefinitely after catching the
+    // rejected child promise.
+    this.protocolError = protocolError;
+    this.abortExecution(protocolError);
+    return protocolError;
   }
 
   private async startTailCall(tailCall: TailCall<unknown>): Promise<string> {
@@ -819,7 +1755,13 @@ export class AllocationRunner implements FunctionRuntime {
       target_function: tailCall.definition.name,
       argument_count: tailCall.args.length,
     });
-    await this.createChildCall(id, tailCall.definition, tailCall.args, 0, callTurn);
+    this.replay?.expectCall(id);
+    try {
+      await this.createChildCall(id, tailCall.definition, tailCall.args, 0, callTurn);
+    } catch (error) {
+      this.replay?.abandonCall(id);
+      throw error;
+    }
     return id;
   }
 
@@ -922,9 +1864,10 @@ export class AllocationRunner implements FunctionRuntime {
         handler_argument_count: handlerArgs.length,
       });
       try {
+        const execute = () => executeHandlerResult(this.definition, handlerArgs);
         result = await runWithRequestContext(requestContext, () =>
           runWithFunctionRuntime(this, () => waitWithAbortSignal(
-            executeHandlerResult(this.definition, handlerArgs),
+            this.replay?.runCausalHandler(execute) ?? execute(),
             this.controller.signal,
           )),
         );
@@ -932,6 +1875,11 @@ export class AllocationRunner implements FunctionRuntime {
         if (error instanceof ReplayMismatchError || error instanceof AllocationProtocolError) {
           throw error;
         }
+        // Promise combinators such as Promise.any can wrap the replay waiter's
+        // ReplayMismatchError (for example in an AggregateError). Preserve the
+        // allocation-level replay classification even when user-level promise
+        // machinery changes the surfaced error object.
+        this.replay?.assertNoMismatch();
         this.log("error", "user function handler failed", {
           duration_ms: Date.now() - handlerStartedAt,
         }, error);
@@ -986,7 +1934,9 @@ export class AllocationRunner implements FunctionRuntime {
       }
     } catch (error) {
       const replayMismatch = error instanceof ReplayMismatchError;
-      const cancelled = this.controller.signal.aborted;
+      const protocolFailure =
+        error instanceof AllocationProtocolError || this.protocolError != null;
+      const cancelled = this.controller.signal.aborted && !protocolFailure;
       this.log(
         cancelled ? "info" : "error",
         cancelled
@@ -999,10 +1949,12 @@ export class AllocationRunner implements FunctionRuntime {
       );
       this.queueTerminalBatch({
         outcomeCode: "ALLOCATION_OUTCOME_CODE_FAILURE",
-        failureReason: cancelled
-          ? "ALLOCATION_FAILURE_REASON_FUNCTION_ERROR"
-          : replayMismatch
+        failureReason: replayMismatch
           ? "ALLOCATION_FAILURE_REASON_REPLAY_EVENT_HISTORY_MISMATCH"
+          : protocolFailure
+          ? "ALLOCATION_FAILURE_REASON_INTERNAL_ERROR"
+          : cancelled
+          ? "ALLOCATION_FAILURE_REASON_FUNCTION_ERROR"
           : "ALLOCATION_FAILURE_REASON_INTERNAL_ERROR",
       });
     } finally {
@@ -1014,23 +1966,26 @@ export class AllocationRunner implements FunctionRuntime {
       });
       this.emitLifecycleEvent("allocations_finished", "Allocations completed");
       this.finish();
+      this.replay?.dispose();
     }
   }
 
   private async finishUserError(error: unknown): Promise<void> {
     const rendered = error instanceof Error ? error.message : String(error);
-    printCloudEvent({
-      level: "error",
-      event: "function_call_failed",
-      message: rendered,
-      namespace: this.functionRef.namespace,
-      application: this.functionRef.applicationName,
-      application_version: this.functionRef.applicationVersion,
-      function: this.functionRef.functionName,
-      request_id: this.allocation.requestId,
-      function_call_id: this.allocation.functionCallId,
-      allocation_id: this.allocation.allocationId,
-      error: error instanceof Error ? error.stack?.split("\n") ?? [rendered] : [rendered],
+    this.runWithoutReplayOwnership(() => {
+      printCloudEvent({
+        level: "error",
+        event: "function_call_failed",
+        message: rendered,
+        namespace: this.functionRef.namespace,
+        application: this.functionRef.applicationName,
+        application_version: this.functionRef.applicationVersion,
+        function: this.functionRef.functionName,
+        request_id: this.allocation.requestId,
+        function_call_id: this.allocation.functionCallId,
+        allocation_id: this.allocation.allocationId,
+        error: error instanceof Error ? error.stack?.split("\n") ?? [rendered] : [rendered],
+      });
     });
     if (isRequestError(error)) {
       const output = prepareTextObject(error.message);
@@ -1059,9 +2014,18 @@ export class AllocationRunner implements FunctionRuntime {
   private createRequestContext(): RequestContextValue {
     return {
       requestId: String(this.allocation.requestId),
+      headers: new Headers(
+        (this.allocation.inputs?.requestContext?.headers ?? []).map(
+          (header: Message) => [
+            String(header.name ?? ""),
+            String(header.value ?? ""),
+          ],
+        ),
+      ),
       signal: this.controller.signal,
       state: {
         get: async <T>(key: string, defaultValue?: T) => {
+          validateRequestStateKey(key);
           const operationId = randomUUID();
           this.log("debug", "request state read starting", {
             state_key: key,
@@ -1088,22 +2052,22 @@ export class AllocationRunner implements FunctionRuntime {
           return value;
         },
         set: async (key: string, value: unknown) => {
-          const serialized = serializeValue(value);
-          if (serialized.encoding !== "json") throw new Error("Request state values must be JSON values");
+          validateRequestStateKey(key);
+          const serialized = serializeRequestStateValue(value);
           const prepareOperationId = randomUUID();
           this.log("debug", "request state write preparation starting", {
             state_key: key,
             operation_id: prepareOperationId,
-            value_bytes: serialized.data.byteLength,
+            value_bytes: serialized.byteLength,
           });
           const prepared = await this.requestStateOperation({
             operationId: prepareOperationId,
             stateKey: key,
-            prepareWrite: { size: serialized.data.byteLength },
+            prepareWrite: { size: serialized.byteLength },
           });
           const error = statusError(prepared.status, `Failed to prepare request state '${key}'`);
           if (error != null) throw error;
-          const blob = await this.uploadBlob(prepared.prepareWrite?.blob, serialized.data, "request state value", {
+          const blob = await this.uploadBlob(prepared.prepareWrite?.blob, serialized, "request state value", {
             state_key: key,
             operation_id: prepareOperationId,
           });
@@ -1123,22 +2087,29 @@ export class AllocationRunner implements FunctionRuntime {
           this.log("debug", "request state write completed", {
             state_key: key,
             operation_id: commitOperationId,
-            value_bytes: serialized.data.byteLength,
+            value_bytes: serialized.byteLength,
           });
         },
       },
       metrics: {
-        counter: async (name, value = 1) => this.emitUserEvent("ai.tensorlake.metric.counter.inc", {
-          counter_name: name,
-          counter_inc: value,
-        }),
-        timer: async (name, value) => this.emitUserEvent("ai.tensorlake.metric.timer", {
-          timer_name: name,
-          timer_value: value,
-        }),
+        counter: async (name, value = 1) => {
+          validateCounterMetric(name, value);
+          this.emitUserEvent("ai.tensorlake.metric.counter.inc", {
+            counter_name: name,
+            counter_inc: value,
+          });
+        },
+        timer: async (name, value) => {
+          validateTimerMetric(name, value);
+          this.emitUserEvent("ai.tensorlake.metric.timer", {
+            timer_name: name,
+            timer_value: value,
+          });
+        },
       },
       progress: {
         update: async (current, total, options) => {
+          validateProgressUpdate(current, total, options);
           this.log("debug", "request progress update", {
             current,
             total,
@@ -1148,20 +2119,22 @@ export class AllocationRunner implements FunctionRuntime {
           this.state.progress = { current, total };
           this.publishState();
           const message = options?.message ?? `${this.functionRef.functionName}: executing step ${current} of ${total}`;
-          printCloudEvent({ RequestProgressUpdated: {
-            request_id: this.allocation.requestId,
-            function_name: this.functionRef.functionName,
-            function_run_id: this.allocation.functionCallId,
-            allocation_id: this.allocation.allocationId,
-            message,
-            step: current,
-            total,
-            attributes: options?.attributes,
-            created_at: new Date().toISOString(),
-          } }, {
-            type: "ai.tensorlake.progress_update",
-            source: "/tensorlake/applications/progress",
-            message,
+          this.runWithoutReplayOwnership(() => {
+            printCloudEvent({ RequestProgressUpdated: {
+              request_id: this.allocation.requestId,
+              function_name: this.functionRef.functionName,
+              function_run_id: this.allocation.functionCallId,
+              allocation_id: this.allocation.allocationId,
+              message,
+              step: current,
+              total,
+              attributes: options?.attributes,
+              created_at: new Date().toISOString(),
+            } }, {
+              type: "ai.tensorlake.progress_update",
+              source: "/tensorlake/applications/progress",
+              message,
+            });
           });
         },
       },
@@ -1173,28 +2146,32 @@ export class AllocationRunner implements FunctionRuntime {
       event_type: type,
       metric_name: data.counter_name ?? data.timer_name,
     });
-    printCloudEvent({
+    this.runWithoutReplayOwnership(() => {
+      printCloudEvent({
         request_id: this.allocation.requestId,
         function_name: this.functionRef.functionName,
         function_run_id: this.allocation.functionCallId,
         allocation_id: this.allocation.allocationId,
         ...data,
-    }, { type, source: "/tensorlake/applications/metrics" });
+      }, { type, source: "/tensorlake/applications/metrics" });
+    });
   }
 
   private emitLifecycleEvent(event: string, message: string): void {
-    printCloudEvent({
-      event,
-      message,
-      allocations: [{
-        namespace: this.functionRef.namespace,
-        application: this.functionRef.applicationName,
-        application_version: this.functionRef.applicationVersion,
-        function: this.functionRef.functionName,
-        request_id: this.allocation.requestId,
-        function_call_id: this.allocation.functionCallId,
-        allocation_id: this.allocation.allocationId,
-      }],
+    this.runWithoutReplayOwnership(() => {
+      printCloudEvent({
+        event,
+        message,
+        allocations: [{
+          namespace: this.functionRef.namespace,
+          application: this.functionRef.applicationName,
+          application_version: this.functionRef.applicationVersion,
+          function: this.functionRef.functionName,
+          request_id: this.allocation.requestId,
+          function_call_id: this.allocation.functionCallId,
+          allocation_id: this.allocation.allocationId,
+        }],
+      });
     });
   }
 
@@ -1214,17 +2191,11 @@ export class AllocationRunner implements FunctionRuntime {
         last_clock: response.lastClock,
         has_more: response.hasMore,
       });
-      const responseClock = Number(response.lastClock ?? requestedAfterClock);
-      if (responseClock < requestedAfterClock) {
-        throw new ReplayMismatchError(
-          `Replay event log moved backwards from clock ${requestedAfterClock} to ${responseClock}`,
-        );
-      }
-      if (response.hasMore && responseClock === requestedAfterClock) {
-        throw new ReplayMismatchError(
-          `Replay event log reported more entries without advancing clock ${requestedAfterClock}`,
-        );
-      }
+      const responseClock = validatedEventLogClock(
+        response,
+        requestedAfterClock,
+        (message) => new ReplayMismatchError(message),
+      );
       afterClock = responseClock;
       if (!response.hasMore) break;
     }
@@ -1238,6 +2209,9 @@ export class AllocationRunner implements FunctionRuntime {
   }
 
   private waitForLiveEvent(predicate: (event: Message) => boolean): Promise<Message> {
+    if (this.controller.signal.aborted) {
+      return Promise.reject(this.controller.signal.reason);
+    }
     const index = this.liveBacklog.findIndex(predicate);
     if (index >= 0) {
       this.log("debug", "durable event satisfied from backlog", {
@@ -1275,17 +2249,11 @@ export class AllocationRunner implements FunctionRuntime {
           last_clock: response.lastClock,
           has_more: response.hasMore,
         });
-        const responseClock = Number(response.lastClock ?? requestedAfterClock);
-        if (responseClock < requestedAfterClock) {
-          throw new AllocationProtocolError(
-            `Allocation event log moved backwards from clock ${requestedAfterClock} to ${responseClock}`,
-          );
-        }
-        if (response.hasMore && responseClock === requestedAfterClock) {
-          throw new AllocationProtocolError(
-            `Allocation event log reported more entries without advancing clock ${requestedAfterClock}`,
-          );
-        }
+        const responseClock = validatedEventLogClock(
+          response,
+          requestedAfterClock,
+          (message) => new AllocationProtocolError(message),
+        );
         this.lastEventClock = responseClock;
         for (const entry of response.entries ?? []) this.dispatchLiveEvent(entry);
       }
@@ -1304,17 +2272,17 @@ export class AllocationRunner implements FunctionRuntime {
       if (!this.finished && this.liveWaiters.length > 0) this.ensureLivePump();
     }, (error) => {
       if (this.livePump === pump) this.livePump = undefined;
-      if (!this.finished) {
+      if (!this.finished && !this.controller.signal.aborted) {
         const protocolError = error instanceof AllocationProtocolError
           ? error
           : new AllocationProtocolError(
             error instanceof Error ? error.message : String(error),
+            { cause: error },
           );
-        this.protocolError = protocolError;
+        this.latchProtocolError(protocolError);
         this.log("error", "durable event live pump failed", {
           pending_waiters: this.liveWaiters.length,
         }, protocolError);
-        for (const waiter of this.liveWaiters.splice(0)) waiter.result.reject(protocolError);
       }
     });
   }
@@ -1355,7 +2323,13 @@ export class AllocationRunner implements FunctionRuntime {
       max_entries: request.maxEntries,
       connected_streams: this.eventReadStreams.size,
     });
-    for (const stream of this.eventReadStreams) stream.write(request);
+    for (const stream of [...this.eventReadStreams]) {
+      try {
+        stream.write(request);
+      } catch (error) {
+        this.dropEventReadStream(stream, "write_failed", error);
+      }
+    }
     return response.promise;
   }
 
@@ -1365,27 +2339,21 @@ export class AllocationRunner implements FunctionRuntime {
       connected_streams: this.eventReadStreams.size,
       has_pending_read: this.currentRead != null,
     });
-    if (this.currentRead != null) {
-      this.log("debug", "sending pending event log read to new stream", {
-        after_clock: this.currentRead.request.afterClock,
-        max_entries: this.currentRead.request.maxEntries,
-      });
-      stream.write(this.currentRead.request);
+    try {
+      stream.on("cancelled", () => this.dropEventReadStream(stream, "cancelled"));
+      stream.on("close", () => this.dropEventReadStream(stream, "closed"));
+      if (this.currentRead != null) {
+        this.log("debug", "sending pending event log read to new stream", {
+          after_clock: this.currentRead.request.afterClock,
+          max_entries: this.currentRead.request.maxEntries,
+        });
+        stream.write(this.currentRead.request);
+      }
+      if (this.finished && this.currentRead == null) stream.end();
+    } catch (error) {
+      this.dropEventReadStream(stream, "setup_failed", error);
+      throw error;
     }
-    let streamRemoved = false;
-    const removeStream = (reason: string) => {
-      if (streamRemoved) return;
-      streamRemoved = true;
-      this.eventReadStreams.delete(stream);
-      this.log("info", "event log read stream disconnected", {
-        reason,
-        connected_streams: this.eventReadStreams.size,
-        has_pending_read: this.currentRead != null,
-      });
-    };
-    stream.on("cancelled", () => removeStream("cancelled"));
-    stream.on("close", () => removeStream("closed"));
-    if (this.finished && this.currentRead == null) stream.end();
   }
 
   deliverEventLogResponse(response: Message): void {
@@ -1408,6 +2376,9 @@ export class AllocationRunner implements FunctionRuntime {
   }
 
   private requestOutputBlob(size: number): Promise<BlobValue> {
+    if (this.controller.signal.aborted) {
+      return Promise.reject(this.controller.signal.reason);
+    }
     const id = randomUUID();
     const request = deferred<Message>();
     this.outputBlobRequests.set(id, request);
@@ -1431,6 +2402,9 @@ export class AllocationRunner implements FunctionRuntime {
   }
 
   private requestStateOperation(operation: Message): Promise<Message> {
+    if (this.controller.signal.aborted) {
+      return Promise.reject(this.controller.signal.reason);
+    }
     const request = deferred<Message>();
     this.stateOperationRequests.set(operation.operationId, request);
     this.state.requestStateOperations.push(operation);
@@ -1474,13 +2448,21 @@ export class AllocationRunner implements FunctionRuntime {
         matched_by_order: matchedByOrder,
         pending_output_blob_requests: this.outputBlobRequests.size,
       });
-      this.publishState();
+      // Once a response is matched, settle its waiter before notifying state
+      // streams. A broken stream writer must not strand the allocation after
+      // the dataplane has already delivered the BLOB response.
       request.resolve(update.outputBlob);
+      this.publishState();
       return;
     }
     const result = update.requestStateOperationResult;
     if (result != null) {
-      const id = String(result.operationId);
+      if (typeof result.operationId !== "string" || result.operationId.length === 0) {
+        throw this.latchProtocolError(
+          "Allocation received a request state operation result without an operation ID",
+        );
+      }
+      const id = result.operationId;
       const request = this.stateOperationRequests.get(id);
       if (request == null) {
         this.log("warn", "unmatched request state operation result ignored", {
@@ -1502,8 +2484,10 @@ export class AllocationRunner implements FunctionRuntime {
         status_code: result.status?.code,
         pending_state_operations: this.stateOperationRequests.size,
       });
-      this.publishState();
+      // State publication is downstream bookkeeping. Resolve the operation
+      // first so a failing stream cannot turn a delivered result into a hang.
       request.resolve(result);
+      this.publishState();
       return;
     }
     this.log("warn", "allocation update contained no recognized payload");
@@ -1511,26 +2495,23 @@ export class AllocationRunner implements FunctionRuntime {
 
   watchState(stream: StreamCall): void {
     this.stateStreams.add(stream);
+    this.stateStreamFlows.set(stream, { backpressured: false });
     this.log("info", "allocation state stream connected", {
       connected_streams: this.stateStreams.size,
       state_hash: this.state.sha256Hash,
       pending_output_blob_requests: this.outputBlobRequests.size,
       pending_state_operations: this.stateOperationRequests.size,
     });
-    stream.write(this.state);
-    let streamRemoved = false;
-    const removeStream = (reason: string) => {
-      if (streamRemoved) return;
-      streamRemoved = true;
-      this.stateStreams.delete(stream);
-      this.log("info", "allocation state stream disconnected", {
-        reason,
-        connected_streams: this.stateStreams.size,
-      });
-    };
-    stream.on("cancelled", () => removeStream("cancelled"));
-    stream.on("close", () => removeStream("closed"));
-    if (this.finished) stream.end();
+    try {
+      stream.on("cancelled", () => this.dropStateStream(stream, "cancelled"));
+      stream.on("close", () => this.dropStateStream(stream, "closed"));
+      stream.on("drain", () => this.drainStateStream(stream));
+      this.writeStateSnapshot(stream, this.snapshotState());
+      if (this.finished) stream.end();
+    } catch (error) {
+      this.dropStateStream(stream, "setup_failed", error);
+      throw error;
+    }
   }
 
   private updateStateHash(): void {
@@ -1540,6 +2521,10 @@ export class AllocationRunner implements FunctionRuntime {
       requestStateOperations: this.state.requestStateOperations,
     });
     this.state.sha256Hash = createHash("sha256").update(content).digest("hex");
+  }
+
+  private snapshotState(): Message {
+    return nativeStructuredClone(this.state) as Message;
   }
 
   private publishState(): void {
@@ -1552,7 +2537,41 @@ export class AllocationRunner implements FunctionRuntime {
       progress_current: this.state.progress?.current,
       progress_total: this.state.progress?.total,
     });
-    for (const stream of this.stateStreams) stream.write(this.state);
+    for (const stream of [...this.stateStreams]) {
+      // Allocation state is level-triggered: one current snapshot contains all
+      // outstanding requests. Coalesce intermediate snapshots while grpc-js is
+      // backpressured so progress-heavy functions cannot grow the transport
+      // buffer without bound.
+      this.writeStateSnapshot(stream, this.snapshotState());
+    }
+  }
+
+  private writeStateSnapshot(stream: StreamCall, snapshot: Message): void {
+    const flow = this.stateStreamFlows.get(stream);
+    if (flow == null) return;
+    if (flow.backpressured) {
+      flow.pending = snapshot;
+      return;
+    }
+    try {
+      // grpc-js streams are object-mode writers and may retain a message
+      // reference while backpressured. Every caller supplies a deep snapshot
+      // so later reconciliation cannot rewrite transport-owned state.
+      flow.backpressured = !stream.write(snapshot);
+    } catch (error) {
+      // A reconnect receives the complete current state. Drop a broken writer
+      // so it cannot block healthy streams or allocation waiters.
+      this.dropStateStream(stream, "write_failed", error);
+    }
+  }
+
+  private drainStateStream(stream: StreamCall): void {
+    const flow = this.stateStreamFlows.get(stream);
+    if (flow == null) return;
+    flow.backpressured = false;
+    const pending = flow.pending;
+    flow.pending = undefined;
+    if (pending != null) this.writeStateSnapshot(stream, pending);
   }
 
   private addBatch(events: Message[]): void {
@@ -1570,7 +2589,10 @@ export class AllocationRunner implements FunctionRuntime {
       queued_batches: this.executionBatches.length,
       waiting_consumers: this.executionBatchWaiters.length,
     });
-    for (const waiter of this.executionBatchWaiters.splice(0)) waiter(events);
+    for (const waiter of this.executionBatchWaiters.splice(0)) {
+      this.markTerminalBatchObserved(events);
+      waiter(events);
+    }
   }
 
   private queueTerminalBatch(finishAllocation: Message): void {
@@ -1591,7 +2613,9 @@ export class AllocationRunner implements FunctionRuntime {
         event_count: this.executionBatches[0].length,
         queued_batches: this.executionBatches.length,
       });
-      return this.executionBatches[0];
+      const events = this.executionBatches[0];
+      this.markTerminalBatchObserved(events);
+      return events;
     }
     if (this.finished) {
       this.log("debug", "returning empty execution log batch for finished allocation");
@@ -1611,6 +2635,18 @@ export class AllocationRunner implements FunctionRuntime {
     });
   }
 
+  private markTerminalBatchObserved(events: Message[]): void {
+    if (
+      this.terminalBatchObserved
+      || !events.some((event) => event.finishAllocation != null)
+    ) {
+      return;
+    }
+    this.terminalBatchObserved = true;
+    this.log("debug", "terminal execution log batch observed by consumer");
+    for (const waiter of this.terminalBatchObservedWaiters.splice(0)) waiter();
+  }
+
   get isFinished(): boolean {
     return this.finished;
   }
@@ -1621,16 +2657,54 @@ export class AllocationRunner implements FunctionRuntime {
       return;
     }
     this.finished = true;
-    if (!this.controller.signal.aborted) this.controller.abort();
+    this.abortExecution(new FunctionError("Allocation finished"));
     this.log("info", "allocation runner finished", {
       duration_ms: Date.now() - this.startedAt,
       queued_execution_batches: this.executionBatches.length,
       state_streams: this.stateStreams.size,
       event_log_streams: this.eventReadStreams.size,
     });
-    for (const stream of this.stateStreams) stream.end();
-    for (const stream of this.eventReadStreams) stream.end();
+    for (const stream of [...this.stateStreams]) {
+      try {
+        stream.end();
+      } catch (error) {
+        this.dropStateStream(stream, "end_failed", error);
+      }
+    }
+    for (const stream of [...this.eventReadStreams]) {
+      try {
+        stream.end();
+      } catch (error) {
+        this.dropEventReadStream(stream, "end_failed", error);
+      }
+    }
     for (const waiter of this.executionBatchWaiters.splice(0)) waiter([]);
+  }
+
+  private dropStateStream(
+    stream: StreamCall,
+    reason: string,
+    error?: unknown,
+  ): void {
+    if (!this.stateStreams.delete(stream)) return;
+    this.stateStreamFlows.delete(stream);
+    this.log("info", "allocation state stream disconnected", {
+      reason,
+      connected_streams: this.stateStreams.size,
+    }, error);
+  }
+
+  private dropEventReadStream(
+    stream: StreamCall,
+    reason: string,
+    error?: unknown,
+  ): void {
+    if (!this.eventReadStreams.delete(stream)) return;
+    this.log("info", "event log read stream disconnected", {
+      reason,
+      connected_streams: this.eventReadStreams.size,
+      has_pending_read: this.currentRead != null,
+    }, error);
   }
 
   private stateOperationKind(operation: Message | undefined): string {
@@ -1787,24 +2861,32 @@ export class AllocationRunner implements FunctionRuntime {
   }
 
   private log(level: LogLevel, message: string, fields: Message = {}, error?: unknown): void {
-    const rendered = error instanceof Error
-      ? error.stack?.split("\n") ?? [`${error.name}: ${error.message}`]
-      : error == null ? undefined : [String(error)];
-    process.stderr.write(`${JSON.stringify({
-      timestamp: new Date().toISOString(),
-      level,
-      component: "typescript_function_executor_allocation",
-      message,
-      allocation_id: this.allocation.allocationId,
-      request_id: this.allocation.requestId,
-      function_call_id: this.allocation.functionCallId,
-      namespace: this.functionRef.namespace,
-      application: this.functionRef.applicationName,
-      application_version: this.functionRef.applicationVersion,
-      function: this.functionRef.functionName,
-      elapsed_ms: Date.now() - this.startedAt,
-      ...fields,
-      ...(rendered == null ? {} : { error: rendered }),
-    })}\n`);
+    this.runWithoutReplayOwnership(() => {
+      writeStructuredOutput("stderr", () => {
+        const rendered = error instanceof Error
+          ? error.stack?.split("\n") ?? [`${error.name}: ${error.message}`]
+          : error == null ? undefined : [String(error)];
+        return {
+          timestamp: new Date().toISOString(),
+          level,
+          component: "typescript_function_executor_allocation",
+          message,
+          allocation_id: this.allocation.allocationId,
+          request_id: this.allocation.requestId,
+          function_call_id: this.allocation.functionCallId,
+          namespace: this.functionRef.namespace,
+          application: this.functionRef.applicationName,
+          application_version: this.functionRef.applicationVersion,
+          function: this.functionRef.functionName,
+          elapsed_ms: Date.now() - this.startedAt,
+          ...fields,
+          ...(rendered == null ? {} : { error: rendered }),
+        };
+      });
+    });
+  }
+
+  private runWithoutReplayOwnership<T>(callback: () => T): T {
+    return this.replay?.runWithoutCausalOwnership(callback) ?? callback();
   }
 }

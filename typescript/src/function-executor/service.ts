@@ -9,6 +9,7 @@ import { SDK_VERSION } from "../defaults.js";
 import type { RegisteredDefinition } from "../applications/function.js";
 import { restoreRegistry, snapshotRegistry } from "../applications/registry.js";
 import { AllocationRunner } from "./allocation.js";
+import { writeStructuredOutput } from "./safe-output.js";
 import { printCloudEvent } from "./user-events.js";
 
 type Message = Record<string, any>;
@@ -16,6 +17,7 @@ type UnaryCall = grpc.ServerUnaryCall<Message, Message>;
 type Callback = grpc.sendUnaryData<Message>;
 type WritableCall = grpc.ServerWritableStream<Message, Message>;
 type LogLevel = "debug" | "info" | "warn" | "error";
+const SHUTDOWN_TERMINAL_DRAIN_TIMEOUT_MS = 1_000;
 
 interface CodeManifest {
   format_version?: number;
@@ -182,6 +184,19 @@ export class FunctionExecutorService {
       const allocations = [...this.allocations.values()];
       for (const allocation of allocations) allocation.cancel(reason);
       await Promise.all(allocations.map((allocation) => allocation.waitForCompletion()));
+      const terminalObservations = await Promise.all(
+        allocations.map((allocation) =>
+          allocation.waitForTerminalBatchObserved(SHUTDOWN_TERMINAL_DRAIN_TIMEOUT_MS)
+        ),
+      );
+      const unobservedCount = terminalObservations.filter((observed) => !observed).length;
+      if (unobservedCount > 0) {
+        this.log(
+          "warn",
+          "shutdown terminal execution batches were not observed before drain deadline",
+          { unobserved_allocation_count: unobservedCount },
+        );
+      }
       this.log("info", "function executor service shutdown completed", {
         allocation_count: allocations.length,
       });
@@ -266,10 +281,16 @@ export class FunctionExecutorService {
 
   private async initializeAttempt(request: Message): Promise<void> {
     if (request.function == null) throw new Error("InitializeRequest.function is required");
-    if (request.function.namespace == null) throw new Error("InitializeRequest.function.namespace is required");
-    if (request.function.applicationName == null) throw new Error("InitializeRequest.function.application_name is required");
-    if (request.function.functionName == null) throw new Error("InitializeRequest.function.function_name is required");
-    if (request.function.applicationVersion == null) throw new Error("InitializeRequest.function.application_version is required");
+    for (const [field, value] of [
+      ["namespace", request.function.namespace],
+      ["application_name", request.function.applicationName],
+      ["function_name", request.function.functionName],
+      ["application_version", request.function.applicationVersion],
+    ] as const) {
+      if (typeof value !== "string" || value.length === 0) {
+        throw new Error(`InitializeRequest.function.${field} is required`);
+      }
+    }
     if (request.applicationCode == null) throw new Error("InitializeRequest.application_code is required");
     if (request.applicationCode.manifest == null) throw new Error("InitializeRequest.application_code.manifest is required");
     if (request.applicationCode.data == null) throw new Error("InitializeRequest.application_code.data is required");
@@ -348,9 +369,20 @@ export class FunctionExecutorService {
         throw new Error("Application runtime does not export __tensorlakeGetFunction");
       }
       const definition = runtime.__tensorlakeGetFunction(functionName);
-      const applicationDefinition = runtime.__tensorlakeGetFunction(request.function.applicationName);
+      if (definition?.name !== functionName) {
+        throw new Error(
+          `Application runtime resolved function '${functionName}' as '${String(definition?.name)}'`,
+        );
+      }
+      const applicationName = String(request.function.applicationName);
+      const applicationDefinition = runtime.__tensorlakeGetFunction(applicationName);
+      if (applicationDefinition?.name !== applicationName) {
+        throw new Error(
+          `Application runtime resolved application '${applicationName}' as '${String(applicationDefinition?.name)}'`,
+        );
+      }
       if (applicationDefinition.application == null) {
-        throw new Error(`'${request.function.applicationName}' is not a Tensorlake application`);
+        throw new Error(`'${applicationName}' is not a Tensorlake application`);
       }
       this.functionRef = request.function;
       this.definition = definition;
@@ -555,6 +587,15 @@ export class FunctionExecutorService {
             ? "request_state_operation_result"
             : "unknown",
       });
+      if (
+        call.request.outputBlob == null
+        && call.request.requestStateOperationResult == null
+      ) {
+        throw rpcError(
+          grpc.status.INVALID_ARGUMENT,
+          `Unknown update type in AllocationUpdate for allocation ${allocationId}`,
+        );
+      }
       const allocation = this.getAllocation(allocationId);
       if (allocation.isFinished) throw rpcError(grpc.status.FAILED_PRECONDITION, "Allocation is already finished");
       allocation.deliverUpdate(call.request);
@@ -674,16 +715,18 @@ export class FunctionExecutorService {
   }
 
   private log(level: LogLevel, message: string, fields: Message = {}, error?: unknown): void {
-    const rendered = error instanceof Error
-      ? error.stack?.split("\n") ?? [`${error.name}: ${error.message}`]
-      : error == null ? undefined : [String(error)];
-    process.stderr.write(`${JSON.stringify({
-      timestamp: new Date().toISOString(),
-      level,
-      component: "typescript_function_executor_service",
-      message,
-      ...fields,
-      ...(rendered == null ? {} : { error: rendered }),
-    })}\n`);
+    writeStructuredOutput("stderr", () => {
+      const rendered = error instanceof Error
+        ? error.stack?.split("\n") ?? [`${error.name}: ${error.message}`]
+        : error == null ? undefined : [String(error)];
+      return {
+        timestamp: new Date().toISOString(),
+        level,
+        component: "typescript_function_executor_service",
+        message,
+        ...fields,
+        ...(rendered == null ? {} : { error: rendered }),
+      };
+    });
   }
 }

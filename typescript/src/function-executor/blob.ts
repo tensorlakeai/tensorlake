@@ -296,11 +296,23 @@ export async function downloadSerializedObject(
   if (manifest?.size == null || manifest.metadataSize == null) {
     throw new Error("Serialized object manifest is missing size or metadata_size");
   }
+  if (!Number.isSafeInteger(manifest.size) || manifest.size < 0) {
+    throw new Error("Serialized object size must be a non-negative safe integer");
+  }
+  if (!Number.isSafeInteger(manifest.metadataSize) || manifest.metadataSize < 0) {
+    throw new Error("Serialized object metadata_size must be a non-negative safe integer");
+  }
+  if (manifest.metadataSize > manifest.size) {
+    throw new Error("Serialized object metadata_size cannot exceed size");
+  }
+  if (typeof manifest.sha256Hash !== "string" || manifest.sha256Hash.length === 0) {
+    throw new Error("Serialized object manifest is missing sha256_hash");
+  }
   const start = object.offset ?? 0;
   const bytes = await downloadBlobRange(blob, start, manifest.size, log, signal);
   throwIfAborted(signal);
   const hash = createHash("sha256").update(bytes).digest("hex");
-  if (manifest.sha256Hash != null && hash !== manifest.sha256Hash) {
+  if (hash !== manifest.sha256Hash) {
     throw new Error(`Serialized object hash mismatch: expected ${manifest.sha256Hash}, got ${hash}`);
   }
   return {
@@ -351,7 +363,7 @@ export function prepareSerializedObject(
         size: bytes.byteLength,
         metadataSize: metadata.byteLength,
         sha256Hash: createHash("sha256").update(bytes).digest("hex"),
-        contentType: serialized.contentType,
+        ...(serialized.encoding === "raw" ? { contentType: serialized.contentType } : {}),
         sourceFunctionCallId,
       },
     },
