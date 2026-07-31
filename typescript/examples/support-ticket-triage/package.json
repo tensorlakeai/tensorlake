@@ -1,0 +1,20 @@
+{
+  "name": "tensorlake-typescript-support-ticket-triage-example",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@ai-sdk/openai": "^4.0.17",
+    "ai": "^7.0.34",
+    "tensorlake": "file:../..",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}
