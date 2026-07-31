@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { pathToFileURL } from "node:url";
+import { compileFunction, constants as vmConstants } from "node:vm";
 import * as grpc from "@grpc/grpc-js";
 import { unzipSync } from "fflate";
 import { SDK_VERSION } from "../defaults.js";
@@ -31,9 +32,11 @@ interface RuntimeModule {
   __tensorlakeGetFunction?(name: string): RegisteredDefinition;
 }
 
-const nativeImport = new Function("specifier", "return import(specifier)") as (
-  specifier: string,
-) => Promise<unknown>;
+const nativeImport = compileFunction(
+  "return import(specifier)",
+  ["specifier"],
+  { importModuleDynamically: vmConstants.USE_MAIN_CONTEXT_DEFAULT_LOADER },
+) as (specifier: string) => Promise<unknown>;
 
 function rpcError(code: grpc.status, details: string): grpc.ServiceError {
   return Object.assign(new Error(details), { code, details, metadata: new grpc.Metadata() });
