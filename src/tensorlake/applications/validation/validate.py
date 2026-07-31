@@ -1,4 +1,5 @@
 import inspect
+import math
 import os
 from typing import Any, Callable
 
@@ -19,7 +20,14 @@ from ..function.type_hints import (
     is_raw_body_type_hint,
 )
 from ..function.user_data_serializer import function_input_serializer
-from ..interface import File, Function, HttpBody, InternalError, SerializationError
+from ..interface import (
+    File,
+    Function,
+    HttpBody,
+    InternalError,
+    Retries,
+    SerializationError,
+)
 from ..interface.decorators import (
     _ApplicationDecorator,
     _class_name,
@@ -410,6 +418,185 @@ def _validate_regular_function(
             )
         )
 
+    if function._function_config is not None:
+        messages.extend(_validate_function_configuration(function, function_details))
+
+    return messages
+
+
+def _configuration_error(
+    message: str,
+    function_details: FunctionDetails,
+) -> ValidationMessage:
+    return ValidationMessage(
+        message=message,
+        severity=ValidationMessageSeverity.ERROR,
+        details=function_details,
+    )
+
+
+def _is_finite_positive_number(value: Any) -> bool:
+    return (
+        isinstance(value, (int, float))
+        and not isinstance(value, bool)
+        and math.isfinite(value)
+        and value > 0
+    )
+
+
+def _is_non_negative_integer(value: Any) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _is_valid_gpu_setting(value: Any) -> bool:
+    values = value if isinstance(value, list) else [value]
+    if value is None:
+        return True
+    if any(not isinstance(item, str) for item in values):
+        return False
+    for item in values:
+        parts = item.split(":")
+        if not parts[0] or len(parts) > 2:
+            return False
+        if len(parts) == 2:
+            try:
+                count = int(parts[1])
+            except ValueError:
+                return False
+            if count <= 0 or str(count) != parts[1]:
+                return False
+    return True
+
+
+def _validate_retries(
+    retries: Any,
+    label: str,
+    function_details: FunctionDetails,
+) -> list[ValidationMessage]:
+    if not isinstance(retries, Retries):
+        return [
+            _configuration_error(
+                f"{label} must be a Retries object.",
+                function_details,
+            )
+        ]
+    if (
+        not isinstance(retries.max_retries, int)
+        or isinstance(retries.max_retries, bool)
+        or retries.max_retries < 0
+        or retries.max_retries > 10
+    ):
+        return [
+            _configuration_error(
+                f"{label} max_retries must be an integer between 0 and 10.",
+                function_details,
+            )
+        ]
+    return []
+
+
+def _validate_function_configuration(
+    function: Function,
+    function_details: FunctionDetails,
+) -> list[ValidationMessage]:
+    config = function._function_config
+    if config is None:
+        return []
+
+    messages: list[ValidationMessage] = []
+    for label, value in (
+        ("Function cpu", config.cpu),
+        ("Function memory", config.memory),
+        ("Function ephemeral_disk", config.ephemeral_disk),
+    ):
+        if not _is_finite_positive_number(value):
+            messages.append(
+                _configuration_error(
+                    f"{label} must be a finite number greater than zero.",
+                    function_details,
+                )
+            )
+
+    if (
+        not isinstance(config.timeout, int)
+        or isinstance(config.timeout, bool)
+        or config.timeout < 1
+        or config.timeout > 86_400
+    ):
+        messages.append(
+            _configuration_error(
+                "Function timeout must be an integer between 1 and 86400 seconds.",
+                function_details,
+            )
+        )
+
+    if not isinstance(config.secrets, list) or any(
+        not isinstance(secret, str) or not secret for secret in config.secrets
+    ):
+        messages.append(
+            _configuration_error(
+                "Function secrets must be a list of non-empty strings.",
+                function_details,
+            )
+        )
+
+    if not _is_valid_gpu_setting(config.gpu):
+        messages.append(
+            _configuration_error(
+                "Function gpu must be a GPU model or list of GPU models, "
+                "optionally followed by a positive integer count.",
+                function_details,
+            )
+        )
+
+    if config.region not in (None, "us-east-1", "eu-west-1"):
+        messages.append(
+            _configuration_error(
+                "Function region must be 'us-east-1', 'eu-west-1', or None.",
+                function_details,
+            )
+        )
+
+    valid_container_settings: dict[str, int] = {}
+    for label, value in (
+        ("warm_containers", config.warm_containers),
+        ("min_containers", config.min_containers),
+        ("max_containers", config.max_containers),
+    ):
+        if value is None:
+            continue
+        if not _is_non_negative_integer(value):
+            messages.append(
+                _configuration_error(
+                    f"Function {label} must be a non-negative integer.",
+                    function_details,
+                )
+            )
+        else:
+            valid_container_settings[label] = value
+
+    maximum = valid_container_settings.get("max_containers")
+    minimum = valid_container_settings.get("min_containers")
+    warm = valid_container_settings.get("warm_containers")
+    if maximum is not None and minimum is not None and minimum > maximum:
+        messages.append(
+            _configuration_error(
+                "Function min_containers cannot exceed max_containers.",
+                function_details,
+            )
+        )
+    if maximum is not None and warm is not None and warm > maximum:
+        messages.append(
+            _configuration_error(
+                "Function warm_containers cannot exceed max_containers.",
+                function_details,
+            )
+        )
+
+    if config.retries is not None:
+        messages.extend(
+            _validate_retries(config.retries, "Function retries", function_details)
+        )
     return messages
 
 
@@ -418,6 +605,43 @@ def _validate_application_function(
 ) -> list[ValidationMessage]:
     """Validates application aspects of an application function."""
     messages: list[ValidationMessage] = []
+    application_config = function._application_config
+    if application_config is not None:
+        if not isinstance(application_config.tags, dict) or any(
+            not isinstance(key, str) or not key or not isinstance(value, str)
+            for key, value in application_config.tags.items()
+        ):
+            messages.append(
+                _configuration_error(
+                    "Application tags require non-empty string keys and string values.",
+                    function_details,
+                )
+            )
+        if not isinstance(application_config.allow, list) or any(
+            capability != "unauthenticated_requests"
+            for capability in application_config.allow
+        ):
+            messages.append(
+                _configuration_error(
+                    "Application allow must contain only "
+                    "'unauthenticated_requests'.",
+                    function_details,
+                )
+            )
+        messages.extend(
+            _validate_retries(
+                application_config.retries,
+                "Application retries",
+                function_details,
+            )
+        )
+        if application_config.region not in (None, "us-east-1", "eu-west-1"):
+            messages.append(
+                _configuration_error(
+                    "Application region must be 'us-east-1', 'eu-west-1', or None.",
+                    function_details,
+                )
+            )
 
     function_decorator: _FunctionDecorator | None = None
     for decorator in get_decorators():

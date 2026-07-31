@@ -27,7 +27,7 @@ class ApplicationArgument:
 @dataclass
 class SerializedApplicationArgument:
     data: bytes | memoryview
-    content_type: str
+    content_type: str | None
 
 
 def serialize_application_function_call_arguments(

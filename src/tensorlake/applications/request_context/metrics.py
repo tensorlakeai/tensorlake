@@ -3,6 +3,13 @@ from typing import Any
 from tensorlake.applications.cloud_events import print_cloud_event
 
 
+def _print_best_effort(*values: object) -> None:
+    try:
+        print(*values, flush=True)
+    except Exception:
+        pass
+
+
 def print_counter_incremented_event(
     request_id: str,
     function_name: str,
@@ -23,7 +30,7 @@ def print_counter_incremented_event(
     }
 
     if local_mode:
-        print(f"Counter Incremented: {event}", flush=True)
+        _print_best_effort(f"Counter Incremented: {event}")
     else:
         try:
             print_cloud_event(
@@ -32,11 +39,10 @@ def print_counter_incremented_event(
                 source="/tensorlake/applications/metrics",
             )
         except Exception:
-            print(
-                f"Failed to print counter incremented cloud event: ",
+            _print_best_effort(
+                "Failed to print counter incremented cloud event:",
                 counter_name,
                 counter_value,
-                flush=True,
             )
 
 
@@ -60,7 +66,7 @@ def print_timer_recorded_event(
     }
 
     if local_mode:
-        print(f"Timer Recorded: {event}", flush=True)
+        _print_best_effort(f"Timer Recorded: {event}")
     else:
         try:
             print_cloud_event(
@@ -69,9 +75,8 @@ def print_timer_recorded_event(
                 source="/tensorlake/applications/metrics",
             )
         except Exception:
-            print(
-                f"Failed to print timer recorded cloud event: ",
+            _print_best_effort(
+                "Failed to print timer recorded cloud event:",
                 timer_name,
                 timer_value,
-                flush=True,
             )

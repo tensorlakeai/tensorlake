@@ -1,3 +1,5 @@
+import math
+
 import httpx
 
 from ...interface.exceptions import InternalError, SDKUsageError
@@ -8,6 +10,18 @@ from ..http_server.handlers.progress_update import (
     FunctionProgressUpdateRequest,
 )
 from .transport import RequestContextHTTPTransport
+
+
+def _is_non_negative_finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value) and value >= 0
+    except OverflowError:
+        # Python integers are unbounded, but the progress transport stores
+        # numbers as finite doubles. Reject values that cannot be represented
+        # before Pydantic turns the SDK usage mistake into an InternalError.
+        return False
 
 
 class FunctionProgressHTTPClient(FunctionProgress):
@@ -39,9 +53,9 @@ class FunctionProgressHTTPClient(FunctionProgress):
     ) -> None:
         # If we don't validate user supplied inputs here then there will be a Pydantic validation error
         # below which will raise an InternalError instead of SDKUsageError.
-        if not isinstance(current, (int, float)):
+        if not _is_non_negative_finite_number(current):
             raise SDKUsageError(f"'current' needs to be a number, got: {current}")
-        if not isinstance(total, (int, float)):
+        if not _is_non_negative_finite_number(total):
             raise SDKUsageError(f"'total' needs to be a number, got: {total}")
         if message is not None and not isinstance(message, str):
             raise SDKUsageError(f"'message' needs to be a string, got: {message}")
