@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tensorlake.ai/schemas/canonical-types.schema.json",
+  "title": "Tensorlake shared canonical types",
+  "description": "Shared shapes used by the Function Executor and Applications SDK specifications.",
+  "$defs": {
+    "OpaqueId": {
+      "description": "A non-empty identifier whose generation and global scope are owned by its producer.",
+      "type": "string",
+      "minLength": 1
+    },
+    "Sha256Hex": {
+      "description": "A lowercase or uppercase hexadecimal SHA-256 digest.",
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{64}$"
+    },
+    "NonEmptyString": {
+      "type": "string",
+      "minLength": 1
+    },
+    "NonNegativeInteger": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "SafeNonNegativeInteger": {
+      "description": "A non-negative integer exactly representable by both Python and JavaScript runtimes.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 9007199254740991
+    }
+  }
+}

@@ -1,0 +1,151 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tensorlake.ai/schemas/function-executor-canonical-types.schema.json",
+  "title": "Function Executor canonical types",
+  "description": "Semantic shapes for core Function Executor entities. The protobuf is the wire-format authority.",
+  "$defs": {
+    "FunctionRef": {
+      "type": "object",
+      "required": ["namespace", "application_name", "application_version", "function_name"],
+      "additionalProperties": false,
+      "properties": {
+        "namespace": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonEmptyString" },
+        "application_name": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonEmptyString" },
+        "application_version": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonEmptyString" },
+        "function_name": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonEmptyString" }
+      }
+    },
+    "SerializedObjectManifest": {
+      "type": "object",
+      "required": ["encoding", "size", "metadata_size", "sha256_hash"],
+      "properties": {
+        "encoding": { "type": ["string", "integer"] },
+        "encoding_version": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/SafeNonNegativeInteger" },
+        "size": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/SafeNonNegativeInteger" },
+        "metadata_size": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/SafeNonNegativeInteger" },
+        "sha256_hash": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/Sha256Hex" },
+        "content_type": { "type": "string" },
+        "source_function_call_id": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" }
+      }
+    },
+    "BLOBChunk": {
+      "type": "object",
+      "required": ["uri", "size"],
+      "properties": {
+        "uri": { "type": "string", "minLength": 1 },
+        "size": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/SafeNonNegativeInteger" },
+        "etag": { "type": "string" }
+      }
+    },
+    "BLOB": {
+      "type": "object",
+      "required": ["id", "chunks"],
+      "properties": {
+        "id": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" },
+        "chunks": { "type": "array", "items": { "$ref": "#/$defs/BLOBChunk" } }
+      }
+    },
+    "SerializedObjectInsideBLOB": {
+      "type": "object",
+      "required": ["manifest", "offset"],
+      "properties": {
+        "manifest": { "$ref": "#/$defs/SerializedObjectManifest" },
+        "offset": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/SafeNonNegativeInteger" }
+      }
+    },
+    "Allocation": {
+      "type": "object",
+      "required": ["request_id", "function_call_id", "allocation_id", "inputs"],
+      "properties": {
+        "request_id": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" },
+        "function_call_id": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" },
+        "allocation_id": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" },
+        "inputs": { "type": "object" },
+        "replay_mode": { "enum": [0, 1, 2, "REPLAY_MODE_NONE", "REPLAY_MODE_STRICT", "REPLAY_MODE_ADAPTIVE"] }
+      }
+    },
+    "StateOperation": {
+      "type": "object",
+      "required": ["operation_id", "state_key", "operation"],
+      "properties": {
+        "operation_id": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" },
+        "state_key": { "type": "string" },
+        "operation": { "enum": ["prepare_read", "prepare_write", "commit_write"] }
+      }
+    },
+    "AllocationState": {
+      "type": "object",
+      "required": ["output_blob_requests", "request_state_operations", "sha256_hash"],
+      "properties": {
+        "progress": {
+          "type": "object",
+          "required": ["current", "total"],
+          "properties": {
+            "current": { "type": "number", "minimum": 0 },
+            "total": { "type": "number", "minimum": 0 }
+          }
+        },
+        "output_blob_requests": { "type": "array", "items": { "type": "object" } },
+        "request_state_operations": { "type": "array", "items": { "$ref": "#/$defs/StateOperation" } },
+        "sha256_hash": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/Sha256Hex" }
+      }
+    },
+    "ExecutionEvent": {
+      "type": "object",
+      "required": ["kind"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "create_function_call",
+            "function_call_creation_failed",
+            "create_function_call_watcher",
+            "finish_allocation"
+          ]
+        }
+      }
+    },
+    "AllocationEvent": {
+      "type": "object",
+      "required": ["clock", "kind"],
+      "properties": {
+        "clock": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "kind": {
+          "enum": [
+            "function_call_created",
+            "function_call_watcher_created",
+            "function_call_watcher_result"
+          ]
+        }
+      }
+    },
+    "EventLogPage": {
+      "type": "object",
+      "required": ["entries"],
+      "properties": {
+        "entries": { "type": "array", "items": { "$ref": "#/$defs/AllocationEvent" } },
+        "last_clock": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "has_more": { "type": "boolean" }
+      }
+    },
+    "TerminalOutcome": {
+      "type": "object",
+      "required": ["outcome_code"],
+      "properties": {
+        "outcome_code": { "enum": ["success", "failure"] },
+        "failure_reason": {
+          "enum": ["internal_error", "function_error", "request_error", "replay_event_history_mismatch"]
+        },
+        "value": {},
+        "tail_call_durable_id": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" }
+      }
+    }
+  }
+}
