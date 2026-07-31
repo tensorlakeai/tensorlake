@@ -6,6 +6,7 @@ use std::process::Stdio;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use rand::distr::{Alphanumeric, SampleString};
 use rolldown::plugin::{
     HookLoadArgs, HookLoadOutput, HookLoadReturn, HookNoopReturn, HookResolveIdArgs,
     HookResolveIdOutput, HookResolveIdReturn, HookUsage, Plugin, PluginContext,
@@ -39,6 +40,7 @@ const MAX_CODE_SIZE: u64 = 5 * 1024 * 1024;
 const DEFAULT_NODE_IMAGE: &str = "node:24-bookworm-slim";
 const EXECUTOR_CAPSULE_CONTEXT_PATH: &str = ".tensorlake/function-executor-runtime.tgz";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
+const UNAUTHENTICATED_REQUESTS: &str = "unauthenticated_requests";
 const DISCOVERY_SCRIPT: &str = r#"
 import { writeFile } from "node:fs/promises";
 
@@ -906,7 +908,7 @@ async fn build_application_images(
                         "Tensorlake CLI (rust/{})",
                         env!("CARGO_PKG_VERSION")
                     )),
-                    docker_compat: false,
+                    docker_compat: true,
                 },
                 dockerfile_path: context_directory.join(".tensorlake-application.Dockerfile"),
                 dockerfile_text: Some(dockerfile),
@@ -1004,7 +1006,9 @@ async fn upsert_application(
     upgrade_running_requests: bool,
 ) -> Result<()> {
     let client = ctx.client()?;
-    let manifest = serde_json::to_string(application)?;
+    let mut application = application.clone();
+    ensure_public_endpoint_id(&ctx.api_url, &ctx.namespace, &client, &mut application).await?;
+    let manifest = serde_json::to_string(&application)?;
     let url = format!(
         "{}/v1/namespaces/{}/applications",
         ctx.api_url.trim_end_matches('/'),
@@ -1048,6 +1052,77 @@ async fn upsert_application(
     unreachable!()
 }
 
+fn allows_unauthenticated_requests(application: &Value) -> bool {
+    application
+        .get("allow")
+        .and_then(Value::as_array)
+        .is_some_and(|allow| {
+            allow
+                .iter()
+                .any(|capability| capability.as_str() == Some(UNAUTHENTICATED_REQUESTS))
+        })
+}
+
+fn generate_public_endpoint_id() -> String {
+    format!(
+        "endpoint_{}",
+        Alphanumeric.sample_string(&mut rand::rng(), 21)
+    )
+}
+
+async fn ensure_public_endpoint_id(
+    api_url: &str,
+    namespace: &str,
+    client: &reqwest::Client,
+    application: &mut Value,
+) -> Result<()> {
+    if !allows_unauthenticated_requests(application)
+        || application
+            .get("public_endpoint_id")
+            .and_then(Value::as_str)
+            .is_some_and(|endpoint_id| !endpoint_id.is_empty())
+    {
+        return Ok(());
+    }
+
+    let application_name = required_string(application, "name", "application")?;
+    let url = format!(
+        "{}/v1/namespaces/{}/applications/{}",
+        api_url.trim_end_matches('/'),
+        urlencoding::encode(namespace),
+        urlencoding::encode(application_name),
+    );
+    let response = client.get(url).send().await.map_err(CliError::Http)?;
+    let endpoint_id = if response.status().is_success() {
+        response
+            .json::<Value>()
+            .await
+            .map_err(CliError::Http)?
+            .get("public_endpoint_id")
+            .and_then(Value::as_str)
+            .filter(|endpoint_id| !endpoint_id.is_empty())
+            .map(ToOwned::to_owned)
+    } else if response.status() == reqwest::StatusCode::NOT_FOUND {
+        None
+    } else {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "Could not resolve the public endpoint for application \
+             '{application_name}' (HTTP {status}): {body}"
+        )));
+    };
+
+    application
+        .as_object_mut()
+        .ok_or_else(|| CliError::usage("Tensorlake application manifest must be an object"))?
+        .insert(
+            "public_endpoint_id".to_string(),
+            Value::String(endpoint_id.unwrap_or_else(generate_public_endpoint_id)),
+        );
+    Ok(())
+}
+
 fn required_string<'a>(value: &'a Value, key: &str, label: &str) -> Result<&'a str> {
     value.get(key).and_then(Value::as_str).ok_or_else(|| {
         CliError::usage(format!(
@@ -1060,8 +1135,10 @@ fn required_string<'a>(value: &'a Value, key: &str, label: &str) -> Result<&'a s
 mod tests {
     use super::{
         SerializedImageOperation, application_dockerfile, bundle_application, canonical_entrypoint,
-        discover_deployment_with_timeout, load_executor_capsule, render_image_operation,
+        discover_deployment_with_timeout, ensure_public_endpoint_id, load_executor_capsule,
+        render_image_operation,
     };
+    use serde_json::json;
     use std::collections::BTreeMap;
     use std::path::PathBuf;
     use std::time::Duration;
@@ -1175,6 +1252,100 @@ export function __tensorlakeDeployment() {
                 .await
                 .unwrap();
         assert_eq!(discovery.sdk_version, "test");
+    }
+
+    #[tokio::test]
+    async fn public_application_deployment_reuses_existing_endpoint_id() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let count = socket.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..count]);
+            assert!(
+                request.starts_with(
+                    "GET /v1/namespaces/default/applications/public_webhook HTTP/1.1\r\n"
+                ),
+                "{request}",
+            );
+            let body = r#"{"public_endpoint_id":"endpoint_0123456789abcdefghijk"}"#;
+            socket
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\
+                         Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        body.len(),
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .unwrap();
+        });
+        let mut application = json!({
+            "name": "public_webhook",
+            "allow": ["unauthenticated_requests"],
+        });
+
+        ensure_public_endpoint_id(
+            &format!("http://{address}"),
+            "default",
+            &crate::http::client_builder().build().unwrap(),
+            &mut application,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        assert_eq!(
+            application["public_endpoint_id"],
+            "endpoint_0123456789abcdefghijk",
+        );
+    }
+
+    #[tokio::test]
+    async fn public_application_deployment_generates_endpoint_id_after_not_found() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            let mut request = vec![0_u8; 4096];
+            let _ = socket.read(&mut request).await.unwrap();
+            socket
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\
+                      Connection: close\r\n\r\n",
+                )
+                .await
+                .unwrap();
+        });
+        let mut application = json!({
+            "name": "new_public_webhook",
+            "allow": ["unauthenticated_requests"],
+        });
+
+        ensure_public_endpoint_id(
+            &format!("http://{address}"),
+            "default",
+            &crate::http::client_builder().build().unwrap(),
+            &mut application,
+        )
+        .await
+        .unwrap();
+        server.await.unwrap();
+
+        let endpoint_id = application["public_endpoint_id"].as_str().unwrap();
+        assert!(endpoint_id.starts_with("endpoint_"));
+        assert_eq!(endpoint_id.len(), "endpoint_".len() + 21);
+        assert!(
+            endpoint_id["endpoint_".len()..]
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric())
+        );
     }
 
     #[tokio::test]
