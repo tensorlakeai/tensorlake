@@ -932,6 +932,16 @@ enum AppCommands {
         args: Vec<String>,
     },
 
+    /// Invoke a deployed application
+    Invoke {
+        /// Application name
+        application: String,
+
+        /// JSON value to send as the application input
+        #[arg(short = 'j', long, value_name = "JSON", allow_hyphen_values = true)]
+        json: Option<String>,
+    },
+
     /// Manage cron schedules for applications
     #[command(subcommand)]
     Cron(CronCommands),
@@ -2352,6 +2362,10 @@ async fn run_app_command(ctx: &mut CliContext, subcmd: AppCommands) -> error::Re
     match subcmd {
         AppCommands::New { name, force } => commands::new::run(&name, force),
         AppCommands::Deploy { args } => run_deploy_command(ctx, &args).await,
+        AppCommands::Invoke { application, json } => {
+            ensure_auth_and_project(ctx).await?;
+            commands::applications::invoke(ctx, &application, json.as_deref()).await
+        }
         AppCommands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
         AppCommands::Describe { application } => {
             ensure_auth_and_project(ctx).await?;
@@ -2915,6 +2929,27 @@ mod tests {
                 assert_eq!(args, vec!["hello_world.py"]);
             }
             _ => panic!("expected app deploy command"),
+        }
+        match parse_command([
+            "tl",
+            "app",
+            "invoke",
+            "hello_world",
+            "--json",
+            r#"{"name":"Tensorlake"}"#,
+        ]) {
+            Commands::App(AppCommands::Invoke { application, json }) => {
+                assert_eq!(application, "hello_world");
+                assert_eq!(json.as_deref(), Some(r#"{"name":"Tensorlake"}"#));
+            }
+            _ => panic!("expected app invoke command"),
+        }
+        match parse_command(["tl", "app", "invoke", "hello_world"]) {
+            Commands::App(AppCommands::Invoke { application, json }) => {
+                assert_eq!(application, "hello_world");
+                assert_eq!(json, None);
+            }
+            _ => panic!("expected app invoke command without JSON"),
         }
         match parse_command(["tl", "app", "cron", "ls", "hello_world"]) {
             Commands::App(AppCommands::Cron(CronCommands::List { application })) => {

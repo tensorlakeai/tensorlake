@@ -1,11 +1,72 @@
 use chrono::{TimeZone, Utc};
 use comfy_table::Cell;
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use serde::Deserialize;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
 const APPLICATION_DETAILS_LABEL_WIDTH: usize = 20;
+
+#[derive(Debug, Deserialize)]
+struct InvokeApplicationResponse {
+    request_id: String,
+}
+
+pub async fn invoke(ctx: &CliContext, application: &str, json: Option<&str>) -> Result<()> {
+    let request_id = invoke_request(ctx, application, json).await?;
+    println!("{request_id}");
+    Ok(())
+}
+
+async fn invoke_request(ctx: &CliContext, application: &str, json: Option<&str>) -> Result<String> {
+    if application.is_empty() {
+        return Err(CliError::usage("application name must not be empty"));
+    }
+
+    if let Some(json) = json {
+        serde_json::from_str::<serde_json::Value>(json)
+            .map_err(|error| CliError::usage(format!("invalid JSON for --json: {error}")))?;
+    }
+
+    let client = ctx.client()?;
+    let url = format!(
+        "{}/v1/namespaces/{}/applications/{}",
+        ctx.api_url.trim_end_matches('/'),
+        urlencoding::encode(&ctx.namespace),
+        urlencoding::encode(application),
+    );
+    let mut request = client.post(url).header(ACCEPT, "application/json");
+    if let Some(json) = json {
+        request = request
+            .header(CONTENT_TYPE, "application/json")
+            .body(json.to_owned());
+    }
+
+    let response = request.send().await.map_err(CliError::Http)?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to invoke application '{}' (HTTP {}): {}",
+            application,
+            status,
+            body,
+        )));
+    }
+
+    let response = response
+        .json::<InvokeApplicationResponse>()
+        .await
+        .map_err(CliError::Http)?;
+    if response.request_id.is_empty() {
+        return Err(CliError::Other(anyhow::anyhow!(
+            "application invocation response did not include a request ID"
+        )));
+    }
+    Ok(response.request_id)
+}
 
 pub async fn ls(ctx: &CliContext) -> Result<()> {
     let client = ctx.client()?;
@@ -282,8 +343,144 @@ fn format_application_state(value: Option<&serde_json::Value>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_application_details, public_endpoint_id};
+    use super::{format_application_details, invoke_request, public_endpoint_id};
+    use crate::auth::context::CliContext;
+    use crate::config::resolver::ResolvedConfig;
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn test_context(api_url: String) -> CliContext {
+        CliContext::from_resolved(ResolvedConfig {
+            api_url,
+            cloud_url: "https://cloud.tensorlake.ai".to_string(),
+            namespace: "customer namespace".to_string(),
+            api_key: Some("test-api-key".to_string()),
+            personal_access_token: None,
+            organization_id: None,
+            project_id: None,
+            debug: false,
+        })
+    }
+
+    async fn invocation_server(
+        response_status: u16,
+        response_body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            let header_end = loop {
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0, "client closed before sending HTTP headers");
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(offset) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    break offset + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(str::trim)
+                        .map(str::parse::<usize>)
+                })
+                .transpose()
+                .unwrap()
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0, "client closed before sending the HTTP body");
+                request.extend_from_slice(&buffer[..count]);
+            }
+
+            let reason = if response_status == 200 {
+                "OK"
+            } else {
+                "Test Error"
+            };
+            let response = format!(
+                "HTTP/1.1 {response_status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len(),
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn invoke_sends_json_and_returns_the_request_id() {
+        let (api_url, server) = invocation_server(200, r#"{"request_id":"request-123"}"#).await;
+        let ctx = test_context(api_url);
+
+        let request_id = invoke_request(&ctx, "support/ticket", Some(r#"{"priority":"high"}"#))
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+
+        assert_eq!(request_id, "request-123");
+        assert!(request.starts_with(
+            "POST /v1/namespaces/customer%20namespace/applications/support%2Fticket HTTP/1.1\r\n"
+        ));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("content-type: application/json\r\n")
+        );
+        assert!(request.ends_with(r#"{"priority":"high"}"#));
+    }
+
+    #[tokio::test]
+    async fn invoke_without_json_sends_an_empty_body() {
+        let (api_url, server) = invocation_server(200, r#"{"request_id":"request-empty"}"#).await;
+        let ctx = test_context(api_url);
+
+        let request_id = invoke_request(&ctx, "zero_args", None).await.unwrap();
+        let request = server.await.unwrap();
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+
+        assert_eq!(request_id, "request-empty");
+        assert!(body.is_empty());
+        assert!(
+            !request
+                .to_ascii_lowercase()
+                .contains("content-type: application/json\r\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_rejects_invalid_json_before_sending_a_request() {
+        let ctx = test_context("http://127.0.0.1:1".to_string());
+
+        let error = invoke_request(&ctx, "application", Some("{"))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().starts_with("invalid JSON for --json:"));
+    }
+
+    #[tokio::test]
+    async fn invoke_reports_server_response_errors() {
+        let (api_url, server) = invocation_server(422, r#"{"error":"bad input"}"#).await;
+        let ctx = test_context(api_url);
+
+        let error = invoke_request(&ctx, "application", Some("null"))
+            .await
+            .unwrap_err();
+        let _ = server.await.unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            r#"failed to invoke application 'application' (HTTP 422 Unprocessable Entity): {"error":"bad input"}"#,
+        );
+    }
 
     #[test]
     fn public_endpoint_id_supports_wire_name_and_missing_values() {
