@@ -98,6 +98,8 @@ from .user_events import (
     log_user_event_initialization_started,
 )
 
+SHUTDOWN_TERMINAL_DRAIN_TIMEOUT_SECONDS = 1.0
+
 
 def _module_was_loaded_from_archive(module: ModuleType, archive_path: str) -> bool:
     archive_prefix = f"{archive_path}{os.sep}"
@@ -142,25 +144,65 @@ class Service(FunctionExecutorServicer):
         self._initialization_lock = threading.Lock()
         self._initialization_condition = threading.Condition()
         self._initialization_in_progress = False
+        self._initialization_request_count = 0
         self._initialization_attempted = False
+        self._stopping = False
+        self._allocation_lock = threading.Lock()
         # Tracks all existing allocations.
         # Added by create_allocation RPC, removed by delete_allocation RPC.
         self._allocation_infos: Dict[str, AllocationInfo] = {}
 
+    def shutdown(self) -> None:
+        """Stops admission and lets execution-log clients drain terminal results."""
+        with self._allocation_lock:
+            if self._stopping:
+                return
+            self._stopping = True
+            allocation_infos = list(self._allocation_infos.values())
+        for allocation_info in allocation_infos:
+            allocation_info.runner.cancel_for_shutdown()
+        deadline = time.monotonic() + SHUTDOWN_TERMINAL_DRAIN_TIMEOUT_SECONDS
+        for allocation_info in allocation_infos:
+            remaining = deadline - time.monotonic()
+            if allocation_info.runner.wait_for_shutdown_terminal(remaining):
+                continue
+            self._logger.warning(
+                "shutdown terminal execution batch was not observed before drain deadline",
+                allocation_id=allocation_info.allocation.allocation_id,
+            )
+
+    def _abort_if_stopping(self, context: grpc.ServicerContext) -> None:
+        with self._allocation_lock:
+            stopping = self._stopping
+        if stopping:
+            context.abort(
+                grpc.StatusCode.UNAVAILABLE,
+                "Function Executor is shutting down",
+            )
+
     def initialize(
         self, request: InitializeRequest, context: grpc.ServicerContext
     ) -> InitializeResponse:
-        with self._initialization_lock:
-            if self._function is not None:
+        self._abort_if_stopping(context)
+        # Mark the request before waiting for the serial initialization lock.
+        # Otherwise an allocation can observe "not initialized" in the small
+        # window after this RPC starts but before the initializer publishes its
+        # in-progress state.
+        with self._initialization_condition:
+            self._initialization_request_count += 1
+            self._initialization_in_progress = True
+            self._initialization_attempted = True
+        try:
+            with self._initialization_lock:
+                self._abort_if_stopping(context)
                 return self._initialize(request, context)
+        finally:
             with self._initialization_condition:
-                self._initialization_attempted = True
-                self._initialization_in_progress = True
-            try:
-                return self._initialize(request, context)
-            finally:
-                with self._initialization_condition:
-                    self._initialization_in_progress = False
+                self._initialization_request_count -= 1
+                self._initialization_in_progress = (
+                    self._initialization_request_count > 0
+                )
+                if not self._initialization_in_progress:
                     self._initialization_condition.notify_all()
 
     def _initialize(
@@ -418,31 +460,28 @@ class Service(FunctionExecutorServicer):
     def list_allocations(
         self, request: ListAllocationsRequest, context: grpc.ServicerContext
     ) -> ListAllocationsResponse:
-        # No need to lock self._allocation_infos because we're not blocking here so we
-        # hold GIL non stop.
-        return ListAllocationsResponse(
-            allocations=[
+        with self._allocation_lock:
+            allocations = [
                 alloc_info.allocation for alloc_info in self._allocation_infos.values()
             ]
+        return ListAllocationsResponse(
+            allocations=allocations,
         )
 
     def create_allocation(
         self, request: CreateAllocationRequest, context: grpc.ServicerContext
     ) -> Empty:
-        # Admission may block while initialization is in progress. Once ready,
-        # allocation registration itself does not release the GIL.
+        self._abort_if_stopping(context)
+        # Admission may block while initialization is in progress. Recheck
+        # shutdown after every blocking or fallible preparation step and make
+        # the final duplicate check, registration, and thread start atomic.
         self._wait_for_initialization(context)
+        self._abort_if_stopping(context)
         allocation: Allocation = request.allocation
         try:
             validate_new_allocation(allocation)
         except ValueError as e:
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
-
-        if allocation.allocation_id in self._allocation_infos:
-            context.abort(
-                grpc.StatusCode.ALREADY_EXISTS,
-                f"Allocation {allocation.allocation_id} already exists",
-            )
 
         self._abort_if_allocation_call_inactive(context)
         allocation_logger: InternalLogger = self._logger.bind(
@@ -477,11 +516,27 @@ class Service(FunctionExecutorServicer):
             ),
             logger=allocation_logger,
         )
-        self._allocation_infos[allocation.allocation_id] = AllocationInfo(
-            allocation=allocation,
-            runner=allocation_runner,
-        )
-        allocation_runner.run()
+        self._abort_if_allocation_call_inactive(context)
+        with self._allocation_lock:
+            if self._stopping:
+                context.abort(
+                    grpc.StatusCode.UNAVAILABLE,
+                    "Function Executor is shutting down",
+                )
+            if allocation.allocation_id in self._allocation_infos:
+                context.abort(
+                    grpc.StatusCode.ALREADY_EXISTS,
+                    f"Allocation {allocation.allocation_id} already exists",
+                )
+            self._allocation_infos[allocation.allocation_id] = AllocationInfo(
+                allocation=allocation,
+                runner=allocation_runner,
+            )
+            try:
+                allocation_runner.run()
+            except BaseException:
+                del self._allocation_infos[allocation.allocation_id]
+                raise
 
         return Empty()
 
@@ -638,11 +693,9 @@ class Service(FunctionExecutorServicer):
         runner: AllocationRunner = self._get_runner_or_abort(
             request.allocation_id, context
         )
-        while True:
-            read_request: ReadAllocationEventLogRequest | None = (
-                runner.event_log_reader.get_next_read_request()
-            )
-            if read_request is None:
+        for read_request in runner.event_log_reader.watch_read_requests():
+            is_active = context.is_active()
+            if isinstance(is_active, bool) and not is_active:
                 break
             yield read_request
 
@@ -654,19 +707,27 @@ class Service(FunctionExecutorServicer):
         runner: AllocationRunner = self._get_runner_or_abort(
             request.allocation_id, context
         )
-        runner.event_log_reader.deliver_read_response(request)
+        delivered = runner.event_log_reader.deliver_read_response(request)
+        if not delivered:
+            self._logger.warning(
+                "late or duplicate allocation event-log response ignored",
+                allocation_id=request.allocation_id,
+                entries_count=len(request.entries),
+            )
         return Empty()
 
     def _get_runner_or_abort(
         self, allocation_id: str, context: grpc.ServicerContext
     ) -> AllocationRunner:
         """Returns the AllocationRunner for the given allocation ID, or aborts with NOT_FOUND."""
-        if allocation_id not in self._allocation_infos:
+        with self._allocation_lock:
+            allocation_info = self._allocation_infos.get(allocation_id)
+        if allocation_info is None:
             context.abort(
                 grpc.StatusCode.NOT_FOUND,
                 f"Allocation {allocation_id} not found",
             )
-        return self._allocation_infos[allocation_id].runner
+        return allocation_info.runner
 
     def delete_allocation(
         self, request: DeleteAllocationRequest, context: grpc.ServicerContext
@@ -680,7 +741,10 @@ class Service(FunctionExecutorServicer):
                 f"Allocation {request.allocation_id} is still running and cannot be deleted",
             )
 
-        del self._allocation_infos[request.allocation_id]
+        with self._allocation_lock:
+            current = self._allocation_infos.get(request.allocation_id)
+            if current is not None and current.runner is runner:
+                del self._allocation_infos[request.allocation_id]
 
         return Empty()
 
@@ -688,7 +752,6 @@ class Service(FunctionExecutorServicer):
         """Returns the AllocationRunner for the current thread's allocation.
 
         Uses the allocation ID context variable to look up the runner.
-        No need to lock self._allocation_infos because we hold GIL non stop.
         """
         try:
             allocation_id: str = get_allocation_id_context_variable()
@@ -698,12 +761,14 @@ class Service(FunctionExecutorServicer):
                 "Please only call Tensorlake SDK from Tensorlake Functions."
             )
 
-        if allocation_id not in self._allocation_infos:
+        with self._allocation_lock:
+            allocation_info = self._allocation_infos.get(allocation_id)
+        if allocation_info is None:
             raise InternalError(
                 f"allocation id '{allocation_id}' not found in Function Executor."
             )
 
-        return self._allocation_infos[allocation_id].runner
+        return allocation_info.runner
 
     def _await_future_runtime_hook(self, future: Future) -> Generator[None, None, Any]:
         return self._thread_allocation_runner().event_loop.await_future_runtime_hook(

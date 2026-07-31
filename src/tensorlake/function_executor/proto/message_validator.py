@@ -8,6 +8,8 @@ from .function_executor_pb2 import (
     SerializedObjectManifest,
 )
 
+_MAX_SAFE_INTEGER: int = (1 << 53) - 1
+
 
 class MessageValidator:
     def __init__(self, message: Any):
@@ -20,6 +22,12 @@ class MessageValidator:
         if not self._message.HasField(field_name):
             raise ValueError(
                 f"Field '{field_name}' is required in {type(self._message).__name__}"
+            )
+        value = getattr(self._message, field_name)
+        if isinstance(value, str) and not value:
+            raise ValueError(
+                f"Field '{field_name}' must not be empty in "
+                f"{type(self._message).__name__}"
             )
         return self
 
@@ -111,6 +119,7 @@ class MessageValidator:
 
 def _validate_serialized_object_inside_blob(so: SerializedObjectInsideBLOB) -> None:
     MessageValidator(so).required_field("manifest").required_field("offset")
+    _validate_safe_integer(so.offset, "offset", type(so).__name__)
     _validate_serialized_object_manifest(so.manifest, require_metadata_size=True)
 
 
@@ -126,6 +135,18 @@ def _validate_serialized_object_manifest(
     )
     if require_metadata_size:
         validator.required_field("metadata_size")
+    _validate_safe_integer(
+        manifest.encoding_version,
+        "encoding_version",
+        type(manifest).__name__,
+    )
+    _validate_safe_integer(manifest.size, "size", type(manifest).__name__)
+    if manifest.HasField("metadata_size"):
+        _validate_safe_integer(
+            manifest.metadata_size,
+            "metadata_size",
+            type(manifest).__name__,
+        )
     if manifest.HasField("metadata_size") and manifest.metadata_size > manifest.size:
         raise ValueError(
             "Field 'metadata_size' cannot exceed 'size' in SerializedObjectManifest"
@@ -144,3 +165,12 @@ def _validate_blob_chunk(blob_chunk: BLOBChunk) -> None:
 
     Raises: ValueError: If the BLOB chunk is invalid or not present."""
     (MessageValidator(blob_chunk).required_field("uri").required_field("size"))
+    _validate_safe_integer(blob_chunk.size, "size", type(blob_chunk).__name__)
+
+
+def _validate_safe_integer(value: int, field_name: str, message_name: str) -> None:
+    if value > _MAX_SAFE_INTEGER:
+        raise ValueError(
+            f"Field '{field_name}' in {message_name} exceeds the shared "
+            f"safe integer maximum {_MAX_SAFE_INTEGER}"
+        )

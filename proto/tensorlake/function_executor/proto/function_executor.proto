@@ -75,6 +75,15 @@ message SerializedObjectInsideBLOB {
     optional uint64 offset = 2;
 }
 
+message HttpRequestHeader {
+    optional string name = 1;
+    optional string value = 2;
+}
+
+message RequestContext {
+    repeated HttpRequestHeader headers = 1;
+}
+
 message FunctionRef {
   optional string namespace = 1;
   optional string application_name = 2;
@@ -219,8 +228,6 @@ message AllocationState {
 
 // FunctionInputs contains the input data for allocation execution
 message FunctionInputs {
-    reserved 5;
-    reserved "request_context";
     // Values for function call arguments.
     repeated SerializedObjectInsideBLOB args = 1;
     // Each arg has a matching BLOB.
@@ -230,6 +237,8 @@ message FunctionInputs {
     // SDK metadata for function calls created by SDK.
     // Empty byte array for application function calls.
     optional bytes function_call_metadata = 4;
+    // Sanitized metadata from the application invocation request.
+    optional RequestContext request_context = 5;
 }
 
 message FunctionArg {

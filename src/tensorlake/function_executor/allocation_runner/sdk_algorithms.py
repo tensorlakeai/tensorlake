@@ -11,6 +11,11 @@ from tensorlake.applications.function.application_call import (
 from tensorlake.applications.function.function_call import (
     set_self_arg,
 )
+from tensorlake.applications.function.type_hints import (
+    function_parameters,
+    is_raw_body_type_hint,
+    parameter_type_hint,
+)
 from tensorlake.applications.function.user_data_serializer import (
     deserialize_value_with_metadata,
     function_input_serializer,
@@ -88,7 +93,9 @@ def deserialize_application_function_call_args(
     serialized_args: list[SerializedApplicationArgument]
     serialized_kwargs: dict[str, SerializedApplicationArgument]
 
-    if payload.content_type == "message/http":
+    if payload.content_type is not None and payload.content_type.lower().startswith(
+        "message/http"
+    ):
         # Future mode for application function calls where the HTTP request is forwarded from Server.
         # Server will start doing this only once all users migrated to FE version 1.2+.
         serialized_args, serialized_kwargs = (
@@ -108,10 +115,14 @@ def deserialize_application_function_call_args(
         )
     else:
         # Current mode for application function calls with a single argument.
-        content_type: str = (
-            input_serializer.content_type
-            if payload.content_type is None
-            else payload.content_type
+        parameters = function_parameters(function)
+        expects_raw_body = bool(parameters) and is_raw_body_type_hint(
+            parameter_type_hint(parameters[0])
+        )
+        content_type = (
+            payload.content_type
+            if expects_raw_body or payload.content_type is not None
+            else input_serializer.content_type
         )
         serialized_arg: SerializedApplicationArgument = (
             parse_application_function_call_arg_from_single_payload(

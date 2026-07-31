@@ -307,10 +307,12 @@ class TestStrictReplayWorkflowRecovery(unittest.TestCase):
                     if did not in watcher_values:
                         watcher_values[did] = (_WF_STEP_VALUES[i], str)
                 live_next_step_idx: int = fail_at_step  # 0-indexed for step N+1
-                live_clock: int = 0
+                # Server-recreated watcher events and callback-generated live
+                # events share one clock that resumes after replay history.
+                live_clock: list[int] = [last_replay_clock]
 
                 def on_batch_replay(events, driver):
-                    nonlocal live_next_step_idx, live_clock
+                    nonlocal live_next_step_idx
                     for event in events:
                         if event.HasField("create_function_call"):
                             did: str = (
@@ -322,20 +324,20 @@ class TestStrictReplayWorkflowRecovery(unittest.TestCase):
                                     str,
                                 )
                                 live_next_step_idx += 1
-                            live_clock += 1
+                            live_clock[0] += 1
                             driver.enqueue_event_log_response(
                                 ReadAllocationEventLogResponse(
                                     allocation_id=alloc_id_2,
                                     entries=[
                                         AllocationEvent(
-                                            clock=live_clock,
+                                            clock=live_clock[0],
                                             function_call_created=AllocationEventFunctionCallCreated(
                                                 function_call_id=did,
                                                 status=ok_status(),
                                             ),
                                         )
                                     ],
-                                    last_clock=live_clock,
+                                    last_clock=live_clock[0],
                                     has_more=False,
                                 )
                             )
@@ -346,47 +348,46 @@ class TestStrictReplayWorkflowRecovery(unittest.TestCase):
                             value, type_hint = watcher_values[wid]
 
                             # Emit FWCC.
-                            live_clock += 1
+                            live_clock[0] += 1
                             driver.enqueue_event_log_response(
                                 ReadAllocationEventLogResponse(
                                     allocation_id=alloc_id_2,
                                     entries=[
                                         AllocationEvent(
-                                            clock=live_clock,
+                                            clock=live_clock[0],
                                             function_call_watcher_created=AllocationEventFunctionCallWatcherCreated(
                                                 function_call_id=wid,
                                                 status=ok_status(),
                                             ),
                                         )
                                     ],
-                                    last_clock=live_clock,
+                                    last_clock=live_clock[0],
                                     has_more=False,
                                 )
                             )
 
                             # Emit WR.
-                            live_clock += 1
+                            live_clock[0] += 1
                             driver.enqueue_event_log_response(
                                 make_watcher_result_response(
                                     allocation_id=alloc_id_2,
                                     function_call_id=wid,
-                                    clock=live_clock,
+                                    clock=live_clock[0],
                                     value=value,
                                     type_hint=type_hint,
-                                    blob_id=f"wr-blob-{alloc_id_2}-{live_clock}",
+                                    blob_id=f"wr-blob-{alloc_id_2}-{live_clock[0]}",
                                 )
                             )
 
                 driver_2: AllocationTestDriver = AllocationTestDriver(stub, alloc_id_2)
                 driver_2.enqueue_event_log_response(replay_response)
                 # Simulate Server re-creating watchers whose WR was erased.
-                server_clock: list[int] = [last_replay_clock]
                 enqueue_server_recreated_watchers(
                     driver=driver_2,
                     allocation_id=alloc_id_2,
                     truncated_entries=captured_entries,
                     watcher_values=watcher_values,
-                    clock_box=server_clock,
+                    clock_box=live_clock,
                 )
                 finish_2: AllocationExecutionEventFinishAllocation = driver_2.run(
                     on_execution_event_batch=on_batch_replay
