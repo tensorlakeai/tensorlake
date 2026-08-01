@@ -61,6 +61,7 @@ xattr = { workspace = true }
 
 [dev-dependencies]
 data-encoding = "2.5"
+serde_json = { workspace = true, features = ["arbitrary_precision"] }
 tokio = { workspace = true, features = ["test-util"] }
 zip = "0.6"
 

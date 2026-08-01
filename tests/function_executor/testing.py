@@ -23,7 +23,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     AdvanceAllocationExecutionLogBatchRequest,
     AllocationExecutionEvent,
     AllocationExecutionEventFinishAllocation,
-    AllocationOutputBLOB,
+    AllocationOutputBlob,
     AllocationOutputBLOBRequest,
     AllocationState,
     AllocationUpdate,
@@ -257,7 +257,7 @@ class AllocationTestDriver:
                     self._stub.send_allocation_update(
                         AllocationUpdate(
                             allocation_id=self._allocation_id,
-                            output_blob=AllocationOutputBLOB(
+                            output_blob=AllocationOutputBlob(
                                 status=Status(code=grpc.StatusCode.OK.value[0]),
                                 blob=blob,
                             ),

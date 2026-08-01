@@ -135,7 +135,12 @@ class InternalLogger:
                 )
             except Exception:
                 # Fallback in case the print fallback failed.
-                print("Internal log message context is lost", message, flush=True)
+                try:
+                    print("Internal log message context is lost", message, flush=True)
+                except Exception:
+                    # Logging must never mask the error path which attempted to
+                    # emit the message, including when user code closed stdio.
+                    pass
 
     def _format_message(self, level: str, message: str, **kwargs) -> str:
         """Formats the log message with context and additional key-value pairs.

@@ -1,4 +1,5 @@
 import asyncio
+import math
 from collections.abc import Coroutine, Generator
 from dataclasses import dataclass
 from enum import Enum
@@ -103,8 +104,16 @@ class Future:
     def run_later(self, start_delay: float) -> "Future":
         """Runs this Future after the given delay in seconds and returns it.
 
+        Raises SDKUsageError if start_delay is not a non-negative finite number.
         Raises TensorlakeError on error.
         """
+        if (
+            not isinstance(start_delay, (int, float))
+            or isinstance(start_delay, bool)
+            or not math.isfinite(start_delay)
+            or start_delay < 0
+        ):
+            raise SDKUsageError("Future delay must be a non-negative finite number.")
         if not self._run_hook_was_called:
             self._start_delay = start_delay
         return self.run()
@@ -227,18 +236,36 @@ class Future:
         This is similar to concurrent.futures.wait:
         https://docs.python.org/3/library/concurrent.futures.html#concurrent.futures.wait
 
-        Raises SDKUsageError if any of the given futures were not started or if any of the given objects is not a Future.
+        Raises SDKUsageError if any given object is not a Future or a wait
+        control has an invalid value.
         Raises TensorlakeError on error running the wait operation. Errors of each individual Future are
         accessible via their .exception property and they don't get raised by wait operation.
         """
-        for future in futures:
+        future_list = list(futures)
+        if timeout is not None and (
+            not isinstance(timeout, (int, float))
+            or isinstance(timeout, bool)
+            or not math.isfinite(timeout)
+            or timeout < 0
+        ):
+            raise SDKUsageError(
+                "Future.wait timeout must be a non-negative finite number."
+            )
+        if return_when not in (
+            RETURN_WHEN.ALL_COMPLETED,
+            RETURN_WHEN.FIRST_COMPLETED,
+            RETURN_WHEN.FIRST_FAILURE,
+        ):
+            raise SDKUsageError(f"Not supported return_when value: '{return_when}'")
+
+        for future in future_list:
             if not isinstance(future, Future):
                 raise SDKUsageError(f"Cannot run a non-Future object {future}.")
             if not future._run_hook_was_called:
                 future.run()
 
         return runtime_hook_wait_futures(
-            futures=list(futures),
+            futures=future_list,
             timeout=timeout,
             return_when=return_when,
         )

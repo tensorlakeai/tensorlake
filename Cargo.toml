@@ -101,6 +101,12 @@ tracing-subscriber = "0.3"
 # gsvc-codec is tested against; the default miniz_oxide backend has produced a divergent test result.
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 tar = "0.4"
+zip = "0.6"
+
+# JavaScript/TypeScript bundling. Rolldown's Rust API does not promise semver
+# compatibility, so keep this exact and upgrade it deliberately.
+rolldown = "=1.2.0"
+rolldown_common = "=1.2.0"
 
 # OpenAPI
 utoipa = { version = "5.4.0", features = ["chrono"] }

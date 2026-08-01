@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import inspect
 from concurrent.futures import ThreadPoolExecutor
 from queue import SimpleQueue
@@ -75,6 +76,10 @@ class FunctionCallFutureRun(LocalFutureRun):
         Doesn't raise any exceptions, instead returns them in LocalFutureRunResult.exception.
         """
         set_current_request_context(self._request_context)
+        if self._arg_values is None or self._kwarg_values is None:
+            raise InternalError(
+                "Function call future started without resolved arguments"
+            )
 
         future: FunctionCallFuture = self._local_future.future
         metadata: FunctionCallMetadata = self._local_future.future_metadata
@@ -84,8 +89,13 @@ class FunctionCallFutureRun(LocalFutureRun):
             or metadata.is_reduce_splitter
         )
 
-        if not is_special_function_call and self._class_instance is not None:
-            set_self_arg(args=self._arg_values, self_instance=self._class_instance)
+        # Keep a pristine boundary copy for every retry. A failed attempt may
+        # mutate its arguments before raising; deployed retries start from the
+        # serialized call inputs and local execution must expose the same
+        # behavior. The process-scoped class instance is injected separately
+        # and is intentionally shared across method calls.
+        original_arg_values = copy.deepcopy(self._arg_values)
+        original_kwarg_values = copy.deepcopy(self._kwarg_values)
 
         # Application retries are used if function retries are not set.
         retries: Retries = (
@@ -96,20 +106,31 @@ class FunctionCallFutureRun(LocalFutureRun):
         runs_left: int = 1 + retries.max_retries
         while True:
             try:
+                attempt_arg_values = copy.deepcopy(original_arg_values)
+                attempt_kwarg_values = copy.deepcopy(original_kwarg_values)
+                if not is_special_function_call and self._class_instance is not None:
+                    set_self_arg(
+                        args=attempt_arg_values,
+                        self_instance=self._class_instance,
+                    )
                 if is_special_function_call:
                     result: Any | _TensorlakeFutureWrapper[Future] = (
-                        self._run_special_function_call(metadata)
+                        self._run_special_function_call(
+                            metadata,
+                            attempt_arg_values,
+                            attempt_kwarg_values,
+                        )
                     )
                 elif inspect.iscoroutinefunction(self._function):
                     result: Any | _TensorlakeFutureWrapper[Future] = asyncio.run(
                         self._function._original_function(
-                            *self._arg_values, **self._kwarg_values
+                            *attempt_arg_values, **attempt_kwarg_values
                         )
                     )
                 else:
                     result: Any | _TensorlakeFutureWrapper[Future] = (
                         self._function._original_function(
-                            *self._arg_values, **self._kwarg_values
+                            *attempt_arg_values, **attempt_kwarg_values
                         )
                     )
                 return LocalFutureRunResult(
@@ -134,36 +155,45 @@ class FunctionCallFutureRun(LocalFutureRun):
                     )
 
     def _run_special_function_call(
-        self, metadata: FunctionCallMetadata
+        self,
+        metadata: FunctionCallMetadata,
+        arg_values: list[Any],
+        kwarg_values: dict[str, Any],
     ) -> Any | _TensorlakeFutureWrapper[Future]:
         """Dispatches to the appropriate special function call handler."""
         if metadata.is_map_splitter:
-            return self._special_function_call_map_splitter(metadata)
+            return self._special_function_call_map_splitter(metadata, arg_values)
         elif metadata.is_map_concat:
-            return self._special_function_call_map_concat()
+            return self._special_function_call_map_concat(arg_values)
         elif metadata.is_reduce_splitter:
-            return self._special_function_call_reduce_splitter(metadata)
+            return self._special_function_call_reduce_splitter(
+                metadata,
+                arg_values,
+                kwarg_values,
+            )
         else:
             raise InternalError(
                 f"Special function call metadata doesn't specify any special function call"
             )
 
     def _special_function_call_map_splitter(
-        self, metadata: FunctionCallMetadata
+        self,
+        metadata: FunctionCallMetadata,
+        arg_values: list[Any],
     ) -> Future:
         """Splits map inputs into individual function calls."""
         map_function: Function = get_function(metadata.splitter_function_name)
         map_inputs: list[Any]
         if metadata.splitter_input_mode == SPLITTER_INPUT_MODE.ITEMS_IN_ONE_ARG:
             # User code passed a Future as map operation input.
-            if not isinstance(self._arg_values[0], list):
+            if not isinstance(arg_values[0], list):
                 raise SDKUsageError(
-                    f"Map operation input must be a list, got {type(self._arg_values[0])}"
+                    f"Map operation input must be a list, got {type(arg_values[0])}"
                 )
-            map_inputs = self._arg_values[0]
+            map_inputs = arg_values[0]
         else:
             # User code passed a list as map operation input.
-            map_inputs = self._arg_values
+            map_inputs = arg_values
 
         # Important: use tail calls to optimize.
         map_futures: list[Future] = [
@@ -173,29 +203,32 @@ class FunctionCallFutureRun(LocalFutureRun):
         # LocalRunner handles this special tail call.
         return self._function.future(*map_futures)
 
-    def _special_function_call_map_concat(self) -> list[Any]:
+    def _special_function_call_map_concat(self, arg_values: list[Any]) -> list[Any]:
         """Concatenates resolved map function call results into a list."""
-        return self._arg_values
+        return arg_values
 
     def _special_function_call_reduce_splitter(
-        self, metadata: FunctionCallMetadata
+        self,
+        metadata: FunctionCallMetadata,
+        arg_values: list[Any],
+        kwarg_values: dict[str, Any],
     ) -> Future:
         """Splits reduce inputs into a chain of function calls."""
         reduce_function: Function = get_function(metadata.splitter_function_name)
         reduce_inputs: list[Any] = []
-        if "initial" in self._kwarg_values:
-            reduce_inputs.append(self._kwarg_values["initial"])
+        if "initial" in kwarg_values:
+            reduce_inputs.append(kwarg_values["initial"])
 
         if metadata.splitter_input_mode == SPLITTER_INPUT_MODE.ITEMS_IN_ONE_ARG:
             # User code passed a Future as reduce operation input.
-            if not isinstance(self._arg_values[0], list):
+            if not isinstance(arg_values[0], list):
                 raise SDKUsageError(
-                    f"Reduce operation input must be a list, got {type(self._arg_values[0])}"
+                    f"Reduce operation input must be a list, got {type(arg_values[0])}"
                 )
-            reduce_inputs.extend(self._arg_values[0])
+            reduce_inputs.extend(arg_values[0])
         else:
             # User code passed a list as reduce operation input.
-            reduce_inputs.extend(self._arg_values)
+            reduce_inputs.extend(arg_values)
 
         if len(reduce_inputs) == 0:
             raise SDKUsageError("reduce of empty iterable with no initial value")

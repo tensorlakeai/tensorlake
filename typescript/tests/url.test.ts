@@ -1,4 +1,4 @@
-import { describe, expect, it, afterEach, vi } from "vitest";
+import { describe, expect, it, afterEach } from "vitest";
 import {
   isLocalhost,
   resolveProxyUrl,

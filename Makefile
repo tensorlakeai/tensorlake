@@ -36,23 +36,25 @@ install-global:
 	@echo "  fish: fish_add_path ~/.local/bin"
 	@echo "  bash/zsh: export PATH=\"\$$HOME/.local/bin:\$$PATH\""
 
-# .proto file and generated Python files have to be in the same directory.
-# See known issue https://github.com/grpc/grpc/issues/29459.
-PROTO_DIR_PATH_INSIDE_PACKAGE=tensorlake/function_executor/proto
-PROTO_DIR_PATH=src/${PROTO_DIR_INSIDE_PACKAGE}
+# Function Executor protocol sources are shared by the Python and TypeScript
+# runtimes. Python bindings remain generated inside the Python package.
+PROTO_SOURCE_ROOT=proto
+PROTO_PACKAGE_PATH=tensorlake/function_executor/proto
+PROTO_SOURCE_DIR=${PROTO_SOURCE_ROOT}/${PROTO_PACKAGE_PATH}
+PROTO_GENERATED_DIR=src/${PROTO_PACKAGE_PATH}
 
 build_proto:
 	@poetry install
-	@cd src && poetry run python -m grpc_tools.protoc \
-		--proto_path=. \
-		--python_out=. \
-		--pyi_out=. \
-		--grpc_python_out=. \
-		${PROTO_DIR_PATH_INSIDE_PACKAGE}/status.proto \
-		${PROTO_DIR_PATH_INSIDE_PACKAGE}/function_executor.proto
+	@poetry run python -m grpc_tools.protoc \
+		--proto_path=${PROTO_SOURCE_ROOT} \
+		--python_out=src \
+		--pyi_out=src \
+		--grpc_python_out=src \
+		${PROTO_SOURCE_DIR}/status.proto \
+		${PROTO_SOURCE_DIR}/function_executor.proto
 	@#The generated proto files don't pass linter checks and need to get reformatted.
-	@poetry run black ${PROTO_DIR_PATH}
-	@poetry run isort ${PROTO_DIR_PATH} --profile black
+	@poetry run black ${PROTO_GENERATED_DIR}
+	@poetry run isort ${PROTO_GENERATED_DIR} --profile black
 
 # Build the Rust Cloud SDK PyO3 extension and install it as tensorlake._cloud_sdk
 build_cloud_sdk:
@@ -79,6 +81,13 @@ test_sandbox:
 	@$(MAKE) build_cloud_sdk
 	cd tests/sandbox && poetry run python test_lifecycle.py -v
 
+# Launches both real function executors and drives the shared gRPC allocation
+# parity matrix through bindings generated from the shared protocol source.
+test_function_executor_compatibility:
+	@npm --prefix typescript run check:proto
+	@npm --prefix typescript run build:sdk
+	@PYTHONPATH=src poetry run python tests/function_executor_compatibility/run.py
+
 # Replicates the PyPI publish workflow locally: builds the tensorlake wheel with
 # the _cloud_sdk Rust extension, then installs into a temporary venv and verifies
 # imports and package scripts — all without touching PyPI.
@@ -94,7 +103,7 @@ bump_version:
 	@test -n "$(VERSION)" || (echo "Usage: make bump_version VERSION=x.y.z" && exit 1)
 	@python3 .github/scripts/bump_version.py "$(VERSION)"
 
-.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
+.PHONY: all build build_proto build_cloud_sdk build_rust_py_client fmt check test test_document_ai test_sandbox test_function_executor_compatibility install-dev install-dev-release install-global build_release bump_version fs-posix-conformance
 
 # POSIX conformance for `tl fs mount` (Linux + FUSE + working credentials). Runs the ported
 # issue-#24 battery against a real mounted workspace, in fresh and snapshot-reattached phases.

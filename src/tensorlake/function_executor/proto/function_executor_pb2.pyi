@@ -285,6 +285,39 @@ class AllocationOutputBLOBRequest(_message.Message):
         self, id: _Optional[str] = ..., size: _Optional[int] = ...
     ) -> None: ...
 
+class AllocationFunctionCall(_message.Message):
+    __slots__ = ("id", "updates", "args_blob")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    UPDATES_FIELD_NUMBER: _ClassVar[int]
+    ARGS_BLOB_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    updates: ExecutionPlanUpdates
+    args_blob: BLOB
+    def __init__(
+        self,
+        id: _Optional[str] = ...,
+        updates: _Optional[_Union[ExecutionPlanUpdates, _Mapping]] = ...,
+        args_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+    ) -> None: ...
+
+class AllocationFunctionCallWatcher(_message.Message):
+    __slots__ = ("watcher_id", "function_call_id", "id", "root_function_call_id")
+    WATCHER_ID_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    ID_FIELD_NUMBER: _ClassVar[int]
+    ROOT_FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    watcher_id: str
+    function_call_id: str
+    id: str
+    root_function_call_id: str
+    def __init__(
+        self,
+        watcher_id: _Optional[str] = ...,
+        function_call_id: _Optional[str] = ...,
+        id: _Optional[str] = ...,
+        root_function_call_id: _Optional[str] = ...,
+    ) -> None: ...
+
 class AllocationRequestStatePrepareReadOperation(_message.Message):
     __slots__ = ()
     def __init__(self) -> None: ...
@@ -338,20 +371,31 @@ class AllocationState(_message.Message):
     __slots__ = (
         "progress",
         "output_blob_requests",
+        "function_calls",
+        "function_call_watchers",
         "request_state_operations",
+        "result",
         "sha256_hash",
     )
     PROGRESS_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_BLOB_REQUESTS_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALLS_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_WATCHERS_FIELD_NUMBER: _ClassVar[int]
     REQUEST_STATE_OPERATIONS_FIELD_NUMBER: _ClassVar[int]
+    RESULT_FIELD_NUMBER: _ClassVar[int]
     SHA256_HASH_FIELD_NUMBER: _ClassVar[int]
     progress: AllocationProgress
     output_blob_requests: _containers.RepeatedCompositeFieldContainer[
         AllocationOutputBLOBRequest
     ]
+    function_calls: _containers.RepeatedCompositeFieldContainer[AllocationFunctionCall]
+    function_call_watchers: _containers.RepeatedCompositeFieldContainer[
+        AllocationFunctionCallWatcher
+    ]
     request_state_operations: _containers.RepeatedCompositeFieldContainer[
         AllocationRequestStateOperation
     ]
+    result: AllocationResult
     sha256_hash: str
     def __init__(
         self,
@@ -359,9 +403,16 @@ class AllocationState(_message.Message):
         output_blob_requests: _Optional[
             _Iterable[_Union[AllocationOutputBLOBRequest, _Mapping]]
         ] = ...,
+        function_calls: _Optional[
+            _Iterable[_Union[AllocationFunctionCall, _Mapping]]
+        ] = ...,
+        function_call_watchers: _Optional[
+            _Iterable[_Union[AllocationFunctionCallWatcher, _Mapping]]
+        ] = ...,
         request_state_operations: _Optional[
             _Iterable[_Union[AllocationRequestStateOperation, _Mapping]]
         ] = ...,
+        result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
         sha256_hash: _Optional[str] = ...,
     ) -> None: ...
 
@@ -422,12 +473,34 @@ class FunctionCall(_message.Message):
         call_metadata: _Optional[bytes] = ...,
     ) -> None: ...
 
-class ExecutionPlanUpdate(_message.Message):
-    __slots__ = ("function_call",)
-    FUNCTION_CALL_FIELD_NUMBER: _ClassVar[int]
-    function_call: FunctionCall
+class ReduceOp(_message.Message):
+    __slots__ = ("id", "collection", "reducer", "call_metadata")
+    ID_FIELD_NUMBER: _ClassVar[int]
+    COLLECTION_FIELD_NUMBER: _ClassVar[int]
+    REDUCER_FIELD_NUMBER: _ClassVar[int]
+    CALL_METADATA_FIELD_NUMBER: _ClassVar[int]
+    id: str
+    collection: _containers.RepeatedCompositeFieldContainer[FunctionArg]
+    reducer: FunctionRef
+    call_metadata: bytes
     def __init__(
-        self, function_call: _Optional[_Union[FunctionCall, _Mapping]] = ...
+        self,
+        id: _Optional[str] = ...,
+        collection: _Optional[_Iterable[_Union[FunctionArg, _Mapping]]] = ...,
+        reducer: _Optional[_Union[FunctionRef, _Mapping]] = ...,
+        call_metadata: _Optional[bytes] = ...,
+    ) -> None: ...
+
+class ExecutionPlanUpdate(_message.Message):
+    __slots__ = ("function_call", "reduce")
+    FUNCTION_CALL_FIELD_NUMBER: _ClassVar[int]
+    REDUCE_FIELD_NUMBER: _ClassVar[int]
+    function_call: FunctionCall
+    reduce: ReduceOp
+    def __init__(
+        self,
+        function_call: _Optional[_Union[FunctionCall, _Mapping]] = ...,
+        reduce: _Optional[_Union[ReduceOp, _Mapping]] = ...,
     ) -> None: ...
 
 class ExecutionPlanUpdates(_message.Message):
@@ -447,23 +520,67 @@ class ExecutionPlanUpdates(_message.Message):
         ] = ...,
     ) -> None: ...
 
+class AllocationResult(_message.Message):
+    __slots__ = (
+        "outcome_code",
+        "failure_reason",
+        "value",
+        "updates",
+        "uploaded_function_outputs_blob",
+        "request_error_output",
+        "uploaded_request_error_blob",
+        "metrics",
+    )
+    OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
+    FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
+    VALUE_FIELD_NUMBER: _ClassVar[int]
+    UPDATES_FIELD_NUMBER: _ClassVar[int]
+    UPLOADED_FUNCTION_OUTPUTS_BLOB_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
+    UPLOADED_REQUEST_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
+    METRICS_FIELD_NUMBER: _ClassVar[int]
+    outcome_code: AllocationOutcomeCode
+    failure_reason: AllocationFailureReason
+    value: SerializedObjectInsideBLOB
+    updates: ExecutionPlanUpdates
+    uploaded_function_outputs_blob: BLOB
+    request_error_output: SerializedObjectInsideBLOB
+    uploaded_request_error_blob: BLOB
+    metrics: Metrics
+    def __init__(
+        self,
+        outcome_code: _Optional[_Union[AllocationOutcomeCode, str]] = ...,
+        failure_reason: _Optional[_Union[AllocationFailureReason, str]] = ...,
+        value: _Optional[_Union[SerializedObjectInsideBLOB, _Mapping]] = ...,
+        updates: _Optional[_Union[ExecutionPlanUpdates, _Mapping]] = ...,
+        uploaded_function_outputs_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+        request_error_output: _Optional[
+            _Union[SerializedObjectInsideBLOB, _Mapping]
+        ] = ...,
+        uploaded_request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+        metrics: _Optional[_Union[Metrics, _Mapping]] = ...,
+    ) -> None: ...
+
 class Allocation(_message.Message):
     __slots__ = (
         "request_id",
         "function_call_id",
         "allocation_id",
         "inputs",
+        "result",
         "replay_mode",
     )
     REQUEST_ID_FIELD_NUMBER: _ClassVar[int]
     FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
     INPUTS_FIELD_NUMBER: _ClassVar[int]
+    RESULT_FIELD_NUMBER: _ClassVar[int]
     REPLAY_MODE_FIELD_NUMBER: _ClassVar[int]
     request_id: str
     function_call_id: str
     allocation_id: str
     inputs: FunctionInputs
+    result: AllocationResult
     replay_mode: ReplayMode
     def __init__(
         self,
@@ -471,6 +588,7 @@ class Allocation(_message.Message):
         function_call_id: _Optional[str] = ...,
         allocation_id: _Optional[str] = ...,
         inputs: _Optional[_Union[FunctionInputs, _Mapping]] = ...,
+        result: _Optional[_Union[AllocationResult, _Mapping]] = ...,
         replay_mode: _Optional[_Union[ReplayMode, str]] = ...,
     ) -> None: ...
 
@@ -494,7 +612,7 @@ class DeleteAllocationRequest(_message.Message):
     allocation_id: str
     def __init__(self, allocation_id: _Optional[str] = ...) -> None: ...
 
-class AllocationOutputBLOB(_message.Message):
+class AllocationOutputBlob(_message.Message):
     __slots__ = ("status", "blob")
     STATUS_FIELD_NUMBER: _ClassVar[int]
     BLOB_FIELD_NUMBER: _ClassVar[int]
@@ -504,6 +622,58 @@ class AllocationOutputBLOB(_message.Message):
         self,
         status: _Optional[_Union[_status_pb2.Status, _Mapping]] = ...,
         blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+    ) -> None: ...
+
+class AllocationFunctionCallResult(_message.Message):
+    __slots__ = (
+        "function_call_id",
+        "watcher_id",
+        "outcome_code",
+        "value_output",
+        "value_blob",
+        "request_error_output",
+        "request_error_blob",
+    )
+    FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    WATCHER_ID_FIELD_NUMBER: _ClassVar[int]
+    OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
+    VALUE_OUTPUT_FIELD_NUMBER: _ClassVar[int]
+    VALUE_BLOB_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
+    REQUEST_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
+    function_call_id: str
+    watcher_id: str
+    outcome_code: AllocationOutcomeCode
+    value_output: SerializedObjectInsideBLOB
+    value_blob: BLOB
+    request_error_output: SerializedObjectInsideBLOB
+    request_error_blob: BLOB
+    def __init__(
+        self,
+        function_call_id: _Optional[str] = ...,
+        watcher_id: _Optional[str] = ...,
+        outcome_code: _Optional[_Union[AllocationOutcomeCode, str]] = ...,
+        value_output: _Optional[_Union[SerializedObjectInsideBLOB, _Mapping]] = ...,
+        value_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+        request_error_output: _Optional[
+            _Union[SerializedObjectInsideBLOB, _Mapping]
+        ] = ...,
+        request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+    ) -> None: ...
+
+class AllocationFunctionCallCreationResult(_message.Message):
+    __slots__ = ("function_call_id", "allocation_function_call_id", "status")
+    FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATION_FUNCTION_CALL_ID_FIELD_NUMBER: _ClassVar[int]
+    STATUS_FIELD_NUMBER: _ClassVar[int]
+    function_call_id: str
+    allocation_function_call_id: str
+    status: _status_pb2.Status
+    def __init__(
+        self,
+        function_call_id: _Optional[str] = ...,
+        allocation_function_call_id: _Optional[str] = ...,
+        status: _Optional[_Union[_status_pb2.Status, _Mapping]] = ...,
     ) -> None: ...
 
 class AllocationRequestStatePrepareReadOperationResult(_message.Message):
@@ -556,19 +726,39 @@ class AllocationRequestStateOperationResult(_message.Message):
     ) -> None: ...
 
 class AllocationUpdate(_message.Message):
-    __slots__ = ("allocation_id", "output_blob", "request_state_operation_result")
+    __slots__ = (
+        "allocation_id",
+        "function_call_result",
+        "output_blob_deprecated",
+        "output_blob",
+        "request_state_operation_result",
+        "function_call_creation_result",
+    )
     ALLOCATION_ID_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_RESULT_FIELD_NUMBER: _ClassVar[int]
+    OUTPUT_BLOB_DEPRECATED_FIELD_NUMBER: _ClassVar[int]
     OUTPUT_BLOB_FIELD_NUMBER: _ClassVar[int]
     REQUEST_STATE_OPERATION_RESULT_FIELD_NUMBER: _ClassVar[int]
+    FUNCTION_CALL_CREATION_RESULT_FIELD_NUMBER: _ClassVar[int]
     allocation_id: str
-    output_blob: AllocationOutputBLOB
+    function_call_result: AllocationFunctionCallResult
+    output_blob_deprecated: BLOB
+    output_blob: AllocationOutputBlob
     request_state_operation_result: AllocationRequestStateOperationResult
+    function_call_creation_result: AllocationFunctionCallCreationResult
     def __init__(
         self,
         allocation_id: _Optional[str] = ...,
-        output_blob: _Optional[_Union[AllocationOutputBLOB, _Mapping]] = ...,
+        function_call_result: _Optional[
+            _Union[AllocationFunctionCallResult, _Mapping]
+        ] = ...,
+        output_blob_deprecated: _Optional[_Union[BLOB, _Mapping]] = ...,
+        output_blob: _Optional[_Union[AllocationOutputBlob, _Mapping]] = ...,
         request_state_operation_result: _Optional[
             _Union[AllocationRequestStateOperationResult, _Mapping]
+        ] = ...,
+        function_call_creation_result: _Optional[
+            _Union[AllocationFunctionCallCreationResult, _Mapping]
         ] = ...,
     ) -> None: ...
 

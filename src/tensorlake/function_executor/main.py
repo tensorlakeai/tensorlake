@@ -1,5 +1,6 @@
 import argparse
 import faulthandler
+import os
 from typing import Any
 
 from ..applications.internal_logger import InternalLogger
@@ -57,7 +58,22 @@ def main():
     Server(
         server_address=args.address,
         service=Service(logger),
+        # A hard timeout means terminal draining or transport shutdown failed.
+        # Report that distinction to the supervising executor.
+        force_exit=lambda: os._exit(1),
     ).run()
+    try:
+        # InternalLogger flushes its captured destination for every message.
+        # Do not touch the current sys.stdout/sys.stderr here: application code
+        # runs in-process and may have replaced either object with a blocking
+        # implementation after the server shutdown watchdog was cancelled.
+        logger.info("stopped function executor server")
+    finally:
+        # Running BLOB operations use worker threads that may be blocked in kernel
+        # I/O and cannot be cancelled by ThreadPoolExecutor. The gRPC grace period
+        # above has already delivered terminal allocation events, so exit without
+        # waiting for those non-daemon workers, matching Node's process.exit.
+        os._exit(0)
 
 
 if __name__ == "__main__":

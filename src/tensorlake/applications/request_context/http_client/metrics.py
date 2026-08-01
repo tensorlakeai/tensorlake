@@ -1,3 +1,5 @@
+import math
+
 import httpx
 
 from ...interface.exceptions import InternalError, SDKUsageError
@@ -35,8 +37,12 @@ class RequestMetricsHTTPClient(RequestMetrics):
         # below which will raise an InternalError instead of SDKUsageError.
         if not isinstance(name, str):
             raise SDKUsageError(f"Timer name must be a string, got: {name}")
-        if not isinstance(value, (int, float)):
-            raise SDKUsageError(f"Timer value must be a number, got: {value}")
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+        ):
+            raise SDKUsageError(f"Timer value must be a finite number, got: {value}")
 
         request_payload: AddMetricsRequest = AddMetricsRequest(
             request_id=self._request_id,
@@ -52,7 +58,7 @@ class RequestMetricsHTTPClient(RequestMetrics):
         # below which will raise an InternalError instead of SDKUsageError.
         if not isinstance(name, str):
             raise SDKUsageError(f"Counter name must be a string, got: {name}")
-        if not isinstance(value, int):
+        if isinstance(value, bool) or not isinstance(value, int):
             raise SDKUsageError(f"Counter value must be an int, got: {value}")
 
         request_payload: AddMetricsRequest = AddMetricsRequest(

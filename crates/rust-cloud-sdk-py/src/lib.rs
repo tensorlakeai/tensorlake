@@ -4046,6 +4046,7 @@ fn build_sandbox_image(
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text,
         context_dir: context_dir.map(PathBuf::from),
+        context_files: Vec::new(),
     };
 
     let result = py

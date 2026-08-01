@@ -35,11 +35,24 @@ jobs:
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
 
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust-full-feature
           cache-bin: false
+
+      - name: Build TypeScript SDK runtime capsule
+        working-directory: typescript
+        run: |
+          npm ci
+          npm run build:sdk
 
       - name: Vendor private artifact_storage crates
         uses: ./.github/actions/vendor-private-crates
@@ -56,7 +69,10 @@ jobs:
       - name: Test private filesystem client engine
         run: |
           CARGO_TARGET_DIR="$PWD/target" cargo clippy --manifest-path crates/gsvc-fs-client/Cargo.toml --all-targets -- -D warnings
-          CARGO_TARGET_DIR="$PWD/target" cargo test --manifest-path crates/gsvc-fs-client/Cargo.toml
+          # Several tests compare live filesystem accounting. Keep them serial so
+          # another test cannot allocate a block between the implementation and
+          # reference statvfs calls.
+          CARGO_TARGET_DIR="$PWD/target" cargo test --manifest-path crates/gsvc-fs-client/Cargo.toml -- --test-threads=1
 
       - name: Run Rust workspace tests with customer features
         run: cargo test --workspace --features tensorlake-cli/mount,tensorlake-cli/git-clone

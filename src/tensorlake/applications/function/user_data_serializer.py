@@ -115,7 +115,7 @@ def deserialize_value(
     Raises DeserializationError if deserialization fails.
     """
     if is_file_type_hint(type_hint) or is_http_body_type_hint(type_hint):
-        if content_type is None:
+        if is_file_type_hint(type_hint) and content_type is None:
             raise DeserializationError(
                 f"Deserializing to {type_hint.__name__} requires a content type, "
                 "but None was provided."

@@ -49,6 +49,7 @@ pub async fn run(
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text: None,
         context_dir: None,
+        context_files: Vec::new(),
     };
 
     let mut renderer = ImageBuildEventRenderer::new();

@@ -1,0 +1,17 @@
+{
+  "name": "tensorlake-typescript-http-body-example",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "tensorlake": "file:../.."
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}
