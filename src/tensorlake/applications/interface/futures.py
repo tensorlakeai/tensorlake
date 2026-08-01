@@ -256,9 +256,7 @@ class Future:
             RETURN_WHEN.FIRST_COMPLETED,
             RETURN_WHEN.FIRST_FAILURE,
         ):
-            raise SDKUsageError(
-                f"Not supported return_when value: '{return_when}'"
-            )
+            raise SDKUsageError(f"Not supported return_when value: '{return_when}'")
 
         for future in future_list:
             if not isinstance(future, Future):
