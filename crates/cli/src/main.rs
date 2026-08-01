@@ -946,6 +946,16 @@ enum AppCommands {
         wait: bool,
     },
 
+    /// Print the output of an application request
+    Output {
+        /// Request ID
+        request_id: String,
+
+        /// Wait for an in-progress request to finish
+        #[arg(short = 'w', long)]
+        wait: bool,
+    },
+
     /// Manage cron schedules for applications
     #[command(subcommand)]
     Cron(CronCommands),
@@ -2374,6 +2384,10 @@ async fn run_app_command(ctx: &mut CliContext, subcmd: AppCommands) -> error::Re
             ensure_auth_and_project(ctx).await?;
             commands::applications::invoke(ctx, &application, json.as_deref(), wait).await
         }
+        AppCommands::Output { request_id, wait } => {
+            ensure_auth_and_project(ctx).await?;
+            commands::applications::output(ctx, &request_id, wait).await
+        }
         AppCommands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
         AppCommands::Describe { application } => {
             ensure_auth_and_project(ctx).await?;
@@ -2969,6 +2983,13 @@ mod tests {
                 assert!(!wait);
             }
             _ => panic!("expected app invoke command without JSON"),
+        }
+        match parse_command(["tl", "app", "output", "request-123", "-w"]) {
+            Commands::App(AppCommands::Output { request_id, wait }) => {
+                assert_eq!(request_id, "request-123");
+                assert!(wait);
+            }
+            _ => panic!("expected app output command"),
         }
         match parse_command(["tl", "app", "cron", "ls", "hello_world"]) {
             Commands::App(AppCommands::Cron(CronCommands::List { application })) => {

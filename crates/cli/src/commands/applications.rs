@@ -1,5 +1,6 @@
 use chrono::{TimeZone, Utc};
 use comfy_table::Cell;
+use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::Deserialize;
 use std::io::Write;
@@ -29,6 +30,17 @@ struct InvocationRequestError {
     message: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct ApplicationsPage {
+    applications: Vec<ApplicationSummary>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplicationSummary {
+    name: String,
+}
+
 pub async fn invoke(
     ctx: &CliContext,
     application: &str,
@@ -41,9 +53,23 @@ pub async fn invoke(
         return Ok(());
     }
 
-    let output = wait_for_request_output(ctx, application, &request_id).await?;
+    let output = request_output(ctx, application, &request_id, true).await?;
+    write_request_output(&output)
+}
+
+pub async fn output(ctx: &CliContext, request_id: &str, wait: bool) -> Result<()> {
+    if request_id.is_empty() {
+        return Err(CliError::usage("request ID must not be empty"));
+    }
+
+    let application = find_request_application(ctx, request_id).await?;
+    let output = request_output(ctx, &application, request_id, wait).await?;
+    write_request_output(&output)
+}
+
+fn write_request_output(output: &[u8]) -> Result<()> {
     let mut stdout = std::io::stdout().lock();
-    stdout.write_all(&output)?;
+    stdout.write_all(output)?;
     if !output.is_empty() && !output.ends_with(b"\n") {
         stdout.write_all(b"\n")?;
     }
@@ -98,34 +124,31 @@ async fn invoke_request(ctx: &CliContext, application: &str, json: Option<&str>)
     Ok(response.request_id)
 }
 
-async fn wait_for_request_output(
+async fn request_output(
     ctx: &CliContext,
     application: &str,
     request_id: &str,
+    wait: bool,
 ) -> Result<Vec<u8>> {
-    wait_for_request_output_with_interval(
+    request_output_with_interval(
         ctx,
         application,
         request_id,
+        wait,
         APPLICATION_REQUEST_POLL_INTERVAL,
     )
     .await
 }
 
-async fn wait_for_request_output_with_interval(
+async fn request_output_with_interval(
     ctx: &CliContext,
     application: &str,
     request_id: &str,
+    wait: bool,
     poll_interval: Duration,
 ) -> Result<Vec<u8>> {
     let client = ctx.client()?;
-    let request_url = format!(
-        "{}/v1/namespaces/{}/applications/{}/requests/{}",
-        ctx.api_url.trim_end_matches('/'),
-        urlencoding::encode(&ctx.namespace),
-        urlencoding::encode(application),
-        urlencoding::encode(request_id),
-    );
+    let request_url = application_request_url(ctx, application, request_id);
 
     loop {
         let response = client
@@ -152,6 +175,13 @@ async fn wait_for_request_output_with_interval(
             .map_err(CliError::Http)?;
         match status.outcome.as_ref() {
             None | Some(serde_json::Value::Null) => {
+                if !wait {
+                    return Err(CliError::Other(anyhow::anyhow!(
+                        "application '{}' request '{}' is still in progress; use --wait to wait for its output",
+                        application,
+                        request_id,
+                    )));
+                }
                 tokio::time::sleep(poll_interval).await;
             }
             Some(serde_json::Value::String(outcome)) if outcome == "success" => break,
@@ -205,6 +235,83 @@ async fn wait_for_request_output_with_interval(
     }
 
     Ok(response.bytes().await.map_err(CliError::Http)?.to_vec())
+}
+
+fn application_request_url(ctx: &CliContext, application: &str, request_id: &str) -> String {
+    format!(
+        "{}/v1/namespaces/{}/applications/{}/requests/{}",
+        ctx.api_url.trim_end_matches('/'),
+        urlencoding::encode(&ctx.namespace),
+        urlencoding::encode(application),
+        urlencoding::encode(request_id),
+    )
+}
+
+async fn find_request_application(ctx: &CliContext, request_id: &str) -> Result<String> {
+    let client = ctx.client()?;
+    let applications_url = format!(
+        "{}/v1/namespaces/{}/applications",
+        ctx.api_url.trim_end_matches('/'),
+        urlencoding::encode(&ctx.namespace),
+    );
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let mut request = client.get(&applications_url).query(&[("limit", "100")]);
+        if let Some(cursor) = cursor.as_deref() {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        let response = request.send().await.map_err(CliError::Http)?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(CliError::Other(anyhow::anyhow!(
+                "failed to list applications while locating request '{}' (HTTP {}): {}",
+                request_id,
+                status,
+                body,
+            )));
+        }
+        let page = response
+            .json::<ApplicationsPage>()
+            .await
+            .map_err(CliError::Http)?;
+
+        for application in page.applications {
+            let request_url = application_request_url(ctx, &application.name, request_id);
+            let response = client
+                .get(request_url)
+                .header(ACCEPT, "application/json")
+                .send()
+                .await
+                .map_err(CliError::Http)?;
+            if response.status().is_success() {
+                return Ok(application.name);
+            }
+            if response.status() != StatusCode::NOT_FOUND {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "failed to locate request '{}' in application '{}' (HTTP {}): {}",
+                    request_id,
+                    application.name,
+                    status,
+                    body,
+                )));
+            }
+        }
+
+        let Some(next_cursor) = page.cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    Err(CliError::Other(anyhow::anyhow!(
+        "application request '{}' was not found in namespace '{}'",
+        request_id,
+        ctx.namespace,
+    )))
 }
 
 pub async fn ls(ctx: &CliContext) -> Result<()> {
@@ -483,8 +590,8 @@ fn format_application_state(value: Option<&serde_json::Value>) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        format_application_details, invoke_request, public_endpoint_id,
-        wait_for_request_output_with_interval,
+        find_request_application, format_application_details, invoke_request, public_endpoint_id,
+        request_output_with_interval,
     };
     use crate::auth::context::CliContext;
     use crate::config::resolver::ResolvedConfig;
@@ -558,13 +665,13 @@ mod tests {
     }
 
     async fn scripted_server(
-        responses: Vec<(&'static str, &'static [u8])>,
+        responses: Vec<(u16, &'static str, &'static [u8])>,
     ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
             let mut requests = Vec::new();
-            for (content_type, response_body) in responses {
+            for (response_status, content_type, response_body) in responses {
                 let (mut stream, _) = listener.accept().await.unwrap();
                 let mut request = Vec::new();
                 let mut buffer = [0_u8; 1024];
@@ -577,8 +684,15 @@ mod tests {
                     }
                 }
 
+                let reason = if response_status == 200 {
+                    "OK"
+                } else if response_status == 404 {
+                    "Not Found"
+                } else {
+                    "Test Error"
+                };
                 let response = format!(
-                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    "HTTP/1.1 {response_status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
                     response_body.len(),
                 );
                 stream.write_all(response.as_bytes()).await.unwrap();
@@ -661,17 +775,18 @@ mod tests {
     #[tokio::test]
     async fn wait_polls_until_success_and_downloads_the_output() {
         let (api_url, server) = scripted_server(vec![
-            ("application/json", br#"{"outcome":null}"#),
-            ("application/json", br#"{"outcome":"success"}"#),
-            ("application/octet-stream", b"completed output"),
+            (200, "application/json", br#"{"outcome":null}"#),
+            (200, "application/json", br#"{"outcome":"success"}"#),
+            (200, "application/octet-stream", b"completed output"),
         ])
         .await;
         let ctx = test_context(api_url);
 
-        let output = wait_for_request_output_with_interval(
+        let output = request_output_with_interval(
             &ctx,
             "support/ticket",
             "request/123",
+            true,
             std::time::Duration::ZERO,
         )
         .await
@@ -694,16 +809,18 @@ mod tests {
     #[tokio::test]
     async fn wait_reports_the_terminal_request_failure() {
         let (api_url, server) = scripted_server(vec![(
+            200,
             "application/json",
             br#"{"outcome":{"failure":"function_error"},"request_error":null}"#,
         )])
         .await;
         let ctx = test_context(api_url);
 
-        let error = wait_for_request_output_with_interval(
+        let error = request_output_with_interval(
             &ctx,
             "application",
             "request-456",
+            true,
             std::time::Duration::ZERO,
         )
         .await
@@ -714,6 +831,58 @@ mod tests {
             error.to_string(),
             "application 'application' request 'request-456' failed: function_error"
         );
+    }
+
+    #[tokio::test]
+    async fn output_without_wait_reports_an_in_progress_request() {
+        let (api_url, server) =
+            scripted_server(vec![(200, "application/json", br#"{"outcome":null}"#)]).await;
+        let ctx = test_context(api_url);
+
+        let error = request_output_with_interval(
+            &ctx,
+            "application",
+            "request-pending",
+            false,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+        let _ = server.await.unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "application 'application' request 'request-pending' is still in progress; use --wait to wait for its output"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_locates_the_application_for_a_request_id() {
+        let (api_url, server) = scripted_server(vec![
+            (
+                200,
+                "application/json",
+                br#"{"applications":[{"name":"first"},{"name":"support/ticket"}],"cursor":null}"#,
+            ),
+            (404, "application/json", br#"{"error":"not found"}"#),
+            (200, "application/json", br#"{"outcome":"success"}"#),
+        ])
+        .await;
+        let ctx = test_context(api_url);
+
+        let application = find_request_application(&ctx, "request/123").await.unwrap();
+        let requests = server.await.unwrap();
+
+        assert_eq!(application, "support/ticket");
+        assert!(requests[0].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications?limit=100 HTTP/1.1\r\n"
+        ));
+        assert!(requests[1].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications/first/requests/request%2F123 HTTP/1.1\r\n"
+        ));
+        assert!(requests[2].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications/support%2Fticket/requests/request%2F123 HTTP/1.1\r\n"
+        ));
     }
 
     #[test]
