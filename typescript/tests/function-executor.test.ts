@@ -1491,10 +1491,8 @@ describe("TypeScript function executor", () => {
     delete malformed.function.namespace;
     const wrongEncoding = request(true);
     wrongEncoding.applicationCode.manifest.encoding = "SERIALIZED_OBJECT_ENCODING_RAW";
-    const wrongSize = request(true);
-    wrongSize.applicationCode.manifest.size += 1;
-    const wrongHash = request(true);
-    wrongHash.applicationCode.manifest.sha256Hash = "0".repeat(64);
+    const transportMetadataMismatch = request(true);
+    transportMetadataMismatch.applicationCode.manifest.sha256Hash = "0".repeat(64);
 
     try {
       const protocolFailure = await initializeRequest(malformed);
@@ -1503,14 +1501,10 @@ describe("TypeScript function executor", () => {
       const encodingFailure = await initializeRequest(wrongEncoding);
       expect(encodingFailure.outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
       expect(encodingFailure.errorMessage).toContain("Expected: BINARY_ZIP");
-      const sizeFailure = await initializeRequest(wrongSize);
-      expect(sizeFailure.outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
-      expect(sizeFailure.errorMessage).toContain("size mismatch");
-      const hashFailure = await initializeRequest(wrongHash);
-      expect(hashFailure.outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
-      expect(hashFailure.errorMessage).toContain("SHA-256 mismatch");
       expect((await initializeRequest(request(false))).outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_FAILURE");
-      expect((await initializeRequest(request(true))).outcomeCode).toBe("INITIALIZATION_OUTCOME_CODE_SUCCESS");
+      expect((await initializeRequest(transportMetadataMismatch)).outcomeCode).toBe(
+        "INITIALIZATION_OUTCOME_CODE_SUCCESS",
+      );
     } finally {
       clearRegistryForTest();
     }

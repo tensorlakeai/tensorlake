@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -307,31 +306,24 @@ export class FunctionExecutorService {
         `Invalid application code encoding: ${String(codeManifest.encoding)}. Expected: BINARY_ZIP`,
       );
     }
-    const archive = new Uint8Array(request.applicationCode.data);
+    // Match the Python executor: the manifest describes dataplane transport,
+    // while initialization consumes the archive bytes that were delivered.
     const declaredSize = requireSafeSize(
       codeManifest.size,
       "InitializeRequest.application_code.manifest.size",
     );
-    if (declaredSize !== archive.byteLength) {
-      throw new Error(
-        `Application code size mismatch: manifest declares ${declaredSize} bytes, received ${archive.byteLength}`,
-      );
-    }
     const metadataSize = codeManifest.metadataSize == null
       ? 0
       : requireSafeSize(
         codeManifest.metadataSize,
         "InitializeRequest.application_code.manifest.metadata_size",
       );
-    if (metadataSize !== 0) {
-      throw new Error("Application code metadata is not supported");
-    }
-    const actualHash = createHash("sha256").update(archive).digest("hex");
-    if (String(codeManifest.sha256Hash).toLowerCase() !== actualHash) {
+    if (metadataSize > declaredSize) {
       throw new Error(
-        `Application code SHA-256 mismatch: expected ${String(codeManifest.sha256Hash)}, received ${actualHash}`,
+        "InitializeRequest.application_code.manifest.metadata_size cannot exceed size",
       );
     }
+    const archive = new Uint8Array(request.applicationCode.data);
     this.log("debug", "unpacking application code", {
       ...this.functionLogFields(request.function),
       application_code_bytes: archive.byteLength,
