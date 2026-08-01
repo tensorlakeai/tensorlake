@@ -12,7 +12,6 @@ use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use sha2::{Digest, Sha256};
 use shlex::split as shlex_split;
 use thiserror::Error;
 
@@ -66,8 +65,6 @@ const DIAGNOSTIC_COMMAND_TIMEOUT_SECS: i64 = 5;
 const BUILDER_DISK_USAGE_DIAGNOSTIC_THRESHOLD_PERCENT: u8 = 95;
 const ARCHIVE_PROGRESS_BYTE_INTERVAL_BYTES: u64 = 64 * 1024 * 1024;
 const CAS_SNAPSHOT_FORMAT_VERSION: &str = "content_addressed_streaming_v1";
-const SIMULATED_CAS_BLOB_STORE_ROOT: &str =
-    "/var/lib/tensorlake/rootfs-builder/work/cas-blob-store";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProcessTerminalStatus {
@@ -182,15 +179,15 @@ pub enum SandboxImageBuildError {
 }
 
 impl SandboxImageBuildError {
-    fn usage(message: impl Into<String>) -> Self {
+    pub(crate) fn usage(message: impl Into<String>) -> Self {
         Self::Usage(message.into())
     }
 
-    fn auth(message: impl Into<String>) -> Self {
+    pub(crate) fn auth(message: impl Into<String>) -> Self {
         Self::Auth(message.into())
     }
 
-    fn other(message: impl Into<String>) -> Self {
+    pub(crate) fn other(message: impl Into<String>) -> Self {
         Self::Other(message.into())
     }
 }
@@ -213,12 +210,13 @@ pub struct CommonBuildOptions {
     pub cpus: Option<f64>,
     pub memory_mb: Option<i64>,
     pub is_public: bool,
-    /// Non-default opt-in: build a CAS (content-addressed streaming,
-    /// `cas-streaming` on the wire) image.
-    ///
-    /// During the local-store simulation, CAS results are returned to the
-    /// caller without Platform registration. The final implementation will
-    /// complete registration using the builder's CAS filesystem receipt.
+    /// Non-default opt-in: build a CAS (content-addressed streaming) image
+    /// through the Image Service build plane instead of the platform-api
+    /// rootfs builder. The SDK resolves the Dockerfile plan's references
+    /// against the Image Service catalog and submits them with the build;
+    /// the service reconciler drives the builder sandbox. Routed through the
+    /// API host's `/images/v4` ingress path by default;
+    /// `TENSORLAKE_IMAGE_SERVICE_URL` overrides it for local development.
     pub cas: bool,
     pub user_agent: Option<String>,
     pub docker_compat: bool,
@@ -236,6 +234,12 @@ pub struct SandboxImageBuildOptions {
     pub dockerfile_path: PathBuf,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<PathBuf>,
+    /// Dockerfile build args (`--build-arg KEY=VALUE`), forwarded to
+    /// BuildKit inside the builder. CAS builds only: the legacy platform
+    /// rootfs builder has no build-arg channel, so a non-CAS build with
+    /// build args is rejected up front. Build args never participate in
+    /// parent-reference resolution.
+    pub build_args: Vec<(String, String)>,
 }
 
 /// Options for importing a registry image directly into a rootfs (no
@@ -260,30 +264,30 @@ pub enum SandboxImageBuildEvent {
 }
 
 #[derive(Debug, Clone)]
-struct ResolvedBuildContext {
-    api_url: String,
-    bearer_token: String,
-    use_scope_headers: bool,
-    organization_id: String,
-    project_id: String,
-    namespace: String,
-    user_agent: Option<String>,
+pub(crate) struct ResolvedBuildContext {
+    pub(crate) api_url: String,
+    pub(crate) bearer_token: String,
+    pub(crate) use_scope_headers: bool,
+    pub(crate) organization_id: String,
+    pub(crate) project_id: String,
+    pub(crate) namespace: String,
+    pub(crate) user_agent: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct DockerfileBuildPlan {
-    context_dir: PathBuf,
-    registered_name: String,
-    dockerfile_text: String,
+pub(crate) struct DockerfileBuildPlan {
+    pub(crate) context_dir: PathBuf,
+    pub(crate) registered_name: String,
+    pub(crate) dockerfile_text: String,
     /// The final-stage FROM image reference — the exact string the user wrote.
     /// Determines the snapshot's lineage parent when it resolves to a
     /// registered Tensorlake template.
-    base_image: String,
+    pub(crate) base_image: String,
     /// True when `base_image` matches a stage alias defined earlier in the
     /// Dockerfile (`FROM ubuntu AS base; FROM base`). In that case the
     /// final FROM is an internal reference to an earlier stage and we do
     /// not look it up as an external template.
-    base_image_is_internal_stage: bool,
+    pub(crate) base_image_is_internal_stage: bool,
     /// Every external image reference encountered in the Dockerfile other
     /// than `base_image`: earlier-stage FROMs, `COPY --from=<image>`, and
     /// `RUN --mount=type=cache,from=<image>`. Excludes `scratch`, internal
@@ -291,32 +295,32 @@ struct DockerfileBuildPlan {
     /// containing `$` variable expansions or `@` digest pins, and the
     /// final-stage FROM itself (which lives in `base_image`). Deduped, in
     /// first-seen order.
-    additional_image_references: Vec<String>,
+    pub(crate) additional_image_references: Vec<String>,
     /// References the SDK could not resolve at planning time and forwarded
     /// to Docker for registry pull at build time. Tagged with a reason so
     /// the caller can emit an appropriate warning.
-    unresolvable_image_references: Vec<UnresolvableImageReference>,
+    pub(crate) unresolvable_image_references: Vec<UnresolvableImageReference>,
     /// Instructions that hit `IGNORED_DOCKERFILE_INSTRUCTIONS` during parse.
     /// Surfaced as warnings by the caller; preserved in `dockerfile_text` and
     /// forwarded to `docker build`.
-    ignored_instructions: Vec<(usize, String)>,
+    pub(crate) ignored_instructions: Vec<(usize, String)>,
     /// When set, this is an image-import build rather than a Dockerfile build:
     /// the builder pulls this registry reference directly into the rootfs with
     /// no Docker daemon. There is no build context to upload and the base is
     /// never resolved against the template registry (import always pulls from
     /// the registry, producing a fresh base rootfs).
-    import_image_reference: Option<String>,
+    pub(crate) import_image_reference: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct UnresolvableImageReference {
-    line_number: usize,
-    reference: String,
-    reason: UnresolvableImageReferenceReason,
+pub(crate) struct UnresolvableImageReference {
+    pub(crate) line_number: usize,
+    pub(crate) reference: String,
+    pub(crate) reason: UnresolvableImageReferenceReason,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum UnresolvableImageReferenceReason {
+pub(crate) enum UnresolvableImageReferenceReason {
     /// Reference contained `$VAR` / `${VAR}` expansion. The SDK does not
     /// resolve build-args at planning time.
     BuildArgExpansion,
@@ -377,55 +381,11 @@ struct PreparedRootfsParent {
 struct ResolvedTemplateSource {
     prepare_payload: Value,
     snapshot_format_version: Option<String>,
-    snapshot_uri: Option<String>,
-    rootfs_disk_bytes: Option<u64>,
 }
 
 impl ResolvedTemplateSource {
     fn is_cas(&self) -> bool {
         self.snapshot_format_version.as_deref() == Some(CAS_SNAPSHOT_FORMAT_VERSION)
-    }
-
-    fn simulated_cas_builder_entry(&self) -> Result<Value> {
-        let mut entry = self.prepare_payload.clone();
-        let object = entry.as_object_mut().ok_or_else(|| {
-            SandboxImageBuildError::other("resolved CAS source payload is not an object")
-        })?;
-        let identity = format!(
-            "{}:{}:{}",
-            object
-                .get("templateId")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            object
-                .get("snapshotId")
-                .and_then(Value::as_str)
-                .unwrap_or_default(),
-            self.snapshot_uri.as_deref().unwrap_or_default(),
-        );
-        let digest = format!("{:x}", Sha256::digest(identity.as_bytes()));
-        // Simulation: the source snapshot id is useful to derive a stable fake
-        // URI in the SDK, but the builder receives only that URI and format.
-        // Final implementation: Platform supplies the canonical CAS manifest
-        // URI and still keeps its snapshot id outside the builder sandbox.
-        object.remove("snapshotId");
-        object.insert(
-            "snapshotFormatVersion".to_string(),
-            Value::String(CAS_SNAPSHOT_FORMAT_VERSION.to_string()),
-        );
-        object.insert(
-            "snapshotUri".to_string(),
-            Value::String(format!(
-                "file://{SIMULATED_CAS_BLOB_STORE_ROOT}/filesystems/{digest}/manifest.json"
-            )),
-        );
-        if let Some(rootfs_disk_bytes) = self.rootfs_disk_bytes {
-            object.insert(
-                "rootfsDiskBytes".to_string(),
-                Value::Number(rootfs_disk_bytes.into()),
-            );
-        }
-        Ok(entry)
     }
 }
 
@@ -467,6 +427,25 @@ where
             options.common.registered_name.as_deref(),
         )?
     };
+    if options.common.cas {
+        // CAS images build through the Image Service: the SDK resolves the
+        // plan's references and submits them; the service reconciler drives
+        // the builder sandbox.
+        return crate::image_service_builds::run_image_service_build(
+            plan,
+            Some(&options.dockerfile_path),
+            options.build_args,
+            options.common,
+            emit,
+        )
+        .await;
+    }
+    if !options.build_args.is_empty() {
+        return Err(SandboxImageBuildError::usage(
+            "build args are only supported for CAS image builds; the platform rootfs builder \
+             has no build-arg channel",
+        ));
+    }
     run_build_plan(plan, options.common, emit).await
 }
 
@@ -488,6 +467,16 @@ where
         &options.image_reference,
         options.common.registered_name.as_deref(),
     )?;
+    if options.common.cas {
+        return crate::image_service_builds::run_image_service_build(
+            plan,
+            None,
+            Vec::new(),
+            options.common,
+            emit,
+        )
+        .await;
+    }
     run_build_plan(plan, options.common, emit).await
 }
 
@@ -546,21 +535,13 @@ where
         "Preparing rootfs build...".to_string(),
     ));
     let platform_client = platform_client(&ctx)?;
-    let (prepared, mut prepared_spec, has_cas_sources) =
+    let (prepared, mut prepared_spec) =
         prepare_rootfs_build(&ctx, &platform_client, &plan, options.is_public).await?;
     emit(SandboxImageBuildEvent::Status(format!(
-        "Build mode: Rootfs{}{}",
-        match (options.cas, prepared.rootfs_node_kind.as_str(),) {
-            (true, _) => "Base",
-            (false, "diff") => "Diff",
+        "Build mode: Rootfs{}",
+        match prepared.rootfs_node_kind.as_str() {
+            "diff" => "Diff",
             _ => "Base",
-        },
-        if options.cas {
-            " (CAS destination)"
-        } else if has_cas_sources {
-            " (CAS source)"
-        } else {
-            ""
         }
     )));
 
@@ -661,18 +642,7 @@ where
             //
             // Legacy path: `snapshot_rel_path` is absent, the upload block is
             // already in `prepared_spec`, and we do nothing here.
-            let signed_snapshot_uri = if options.cas {
-                // Simulation: Platform prepared a durable destination, but a
-                // CAS output writes only into the daemon's builder-local
-                // file:// store. Do not mint or pass the unused durable upload.
-                // Final implementation: the daemon will mint scoped remote
-                // object operations with the Platform build capability.
-                if prepared.snapshot_rel_path.is_some() {
-                    sign_prepared_parent_download(&proxy, &prepared, &mut prepared_spec).await?;
-                    sign_prepared_local_image_downloads(&proxy, &mut prepared_spec).await?;
-                }
-                None
-            } else if let Some(rel_path) = prepared.snapshot_rel_path.clone() {
+            let signed_snapshot_uri = if let Some(rel_path) = prepared.snapshot_rel_path.clone() {
                 let disk_mb = rootfs_disk_bytes_to_mb(rootfs_disk_bytes)?;
                 let parts: u32 = disk_mb
                     .div_ceil(MULTIPART_PART_SIZE_MB)
@@ -707,7 +677,6 @@ where
                 &prepared_spec,
                 options.disk_mb,
                 options.docker_compat,
-                options.cas,
                 &mut emit,
             )
             .await?;
@@ -732,37 +701,6 @@ where
             builder_result?;
 
             let metadata = read_build_metadata(&proxy).await?;
-            if options.cas {
-                // Simulation: return the local receipt and deliberately skip
-                // Platform completion because its file:// objects disappear
-                // with this builder sandbox.
-                // Final implementation: submit this receipt with the retained
-                // Platform snapshot id and return the registered image.
-                let result = simulated_cas_build_result(
-                    &plan.registered_name,
-                    &prepared,
-                    &metadata,
-                    rootfs_disk_bytes,
-                )?;
-                emit(SandboxImageBuildEvent::Warning(format!(
-                    "CAS image '{}' was built in the builder-local simulation but was not \
-                     registered. Platform build {} remains prepared, and the CAS data is \
-                     deleted with the builder sandbox.",
-                    plan.registered_name, prepared.build_id
-                )));
-                return Ok(result);
-            }
-            if has_cas_sources {
-                // Simulation safety invariant: Platform did not authorize the
-                // hidden CAS source, so even an unexpectedly successful local
-                // mount must never produce a registered durable image.
-                // Final implementation removes this stop after Platform
-                // authorizes and returns all CAS source identities.
-                return Err(SandboxImageBuildError::other(
-                    "simulated CAS source unexpectedly materialized; refusing Platform \
-                     completion because Platform did not authorize that source",
-                ));
-            }
             let complete_request = complete_request_from_metadata(
                 &prepared,
                 &metadata,
@@ -812,7 +750,9 @@ where
     })
 }
 
-async fn resolve_build_context(options: CommonBuildOptions) -> Result<ResolvedBuildContext> {
+pub(crate) async fn resolve_build_context(
+    options: CommonBuildOptions,
+) -> Result<ResolvedBuildContext> {
     let client = unscoped_client(&options)?;
     let (organization_id, project_id) = if options.use_scope_headers {
         match (options.organization_id.clone(), options.project_id.clone()) {
@@ -900,7 +840,7 @@ fn sandbox_lifecycle_client(ctx: &ResolvedBuildContext) -> Result<Client> {
     .map_err(Into::into)
 }
 
-fn client_builder(
+pub(crate) fn client_builder(
     base_url: &str,
     bearer_token: &str,
     use_scope_headers: bool,
@@ -988,8 +928,6 @@ async fn resolve_template_source(
     Ok(Some(ResolvedTemplateSource {
         prepare_payload: template_build_payload(&template, reference)?,
         snapshot_format_version: template.snapshot_format_version,
-        snapshot_uri: template.snapshot_uri,
-        rootfs_disk_bytes: template.rootfs_disk_bytes,
     }))
 }
 
@@ -1033,7 +971,7 @@ async fn prepare_rootfs_build(
     client: &Client,
     plan: &DockerfileBuildPlan,
     is_public: bool,
-) -> Result<(PreparedSandboxTemplateBuild, Value, bool)> {
+) -> Result<(PreparedSandboxTemplateBuild, Value)> {
     // Resolve every external image reference against the platform's template
     // registry. The final-stage FROM is treated separately so its resolution
     // becomes the lineage parent; the additional references (earlier stages,
@@ -1068,26 +1006,33 @@ async fn prepare_rootfs_build(
         }
     }
 
-    let has_cas_sources = parent_source
+    // The platform-api rootfs builder cannot mount CAS templates as local
+    // build images; those builds belong to the Image Service build plane.
+    // Fail early with guidance instead of preparing a build that the
+    // builder would reject at materialization.
+    let cas_source_reference = parent_source
         .as_ref()
-        .is_some_and(ResolvedTemplateSource::is_cas)
-        || additional_sources
-            .iter()
-            .any(ResolvedTemplateSource::is_cas);
-
-    // Simulation: current Platform rejects CAS templates as local build images,
-    // so only durable sources are authorized/prepared there. We inject CAS
-    // source identities into the in-sandbox spec after prepare; every such
-    // source intentionally points at a missing local manifest.
-    // Final implementation: Platform will authorize every source format and
-    // return its real canonical manifest URI in the prepare response.
+        .filter(|source| source.is_cas())
+        .or_else(|| additional_sources.iter().find(|source| source.is_cas()))
+        .and_then(|source| {
+            source
+                .prepare_payload
+                .get("reference")
+                .and_then(Value::as_str)
+                .map(str::to_string)
+        });
+    if let Some(reference) = cas_source_reference {
+        return Err(SandboxImageBuildError::usage(format!(
+            "'{reference}' resolves to a CAS (content-addressed streaming) image, which the \
+             platform rootfs builder cannot use as a build source; build with the CAS option \
+             enabled to run this build through the Image Service"
+        )));
+    }
     let platform_parent_payload = parent_source
         .as_ref()
-        .filter(|source| !source.is_cas())
         .map(|source| source.prepare_payload.clone());
     let platform_additional_payload = additional_sources
         .iter()
-        .filter(|source| !source.is_cas())
         .map(|source| source.prepare_payload.clone())
         .collect();
     let prepare_body = prepare_request_body(
@@ -1111,67 +1056,9 @@ async fn prepare_rootfs_build(
         )));
     }
 
-    let mut raw: Value = response.json().await?;
+    let raw: Value = response.json().await?;
     let prepared = serde_json::from_value(raw.clone())?;
-    inject_simulated_cas_sources(&mut raw, parent_source.as_ref(), &additional_sources)?;
-    Ok((prepared, raw, has_cas_sources))
-}
-
-fn inject_simulated_cas_sources(
-    prepared_spec: &mut Value,
-    parent_source: Option<&ResolvedTemplateSource>,
-    additional_sources: &[ResolvedTemplateSource],
-) -> Result<()> {
-    let object = prepared_spec.as_object_mut().ok_or_else(|| {
-        SandboxImageBuildError::other("platform API returned a non-object rootfs build spec")
-    })?;
-
-    if let Some(parent_source) = parent_source
-        && parent_source.is_cas()
-    {
-        object.insert(
-            "parent".to_string(),
-            parent_source.simulated_cas_builder_entry()?,
-        );
-    }
-
-    if additional_sources
-        .iter()
-        .any(ResolvedTemplateSource::is_cas)
-    {
-        let platform_entries = object
-            .get("additionalLocalImages")
-            .and_then(Value::as_array)
-            .cloned()
-            .unwrap_or_default();
-        let mut final_entries = Vec::with_capacity(additional_sources.len());
-        for source in additional_sources {
-            if source.is_cas() {
-                final_entries.push(source.simulated_cas_builder_entry()?);
-                continue;
-            }
-            let reference = source
-                .prepare_payload
-                .get("reference")
-                .and_then(Value::as_str)
-                .unwrap_or_default();
-            let platform_entry = platform_entries
-                .iter()
-                .find(|entry| entry.get("reference").and_then(Value::as_str) == Some(reference))
-                .cloned()
-                .ok_or_else(|| {
-                    SandboxImageBuildError::other(format!(
-                        "platform prepare response omitted durable local image '{reference}'"
-                    ))
-                })?;
-            final_entries.push(platform_entry);
-        }
-        object.insert(
-            "additionalLocalImages".to_string(),
-            Value::Array(final_entries),
-        );
-    }
-    Ok(())
+    Ok((prepared, raw))
 }
 
 /// Assemble the prepare-request body from the plan and the resolved
@@ -1334,7 +1221,6 @@ async fn upload_build_inputs(
     prepared_spec: &Value,
     disk_mb: Option<u64>,
     docker_compat: bool,
-    cas_destination: bool,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
     // Pre-create REMOTE_BUILD_DIR with permissive mode as root so the
@@ -1359,7 +1245,6 @@ async fn upload_build_inputs(
         disk_mb,
         docker_config_json,
         docker_compat,
-        cas_destination,
     )?;
     ensure_remote_parent_dir(proxy, REMOTE_SPEC_PATH).await?;
     proxy
@@ -1375,7 +1260,6 @@ fn build_rootfs_spec(
     disk_mb: Option<u64>,
     docker_config_json: Option<String>,
     docker_compat: bool,
-    cas_destination: bool,
 ) -> Result<Value> {
     let mut spec = prepared_spec.clone();
     let object = spec.as_object_mut().ok_or_else(|| {
@@ -1415,33 +1299,6 @@ fn build_rootfs_spec(
     if docker_compat {
         object.insert("dockerCompat".to_string(), Value::Bool(true));
     }
-    if cas_destination {
-        // Simulation: the current prepare response is durable-shaped. Strip
-        // every destination field that the local CAS daemon neither consumes
-        // nor may mistake for an upload instruction, and do not expose the
-        // Platform snapshot id inside the builder sandbox.
-        // Final implementation: Platform will return rootfsFormat, casBaseUri,
-        // and the opaque build capability directly in this prepared spec.
-        for key in [
-            "snapshotId",
-            "snapshotUri",
-            "snapshotRelPath",
-            "upload",
-            "manifestUpload",
-            "fileManifestUpload",
-        ] {
-            object.remove(key);
-        }
-        object.insert(
-            "rootfsFormat".to_string(),
-            Value::String("cas-streaming".to_string()),
-        );
-        object.insert(
-            "rootfsNodeKind".to_string(),
-            Value::String("base".to_string()),
-        );
-    }
-
     Ok(spec)
 }
 
@@ -1554,74 +1411,6 @@ async fn sign_prepared_local_image_downloads(
     Ok(())
 }
 
-fn simulated_cas_build_result(
-    registered_name: &str,
-    prepared: &PreparedSandboxTemplateBuild,
-    metadata: &Value,
-    rootfs_disk_bytes: u64,
-) -> Result<Value> {
-    // Simulation: shape the daemon receipt like a completion result, while
-    // marking its builder-local lifetime and lack of registration explicitly.
-    // Final implementation: Platform completion returns the authoritative
-    // registered image instead of this locally assembled value.
-    let receipt = metadata
-        .get("casFilesystemReceipt")
-        .and_then(Value::as_object)
-        .ok_or_else(|| {
-            SandboxImageBuildError::other(
-                "CAS rootfs builder metadata is missing casFilesystemReceipt",
-            )
-        })?;
-    let receipt_string = |key: &str| {
-        receipt
-            .get(key)
-            .and_then(Value::as_str)
-            .map(str::to_string)
-            .ok_or_else(|| {
-                SandboxImageBuildError::other(format!(
-                    "CAS rootfs builder receipt is missing {key}"
-                ))
-            })
-    };
-    let receipt_u64 = |key: &str| {
-        receipt.get(key).and_then(Value::as_u64).ok_or_else(|| {
-            SandboxImageBuildError::other(format!("CAS rootfs builder receipt is missing {key}"))
-        })
-    };
-    let cas_filesystem_id = receipt_string("casFilesystemId")?;
-    let manifest_uri = receipt_string("manifestUri")?;
-    let stored_bytes = receipt_u64("storedBytes")?;
-    let logical_bytes = receipt_u64("logicalBytes")?;
-    let novel_bytes_uploaded = receipt_u64("novelBytesUploaded")?;
-    let dedup_bytes_reused = receipt_u64("dedupBytesReused")?;
-    if metadata.get("snapshotUri").and_then(Value::as_str) != Some(manifest_uri.as_str()) {
-        return Err(SandboxImageBuildError::other(
-            "CAS rootfs builder metadata snapshotUri does not match its receipt",
-        ));
-    }
-    Ok(json!({
-        "registered": false,
-        "ephemeral": true,
-        "name": registered_name,
-        "buildId": prepared.build_id,
-        "snapshotId": prepared.snapshot_id,
-        "snapshotFormatVersion": CAS_SNAPSHOT_FORMAT_VERSION,
-        "snapshotUri": manifest_uri,
-        "rootfsFormat": "cas-streaming",
-        "rootfsNodeKind": "base",
-        "rootfsDiskBytes": rootfs_disk_bytes,
-        "snapshotSizeBytes": stored_bytes,
-        "casFilesystemReceipt": {
-            "casFilesystemId": cas_filesystem_id,
-            "manifestUri": manifest_uri,
-            "storedBytes": stored_bytes,
-            "logicalBytes": logical_bytes,
-            "novelBytesUploaded": novel_bytes_uploaded,
-            "dedupBytesReused": dedup_bytes_reused,
-        },
-    }))
-}
-
 fn rootfs_disk_bytes(disk_mb: Option<u64>, prepared: &PreparedSandboxTemplateBuild) -> Result<u64> {
     if let Some(disk_mb) = disk_mb {
         return disk_mb.checked_mul(1024 * 1024).ok_or_else(|| {
@@ -1659,7 +1448,7 @@ const MULTIPART_PART_SIZE_BYTES: u64 = MULTIPART_PART_SIZE_MB * 1024 * 1024;
 /// `indexify/crates/dataplane/src/sign_blob.rs`); keep these in sync.
 const MULTIPART_MAX_PARTS: u32 = 10_000;
 
-async fn resolved_docker_config_json() -> Result<Option<String>> {
+pub(crate) async fn resolved_docker_config_json() -> Result<Option<String>> {
     let docker_config = DockerConfig::load().await.map_err(|error| {
         SandboxImageBuildError::other(format!("Failed to load Docker config: {error}"))
     })?;
@@ -3116,7 +2905,7 @@ fn join_posix(base: &str, child: &str) -> String {
     normalize_posix(&format!("{}/{}", base.trim_end_matches('/'), child))
 }
 
-fn collect_dir_files(root: &Path, current: &Path) -> Result<Vec<(PathBuf, String)>> {
+pub(crate) fn collect_dir_files(root: &Path, current: &Path) -> Result<Vec<(PathBuf, String)>> {
     let mut files = Vec::new();
     let dockerignore = dockerignore_matcher(root)?;
     collect_dir_files_filtered(root, current, dockerignore.as_ref(), &mut files)?;
@@ -3444,16 +3233,9 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         .unwrap();
         let plan = super::plan_image_import("ubuntu:24.04", None).unwrap();
 
-        let spec = super::build_rootfs_spec(
-            &prepared_spec,
-            &prepared,
-            &plan,
-            Some(10240),
-            None,
-            false,
-            false,
-        )
-        .unwrap();
+        let spec =
+            super::build_rootfs_spec(&prepared_spec, &prepared, &plan, Some(10240), None, false)
+                .unwrap();
         assert_eq!(spec["importImageReference"], "ubuntu:24.04");
         assert_eq!(spec["baseImage"], "ubuntu:24.04");
         assert_eq!(spec["dockerfile"], "FROM ubuntu:24.04\n");
@@ -4069,92 +3851,6 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
     }
 
     #[test]
-    fn simulated_cas_sources_use_fake_local_manifests_without_snapshot_ids() {
-        let cas_parent = super::ResolvedTemplateSource {
-            prepare_payload: json!({
-                "templateId": "tmpl-cas-parent",
-                "name": "cas-parent",
-                "reference": "tensorlake/cas-parent",
-                "snapshotId": "snapshot-cas-parent",
-                "public": false,
-            }),
-            snapshot_format_version: Some(super::CAS_SNAPSHOT_FORMAT_VERSION.to_string()),
-            snapshot_uri: Some("s3://production/cas-parent/manifest.json".to_string()),
-            rootfs_disk_bytes: Some(4096),
-        };
-        let durable_additional = super::ResolvedTemplateSource {
-            prepare_payload: json!({
-                "templateId": "tmpl-durable",
-                "name": "durable",
-                "reference": "tensorlake/durable",
-                "snapshotId": "snapshot-durable",
-                "public": false,
-            }),
-            snapshot_format_version: Some("durable_archive_v1".to_string()),
-            snapshot_uri: Some("s3://production/durable.tlsnap".to_string()),
-            rootfs_disk_bytes: Some(8192),
-        };
-        let cas_additional = super::ResolvedTemplateSource {
-            prepare_payload: json!({
-                "templateId": "tmpl-cas-tool",
-                "name": "cas-tool",
-                "reference": "tensorlake/cas-tool",
-                "snapshotId": "snapshot-cas-tool",
-                "public": false,
-            }),
-            snapshot_format_version: Some(super::CAS_SNAPSHOT_FORMAT_VERSION.to_string()),
-            snapshot_uri: Some("s3://production/cas-tool/manifest.json".to_string()),
-            rootfs_disk_bytes: Some(16384),
-        };
-        let mut prepared_spec = json!({
-            "parent": null,
-            "additionalLocalImages": [{
-                "templateId": "tmpl-durable",
-                "name": "durable",
-                "reference": "tensorlake/durable",
-                "snapshotId": "snapshot-durable",
-                "snapshotUri": "s3://prepared/durable.tlsnap"
-            }]
-        });
-
-        super::inject_simulated_cas_sources(
-            &mut prepared_spec,
-            Some(&cas_parent),
-            &[durable_additional, cas_additional],
-        )
-        .unwrap();
-
-        assert_eq!(
-            prepared_spec["parent"]["snapshotFormatVersion"],
-            super::CAS_SNAPSHOT_FORMAT_VERSION
-        );
-        assert_eq!(prepared_spec["parent"]["rootfsDiskBytes"], 4096);
-        assert!(
-            prepared_spec["parent"]["snapshotUri"]
-                .as_str()
-                .unwrap()
-                .starts_with(&format!(
-                    "file://{}/filesystems/",
-                    super::SIMULATED_CAS_BLOB_STORE_ROOT
-                ))
-        );
-        assert!(prepared_spec["parent"].get("snapshotId").is_none());
-        assert_eq!(
-            prepared_spec["additionalLocalImages"][0]["snapshotUri"],
-            "s3://prepared/durable.tlsnap"
-        );
-        assert_eq!(
-            prepared_spec["additionalLocalImages"][1]["snapshotFormatVersion"],
-            super::CAS_SNAPSHOT_FORMAT_VERSION
-        );
-        assert!(
-            prepared_spec["additionalLocalImages"][1]
-                .get("snapshotId")
-                .is_none()
-        );
-    }
-
-    #[test]
     fn template_build_payload_imposes_no_eligibility_policy() {
         // The client owns no node-kind or snapshot-format allowlist: diff
         // templates, cas-streaming templates, and formats this client has
@@ -4244,7 +3940,6 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             Some(2048),
             Some("{}".to_string()),
             true,
-            false,
         )
         .unwrap();
         assert_eq!(spec["dockerfile"], "FROM alpine\nRUN echo hi\n");
@@ -4273,79 +3968,9 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             import_image_reference: None,
         };
 
-        let spec =
-            build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None, false, false).unwrap();
+        let spec = build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None, false).unwrap();
         assert_eq!(spec["rootfsDiskBytes"], 20_u64 * 1024 * 1024 * 1024);
         assert!(spec.get("dockerCompat").is_none());
-    }
-
-    #[test]
-    fn build_rootfs_spec_for_simulated_cas_strips_durable_destination_fields() {
-        let prepared_spec = json!({
-            "buildId": "build-1",
-            "snapshotId": "snapshot-1",
-            "snapshotUri": "s3://bucket/snapshot.tlsnap",
-            "snapshotRelPath": "snapshots/snapshot-1.tlsnap",
-            "rootfsNodeKind": "base",
-            "upload": {"kind": "single_put"},
-            "manifestUpload": {"url": "https://example/manifest"},
-            "fileManifestUpload": {"url": "https://example/files"},
-            "builder": {
-                "image": "tensorlake/rootfs-builder",
-                "command": "tl-rootfs-build",
-                "cpus": 2,
-                "memoryMb": 4096,
-                "diskMb": 30720
-            }
-        });
-        let prepared: PreparedSandboxTemplateBuild =
-            serde_json::from_value(prepared_spec.clone()).unwrap();
-        let plan = super::plan_image_import("ubuntu:24.04", Some("ubuntu-cas")).unwrap();
-
-        let spec =
-            build_rootfs_spec(&prepared_spec, &prepared, &plan, None, None, false, true).unwrap();
-
-        assert_eq!(spec["buildId"], "build-1");
-        assert_eq!(spec["rootfsFormat"], "cas-streaming");
-        assert_eq!(spec["rootfsNodeKind"], "base");
-        for key in [
-            "snapshotId",
-            "snapshotUri",
-            "snapshotRelPath",
-            "upload",
-            "manifestUpload",
-            "fileManifestUpload",
-        ] {
-            assert!(spec.get(key).is_none(), "{key} leaked into CAS spec");
-        }
-    }
-
-    #[test]
-    fn simulated_cas_result_returns_full_unregistered_receipt() {
-        let prepared = prepared_build("base");
-        let manifest_uri = "file:///var/lib/tensorlake/rootfs-builder/work/cas-blob-store/filesystems/fs/manifest.json";
-        let metadata = json!({
-            "snapshotUri": manifest_uri,
-            "casFilesystemReceipt": {
-                "casFilesystemId": "fs-1",
-                "manifestUri": manifest_uri,
-                "storedBytes": 120,
-                "logicalBytes": 200,
-                "novelBytesUploaded": 80,
-                "dedupBytesReused": 120
-            }
-        });
-
-        let result =
-            super::simulated_cas_build_result("ubuntu-cas", &prepared, &metadata, 4096).unwrap();
-
-        assert_eq!(result["registered"], false);
-        assert_eq!(result["ephemeral"], true);
-        assert_eq!(result["name"], "ubuntu-cas");
-        assert_eq!(result["snapshotUri"], manifest_uri);
-        assert_eq!(result["snapshotSizeBytes"], 120);
-        assert_eq!(result["rootfsDiskBytes"], 4096);
-        assert_eq!(result["casFilesystemReceipt"]["logicalBytes"], 200);
     }
 
     #[test]

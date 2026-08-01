@@ -23,8 +23,17 @@ pub async fn run(
     is_public: bool,
     docker_compat: bool,
     cas: bool,
+    build_args: &[String],
     output_json: bool,
 ) -> Result<()> {
+    let build_args = build_args
+        .iter()
+        .map(|raw| {
+            raw.split_once('=')
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .ok_or_else(|| CliError::usage(format!("--build-arg {raw:?} must be KEY=VALUE")))
+        })
+        .collect::<Result<Vec<_>>>()?;
     let options = SandboxImageBuildOptions {
         common: CommonBuildOptions {
             api_url: ctx.api_url.clone(),
@@ -49,6 +58,7 @@ pub async fn run(
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text: None,
         context_dir: None,
+        build_args,
     };
 
     let mut renderer = ImageBuildEventRenderer::new();
@@ -57,10 +67,8 @@ pub async fn run(
         .map_err(|error| CliError::Other(error.into()))?;
 
     if output_json || cas {
-        // Simulation: --cas must expose the unregistered, builder-local CAS
-        // receipt even when --json was not requested.
-        // Final implementation: this prints the normal registered Platform
-        // image response, while --json remains the durable-path opt-in.
+        // --cas prints the published Image Service image record; --json
+        // remains the opt-in for the legacy platform path.
         println!("{}", serde_json::to_string_pretty(&registered)?);
     }
 

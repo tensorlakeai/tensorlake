@@ -49,6 +49,9 @@ pub struct SandboxImageBuildOptionsJs {
     /// Opt into the non-default CAS (content-addressed streaming) image
     /// format.
     pub cas: Option<bool>,
+    /// Dockerfile build args forwarded to BuildKit inside the builder. CAS
+    /// builds only.
+    pub build_args: Option<std::collections::HashMap<String, String>>,
 }
 
 #[napi(object)]
@@ -140,6 +143,14 @@ pub async fn build_sandbox_image(
         dockerfile_path: PathBuf::from(options.dockerfile_path),
         dockerfile_text: options.dockerfile_text,
         context_dir: options.context_dir.map(PathBuf::from),
+        build_args: options
+            .build_args
+            .map(|args| {
+                let mut args: Vec<(String, String)> = args.into_iter().collect();
+                args.sort();
+                args
+            })
+            .unwrap_or_default(),
     };
 
     let result = rust_build_sandbox_image(build_options, move |event| {

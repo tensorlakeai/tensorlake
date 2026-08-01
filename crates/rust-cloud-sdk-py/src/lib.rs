@@ -4001,6 +4001,7 @@ fn create_image_context_file(
     dockerfile_text=None,
     context_dir=None,
     cas=false,
+    build_args=None,
     emit=None,
 ))]
 fn build_sandbox_image(
@@ -4023,6 +4024,7 @@ fn build_sandbox_image(
     dockerfile_text: Option<String>,
     context_dir: Option<String>,
     cas: bool,
+    build_args: Option<std::collections::BTreeMap<String, String>>,
     emit: Option<Py<PyAny>>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageBuildOptions {
@@ -4046,6 +4048,9 @@ fn build_sandbox_image(
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text,
         context_dir: context_dir.map(PathBuf::from),
+        build_args: build_args
+            .map(|args| args.into_iter().collect())
+            .unwrap_or_default(),
     };
 
     let result = py

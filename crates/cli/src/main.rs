@@ -1469,11 +1469,16 @@ enum ImageCommands {
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
-        /// Build a CAS (content-addressed streaming) image (non-default). CAS
-        /// images cold-boot by faulting content on demand instead of
-        /// localizing a monolithic snapshot.
+        /// Build a CAS (content-addressed streaming) image through the Image
+        /// Service build plane (non-default). CAS images cold-boot by
+        /// faulting content on demand instead of localizing a monolithic
+        /// snapshot. Routed through the API host's /images/v4 path.
         #[arg(long, hide = true)]
         cas: bool,
+
+        /// Dockerfile build arg, KEY=VALUE. Repeatable. CAS builds only.
+        #[arg(long = "build-arg")]
+        build_arg: Vec<String>,
 
         /// Print the sandbox image result JSON to stdout
         #[arg(long = "json", hide = true)]
@@ -1516,9 +1521,10 @@ enum ImageCommands {
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
-        /// Import as a CAS (content-addressed streaming) image (non-default).
-        /// CAS images cold-boot by faulting content on demand instead of
-        /// localizing a monolithic snapshot.
+        /// Import as a CAS (content-addressed streaming) image through the
+        /// Image Service build plane (non-default). CAS images cold-boot by
+        /// faulting content on demand instead of localizing a monolithic
+        /// snapshot. Routed through the API host's /images/v4 path.
         #[arg(long, hide = true)]
         cas: bool,
 
@@ -2245,6 +2251,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             public,
                             docker_compat,
                             cas,
+                            build_arg,
                             json,
                         } => {
                             let disk_mb = if let Some(value) = disk_mb {
@@ -2269,6 +2276,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 public,
                                 docker_compat,
                                 cas,
+                                &build_arg,
                                 json,
                             )
                             .await
