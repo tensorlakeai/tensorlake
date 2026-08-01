@@ -2,21 +2,51 @@ use chrono::{TimeZone, Utc};
 use comfy_table::Cell;
 use reqwest::header::{ACCEPT, CONTENT_TYPE};
 use serde::Deserialize;
+use std::io::Write;
+use std::time::Duration;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
 const APPLICATION_DETAILS_LABEL_WIDTH: usize = 20;
+const APPLICATION_REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Deserialize)]
 struct InvokeApplicationResponse {
     request_id: String,
 }
 
-pub async fn invoke(ctx: &CliContext, application: &str, json: Option<&str>) -> Result<()> {
+#[derive(Debug, Deserialize)]
+struct InvocationRequestStatus {
+    outcome: Option<serde_json::Value>,
+    request_error: Option<InvocationRequestError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InvocationRequestError {
+    function_name: String,
+    message: String,
+}
+
+pub async fn invoke(
+    ctx: &CliContext,
+    application: &str,
+    json: Option<&str>,
+    wait: bool,
+) -> Result<()> {
     let request_id = invoke_request(ctx, application, json).await?;
-    println!("{request_id}");
+    if !wait {
+        println!("{request_id}");
+        return Ok(());
+    }
+
+    let output = wait_for_request_output(ctx, application, &request_id).await?;
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(&output)?;
+    if !output.is_empty() && !output.ends_with(b"\n") {
+        stdout.write_all(b"\n")?;
+    }
     Ok(())
 }
 
@@ -66,6 +96,115 @@ async fn invoke_request(ctx: &CliContext, application: &str, json: Option<&str>)
         )));
     }
     Ok(response.request_id)
+}
+
+async fn wait_for_request_output(
+    ctx: &CliContext,
+    application: &str,
+    request_id: &str,
+) -> Result<Vec<u8>> {
+    wait_for_request_output_with_interval(
+        ctx,
+        application,
+        request_id,
+        APPLICATION_REQUEST_POLL_INTERVAL,
+    )
+    .await
+}
+
+async fn wait_for_request_output_with_interval(
+    ctx: &CliContext,
+    application: &str,
+    request_id: &str,
+    poll_interval: Duration,
+) -> Result<Vec<u8>> {
+    let client = ctx.client()?;
+    let request_url = format!(
+        "{}/v1/namespaces/{}/applications/{}/requests/{}",
+        ctx.api_url.trim_end_matches('/'),
+        urlencoding::encode(&ctx.namespace),
+        urlencoding::encode(application),
+        urlencoding::encode(request_id),
+    );
+
+    loop {
+        let response = client
+            .get(&request_url)
+            .header(ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(CliError::Http)?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(CliError::Other(anyhow::anyhow!(
+                "failed to get application '{}' request '{}' (HTTP {}): {}",
+                application,
+                request_id,
+                status,
+                body,
+            )));
+        }
+
+        let status = response
+            .json::<InvocationRequestStatus>()
+            .await
+            .map_err(CliError::Http)?;
+        match status.outcome.as_ref() {
+            None | Some(serde_json::Value::Null) => {
+                tokio::time::sleep(poll_interval).await;
+            }
+            Some(serde_json::Value::String(outcome)) if outcome == "success" => break,
+            Some(serde_json::Value::Object(outcome)) => {
+                let reason = outcome
+                    .get("failure")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown failure");
+                if let Some(request_error) = status.request_error {
+                    return Err(CliError::Other(anyhow::anyhow!(
+                        "application '{}' request '{}' failed in function '{}': {}",
+                        application,
+                        request_id,
+                        request_error.function_name,
+                        request_error.message,
+                    )));
+                }
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "application '{}' request '{}' failed: {}",
+                    application,
+                    request_id,
+                    reason,
+                )));
+            }
+            Some(outcome) => {
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "application '{}' request '{}' returned an unexpected outcome: {}",
+                    application,
+                    request_id,
+                    outcome,
+                )));
+            }
+        }
+    }
+
+    let response = client
+        .get(format!("{request_url}/output"))
+        .send()
+        .await
+        .map_err(CliError::Http)?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to download application '{}' request '{}' output (HTTP {}): {}",
+            application,
+            request_id,
+            status,
+            body,
+        )));
+    }
+
+    Ok(response.bytes().await.map_err(CliError::Http)?.to_vec())
 }
 
 pub async fn ls(ctx: &CliContext) -> Result<()> {
@@ -343,7 +482,10 @@ fn format_application_state(value: Option<&serde_json::Value>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_application_details, invoke_request, public_endpoint_id};
+    use super::{
+        format_application_details, invoke_request, public_endpoint_id,
+        wait_for_request_output_with_interval,
+    };
     use crate::auth::context::CliContext;
     use crate::config::resolver::ResolvedConfig;
     use serde_json::json;
@@ -415,6 +557,40 @@ mod tests {
         (format!("http://{address}"), server)
     }
 
+    async fn scripted_server(
+        responses: Vec<(&'static str, &'static [u8])>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (content_type, response_body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "client closed before sending HTTP headers");
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len(),
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(response_body).await.unwrap();
+                stream.shutdown().await.unwrap();
+                requests.push(String::from_utf8(request).unwrap());
+            }
+            requests
+        });
+        (format!("http://{address}"), server)
+    }
+
     #[tokio::test]
     async fn invoke_sends_json_and_returns_the_request_id() {
         let (api_url, server) = invocation_server(200, r#"{"request_id":"request-123"}"#).await;
@@ -479,6 +655,64 @@ mod tests {
         assert_eq!(
             error.to_string(),
             r#"failed to invoke application 'application' (HTTP 422 Unprocessable Entity): {"error":"bad input"}"#,
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_polls_until_success_and_downloads_the_output() {
+        let (api_url, server) = scripted_server(vec![
+            ("application/json", br#"{"outcome":null}"#),
+            ("application/json", br#"{"outcome":"success"}"#),
+            ("application/octet-stream", b"completed output"),
+        ])
+        .await;
+        let ctx = test_context(api_url);
+
+        let output = wait_for_request_output_with_interval(
+            &ctx,
+            "support/ticket",
+            "request/123",
+            std::time::Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let requests = server.await.unwrap();
+
+        assert_eq!(output, b"completed output");
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications/support%2Fticket/requests/request%2F123 HTTP/1.1\r\n"
+        ));
+        assert!(requests[1].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications/support%2Fticket/requests/request%2F123 HTTP/1.1\r\n"
+        ));
+        assert!(requests[2].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications/support%2Fticket/requests/request%2F123/output HTTP/1.1\r\n"
+        ));
+    }
+
+    #[tokio::test]
+    async fn wait_reports_the_terminal_request_failure() {
+        let (api_url, server) = scripted_server(vec![(
+            "application/json",
+            br#"{"outcome":{"failure":"function_error"},"request_error":null}"#,
+        )])
+        .await;
+        let ctx = test_context(api_url);
+
+        let error = wait_for_request_output_with_interval(
+            &ctx,
+            "application",
+            "request-456",
+            std::time::Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+        let _ = server.await.unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "application 'application' request 'request-456' failed: function_error"
         );
     }
 

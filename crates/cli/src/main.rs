@@ -940,6 +940,10 @@ enum AppCommands {
         /// JSON value to send as the application input
         #[arg(short = 'j', long, value_name = "JSON", allow_hyphen_values = true)]
         json: Option<String>,
+
+        /// Wait for the request to finish and print its output
+        #[arg(short = 'w', long)]
+        wait: bool,
     },
 
     /// Manage cron schedules for applications
@@ -2362,9 +2366,13 @@ async fn run_app_command(ctx: &mut CliContext, subcmd: AppCommands) -> error::Re
     match subcmd {
         AppCommands::New { name, force } => commands::new::run(&name, force),
         AppCommands::Deploy { args } => run_deploy_command(ctx, &args).await,
-        AppCommands::Invoke { application, json } => {
+        AppCommands::Invoke {
+            application,
+            json,
+            wait,
+        } => {
             ensure_auth_and_project(ctx).await?;
-            commands::applications::invoke(ctx, &application, json.as_deref()).await
+            commands::applications::invoke(ctx, &application, json.as_deref(), wait).await
         }
         AppCommands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
         AppCommands::Describe { application } => {
@@ -2937,17 +2945,28 @@ mod tests {
             "hello_world",
             "--json",
             r#"{"name":"Tensorlake"}"#,
+            "--wait",
         ]) {
-            Commands::App(AppCommands::Invoke { application, json }) => {
+            Commands::App(AppCommands::Invoke {
+                application,
+                json,
+                wait,
+            }) => {
                 assert_eq!(application, "hello_world");
                 assert_eq!(json.as_deref(), Some(r#"{"name":"Tensorlake"}"#));
+                assert!(wait);
             }
             _ => panic!("expected app invoke command"),
         }
         match parse_command(["tl", "app", "invoke", "hello_world"]) {
-            Commands::App(AppCommands::Invoke { application, json }) => {
+            Commands::App(AppCommands::Invoke {
+                application,
+                json,
+                wait,
+            }) => {
                 assert_eq!(application, "hello_world");
                 assert_eq!(json, None);
+                assert!(!wait);
             }
             _ => panic!("expected app invoke command without JSON"),
         }
