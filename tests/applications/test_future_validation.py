@@ -61,6 +61,15 @@ class TestFutureValidation(unittest.TestCase):
                     Future.wait([future], **controls)  # type: ignore[arg-type]
                 self.assertFalse(future._run_hook_was_called)
 
+    def test_wait_invalid_return_when_preserves_the_sdk_error_contract(self) -> None:
+        with self.assertRaises(SDKUsageError) as context:
+            Future.wait([], return_when="wrong_value")  # type: ignore[arg-type]
+
+        self.assertEqual(
+            str(context.exception),
+            "Not supported return_when value: 'wrong_value'",
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

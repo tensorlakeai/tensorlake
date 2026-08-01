@@ -257,7 +257,7 @@ class Future:
             RETURN_WHEN.FIRST_FAILURE,
         ):
             raise SDKUsageError(
-                f"Not supported Future.wait return_when value: '{return_when}'."
+                f"Not supported return_when value: '{return_when}'"
             )
 
         for future in future_list:
