@@ -214,8 +214,9 @@ pub struct CommonBuildOptions {
     /// through the Image Service build plane instead of the platform-api
     /// rootfs builder. The SDK resolves the Dockerfile plan's references
     /// against the Image Service catalog and submits them with the build;
-    /// the service reconciler drives the builder sandbox. Requires
-    /// `TENSORLAKE_IMAGE_SERVICE_URL`.
+    /// the service reconciler drives the builder sandbox. Routed through the
+    /// API host's `/images/v4` ingress path by default;
+    /// `TENSORLAKE_IMAGE_SERVICE_URL` overrides it for local development.
     pub cas: bool,
     pub user_agent: Option<String>,
     pub docker_compat: bool,

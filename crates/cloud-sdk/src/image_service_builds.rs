@@ -30,6 +30,12 @@ type Result<T> = std::result::Result<T, SandboxImageBuildError>;
 /// service, CAS builds require this to be set explicitly.
 pub const IMAGE_SERVICE_URL_ENV: &str = "TENSORLAKE_IMAGE_SERVICE_URL";
 
+/// Ingress route that fronts the Image Service. The ingress authenticates,
+/// replaces any client-supplied identity headers with verified ones, and maps
+/// this prefix onto the service's own routes -- so the paths below are
+/// prefix-relative (`/builds`, not `/v1/builds`).
+const IMAGE_SERVICE_INGRESS_PATH: &str = "/images/v4";
+
 /// Immutable image reference prefix (`cas-v1:<64 hex sha256>`). A Dockerfile
 /// reference written in this form pins the image id directly, with no
 /// catalog name lookup.
@@ -62,7 +68,6 @@ pub(crate) async fn run_image_service_build<F>(
 where
     F: FnMut(SandboxImageBuildEvent),
 {
-    let image_service_url = image_service_url()?;
     warn_ignored_options(&options, &mut emit);
     // Forward the local `docker login` state for the guest's registry pulls,
     // the same source the legacy path ships into its builder. The service
@@ -76,6 +81,7 @@ where
     }
     let ctx = resolve_build_context(options).await?;
     let project = ctx.project_id.clone();
+    let image_service_url = image_service_url(&ctx.api_url);
     let client = client_builder(
         &image_service_url,
         &ctx.bearer_token,
@@ -147,17 +153,35 @@ where
     wait_for_publication(&client, &project, &created, &plan.registered_name, emit).await
 }
 
-fn image_service_url() -> Result<String> {
-    std::env::var(IMAGE_SERVICE_URL_ENV)
-        .ok()
+/// Base URL for the Image Service.
+///
+/// Defaults to the ingress route on the configured API host, so a normal
+/// client needs no extra configuration: `https://api.tensorlake.ai` yields
+/// `https://api.tensorlake.ai/images/v4`, and the ingress authenticates the
+/// request, injects verified identity headers, and strips the prefix before
+/// the Image Service sees it. The service performs no authentication of its
+/// own, so reaching it any other way in a deployed environment would bypass
+/// the only auth boundary there is.
+///
+/// `TENSORLAKE_IMAGE_SERVICE_URL` overrides it for pointing at a local
+/// Image Service directly during development.
+fn image_service_url(api_url: &str) -> String {
+    resolve_image_service_url(api_url, std::env::var(IMAGE_SERVICE_URL_ENV).ok())
+}
+
+/// Pure form, so the defaulting rule is testable without mutating process
+/// environment (which races across parallel tests).
+fn resolve_image_service_url(api_url: &str, override_url: Option<String>) -> String {
+    if let Some(override_url) = override_url
         .map(|value| value.trim().trim_end_matches('/').to_string())
         .filter(|value| !value.is_empty())
-        .ok_or_else(|| {
-            SandboxImageBuildError::usage(format!(
-                "CAS image builds go through the Image Service; set {IMAGE_SERVICE_URL_ENV} to \
-                 its base URL"
-            ))
-        })
+    {
+        return override_url;
+    }
+    format!(
+        "{}{IMAGE_SERVICE_INGRESS_PATH}",
+        api_url.trim_end_matches('/')
+    )
 }
 
 /// Attach the forwarded docker config to a build-creation body. The field is
@@ -284,10 +308,7 @@ async fn lookup_catalog_name(
     project: &str,
     reference: &str,
 ) -> Result<Option<String>> {
-    let path = format!(
-        "/v1/names/{reference}?project={}",
-        urlencoding_encode(project)
-    );
+    let path = format!("/names/{reference}?project={}", urlencoding_encode(project));
     let request = client.request(Method::GET, &path).build()?;
     let response = client.execute_raw(request).await?;
     match response.status() {
@@ -376,7 +397,7 @@ async fn create_build(
         "Creating Image Service build...".to_string(),
     ));
     let request = client
-        .request(Method::POST, "/v1/builds")
+        .request(Method::POST, "/builds")
         .json(&body)
         .build()?;
     let response = client.execute_raw(request).await?;
@@ -467,7 +488,7 @@ async fn upload_and_seal_context(
         "Sealing build context...".to_string(),
     ));
     let request = client
-        .request(Method::POST, &format!("/v1/builds/{build_id}/context/seal"))
+        .request(Method::POST, &format!("/builds/{build_id}/context/seal"))
         .json(&json!({ "project": project, "digest": digest }))
         .build()?;
     let response = client.execute_raw(request).await?;
@@ -534,10 +555,7 @@ async fn wait_for_publication(
     mut emit: impl FnMut(SandboxImageBuildEvent),
 ) -> Result<Value> {
     let build_id = build_id_of(created)?;
-    let path = format!(
-        "/v1/builds/{build_id}?project={}",
-        urlencoding_encode(project)
-    );
+    let path = format!("/builds/{build_id}?project={}", urlencoding_encode(project));
     let deadline = tokio::time::Instant::now() + BUILD_POLL_TIMEOUT;
     let mut last_reported = String::new();
     let image_id = loop {
@@ -617,6 +635,50 @@ async fn wait_for_publication(
         "Image '{registered_name}' published ({CAS_IMAGE_REF_PREFIX}{image_id})"
     )));
     Ok(image)
+}
+
+#[cfg(test)]
+mod url_tests {
+    use super::*;
+
+    /// A normal client needs no configuration: the Image Service is reached
+    /// through the API host's ingress path, which is the only place requests
+    /// are authenticated.
+    #[test]
+    fn defaults_to_the_ingress_path_on_the_api_host() {
+        assert_eq!(
+            resolve_image_service_url("https://api.tensorlake.ai", None),
+            "https://api.tensorlake.ai/images/v4"
+        );
+        // A trailing slash on the API URL must not double up.
+        assert_eq!(
+            resolve_image_service_url("https://api.tensorlake.ai/", None),
+            "https://api.tensorlake.ai/images/v4"
+        );
+    }
+
+    #[test]
+    fn the_override_wins_and_is_trimmed() {
+        assert_eq!(
+            resolve_image_service_url(
+                "https://api.tensorlake.ai",
+                Some("  http://127.0.0.1:8843/  ".to_string())
+            ),
+            "http://127.0.0.1:8843"
+        );
+    }
+
+    /// An empty or whitespace override is ignored rather than producing a
+    /// client with an empty base URL.
+    #[test]
+    fn a_blank_override_falls_back_to_the_default() {
+        for blank in ["", "   "] {
+            assert_eq!(
+                resolve_image_service_url("https://api.tensorlake.ai", Some(blank.to_string())),
+                "https://api.tensorlake.ai/images/v4"
+            );
+        }
+    }
 }
 
 #[cfg(test)]

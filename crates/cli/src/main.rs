@@ -1472,7 +1472,7 @@ enum ImageCommands {
         /// Build a CAS (content-addressed streaming) image through the Image
         /// Service build plane (non-default). CAS images cold-boot by
         /// faulting content on demand instead of localizing a monolithic
-        /// snapshot. Requires TENSORLAKE_IMAGE_SERVICE_URL.
+        /// snapshot. Routed through the API host's /images/v4 path.
         #[arg(long, hide = true)]
         cas: bool,
 
@@ -1524,7 +1524,7 @@ enum ImageCommands {
         /// Import as a CAS (content-addressed streaming) image through the
         /// Image Service build plane (non-default). CAS images cold-boot by
         /// faulting content on demand instead of localizing a monolithic
-        /// snapshot. Requires TENSORLAKE_IMAGE_SERVICE_URL.
+        /// snapshot. Routed through the API host's /images/v4 path.
         #[arg(long, hide = true)]
         cas: bool,
 
