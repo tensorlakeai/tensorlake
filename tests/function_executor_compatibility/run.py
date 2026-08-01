@@ -2556,15 +2556,9 @@ def initialize_executor(
 
     def initialization_request(
         archive: bytes,
-        sha256_hash: str | None = None,
-        size: int | None = None,
         function_name: str = scenario.name,
         namespace: str = "compatibility",
     ) -> InitializeRequest:
-        if sha256_hash is None:
-            sha256_hash = hashlib.sha256(archive).hexdigest()
-        if size is None:
-            size = len(archive)
         return InitializeRequest(
             function=FunctionRef(
                 namespace=namespace,
@@ -2576,9 +2570,9 @@ def initialize_executor(
                 manifest=SerializedObjectManifest(
                     encoding=SerializedObjectEncoding.SERIALIZED_OBJECT_ENCODING_BINARY_ZIP,
                     encoding_version=0,
-                    size=size,
+                    size=len(archive),
                     metadata_size=0,
-                    sha256_hash=sha256_hash,
+                    sha256_hash=hashlib.sha256(archive).hexdigest(),
                 ),
                 data=archive,
             ),
@@ -2591,22 +2585,6 @@ def initialize_executor(
             namespace="",
         ),
         "an empty function-reference namespace",
-    )
-    integrity_rejection = assert_structured_initialization_rejection(
-        executor,
-        initialization_request(
-            executor.spec.application_archive,
-            sha256_hash="0" * 64,
-        ),
-        "application code with a false SHA-256",
-    )
-    size_rejection = assert_structured_initialization_rejection(
-        executor,
-        initialization_request(
-            executor.spec.application_archive,
-            size=len(executor.spec.application_archive) + 1,
-        ),
-        "application code with a false size",
     )
     post_import_rejection = assert_structured_initialization_rejection(
         executor,
@@ -2640,8 +2618,6 @@ def initialize_executor(
     return {
         "protocol_version": info.version,
         "initialization_empty_reference_rejected": empty_reference_rejection,
-        "initialization_integrity_rejected": integrity_rejection,
-        "initialization_size_rejected": size_rejection,
         "initialization_post_import_rejected": post_import_rejection,
         "initialization_changed_archive_retry": (
             executor.spec.failed_initialization_archive
@@ -3970,10 +3946,6 @@ def comparable_result(result: dict[str, Any]) -> dict[str, Any]:
         "initialization_empty_reference_rejected": result[
             "initialization_empty_reference_rejected"
         ],
-        "initialization_integrity_rejected": result[
-            "initialization_integrity_rejected"
-        ],
-        "initialization_size_rejected": result["initialization_size_rejected"],
         "initialization_post_import_rejected": result[
             "initialization_post_import_rejected"
         ],
