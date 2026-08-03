@@ -58,7 +58,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = { version = "0.17", default-features = false }
+fuser = { version = "0.18", default-features = false }
 
 [dev-dependencies]
 proptest = "1"
