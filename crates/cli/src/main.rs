@@ -1,3 +1,7 @@
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL_ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
 mod auth;
 mod cache;
 mod commands;
