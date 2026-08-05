@@ -131,3 +131,8 @@ napi-build = "2"
 codegen-units = 1
 strip = true
 lto = true
+
+[patch.crates-io]
+# Fork of fuser 0.18.0 adding Config::read_buffer_size; consumed by the vendored
+# gsvc-fs-client mount client. See tensorlakeai/fuser and cberner/fuser#338.
+fuser = { git = "https://github.com/tensorlakeai/fuser", branch = "configurable-buffer-size" }

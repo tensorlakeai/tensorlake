@@ -58,7 +58,7 @@ xxhash-rust = { version = "0.8", features = ["xxh3"] }
 zstd = "0.13"
 
 [target.'cfg(target_os = "linux")'.dependencies]
-fuser = { version = "0.17", default-features = false }
+fuser = { version = "0.18", default-features = false }
 
 [dev-dependencies]
 proptest = "1"
@@ -68,3 +68,11 @@ large_enum_variant = "allow"
 result_large_err = "allow"
 too_many_arguments = "allow"
 type_complexity = "allow"
+
+# The mount client uses `Config::read_buffer_size`, which exists only on the tensorlakeai fork of
+# fuser (upstream PR cberner/fuser#338). This manifest is its own workspace root (see the
+# `[workspace]` marker above), so the patch must live here: root-workspace `[patch.crates-io]`
+# sections do not apply to standalone --manifest-path builds like the fuse cross-check and the
+# vendored full-feature CI step.
+[patch.crates-io]
+fuser = { git = "https://github.com/tensorlakeai/fuser", branch = "configurable-buffer-size" }
