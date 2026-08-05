@@ -1,3 +1,22 @@
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL_ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Compiled-in jemalloc configuration (the prefixed build reads `_rjem_malloc_conf`).
+/// `dirty_decay_ms:0` returns freed pages to the kernel immediately: measured on the 150k-file
+/// mount-daemon burst harness it cuts peak RSS by ~370 MB (1152 -> 781 MB) with no wall-clock
+/// cost (60 s vs 64 s). The background thread handles any deferred purging. Compiled in rather
+/// than set via environment so deployments cannot drift from the measured configuration.
+#[cfg(target_os = "linux")]
+#[repr(transparent)]
+struct MallocConf(*const u8);
+#[cfg(target_os = "linux")]
+unsafe impl Sync for MallocConf {}
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+static MALLOC_CONF: MallocConf =
+    MallocConf(c"background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0".as_ptr().cast());
+
 mod auth;
 mod cache;
 mod commands;
