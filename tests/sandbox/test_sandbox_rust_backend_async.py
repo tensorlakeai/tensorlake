@@ -559,6 +559,7 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
             name="renamed",
             allow_unauthenticated_access=True,
             exposed_ports=[8080],
+            network=None,
         )
         self.assertEqual(traced.name, "renamed")
 
