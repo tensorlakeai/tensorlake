@@ -76,6 +76,14 @@ export interface GPUResources {
   model: string;
 }
 
+/**
+ * Egress network access control policy for a sandbox.
+ *
+ * `denyOut` takes precedence over `allowOut`: a destination matched by both is
+ * blocked. Entries may be IPv4 addresses, CIDR ranges, or DNS hostnames;
+ * hostname rules are followed across DNS changes. The policy can be changed on
+ * a running sandbox via `Sandbox.update({ network })` (pass `null` to clear).
+ */
 export interface NetworkConfig {
   allowInternetAccess: boolean;
   allowOut: string[];
@@ -126,6 +134,12 @@ export interface UpdateSandboxOptions {
   allowUnauthenticatedAccess?: boolean;
   /** User ports that should be routable through the sandbox proxy. Port 9501 is reserved. */
   exposedPorts?: number[];
+  /**
+   * Egress network policy for the running sandbox, applied to the live VM's
+   * firewall in one atomic swap. Omit to keep the current policy, set to
+   * replace it, or pass `null` to clear it to unrestricted egress.
+   */
+  network?: NetworkConfig | null;
 }
 
 export interface CreateSandboxResponse {

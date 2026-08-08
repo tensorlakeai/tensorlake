@@ -443,6 +443,74 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    const sandboxInfoJson = JSON.stringify({
+      id: "sbx-1",
+      namespace: "default",
+      status: "running",
+      resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+    });
+
+    it("replaces the network policy with a snake-cased object", async () => {
+      const stub = installNativeStub({
+        client: {
+          updateSandbox: vi.fn(async (id: string, json: string) => {
+            expect(id).toBe("sbx-1");
+            const body = JSON.parse(json);
+            expect(body.network).toEqual({
+              allow_internet_access: true,
+              allow_out: ["example.com"],
+              deny_out: [],
+            });
+            return { traceId: "t", json: sandboxInfoJson };
+          }),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await client.update("sbx-1", {
+        network: {
+          allowInternetAccess: true,
+          allowOut: ["example.com"],
+          denyOut: [],
+        },
+      });
+      expect(stub.client.updateSandbox).toHaveBeenCalledOnce();
+      client.close();
+    });
+
+    it("clears the network policy with an explicit null", async () => {
+      installNativeStub({
+        client: {
+          updateSandbox: vi.fn(async (_id: string, json: string) => {
+            const body = JSON.parse(json);
+            expect("network" in body).toBe(true);
+            expect(body.network).toBeNull();
+            return { traceId: "t", json: sandboxInfoJson };
+          }),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await client.update("sbx-1", { network: null });
+      client.close();
+    });
+
+    it("omits network when it is not provided", async () => {
+      installNativeStub({
+        client: {
+          updateSandbox: vi.fn(async (_id: string, json: string) => {
+            const body = JSON.parse(json);
+            expect("network" in body).toBe(false);
+            return { traceId: "t", json: sandboxInfoJson };
+          }),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await client.update("sbx-1", { name: "renamed" });
+      client.close();
+    });
+
     it("rejects empty sandbox updates", async () => {
       installNativeStub();
       const client = SandboxClient.forLocalhost();

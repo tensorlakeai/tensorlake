@@ -390,25 +390,36 @@ class AsyncSandboxClient:
         *,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
+        network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
         normalized_ports = (
             _normalize_user_ports(exposed_ports) if exposed_ports is not None else None
         )
+        clearing_network = network is CLEAR_NETWORK_POLICY
+        network_config = network if isinstance(network, NetworkConfig) else None
         if (
             name is None
             and allow_unauthenticated_access is None
             and normalized_ports is None
+            and network_config is None
+            and not clearing_network
         ):
             raise SandboxError("At least one sandbox update field must be provided.")
         request = UpdateSandboxRequest(
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=normalized_ports,
+            network=network_config,
         )
+        # exclude_none omits an unset policy (keep); CLEAR must reach the wire
+        # as an explicit null so the service clears it.
+        payload = json.loads(request.model_dump_json(exclude_none=True))
+        if clearing_network:
+            payload["network"] = None
         try:
             trace_id, response_json = await self._rust_client.update_sandbox_async(
                 sandbox_id=sandbox_id,
-                request_json=request.model_dump_json(exclude_none=True),
+                request_json=json.dumps(payload),
             )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:

@@ -693,10 +693,12 @@ class SandboxClient:
         *,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
+        network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
-        """Update a sandbox's properties.
+        """Update a running sandbox's properties.
 
-        Supports updating the sandbox name and sandbox proxy access settings.
+        Supports updating the sandbox name, sandbox proxy access settings, and
+        the egress network policy.
 
         Args:
             sandbox_id: ID or name of the sandbox to update
@@ -707,6 +709,12 @@ class SandboxClient:
             exposed_ports: User ports that should be routable through the sandbox
                 proxy. Port ``9501`` is reserved for sandbox management and cannot
                 be configured here.
+            network: Egress network policy update, applied to the running VM's
+                firewall in one atomic swap. Omit (the default) to leave the
+                current policy unchanged, pass a :class:`NetworkConfig` to
+                replace it, or pass :data:`CLEAR_NETWORK_POLICY` to clear it to
+                unrestricted egress. A destination that fails to resolve rejects
+                the update and the previous policy stays enforced.
 
         Returns:
             SandboxInfo with updated sandbox details
@@ -719,10 +727,14 @@ class SandboxClient:
         normalized_ports = (
             _normalize_user_ports(exposed_ports) if exposed_ports is not None else None
         )
+        clearing_network = network is CLEAR_NETWORK_POLICY
+        network_config = network if isinstance(network, NetworkConfig) else None
         if (
             name is None
             and allow_unauthenticated_access is None
             and normalized_ports is None
+            and network_config is None
+            and not clearing_network
         ):
             raise SandboxError("At least one sandbox update field must be provided.")
 
@@ -730,11 +742,18 @@ class SandboxClient:
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=normalized_ports,
+            network=network_config,
         )
+        # exclude_none omits an unset policy (keep); CLEAR must reach the wire
+        # as an explicit null so the service clears it. Mirrors the pool
+        # tri-state contract in _pool_update_request_json.
+        payload = json.loads(request.model_dump_json(exclude_none=True))
+        if clearing_network:
+            payload["network"] = None
         try:
             trace_id, response_json = self._rust_client.update_sandbox(
                 sandbox_id=sandbox_id,
-                request_json=request.model_dump_json(exclude_none=True),
+                request_json=json.dumps(payload),
             )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:
