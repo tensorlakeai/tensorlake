@@ -22,6 +22,7 @@ from . import _defaults
 from .exceptions import RemoteAPIError, SandboxConnectionError, SandboxError
 from .models import (
     CheckpointType,
+    ClearNetworkPolicy,
     CommandResult,
     CopySandboxResponse,
     DaemonInfo,
@@ -29,6 +30,7 @@ from .models import (
     HealthResponse,
     ListDirectoryResponse,
     ListProcessesResponse,
+    NetworkConfig,
     OutputEvent,
     OutputMode,
     OutputResponse,
@@ -573,6 +575,7 @@ class AsyncSandbox:
         *,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
+        network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
         self._require_lifecycle_client("update")
         traced = await self._lifecycle_client.update_sandbox(
@@ -580,6 +583,7 @@ class AsyncSandbox:
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=exposed_ports,
+            network=network,
         )
         self._sandbox_id = traced.sandbox_id
         self._cached_info = traced.value

@@ -4,7 +4,7 @@ use tensorlake::{
         SandboxProxyClient, SandboxesClient,
         models::{
             ContainerResourcesInfo, CreateSandboxPoolRequest, NetworkConfig, NetworkPolicyUpdate,
-            SandboxPoolRequest, UpdateSandboxPoolRequest,
+            SandboxPoolRequest, UpdateSandboxPoolRequest, UpdateSandboxRequest,
         },
     },
 };
@@ -385,6 +385,139 @@ fn network_policy_update_wire_shapes() {
         serde_json::from_str(&encode(NetworkPolicyUpdate::Keep)).expect("decode keep");
     assert_eq!(keep.network, NetworkPolicyUpdate::Keep);
     let clear: UpdateSandboxPoolRequest =
+        serde_json::from_str(&encode(NetworkPolicyUpdate::Clear)).expect("decode clear");
+    assert_eq!(clear.network, NetworkPolicyUpdate::Clear);
+}
+
+const SANDBOX_INFO_JSON: &str = r#"{
+    "sandbox_id":"sb-1",
+    "namespace":"default",
+    "status":"running",
+    "resources":{"cpus":1.0,"memory_mb":1024,"ephemeral_disk_mb":1024}
+}"#;
+
+#[tokio::test]
+async fn update_sandbox_replaces_network_policy() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept update");
+        let update = read_http_request(&mut socket).await;
+        write_json_response(&mut socket, SANDBOX_INFO_JSON).await;
+        update
+    });
+
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", false);
+
+    sandboxes
+        .update(
+            "sb-1",
+            &UpdateSandboxRequest {
+                name: None,
+                allow_unauthenticated_access: None,
+                exposed_ports: None,
+                network: NetworkPolicyUpdate::Set(NetworkConfig {
+                    allow_internet_access: true,
+                    allow_out: vec!["example.com".to_string()],
+                    deny_out: vec![],
+                }),
+            },
+        )
+        .await
+        .expect("update sandbox network policy");
+
+    let update = server.await.expect("server join");
+    let update_text = String::from_utf8_lossy(&update);
+    assert!(
+        update_text.starts_with("PATCH "),
+        "sandbox network updates must use PATCH: {update_text}"
+    );
+    assert!(
+        update_text.contains(r#""network":{"allow_internet_access":true"#),
+        "the replacement policy must be sent as an object: {update_text}"
+    );
+    assert!(
+        update_text.contains(r#""allow_out":["example.com"]"#),
+        "allow_out entries must be sent: {update_text}"
+    );
+}
+
+#[tokio::test]
+async fn update_sandbox_clear_sends_explicit_null_network() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept update");
+        let update = read_http_request(&mut socket).await;
+        write_json_response(&mut socket, SANDBOX_INFO_JSON).await;
+        update
+    });
+
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", false);
+
+    sandboxes
+        .update(
+            "sb-1",
+            &UpdateSandboxRequest {
+                name: None,
+                allow_unauthenticated_access: None,
+                exposed_ports: None,
+                network: NetworkPolicyUpdate::Clear,
+            },
+        )
+        .await
+        .expect("clear sandbox network policy");
+
+    let update = server.await.expect("server join");
+    let update_text = String::from_utf8_lossy(&update);
+    assert!(
+        update_text.contains(r#""network":null"#),
+        "clear must send an explicit null so the service removes the policy: {update_text}"
+    );
+}
+
+#[test]
+fn sandbox_network_policy_update_wire_shapes() {
+    // Keep is omitted entirely, Clear is an explicit null, Set is an object —
+    // the tri-state PATCH semantics the running-sandbox update relies on.
+    let encode = |network| {
+        serde_json::to_string(&UpdateSandboxRequest {
+            name: None,
+            allow_unauthenticated_access: None,
+            exposed_ports: None,
+            network,
+        })
+        .expect("serialize")
+    };
+
+    assert!(!encode(NetworkPolicyUpdate::Keep).contains("network"));
+    assert!(encode(NetworkPolicyUpdate::Clear).contains(r#""network":null"#));
+    assert!(
+        encode(NetworkPolicyUpdate::Set(NetworkConfig {
+            allow_internet_access: false,
+            allow_out: vec![],
+            deny_out: vec![],
+        }))
+        .contains(r#""network":{"allow_internet_access":false"#)
+    );
+
+    // Round-trip: an absent key decodes back to Keep, null to Clear.
+    let keep: UpdateSandboxRequest =
+        serde_json::from_str(&encode(NetworkPolicyUpdate::Keep)).expect("decode keep");
+    assert_eq!(keep.network, NetworkPolicyUpdate::Keep);
+    let clear: UpdateSandboxRequest =
         serde_json::from_str(&encode(NetworkPolicyUpdate::Clear)).expect("decode clear");
     assert_eq!(clear.network, NetworkPolicyUpdate::Clear);
 }

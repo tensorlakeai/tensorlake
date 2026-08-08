@@ -871,6 +871,52 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(info.allow_unauthenticated_access)
         self.assertEqual(info.exposed_ports, [8080, 8081])
 
+    async def test_update_sandbox_sets_network_policy(self):
+        fake = _FakeAsyncRustClient()
+        client = _make_client(fake)
+
+        await client.update_sandbox(
+            "sbx-1",
+            network=NetworkConfig(
+                allow_internet_access=True, allow_out=["example.com"]
+            ),
+        )
+
+        request_json = json.loads(fake.update_request_json)
+        self.assertEqual(
+            request_json["network"],
+            {
+                "allow_internet_access": True,
+                "allow_out": ["example.com"],
+                "deny_out": [],
+            },
+        )
+
+    async def test_update_sandbox_clears_network_policy_with_explicit_null(self):
+        fake = _FakeAsyncRustClient()
+        client = _make_client(fake)
+
+        await client.update_sandbox("sbx-1", network=CLEAR_NETWORK_POLICY)
+
+        request_json = json.loads(fake.update_request_json)
+        self.assertIn("network", request_json)
+        self.assertIsNone(request_json["network"])
+
+    async def test_update_sandbox_omits_network_when_unset(self):
+        fake = _FakeAsyncRustClient()
+        client = _make_client(fake)
+
+        await client.update_sandbox("sbx-1", name="renamed")
+
+        request_json = json.loads(fake.update_request_json)
+        self.assertNotIn("network", request_json)
+
+    async def test_update_sandbox_requires_at_least_one_field(self):
+        client = _make_client(_FakeAsyncRustClient())
+
+        with self.assertRaises(SandboxError):
+            await client.update_sandbox("sbx-1")
+
     async def test_get_port_access_reads_current_settings(self):
         client = _make_client()
 
