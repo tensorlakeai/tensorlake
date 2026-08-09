@@ -708,10 +708,12 @@ export class Sandbox {
   }
 
   /**
-   * Update this sandbox's properties (name, exposed ports, proxy auth).
+   * Update this sandbox's properties (name, exposed ports, proxy auth, and
+   * egress network policy).
    *
    * Naming an ephemeral sandbox makes it non-ephemeral and enables
-   * suspend/resume.
+   * suspend/resume. For `network`, omit to keep the current policy, pass an
+   * object to replace it, or pass `null` to clear it to unrestricted egress.
    */
   async update(options: UpdateSandboxOptions): Promise<Traced<SandboxInfo>> {
     const client = this.requireLifecycleClient("update");

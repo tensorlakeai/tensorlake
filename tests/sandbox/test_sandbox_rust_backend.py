@@ -410,6 +410,7 @@ class TestSandboxRustBackend(unittest.TestCase):
             name="renamed",
             allow_unauthenticated_access=True,
             exposed_ports=[8080],
+            network=None,
         )
         self.assertEqual(traced.name, "renamed")
         self.assertEqual(sandbox.name, "renamed")
@@ -431,6 +432,7 @@ class TestSandboxRustBackend(unittest.TestCase):
             name="new-name",
             allow_unauthenticated_access=None,
             exposed_ports=None,
+            network=None,
         )
 
     def test_update_raises_without_lifecycle_client(self):
@@ -453,6 +455,7 @@ class TestSandboxRustBackend(unittest.TestCase):
             name="new-env",
             allow_unauthenticated_access=None,
             exposed_ports=None,
+            network=None,
         )
         self.assertEqual(sandbox.name, "new-env")
 

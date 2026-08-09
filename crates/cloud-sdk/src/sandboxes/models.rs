@@ -194,6 +194,12 @@ pub struct UpdateSandboxRequest {
     pub allow_unauthenticated_access: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exposed_ports: Option<Vec<u16>>,
+    /// Tri-state update of the running sandbox's egress network policy: omitted
+    /// leaves it unchanged, `null` clears it to unrestricted egress, an object
+    /// replaces the whole policy. The dataplane re-renders the live VM's
+    /// firewall in one atomic swap with no enforcement gap.
+    #[serde(default, skip_serializing_if = "NetworkPolicyUpdate::is_keep")]
+    pub network: NetworkPolicyUpdate,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -220,19 +226,19 @@ pub struct CreateSandboxPoolRequest {
     pub network: Option<NetworkConfig>,
 }
 
-/// What a pool update should do with the pool's network policy.
+/// What an update should do with a pool's or sandbox's network policy.
 ///
-/// A pool update replaces the pool record wholesale, so the three states are
-/// distinct on the wire: the field is omitted to keep the current policy,
-/// sent as `null` to clear it, or sent as an object to replace it.
+/// The three states are distinct on the wire: the field is omitted to keep the
+/// current policy, sent as `null` to clear it, or sent as an object to replace
+/// it. Shared by [`UpdateSandboxPoolRequest`] and [`UpdateSandboxRequest`].
 #[derive(Clone, Debug, Default, PartialEq)]
 pub enum NetworkPolicyUpdate {
-    /// Leave the pool's current network policy in place.
+    /// Leave the current network policy in place.
     #[default]
     Keep,
-    /// Remove the pool's network policy, leaving containers unrestricted.
+    /// Remove the network policy, leaving egress unrestricted.
     Clear,
-    /// Replace the pool's network policy.
+    /// Replace the network policy.
     Set(NetworkConfig),
 }
 

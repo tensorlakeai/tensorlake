@@ -342,6 +342,12 @@ export class SandboxClient {
     if (options.exposedPorts != null) {
       body.exposed_ports = normalizeUserPorts(options.exposedPorts);
     }
+    // Tri-state network policy: omit to keep the current policy, `null` to
+    // clear it to unrestricted egress, an object to replace it.
+    if (options.network !== undefined) {
+      body.network =
+        options.network === null ? null : toSnakeKeys(options.network);
+    }
     if (Object.keys(body).length === 0) {
       throw new SandboxError(
         "At least one sandbox update field must be provided.",

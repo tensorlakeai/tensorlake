@@ -180,37 +180,43 @@ explicit instruction. Containers in the pool become unrestricted.
 
 
 class NetworkConfig(BaseModel):
-    """Network access control policy for sandbox containers.
+    """Egress network access control policy for a sandbox.
 
-    Rules are enforced via host-level iptables on the DOCKER-USER chain.
-    Each container gets its own chain with rules applied before any user
-    code runs.
+    Enforced host-side per sandbox. ``deny_out`` takes precedence over
+    ``allow_out``: a destination matched by both is blocked. Established and
+    related connections are always permitted (stateful firewall).
 
-    ``allow_out`` rules are evaluated before ``deny_out`` rules, so allow
-    takes precedence over deny.  Established/related connections are always
-    permitted (stateful firewall).
+    When ``allow_internet_access`` is ``True`` (the default), outbound traffic
+    is allowed unless matched by ``deny_out``. When ``False``, outbound is
+    blocked unless matched by ``allow_out`` (and not by ``deny_out``).
 
-    When ``allow_internet_access`` is ``True`` (the default), all outbound
-    traffic is allowed unless explicitly denied by ``deny_out``.  When
-    ``False``, all outbound traffic is blocked unless explicitly allowed by
-    ``allow_out``.
+    Entries may be IPv4 addresses, CIDR ranges, or DNS hostnames (an optional
+    ``:port`` suffix is accepted but does not make the rule port-specific).
+    Hostname rules are followed across DNS changes, so a CDN-backed name keeps
+    working as its addresses rotate. Deny-precedence applies to the sandbox's
+    own DNS resolver too: a ``deny_out`` covering the resolver disables DNS
+    even if ``allow_out`` also covers it.
+
+    The policy can be changed on a running sandbox with
+    :meth:`Sandbox.update` (pass ``network=...`` or
+    :data:`CLEAR_NETWORK_POLICY`).
     """
 
     allow_internet_access: bool = True
     allow_out: list[str] = Field(
         default_factory=list,
         description=(
-            "Destination IPs or CIDRs to allow "
-            '(e.g. ["8.8.8.8", "10.0.0.0/8"]). '
-            "Evaluated before deny_out; takes precedence."
+            "Destinations to allow: IPv4 addresses, CIDRs, or hostnames "
+            '(e.g. ["8.8.8.8", "10.0.0.0/8", "api.example.com"]). '
+            "Overridden by any matching deny_out entry."
         ),
     )
     deny_out: list[str] = Field(
         default_factory=list,
         description=(
-            "Destination IPs or CIDRs to deny "
-            '(e.g. ["192.168.1.0/24"]). '
-            "Evaluated after allow_out."
+            "Destinations to deny: IPv4 addresses, CIDRs, or hostnames "
+            '(e.g. ["192.168.1.0/24", "ads.example.com"]). '
+            "Takes precedence over allow_out."
         ),
     )
 
@@ -270,11 +276,18 @@ class CreateSandboxRequest(BaseModel):
 
 
 class UpdateSandboxRequest(BaseModel):
-    """Request payload for updating a sandbox."""
+    """Request payload for updating a sandbox.
+
+    ``network`` carries only the "set" case here (a policy object). The
+    "keep" and "clear" cases are expressed on the wire by omitting the field
+    or sending an explicit ``null``; the client builds those from the
+    :data:`CLEAR_NETWORK_POLICY` sentinel rather than this model.
+    """
 
     name: str | None = None
     allow_unauthenticated_access: bool | None = None
     exposed_ports: list[int] | None = None
+    network: NetworkConfig | None = None
 
 
 class SandboxPoolRequest(BaseModel):
