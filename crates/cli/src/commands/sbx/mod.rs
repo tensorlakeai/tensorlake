@@ -20,13 +20,14 @@ pub mod ssh;
 pub mod suspend;
 pub mod terminate;
 pub mod tunnel;
+pub mod update;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use tensorlake::sandboxes::{
-    resolve_default_sandbox_proxy_url, resolve_sandbox_proxy_target as resolve_core_proxy_target,
-    select_sandbox_proxy_url,
+    models::NetworkConfig, resolve_default_sandbox_proxy_url,
+    resolve_sandbox_proxy_target as resolve_core_proxy_target, select_sandbox_proxy_url,
 };
 use tokio::time::{Duration, Instant};
 
@@ -71,6 +72,34 @@ pub fn apply_proxy_access_settings(
     if allow_unauthenticated_access || !ports.is_empty() {
         body["allow_unauthenticated_access"] = serde_json::Value::Bool(true);
     }
+}
+
+/// Build the CLI's egress policy from its mutually exclusive network modes.
+///
+/// A non-empty `allow_out` is itself a default-drop allowlist in the
+/// dataplane while preserving resolver-scoped DNS. `allow_internet_access`
+/// must therefore remain true for `--network-allow`; false is reserved for
+/// the absolute `--no-internet` mode, which also blocks DNS.
+pub fn build_network_config(
+    no_internet: bool,
+    network_allow: &[String],
+    network_deny: &[String],
+) -> Result<Option<NetworkConfig>> {
+    if no_internet && (!network_allow.is_empty() || !network_deny.is_empty()) {
+        return Err(CliError::usage(
+            "--no-internet cannot be combined with allow or deny rules",
+        ));
+    }
+
+    if !no_internet && network_allow.is_empty() && network_deny.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(NetworkConfig {
+        allow_internet_access: !no_internet,
+        allow_out: network_allow.to_vec(),
+        deny_out: network_deny.to_vec(),
+    }))
 }
 
 /// Image name displayed when a sandbox carries no explicit image (i.e. it
@@ -422,6 +451,53 @@ mod proxy_access_tests {
 
         assert!(body.get("allow_unauthenticated_access").is_none());
         assert!(body.get("exposed_ports").is_none());
+    }
+}
+
+#[cfg(test)]
+mod network_config_tests {
+    use super::build_network_config;
+
+    #[test]
+    fn no_network_flags_omit_the_policy() {
+        assert_eq!(build_network_config(false, &[], &[]).unwrap(), None);
+    }
+
+    #[test]
+    fn allow_rules_keep_dns_enabled_for_dataplane_allowlist_mode() {
+        let allow = vec!["api.example.com".to_string()];
+        let policy = build_network_config(false, &allow, &[]).unwrap().unwrap();
+
+        assert!(policy.allow_internet_access);
+        assert_eq!(policy.allow_out, allow);
+        assert!(policy.deny_out.is_empty());
+    }
+
+    #[test]
+    fn deny_rules_use_default_allow_mode() {
+        let deny = vec!["ads.example.com".to_string()];
+        let policy = build_network_config(false, &[], &deny).unwrap().unwrap();
+
+        assert!(policy.allow_internet_access);
+        assert!(policy.allow_out.is_empty());
+        assert_eq!(policy.deny_out, deny);
+    }
+
+    #[test]
+    fn no_internet_builds_an_absolute_block_policy() {
+        let policy = build_network_config(true, &[], &[]).unwrap().unwrap();
+
+        assert!(!policy.allow_internet_access);
+        assert!(policy.allow_out.is_empty());
+        assert!(policy.deny_out.is_empty());
+    }
+
+    #[test]
+    fn no_internet_rejects_allow_and_deny_rules() {
+        let rule = vec!["example.com".to_string()];
+
+        assert!(build_network_config(true, &rule, &[]).is_err());
+        assert!(build_network_config(true, &[], &rule).is_err());
     }
 }
 
