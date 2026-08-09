@@ -1,6 +1,8 @@
 use reqwest::{Method, StatusCode};
 use serde::de::DeserializeOwned;
 use std::collections::{HashMap, HashSet};
+#[cfg(unix)]
+use std::path::Path;
 use std::sync::Arc;
 
 use crate::{
@@ -60,6 +62,26 @@ impl ArtifactStorageClient {
             api_client,
             git_client: reqwest::Client::builder()
                 .user_agent(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")))
+                .build()?,
+            git_base_url: trim_base_url(git_base_url.into()),
+            git_credentials: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+        })
+    }
+
+    /// Build an Artifact Storage client whose data-plane HTTP connections use
+    /// a local Unix socket. Sandbox TLFS uses this for its root-owned relay to
+    /// the authenticated dataplane-host system-storage proxy.
+    #[cfg(unix)]
+    pub fn new_with_unix_socket(
+        api_client: Client,
+        git_base_url: impl Into<String>,
+        socket_path: &Path,
+    ) -> Result<Self, SdkError> {
+        Ok(Self {
+            api_client,
+            git_client: reqwest::Client::builder()
+                .user_agent(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")))
+                .unix_socket(socket_path)
                 .build()?,
             git_base_url: trim_base_url(git_base_url.into()),
             git_credentials: Arc::new(tokio::sync::Mutex::new(HashMap::new())),

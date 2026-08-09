@@ -13,6 +13,10 @@ publish = false
 [lib]
 path = "src/lib.rs"
 
+[[bin]]
+name = "tlfs-mount-daemon"
+path = "src/tlfs_mount_daemon.rs"
+
 [dependencies]
 tensorlake = { path = "../cloud-sdk" }
 gsvc-mount = { path = "../gsvc-mount" }
@@ -29,7 +33,7 @@ filetime = "0.2"
 fjall = { version = "3.1.8", default-features = false }
 flate2 = { version = "1", features = ["zlib-rs"] }
 futures = "0.3"
-gethostname = "0.5"
+gethostname = "1"
 hex = "0.4"
 ignore = "0.4"
 indicatif = "0.18"
@@ -41,7 +45,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha1 = "0.11"
-sha2 = "0.10"
+sha2 = "0.11"
 shlex = "1"
 tempfile = "3"
 thiserror = "2"
