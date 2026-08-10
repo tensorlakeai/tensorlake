@@ -48,7 +48,7 @@ jobs:
           private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
           # Stacked mount PRs pin their exact artifact_storage code commit only on their own head
           # branch; main and every other PR continue integrating against artifact_storage/main.
-          source-ref: ${{ github.event_name == 'pull_request' && github.head_ref == 'agent/tlfs-mount-daemon' && 'b23e6939acfbe7910f45f0f46a16711478b4dac0' || github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-prefetch-cli' && '714d14ae13dd9f22623080703876df98c8484dd4' || github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-dependencies' && 'c77631e7247159516e99bbaf3e68900b2ea86eae' || 'main' }}
+          source-ref: ${{ github.event_name == 'pull_request' && github.head_ref == 'agent/tlfs-mount-daemon' && '92131d3795026c33cd2edaa01fa918360bf8e94d' || github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-prefetch-cli' && '714d14ae13dd9f22623080703876df98c8484dd4' || github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-dependencies' && 'c77631e7247159516e99bbaf3e68900b2ea86eae' || 'main' }}
 
       - name: Build full-feature CLI
         run: cargo build -p tensorlake-cli --features mount,git-clone
@@ -90,7 +90,7 @@ jobs:
           private-key: ${{ secrets.ARTIFACT_STORAGE_APP_PRIVATE_KEY }}
           include-macos-fskit: "true"
           # Keep the private Rust and FSKit sources on the same stacked revision as the Linux job.
-          source-ref: ${{ github.event_name == 'pull_request' && github.head_ref == 'agent/tlfs-mount-daemon' && 'b23e6939acfbe7910f45f0f46a16711478b4dac0' || github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-prefetch-cli' && '714d14ae13dd9f22623080703876df98c8484dd4' || github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-dependencies' && 'c77631e7247159516e99bbaf3e68900b2ea86eae' || 'main' }}
+          source-ref: ${{ github.event_name == 'pull_request' && github.head_ref == 'agent/tlfs-mount-daemon' && '92131d3795026c33cd2edaa01fa918360bf8e94d' || github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-prefetch-cli' && '714d14ae13dd9f22623080703876df98c8484dd4' || github.event_name == 'pull_request' && github.head_ref == 'agent/logical-v1-dependencies' && 'c77631e7247159516e99bbaf3e68900b2ea86eae' || 'main' }}
 
       - name: Verify the CLI and FSKit source contract compile together
         run: >-
