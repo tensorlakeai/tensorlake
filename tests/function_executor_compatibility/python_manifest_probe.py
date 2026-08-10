@@ -47,7 +47,6 @@ def function_view(function_manifest) -> dict:
     return {
         "name": function_manifest.name,
         "description": function_manifest.description,
-        "secret_names": function_manifest.secret_names,
         "initialization_timeout_sec": function_manifest.initialization_timeout_sec,
         "timeout_sec": function_manifest.timeout_sec,
         "resources": function_manifest.resources.model_dump(),
@@ -75,6 +74,8 @@ manifest = create_application_manifest(
     application_function=manifest_application,
     all_functions=get_functions(),
 )
+if manifest.functions["manifest_child"].secret_names != ["MANIFEST_SECRET"]:
+    raise AssertionError("application manifest omitted the configured secret names")
 print(
     json.dumps(
         {

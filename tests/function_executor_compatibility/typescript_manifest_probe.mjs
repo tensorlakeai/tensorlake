@@ -43,7 +43,6 @@ function functionView(functionManifest) {
   return {
     name: functionManifest.name,
     description: functionManifest.description,
-    secret_names: functionManifest.secret_names,
     initialization_timeout_sec: functionManifest.initialization_timeout_sec,
     timeout_sec: functionManifest.timeout_sec,
     resources: functionManifest.resources,
@@ -63,6 +62,12 @@ function functionView(functionManifest) {
 }
 
 const manifest = createApplicationManifest(application.definition);
+if (
+  manifest.functions.manifest_child.secret_names.length !== 1 ||
+  manifest.functions.manifest_child.secret_names[0] !== "MANIFEST_SECRET"
+) {
+  throw new Error("application manifest omitted the configured secret names");
+}
 console.log(JSON.stringify({
   name: manifest.name,
   description: manifest.description,
