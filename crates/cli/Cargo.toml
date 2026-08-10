@@ -78,3 +78,6 @@ rolldown = { workspace = true }
 rolldown_common = { workspace = true }
 tempfile = { workspace = true }
 zip = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+tikv-jemallocator = "0.6"

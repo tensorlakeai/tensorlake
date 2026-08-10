@@ -1,7 +1,7 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
-    DEFAULT_SANDBOX_WAIT_TIMEOUT, apply_proxy_access_settings, sandbox_endpoint,
-    wait_for_sandbox_status,
+    DEFAULT_SANDBOX_WAIT_TIMEOUT, apply_proxy_access_settings, build_network_config,
+    sandbox_endpoint, wait_for_sandbox_status,
 };
 use crate::error::{CliError, Result};
 use serde::Deserialize;
@@ -157,19 +157,8 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
 
     apply_proxy_access_settings(&mut body, ports, allow_unauthenticated_access);
 
-    let has_network = no_internet || !network_allow.is_empty() || !network_deny.is_empty();
-    if has_network {
-        let mut network = serde_json::json!({});
-        if no_internet {
-            network["allow_internet_access"] = serde_json::Value::Bool(false);
-        }
-        if !network_allow.is_empty() {
-            network["allow_out"] = serde_json::json!(network_allow);
-        }
-        if !network_deny.is_empty() {
-            network["deny_out"] = serde_json::json!(network_deny);
-        }
-        body["network"] = network;
+    if let Some(network) = build_network_config(no_internet, network_allow, network_deny)? {
+        body["network"] = serde_json::to_value(network)?;
     }
 
     let file_system_mounts = parse_file_system_mounts(file_systems)?;

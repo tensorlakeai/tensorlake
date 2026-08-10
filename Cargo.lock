@@ -1365,9 +1365,8 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 
 [[package]]
 name = "fuser"
-version = "0.17.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "80a5eca878900c2e39e9e52fd797954b7fc39eeefc8558257114bfea6a698fcf"
+version = "0.18.0"
+source = "git+https://github.com/tensorlakeai/fuser?branch=configurable-buffer-size#2565863131bb3865b068228a715b1efd9a7bfcb3"
 dependencies = [
  "bitflags",
  "libc",
@@ -1492,6 +1491,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "gethostname"
+version = "1.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1bd49230192a3797a9a4d6abe9b3eed6f7fa4c8a8a4947977c6f80025f92cbd8"
+dependencies = [
+ "rustix 1.1.4",
+ "windows-link",
+]
+
+[[package]]
 name = "getopts"
 version = "0.2.24"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1566,7 +1575,7 @@ dependencies = [
  "rayon",
  "serde",
  "sha1 0.11.0",
- "sha2",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
@@ -1574,7 +1583,7 @@ dependencies = [
 
 [[package]]
 name = "gsvc-fs-client"
-version = "0.5.97"
+version = "0.5.104"
 dependencies = [
  "anyhow",
  "base64",
@@ -1590,7 +1599,7 @@ dependencies = [
  "flate2",
  "fuser",
  "futures",
- "gethostname",
+ "gethostname 1.1.0",
  "gsvc-mount",
  "hex",
  "ignore",
@@ -1603,7 +1612,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.11.0",
- "sha2",
+ "sha2 0.11.0",
  "shlex",
  "tempfile",
  "tensorlake",
@@ -1632,7 +1641,7 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
@@ -2688,9 +2697,9 @@ dependencies = [
 
 [[package]]
 name = "nix"
-version = "0.30.1"
+version = "0.31.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74523f3a35e05aba87a1d978330aef40f67b0304ac79c1c00b294c9830543db6"
+checksum = "cf20d2fde8ff38632c426f1165ed7436270b44f199fc55284c38276f9db47c3d"
 dependencies = [
  "bitflags",
  "cfg-if",
@@ -3409,7 +3418,7 @@ dependencies = [
  "digest 0.10.7",
  "hmac",
  "password-hash",
- "sha2",
+ "sha2 0.10.9",
 ]
 
 [[package]]
@@ -4989,6 +4998,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "sha2"
+version = "0.11.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "446ba717509524cb3f22f17ecc096f10f4822d76ab5c0b9822c5f9c284e825f4"
+dependencies = [
+ "cfg-if",
+ "cpufeatures 0.3.0",
+ "digest 0.11.3",
+]
+
+[[package]]
 name = "sharded-slab"
 version = "0.1.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5260,7 +5280,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.97"
+version = "0.5.104"
 dependencies = [
  "anyhow",
  "base64",
@@ -5294,7 +5314,7 @@ dependencies = [
  "serde_repr",
  "serde_with",
  "sha1 0.11.0",
- "sha2",
+ "sha2 0.10.9",
  "shlex",
  "tar",
  "tempfile",
@@ -5313,7 +5333,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.97"
+version = "0.5.104"
 dependencies = [
  "anyhow",
  "base64",
@@ -5331,7 +5351,7 @@ dependencies = [
  "eventsource-stream",
  "flate2",
  "futures",
- "gethostname",
+ "gethostname 0.5.0",
  "gsvc-codec",
  "gsvc-fs-client",
  "hex",
@@ -5349,11 +5369,12 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.11.0",
- "sha2",
+ "sha2 0.10.9",
  "tar",
  "tempfile",
  "tensorlake",
  "thiserror 2.0.18",
+ "tikv-jemallocator",
  "tokio",
  "tokio-tungstenite",
  "tokio-util",
@@ -5366,7 +5387,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-function-agent-core"
-version = "0.5.97"
+version = "0.5.104"
 dependencies = [
  "anyhow",
  "base64",
@@ -5375,7 +5396,7 @@ dependencies = [
  "rustls",
  "serde",
  "serde_json",
- "sha2",
+ "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -5386,7 +5407,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.97"
+version = "0.5.104"
 dependencies = [
  "anyhow",
  "napi",
@@ -5405,7 +5426,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.97"
+version = "0.5.104"
 dependencies = [
  "futures",
  "pyo3",
@@ -5501,6 +5522,26 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f60246a4944f24f6e018aa17cdeffb7818b76356965d03b07d6a9886e8962185"
 dependencies = [
  "cfg-if",
+]
+
+[[package]]
+name = "tikv-jemalloc-sys"
+version = "0.6.1+5.3.0-1-ge13ca993e8ccb9ba9847cc330696e02839f328f7"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "cd8aa5b2ab86a2cefa406d889139c162cbb230092f7d1d7cbc1716405d852a3b"
+dependencies = [
+ "cc",
+ "libc",
+]
+
+[[package]]
+name = "tikv-jemallocator"
+version = "0.6.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0359b4327f954e0567e69fb191cf1436617748813819c94b8cd4a431422d053a"
+dependencies = [
+ "libc",
+ "tikv-jemalloc-sys",
 ]
 
 [[package]]

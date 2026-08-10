@@ -930,6 +930,7 @@ async fn build_application_images(
                     contents: bundle.function_runner_capsule.tgz.clone(),
                     mode: 0o644,
                 }],
+                build_args: Vec::new(),
             };
             let mut renderer = ImageBuildEventRenderer::new();
             build_sandbox_image(options, |event| renderer.render(event))

@@ -22,6 +22,7 @@ from .exceptions import (
 )
 from .models import (
     CheckpointType,
+    ClearNetworkPolicy,
     CommandResult,
     CopySandboxResponse,
     DaemonInfo,
@@ -29,6 +30,7 @@ from .models import (
     HealthResponse,
     ListDirectoryResponse,
     ListProcessesResponse,
+    NetworkConfig,
     OutputEvent,
     OutputMode,
     OutputResponse,
@@ -922,12 +924,13 @@ class Sandbox:
         *,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
+        network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
         """Update this sandbox's properties.
 
-        Supports updating the sandbox name and sandbox proxy access settings.
-        Naming an ephemeral sandbox makes it non-ephemeral and enables
-        suspend/resume.
+        Supports updating the sandbox name, sandbox proxy access settings, and
+        the egress network policy. Naming an ephemeral sandbox makes it
+        non-ephemeral and enables suspend/resume.
 
         Args:
             name: New name for the sandbox.
@@ -935,6 +938,9 @@ class Sandbox:
                 reachable without TensorLake auth.
             exposed_ports: User ports that should be routable through the
                 sandbox proxy. Port ``9501`` is reserved.
+            network: Egress network policy update. Omit to leave it unchanged,
+                pass a :class:`NetworkConfig` to replace it, or pass
+                :data:`CLEAR_NETWORK_POLICY` to clear it to unrestricted egress.
 
         Returns:
             Traced[SandboxInfo] with the updated sandbox details.
@@ -945,6 +951,7 @@ class Sandbox:
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=exposed_ports,
+            network=network,
         )
         self._sandbox_id = traced.sandbox_id
         self._cached_info = traced.value

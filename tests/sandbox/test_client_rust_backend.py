@@ -884,6 +884,56 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertTrue(info.allow_unauthenticated_access)
         self.assertEqual(info.exposed_ports, [8080, 8081])
 
+    def test_update_sandbox_sets_network_policy(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        client.update_sandbox(
+            "sbx-1",
+            network=NetworkConfig(
+                allow_internet_access=True, allow_out=["example.com"]
+            ),
+        )
+
+        request_json = json.loads(fake.update_request_json)
+        self.assertEqual(
+            request_json["network"],
+            {
+                "allow_internet_access": True,
+                "allow_out": ["example.com"],
+                "deny_out": [],
+            },
+        )
+
+    def test_update_sandbox_clears_network_policy_with_explicit_null(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        client.update_sandbox("sbx-1", network=CLEAR_NETWORK_POLICY)
+
+        request_json = json.loads(fake.update_request_json)
+        self.assertIn("network", request_json)
+        self.assertIsNone(request_json["network"])
+
+    def test_update_sandbox_omits_network_when_unset(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _FakeRustClient()
+        client._rust_client = fake
+
+        client.update_sandbox("sbx-1", name="renamed")
+
+        request_json = json.loads(fake.update_request_json)
+        self.assertNotIn("network", request_json)
+
+    def test_update_sandbox_requires_at_least_one_field(self):
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _FakeRustClient()
+
+        with self.assertRaises(SandboxError):
+            client.update_sandbox("sbx-1")
+
     def test_get_port_access_reads_current_settings(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         client._rust_client = _FakeRustClient()

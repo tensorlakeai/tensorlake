@@ -72,6 +72,7 @@ pub mod cron;
 pub mod document_ai;
 pub mod error;
 pub mod file_systems;
+mod image_service_builds;
 pub mod images;
 pub mod sandbox_images;
 pub mod sandbox_templates;
@@ -278,6 +279,17 @@ impl Sdk {
         git_base_url: &str,
     ) -> Result<ArtifactStorageClient, error::SdkError> {
         ArtifactStorageClient::new(self.client.clone(), git_base_url)
+    }
+
+    /// Get an Artifact Storage client whose data-plane requests use a local
+    /// Unix socket instead of guest networking.
+    #[cfg(unix)]
+    pub fn artifact_storage_with_unix_socket(
+        &self,
+        git_base_url: &str,
+        socket_path: &std::path::Path,
+    ) -> Result<ArtifactStorageClient, error::SdkError> {
+        ArtifactStorageClient::new_with_unix_socket(self.client.clone(), git_base_url, socket_path)
     }
 
     /// Get a client for managing snapshot-backed sandbox image registrations.

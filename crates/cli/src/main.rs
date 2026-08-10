@@ -1,3 +1,25 @@
+#[cfg(target_os = "linux")]
+#[global_allocator]
+static GLOBAL_ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
+
+/// Compiled-in jemalloc configuration (the prefixed build reads `_rjem_malloc_conf`).
+/// `dirty_decay_ms:0` returns freed pages to the kernel immediately: measured on the 150k-file
+/// mount-daemon burst harness it cuts peak RSS by ~370 MB (1152 -> 781 MB) with no wall-clock
+/// cost (60 s vs 64 s). The background thread handles any deferred purging. Compiled in rather
+/// than set via environment so deployments cannot drift from the measured configuration.
+#[cfg(target_os = "linux")]
+#[repr(transparent)]
+struct MallocConf(*const u8);
+#[cfg(target_os = "linux")]
+unsafe impl Sync for MallocConf {}
+#[cfg(target_os = "linux")]
+#[unsafe(export_name = "_rjem_malloc_conf")]
+static MALLOC_CONF: MallocConf = MallocConf(
+    c"background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
+        .as_ptr()
+        .cast(),
+);
+
 mod auth;
 mod cache;
 mod commands;
@@ -1101,16 +1123,20 @@ enum SbxCommands {
         #[arg(long, hide = true)]
         allow_unauthenticated_access: bool,
 
-        /// Block all outbound internet access
-        #[arg(short = 'N', long)]
+        /// Block all outbound internet access, including DNS
+        #[arg(
+            short = 'N',
+            long,
+            conflicts_with_all = ["network_allow", "network_deny"]
+        )]
         no_internet: bool,
 
-        /// Allow outbound traffic to this IP or CIDR (can be repeated)
-        #[arg(short = 'A', long = "network-allow")]
+        /// Allow outbound traffic only to this IP, CIDR, or hostname, plus resolver-scoped DNS (can be repeated)
+        #[arg(short = 'A', long = "network-allow", conflicts_with = "no_internet")]
         network_allow: Vec<String>,
 
-        /// Deny outbound traffic to this IP or CIDR (can be repeated)
-        #[arg(short = 'D', long = "network-deny")]
+        /// Deny outbound traffic to this IP, CIDR, or hostname (can be repeated)
+        #[arg(short = 'D', long = "network-deny", conflicts_with = "no_internet")]
         network_deny: Vec<String>,
 
         /// Mount a registered file system at boot as
@@ -1336,16 +1362,20 @@ enum SbxCommands {
         #[arg(long, hide = true)]
         allow_unauthenticated_access: bool,
 
-        /// Block all outbound internet access
-        #[arg(short = 'N', long)]
+        /// Block all outbound internet access, including DNS
+        #[arg(
+            short = 'N',
+            long,
+            conflicts_with_all = ["network_allow", "network_deny"]
+        )]
         no_internet: bool,
 
-        /// Allow outbound traffic to this IP or CIDR (can be repeated)
-        #[arg(short = 'A', long = "network-allow")]
+        /// Allow outbound traffic only to this IP, CIDR, or hostname, plus resolver-scoped DNS (can be repeated)
+        #[arg(short = 'A', long = "network-allow", conflicts_with = "no_internet")]
         network_allow: Vec<String>,
 
-        /// Deny outbound traffic to this IP or CIDR (can be repeated)
-        #[arg(short = 'D', long = "network-deny")]
+        /// Deny outbound traffic to this IP, CIDR, or hostname (can be repeated)
+        #[arg(short = 'D', long = "network-deny", conflicts_with = "no_internet")]
         network_deny: Vec<String>,
     },
 
@@ -1358,6 +1388,46 @@ enum SbxCommands {
         /// letters, digits, and hyphens, not end with a hyphen, max 63 chars. Names that are
         /// exactly 21 lowercase alphanumeric characters are rejected (ambiguous with sandbox IDs).
         new_name: String,
+    },
+
+    /// Update the network configuration of a running sandbox
+    #[command(group(
+        clap::ArgGroup::new("network_update")
+            .required(true)
+            .multiple(true)
+            .args(["no_internet", "network_allow", "network_deny", "clear_network"])
+    ))]
+    Update {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Replace the network policy and block all outbound internet access, including DNS
+        #[arg(
+            short = 'N',
+            long,
+            conflicts_with_all = ["network_allow", "network_deny", "clear_network"]
+        )]
+        no_internet: bool,
+
+        /// Allow outbound traffic only to this IP, CIDR, or hostname, plus resolver-scoped DNS (can be repeated)
+        #[arg(
+            short = 'A',
+            long = "network-allow",
+            conflicts_with_all = ["no_internet", "clear_network"]
+        )]
+        network_allow: Vec<String>,
+
+        /// Deny outbound traffic to this IP, CIDR, or hostname (can be repeated)
+        #[arg(
+            short = 'D',
+            long = "network-deny",
+            conflicts_with_all = ["no_internet", "clear_network"]
+        )]
+        network_deny: Vec<String>,
+
+        /// Remove the network policy and restore unrestricted outbound access
+        #[arg(long, conflicts_with_all = ["no_internet", "network_allow", "network_deny"])]
+        clear_network: bool,
     },
 
     /// Interactive shell in a sandbox, or manage native SSH keys
@@ -1493,11 +1563,16 @@ enum ImageCommands {
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
-        /// Build a CAS (content-addressed streaming) image (non-default). CAS
-        /// images cold-boot by faulting content on demand instead of
-        /// localizing a monolithic snapshot.
+        /// Build a CAS (content-addressed streaming) image through the Image
+        /// Service build plane (non-default). CAS images cold-boot by
+        /// faulting content on demand instead of localizing a monolithic
+        /// snapshot. Routed through the API host's /images/v4 path.
         #[arg(long, hide = true)]
         cas: bool,
+
+        /// Dockerfile build arg, KEY=VALUE. Repeatable. CAS builds only.
+        #[arg(long = "build-arg")]
+        build_arg: Vec<String>,
 
         /// Print the sandbox image result JSON to stdout
         #[arg(long = "json", hide = true)]
@@ -1540,9 +1615,10 @@ enum ImageCommands {
         #[arg(long = "docker_compat")]
         docker_compat: bool,
 
-        /// Import as a CAS (content-addressed streaming) image (non-default).
-        /// CAS images cold-boot by faulting content on demand instead of
-        /// localizing a monolithic snapshot.
+        /// Import as a CAS (content-addressed streaming) image through the
+        /// Image Service build plane (non-default). CAS images cold-boot by
+        /// faulting content on demand instead of localizing a monolithic
+        /// snapshot. Routed through the API host's /images/v4 path.
         #[arg(long, hide = true)]
         cas: bool,
 
@@ -2030,6 +2106,25 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         sandbox_id,
                         new_name,
                     } => commands::sbx::name::run(ctx, &sandbox_id, &new_name).await,
+                    SbxCommands::Update {
+                        sandbox_id,
+                        no_internet,
+                        network_allow,
+                        network_deny,
+                        clear_network,
+                    } => {
+                        commands::sbx::update::run(
+                            ctx,
+                            &sandbox_id,
+                            commands::sbx::update::UpdateNetworkArgs {
+                                clear_network,
+                                no_internet,
+                                network_allow: &network_allow,
+                                network_deny: &network_deny,
+                            },
+                        )
+                        .await
+                    }
                     SbxCommands::Suspend {
                         sandbox_id,
                         no_wait,
@@ -2269,6 +2364,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             public,
                             docker_compat,
                             cas,
+                            build_arg,
                             json,
                         } => {
                             let disk_mb = if let Some(value) = disk_mb {
@@ -2293,6 +2389,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 public,
                                 docker_compat,
                                 cas,
+                                &build_arg,
                                 json,
                             )
                             .await
@@ -4089,6 +4186,190 @@ mod tests {
             }
             _ => panic!("expected sbx create command"),
         }
+    }
+
+    #[test]
+    fn sbx_update_parses_replacement_network_policy() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "update",
+            "sbx-123",
+            "--network-allow",
+            "api.example.com",
+            "--network-deny",
+            "10.10.0.0/16",
+        ]) {
+            Commands::Sbx(SbxCommands::Update {
+                sandbox_id,
+                no_internet,
+                network_allow,
+                network_deny,
+                clear_network,
+            }) => {
+                assert_eq!(sandbox_id, "sbx-123");
+                assert!(!no_internet);
+                assert_eq!(network_allow, vec!["api.example.com"]);
+                assert_eq!(network_deny, vec!["10.10.0.0/16"]);
+                assert!(!clear_network);
+            }
+            _ => panic!("expected sbx update command"),
+        }
+    }
+
+    #[test]
+    fn sbx_update_parses_clear_network() {
+        match parse_command(["tl", "sbx", "update", "stable-name", "--clear-network"]) {
+            Commands::Sbx(SbxCommands::Update {
+                sandbox_id,
+                clear_network,
+                ..
+            }) => {
+                assert_eq!(sandbox_id, "stable-name");
+                assert!(clear_network);
+            }
+            _ => panic!("expected sbx update command"),
+        }
+    }
+
+    #[test]
+    fn sbx_update_parses_no_internet_as_block_all() {
+        match parse_command(["tl", "sbx", "update", "sbx-123", "--no-internet"]) {
+            Commands::Sbx(SbxCommands::Update {
+                no_internet,
+                network_allow,
+                network_deny,
+                ..
+            }) => {
+                assert!(no_internet);
+                assert!(network_allow.is_empty());
+                assert!(network_deny.is_empty());
+            }
+            _ => panic!("expected sbx update command"),
+        }
+    }
+
+    #[test]
+    fn sbx_update_requires_a_network_change() {
+        assert!(Cli::try_parse_from(["tl", "sbx", "update", "sbx-123"]).is_err());
+    }
+
+    #[test]
+    fn sbx_update_rejects_clear_with_replacement_policy() {
+        assert!(
+            Cli::try_parse_from([
+                "tl",
+                "sbx",
+                "update",
+                "sbx-123",
+                "--clear-network",
+                "--network-deny",
+                "example.com",
+            ])
+            .is_err()
+        );
+    }
+
+    #[test]
+    fn sbx_update_rejects_no_internet_with_allow_or_deny_rules() {
+        for rule in ["--network-allow", "--network-deny"] {
+            assert!(
+                Cli::try_parse_from([
+                    "tl",
+                    "sbx",
+                    "update",
+                    "sbx-123",
+                    "--no-internet",
+                    rule,
+                    "example.com",
+                ])
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn sbx_create_and_run_reject_no_internet_with_allow_or_deny_rules() {
+        for args in [
+            vec![
+                "tl",
+                "sbx",
+                "create",
+                "--no-internet",
+                "--network-allow",
+                "example.com",
+            ],
+            vec![
+                "tl",
+                "sbx",
+                "create",
+                "--no-internet",
+                "--network-deny",
+                "example.com",
+            ],
+            vec![
+                "tl",
+                "sbx",
+                "run",
+                "--no-internet",
+                "--network-allow",
+                "example.com",
+                "echo",
+            ],
+            vec![
+                "tl",
+                "sbx",
+                "run",
+                "--no-internet",
+                "--network-deny",
+                "example.com",
+                "echo",
+            ],
+        ] {
+            assert!(Cli::try_parse_from(args).is_err());
+        }
+    }
+
+    #[test]
+    fn sbx_network_allow_and_deny_rules_can_be_combined() {
+        assert!(
+            Cli::try_parse_from([
+                "tl",
+                "sbx",
+                "create",
+                "--network-allow",
+                "10.0.0.0/8",
+                "--network-deny",
+                "10.10.0.0/16",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "tl",
+                "sbx",
+                "run",
+                "--network-allow",
+                "10.0.0.0/8",
+                "--network-deny",
+                "10.10.0.0/16",
+                "echo",
+            ])
+            .is_ok()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "tl",
+                "sbx",
+                "update",
+                "sbx-123",
+                "--network-allow",
+                "10.0.0.0/8",
+                "--network-deny",
+                "10.10.0.0/16",
+            ])
+            .is_ok()
+        );
     }
 
     #[test]

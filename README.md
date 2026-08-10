@@ -74,6 +74,15 @@ tl sbx cp ./my_script.py <sandbox-id>:/tmp/my_script.py
 # Open an interactive terminal
 tl sbx ssh <sandbox-id>
 
+# Block all outbound internet access on a running sandbox
+tl sbx update <sandbox-id> --no-internet
+
+# Allow outbound traffic only to selected destinations
+tl sbx update <sandbox-id> --network-allow api.example.com
+
+# Remove the network policy and restore unrestricted outbound access
+tl sbx update <sandbox-id> --clear-network
+
 # Terminate when done
 tl sbx terminate <sandbox-id>
 ```

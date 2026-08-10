@@ -48,6 +48,8 @@ fn private_context(ctx: &CliContext) -> gsvc_fs_client::CliContext {
         project_id: ctx.project_id.clone(),
         debug: ctx.debug,
         trace_id: ctx.trace_id.clone(),
+        system_storage_socket: None,
+        preprovisioned_git_credential: None,
     }
 }
 
