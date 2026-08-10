@@ -21,7 +21,11 @@ interface NativeBindingPathOptions extends TargetOptions {
 }
 
 function packageRoot(): string {
-  return fileURLToPath(new URL("../", import.meta.url));
+  const parent = fileURLToPath(new URL("../", import.meta.url));
+  if (existsSync(path.join(parent, "package.json"))) return parent;
+  const grandparent = fileURLToPath(new URL("../../", import.meta.url));
+  if (existsSync(path.join(grandparent, "package.json"))) return grandparent;
+  return parent;
 }
 
 function linuxLibcFamily(options: TargetOptions): "gnu" | "musl" {

@@ -2,6 +2,7 @@
 members = [
     "crates/cloud-sdk",
     "crates/cli",
+    "crates/function-agent-core",
     "crates/rust-cloud-sdk-node",
     "crates/rust-cloud-sdk-py",
 ]
@@ -22,6 +23,7 @@ fastcdc = "3"
 
 # Internal crates
 tensorlake = { path = "crates/cloud-sdk" }
+tensorlake-function-agent-core = { path = "crates/function-agent-core" }
 # Resolution-only placeholder for the private gsvc-codec packfile codec (backs `tl git clone`).
 # The real source is no longer vendored here: official builds swap it in ephemerally — see
 # crates/VENDORED_FROM and the `build-cli-full` justfile recipe / vendor-private-crates CI action.

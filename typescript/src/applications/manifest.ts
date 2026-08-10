@@ -55,6 +55,7 @@ export interface ApplicationManifest {
   allow: ApplicationCapability[];
   public_endpoint_id?: string;
   version: string;
+  runtime: "typescript";
   functions: Record<string, FunctionManifest>;
   entrypoint: {
     function_name: string;
@@ -152,6 +153,7 @@ export function createApplicationManifest(application: RegisteredDefinition): Ap
     tags: { ...application.application.tags },
     allow: [...application.application.allow],
     version: application.application.version,
+    runtime: "typescript",
     functions,
     entrypoint: {
       function_name: application.name,

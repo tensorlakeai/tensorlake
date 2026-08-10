@@ -11,13 +11,17 @@ crate-type = ["cdylib"]
 
 [dependencies]
 tensorlake = { workspace = true }
+tensorlake-function-agent-core = { workspace = true }
+anyhow = { workspace = true }
 tokio = { workspace = true }
+tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 reqwest = { workspace = true }
 napi = { workspace = true }
 napi-derive = { workspace = true }
 uuid = { workspace = true }
+url = { workspace = true }
 
 [build-dependencies]
 napi-build = { workspace = true }

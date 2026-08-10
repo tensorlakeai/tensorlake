@@ -9,7 +9,7 @@ build:
 
 # Local development install: builds the Rust Cloud SDK extension and installs the
 # Python SDK into the active Poetry virtualenv so helper scripts such as
-# `tensorlake-deploy` and `function-executor` are on PATH.
+# `tensorlake-deploy`, `function-executor`, and the Function Service runner are on PATH.
 # Note: proto stubs are pre-generated and committed; run `make build_proto`
 # separately only when you change .proto files.
 install-dev:
@@ -96,7 +96,7 @@ build_release:
 	@echo "--- Building tensorlake wheel ---"
 	@poetry run maturin build --release --out dist
 	@echo "--- Verifying wheel in a clean venv ---"
-	@poetry run python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --expect-script function-executor --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
+	@poetry run python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --expect-script function-executor --expect-script tensorlake-python-function-runner --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
 	@echo "--- Done. Wheel is in dist/ ---"
 
 bump_version:

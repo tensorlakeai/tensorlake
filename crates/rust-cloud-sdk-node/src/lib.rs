@@ -8,6 +8,7 @@
 
 #![deny(clippy::all)]
 
+mod function_agent;
 mod repositories;
 mod sandbox;
 

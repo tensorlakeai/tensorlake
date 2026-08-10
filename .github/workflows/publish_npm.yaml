@@ -226,7 +226,8 @@ jobs:
 
       - name: Verify package contents
         run: |
-          test -f runtime/function-executor/manifest.json
+          npm run build:runtime
+          test -f runtime/typescript-function-runner/manifest.json
           npm pack --dry-run --ignore-scripts
 
       - name: Publish to npm

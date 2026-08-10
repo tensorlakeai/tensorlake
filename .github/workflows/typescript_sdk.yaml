@@ -7,10 +7,13 @@ on:
     paths:
       - "typescript/**"
       - "crates/rust-cloud-sdk-node/**"
+      - "crates/function-agent-core/**"
       - "Cargo.lock"
       - "proto/**"
       - "src/tensorlake/applications/**"
       - "src/tensorlake/function_executor/**"
+      - "src/tensorlake/function_agent/**"
+      - "tests/function_agent/**"
       - "tests/function_executor_compatibility/**"
       - "Makefile"
       - ".github/workflows/typescript_sdk.yaml"
@@ -21,10 +24,13 @@ on:
     paths:
       - "typescript/**"
       - "crates/rust-cloud-sdk-node/**"
+      - "crates/function-agent-core/**"
       - "Cargo.lock"
       - "proto/**"
       - "src/tensorlake/applications/**"
       - "src/tensorlake/function_executor/**"
+      - "src/tensorlake/function_agent/**"
+      - "tests/function_agent/**"
       - "tests/function_executor_compatibility/**"
       - "Makefile"
       - ".github/workflows/typescript_sdk.yaml"
@@ -134,7 +140,7 @@ jobs:
       - name: Run unit tests
         run: npm test
 
-      - name: Build SDK and function-executor capsule
+      - name: Build SDK
         run: npm run build:sdk
 
       - name: Run snapshot-focused SDK unit tests
@@ -176,6 +182,9 @@ jobs:
             printf '%s\n' "$required_versions"
             exit 1
           fi
+
+      - name: Build and verify Function Service runner capsule
+        run: npm run build:runtime
 
   integration-tests:
     name: Integration tests

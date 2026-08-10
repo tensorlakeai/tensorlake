@@ -5365,9 +5365,30 @@ dependencies = [
 ]
 
 [[package]]
+name = "tensorlake-function-agent-core"
+version = "0.5.97"
+dependencies = [
+ "anyhow",
+ "base64",
+ "hex",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+ "url",
+ "urlencoding",
+]
+
+[[package]]
 name = "tensorlake-rust-cloud-sdk-node"
 version = "0.5.97"
 dependencies = [
+ "anyhow",
  "napi",
  "napi-build",
  "napi-derive",
@@ -5375,7 +5396,10 @@ dependencies = [
  "serde",
  "serde_json",
  "tensorlake",
+ "tensorlake-function-agent-core",
  "tokio",
+ "tracing",
+ "url",
  "uuid",
 ]
 
@@ -5391,7 +5415,10 @@ dependencies = [
  "serde",
  "serde_json",
  "tensorlake",
+ "tensorlake-function-agent-core",
  "tokio",
+ "tracing",
+ "url",
  "urlencoding",
  "uuid",
 ]

@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { access } from "node:fs/promises";
+import { access, readFile } from "node:fs/promises";
 const require = createRequire(import.meta.url);
 
 const commonJS = require("tensorlake");
@@ -83,5 +83,17 @@ if (!(crossBundleHeaders instanceof esmApplications.Headers)) {
 }
 
 await access(new URL("../runtime/function-executor/manifest.json", import.meta.url));
+await access(new URL("../runtime/typescript-function-runner/manifest.json", import.meta.url));
+const functionRunnerManifest = JSON.parse(await readFile(
+  new URL("../runtime/typescript-function-runner/manifest.json", import.meta.url),
+  "utf8",
+));
+if (!Object.keys(functionRunnerManifest.files).some(
+  (file) => file.endsWith("/tensorlake-node.node"),
+)) {
+  throw new Error("Function runner capsule does not contain a native Rust agent core");
+}
 
-process.stdout.write("Verified ESM and CommonJS package entrypoints and executor capsule\n");
+process.stdout.write(
+  "Verified ESM and CommonJS package entrypoints, legacy executor capsule, and function runner capsule\n",
+);

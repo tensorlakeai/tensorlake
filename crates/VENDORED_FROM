@@ -22,3 +22,9 @@ Wire-format coupling still applies even without vendoring: the fast-clone client
 (crates/cloud-sdk/src/artifact_storage/ingest.rs) duplicate artifact_storage wire types
 (FastCloneManifest and friends, ingest request/response shapes). If those change upstream, open
 a companion PR here.
+
+Function agent core: `crates/function-agent-core` is vendored from
+`compute-engine-internal/function-service/agent-core`. It is the disposable
+worker half of Function Service protocol v1. Sync it when that protocol or its
+deterministic execution core changes; Function Service remains the durable
+state and fencing authority.

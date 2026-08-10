@@ -38,7 +38,8 @@ const RUNTIME_MODULE: &str = "runtime.mjs";
 const CODE_MANIFEST_FILE: &str = ".tensorlake_code_manifest.json";
 const MAX_CODE_SIZE: u64 = 5 * 1024 * 1024;
 const DEFAULT_NODE_IMAGE: &str = "node:24-bookworm-slim";
-const EXECUTOR_CAPSULE_CONTEXT_PATH: &str = ".tensorlake/function-executor-runtime.tgz";
+const FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH: &str =
+    ".tensorlake/typescript-function-runner-runtime.tgz";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const UNAUTHENTICATED_REQUESTS: &str = "unauthenticated_requests";
 const DISCOVERY_SCRIPT: &str = r#"
@@ -54,7 +55,7 @@ const deployment = await runtime.__tensorlakeDeployment();
 await writeFile(outputPath, JSON.stringify(deployment));
 // Discovery is complete once the metadata is durable. Application modules may
 // intentionally own long-lived timers, sockets, or client pools that belong in
-// the executor process but must not keep this short-lived CLI helper alive.
+// the function runner process but must not keep this short-lived CLI helper alive.
 process.exit(0);
 "#;
 
@@ -93,27 +94,27 @@ struct ApplicationBundle {
     _temp: TempDir,
     code_zip: Vec<u8>,
     discovery: DeploymentDiscovery,
-    executor_capsule: ExecutorCapsule,
+    function_runner_capsule: FunctionRunnerCapsule,
 }
 
 #[derive(Debug)]
-struct ExecutorCapsule {
+struct FunctionRunnerCapsule {
     runtime_id: String,
     tgz: Vec<u8>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ExecutorCapsuleManifest {
+struct FunctionRunnerCapsuleManifest {
     format_version: u64,
     sdk_version: String,
     minimum_node_major: u64,
     package_name: String,
     runtime_id: String,
-    files: BTreeMap<String, ExecutorCapsuleFile>,
+    files: BTreeMap<String, FunctionRunnerCapsuleFile>,
 }
 
 #[derive(Debug, Deserialize)]
-struct ExecutorCapsuleFile {
+struct FunctionRunnerCapsuleFile {
     sha256: String,
     size: u64,
     mode: u32,
@@ -360,7 +361,7 @@ export function __tensorlakeDeployment() {{
         chunk_filenames: Some(ChunkFilenamesOutputOption::String(
             "chunks/[name]-[hash].mjs".to_string(),
         )),
-        // The executor does not enable Node source-map loading. Shipping maps
+        // The function runner does not enable Node source-map loading. Shipping maps
         // only embeds application and dependency sources in the code ZIP and
         // can make otherwise small third-party dependency graphs exceed the
         // 5 MB application-code limit.
@@ -413,7 +414,8 @@ export function __tensorlakeDeployment() {{
                 "Rolldown did not resolve tensorlake/applications from a Tensorlake SDK package",
             )
         })?;
-    let executor_capsule = load_executor_capsule(&sdk_package_root, &discovery.sdk_version)?;
+    let function_runner_capsule =
+        load_function_runner_capsule(&sdk_package_root, &discovery.sdk_version)?;
     std::fs::write(
         output_directory.join(CODE_MANIFEST_FILE),
         serde_json::to_vec(&discovery.code_manifest)?,
@@ -425,7 +427,7 @@ export function __tensorlakeDeployment() {{
         _temp: temp,
         code_zip,
         discovery,
-        executor_capsule,
+        function_runner_capsule,
     })
 }
 
@@ -583,41 +585,44 @@ fn validate_discovery(discovery: &DeploymentDiscovery, entry_file: &Path) -> Res
     Ok(())
 }
 
-fn load_executor_capsule(package_root: &Path, sdk_version: &str) -> Result<ExecutorCapsule> {
-    let capsule_root = package_root.join("runtime/function-executor");
+fn load_function_runner_capsule(
+    package_root: &Path,
+    sdk_version: &str,
+) -> Result<FunctionRunnerCapsule> {
+    let capsule_root = package_root.join("runtime/typescript-function-runner");
     let manifest_path = capsule_root.join("manifest.json");
     let manifest_data = std::fs::read(&manifest_path).map_err(|error| {
         CliError::usage(format!(
-            "The Tensorlake SDK resolved from {} does not contain a built function executor capsule at {} ({error}). Reinstall the package or run its build:sdk script.",
+            "The Tensorlake SDK resolved from {} does not contain a built TypeScript function runner capsule at {} ({error}). Reinstall the package or run its build:sdk script.",
             package_root.display(),
             manifest_path.display(),
         ))
     })?;
-    let manifest: ExecutorCapsuleManifest =
+    let manifest: FunctionRunnerCapsuleManifest =
         serde_json::from_slice(&manifest_data).map_err(|error| {
             CliError::usage(format!(
-                "The Tensorlake function executor capsule manifest at {} is invalid: {error}",
+                "The Tensorlake TypeScript function runner capsule manifest at {} is invalid: {error}",
                 manifest_path.display()
             ))
         })?;
     if manifest.format_version != 1
         || manifest.minimum_node_major != 24
-        || manifest.package_name != "@tensorlake/function-executor-runtime"
+        || manifest.package_name != "@tensorlake/typescript-function-runner-runtime"
     {
         return Err(CliError::usage(format!(
-            "The Tensorlake function executor capsule at {} uses an unsupported format",
+            "The Tensorlake TypeScript function runner capsule at {} uses an unsupported format",
             capsule_root.display()
         )));
     }
     if manifest.sdk_version != sdk_version {
         return Err(CliError::usage(format!(
-            "The application uses Tensorlake SDK {sdk_version}, but its executor capsule reports SDK {}",
+            "The application uses Tensorlake SDK {sdk_version}, but its function runner capsule reports SDK {}",
             manifest.sdk_version
         )));
     }
     if manifest.files.is_empty() {
         return Err(CliError::usage(
-            "Tensorlake function executor capsule is empty",
+            "Tensorlake TypeScript function runner capsule is empty",
         ));
     }
 
@@ -634,7 +639,7 @@ fn load_executor_capsule(package_root: &Path, sdk_version: &str) -> Result<Execu
             .cloned()
             .collect::<Vec<_>>();
         return Err(CliError::usage(format!(
-            "Tensorlake function executor capsule file list does not match its manifest (missing: {}; unexpected: {})",
+            "Tensorlake TypeScript function runner capsule file list does not match its manifest (missing: {}; unexpected: {})",
             missing.join(", "),
             unexpected.join(", ")
         )));
@@ -647,13 +652,13 @@ fn load_executor_capsule(package_root: &Path, sdk_version: &str) -> Result<Execu
         || package_json.get("version").and_then(Value::as_str) != Some(sdk_version)
         || package_json.get("type").and_then(Value::as_str) != Some("module")
         || package_json
-            .pointer("/bin/function-executor")
+            .pointer("/bin/tensorlake-typescript-function-runner")
             .and_then(Value::as_str)
-            != Some("./bin/function-executor.js")
+            != Some("./bin/tensorlake-typescript-function-runner.js")
         || !manifest.files.contains_key("package/npm-shrinkwrap.json")
     {
         return Err(CliError::usage(format!(
-            "Tensorlake function executor capsule package metadata at {} is invalid",
+            "Tensorlake TypeScript function runner capsule package metadata at {} is invalid",
             package_directory.display()
         )));
     }
@@ -666,12 +671,12 @@ fn load_executor_capsule(package_root: &Path, sdk_version: &str) -> Result<Execu
         let digest = hex::encode(Sha256::digest(&contents));
         if contents.len() as u64 != metadata.size || digest != metadata.sha256 {
             return Err(CliError::usage(format!(
-                "Tensorlake function executor capsule file failed integrity validation: {relative_path}"
+                "Tensorlake TypeScript function runner capsule file failed integrity validation: {relative_path}"
             )));
         }
         if !matches!(metadata.mode, 0o644 | 0o755) {
             return Err(CliError::usage(format!(
-                "Tensorlake function executor capsule file has unsupported mode {:o}: {relative_path}",
+                "Tensorlake TypeScript function runner capsule file has unsupported mode {:o}: {relative_path}",
                 metadata.mode
             )));
         }
@@ -684,7 +689,7 @@ fn load_executor_capsule(package_root: &Path, sdk_version: &str) -> Result<Execu
     let runtime_id = format!("sha256:{}", hex::encode(runtime_hash.finalize()));
     if runtime_id != manifest.runtime_id {
         return Err(CliError::usage(format!(
-            "Tensorlake function executor capsule runtime ID is invalid: expected {}, calculated {runtime_id}",
+            "Tensorlake TypeScript function runner capsule runtime ID is invalid: expected {}, calculated {runtime_id}",
             manifest.runtime_id
         )));
     }
@@ -709,13 +714,13 @@ fn load_executor_capsule(package_root: &Path, sdk_version: &str) -> Result<Execu
     archive.finish().map_err(CliError::Io)?;
     let encoder = archive.into_inner().map_err(CliError::Io)?;
     let tgz = encoder.finish().map_err(CliError::Io)?;
-    Ok(ExecutorCapsule { runtime_id, tgz })
+    Ok(FunctionRunnerCapsule { runtime_id, tgz })
 }
 
 fn safe_capsule_file_path(capsule_root: &Path, relative_path: &str) -> Result<PathBuf> {
     if relative_path.contains('\\') {
         return Err(CliError::usage(format!(
-            "Tensorlake function executor capsule contains an unsafe path: {relative_path}"
+            "Tensorlake TypeScript function runner capsule contains an unsafe path: {relative_path}"
         )));
     }
     let relative = Path::new(relative_path);
@@ -727,7 +732,7 @@ fn safe_capsule_file_path(capsule_root: &Path, relative_path: &str) -> Result<Pa
             .any(|component| !matches!(component, Component::Normal(_)))
     {
         return Err(CliError::usage(format!(
-            "Tensorlake function executor capsule contains an unsafe path: {relative_path}"
+            "Tensorlake TypeScript function runner capsule contains an unsafe path: {relative_path}"
         )));
     }
     Ok(capsule_root.join(relative))
@@ -741,7 +746,7 @@ fn collect_capsule_files(package_directory: &Path) -> Result<BTreeSet<String>> {
             let metadata = std::fs::symlink_metadata(&path).map_err(CliError::Io)?;
             if metadata.file_type().is_symlink() {
                 return Err(CliError::usage(format!(
-                    "Tensorlake function executor capsule cannot contain symlinks: {}",
+                    "Tensorlake TypeScript function runner capsule cannot contain symlinks: {}",
                     path.display()
                 )));
             }
@@ -867,10 +872,13 @@ async fn build_application_images(
             let fingerprint = match image {
                 Some(image) => format!(
                     "{}:{}",
-                    bundle.executor_capsule.runtime_id,
+                    bundle.function_runner_capsule.runtime_id,
                     serde_json::to_string(image)?
                 ),
-                None => format!("{}:default-node-24", bundle.executor_capsule.runtime_id),
+                None => format!(
+                    "{}:default-node-24",
+                    bundle.function_runner_capsule.runtime_id
+                ),
             };
             if let Some(previous) = built.get(&registered_name) {
                 if previous != &fingerprint {
@@ -918,8 +926,8 @@ async fn build_application_images(
                     empty_context_directory.clone()
                 }),
                 context_files: vec![SandboxImageContextFile {
-                    path: PathBuf::from(EXECUTOR_CAPSULE_CONTEXT_PATH),
-                    contents: bundle.executor_capsule.tgz.clone(),
+                    path: PathBuf::from(FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH),
+                    contents: bundle.function_runner_capsule.tgz.clone(),
                     mode: 0o644,
                 }],
             };
@@ -956,10 +964,10 @@ fn application_dockerfile(image: Option<&SerializedImageDefinition>) -> Result<S
     }
     lines.push("USER root".to_string());
     lines.push(format!(
-        "COPY {EXECUTOR_CAPSULE_CONTEXT_PATH} /tmp/tensorlake-function-executor-runtime.tgz"
+        "COPY {FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH} /tmp/tensorlake-typescript-function-runner-runtime.tgz"
     ));
     lines.push(
-        "RUN set -eu; npm install --global --force --omit=dev --no-bin-links /tmp/tensorlake-function-executor-runtime.tgz; executor_entry=\"$(npm root --global)/@tensorlake/function-executor-runtime/bin/function-executor.js\"; test -f \"$executor_entry\"; mkdir -p /usr/local/bin; printf '#!/bin/sh\\nexec node \"%s\" \"$@\"\\n' \"$executor_entry\" > /usr/local/bin/function-executor; chmod 0755 /usr/local/bin/function-executor; rm -f /tmp/tensorlake-function-executor-runtime.tgz; test -x /usr/local/bin/function-executor; test ! -L /usr/local/bin/function-executor; node -e \"if (Number(process.versions.node.split('.')[0]) < 24) process.exit(1)\""
+        "RUN set -eu; npm install --global --force --omit=dev --no-bin-links /tmp/tensorlake-typescript-function-runner-runtime.tgz; runner_entry=\"$(npm root --global)/@tensorlake/typescript-function-runner-runtime/bin/tensorlake-typescript-function-runner.js\"; test -f \"$runner_entry\"; mkdir -p /usr/local/bin; printf '#!/bin/sh\\nexec node \"%s\" \"$@\"\\n' \"$runner_entry\" > /usr/local/bin/tensorlake-typescript-function-runner; chmod 0755 /usr/local/bin/tensorlake-typescript-function-runner; rm -f /tmp/tensorlake-typescript-function-runner-runtime.tgz; test -x /usr/local/bin/tensorlake-typescript-function-runner; test ! -L /usr/local/bin/tensorlake-typescript-function-runner; node -e \"if (Number(process.versions.node.split('.')[0]) < 24) process.exit(1)\""
             .to_string(),
     );
     Ok(lines.join("\n"))
@@ -1135,7 +1143,7 @@ fn required_string<'a>(value: &'a Value, key: &str, label: &str) -> Result<&'a s
 mod tests {
     use super::{
         SerializedImageOperation, application_dockerfile, bundle_application, canonical_entrypoint,
-        discover_deployment_with_timeout, ensure_public_endpoint_id, load_executor_capsule,
+        discover_deployment_with_timeout, ensure_public_endpoint_id, load_function_runner_capsule,
         render_image_operation,
     };
     use serde_json::json;
@@ -1166,17 +1174,19 @@ mod tests {
     fn renders_node_24_application_dockerfile() {
         let dockerfile = application_dockerfile(None).unwrap();
         assert!(dockerfile.contains("FROM node:24-bookworm-slim"));
-        assert!(dockerfile.contains("COPY .tensorlake/function-executor-runtime.tgz"));
+        assert!(dockerfile.contains("COPY .tensorlake/typescript-function-runner-runtime.tgz"));
         assert!(!dockerfile.contains("tensorlake@"));
         assert!(dockerfile.contains("--no-bin-links"));
-        assert!(dockerfile.contains("test ! -L /usr/local/bin/function-executor"));
-        assert!(dockerfile.contains("function-executor"));
+        assert!(
+            dockerfile.contains("test ! -L /usr/local/bin/tensorlake-typescript-function-runner")
+        );
+        assert!(dockerfile.contains("tensorlake-typescript-function-runner"));
     }
 
     #[test]
-    fn validates_and_packages_built_executor_capsule() {
+    fn validates_and_packages_built_function_runner_capsule() {
         let root = repository_root().join("typescript");
-        let capsule = load_executor_capsule(&root, env!("CARGO_PKG_VERSION")).unwrap();
+        let capsule = load_function_runner_capsule(&root, env!("CARGO_PKG_VERSION")).unwrap();
         assert!(capsule.runtime_id.starts_with("sha256:"));
         assert!(!capsule.tgz.is_empty());
         let decoder = flate2::read::GzDecoder::new(capsule.tgz.as_slice());
@@ -1195,7 +1205,9 @@ mod tests {
             .collect::<Vec<_>>();
         assert!(paths.contains(&"package/package.json".to_string()));
         assert!(paths.contains(&"package/npm-shrinkwrap.json".to_string()));
-        assert!(paths.contains(&"package/bin/function-executor.js".to_string()));
+        assert!(
+            paths.contains(&"package/bin/tensorlake-typescript-function-runner.js".to_string())
+        );
     }
 
     #[test]

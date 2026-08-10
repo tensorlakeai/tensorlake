@@ -48,11 +48,11 @@ jobs:
           prefix-key: v1-rust-full-feature
           cache-bin: false
 
-      - name: Build TypeScript SDK runtime capsule
+      - name: Build TypeScript SDK and Function Service runner capsule
         working-directory: typescript
         run: |
           npm ci
-          npm run build:sdk
+          npm run build
 
       - name: Vendor private artifact_storage crates
         uses: ./.github/actions/vendor-private-crates
@@ -142,7 +142,7 @@ jobs:
 
       - name: Verify wheel imports Rust Cloud SDK extension
         run: |
-          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --expect-script function-executor --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --expect-script function-executor --expect-script tensorlake-python-function-runner --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
 
       - name: Build Node.js native binding
         env:
@@ -191,7 +191,8 @@ jobs:
             tests.sandbox.test_sandbox_rust_backend \
             tests.sandbox.test_sandbox_rust_backend_async \
             tests.sandbox.test_file_systems \
-            tests.image.test_sandbox_builder
+            tests.image.test_sandbox_builder \
+            tests.function_agent.test_runner
 
   test_sandbox:
     name: Sandbox integration tests

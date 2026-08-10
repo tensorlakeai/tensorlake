@@ -10,6 +10,7 @@ export default defineConfig({
     "src/sandbox-image.ts",
     "src/applications/index.ts",
     "src/function-executor/main.ts",
+    "src/function-agent/main.ts",
   ],
   format: ["esm", "cjs"],
   dts: true,
