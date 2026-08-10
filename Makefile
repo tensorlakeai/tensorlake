@@ -58,7 +58,7 @@ build_proto:
 
 # Build the Rust Cloud SDK PyO3 extension and install it as tensorlake._cloud_sdk
 build_cloud_sdk:
-	@poetry run maturin develop --manifest-path crates/rust-cloud-sdk-py/Cargo.toml
+	@poetry run maturin develop
 
 # Legacy alias
 build_rust_py_client: build_cloud_sdk
