@@ -98,6 +98,34 @@ build-cli-full *ARGS:
 # Back-compat alias for the old recipe name.
 build-cli-mount *ARGS: (build-cli-full ARGS)
 
+# Build only the headless Linux mount daemon used in Tensorlake sandbox images.
+# The private source is staged exactly like the full CLI build, but the output
+# links no CLI command surface.
+build-tlfs-mount-daemon *ARGS:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    artifact_storage="{{ARTIFACT_STORAGE_DIR}}"
+    for crate in gsvc-mount gsvc-fs-client; do
+        if [ ! -d "$artifact_storage/crates/$crate/src" ]; then
+            echo "error: $artifact_storage/crates/$crate/src not found." >&2
+            exit 1
+        fi
+    done
+    restore() {
+        for crate in gsvc-mount gsvc-fs-client; do
+            git checkout -q -- "crates/$crate/src" 2>/dev/null || true
+            git clean -fdq "crates/$crate/src" 2>/dev/null || true
+        done
+        rm -f crates/gsvc-fs-client/Cargo.lock
+    }
+    trap restore EXIT
+    for crate in gsvc-mount gsvc-fs-client; do
+        rm -f "crates/$crate/src"/*.rs
+        cp "$artifact_storage/crates/$crate/src"/*.rs "crates/$crate/src"/
+    done
+    cargo build --manifest-path crates/gsvc-fs-client/Cargo.toml \
+        --bin tlfs-mount-daemon {{ARGS}}
+
 # Build the macOS TLFS.app from the private artifact_storage checkout (see its
 # platform/macos/tlfs/README.md). Flags pass through, e.g. `just build-tlfs-app --release`.
 build-tlfs-app *ARGS:
