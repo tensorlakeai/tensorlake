@@ -8,7 +8,7 @@ import io
 import json
 import unittest
 import zipfile
-from typing import Any
+from typing import Any, Coroutine
 
 from tensorlake._cloud_sdk import FunctionAgentCore
 from tensorlake.applications.request_context.request_state import (
@@ -38,6 +38,21 @@ class FakeNativeCore:
         self.inputs.put_nowait(json.dumps(message))
 
 
+class LoopBoundNativeCore:
+    """Models PyO3 future creation, which requires the running loop thread."""
+
+    def __init__(self) -> None:
+        self.outputs: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+
+    def submit_output(self, output_json: str) -> Coroutine[Any, Any, None]:
+        asyncio.get_running_loop()
+
+        async def submit() -> None:
+            await self.outputs.put(json.loads(output_json))
+
+        return submit()
+
+
 class PythonFunctionRunnerTest(unittest.IsolatedAsyncioTestCase):
     async def test_native_core_can_start_inside_the_python_event_loop(self) -> None:
         core = FunctionAgentCore(
@@ -50,6 +65,16 @@ class PythonFunctionRunnerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(callable(core.next_input))
         self.assertTrue(callable(core.submit_output))
         await asyncio.sleep(0.1)
+
+    async def test_protocol_writer_invokes_native_core_on_event_loop(self) -> None:
+        core = LoopBoundNativeCore()
+        protocol = ProtocolWriter(core, asyncio.get_running_loop())  # type: ignore[arg-type]
+
+        await asyncio.wait_for(
+            asyncio.to_thread(protocol.write, {"type": "initialized"}), timeout=2
+        )
+
+        self.assertEqual(await core.outputs.get(), {"type": "initialized"})
 
     async def test_application_state_round_trip_and_value_result(self) -> None:
         function_name = "embedded_agent_stateful_test"

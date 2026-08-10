@@ -116,10 +116,12 @@ class ProtocolWriter:
 
     def write(self, message: dict[str, Any]) -> None:
         encoded = json.dumps(message, separators=(",", ":"), ensure_ascii=False)
+
+        async def submit_output() -> None:
+            await self._core.submit_output(encoded)
+
         with self._lock:
-            asyncio.run_coroutine_threadsafe(
-                self._core.submit_output(encoded), self._loop
-            ).result()
+            asyncio.run_coroutine_threadsafe(submit_output(), self._loop).result()
 
 
 class RuntimeRequestState(RequestState):
