@@ -5387,7 +5387,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-function-agent-core"
-version = "0.5.104"
+version = "0.5.105"
 dependencies = [
  "anyhow",
  "base64",

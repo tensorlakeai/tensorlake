@@ -722,6 +722,8 @@ mod tests {
             }],
             call_metadata_base64: String::new(),
             application_code_base64: BASE64.encode(b"code"),
+            application_code_blob: None,
+            application_code_read: None,
             application_code_sha256: "digest".into(),
             execution_history: Vec::new(),
         }

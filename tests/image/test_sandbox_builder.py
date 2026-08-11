@@ -185,6 +185,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
                 context_dir=None,
                 is_public=False,
                 docker_compat=False,
+                cas=False,
                 emit=emitted.append,
             )
 
@@ -645,6 +646,8 @@ class TestBuildSandboxApplicationImage(unittest.TestCase):
                 memory_mb=BUILD_MEMORY_MB,
             )
 
+        self.assertIs(rust_builder_mock.call_args.kwargs["cas"], True)
+
         dockerfile_text = captured["dockerfile_text"]
         self.assertIsInstance(dockerfile_text, str)
         dockerfile_lines = dockerfile_text.rstrip().splitlines()
@@ -659,7 +662,10 @@ class TestBuildSandboxApplicationImage(unittest.TestCase):
         self.assertNotIn("id -u", install_line)
         self.assertIn("RUN PIP_USER=false python3 -m pip install", install_line)
         self.assertTrue(
-            install_line.endswith("&& test -x /usr/local/bin/function-executor"),
+            install_line.endswith(
+                "&& test -x /usr/local/bin/tensorlake-python-function-runner "
+                "&& python3 -c 'from tensorlake._cloud_sdk import FunctionAgentCore'"
+            ),
             install_line,
         )
 
@@ -682,7 +688,14 @@ class TestApplicationDockerfileContent(unittest.TestCase):
         )
         self.assertNotIn("sudo", dockerfile)
         self.assertNotIn("id -u", dockerfile)
-        self.assertIn("&& test -x /usr/local/bin/function-executor", dockerfile)
+        self.assertIn(
+            "&& test -x /usr/local/bin/tensorlake-python-function-runner",
+            dockerfile,
+        )
+        self.assertIn(
+            "python3 -c 'from tensorlake._cloud_sdk import FunctionAgentCore'",
+            dockerfile,
+        )
 
 
 if __name__ == "__main__":

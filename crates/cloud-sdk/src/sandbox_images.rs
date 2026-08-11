@@ -439,18 +439,15 @@ where
         )?
     };
     if options.common.cas {
-        if !options.context_files.is_empty() {
-            return Err(SandboxImageBuildError::usage(
-                "in-memory context files are not supported by Image Service builds",
-            ));
-        }
         // CAS images build through the Image Service: the SDK resolves the
         // plan's references and submits them; the service reconciler drives
         // the builder sandbox.
+        let dockerfile_path = options.dockerfile_path.clone();
         return crate::image_service_builds::run_image_service_build(
             plan,
-            Some(&options.dockerfile_path),
+            Some(&dockerfile_path),
             options.build_args,
+            options.context_files,
             options.common,
             emit,
         )
@@ -487,6 +484,7 @@ where
         return crate::image_service_builds::run_image_service_build(
             plan,
             None,
+            Vec::new(),
             Vec::new(),
             options.common,
             emit,
@@ -2281,7 +2279,7 @@ fn create_context_archive(
     })
 }
 
-fn normalize_context_file_path(path: &Path) -> Result<String> {
+pub(crate) fn normalize_context_file_path(path: &Path) -> Result<String> {
     let mut components = Vec::new();
     for component in path.components() {
         match component {

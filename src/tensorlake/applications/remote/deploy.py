@@ -14,6 +14,7 @@ from ..remote.manifests.application import (
 from .code.ignored_code_paths import ignored_code_paths
 from .code.loader import load_code
 from .code.zip import zip_code
+from .images import prepare_application_images
 
 _UNAUTHENTICATED_REQUESTS = "unauthenticated_requests"
 
@@ -55,14 +56,16 @@ def _ensure_public_endpoint_id(
 
 def deploy_applications(
     applications_file_path: str,
-    upgrade_running_requests: bool = True,
+    upgrade_running_requests: bool = False,
     load_source_dir_modules: bool = False,
     api_client=None,
+    function_images: dict[tuple[str, str], str] | None = None,
 ) -> None:
     """Deploys all applications in the supplied .py file so they are runnable in remote mode (i.e. on Tensorlake Cloud).
 
     `application_file_path` is a path to the .py file where the applications are defined.
-    `upgrade_running_requests` indicates whether to update running requests to use the deployed code.
+    `upgrade_running_requests` is retained for call-site compatibility but must be False;
+                               Function Service pins existing requests to their application version.
     `load_source_dir_modules` indicates whether to load the .py file so all applications from it get added to the registry.
                                Should be set to True when called from CLI, False when called programmatically from test code
                                because applications in test code are already loaded into registry.
@@ -71,6 +74,10 @@ def deploy_applications(
     Raises SDKUsageError if the client configuration is not valid for the operation.
     Raises TensorlakeError on other errors.
     """
+    if upgrade_running_requests:
+        raise ValueError(
+            "upgrading running requests is not supported by Function Service"
+        )
     # Work with absolute paths to make sure that the path comparisons work correctly.
     applications_file_path: str = os.path.abspath(applications_file_path)
     applications_dir_path: str = os.path.dirname(applications_file_path)
@@ -81,6 +88,11 @@ def deploy_applications(
 
     # Now the application is fully loaded into memory so we can use the registry.
     functions: List[Function] = get_functions()
+    if function_images is None:
+        function_images = prepare_application_images(
+            functions,
+            context_dir=applications_dir_path,
+        )
     app_code: bytes = zip_code(
         code_dir_path=applications_dir_path,
         ignored_absolute_paths=ignored_absolute_paths,
@@ -101,7 +113,9 @@ def deploy_applications(
     try:
         for application in filter_applications(functions):
             app_manifest: ApplicationManifest = create_application_manifest(
-                application_function=application, all_functions=functions
+                application_function=application,
+                all_functions=functions,
+                function_images=function_images,
             )
             _ensure_public_endpoint_id(api_client, app_manifest)
             api_client.upsert_application(

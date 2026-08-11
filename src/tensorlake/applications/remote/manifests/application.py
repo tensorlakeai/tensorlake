@@ -1,7 +1,7 @@
 import base64
 import inspect
 import pickle
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Literal
 
 from pydantic import BaseModel, Field
 
@@ -16,6 +16,7 @@ from ...function.user_data_serializer import (
     function_input_serializer,
     function_output_serializer,
 )
+from ...interface.exceptions import TensorlakeError
 from ...interface.function import (
     ApplicationCapability,
     Function,
@@ -54,6 +55,7 @@ class ApplicationManifest(BaseModel):
     allow: List[ApplicationCapability] = Field(default_factory=list)
     public_endpoint_id: str | None = None
     version: str
+    runtime: Literal["python"] = "python"
     functions: Dict[str, FunctionManifest]
     entrypoint: EntryPointManifest
 
@@ -69,7 +71,9 @@ class ApplicationManifest(BaseModel):
 
 
 def create_application_manifest(
-    application_function: Function, all_functions: List[Function]
+    application_function: Function,
+    all_functions: List[Function],
+    function_images: dict[tuple[str, str], str] | None = None,
 ) -> ApplicationManifest:
     """Creates ApplicationManifest for the supplied application function.
 
@@ -84,6 +88,24 @@ def create_application_manifest(
         )
         for fn in all_functions
     }
+    if function_images is not None:
+        application_name = application_function._function_config.function_name
+        for function_name, manifest in function_manifests.items():
+            image = function_images.get((application_name, function_name))
+            if image is None:
+                raise TensorlakeError(
+                    f"runtime image was not prepared for function '{function_name}'"
+                )
+            image_id = image.removeprefix("cas-v1:")
+            if (
+                not image.startswith("cas-v1:")
+                or len(image_id) != 64
+                or any(byte not in "0123456789abcdef" for byte in image_id)
+            ):
+                raise TensorlakeError(
+                    f"runtime image for function '{function_name}' is not immutable"
+                )
+            manifest.image = image
 
     inputs: list[EntryPointInputManifest] = _input_manifests(application_function)
     inputs_base64: str = base64.encodebytes(serialize_input_manifests(inputs)).decode(
@@ -100,6 +122,7 @@ def create_application_manifest(
         tags=app_config.tags,
         allow=app_config.allow,
         version=app_config.version,
+        runtime="python",
         functions=function_manifests,
         entrypoint=EntryPointManifest(
             function_name=application_function._function_config.function_name,

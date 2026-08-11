@@ -3,7 +3,14 @@ import unittest
 
 import validate_all_applications
 
-from tensorlake.applications import Image, Retries, application, cls, function
+from tensorlake.applications import (
+    Image,
+    Retries,
+    TensorlakeError,
+    application,
+    cls,
+    function,
+)
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.manifests.application import (
     ApplicationManifest,
@@ -284,6 +291,40 @@ def function_with_custom_image(x: int) -> str:
 
 
 class TestFunctionManifestImages(unittest.TestCase):
+    def test_runtime_and_resolved_images_are_serialized_for_deployment(self):
+        app_manifest: ApplicationManifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+            function_images={
+                (
+                    default_application_function._function_config.function_name,
+                    function._function_config.function_name,
+                ): f"cas-v1:{'a' * 64}"
+                for function in get_functions()
+            },
+        )
+
+        manifest = json.loads(app_manifest.model_dump_json())
+        self.assertEqual(manifest["runtime"], "python")
+        self.assertEqual(
+            manifest["functions"]["function_with_default_image"]["image"],
+            f"cas-v1:{'a' * 64}",
+        )
+
+    def test_resolved_images_must_be_immutable(self):
+        with self.assertRaisesRegex(TensorlakeError, "is not immutable"):
+            create_application_manifest(
+                application_function=default_application_function,
+                all_functions=get_functions(),
+                function_images={
+                    (
+                        default_application_function._function_config.function_name,
+                        function._function_config.function_name,
+                    ): "mutable-image-name"
+                    for function in get_functions()
+                },
+            )
+
     def test_default_function_image_is_omitted(self):
         app_manifest: ApplicationManifest = create_application_manifest(
             application_function=default_application_function,

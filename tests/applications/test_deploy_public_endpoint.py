@@ -1,6 +1,7 @@
 import json
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from tensorlake.applications import application, function
 from tensorlake.applications.remote.deploy import deploy_applications
@@ -37,7 +38,21 @@ class FakeDeployClient:
 
 class TestDeployPublicEndpoint(unittest.TestCase):
     def _deployed_manifest(self, client: FakeDeployClient) -> dict:
-        deploy_applications(__file__, api_client=client)
+        image_ref = f"cas-v1:{'a' * 64}"
+        with (
+            patch(
+                "tensorlake.applications.remote.deploy.get_functions",
+                return_value=[public_endpoint_app],
+            ),
+            patch(
+                "tensorlake.applications.remote.deploy.prepare_application_images",
+                return_value={
+                    ("public_endpoint_app", "public_endpoint_app"): image_ref
+                },
+            ) as prepare_images,
+        ):
+            deploy_applications(__file__, api_client=client)
+        prepare_images.assert_called_once()
         return next(
             upsert["manifest"]
             for upsert in client.upserts

@@ -1,5 +1,6 @@
 import inspect
 import io
+import json
 import os
 import stat
 import sys
@@ -31,6 +32,16 @@ CODE_ZIP_MANIFEST_FILE_NAME = ".tensorlake_code_manifest.json"
 # If only application Python code is put into the ZIP archive without external dependencies then
 # the code size should be much smaller than 5 MB.
 _MAX_CODE_SIZE_BYTES = 5 * 1024 * 1024
+_CANONICAL_ZIP_TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+_CANONICAL_MANIFEST_MODE = stat.S_IFREG | 0o644
+
+
+def _canonical_zip_info(file_name: str, mode: int) -> zipfile.ZipInfo:
+    zip_info = zipfile.ZipInfo(file_name, date_time=_CANONICAL_ZIP_TIMESTAMP)
+    zip_info.create_system = 3
+    zip_info.external_attr = (mode & 0xFFFF) << 16
+    zip_info.compress_type = zipfile.ZIP_DEFLATED
+    return zip_info
 
 
 def zip_code(
@@ -79,22 +90,45 @@ def _zip_code(
         allowZip64=False,
         compresslevel=5,
     ) as zipf:
-        zipf.writestr(CODE_ZIP_MANIFEST_FILE_NAME, code_zip_manifest.model_dump_json())
+        manifest_json = json.dumps(
+            code_zip_manifest.model_dump(mode="json"),
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        zipf.writestr(
+            _canonical_zip_info(
+                CODE_ZIP_MANIFEST_FILE_NAME,
+                _CANONICAL_MANIFEST_MODE,
+            ),
+            manifest_json,
+            compress_type=zipfile.ZIP_DEFLATED,
+            compresslevel=5,
+        )
         for file_path in walk_code(code_dir_path, ignored_absolute_paths):
             # The file is added to the ZIP archive with its original rwx/rwx/rwx permissions.
             # When unzipping the files owner and group are set to the current process uid, gid.
             # We need to check that file owner has read access on the file so the unzipping process
             # can load and run them.
-            if not (os.stat(file_path).st_mode & stat.S_IRUSR):
+            file_stat = os.stat(file_path)
+            if not (file_stat.st_mode & stat.S_IRUSR):
                 raise SDKUsageError(
                     f"Application code file {file_path} is not readable by its owner. "
                     "Please change the file permissions."
                 )
 
             file_path_inside_code_dir = os.path.relpath(file_path, code_dir_path)
-            zipf.write(file_path, file_path_inside_code_dir)
+            with open(file_path, "rb") as source_file:
+                zipf.writestr(
+                    _canonical_zip_info(
+                        file_path_inside_code_dir,
+                        file_stat.st_mode,
+                    ),
+                    source_file.read(),
+                    compress_type=zipfile.ZIP_DEFLATED,
+                    compresslevel=5,
+                )
             zip_infos.append(zipf.getinfo(file_path_inside_code_dir))
-            zip_code_size += os.path.getsize(file_path)
+            zip_code_size += file_stat.st_size
             # Check code size after adding each file to the ZIP archive to prevent infinite
             # recursion because we allow soft links in the code directory for users' convenience.
             _check_code_size(zip_code_size, zip_infos)

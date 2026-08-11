@@ -38,8 +38,11 @@ const RUNTIME_MODULE: &str = "runtime.mjs";
 const CODE_MANIFEST_FILE: &str = ".tensorlake_code_manifest.json";
 const MAX_CODE_SIZE: u64 = 5 * 1024 * 1024;
 const DEFAULT_NODE_IMAGE: &str = "node:24-bookworm-slim";
+const CAS_IMAGE_REF_PREFIX: &str = "cas-v1:";
 const FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH: &str =
     ".tensorlake/typescript-function-runner-runtime.tgz";
+const FUNCTION_RUNNER_LINUX_X64_BINDING: &str =
+    "package/dist/native/linux-x64/tensorlake-node.node";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const UNAUTHENTICATED_REQUESTS: &str = "unauthenticated_requests";
 const DISCOVERY_SCRIPT: &str = r#"
@@ -250,6 +253,11 @@ pub async fn run(
     entry_file: &Path,
     upgrade_running_requests: bool,
 ) -> Result<()> {
+    if upgrade_running_requests {
+        return Err(CliError::usage(
+            "--upgrade-running-requests is not supported by Function Service; existing requests stay pinned to their deployed application version",
+        ));
+    }
     let entry_file = canonical_entrypoint(entry_file)?;
     eprintln!(
         "⚙️  Bundling TypeScript application {}",
@@ -257,12 +265,19 @@ pub async fn run(
     );
     let bundle = bundle_application(&entry_file).await?;
 
-    build_application_images(ctx, &entry_file, &bundle).await?;
+    let function_images = build_application_images(ctx, &entry_file, &bundle).await?;
     eprintln!("\n✅ All images built successfully");
 
     for application in &bundle.discovery.applications {
-        upsert_application(ctx, application, &bundle.code_zip, upgrade_running_requests).await?;
-        let name = required_string(application, "name", "application")?;
+        let application = application_with_resolved_images(application, &function_images)?;
+        upsert_application(
+            ctx,
+            &application,
+            &bundle.code_zip,
+            upgrade_running_requests,
+        )
+        .await?;
+        let name = required_string(&application, "name", "application")?;
         eprintln!("🚀 Application `{name}` deployed successfully");
         eprintln!(
             "\n💡 To invoke it, you can use the following cURL command:\n\ncurl {}/applications/{} \\\n  -H \"Authorization: Bearer $TENSORLAKE_API_KEY\" \\\n  --json 'null'",
@@ -625,6 +640,14 @@ fn load_function_runner_capsule(
             "Tensorlake TypeScript function runner capsule is empty",
         ));
     }
+    if !manifest
+        .files
+        .contains_key(FUNCTION_RUNNER_LINUX_X64_BINDING)
+    {
+        return Err(CliError::usage(format!(
+            "The Tensorlake TypeScript function runner capsule does not contain the Linux x64 native agent core required by sandbox images ({FUNCTION_RUNNER_LINUX_X64_BINDING}). Reinstall the published package or build the linux-x64 native target before running build:runtime."
+        )));
+    }
 
     let package_directory = capsule_root.join("package");
     let actual_files = collect_capsule_files(&package_directory)?;
@@ -845,15 +868,19 @@ async fn build_application_images(
     ctx: &CliContext,
     entry_file: &Path,
     bundle: &ApplicationBundle,
-) -> Result<()> {
+) -> Result<BTreeMap<(String, String), String>> {
     let discovery = &bundle.discovery;
     let context_directory = entry_file.parent().unwrap_or_else(|| Path::new("."));
     let empty_context_directory = bundle._temp.path().join("image-context");
-    let mut built = BTreeMap::<String, String>::new();
+    let mut built = BTreeMap::<String, (String, String)>::new();
+    let mut function_images = BTreeMap::new();
     for application in &discovery.applications {
         let application_name = required_string(application, "name", "application")?;
         let version = required_string(application, "version", application_name)?;
-        let default_name = format!("applications/{application_name}/versions/{version}/default");
+        let application_component = registered_image_component(application_name);
+        let version_component = registered_image_component(version);
+        let default_name =
+            format!("applications/{application_component}/versions/{version_component}/default");
         let functions = application
             .get("functions")
             .and_then(Value::as_object)
@@ -864,11 +891,16 @@ async fn build_application_images(
             })?;
         for (function_name, function_manifest) in functions {
             let image = discovery.images.get(function_name).and_then(Option::as_ref);
-            let registered_name = function_manifest
-                .get("image")
-                .and_then(Value::as_str)
-                .unwrap_or(&default_name)
-                .to_string();
+            let explicit_name = function_manifest.get("image").and_then(Value::as_str);
+            let registered_name = explicit_name.map_or_else(
+                || default_name.clone(),
+                |image_name| {
+                    let image_component = registered_image_component(image_name);
+                    format!(
+                        "applications/{application_component}/versions/{version_component}/images/{image_component}"
+                    )
+                },
+            );
             let fingerprint = match image {
                 Some(image) => format!(
                     "{}:{}",
@@ -880,15 +912,18 @@ async fn build_application_images(
                     bundle.function_runner_capsule.runtime_id
                 ),
             };
-            if let Some(previous) = built.get(&registered_name) {
+            if let Some((previous, immutable_ref)) = built.get(&registered_name) {
                 if previous != &fingerprint {
                     return Err(CliError::usage(format!(
                         "Different Image definitions use the registered name '{registered_name}'"
                     )));
                 }
+                function_images.insert(
+                    (application_name.to_string(), function_name.to_string()),
+                    immutable_ref.clone(),
+                );
                 continue;
             }
-            built.insert(registered_name.clone(), fingerprint);
             eprintln!("📦 Building `{registered_name}` image...");
             let dockerfile = application_dockerfile(image)?;
             let needs_context = image.is_some_and(|image| {
@@ -905,13 +940,13 @@ async fn build_application_images(
                     organization_id: ctx.effective_organization_id(),
                     project_id: ctx.effective_project_id(),
                     namespace: ctx.namespace.clone(),
-                    registered_name: Some(registered_name),
+                    registered_name: Some(registered_name.clone()),
                     disk_mb: None,
                     builder_disk_mb: None,
                     cpus: None,
                     memory_mb: None,
                     is_public: false,
-                    cas: false,
+                    cas: true,
                     user_agent: Some(format!(
                         "Tensorlake CLI (rust/{})",
                         env!("CARGO_PKG_VERSION")
@@ -933,12 +968,100 @@ async fn build_application_images(
                 build_args: Vec::new(),
             };
             let mut renderer = ImageBuildEventRenderer::new();
-            build_sandbox_image(options, |event| renderer.render(event))
+            let published = build_sandbox_image(options, |event| renderer.render(event))
                 .await
                 .map_err(|error| CliError::Other(error.into()))?;
+            let immutable_ref = published_image_reference(&published)?;
+            built.insert(registered_name, (fingerprint, immutable_ref.clone()));
+            function_images.insert(
+                (application_name.to_string(), function_name.to_string()),
+                immutable_ref,
+            );
         }
     }
-    Ok(())
+    Ok(function_images)
+}
+
+fn published_image_reference(image: &Value) -> Result<String> {
+    let image_id = image
+        .get("image_id")
+        .and_then(Value::as_str)
+        .ok_or_else(|| {
+            CliError::Other(anyhow::anyhow!(
+                "Image Service publication returned no immutable image_id"
+            ))
+        })?;
+    if image_id.len() != 64
+        || !image_id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(CliError::Other(anyhow::anyhow!(
+            "Image Service publication returned an invalid immutable image_id"
+        )));
+    }
+    Ok(format!("{CAS_IMAGE_REF_PREFIX}{image_id}"))
+}
+
+fn registered_image_component(value: &str) -> String {
+    if value.len() <= 64 && is_valid_registered_image_component(value) {
+        return value.to_string();
+    }
+    let digest = hex::encode(Sha256::digest(value.as_bytes()));
+    format!("id-{}", &digest[..32])
+}
+
+fn is_valid_registered_image_component(value: &str) -> bool {
+    if value.is_empty() {
+        return false;
+    }
+    let mut previous_was_separator = true;
+    for byte in value.bytes() {
+        let is_separator = matches!(byte, b'.' | b'_' | b'-');
+        if is_separator {
+            if previous_was_separator {
+                return false;
+            }
+        } else if !(byte.is_ascii_lowercase() || byte.is_ascii_digit()) {
+            return false;
+        }
+        previous_was_separator = is_separator;
+    }
+    !previous_was_separator
+}
+
+fn application_with_resolved_images(
+    application: &Value,
+    function_images: &BTreeMap<(String, String), String>,
+) -> Result<Value> {
+    let mut application = application.clone();
+    let application_name = required_string(&application, "name", "application")?.to_string();
+    let functions = application
+        .get_mut("functions")
+        .and_then(Value::as_object_mut)
+        .ok_or_else(|| {
+            CliError::usage(format!(
+                "Application '{application_name}' is missing functions"
+            ))
+        })?;
+    for (function_name, manifest) in functions {
+        let registered_name = function_images
+            .get(&(application_name.clone(), function_name.clone()))
+            .ok_or_else(|| {
+                CliError::usage(format!(
+                    "Runtime image was not prepared for function '{function_name}'"
+                ))
+            })?;
+        manifest
+            .as_object_mut()
+            .ok_or_else(|| {
+                CliError::usage(format!(
+                    "Application '{application_name}' has an invalid manifest for function '{function_name}'"
+                ))
+            })?
+            .insert("image".to_string(), Value::String(registered_name.clone()));
+    }
+    Ok(application)
 }
 
 fn application_dockerfile(image: Option<&SerializedImageDefinition>) -> Result<String> {
@@ -1016,11 +1139,18 @@ async fn upsert_application(
 ) -> Result<()> {
     let client = ctx.client()?;
     let mut application = application.clone();
-    ensure_public_endpoint_id(&ctx.api_url, &ctx.namespace, &client, &mut application).await?;
+    let function_service_url = function_service_url(&ctx.api_url);
+    ensure_public_endpoint_id(
+        &function_service_url,
+        &ctx.namespace,
+        &client,
+        &mut application,
+    )
+    .await?;
     let manifest = serde_json::to_string(&application)?;
     let url = format!(
         "{}/v1/namespaces/{}/applications",
-        ctx.api_url.trim_end_matches('/'),
+        function_service_url.trim_end_matches('/'),
         urlencoding::encode(&ctx.namespace)
     );
     let mut delay = Duration::from_millis(500);
@@ -1059,6 +1189,19 @@ async fn upsert_application(
         delay *= 2;
     }
     unreachable!()
+}
+
+fn function_service_url(api_url: &str) -> String {
+    resolve_function_service_url(
+        api_url,
+        std::env::var("TENSORLAKE_FUNCTION_SERVICE_URL").ok(),
+    )
+}
+
+fn resolve_function_service_url(api_url: &str, override_url: Option<String>) -> String {
+    override_url
+        .filter(|value| !value.trim().is_empty())
+        .unwrap_or_else(|| api_url.to_string())
 }
 
 fn allows_unauthenticated_requests(application: &Value) -> bool {
@@ -1143,9 +1286,11 @@ fn required_string<'a>(value: &'a Value, key: &str, label: &str) -> Result<&'a s
 #[cfg(test)]
 mod tests {
     use super::{
-        SerializedImageOperation, application_dockerfile, bundle_application, canonical_entrypoint,
+        FUNCTION_RUNNER_LINUX_X64_BINDING, SerializedImageOperation, application_dockerfile,
+        application_with_resolved_images, bundle_application, canonical_entrypoint,
         discover_deployment_with_timeout, ensure_public_endpoint_id, load_function_runner_capsule,
-        render_image_operation,
+        published_image_reference, registered_image_component, render_image_operation,
+        resolve_function_service_url,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1209,6 +1354,7 @@ mod tests {
         assert!(
             paths.contains(&"package/bin/tensorlake-typescript-function-runner.js".to_string())
         );
+        assert!(paths.contains(&FUNCTION_RUNNER_LINUX_X64_BINDING.to_string()));
     }
 
     #[test]
@@ -1221,6 +1367,68 @@ mod tests {
         assert_eq!(
             render_image_operation(&operation).unwrap(),
             "ENV NAME=\"a value\""
+        );
+    }
+
+    #[test]
+    fn writes_resolved_registered_images_into_application_manifest() {
+        let application = json!({
+            "name": "app",
+            "runtime": "typescript",
+            "functions": {
+                "default_fn": {"name": "default_fn"},
+                "custom_fn": {"name": "custom_fn", "image": "logical-image"}
+            }
+        });
+        let images = BTreeMap::from([
+            (
+                ("app".to_string(), "default_fn".to_string()),
+                format!("cas-v1:{}", "a".repeat(64)),
+            ),
+            (
+                ("app".to_string(), "custom_fn".to_string()),
+                format!("cas-v1:{}", "b".repeat(64)),
+            ),
+        ]);
+
+        let resolved = application_with_resolved_images(&application, &images).unwrap();
+
+        assert_eq!(
+            resolved["functions"]["default_fn"]["image"],
+            format!("cas-v1:{}", "a".repeat(64))
+        );
+        assert_eq!(
+            resolved["functions"]["custom_fn"]["image"],
+            format!("cas-v1:{}", "b".repeat(64))
+        );
+    }
+
+    #[test]
+    fn validates_published_image_ids_and_registered_name_components() {
+        let image_id = "a".repeat(64);
+        assert_eq!(
+            published_image_reference(&json!({ "image_id": image_id })).unwrap(),
+            format!("cas-v1:{}", "a".repeat(64))
+        );
+        assert!(published_image_reference(&json!({ "image_id": "mutable-name" })).is_err());
+        assert_eq!(registered_image_component("app-v1"), "app-v1");
+        let sanitized = registered_image_component("My Application");
+        assert!(sanitized.starts_with("id-"));
+        assert_eq!(sanitized.len(), 35);
+    }
+
+    #[test]
+    fn function_service_url_defaults_to_api_origin() {
+        assert_eq!(
+            resolve_function_service_url("https://api.tensorlake.ai", None),
+            "https://api.tensorlake.ai"
+        );
+        assert_eq!(
+            resolve_function_service_url(
+                "https://api.tensorlake.ai",
+                Some("http://functions.test:8930".to_string())
+            ),
+            "http://functions.test:8930"
         );
     }
 

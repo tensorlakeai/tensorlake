@@ -222,6 +222,7 @@ def _run_rust_image_create(
     builder_disk_mb: int | None,
     is_public: bool,
     docker_compat: bool,
+    cas: bool,
     emit: EmitFn,
 ) -> dict:
     ctx, token = _resolve_build_credentials()
@@ -246,7 +247,7 @@ def _run_rust_image_create(
         docker_compat,
         dockerfile_text,
         context_dir,
-        cas=False,
+        cas=cas,
         emit=_forwarder(emit),
     )
     return _finish_image_registration(result_json, registered_name, emit)
@@ -326,9 +327,9 @@ def _finish_image_registration(
     emit(
         {
             "type": "image_registered",
-            "image_id": result.get("id", ""),
+            "image_id": result.get("image_id") or result.get("id", ""),
             "name": registered_name,
-            "snapshot_id": result.get("snapshot_id", ""),
+            "snapshot_id": result.get("snapshot_id") or result.get("image_id", ""),
         }
     )
     return result
@@ -668,6 +669,7 @@ def build_sandbox_image(
                 builder_disk_mb=builder_disk_mb,
                 is_public=is_public,
                 docker_compat=docker_compat,
+                cas=False,
                 emit=emit,
             )
         except SandboxImageError:
@@ -813,6 +815,7 @@ def build_sandbox_application_image(
             builder_disk_mb=builder_disk_mb,
             is_public=is_public,
             docker_compat=False,
+            cas=True,
             emit=emit,
         )
     except SandboxImageError:
