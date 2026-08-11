@@ -2828,9 +2828,21 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
         }
         _ => unreachable!("only logical Git mount commands are routed here"),
     };
+    // `unmount --discard` is the escape hatch for a mount whose state file this binary cannot
+    // parse — corrupt, or written by a newer `tl` that knows a mount kind this one does not. Both
+    // calls below parse that state, so gating the hatch on them makes it unreachable in exactly
+    // the situation it exists for, leaving a live mount no installed binary can remove. Discard
+    // already means "drop unpublished local state"; teardown must not additionally require
+    // understanding it.
+    let discarding_teardown = matches!(subcmd, GitCommands::Unmount { discard: true, .. });
     if let Some(path) = mount_dir.as_ref() {
-        commands::fs::require_repository_mount_attachment(path)?;
-        commands::fs::hydrate_scope_from_mount(ctx, path)?;
+        if discarding_teardown {
+            let _ = commands::fs::require_repository_mount_attachment(path);
+            let _ = commands::fs::hydrate_scope_from_mount(ctx, path);
+        } else {
+            commands::fs::require_repository_mount_attachment(path)?;
+            commands::fs::hydrate_scope_from_mount(ctx, path)?;
+        }
     }
     ensure_auth_and_project(ctx).await?;
     let result = match subcmd {
