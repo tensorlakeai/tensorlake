@@ -180,6 +180,7 @@ pub async fn mount_repo(
     target: &str,
     workspace: Option<&str>,
     path: &Path,
+    read_only: bool,
     publish: bool,
     foreground: bool,
     trace_ops: bool,
@@ -191,6 +192,7 @@ pub async fn mount_repo(
         target,
         workspace,
         path,
+        read_only,
         publish,
         foreground,
         trace_ops,
@@ -229,6 +231,19 @@ pub async fn snapshot(ctx: &CliContext, path: &Path, message: Option<&str>) -> R
 
 pub async fn status(ctx: &CliContext, path: &Path, json: bool) -> Result<()> {
     map(gsvc_fs_client::status(&private_context(ctx), path, json).await)
+}
+
+pub async fn git_log(ctx: &CliContext, subject: Option<&str>, json: bool) -> Result<()> {
+    map(gsvc_fs_client::git_log(&private_context(ctx), subject, json).await)
+}
+
+pub async fn git_smartlog(
+    ctx: &CliContext,
+    subject: Option<&str>,
+    project: bool,
+    json: bool,
+) -> Result<()> {
+    map(gsvc_fs_client::git_smartlog(&private_context(ctx), subject, project, json).await)
 }
 
 pub async fn prefetch_filesystem(path: Option<PathBuf>) -> Result<()> {
