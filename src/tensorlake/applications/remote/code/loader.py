@@ -60,6 +60,8 @@ def walk_code(
             for dir_name in dir_names
             if os.path.join(dir_path, dir_name) not in ignored_absolute_paths
         ]
+        dir_names.sort()
+        file_names.sort()
         for file_name in file_names:
             # Only include Python files.
             if not file_name.endswith(".py"):
