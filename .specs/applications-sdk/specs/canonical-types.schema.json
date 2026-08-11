@@ -1,0 +1,156 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://tensorlake.ai/schemas/applications-sdk-canonical-types.schema.json",
+  "title": "Applications SDK canonical types",
+  "description": "Language-neutral shapes for public Applications SDK entities.",
+  "$defs": {
+    "Retries": {
+      "type": "object",
+      "required": ["max_retries"],
+      "additionalProperties": false,
+      "properties": {
+        "max_retries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 10
+        }
+      }
+    },
+    "FunctionResources": {
+      "type": "object",
+      "required": ["cpu", "memory", "ephemeral_disk", "timeout"],
+      "properties": {
+        "cpu": { "type": "number", "exclusiveMinimum": 0 },
+        "memory": { "type": "number", "exclusiveMinimum": 0 },
+        "ephemeral_disk": { "type": "number", "exclusiveMinimum": 0 },
+        "timeout": { "type": "integer", "minimum": 1, "maximum": 86400 },
+        "gpu": {
+          "oneOf": [
+            { "type": "null" },
+            { "type": "string" },
+            { "type": "array", "items": { "type": "string" } }
+          ]
+        },
+        "secrets": { "type": "array", "items": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonEmptyString" } },
+        "region": { "enum": [null, "us-east-1", "eu-west-1"] },
+        "warm_containers": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonNegativeInteger" },
+        "min_containers": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonNegativeInteger" },
+        "max_containers": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonNegativeInteger" }
+      }
+    },
+    "Application": {
+      "type": "object",
+      "required": ["name", "tags", "retries", "version"],
+      "properties": {
+        "name": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonEmptyString" },
+        "tags": { "type": "object", "additionalProperties": { "type": "string" } },
+        "retries": { "$ref": "#/$defs/Retries" },
+        "region": { "enum": [null, "us-east-1", "eu-west-1"] },
+        "version": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonEmptyString" }
+      }
+    },
+    "Function": {
+      "type": "object",
+      "required": ["name", "resources"],
+      "properties": {
+        "name": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/NonEmptyString" },
+        "description": { "type": "string" },
+        "resources": { "$ref": "#/$defs/FunctionResources" },
+        "retries": { "$ref": "#/$defs/Retries" }
+      }
+    },
+    "Future": {
+      "type": "object",
+      "required": ["id", "state"],
+      "properties": {
+        "id": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" },
+        "state": { "enum": ["created", "running", "succeeded", "failed"] }
+      }
+    },
+    "RegisteredFunction": {
+      "type": "object",
+      "required": ["definition", "future", "map", "reduce"],
+      "properties": {
+        "definition": { "$ref": "#/$defs/Function" },
+        "future": { "description": "Language callable that creates a Future." },
+        "map": { "description": "Language callable that maps the function." },
+        "reduce": { "description": "Language callable that reduces with the function." },
+        "tail_call": { "description": "Language-specific tail-call operation." }
+      }
+    },
+    "Request": {
+      "type": "object",
+      "required": ["id", "state"],
+      "properties": {
+        "id": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" },
+        "state": { "enum": ["submitted", "running", "success", "failure", "cancelled"] }
+      }
+    },
+    "RequestContext": {
+      "type": "object",
+      "required": ["request_id", "state", "metrics", "progress"],
+      "properties": {
+        "request_id": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" },
+        "state": { "type": "object" },
+        "metrics": { "type": "object" },
+        "progress": { "type": "object" },
+        "signal": { "description": "TypeScript AbortSignal when available." }
+      }
+    },
+    "File": {
+      "type": "object",
+      "required": ["content", "content_type"],
+      "additionalProperties": false,
+      "properties": {
+        "content": { "description": "Language-native byte sequence" },
+        "content_type": { "type": "string" }
+      }
+    },
+    "ProgressUpdate": {
+      "type": "object",
+      "required": ["current", "total"],
+      "additionalProperties": false,
+      "properties": {
+        "current": { "type": "number", "minimum": 0 },
+        "total": { "type": "number", "minimum": 0 },
+        "message": { "type": "string" },
+        "attributes": {
+          "type": "object",
+          "propertyNames": { "type": "string" },
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    },
+    "WaitResult": {
+      "type": "object",
+      "required": ["done", "not_done"],
+      "additionalProperties": false,
+      "properties": {
+        "done": { "type": "array", "items": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" } },
+        "not_done": { "type": "array", "items": { "$ref": "https://tensorlake.ai/schemas/canonical-types.schema.json#/$defs/OpaqueId" } }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "required": ["kind", "message"],
+      "properties": {
+        "kind": {
+          "enum": [
+            "sdk_usage",
+            "serialization",
+            "deserialization",
+            "function",
+            "timeout",
+            "request",
+            "request_not_finished",
+            "request_failed",
+            "remote_api",
+            "replay_mismatch",
+            "internal"
+          ]
+        },
+        "message": { "type": "string" }
+      }
+    }
+  }
+}

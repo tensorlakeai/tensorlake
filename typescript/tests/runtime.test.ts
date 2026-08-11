@@ -1,9 +1,6 @@
 import path from "node:path";
-import { createRequire } from "node:module";
 import { describe, expect, it } from "vitest";
-
-const require = createRequire(import.meta.url);
-const { nativeBindingPath, nativeTargetId } = require("../lib/runtime.cjs");
+import { nativeBindingPath, nativeTargetId } from "../src/native-binding.js";
 
 describe("runtime native binding selection", () => {
   it("selects libc-specific native binding targets on Linux", () => {

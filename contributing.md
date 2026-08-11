@@ -85,7 +85,7 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    poetry shell   # activate the venv
    ```
 
-   > **Note:** gRPC stubs are pre-generated and committed to the repository. Run `make build_proto` separately only if you modify `.proto` files. The `build_proto` step requires grpcio 1.60.0 (pinned for stub compatibility), which must be compiled from source and needs Python < 3.13.
+   > **Note:** The shared function-executor protocol sources live under `proto/`. Python gRPC stubs are pre-generated and committed to the repository; run `make build_proto` after modifying the shared `.proto` files. The TypeScript SDK packages the same sources into its function-executor capsule during `npm run build:sdk`.
 
 3. **Verify the installation**
    ```bash

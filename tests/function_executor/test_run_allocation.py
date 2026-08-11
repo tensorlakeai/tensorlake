@@ -57,7 +57,7 @@ from tensorlake.function_executor.proto.function_executor_pb2 import (
     AllocationExecutionEventFinishAllocation,
     AllocationFailureReason,
     AllocationOutcomeCode,
-    AllocationOutputBLOB,
+    AllocationOutputBlob,
     AllocationOutputBLOBRequest,
     AllocationState,
     AllocationUpdate,
@@ -995,7 +995,7 @@ class TestRunAllocation(unittest.TestCase):
                             stub.send_allocation_update(
                                 AllocationUpdate(
                                     allocation_id=allocation_id,
-                                    output_blob=AllocationOutputBLOB(
+                                    output_blob=AllocationOutputBlob(
                                         status=Status(code=grpc.StatusCode.OK.value[0]),
                                         blob=function_output_blob,
                                     ),

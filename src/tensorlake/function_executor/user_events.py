@@ -13,6 +13,17 @@ from dataclasses import dataclass
 from tensorlake.applications.cloud_events import print_cloud_event
 
 
+def _print_user_event(event: dict) -> None:
+    """Emits an executor event without allowing damaged stdio to affect control flow."""
+    try:
+        print_cloud_event(event)
+    except Exception:
+        # Application code shares this process and can close or replace stdout.
+        # User-visible logging is best-effort; allocation and initialization
+        # lifecycle paths must still reach their protocol callbacks.
+        pass
+
+
 @dataclass
 class InitializationEventDetails:
     namespace: str
@@ -23,7 +34,7 @@ class InitializationEventDetails:
 
 def log_user_event_initialization_started(details: InitializationEventDetails) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
-    print_cloud_event(
+    _print_user_event(
         {
             "event": "function_executor_initialization_started",
             "message": "Initializing function executor",
@@ -37,7 +48,7 @@ def log_user_event_initialization_started(details: InitializationEventDetails) -
 
 def log_user_event_initialization_finished(details: InitializationEventDetails) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
-    print_cloud_event(
+    _print_user_event(
         {
             "event": "function_executor_initialization_finished",
             "message": "Function executor initialization completed",
@@ -53,7 +64,7 @@ def log_user_event_initialization_failed(
     details: InitializationEventDetails, error: BaseException
 ) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
-    print_cloud_event(
+    _print_user_event(
         {
             "level": "error",
             "event": "function_executor_initialization_failed",
@@ -82,7 +93,7 @@ def log_user_event_allocations_started(
     details: list[AllocationEventDetails],
 ) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
-    print_cloud_event(
+    _print_user_event(
         {
             "event": "allocations_started",
             "message": "Starting allocations",
@@ -106,7 +117,7 @@ def log_user_event_allocations_finished(
     details: list[AllocationEventDetails],
 ) -> None:
     # Using standardized tags, see https://github.com/tensorlakeai/indexify/blob/main/docs/tags.md.
-    print_cloud_event(
+    _print_user_event(
         {
             "event": "allocations_finished",
             "message": "Allocations completed",
@@ -129,7 +140,7 @@ def log_user_event_allocations_finished(
 def log_user_event_function_call_failed(
     details: AllocationEventDetails, error: BaseException
 ) -> None:
-    print_cloud_event(
+    _print_user_event(
         {
             "level": "error",
             "event": "function_call_failed",

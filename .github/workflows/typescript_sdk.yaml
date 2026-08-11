@@ -7,7 +7,15 @@ on:
     paths:
       - "typescript/**"
       - "crates/rust-cloud-sdk-node/**"
+      - "crates/function-agent-core/**"
       - "Cargo.lock"
+      - "proto/**"
+      - "src/tensorlake/applications/**"
+      - "src/tensorlake/function_executor/**"
+      - "src/tensorlake/function_agent/**"
+      - "tests/function_agent/**"
+      - "tests/function_executor_compatibility/**"
+      - "Makefile"
       - ".github/workflows/typescript_sdk.yaml"
 
   push:
@@ -16,7 +24,15 @@ on:
     paths:
       - "typescript/**"
       - "crates/rust-cloud-sdk-node/**"
+      - "crates/function-agent-core/**"
       - "Cargo.lock"
+      - "proto/**"
+      - "src/tensorlake/applications/**"
+      - "src/tensorlake/function_executor/**"
+      - "src/tensorlake/function_agent/**"
+      - "tests/function_agent/**"
+      - "tests/function_executor_compatibility/**"
+      - "Makefile"
       - ".github/workflows/typescript_sdk.yaml"
 
 permissions:
@@ -28,6 +44,60 @@ defaults:
     working-directory: typescript
 
 jobs:
+  function-executor-compatibility:
+    name: Python/TypeScript function executor compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: typescript/package-lock.json
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Rust build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: v1-rust-no-bin
+          cache-bin: false
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 2.0.0
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Install TypeScript dependencies
+        run: npm ci
+
+      - name: Install Python dependencies
+        working-directory: ${{ github.workspace }}
+        run: poetry install --with=dev
+
+      - name: Verify the shared protocol and generated Python bindings
+        working-directory: ${{ github.workspace }}
+        run: |
+          npm --prefix typescript run check:proto
+          make build_proto
+          git diff --exit-code -- src/tensorlake/function_executor/proto
+
+      - name: Run shared function executor compatibility harness
+        working-directory: ${{ github.workspace }}
+        run: make test_function_executor_compatibility
+
   unit-tests:
     name: Unit tests
     runs-on: ubuntu-latest
@@ -38,7 +108,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -61,11 +131,17 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Check shared function-executor protocol source
+        run: npm run check:proto
+
       - name: Type check
         run: npm run typecheck
 
       - name: Run unit tests
         run: npm test
+
+      - name: Build SDK
+        run: npm run build:sdk
 
       - name: Run snapshot-focused SDK unit tests
         run: npm test -- tests/client.test.ts tests/sandbox-image.test.ts
@@ -107,6 +183,9 @@ jobs:
             exit 1
           fi
 
+      - name: Build and verify Function Service runner capsule
+        run: npm run build:runtime
+
   integration-tests:
     name: Integration tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
@@ -119,7 +198,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
 
       - name: Install dependencies
         run: npm ci

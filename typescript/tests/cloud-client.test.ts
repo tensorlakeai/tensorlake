@@ -1,6 +1,11 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import * as undici from "undici";
 import { CloudClient } from "../src/cloud-client.js";
+import { RemoteRequest, remoteOptions, runRemote } from "../src/applications/remote.js";
+import { FunctionError, RequestError } from "../src/applications/errors.js";
+import { File } from "../src/applications/file.js";
+import { registerApplication } from "../src/applications/function.js";
+import { RequestExecutionError, RequestFailedError } from "../src/errors.js";
 
 vi.mock("undici", async (importOriginal) => {
   const actual = await importOriginal<typeof import("undici")>();
@@ -79,6 +84,210 @@ describe("CloudClient", () => {
 
     expect(requestId).toBe("req-2");
     client.close();
+  });
+
+  it("keeps the legacy variadic name-only invocation signature", async () => {
+    mockFetch((url, init) => {
+      expect(url).toContain("/v1/namespaces/default/applications/echo");
+      expect(new TextDecoder().decode(init?.body as ArrayBuffer)).toBe('"Ada"');
+      expect((init?.headers as Record<string, string>)["Content-Type"]).toBe(
+        "application/json; charset=UTF-8",
+      );
+      return new Response(JSON.stringify({ request_id: "req-remote" }), { status: 200 });
+    });
+
+    const request = await runRemote<string>("echo", "Ada");
+
+    expect(request.id).toBe("req-remote");
+  });
+
+  it("extracts explicit remote options from name-only invocations", async () => {
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8913/v1/namespaces/default/applications/echo",
+      );
+      expect(new TextDecoder().decode(init?.body as ArrayBuffer)).toBe('"Ada"');
+      return new Response(JSON.stringify({ request_id: "req-named-options" }), { status: 200 });
+    });
+
+    const request = await runRemote<string>(
+      "echo",
+      "Ada",
+      remoteOptions({ apiUrl: "http://localhost:8913" }),
+    );
+
+    expect(request.id).toBe("req-named-options");
+  });
+
+  it("accepts client options after omitted default application arguments", async () => {
+    const application = registerApplication(
+      "remote_default_options",
+      async (name = "world") => `Hello, ${name}`,
+    );
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8911/v1/namespaces/default/applications/remote_default_options",
+      );
+      expect(init?.body).toBeInstanceOf(ArrayBuffer);
+      expect((init?.body as ArrayBuffer).byteLength).toBe(0);
+      return new Response(JSON.stringify({ request_id: "req-default" }), { status: 200 });
+    });
+
+    const request = await runRemote(
+      application,
+      remoteOptions({ apiUrl: "http://localhost:8911", apiKey: undefined }),
+    );
+
+    expect(request.id).toBe("req-default");
+  });
+
+  it("rejects explicit remote options when a required application argument is missing", async () => {
+    const application = registerApplication(
+      "remote_required_options",
+      async (name: string) => `Hello, ${name}`,
+    );
+
+    await expect(runRemote(
+      application,
+      remoteOptions({ apiUrl: "http://localhost:8911" }),
+    )).rejects.toThrow("missing a required application argument");
+    expect(undici.fetch).not.toHaveBeenCalled();
+  });
+
+  it("keeps CloudClientOptions-shaped application objects as application inputs", async () => {
+    const application = registerApplication(
+      "remote_options_shaped_input",
+      async (input: { apiUrl: string }) => input.apiUrl,
+    );
+    mockFetch((_url, init) => {
+      expect(new TextDecoder().decode(init?.body as ArrayBuffer)).toBe(
+        '{"apiUrl":"payload-value"}',
+      );
+      return new Response(JSON.stringify({ request_id: "req-object-input" }), { status: 200 });
+    });
+
+    const request = await runRemote(application, { apiUrl: "payload-value" });
+
+    expect(request.id).toBe("req-object-input");
+  });
+
+  it("accepts empty legacy client options after all application arguments", async () => {
+    const application = registerApplication(
+      "remote_empty_options",
+      async () => "ok",
+    );
+    mockFetch(() => new Response(
+      JSON.stringify({ request_id: "req-empty-options" }),
+      { status: 200 },
+    ));
+
+    const request = await runRemote(application, {});
+
+    expect(request.id).toBe("req-empty-options");
+  });
+
+  it("keeps legacy trailing client options when all application arguments are supplied", async () => {
+    const application = registerApplication(
+      "remote_full_arguments",
+      async (name = "world") => `Hello, ${name}`,
+    );
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8912/v1/namespaces/default/applications/remote_full_arguments",
+      );
+      expect(new TextDecoder().decode(init?.body as ArrayBuffer)).toBe('"Ada"');
+      return new Response(JSON.stringify({ request_id: "req-full-arguments" }), { status: 200 });
+    });
+
+    const request = await runRemote(application, "Ada", { apiUrl: "http://localhost:8912" });
+
+    expect(request.id).toBe("req-full-arguments");
+  });
+
+  it("uses a registered application's return schema for JSON MIME files", async () => {
+    const bytes = new TextEncoder().encode('{"raw":true}');
+    const client = {
+      waitOnRequestCompletion: async () => undefined,
+      requestOutput: async () => ({
+        serializedValue: bytes,
+        contentType: "application/json",
+      }),
+    };
+    const request = new RemoteRequest<File>("req-file", "file_app", client as never, true);
+
+    const output = await request.output();
+    expect(output).toBeInstanceOf(File);
+    expect(output.content).toEqual(bytes);
+    expect(output.contentType).toBe("application/json");
+  });
+
+  it("normalizes remote request errors to application RequestError", async () => {
+    const underlying = new RequestExecutionError("invalid input", "remote_app");
+    const client = {
+      waitOnRequestCompletion: async () => {
+        throw underlying;
+      },
+      requestOutput: async () => {
+        throw new Error("requestOutput must not run after completion wait fails");
+      },
+    };
+    const request = new RemoteRequest("req-error", "remote_app", client as never);
+
+    try {
+      await request.output();
+      throw new Error("expected request output to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(RequestError);
+      expect((error as Error).cause).toBe(underlying);
+    }
+  });
+
+  it("normalizes failed remote requests to application FunctionError", async () => {
+    const underlying = new RequestFailedError("function_error");
+    const client = {
+      waitOnRequestCompletion: async () => {
+        throw underlying;
+      },
+      requestOutput: async () => {
+        throw new Error("requestOutput must not run after completion wait fails");
+      },
+    };
+    const request = new RemoteRequest("req-failure", "remote_app", client as never);
+
+    try {
+      await request.output();
+      throw new Error("expected request output to fail");
+    } catch (error) {
+      expect(error).toBeInstanceOf(FunctionError);
+      expect((error as Error).cause).toBe(underlying);
+    }
+  });
+
+  it("normalizes application errors discovered while fetching output", async () => {
+    const requestFailure = new RequestExecutionError("invalid input", "remote_app");
+    const functionFailure = new RequestFailedError("function_error");
+    const cases = [
+      { underlying: requestFailure, expected: RequestError },
+      { underlying: functionFailure, expected: FunctionError },
+    ];
+
+    for (const { underlying, expected } of cases) {
+      const client = {
+        waitOnRequestCompletion: async () => undefined,
+        requestOutput: async () => {
+          throw underlying;
+        },
+      };
+      const request = new RemoteRequest("req-output-error", "remote_app", client as never);
+
+      try {
+        await request.output();
+        throw new Error("expected request output to fail");
+      } catch (error) {
+        expect(error).toBeInstanceOf(expected);
+        expect((error as Error).cause).toBe(underlying);
+      }
+    }
   });
 
   it("uploads applications as multipart form data", async () => {

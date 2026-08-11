@@ -94,7 +94,7 @@ jobs:
 
       - name: Verify wheel imports Rust Cloud SDK extension
         run: |
-          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --tls-check https://api.tensorlake.ai --expect-script function-executor --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
+          python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --tls-check https://api.tensorlake.ai --expect-script function-executor --expect-script tensorlake-python-function-runner --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
 
       - name: Upload wheels
         uses: actions/upload-artifact@v4

@@ -1,4 +1,4 @@
-from typing import Any
+from typing import Any, NamedTuple
 
 # Not importing Function and etc here to avoid circular imports.
 
@@ -10,6 +10,12 @@ from typing import Any
 _function_registry: dict[str, list[Any]] = {}
 # Class name -> [original class]
 _class_registry: dict[str, list[Any]] = {}
+
+
+class RegistrySnapshot(NamedTuple):
+    functions: dict[str, list[Any]]
+    classes: dict[str, list[Any]]
+    decorators: list[Any]
 
 
 def register_function(fn_name: str, fn: Any) -> None:
@@ -124,3 +130,30 @@ def get_decorators() -> list[Any]:
     """Returns all registered decorators."""
     global _decorators
     return _decorators
+
+
+def snapshot_registry() -> RegistrySnapshot:
+    """Returns an independent snapshot of all process-global application registries."""
+    return RegistrySnapshot(
+        functions={
+            name: list(definitions) for name, definitions in _function_registry.items()
+        },
+        classes={
+            name: list(definitions) for name, definitions in _class_registry.items()
+        },
+        decorators=list(_decorators),
+    )
+
+
+def restore_registry(snapshot: RegistrySnapshot) -> None:
+    """Restores all process-global application registries from a snapshot."""
+    _function_registry.clear()
+    _function_registry.update(
+        {name: list(definitions) for name, definitions in snapshot.functions.items()}
+    )
+    _class_registry.clear()
+    _class_registry.update(
+        {name: list(definitions) for name, definitions in snapshot.classes.items()}
+    )
+    _decorators.clear()
+    _decorators.extend(snapshot.decorators)

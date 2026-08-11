@@ -1,7 +1,7 @@
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     fs::File,
-    io::Read,
+    io::{Cursor, Read},
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -234,12 +234,23 @@ pub struct SandboxImageBuildOptions {
     pub dockerfile_path: PathBuf,
     pub dockerfile_text: Option<String>,
     pub context_dir: Option<PathBuf>,
+    /// Files added to the build context without first writing them to disk.
+    /// Paths are relative POSIX-style context paths and may not replace files
+    /// from `context_dir` or another in-memory file.
+    pub context_files: Vec<SandboxImageContextFile>,
     /// Dockerfile build args (`--build-arg KEY=VALUE`), forwarded to
     /// BuildKit inside the builder. CAS builds only: the legacy platform
     /// rootfs builder has no build-arg channel, so a non-CAS build with
     /// build args is rejected up front. Build args never participate in
     /// parent-reference resolution.
     pub build_args: Vec<(String, String)>,
+}
+
+#[derive(Debug, Clone)]
+pub struct SandboxImageContextFile {
+    pub path: PathBuf,
+    pub contents: Vec<u8>,
+    pub mode: u32,
 }
 
 /// Options for importing a registry image directly into a rootfs (no
@@ -428,6 +439,11 @@ where
         )?
     };
     if options.common.cas {
+        if !options.context_files.is_empty() {
+            return Err(SandboxImageBuildError::usage(
+                "in-memory context files are not supported by Image Service builds",
+            ));
+        }
         // CAS images build through the Image Service: the SDK resolves the
         // plan's references and submits them; the service reconciler drives
         // the builder sandbox.
@@ -446,7 +462,7 @@ where
              has no build-arg channel",
         ));
     }
-    run_build_plan(plan, options.common, emit).await
+    run_build_plan(plan, options.common, options.context_files, emit).await
 }
 
 /// Import a registry image directly into a rootfs (no Dockerfile, no Docker
@@ -477,7 +493,7 @@ where
         )
         .await;
     }
-    run_build_plan(plan, options.common, emit).await
+    run_build_plan(plan, options.common, Vec::new(), emit).await
 }
 
 /// Shared build pipeline: provision the rootfs-builder sandbox, materialize the
@@ -487,6 +503,7 @@ where
 async fn run_build_plan<F>(
     plan: DockerfileBuildPlan,
     options: CommonBuildOptions,
+    context_files: Vec<SandboxImageContextFile>,
     mut emit: F,
 ) -> Result<Value>
 where
@@ -677,6 +694,7 @@ where
                 &prepared_spec,
                 options.disk_mb,
                 options.docker_compat,
+                &context_files,
                 &mut emit,
             )
             .await?;
@@ -1221,6 +1239,7 @@ async fn upload_build_inputs(
     prepared_spec: &Value,
     disk_mb: Option<u64>,
     docker_compat: bool,
+    context_files: &[SandboxImageContextFile],
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
     // Pre-create REMOTE_BUILD_DIR with permissive mode as root so the
@@ -1234,7 +1253,7 @@ async fn upload_build_inputs(
         emit(SandboxImageBuildEvent::Status(
             "Uploading build context...".to_string(),
         ));
-        upload_context_archive(proxy, &plan.context_dir, emit).await?;
+        upload_context_archive(proxy, &plan.context_dir, context_files, emit).await?;
     }
 
     let docker_config_json = resolved_docker_config_json().await?;
@@ -2110,6 +2129,7 @@ fn streaming_process_payload(
 async fn upload_context_archive(
     proxy: &SandboxProxyClient,
     context_dir: &Path,
+    context_files: &[SandboxImageContextFile],
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
     if !context_dir.is_dir() {
@@ -2127,7 +2147,7 @@ async fn upload_context_archive(
         .prefix("tensorlake-build-context-")
         .suffix(".tar.gz")
         .tempfile()?;
-    let stats = create_context_archive(context_dir, archive.path(), emit)?;
+    let stats = create_context_archive(context_dir, context_files, archive.path(), emit)?;
     emit(SandboxImageBuildEvent::Status(format!(
         "Build context: {} files, {} uncompressed, {} compressed",
         stats.file_count,
@@ -2149,6 +2169,7 @@ async fn upload_context_archive(
 
 fn create_context_archive(
     context_dir: &Path,
+    context_files: &[SandboxImageContextFile],
     archive_path: &Path,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<ContextArchiveStats> {
@@ -2157,9 +2178,38 @@ fn create_context_archive(
     let mut tar = tar::Builder::new(gz);
 
     let files = collect_context_archive_files(context_dir)?;
+    let disk_paths = files
+        .iter()
+        .map(|file| file.relative_path.as_str())
+        .collect::<HashSet<_>>();
+    let mut memory_files = context_files
+        .iter()
+        .map(|file| {
+            let relative_path = normalize_context_file_path(&file.path)?;
+            if disk_paths.contains(relative_path.as_str()) {
+                return Err(SandboxImageBuildError::usage(format!(
+                    "In-memory build context file '{relative_path}' conflicts with a file in {}",
+                    context_dir.display()
+                )));
+            }
+            Ok((relative_path, file))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    memory_files.sort_by(|left, right| left.0.cmp(&right.0));
+    for pair in memory_files.windows(2) {
+        if pair[0].0 == pair[1].0 {
+            return Err(SandboxImageBuildError::usage(format!(
+                "In-memory build context contains duplicate path '{}'",
+                pair[0].0
+            )));
+        }
+    }
     let uncompressed_bytes = files
         .iter()
-        .fold(0_u64, |total, file| total.saturating_add(file.bytes));
+        .fold(0_u64, |total, file| total.saturating_add(file.bytes))
+        .saturating_add(memory_files.iter().fold(0_u64, |total, (_, file)| {
+            total.saturating_add(file.contents.len() as u64)
+        }));
     emit_archive_progress(0, uncompressed_bytes, emit);
 
     let mut archived_bytes = 0_u64;
@@ -2204,6 +2254,19 @@ fn create_context_archive(
 
         archived_bytes = archived_bytes.saturating_add(file_bytes);
     }
+    for (relative_path, file) in &memory_files {
+        let file_bytes = file.contents.len() as u64;
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(file_bytes);
+        header.set_mode(file.mode & 0o777);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_cksum();
+        tar.append_data(&mut header, relative_path, Cursor::new(&file.contents))?;
+        archived_bytes = archived_bytes.saturating_add(file_bytes);
+    }
     if last_percent < 100 {
         emit_archive_progress(uncompressed_bytes, uncompressed_bytes, emit);
     }
@@ -2212,10 +2275,44 @@ fn create_context_archive(
     tar.into_inner()?.finish()?;
     let compressed_bytes = std::fs::metadata(archive_path)?.len();
     Ok(ContextArchiveStats {
-        file_count: files.len(),
+        file_count: files.len() + memory_files.len(),
         uncompressed_bytes,
         compressed_bytes,
     })
+}
+
+fn normalize_context_file_path(path: &Path) -> Result<String> {
+    let mut components = Vec::new();
+    for component in path.components() {
+        match component {
+            std::path::Component::Normal(value) => {
+                let value = value.to_str().ok_or_else(|| {
+                    SandboxImageBuildError::usage(format!(
+                        "Build context path is not valid UTF-8: {}",
+                        path.display()
+                    ))
+                })?;
+                if value.is_empty() {
+                    return Err(SandboxImageBuildError::usage(
+                        "Build context paths cannot contain empty components",
+                    ));
+                }
+                components.push(value);
+            }
+            _ => {
+                return Err(SandboxImageBuildError::usage(format!(
+                    "Build context path must be relative and cannot contain '.' or '..': {}",
+                    path.display()
+                )));
+            }
+        }
+    }
+    if components.is_empty() {
+        return Err(SandboxImageBuildError::usage(
+            "Build context path cannot be empty",
+        ));
+    }
+    Ok(components.join("/"))
 }
 
 fn collect_context_archive_files(context_dir: &Path) -> Result<Vec<ContextArchiveFile>> {
@@ -3002,7 +3099,7 @@ mod tests {
     use super::{
         BuilderFailureDiagnostics, CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder,
         PreparedRootfsParent, PreparedSandboxTemplateBuild, SandboxImageBuildError,
-        SandboxImageBuildEvent, build_rootfs_spec, collect_dir_files,
+        SandboxImageBuildEvent, SandboxImageContextFile, build_rootfs_spec, collect_dir_files,
         complete_request_from_metadata, contains_disk_space_evidence, contains_oom_killer_evidence,
         create_context_archive, default_registered_name, load_dockerfile_plan,
         load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
@@ -3013,7 +3110,9 @@ mod tests {
     };
     use crate::sandboxes::models::ProcessInfo;
     use serde_json::{Value, json};
-    use std::io::Write;
+    use std::fs::File;
+    use std::io::{Read, Write};
+    use std::path::PathBuf;
 
     #[test]
     fn oom_dmesg_parser_detects_kernel_oom_entries() {
@@ -4257,9 +4356,10 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
 
         let archive_file = tempfile::NamedTempFile::new().unwrap();
         let mut events = Vec::new();
-        let stats =
-            create_context_archive(root, archive_file.path(), &mut |event| events.push(event))
-                .unwrap();
+        let stats = create_context_archive(root, &[], archive_file.path(), &mut |event| {
+            events.push(event)
+        })
+        .unwrap();
 
         assert_eq!(stats.file_count, 3);
         assert!(events.iter().any(|event| matches!(
@@ -4289,6 +4389,76 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             entries,
             vec![".dockerignore", "cache/keep.txt", "included.txt"]
         );
+    }
+
+    #[test]
+    fn create_context_archive_adds_in_memory_files() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(temp_dir.path().join("on-disk.txt"), "disk").unwrap();
+        let archive_file = tempfile::NamedTempFile::new().unwrap();
+        let context_files = vec![SandboxImageContextFile {
+            path: PathBuf::from(".tensorlake/runtime.tgz"),
+            contents: b"capsule".to_vec(),
+            mode: 0o600,
+        }];
+        let stats = create_context_archive(
+            temp_dir.path(),
+            &context_files,
+            archive_file.path(),
+            &mut |_| {},
+        )
+        .unwrap();
+        assert_eq!(stats.file_count, 2);
+        assert_eq!(stats.uncompressed_bytes, 11);
+
+        let decoder = flate2::read::GzDecoder::new(File::open(archive_file.path()).unwrap());
+        let mut archive = tar::Archive::new(decoder);
+        let mut entries = archive
+            .entries()
+            .unwrap()
+            .map(|entry| {
+                let mut entry = entry.unwrap();
+                let path = entry.path().unwrap().to_string_lossy().into_owned();
+                let mode = entry.header().mode().unwrap();
+                let mut contents = Vec::new();
+                entry.read_to_end(&mut contents).unwrap();
+                (path, mode, contents)
+            })
+            .collect::<Vec<_>>();
+        entries.sort_by(|left, right| left.0.cmp(&right.0));
+        assert_eq!(
+            entries[0],
+            (
+                ".tensorlake/runtime.tgz".to_string(),
+                0o600,
+                b"capsule".to_vec()
+            )
+        );
+        assert_eq!(entries[1].0, "on-disk.txt");
+    }
+
+    #[test]
+    fn in_memory_context_file_cannot_escape_or_replace_disk_file() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        std::fs::write(temp_dir.path().join("same.txt"), "disk").unwrap();
+        let archive_file = tempfile::NamedTempFile::new().unwrap();
+        for path in ["../escape", "/absolute", "same.txt"] {
+            let context_files = vec![SandboxImageContextFile {
+                path: PathBuf::from(path),
+                contents: Vec::new(),
+                mode: 0o644,
+            }];
+            assert!(
+                create_context_archive(
+                    temp_dir.path(),
+                    &context_files,
+                    archive_file.path(),
+                    &mut |_| {},
+                )
+                .is_err(),
+                "{path} should be rejected"
+            );
+        }
     }
 
     #[test]

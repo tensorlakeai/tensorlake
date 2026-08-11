@@ -28,6 +28,30 @@ def default_application_function(x: int) -> str:
     return "success"
 
 
+@application(allow=["unauthenticated_requests"])
+@function()
+def public_application_function(x: int) -> str:
+    return "success"
+
+
+class TestApplicationManifestAllow(unittest.TestCase):
+    def test_default_application_is_not_public(self):
+        manifest = create_application_manifest(
+            application_function=default_application_function,
+            all_functions=get_functions(),
+        )
+
+        self.assertEqual(manifest.allow, [])
+
+    def test_public_invocation_capability_is_emitted(self):
+        manifest = create_application_manifest(
+            application_function=public_application_function,
+            all_functions=get_functions(),
+        )
+
+        self.assertEqual(manifest.allow, ["unauthenticated_requests"])
+
+
 @function()
 def function_with_default_timeout(x: int) -> str:
     return "success"

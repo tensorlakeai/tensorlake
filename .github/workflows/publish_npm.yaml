@@ -25,7 +25,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           registry-url: "https://registry.npmjs.org"
           cache: "npm"
           cache-dependency-path: typescript/package-lock.json
@@ -46,7 +46,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: sdk-dist
-          path: typescript/dist
+          path: |
+            typescript/dist
+            typescript/runtime
 
   build-native-binaries:
     name: Build native binding (${{ matrix.target_id }})
@@ -97,7 +99,7 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: "22"
+          node-version: "24"
           cache: "npm"
           cache-dependency-path: typescript/package-lock.json
 
@@ -184,7 +186,7 @@ jobs:
         uses: actions/download-artifact@v4
         with:
           name: sdk-dist
-          path: typescript/dist
+          path: typescript
 
       - name: Download Linux native artifact
         uses: actions/download-artifact@v4
@@ -223,7 +225,10 @@ jobs:
           path: typescript/dist/native/win32-x64
 
       - name: Verify package contents
-        run: npm pack --dry-run --ignore-scripts
+        run: |
+          npm run build:runtime
+          test -f runtime/typescript-function-runner/manifest.json
+          npm pack --dry-run --ignore-scripts
 
       - name: Publish to npm
         run: npm publish --access public --ignore-scripts

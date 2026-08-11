@@ -71,9 +71,13 @@ gsvc-codec = { workspace = true, optional = true }
 gsvc-fs-client = { workspace = true, optional = true }
 uuid = { workspace = true }
 flate2 = { workspace = true }
+tar = { workspace = true }
 sha1 = { workspace = true }
 ignore = { workspace = true }
+rolldown = { workspace = true }
+rolldown_common = { workspace = true }
 tempfile = { workspace = true }
+zip = { workspace = true }
 
 [target.'cfg(target_os = "linux")'.dependencies]
 tikv-jemallocator = "0.6"

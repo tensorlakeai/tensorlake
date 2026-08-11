@@ -17,7 +17,12 @@ from .allocation_event import (
     process_function_call_watcher_created,
     process_function_call_watcher_result,
 )
-from .event_log_reader import EventLogReader, EventLogReaderStopped
+from .event_log_reader import (
+    EventLogReader,
+    EventLogReaderStopped,
+    InvalidEventLogResponse,
+    validate_event_log_response,
+)
 from .event_loop import (
     AllocationEventLoop,
     InputEventEmergencyShutdown,
@@ -83,11 +88,14 @@ class _AllocationEventReplayBuffer:
             self._end_of_log = True
             return
 
+        response_clock = validate_event_log_response(
+            response=response,
+            requested_after_clock=self._after_clock_cursor,
+        )
         for entry in response.entries:
             self._entries.append(entry)
 
-        if response.HasField("last_clock"):
-            self._after_clock_cursor = response.last_clock
+        self._after_clock_cursor = response_clock
 
         if not response.has_more:
             self._end_of_log = True
@@ -132,6 +140,8 @@ class AllocationStrictModeReplayer:
         )
         # Watchers that are currently pending in the event loop.
         self._event_loop_pending_watchers: dict[str, _PendingEventLoopWatcher] = {}
+        self._replayed_watcher_ids: set[str] = set()
+        self._replayed_watcher_result_ids: set[str] = set()
 
     def _replay_mismatch(self) -> StrictReplayResult:
         """Sends emergency shutdown to event loop and returns a replay mismatch result."""
@@ -165,6 +175,16 @@ class AllocationStrictModeReplayer:
 
         Doesn't raise any exceptions.
         """
+        try:
+            return self._run()
+        except InvalidEventLogResponse as error:
+            self._logger.error(
+                "Strict replay received an invalid allocation event-log page",
+                exc_info=error,
+            )
+            return self._replay_mismatch()
+
+    def _run(self) -> StrictReplayResult:
         # Key algorithm assumptions and design choices:
         # -  AllocationEventFunctionCallCreated, AllocationEventFunctionCallWatcherCreated events appear in the
         #    allocation log in the same order as OutputEventCreateFunctionCall, OutputEventCreateFunctionCallWatcher
@@ -274,6 +294,14 @@ class AllocationStrictModeReplayer:
                                 got=fwcc.function_call_id,
                             )
                             return self._replay_mismatch()
+                        if fwcc.function_call_id in self._replayed_watcher_ids:
+                            self._logger.info(
+                                "Replay mismatch: duplicate function call watcher "
+                                "creation.",
+                                function_call_id=fwcc.function_call_id,
+                            )
+                            return self._replay_mismatch()
+                        self._replayed_watcher_ids.add(fwcc.function_call_id)
                         process_function_call_watcher_created(
                             event=fwcc,
                             event_loop=self._event_loop,
@@ -312,6 +340,20 @@ class AllocationStrictModeReplayer:
                     alloc_event.function_call_watcher_result
                 )
                 self._alloc_buffer.next()
+                if fcwr.function_call_id not in self._replayed_watcher_ids:
+                    self._logger.info(
+                        "Replay mismatch: function call watcher result appeared "
+                        "before its watcher was created.",
+                        function_call_id=fcwr.function_call_id,
+                    )
+                    return self._replay_mismatch()
+                if fcwr.function_call_id in self._replayed_watcher_result_ids:
+                    self._logger.info(
+                        "Replay mismatch: duplicate function call watcher result.",
+                        function_call_id=fcwr.function_call_id,
+                    )
+                    return self._replay_mismatch()
+                self._replayed_watcher_result_ids.add(fcwr.function_call_id)
                 process_function_call_watcher_result(
                     event=fcwr,
                     event_loop=self._event_loop,

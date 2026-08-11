@@ -17,6 +17,8 @@ downloads/
 eggs/
 .eggs/
 lib/
+!typescript/lib/
+!typescript/lib/runtime.cjs
 lib64/
 parts/
 sdist/

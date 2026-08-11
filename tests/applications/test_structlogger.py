@@ -2,6 +2,7 @@ import io
 import json
 import sys
 import unittest
+from unittest.mock import patch
 
 from pydantic import BaseModel
 
@@ -12,6 +13,7 @@ from tensorlake.applications import (
     function,
     run_local_application,
 )
+from tensorlake.applications.internal_logger import InternalLogger
 
 
 class DummyPayload(BaseModel):
@@ -159,6 +161,24 @@ class TestInternalLoggerLogging(unittest.TestCase):
         self.assertEqual(log_entry["module"], "test")
         self.assertEqual(log_entry["request_id"], "123")
         self.assertEqual(log_entry["user"], "test_user")
+
+    def test_internal_logger_does_not_raise_when_output_and_fallbacks_fail(self):
+        class FailingLogFile:
+            def write(self, _value):
+                raise OSError("closed")
+
+            def flush(self):
+                raise OSError("closed")
+
+        logger = InternalLogger(
+            context={},
+            destination=InternalLogger.LOG_FILE.NULL,
+            as_cloud_event=False,
+        )
+        logger._log_file = FailingLogFile()
+
+        with patch("builtins.print", side_effect=OSError("closed")):
+            logger.info("must not escape")
 
 
 if __name__ == "__main__":

@@ -71,7 +71,6 @@ export interface HttpRequestOptions {
  */
 export type Traced<T> = T & { readonly traceId: string };
 
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
 function withTraceId<T>(value: T, traceId: string): Traced<T> {
   if (value == null) {
     return { traceId } as unknown as Traced<T>;
@@ -299,7 +298,7 @@ export class HttpClient {
           headers,
           body,
           signal: combinedSignal,
-        })) as Response;
+        })) as unknown as Response;
 
         if (timeoutId != null) clearTimeout(timeoutId);
         logSdkTiming("http.request", "headers", attemptStart, {

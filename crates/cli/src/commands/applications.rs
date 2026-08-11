@@ -1,11 +1,318 @@
 use chrono::{TimeZone, Utc};
 use comfy_table::Cell;
+use reqwest::StatusCode;
+use reqwest::header::{ACCEPT, CONTENT_TYPE};
+use serde::Deserialize;
+use std::io::Write;
+use std::time::Duration;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
 const APPLICATION_DETAILS_LABEL_WIDTH: usize = 20;
+const APPLICATION_REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(250);
+
+#[derive(Debug, Deserialize)]
+struct InvokeApplicationResponse {
+    request_id: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct InvocationRequestStatus {
+    outcome: Option<serde_json::Value>,
+    request_error: Option<InvocationRequestError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct InvocationRequestError {
+    function_name: String,
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplicationsPage {
+    applications: Vec<ApplicationSummary>,
+    cursor: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApplicationSummary {
+    name: String,
+}
+
+pub async fn invoke(
+    ctx: &CliContext,
+    application: &str,
+    json: Option<&str>,
+    wait: bool,
+) -> Result<()> {
+    let request_id = invoke_request(ctx, application, json).await?;
+    if !wait {
+        println!("{request_id}");
+        return Ok(());
+    }
+
+    let output = request_output(ctx, application, &request_id, true).await?;
+    write_request_output(&output)
+}
+
+pub async fn output(ctx: &CliContext, request_id: &str, wait: bool) -> Result<()> {
+    if request_id.is_empty() {
+        return Err(CliError::usage("request ID must not be empty"));
+    }
+
+    let application = find_request_application(ctx, request_id).await?;
+    let output = request_output(ctx, &application, request_id, wait).await?;
+    write_request_output(&output)
+}
+
+fn write_request_output(output: &[u8]) -> Result<()> {
+    let mut stdout = std::io::stdout().lock();
+    stdout.write_all(output)?;
+    if !output.is_empty() && !output.ends_with(b"\n") {
+        stdout.write_all(b"\n")?;
+    }
+    Ok(())
+}
+
+async fn invoke_request(ctx: &CliContext, application: &str, json: Option<&str>) -> Result<String> {
+    if application.is_empty() {
+        return Err(CliError::usage("application name must not be empty"));
+    }
+
+    if let Some(json) = json {
+        serde_json::from_str::<serde_json::Value>(json)
+            .map_err(|error| CliError::usage(format!("invalid JSON for --json: {error}")))?;
+    }
+
+    let client = ctx.client()?;
+    let url = format!(
+        "{}/v1/namespaces/{}/applications/{}",
+        ctx.api_url.trim_end_matches('/'),
+        urlencoding::encode(&ctx.namespace),
+        urlencoding::encode(application),
+    );
+    let mut request = client.post(url).header(ACCEPT, "application/json");
+    if let Some(json) = json {
+        request = request
+            .header(CONTENT_TYPE, "application/json")
+            .body(json.to_owned());
+    }
+
+    let response = request.send().await.map_err(CliError::Http)?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to invoke application '{}' (HTTP {}): {}",
+            application,
+            status,
+            body,
+        )));
+    }
+
+    let response = response
+        .json::<InvokeApplicationResponse>()
+        .await
+        .map_err(CliError::Http)?;
+    if response.request_id.is_empty() {
+        return Err(CliError::Other(anyhow::anyhow!(
+            "application invocation response did not include a request ID"
+        )));
+    }
+    Ok(response.request_id)
+}
+
+async fn request_output(
+    ctx: &CliContext,
+    application: &str,
+    request_id: &str,
+    wait: bool,
+) -> Result<Vec<u8>> {
+    request_output_with_interval(
+        ctx,
+        application,
+        request_id,
+        wait,
+        APPLICATION_REQUEST_POLL_INTERVAL,
+    )
+    .await
+}
+
+async fn request_output_with_interval(
+    ctx: &CliContext,
+    application: &str,
+    request_id: &str,
+    wait: bool,
+    poll_interval: Duration,
+) -> Result<Vec<u8>> {
+    let client = ctx.client()?;
+    let request_url = application_request_url(ctx, application, request_id);
+
+    loop {
+        let response = client
+            .get(&request_url)
+            .header(ACCEPT, "application/json")
+            .send()
+            .await
+            .map_err(CliError::Http)?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(CliError::Other(anyhow::anyhow!(
+                "failed to get application '{}' request '{}' (HTTP {}): {}",
+                application,
+                request_id,
+                status,
+                body,
+            )));
+        }
+
+        let status = response
+            .json::<InvocationRequestStatus>()
+            .await
+            .map_err(CliError::Http)?;
+        match status.outcome.as_ref() {
+            None | Some(serde_json::Value::Null) => {
+                if !wait {
+                    return Err(CliError::Other(anyhow::anyhow!(
+                        "application '{}' request '{}' is still in progress; use --wait to wait for its output",
+                        application,
+                        request_id,
+                    )));
+                }
+                tokio::time::sleep(poll_interval).await;
+            }
+            Some(serde_json::Value::String(outcome)) if outcome == "success" => break,
+            Some(serde_json::Value::Object(outcome)) => {
+                let reason = outcome
+                    .get("failure")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("unknown failure");
+                if let Some(request_error) = status.request_error {
+                    return Err(CliError::Other(anyhow::anyhow!(
+                        "application '{}' request '{}' failed in function '{}': {}",
+                        application,
+                        request_id,
+                        request_error.function_name,
+                        request_error.message,
+                    )));
+                }
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "application '{}' request '{}' failed: {}",
+                    application,
+                    request_id,
+                    reason,
+                )));
+            }
+            Some(outcome) => {
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "application '{}' request '{}' returned an unexpected outcome: {}",
+                    application,
+                    request_id,
+                    outcome,
+                )));
+            }
+        }
+    }
+
+    let response = client
+        .get(format!("{request_url}/output"))
+        .send()
+        .await
+        .map_err(CliError::Http)?;
+    if !response.status().is_success() {
+        let status = response.status();
+        let body = response.text().await.unwrap_or_default();
+        return Err(CliError::Other(anyhow::anyhow!(
+            "failed to download application '{}' request '{}' output (HTTP {}): {}",
+            application,
+            request_id,
+            status,
+            body,
+        )));
+    }
+
+    Ok(response.bytes().await.map_err(CliError::Http)?.to_vec())
+}
+
+fn application_request_url(ctx: &CliContext, application: &str, request_id: &str) -> String {
+    format!(
+        "{}/v1/namespaces/{}/applications/{}/requests/{}",
+        ctx.api_url.trim_end_matches('/'),
+        urlencoding::encode(&ctx.namespace),
+        urlencoding::encode(application),
+        urlencoding::encode(request_id),
+    )
+}
+
+async fn find_request_application(ctx: &CliContext, request_id: &str) -> Result<String> {
+    let client = ctx.client()?;
+    let applications_url = format!(
+        "{}/v1/namespaces/{}/applications",
+        ctx.api_url.trim_end_matches('/'),
+        urlencoding::encode(&ctx.namespace),
+    );
+    let mut cursor: Option<String> = None;
+
+    loop {
+        let mut request = client.get(&applications_url).query(&[("limit", "100")]);
+        if let Some(cursor) = cursor.as_deref() {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        let response = request.send().await.map_err(CliError::Http)?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(CliError::Other(anyhow::anyhow!(
+                "failed to list applications while locating request '{}' (HTTP {}): {}",
+                request_id,
+                status,
+                body,
+            )));
+        }
+        let page = response
+            .json::<ApplicationsPage>()
+            .await
+            .map_err(CliError::Http)?;
+
+        for application in page.applications {
+            let request_url = application_request_url(ctx, &application.name, request_id);
+            let response = client
+                .get(request_url)
+                .header(ACCEPT, "application/json")
+                .send()
+                .await
+                .map_err(CliError::Http)?;
+            if response.status().is_success() {
+                return Ok(application.name);
+            }
+            if response.status() != StatusCode::NOT_FOUND {
+                let status = response.status();
+                let body = response.text().await.unwrap_or_default();
+                return Err(CliError::Other(anyhow::anyhow!(
+                    "failed to locate request '{}' in application '{}' (HTTP {}): {}",
+                    request_id,
+                    application.name,
+                    status,
+                    body,
+                )));
+            }
+        }
+
+        let Some(next_cursor) = page.cursor else {
+            break;
+        };
+        cursor = Some(next_cursor);
+    }
+
+    Err(CliError::Other(anyhow::anyhow!(
+        "application request '{}' was not found in namespace '{}'",
+        request_id,
+        ctx.namespace,
+    )))
+}
 
 pub async fn ls(ctx: &CliContext) -> Result<()> {
     let client = ctx.client()?;
@@ -282,8 +589,301 @@ fn format_application_state(value: Option<&serde_json::Value>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{format_application_details, public_endpoint_id};
+    use super::{
+        find_request_application, format_application_details, invoke_request, public_endpoint_id,
+        request_output_with_interval,
+    };
+    use crate::auth::context::CliContext;
+    use crate::config::resolver::ResolvedConfig;
     use serde_json::json;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    fn test_context(api_url: String) -> CliContext {
+        CliContext::from_resolved(ResolvedConfig {
+            api_url,
+            cloud_url: "https://cloud.tensorlake.ai".to_string(),
+            namespace: "customer namespace".to_string(),
+            api_key: Some("test-api-key".to_string()),
+            personal_access_token: None,
+            organization_id: None,
+            project_id: None,
+            debug: false,
+        })
+    }
+
+    async fn invocation_server(
+        response_status: u16,
+        response_body: &'static str,
+    ) -> (String, tokio::task::JoinHandle<String>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut buffer = [0_u8; 1024];
+            let header_end = loop {
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0, "client closed before sending HTTP headers");
+                request.extend_from_slice(&buffer[..count]);
+                if let Some(offset) = request.windows(4).position(|bytes| bytes == b"\r\n\r\n") {
+                    break offset + 4;
+                }
+            };
+            let headers = String::from_utf8_lossy(&request[..header_end]);
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    line.to_ascii_lowercase()
+                        .strip_prefix("content-length:")
+                        .map(str::trim)
+                        .map(str::parse::<usize>)
+                })
+                .transpose()
+                .unwrap()
+                .unwrap_or(0);
+            while request.len() < header_end + content_length {
+                let count = stream.read(&mut buffer).await.unwrap();
+                assert!(count > 0, "client closed before sending the HTTP body");
+                request.extend_from_slice(&buffer[..count]);
+            }
+
+            let reason = if response_status == 200 {
+                "OK"
+            } else {
+                "Test Error"
+            };
+            let response = format!(
+                "HTTP/1.1 {response_status} {reason}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{response_body}",
+                response_body.len(),
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            stream.shutdown().await.unwrap();
+            String::from_utf8(request).unwrap()
+        });
+        (format!("http://{address}"), server)
+    }
+
+    async fn scripted_server(
+        responses: Vec<(u16, &'static str, &'static [u8])>,
+    ) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for (response_status, content_type, response_body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0, "client closed before sending HTTP headers");
+                    request.extend_from_slice(&buffer[..count]);
+                    if request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+
+                let reason = if response_status == 200 {
+                    "OK"
+                } else if response_status == 404 {
+                    "Not Found"
+                } else {
+                    "Test Error"
+                };
+                let response = format!(
+                    "HTTP/1.1 {response_status} {reason}\r\nContent-Type: {content_type}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len(),
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(response_body).await.unwrap();
+                stream.shutdown().await.unwrap();
+                requests.push(String::from_utf8(request).unwrap());
+            }
+            requests
+        });
+        (format!("http://{address}"), server)
+    }
+
+    #[tokio::test]
+    async fn invoke_sends_json_and_returns_the_request_id() {
+        let (api_url, server) = invocation_server(200, r#"{"request_id":"request-123"}"#).await;
+        let ctx = test_context(api_url);
+
+        let request_id = invoke_request(&ctx, "support/ticket", Some(r#"{"priority":"high"}"#))
+            .await
+            .unwrap();
+        let request = server.await.unwrap();
+
+        assert_eq!(request_id, "request-123");
+        assert!(request.starts_with(
+            "POST /v1/namespaces/customer%20namespace/applications/support%2Fticket HTTP/1.1\r\n"
+        ));
+        assert!(
+            request
+                .to_ascii_lowercase()
+                .contains("content-type: application/json\r\n")
+        );
+        assert!(request.ends_with(r#"{"priority":"high"}"#));
+    }
+
+    #[tokio::test]
+    async fn invoke_without_json_sends_an_empty_body() {
+        let (api_url, server) = invocation_server(200, r#"{"request_id":"request-empty"}"#).await;
+        let ctx = test_context(api_url);
+
+        let request_id = invoke_request(&ctx, "zero_args", None).await.unwrap();
+        let request = server.await.unwrap();
+        let (_, body) = request.split_once("\r\n\r\n").unwrap();
+
+        assert_eq!(request_id, "request-empty");
+        assert!(body.is_empty());
+        assert!(
+            !request
+                .to_ascii_lowercase()
+                .contains("content-type: application/json\r\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn invoke_rejects_invalid_json_before_sending_a_request() {
+        let ctx = test_context("http://127.0.0.1:1".to_string());
+
+        let error = invoke_request(&ctx, "application", Some("{"))
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().starts_with("invalid JSON for --json:"));
+    }
+
+    #[tokio::test]
+    async fn invoke_reports_server_response_errors() {
+        let (api_url, server) = invocation_server(422, r#"{"error":"bad input"}"#).await;
+        let ctx = test_context(api_url);
+
+        let error = invoke_request(&ctx, "application", Some("null"))
+            .await
+            .unwrap_err();
+        let _ = server.await.unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            r#"failed to invoke application 'application' (HTTP 422 Unprocessable Entity): {"error":"bad input"}"#,
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_polls_until_success_and_downloads_the_output() {
+        let (api_url, server) = scripted_server(vec![
+            (200, "application/json", br#"{"outcome":null}"#),
+            (200, "application/json", br#"{"outcome":"success"}"#),
+            (200, "application/octet-stream", b"completed output"),
+        ])
+        .await;
+        let ctx = test_context(api_url);
+
+        let output = request_output_with_interval(
+            &ctx,
+            "support/ticket",
+            "request/123",
+            true,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .unwrap();
+        let requests = server.await.unwrap();
+
+        assert_eq!(output, b"completed output");
+        assert_eq!(requests.len(), 3);
+        assert!(requests[0].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications/support%2Fticket/requests/request%2F123 HTTP/1.1\r\n"
+        ));
+        assert!(requests[1].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications/support%2Fticket/requests/request%2F123 HTTP/1.1\r\n"
+        ));
+        assert!(requests[2].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications/support%2Fticket/requests/request%2F123/output HTTP/1.1\r\n"
+        ));
+    }
+
+    #[tokio::test]
+    async fn wait_reports_the_terminal_request_failure() {
+        let (api_url, server) = scripted_server(vec![(
+            200,
+            "application/json",
+            br#"{"outcome":{"failure":"function_error"},"request_error":null}"#,
+        )])
+        .await;
+        let ctx = test_context(api_url);
+
+        let error = request_output_with_interval(
+            &ctx,
+            "application",
+            "request-456",
+            true,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+        let _ = server.await.unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "application 'application' request 'request-456' failed: function_error"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_without_wait_reports_an_in_progress_request() {
+        let (api_url, server) =
+            scripted_server(vec![(200, "application/json", br#"{"outcome":null}"#)]).await;
+        let ctx = test_context(api_url);
+
+        let error = request_output_with_interval(
+            &ctx,
+            "application",
+            "request-pending",
+            false,
+            std::time::Duration::ZERO,
+        )
+        .await
+        .unwrap_err();
+        let _ = server.await.unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "application 'application' request 'request-pending' is still in progress; use --wait to wait for its output"
+        );
+    }
+
+    #[tokio::test]
+    async fn output_locates_the_application_for_a_request_id() {
+        let (api_url, server) = scripted_server(vec![
+            (
+                200,
+                "application/json",
+                br#"{"applications":[{"name":"first"},{"name":"support/ticket"}],"cursor":null}"#,
+            ),
+            (404, "application/json", br#"{"error":"not found"}"#),
+            (200, "application/json", br#"{"outcome":"success"}"#),
+        ])
+        .await;
+        let ctx = test_context(api_url);
+
+        let application = find_request_application(&ctx, "request/123").await.unwrap();
+        let requests = server.await.unwrap();
+
+        assert_eq!(application, "support/ticket");
+        assert!(requests[0].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications?limit=100 HTTP/1.1\r\n"
+        ));
+        assert!(requests[1].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications/first/requests/request%2F123 HTTP/1.1\r\n"
+        ));
+        assert!(requests[2].starts_with(
+            "GET /v1/namespaces/customer%20namespace/applications/support%2Fticket/requests/request%2F123 HTTP/1.1\r\n"
+        ));
+    }
 
     #[test]
     fn public_endpoint_id_supports_wire_name_and_missing_values() {

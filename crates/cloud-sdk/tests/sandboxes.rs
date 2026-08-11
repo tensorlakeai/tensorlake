@@ -369,7 +369,14 @@ fn network_policy_update_wire_shapes() {
         .expect("serialize")
     };
 
-    assert!(!encode(NetworkPolicyUpdate::Keep).contains("network"));
+    let keep_json = encode(NetworkPolicyUpdate::Keep);
+    assert!(!keep_json.contains("network"));
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&keep_json).expect("decode keep JSON value")["resources"]
+            ["cpus"],
+        serde_json::json!(1.0),
+        "floating-point resources must remain JSON numbers when arbitrary precision is enabled"
+    );
     assert!(encode(NetworkPolicyUpdate::Clear).contains(r#""network":null"#));
     assert!(
         encode(NetworkPolicyUpdate::Set(NetworkConfig {
@@ -381,12 +388,43 @@ fn network_policy_update_wire_shapes() {
     );
 
     // Round-trip: an absent key must decode back to Keep, null to Clear.
-    let keep: UpdateSandboxPoolRequest =
-        serde_json::from_str(&encode(NetworkPolicyUpdate::Keep)).expect("decode keep");
+    let keep: UpdateSandboxPoolRequest = serde_json::from_str(&keep_json).expect("decode keep");
     assert_eq!(keep.network, NetworkPolicyUpdate::Keep);
     let clear: UpdateSandboxPoolRequest =
         serde_json::from_str(&encode(NetworkPolicyUpdate::Clear)).expect("decode clear");
     assert_eq!(clear.network, NetworkPolicyUpdate::Clear);
+}
+
+#[test]
+fn create_pool_wire_round_trips_with_arbitrary_precision() {
+    let request = CreateSandboxPoolRequest {
+        pool: SandboxPoolRequest {
+            image: Some("alpine".to_string()),
+            resources: ContainerResourcesInfo {
+                cpus: 1.5,
+                memory_mb: 1024,
+                ephemeral_disk_mb: 2048,
+            },
+            timeout_secs: 60,
+            entrypoint: Some(vec!["sleep".to_string(), "60".to_string()]),
+            max_containers: Some(5),
+            warm_containers: Some(1),
+        },
+        network: Some(NetworkConfig {
+            allow_internet_access: false,
+            allow_out: vec!["example.com".to_string()],
+            deny_out: vec![],
+        }),
+    };
+
+    let encoded = serde_json::to_string(&request).expect("encode create pool");
+    let value: serde_json::Value =
+        serde_json::from_str(&encoded).expect("decode create pool JSON value");
+    assert_eq!(value["resources"]["cpus"], serde_json::json!(1.5));
+    assert_eq!(
+        serde_json::from_str::<CreateSandboxPoolRequest>(&encoded).expect("round-trip create pool"),
+        request
+    );
 }
 
 const SANDBOX_INFO_JSON: &str = r#"{

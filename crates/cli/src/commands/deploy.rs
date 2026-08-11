@@ -1,11 +1,107 @@
-use std::process::Stdio;
+use std::{path::PathBuf, process::Stdio};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
+mod typescript;
+
+#[derive(Debug, PartialEq, Eq)]
+struct TypeScriptDeployArgs {
+    entrypoint: PathBuf,
+    upgrade_running_requests: bool,
+}
+
+fn typescript_deploy_args(remaining_args: &[String]) -> Result<Option<TypeScriptDeployArgs>> {
+    let mut positionals = Vec::new();
+    let mut skip_option_value = false;
+    let mut options_ended = false;
+    for argument in remaining_args {
+        if skip_option_value {
+            skip_option_value = false;
+            continue;
+        }
+        if !options_ended && argument == "--" {
+            options_ended = true;
+            continue;
+        }
+        if !options_ended && argument == "--build-env" {
+            skip_option_value = true;
+            continue;
+        }
+        if !options_ended && argument.starts_with("--build-env=") {
+            continue;
+        }
+        if !options_ended && argument.starts_with('-') {
+            continue;
+        }
+        positionals.push(argument);
+    }
+    for positional in &positionals {
+        let extension = std::path::Path::new(positional.as_str())
+            .extension()
+            .and_then(|extension| extension.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase();
+        if matches!(extension.as_str(), "cts" | "cjs") {
+            return Err(CliError::usage(
+                "Tensorlake TypeScript applications support ESM only; use a .ts, .mts, .js, or .mjs entrypoint",
+            ));
+        }
+    }
+
+    let typescript_entries = positionals
+        .iter()
+        .filter(|positional| {
+            matches!(
+                std::path::Path::new(positional.as_str())
+                    .extension()
+                    .and_then(|extension| extension.to_str())
+                    .unwrap_or_default()
+                    .to_ascii_lowercase()
+                    .as_str(),
+                "ts" | "mts" | "js" | "mjs"
+            )
+        })
+        .collect::<Vec<_>>();
+    if typescript_entries.is_empty() {
+        return Ok(None);
+    }
+    if typescript_entries.len() != 1 || positionals.len() != 1 {
+        return Err(CliError::usage(
+            "Usage: tl deploy [--upgrade-running-requests] <application.ts>",
+        ));
+    }
+    for argument in remaining_args {
+        if argument.starts_with('-')
+            && !matches!(
+                argument.as_str(),
+                "--" | "--upgrade-running-requests" | "-u"
+            )
+        {
+            return Err(CliError::usage(format!(
+                "Unknown TypeScript deployment option '{argument}'. Usage: tl deploy [--upgrade-running-requests] <application.ts>"
+            )));
+        }
+    }
+    Ok(Some(TypeScriptDeployArgs {
+        entrypoint: PathBuf::from(typescript_entries[0].as_str()),
+        upgrade_running_requests: remaining_args
+            .iter()
+            .any(|argument| matches!(argument.as_str(), "--upgrade-running-requests" | "-u")),
+    }))
+}
+
 pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
-    let mut cmd = tokio::process::Command::new("tensorlake-deploy");
+    if let Some(args) = typescript_deploy_args(remaining_args)? {
+        return typescript::run(ctx, &args.entrypoint, args.upgrade_running_requests).await;
+    }
+    run_python_deployer(ctx, remaining_args).await
+}
+
+async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
+    let executable = PathBuf::from("tensorlake-deploy");
+    let mut cmd = tokio::process::Command::new(&executable);
     cmd.args(remaining_args);
 
     // Pass auth context via environment
@@ -33,10 +129,10 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
 
     let mut child = cmd.spawn().map_err(|e: std::io::Error| {
         if e.kind() == std::io::ErrorKind::NotFound {
-            CliError::usage(
-                "'tensorlake-deploy' not found on PATH. \
-                 Install the Python tensorlake package: pip install tensorlake",
-            )
+            CliError::usage(format!(
+                "'{}' not found on PATH. Install the Python Tensorlake SDK with `pip install tensorlake`.",
+                executable.display(),
+            ))
         } else {
             CliError::Io(e)
         }
@@ -112,7 +208,7 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                 eprintln!("📦 Building `{}` image...", image);
             }
             "build_log" => {
-                // Build logs already go to stderr from Python — this is for any structured build logs
+                // Build logs normally go directly to stderr; this handles structured build logs too.
                 let message = event.get("message").and_then(|v| v.as_str()).unwrap_or("");
                 if !message.is_empty() {
                     eprintln!("{}", message);
@@ -134,7 +230,7 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                 if let Some(traceback) = event.get("traceback").and_then(|v| v.as_str())
                     && !traceback.is_empty()
                 {
-                    eprintln!("\nPython traceback:\n{}", traceback);
+                    eprintln!("\nTraceback:\n{}", traceback);
                 }
             }
             "deployed" => {
@@ -171,7 +267,7 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
                 if let Some(traceback) = event.get("traceback").and_then(|v| v.as_str())
                     && !traceback.is_empty()
                 {
-                    eprintln!("\nPython traceback:\n{}", traceback);
+                    eprintln!("\nTraceback:\n{}", traceback);
                 }
             }
             _ => {
@@ -192,7 +288,7 @@ pub async fn run(ctx: &CliContext, remaining_args: &[String]) -> Result<()> {
 }
 
 async fn terminate_child(child: &mut tokio::process::Child) -> Result<()> {
-    // Best-effort cancellation of the spawned Python process when the user presses Ctrl+C.
+    // Best-effort cancellation of the spawned deploy process when the user presses Ctrl+C.
     match child.start_kill() {
         Ok(()) => {}
         Err(err) if err.kind() == std::io::ErrorKind::InvalidInput => {}
@@ -200,4 +296,61 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<()> {
     }
     let _ = child.wait().await;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{TypeScriptDeployArgs, typescript_deploy_args};
+
+    #[test]
+    fn selects_rust_typescript_deployment_for_esm_entrypoints() {
+        assert_eq!(typescript_deploy_args(&["app.py".into()]).unwrap(), None);
+        assert_eq!(
+            typescript_deploy_args(&["app.ts".into()]).unwrap(),
+            Some(TypeScriptDeployArgs {
+                entrypoint: "app.ts".into(),
+                upgrade_running_requests: false,
+            })
+        );
+        assert_eq!(
+            typescript_deploy_args(&["--upgrade-running-requests".into(), "app.mjs".into()])
+                .unwrap(),
+            Some(TypeScriptDeployArgs {
+                entrypoint: "app.mjs".into(),
+                upgrade_running_requests: true,
+            })
+        );
+    }
+
+    #[test]
+    fn rejects_commonjs_entrypoints() {
+        assert!(typescript_deploy_args(&["app.cjs".into()]).is_err());
+        assert!(typescript_deploy_args(&["app.cts".into()]).is_err());
+    }
+
+    #[test]
+    fn rejects_extra_typescript_arguments() {
+        assert!(
+            typescript_deploy_args(&["--build-env".into(), "A=B".into(), "app.ts".into()]).is_err()
+        );
+        assert!(typescript_deploy_args(&["first.ts".into(), "second.ts".into()]).is_err());
+    }
+
+    #[test]
+    fn ignores_python_build_environment_values_when_selecting_the_deployer() {
+        assert_eq!(
+            typescript_deploy_args(&[
+                "app.py".into(),
+                "--build-env".into(),
+                "WORKER=worker.js".into(),
+            ])
+            .unwrap(),
+            None,
+        );
+        assert_eq!(
+            typescript_deploy_args(&["--build-env=WORKER=worker.mjs".into(), "app.py".into(),])
+                .unwrap(),
+            None,
+        );
+    }
 }

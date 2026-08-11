@@ -24,6 +24,7 @@ build-backend = "maturin"
 
 [project.scripts]
 function-executor = "tensorlake.function_executor.main:main"
+tensorlake-python-function-runner = "tensorlake.function_agent.runner:main"
 tensorlake-deploy = "tensorlake.cli.deploy:deploy_entrypoint"
 
 [tool.maturin]

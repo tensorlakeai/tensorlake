@@ -3,6 +3,13 @@ from typing import Any
 from tensorlake.applications.cloud_events import event_time, print_cloud_event
 
 
+def _print_best_effort(*values: object) -> None:
+    try:
+        print(*values, flush=True)
+    except Exception:
+        pass
+
+
 def print_progress_update(
     request_id: str,
     function_name: str,
@@ -40,7 +47,7 @@ def print_progress_update(
     }
 
     if local_mode:
-        print(f"Progress Update: {event}", flush=True)
+        _print_best_effort(f"Progress Update: {event}")
     else:
         try:
             print_cloud_event(
@@ -53,7 +60,7 @@ def print_progress_update(
                 message=event_message,
             )
         except Exception:
-            print(f"Failed to print progress update cloud event: {event}", flush=True)
+            _print_best_effort(f"Failed to print progress update cloud event: {event}")
 
 
 def _maybe_int(value: float) -> float | int:

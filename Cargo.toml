@@ -2,6 +2,7 @@
 members = [
     "crates/cloud-sdk",
     "crates/cli",
+    "crates/function-agent-core",
     "crates/rust-cloud-sdk-node",
     "crates/rust-cloud-sdk-py",
 ]
@@ -22,6 +23,7 @@ fastcdc = "3"
 
 # Internal crates
 tensorlake = { path = "crates/cloud-sdk" }
+tensorlake-function-agent-core = { path = "crates/function-agent-core" }
 # Resolution-only placeholder for the private gsvc-codec packfile codec (backs `tl git clone`).
 # The real source is no longer vendored here: official builds swap it in ephemerally — see
 # crates/VENDORED_FROM and the `build-cli-full` justfile recipe / vendor-private-crates CI action.
@@ -101,6 +103,12 @@ tracing-subscriber = "0.3"
 # gsvc-codec is tested against; the default miniz_oxide backend has produced a divergent test result.
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 tar = "0.4"
+zip = "0.6"
+
+# JavaScript/TypeScript bundling. Rolldown's Rust API does not promise semver
+# compatibility, so keep this exact and upgrade it deliberately.
+rolldown = "=1.2.0"
+rolldown_common = "=1.2.0"
 
 # OpenAPI
 utoipa = { version = "5.4.0", features = ["chrono"] }

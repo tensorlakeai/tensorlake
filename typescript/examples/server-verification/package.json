@@ -1,0 +1,11 @@
+{
+  "name": "tensorlake-typescript-server-verification",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "dependencies": {
+    "tensorlake": "file:../.."
+  }
+}

@@ -76,12 +76,12 @@ class _ApplicationDecorator(_Decorator):
             tags=self._tags,
             retries=self._retries,
             region=self._region,
-            allow=self._allow,
             # Use a unique random version. We don't provide user controlled versioning at the moment.
             # Use only alphanumeric characters so app version can be used as container tags.
             version=nanoid(
                 alphabet="0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ"
             ),
+            allow=list(self._allow),
         )
 
         return fn

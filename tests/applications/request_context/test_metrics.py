@@ -4,6 +4,7 @@ import multiprocessing as mp
 import queue as mt_queue
 import threading
 import unittest
+from unittest.mock import Mock, patch
 
 import parameterized
 import validate_all_applications
@@ -15,7 +16,15 @@ from tensorlake.applications import (
     function,
 )
 from tensorlake.applications.applications import run_application
+from tensorlake.applications.interface.exceptions import SDKUsageError
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.request_context.http_client.metrics import (
+    RequestMetricsHTTPClient,
+)
+from tensorlake.applications.request_context.metrics import (
+    print_counter_incremented_event,
+    print_timer_recorded_event,
+)
 
 # Makes the test case discoverable by unittest framework.
 ValidateAllApplicationsTest: unittest.TestCase = validate_all_applications.define_test()
@@ -89,6 +98,51 @@ class TestUseMetricsFromFunction(unittest.TestCase):
             "'timer_value': 2.5",
             output,
         )
+
+
+class TestMetricValidationAndLogging(unittest.TestCase):
+    def test_metric_logging_is_best_effort_when_stdout_is_broken(self):
+        with (
+            patch(
+                "tensorlake.applications.request_context.metrics.print_cloud_event",
+                side_effect=OSError("stdout is closed"),
+            ),
+            patch("builtins.print", side_effect=OSError("stdout is closed")),
+        ):
+            print_counter_incremented_event(
+                request_id="request",
+                function_name="function",
+                counter_name="counter",
+                counter_value=1,
+                local_mode=False,
+            )
+            print_timer_recorded_event(
+                request_id="request",
+                function_name="function",
+                timer_name="timer",
+                timer_value=1,
+                local_mode=False,
+            )
+
+    def test_invalid_metric_values_are_rejected_before_transport(self):
+        transport = Mock()
+        metrics = RequestMetricsHTTPClient(
+            request_id="request",
+            allocation_id="allocation",
+            function_name="function",
+            http_client=transport,
+        )
+
+        for value in (True, 1.5):
+            with self.subTest(metric="counter", value=value):
+                with self.assertRaises(SDKUsageError):
+                    metrics.counter("counter", value)
+        for value in (True, float("nan"), float("inf"), float("-inf")):
+            with self.subTest(metric="timer", value=value):
+                with self.assertRaises(SDKUsageError):
+                    metrics.timer("timer", value)
+
+        transport.build_request.assert_not_called()
 
 
 @application()

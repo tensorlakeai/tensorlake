@@ -26,6 +26,8 @@ from ..proto.function_executor_pb2 import (
     AllocationEvent,
     AllocationExecutionEvent,
     AllocationExecutionEventFinishAllocation,
+    AllocationFailureReason,
+    AllocationOutcomeCode,
     FunctionRef,
     ReadAllocationEventLogResponse,
 )
@@ -42,7 +44,11 @@ from .allocation_event import (
 from .allocation_state_wrapper import AllocationStateWrapper
 from .blob_manager import AllocationBLOBManager
 from .download import download_function_arguments
-from .event_log_reader import EventLogReader, EventLogReaderStopped
+from .event_log_reader import (
+    EventLogReader,
+    EventLogReaderStopped,
+    validate_event_log_response,
+)
 from .event_loop import (
     AllocationEventLoop,
     InputEventEmergencyShutdown,
@@ -201,6 +207,31 @@ class AllocationRunner:
         """Runs the allocation in a separate thread."""
         self._run_allocation_thread.start()
 
+    def cancel_for_shutdown(self) -> None:
+        """Queues one terminal result and unblocks runtime hooks during shutdown."""
+        if self._allocation_state.finished:
+            return
+        self._execution_log_buffer.add_batch(
+            [
+                AllocationExecutionEvent(
+                    finish_allocation=AllocationExecutionEventFinishAllocation(
+                        outcome_code=(
+                            AllocationOutcomeCode.ALLOCATION_OUTCOME_CODE_FAILURE
+                        ),
+                        failure_reason=(
+                            AllocationFailureReason.ALLOCATION_FAILURE_REASON_FUNCTION_ERROR
+                        ),
+                    )
+                )
+            ]
+        )
+        self._event_loop.add_input_event(InputEventEmergencyShutdown())
+        self._event_log_reader.stop()
+
+    def wait_for_shutdown_terminal(self, timeout: float) -> bool:
+        """Waits until the execution-log client has received the terminal batch."""
+        return self._execution_log_buffer.wait_for_terminal_observed(timeout)
+
     def _process_allocation_events(self, after_clock: int) -> None:
         """Reads AllocationEvent protos via EventLogReader, converts to EventLoop InputEvents.
 
@@ -214,10 +245,13 @@ class AllocationRunner:
             except EventLogReaderStopped:
                 break
             try:
+                response_clock = validate_event_log_response(
+                    response=response,
+                    requested_after_clock=after_clock,
+                )
                 for entry in response.entries:
                     self._process_allocation_event(entry)
-                if response.HasField("last_clock"):
-                    after_clock = response.last_clock
+                after_clock = response_clock
             except BaseException as e:
                 # NB: If an exception is raised in an allocation event handler, we should not report it
                 # to event loop as an "internal error" input event because the original event
@@ -231,6 +265,7 @@ class AllocationRunner:
                     exc_info=e,
                 )
                 self._event_loop.add_input_event(InputEventEmergencyShutdown())
+                break
 
         self._logger.info("stopping allocation event processing thread")
 
@@ -417,6 +452,9 @@ class AllocationRunner:
                 )
                 if isinstance(output_event, OutputEventFinishAllocation):
                     alloc_finished = True
+                    # A finish event is terminal even if an invalid producer
+                    # were to place more items in the same internal batch.
+                    break
             except BaseException as e:
                 self._logger.error(
                     "Error while processing event loop output event, sending emergency shutdown to event loop",
@@ -424,6 +462,16 @@ class AllocationRunner:
                     exc_info=e,
                 )
                 self._event_loop.add_input_event(InputEventEmergencyShutdown())
+                # Conversion failures are executor failures, not new inputs for
+                # user code to handle. The user thread may already have exited
+                # after emitting its finish event, so emergency shutdown alone
+                # cannot be relied on to produce another output batch.
+                event_loop_execution_events.append(
+                    AllocationExecutionEvent(
+                        finish_allocation=self._finish_event_helper.from_internal_error()
+                    )
+                )
+                alloc_finished = True
                 break
 
         if len(event_loop_execution_events) > 0:

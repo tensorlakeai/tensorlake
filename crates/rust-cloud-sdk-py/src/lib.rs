@@ -4,6 +4,8 @@
 #![allow(clippy::useless_conversion)]
 #![allow(clippy::too_many_arguments)]
 
+mod function_agent;
+
 use std::error::Error as StdError;
 use std::future::Future;
 use std::io::Write;
@@ -4048,6 +4050,7 @@ fn build_sandbox_image(
         dockerfile_path: PathBuf::from(dockerfile_path),
         dockerfile_text,
         context_dir: context_dir.map(PathBuf::from),
+        context_files: Vec::new(),
         build_args: build_args
             .map(|args| args.into_iter().collect())
             .unwrap_or_default(),
@@ -4261,6 +4264,7 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudSandboxProxyClient>()?;
     module.add_class::<CloudSandboxDesktopClient>()?;
     module.add_class::<CloudDocumentAIClient>()?;
+    module.add_class::<function_agent::FunctionAgentCore>()?;
     module.add_function(wrap_pyfunction!(create_image_context_file, module)?)?;
     module.add_function(wrap_pyfunction!(build_sandbox_image, module)?)?;
     module.add_function(wrap_pyfunction!(import_sandbox_image, module)?)?;

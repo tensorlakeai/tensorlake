@@ -21,7 +21,6 @@ import {
   type CreateAndConnectOptions,
   type CreatePtySessionOptions,
   type DaemonInfo,
-  type DirectoryEntry,
   type GetSandboxLogsOptions,
   type HealthResponse,
   type ListDirectoryResponse,

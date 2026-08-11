@@ -14,8 +14,11 @@ struct MallocConf(*const u8);
 unsafe impl Sync for MallocConf {}
 #[cfg(target_os = "linux")]
 #[unsafe(export_name = "_rjem_malloc_conf")]
-static MALLOC_CONF: MallocConf =
-    MallocConf(c"background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0".as_ptr().cast());
+static MALLOC_CONF: MallocConf = MallocConf(
+    c"background_thread:true,dirty_decay_ms:0,muzzy_decay_ms:0"
+        .as_ptr()
+        .cast(),
+);
 
 mod auth;
 mod cache;
@@ -131,7 +134,7 @@ enum Commands {
     /// Deploy applications to Tensorlake Cloud
     #[command(hide = true)]
     Deploy {
-        /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
+        /// Deployment arguments; TypeScript ESM applications are bundled directly by tl
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -946,9 +949,33 @@ enum AppCommands {
 
     /// Deploy applications to Tensorlake Cloud
     Deploy {
-        /// Arguments passed to the deploy Python module (use --build-env KEY=VALUE to inject ENV directives into generated Dockerfiles)
+        /// Deployment arguments; TypeScript ESM applications are bundled directly by tl
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+
+    /// Invoke a deployed application
+    Invoke {
+        /// Application name
+        application: String,
+
+        /// JSON value to send as the application input
+        #[arg(short = 'j', long, value_name = "JSON", allow_hyphen_values = true)]
+        json: Option<String>,
+
+        /// Wait for the request to finish and print its output
+        #[arg(short = 'w', long)]
+        wait: bool,
+    },
+
+    /// Print the output of an application request
+    Output {
+        /// Request ID
+        request_id: String,
+
+        /// Wait for an in-progress request to finish
+        #[arg(short = 'w', long)]
+        wait: bool,
     },
 
     /// Manage cron schedules for applications
@@ -2446,6 +2473,18 @@ async fn run_app_command(ctx: &mut CliContext, subcmd: AppCommands) -> error::Re
     match subcmd {
         AppCommands::New { name, force } => commands::new::run(&name, force),
         AppCommands::Deploy { args } => run_deploy_command(ctx, &args).await,
+        AppCommands::Invoke {
+            application,
+            json,
+            wait,
+        } => {
+            ensure_auth_and_project(ctx).await?;
+            commands::applications::invoke(ctx, &application, json.as_deref(), wait).await
+        }
+        AppCommands::Output { request_id, wait } => {
+            ensure_auth_and_project(ctx).await?;
+            commands::applications::output(ctx, &request_id, wait).await
+        }
         AppCommands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
         AppCommands::Describe { application } => {
             ensure_auth_and_project(ctx).await?;
@@ -3009,6 +3048,45 @@ mod tests {
                 assert_eq!(args, vec!["hello_world.py"]);
             }
             _ => panic!("expected app deploy command"),
+        }
+        match parse_command([
+            "tl",
+            "app",
+            "invoke",
+            "hello_world",
+            "--json",
+            r#"{"name":"Tensorlake"}"#,
+            "--wait",
+        ]) {
+            Commands::App(AppCommands::Invoke {
+                application,
+                json,
+                wait,
+            }) => {
+                assert_eq!(application, "hello_world");
+                assert_eq!(json.as_deref(), Some(r#"{"name":"Tensorlake"}"#));
+                assert!(wait);
+            }
+            _ => panic!("expected app invoke command"),
+        }
+        match parse_command(["tl", "app", "invoke", "hello_world"]) {
+            Commands::App(AppCommands::Invoke {
+                application,
+                json,
+                wait,
+            }) => {
+                assert_eq!(application, "hello_world");
+                assert_eq!(json, None);
+                assert!(!wait);
+            }
+            _ => panic!("expected app invoke command without JSON"),
+        }
+        match parse_command(["tl", "app", "output", "request-123", "-w"]) {
+            Commands::App(AppCommands::Output { request_id, wait }) => {
+                assert_eq!(request_id, "request-123");
+                assert!(wait);
+            }
+            _ => panic!("expected app output command"),
         }
         match parse_command(["tl", "app", "cron", "ls", "hello_world"]) {
             Commands::App(AppCommands::Cron(CronCommands::List { application })) => {

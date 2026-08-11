@@ -241,7 +241,10 @@ class TestStrictReplayComplexFunction(unittest.TestCase):
                             )
                         )
 
-                        live_clock: list[int] = [0]
+                        # Live allocation events continue from the replay cursor.
+                        # Reusing clocks from zero violates the event-log protocol
+                        # and can cause the executor to process history out of order.
+                        live_clock: list[int] = [last_clock]
                         _aid: str = alloc_id
                         _wv: dict = watcher_values
 
@@ -259,13 +262,12 @@ class TestStrictReplayComplexFunction(unittest.TestCase):
                         )
                         driver.enqueue_event_log_response(replay_response)
                         # Simulate Server re-creating watchers whose WR was truncated.
-                        server_clock: list[int] = [last_clock]
                         enqueue_server_recreated_watchers(
                             driver=driver,
                             allocation_id=alloc_id,
                             truncated_entries=truncated,
                             watcher_values=watcher_values,
-                            clock_box=server_clock,
+                            clock_box=live_clock,
                         )
                         finish: AllocationExecutionEventFinishAllocation = driver.run(
                             on_execution_event_batch=on_batch_replay

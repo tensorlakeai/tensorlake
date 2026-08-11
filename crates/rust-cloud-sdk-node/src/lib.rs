@@ -8,6 +8,7 @@
 
 #![deny(clippy::all)]
 
+mod function_agent;
 mod repositories;
 mod sandbox;
 
@@ -143,6 +144,7 @@ pub async fn build_sandbox_image(
         dockerfile_path: PathBuf::from(options.dockerfile_path),
         dockerfile_text: options.dockerfile_text,
         context_dir: options.context_dir.map(PathBuf::from),
+        context_files: Vec::new(),
         build_args: options
             .build_args
             .map(|args| {

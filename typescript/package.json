@@ -8,9 +8,10 @@
   "types": "./dist/index.d.ts",
   "bin": {
     "tensorlake-deploy": "./bin/tensorlake-deploy.cjs",
-    "tensorlake-create-sandbox-image": "./bin/tensorlake-create-sandbox-image.cjs",
-    "tensorlake-import-sandbox-image": "./bin/tensorlake-import-sandbox-image.cjs",
-    "function-executor": "./bin/function-executor.cjs"
+    "tensorlake-create-sandbox-image": "./bin/tensorlake-create-sandbox-image.js",
+    "tensorlake-import-sandbox-image": "./bin/tensorlake-import-sandbox-image.js",
+    "function-executor": "./bin/function-executor.js",
+    "tensorlake-typescript-function-runner": "./bin/tensorlake-typescript-function-runner.js"
   },
   "exports": {
     ".": {
@@ -22,19 +23,34 @@
         "types": "./dist/index.d.cts",
         "default": "./dist/index.cjs"
       }
+    },
+    "./applications": {
+      "import": {
+        "types": "./dist/applications/index.d.ts",
+        "default": "./dist/applications/index.js"
+      },
+      "require": {
+        "types": "./dist/applications/index.d.cts",
+        "default": "./dist/applications/index.cjs"
+      }
     }
   },
   "files": [
     "dist",
     "bin",
-    "lib"
+    "lib",
+    "runtime"
   ],
   "scripts": {
     "build:sdk": "tsup",
+    "build:runtime": "node ./scripts/build-function-executor-capsule.mjs && node ./scripts/build-typescript-function-runner-capsule.mjs && node ./scripts/check-package-compatibility.mjs",
     "build:native": "node ./scripts/build-native.mjs",
-    "build": "npm run build:sdk && npm run build:native",
+    "build": "npm run build:sdk && npm run build:native && npm run build:runtime",
+    "check:proto": "node ./scripts/check-function-executor-proto.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude tests/integration.test.ts",
+    "test:function-executor": "vitest run tests/function-executor.test.ts tests/function-executor-protocol.test.ts",
+    "test:function-agent": "vitest run tests/function-agent.test.ts",
     "test:integration": "vitest run tests/integration.test.ts",
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
@@ -57,14 +73,21 @@
   },
   "license": "Apache-2.0",
   "devDependencies": {
-    "@types/node": "^22.0.0",
+    "@eslint/js": "^9.39.4",
+    "@types/node": "^24.0.0",
     "@types/ws": "^8.18.1",
     "eslint": "^9.0.0",
     "tsup": "^8.0.0",
-    "typescript": "^5.4.0",
+    "typescript": "^5.8.0",
+    "typescript-eslint": "^8.65.0",
     "vitest": "^2.0.0"
   },
   "dependencies": {
+    "@grpc/grpc-js": "^1.13.0",
+    "@grpc/proto-loader": "^0.8.0",
+    "ajv": "^8.17.1",
+    "fflate": "^0.8.2",
+    "google-proto-files": "^5.0.2",
     "nanoid": "3.3.11",
     "undici": "8.3.0",
     "ws": "^8.20.0"
