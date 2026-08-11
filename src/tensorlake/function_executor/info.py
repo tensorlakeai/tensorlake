@@ -4,7 +4,10 @@ from typing import Any, Dict
 
 
 def info_response_kv_args() -> Dict[str, Any]:
-    sdk_version = importlib.metadata.version("tensorlake")
+    try:
+        sdk_version = importlib.metadata.version("tensorlake")
+    except importlib.metadata.PackageNotFoundError:
+        sdk_version = "unknown"
     python_version = (
         f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}"
     )
