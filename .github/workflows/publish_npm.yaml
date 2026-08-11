@@ -96,6 +96,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Vendor canonical Function Agent core
+        uses: ./.github/actions/vendor-function-agent-core
+        with:
+          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
+          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:

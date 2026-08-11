@@ -4,19 +4,29 @@
 # Override with e.g. `ARTIFACT_STORAGE_DIR=~/src/artifact_storage just build-cli-full`.
 ARTIFACT_STORAGE_DIR := env("ARTIFACT_STORAGE_DIR", "../artifact_storage")
 
+# Canonical Function Agent core checkout used by `with-function-agent-core`. The public repository
+# tracks only a fail-closed placeholder; native SDK builds stage this private CEI crate temporarily.
+COMPUTE_ENGINE_INTERNAL_DIR := env("COMPUTE_ENGINE_INTERNAL_DIR", "../compute-engine-internal")
+
 # Default recipe: show available commands
 default:
     @just --list
+
+# Run one command with the canonical Function Agent core staged from CEI, restoring the public
+# placeholder afterward. Trusted CI uses the equivalent vendor-function-agent-core action.
+with-function-agent-core *COMMAND:
+    COMPUTE_ENGINE_INTERNAL_DIR="{{COMPUTE_ENGINE_INTERNAL_DIR}}" \
+        ./scripts/with_function_agent_core.sh bash -c {{quote(COMMAND)}}
 
 # ─── Rust ────────────────────────────────────────────────────────────────────
 
 # Build all Rust crates (debug)
 build:
-    cargo build --workspace
+    just with-function-agent-core cargo build --workspace
 
 # Build all Rust crates (release)
 build-release:
-    cargo build --workspace --release
+    just with-function-agent-core cargo build --workspace --release
 
 # Build just the CLI binary (debug)
 build-cli:
@@ -209,16 +219,18 @@ test-cli-full *ARGS:
     fi
     CARGO_TARGET_DIR="$PWD/target" cargo clippy --manifest-path crates/gsvc-fs-client/Cargo.toml --all-targets -- -D warnings
     CARGO_TARGET_DIR="$PWD/target" cargo test --manifest-path crates/gsvc-fs-client/Cargo.toml {{ARGS}}
-    cargo test --workspace --features tensorlake-cli/mount,tensorlake-cli/git-clone {{ARGS}}
+    COMPUTE_ENGINE_INTERNAL_DIR="{{COMPUTE_ENGINE_INTERNAL_DIR}}" \
+        ./scripts/with_function_agent_core.sh \
+        cargo test --workspace --features tensorlake-cli/mount,tensorlake-cli/git-clone {{ARGS}}
 
 # Validate the server-side filesystem SDK. It deliberately has no dependency on the private mount
 # engine: reads use native HTTP routes and writes upload directly to object storage.
 test-node-filesystem-full:
-    cargo clippy -p tensorlake-rust-cloud-sdk-node --no-deps -- -D warnings
-    cargo test -p tensorlake-rust-cloud-sdk-node
+    just with-function-agent-core cargo clippy -p tensorlake-rust-cloud-sdk-node --no-deps -- -D warnings
+    just with-function-agent-core cargo test -p tensorlake-rust-cloud-sdk-node
     cd typescript && npm run typecheck
     cd typescript && npm test -- tests/filesystem.test.ts
-    cd typescript && npm run build:native
+    just with-function-agent-core 'cd typescript && npm run build:native'
 
 # Authoritative validation for the private filesystem client integration. Run the complete
 # full-feature CLI suite so changes exercise every consumer of the private crate.
@@ -227,19 +239,19 @@ test-fs-journal:
 
 # Run all Rust tests
 test-rust:
-    cargo test --workspace
+    just with-function-agent-core cargo test --workspace
 
 # Run Rust tests for a specific crate
 test-crate crate:
-    cargo test -p {{crate}}
+    just with-function-agent-core cargo test -p {{crate}}
 
 
 # Run clippy lints on all crates
 clippy:
-    cargo clippy --workspace --all-targets -- -D warnings
+    just with-function-agent-core cargo clippy --workspace --all-targets -- -D warnings
 
 clippy-fix:
-    cargo clippy --fix --workspace --allow-dirty
+    just with-function-agent-core cargo clippy --fix --workspace --allow-dirty
 
 # Format all Rust code
 fmt-rust:
@@ -272,15 +284,15 @@ check-python-fmt:
 
 # Development install (builds Rust Cloud SDK extension + installs Python package)
 develop:
-    maturin develop
+    just with-function-agent-core maturin develop
 
 # Development install (release mode)
 develop-release:
-    maturin develop --release
+    just with-function-agent-core maturin develop --release
 
 # Build wheel for current platform
 wheel:
-    maturin build --release
+    just with-function-agent-core maturin build --release
 
 # ─── Combined ────────────────────────────────────────────────────────────────
 

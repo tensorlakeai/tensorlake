@@ -1,10 +1,12 @@
+WITH_FUNCTION_AGENT_CORE=./scripts/with_function_agent_core.sh
+
 all: build
 
 build:
 	@rm -rf dist
-	@poetry install --with=dev
+	@$(WITH_FUNCTION_AGENT_CORE) poetry install --with=dev
 	@$(MAKE) build_cloud_sdk
-	@poetry build
+	@$(WITH_FUNCTION_AGENT_CORE) poetry build --format wheel
 	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/ 2>/dev/null || true
 
 # Local development install: builds the Rust Cloud SDK extension and installs the
@@ -13,15 +15,15 @@ build:
 # Note: proto stubs are pre-generated and committed; run `make build_proto`
 # separately only when you change .proto files.
 install-dev:
-	@poetry install --with=dev
-	@poetry run maturin develop
+	@$(WITH_FUNCTION_AGENT_CORE) poetry install --with=dev
+	@$(WITH_FUNCTION_AGENT_CORE) poetry run maturin develop
 	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/
 	@echo "Done. Activate the venv with 'poetry shell' or prefix commands with 'poetry run'."
 
 # Same as install-dev but compiles the Rust Cloud SDK extension with optimisations.
 install-dev-release:
-	@poetry install --with=dev
-	@poetry run maturin develop --release
+	@$(WITH_FUNCTION_AGENT_CORE) poetry install --with=dev
+	@$(WITH_FUNCTION_AGENT_CORE) poetry run maturin develop --release
 	@cp tensorlake.data/scripts/* $$(poetry env info --path)/bin/
 	@echo "Done. Activate the venv with 'poetry shell' or prefix commands with 'poetry run'."
 
@@ -30,7 +32,7 @@ install-dev-release:
 # After running, ensure ~/.local/bin is on your PATH.
 install-global:
 	@rm -rf dist
-	@poetry run maturin build --release --out dist
+	@$(WITH_FUNCTION_AGENT_CORE) poetry run maturin build --release --out dist
 	@pip3 install --user --break-system-packages --force-reinstall dist/tensorlake-*.whl
 	@echo "Done. Make sure ~/.local/bin is on your PATH."
 	@echo "  fish: fish_add_path ~/.local/bin"
@@ -44,7 +46,7 @@ PROTO_SOURCE_DIR=${PROTO_SOURCE_ROOT}/${PROTO_PACKAGE_PATH}
 PROTO_GENERATED_DIR=src/${PROTO_PACKAGE_PATH}
 
 build_proto:
-	@poetry install
+	@poetry install --no-root
 	@poetry run python -m grpc_tools.protoc \
 		--proto_path=${PROTO_SOURCE_ROOT} \
 		--python_out=src \
@@ -58,7 +60,7 @@ build_proto:
 
 # Build the Rust Cloud SDK PyO3 extension and install it as tensorlake._cloud_sdk
 build_cloud_sdk:
-	@poetry run maturin develop
+	@$(WITH_FUNCTION_AGENT_CORE) poetry run maturin develop
 
 # Legacy alias
 build_rust_py_client: build_cloud_sdk
@@ -94,7 +96,7 @@ test_function_executor_compatibility:
 build_release:
 	@rm -rf dist
 	@echo "--- Building tensorlake wheel ---"
-	@poetry run maturin build --release --out dist
+	@$(WITH_FUNCTION_AGENT_CORE) poetry run maturin build --release --out dist
 	@echo "--- Verifying wheel in a clean venv ---"
 	@poetry run python .github/scripts/verify_wheel.py "dist/tensorlake-*.whl" tensorlake._cloud_sdk tensorlake.cli.deploy --expect-script function-executor --expect-script tensorlake-python-function-runner --expect-script tensorlake-deploy --reject-script tl --reject-script tensorlake
 	@echo "--- Done. Wheel is in dist/ ---"

@@ -8,6 +8,8 @@ on:
       - "typescript/**"
       - "crates/rust-cloud-sdk-node/**"
       - "crates/function-agent-core/**"
+      - ".github/actions/vendor-function-agent-core/**"
+      - ".github/scripts/stage_function_agent_core.sh"
       - "Cargo.lock"
       - "proto/**"
       - "src/tensorlake/applications/**"
@@ -25,6 +27,8 @@ on:
       - "typescript/**"
       - "crates/rust-cloud-sdk-node/**"
       - "crates/function-agent-core/**"
+      - ".github/actions/vendor-function-agent-core/**"
+      - ".github/scripts/stage_function_agent_core.sh"
       - "Cargo.lock"
       - "proto/**"
       - "src/tensorlake/applications/**"
@@ -64,15 +68,6 @@ jobs:
           python-version: "3.10"
           cache: pip
 
-      - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
-
-      - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
-        with:
-          prefix-key: v1-rust-no-bin
-          cache-bin: false
-
       - name: Install Poetry
         uses: snok/install-poetry@v1
         with:
@@ -85,7 +80,7 @@ jobs:
 
       - name: Install Python dependencies
         working-directory: ${{ github.workspace }}
-        run: poetry install --with=dev
+        run: poetry install --no-root --with=dev
 
       - name: Verify the shared protocol and generated Python bindings
         working-directory: ${{ github.workspace }}
@@ -104,6 +99,43 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Check shared function-executor protocol source
+        run: npm run check:proto
+
+      - name: Type check
+        run: npm run typecheck
+
+      - name: Run unit tests
+        run: npm test
+
+      - name: Build SDK
+        run: npm run build:sdk
+
+      - name: Run snapshot-focused SDK unit tests
+        run: npm test -- tests/client.test.ts tests/sandbox-image.test.ts
+
+  native-binding-smoke:
+    name: Native Function Agent binding smoke tests
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Vendor canonical Function Agent core
+        uses: ./.github/actions/vendor-function-agent-core
+        with:
+          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
+          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -131,20 +163,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Check shared function-executor protocol source
-        run: npm run check:proto
-
-      - name: Type check
-        run: npm run typecheck
-
-      - name: Run unit tests
-        run: npm test
-
       - name: Build SDK
         run: npm run build:sdk
-
-      - name: Run snapshot-focused SDK unit tests
-        run: npm test -- tests/client.test.ts tests/sandbox-image.test.ts
 
       - name: Build native binding (glibc compatibility smoke)
         run: npm run build:native
@@ -194,6 +214,12 @@ jobs:
     environment: prod
     steps:
       - uses: actions/checkout@v4
+
+      - name: Vendor canonical Function Agent core
+        uses: ./.github/actions/vendor-function-agent-core
+        with:
+          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
+          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
       - name: Setup Node.js
         uses: actions/setup-node@v4

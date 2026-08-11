@@ -12,32 +12,6 @@ permissions:
   contents: read
 
 jobs:
-  build-sdist:
-    name: Build source distribution
-    runs-on: namespace-profile-rust-builder-amd64
-    outputs:
-      version: ${{ steps.version.outputs.version }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Extract version from pyproject.toml
-        id: version
-        run: |
-          version=$(grep '^version = ' pyproject.toml | sed 's/version = "\(.*\)"/\1/')
-          echo "version=$version" >> $GITHUB_OUTPUT
-
-      - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
-
-      - name: Upload sdist
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-sdist
-          path: dist
-
   build-wheels:
     name: Build wheels on ${{ matrix.platform.os }} (${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}
@@ -62,6 +36,12 @@ jobs:
             rust_target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+
+      - name: Vendor canonical Function Agent core
+        uses: ./.github/actions/vendor-function-agent-core
+        with:
+          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
+          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -104,7 +84,9 @@ jobs:
 
   publish:
     name: Publish to PyPI
-    needs: [build-sdist, build-wheels]
+    # The private Function Agent implementation is compiled into wheels. Publishing an sdist
+    # would either expose that source or produce an artifact that cannot build from public files.
+    needs: [build-wheels]
     runs-on: ubuntu-latest
     environment:
       name: pypi
