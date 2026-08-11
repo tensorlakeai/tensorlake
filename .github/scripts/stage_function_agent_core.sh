@@ -38,7 +38,8 @@ if [[ ! -f "${destination_crate}/Cargo.toml" || ! -d "${destination_crate}" ]]; 
   exit 1
 fi
 
-if ! grep -Eq '^name = "tensorlake-function-agent-core"$' "${upstream_crate}/Cargo.toml"; then
+if ! tr -d '\r' <"${upstream_crate}/Cargo.toml" \
+  | grep -Eq '^name = "tensorlake-function-agent-core"$'; then
   echo "error: upstream Cargo.toml has the wrong package name" >&2
   exit 1
 fi
@@ -46,11 +47,14 @@ fi
 # Tensorlake intentionally selects ring by default for portable SDK binaries; CEI selects
 # aws-lc for the service workspace. Every other manifest line must remain identical so a new
 # dependency or feature cannot be silently omitted from the public workspace placeholder.
-normalized_manifest="$(mktemp "${TMPDIR:-/tmp}/function-agent-core-manifest.XXXXXX")"
-trap 'rm -f "${normalized_manifest}"' EXIT
-sed 's/^default = \["tls-aws-lc"\]$/default = ["tls-ring"]/' \
-  "${upstream_crate}/Cargo.toml" >"${normalized_manifest}"
-if ! diff -u "${destination_crate}/Cargo.toml" "${normalized_manifest}"; then
+normalized_upstream_manifest="$(mktemp "${TMPDIR:-/tmp}/function-agent-core-upstream.XXXXXX")"
+normalized_destination_manifest="$(mktemp "${TMPDIR:-/tmp}/function-agent-core-destination.XXXXXX")"
+trap 'rm -f "${normalized_upstream_manifest}" "${normalized_destination_manifest}"' EXIT
+tr -d '\r' <"${upstream_crate}/Cargo.toml" \
+  | sed 's/^default = \["tls-aws-lc"\]$/default = ["tls-ring"]/' \
+    >"${normalized_upstream_manifest}"
+tr -d '\r' <"${destination_crate}/Cargo.toml" >"${normalized_destination_manifest}"
+if ! diff -u "${normalized_destination_manifest}" "${normalized_upstream_manifest}"; then
   echo "error: Tensorlake's Function Agent placeholder manifest has drifted from CEI" >&2
   exit 1
 fi
