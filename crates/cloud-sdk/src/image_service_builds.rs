@@ -10,7 +10,7 @@
 //! only creates the build, uploads and seals the context, and polls the
 //! build to completion; it never talks to the builder sandbox.
 
-use std::{path::Path, time::Duration};
+use std::{collections::HashSet, path::Path, time::Duration};
 
 use reqwest::{Method, StatusCode, header::CONTENT_LENGTH};
 use serde_json::{Value, json};
@@ -20,7 +20,8 @@ use crate::{
     Client,
     sandbox_images::{
         CommonBuildOptions, DockerfileBuildPlan, SandboxImageBuildError, SandboxImageBuildEvent,
-        client_builder, collect_dir_files, resolve_build_context, resolved_docker_config_json,
+        SandboxImageContextFile, client_builder, collect_dir_files, normalize_context_file_path,
+        resolve_build_context, resolved_docker_config_json,
     },
 };
 
@@ -62,6 +63,7 @@ pub(crate) async fn run_image_service_build<F>(
     plan: DockerfileBuildPlan,
     dockerfile_path: Option<&Path>,
     build_args: Vec<(String, String)>,
+    context_files: Vec<SandboxImageContextFile>,
     options: CommonBuildOptions,
     mut emit: F,
 ) -> Result<Value>
@@ -146,6 +148,7 @@ where
         &upload,
         &plan,
         injected_dockerfile.as_deref(),
+        &context_files,
         &mut emit,
     )
     .await?;
@@ -431,6 +434,7 @@ async fn upload_and_seal_context(
     upload: &Value,
     plan: &DockerfileBuildPlan,
     injected_dockerfile: Option<&str>,
+    context_files: &[SandboxImageContextFile],
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
     emit(SandboxImageBuildEvent::Status(
@@ -440,8 +444,12 @@ async fn upload_and_seal_context(
         .prefix("tensorlake-image-context-")
         .suffix(".tar")
         .tempfile()?;
-    let (tar_bytes, digest) =
-        create_context_tar(&plan.context_dir, injected_dockerfile, tar_file.path())?;
+    let (tar_bytes, digest) = create_context_tar(
+        &plan.context_dir,
+        injected_dockerfile,
+        context_files,
+        tar_file.path(),
+    )?;
 
     let max_bytes = upload.get("max_bytes").and_then(Value::as_u64);
     if let Some(max_bytes) = max_bytes
@@ -509,9 +517,11 @@ async fn upload_and_seal_context(
 fn create_context_tar(
     context_dir: &Path,
     injected_dockerfile: Option<&str>,
+    context_files: &[SandboxImageContextFile],
     tar_path: &Path,
 ) -> Result<(u64, String)> {
     let mut tar = tar::Builder::new(std::fs::File::create(tar_path)?);
+    let mut archived_paths = HashSet::new();
     if context_dir.is_dir() {
         for (full_path, relative_path) in collect_dir_files(context_dir, context_dir)? {
             if injected_dockerfile.is_some() && relative_path == INJECTED_DOCKERFILE_PATH {
@@ -522,6 +532,7 @@ fn create_context_tar(
             }
             let mut file = std::fs::File::open(&full_path)?;
             tar.append_file(&relative_path, &mut file)?;
+            archived_paths.insert(relative_path);
         }
     }
     if let Some(dockerfile_text) = injected_dockerfile {
@@ -534,6 +545,33 @@ fn create_context_tar(
             &mut header,
             INJECTED_DOCKERFILE_PATH,
             dockerfile_text.as_bytes(),
+        )?;
+        archived_paths.insert(INJECTED_DOCKERFILE_PATH.to_string());
+    }
+
+    let mut context_files = context_files
+        .iter()
+        .map(|file| Ok((normalize_context_file_path(&file.path)?, file)))
+        .collect::<Result<Vec<_>>>()?;
+    context_files.sort_by(|left, right| left.0.cmp(&right.0));
+    for (relative_path, file) in context_files {
+        if !archived_paths.insert(relative_path.clone()) {
+            return Err(SandboxImageBuildError::usage(format!(
+                "in-memory build context file '{relative_path}' conflicts with another context file"
+            )));
+        }
+        let mut header = tar::Header::new_gnu();
+        header.set_entry_type(tar::EntryType::Regular);
+        header.set_size(file.contents.len() as u64);
+        header.set_mode(file.mode & 0o777);
+        header.set_uid(0);
+        header.set_gid(0);
+        header.set_mtime(0);
+        header.set_cksum();
+        tar.append_data(
+            &mut header,
+            relative_path,
+            std::io::Cursor::new(&file.contents),
         )?;
     }
     tar.finish()?;
@@ -746,7 +784,7 @@ mod tests {
 
         let tar_path = scratch.path().join("out.tar");
         let (bytes, digest) =
-            create_context_tar(dir.path(), Some("FROM scratch\n"), &tar_path).unwrap();
+            create_context_tar(dir.path(), Some("FROM scratch\n"), &[], &tar_path).unwrap();
         assert_eq!(bytes, std::fs::metadata(&tar_path).unwrap().len());
         assert_eq!(digest.len(), 64);
 
@@ -777,12 +815,52 @@ mod tests {
         std::fs::write(dir.path().join(INJECTED_DOCKERFILE_PATH), "FROM x\n").unwrap();
 
         let tar_path = scratch.path().join("out.tar");
-        let error = create_context_tar(dir.path(), Some("FROM scratch\n"), &tar_path)
+        let error = create_context_tar(dir.path(), Some("FROM scratch\n"), &[], &tar_path)
             .expect_err("reserved path must collide");
         assert!(
             error.to_string().contains(".tensorlake/Dockerfile"),
             "{error}"
         );
+    }
+
+    #[test]
+    fn context_tar_carries_validated_in_memory_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        let tar_path = scratch.path().join("out.tar");
+        let files = vec![SandboxImageContextFile {
+            path: ".tensorlake/runtime.tgz".into(),
+            contents: b"runtime".to_vec(),
+            mode: 0o640,
+        }];
+
+        create_context_tar(dir.path(), Some("FROM scratch\n"), &files, &tar_path).unwrap();
+
+        let mut archive = tar::Archive::new(std::fs::File::open(&tar_path).unwrap());
+        let runtime = archive
+            .entries()
+            .unwrap()
+            .map(|entry| entry.unwrap())
+            .find(|entry| entry.path().unwrap() == Path::new(".tensorlake/runtime.tgz"))
+            .expect("in-memory runtime file");
+        assert_eq!(runtime.header().mode().unwrap(), 0o640);
+    }
+
+    #[test]
+    fn context_tar_rejects_in_memory_file_collisions() {
+        let dir = tempfile::tempdir().unwrap();
+        let scratch = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("runtime.tgz"), "disk").unwrap();
+        let tar_path = scratch.path().join("out.tar");
+        let files = vec![SandboxImageContextFile {
+            path: "runtime.tgz".into(),
+            contents: b"memory".to_vec(),
+            mode: 0o644,
+        }];
+
+        let error = create_context_tar(dir.path(), None, &files, &tar_path)
+            .expect_err("disk and memory paths must not collide");
+        assert!(error.to_string().contains("conflicts"), "{error}");
     }
 
     fn plan_with_context(context_dir: std::path::PathBuf) -> DockerfileBuildPlan {

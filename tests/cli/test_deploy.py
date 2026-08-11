@@ -9,6 +9,9 @@ from tensorlake.applications import Image, application, function
 from tensorlake.applications import registry as registry_module
 from tensorlake.cli import deploy as deploy_module
 
+_IMAGE_ID = "a" * 64
+_IMAGE_REF = f"cas-v1:{_IMAGE_ID}"
+
 
 @contextmanager
 def isolated_registry():
@@ -21,6 +24,22 @@ def isolated_registry():
 
 
 class TestDeployHelpers(unittest.TestCase):
+    def test_application_image_names_sanitize_catalog_components(self):
+        name = deploy_module.explicit_application_image_name(
+            "My Application", "Version 1", "GPU/Image"
+        )
+
+        self.assertRegex(
+            name,
+            r"^applications/id-[0-9a-f]{32}/versions/id-[0-9a-f]{32}/images/id-[0-9a-f]{32}$",
+        )
+
+    def test_immutable_image_reference_rejects_mutable_build_results(self):
+        with self.assertRaisesRegex(deploy_module.SDKUsageError, "immutable image ID"):
+            deploy_module.immutable_image_reference(
+                {"image_id": "mutable-name"}, "application-image"
+            )
+
     def test_format_error_message_does_not_include_exception_payload(self):
         message = deploy_module._format_error_message(
             "build failed", RuntimeError("secret")
@@ -70,6 +89,39 @@ class TestDeployHelpers(unittest.TestCase):
             organization_id="org-1",
             project_id="proj-1",
             debug=False,
+        )
+
+    def test_function_service_context_uses_explicit_service_url(self):
+        auth = SimpleNamespace(
+            api_key="api-key",
+            personal_access_token=None,
+            namespace="ns",
+            organization_id="org-1",
+            project_id="project-1",
+            debug=True,
+        )
+        expected = object()
+        with (
+            patch.dict(
+                os.environ,
+                {"TENSORLAKE_FUNCTION_SERVICE_URL": "http://functions.test:8930"},
+                clear=True,
+            ),
+            patch.object(
+                deploy_module.Context, "default", return_value=expected
+            ) as context_default,
+        ):
+            actual = deploy_module._function_service_context(auth)
+
+        self.assertIs(actual, expected)
+        context_default.assert_called_once_with(
+            api_url="http://functions.test:8930",
+            api_key="api-key",
+            personal_access_token=None,
+            namespace="ns",
+            organization_id="org-1",
+            project_id="project-1",
+            debug=True,
         )
 
     def test_warning_missing_secrets_returns_only_missing(self):
@@ -153,7 +205,7 @@ class TestDeployEntrypoints(unittest.TestCase):
                 )
 
         self.assertEqual(exc.exception.code, 1)
-        self.assertEqual(emit.call_args_list[0].args[0]["type"], "status")
+        self.assertEqual(emit.call_args_list[0].args[0]["type"], "protocol")
         event = emit.call_args_list[-1].args[0]
         self.assertEqual(event["type"], "error")
         self.assertIn(
@@ -161,6 +213,21 @@ class TestDeployEntrypoints(unittest.TestCase):
             event["message"],
         )
         self.assertEqual(event["details"], "ImportError: boom")
+
+    def test_deploy_rejects_upgrading_running_requests_before_building(self):
+        with patch.object(deploy_module, "_emit") as emit:
+            with self.assertRaises(SystemExit) as exc:
+                deploy_module.deploy(
+                    application_file_path="my_app.py",
+                    upgrade_running_requests=True,
+                )
+
+        self.assertEqual(exc.exception.code, 1)
+        self.assertEqual(emit.call_args_list[0].args[0]["type"], "protocol")
+        self.assertIn(
+            "not supported by Function Service",
+            emit.call_args_list[1].args[0]["message"],
+        )
 
     def test_deploy_emits_validation_failed_when_validation_has_errors(self):
         with (
@@ -200,6 +267,7 @@ class TestDeployEntrypoints(unittest.TestCase):
 
     def test_deploy_runs_build_and_deploy_flow(self):
         prepare_images = AsyncMock()
+        prepare_images.return_value = {}
         auth = self._make_auth_context()
         application = SimpleNamespace(_name="app-one")
         with (
@@ -233,7 +301,7 @@ class TestDeployEntrypoints(unittest.TestCase):
         ):
             deploy_module.deploy(
                 application_file_path="my_app.py",
-                upgrade_running_requests=True,
+                upgrade_running_requests=False,
             )
 
         prepare_images.assert_awaited_once_with(
@@ -243,9 +311,10 @@ class TestDeployEntrypoints(unittest.TestCase):
         )
         deploy_apps.assert_called_once_with(
             applications_file_path=os.path.abspath("my_app.py"),
-            upgrade_running_requests=True,
+            upgrade_running_requests=False,
             load_source_dir_modules=False,
             api_client=auth.cloud_client,
+            function_images={},
         )
         deployed_event = next(
             call.args[0]
@@ -353,9 +422,9 @@ class TestDeployEntrypoints(unittest.TestCase):
                 patch.object(
                     deploy_module,
                     "build_sandbox_application_image",
-                    return_value={},
+                    return_value={"image_id": _IMAGE_ID},
                 ) as build_image,
-                patch.object(deploy_module, "_deploy_applications"),
+                patch.object(deploy_module, "_deploy_applications") as deploy_apps,
                 patch.object(deploy_module, "_emit") as emit,
             ):
                 deploy_module.deploy(
@@ -375,20 +444,63 @@ class TestDeployEntrypoints(unittest.TestCase):
             [call.kwargs["registered_name"] for call in build_image.call_args_list],
             [
                 finance_analyzer_default,
-                "parser-image",
-                "agent-image",
-                "code-exec-image",
+                deploy_module.explicit_application_image_name(
+                    finance_analyzer._function_config.function_name,
+                    finance_analyzer._application_config.version,
+                    "parser-image",
+                ),
+                deploy_module.explicit_application_image_name(
+                    finance_analyzer._function_config.function_name,
+                    finance_analyzer._application_config.version,
+                    "agent-image",
+                ),
+                deploy_module.explicit_application_image_name(
+                    finance_analyzer._function_config.function_name,
+                    finance_analyzer._application_config.version,
+                    "code-exec-image",
+                ),
                 finance_query_default,
+                deploy_module.explicit_application_image_name(
+                    finance_query._function_config.function_name,
+                    finance_query._application_config.version,
+                    "parser-image",
+                ),
+                deploy_module.explicit_application_image_name(
+                    finance_query._function_config.function_name,
+                    finance_query._application_config.version,
+                    "agent-image",
+                ),
+                deploy_module.explicit_application_image_name(
+                    finance_query._function_config.function_name,
+                    finance_query._application_config.version,
+                    "code-exec-image",
+                ),
             ],
         )
         self.assertEqual(
             [
                 call.args[0]
                 for call in build_image.call_args_list
-                if call.kwargs["registered_name"]
-                in {"parser-image", "agent-image", "code-exec-image"}
+                if call.args[0] in {parser_image, agent_image, code_exec_image}
             ],
-            [parser_image, agent_image, code_exec_image],
+            [
+                parser_image,
+                agent_image,
+                code_exec_image,
+                parser_image,
+                agent_image,
+                code_exec_image,
+            ],
+        )
+        function_images = deploy_apps.call_args.kwargs["function_images"]
+        self.assertEqual(
+            function_images[
+                (
+                    finance_query._function_config.function_name,
+                    run_query_agent._function_config.function_name,
+                )
+            ],
+            _IMAGE_REF,
         )
         emit.assert_any_call({"type": "build_done"})
 
@@ -413,9 +525,9 @@ class TestDeployEntrypoints(unittest.TestCase):
                 patch.object(
                     deploy_module,
                     "build_sandbox_application_image",
-                    return_value={},
+                    return_value={"image_id": _IMAGE_ID},
                 ) as build_image,
-                patch.object(deploy_module, "_deploy_applications"),
+                patch.object(deploy_module, "_deploy_applications") as deploy_apps,
                 patch.object(deploy_module, "_emit") as emit,
             ):
                 deploy_module.deploy(
@@ -431,6 +543,19 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(build_image.call_args.args[0].name, "default")
         self.assertEqual(
             build_image.call_args.kwargs["registered_name"], registered_name
+        )
+        self.assertEqual(
+            deploy_apps.call_args.kwargs["function_images"],
+            {
+                (
+                    default_image_app._function_config.function_name,
+                    default_image_app._function_config.function_name,
+                ): _IMAGE_REF,
+                (
+                    default_image_app._function_config.function_name,
+                    helper._function_config.function_name,
+                ): _IMAGE_REF,
+            },
         )
         emit.assert_any_call({"type": "build_start", "image": registered_name})
 
@@ -469,7 +594,7 @@ class TestDeployEntrypoints(unittest.TestCase):
             patch.object(
                 deploy_module,
                 "build_sandbox_application_image",
-                return_value={},
+                return_value={"image_id": _IMAGE_ID},
             ) as build_image,
             patch.object(deploy_module, "_deploy_applications") as deploy_apps,
             patch.object(deploy_module, "_emit") as emit,
@@ -482,7 +607,10 @@ class TestDeployEntrypoints(unittest.TestCase):
         build_image.assert_called_once()
         self.assertEqual(build_image.call_args.args[0], shared_image)
         self.assertEqual(
-            build_image.call_args.kwargs["registered_name"], "shared-image"
+            build_image.call_args.kwargs["registered_name"],
+            deploy_module.explicit_application_image_name(
+                "app-one", "v1", "shared-image"
+            ),
         )
         build_start_events = [
             call.args[0]
@@ -491,7 +619,14 @@ class TestDeployEntrypoints(unittest.TestCase):
         ]
         self.assertEqual(
             build_start_events,
-            [{"type": "build_start", "image": "shared-image"}],
+            [
+                {
+                    "type": "build_start",
+                    "image": deploy_module.explicit_application_image_name(
+                        "app-one", "v1", "shared-image"
+                    ),
+                }
+            ],
         )
         deploy_apps.assert_called_once()
 
@@ -547,11 +682,13 @@ class TestDeployEntrypoints(unittest.TestCase):
         )
 
         with (
-            patch.object(
-                deploy_module, "filter_applications", return_value=[application]
+            patch(
+                "tensorlake.applications.remote.images.filter_applications",
+                return_value=[application],
             ),
-            patch.object(
-                deploy_module, "functions_for_application", return_value=[application]
+            patch(
+                "tensorlake.applications.remote.images.functions_for_application",
+                return_value=[application],
             ),
             patch.object(
                 deploy_module,
@@ -574,9 +711,12 @@ class TestDeployEntrypoints(unittest.TestCase):
         emit.assert_any_call(
             {
                 "type": "build_failed",
-                "image": "parser-image",
+                "image": deploy_module.explicit_application_image_name(
+                    "app", "v1", "parser-image"
+                ),
                 "error": (
-                    "image 'parser-image' build failed: rootfs builder failed. "
+                    "image 'applications/app/versions/v1/images/parser-image' "
+                    "build failed: rootfs builder failed. "
                     "check your Image() configuration and try again."
                 ),
             }

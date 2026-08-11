@@ -86,7 +86,12 @@ pub struct AgentAssignment {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub request_headers: Vec<RequestHeader>,
     pub call_metadata_base64: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
     pub application_code_base64: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_code_blob: Option<BlobReference>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub application_code_read: Option<AgentReadPlan>,
     pub application_code_sha256: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub execution_history: Vec<ExecutionHistoryEntry>,

@@ -6,6 +6,8 @@ use crate::error::{CliError, Result};
 
 mod typescript;
 
+const PYTHON_DEPLOY_PROTOCOL_VERSION: u64 = 1;
+
 #[derive(Debug, PartialEq, Eq)]
 struct TypeScriptDeployArgs {
     entrypoint: PathBuf,
@@ -142,6 +144,7 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
+    let mut protocol_verified = false;
 
     loop {
         let maybe_line = tokio::select! {
@@ -164,6 +167,17 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
         };
 
         let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+        if !protocol_verified {
+            if !supports_python_deploy_protocol(&event) {
+                terminate_child(&mut child).await?;
+                return Err(CliError::usage(
+                    "The installed Python Tensorlake SDK is incompatible with this CLI. Upgrade both `tl` and `tensorlake` to the same release.",
+                ));
+            }
+            protocol_verified = true;
+            continue;
+        }
 
         match event_type {
             "status" => {
@@ -278,6 +292,11 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
     }
 
     let status = child.wait().await.map_err(CliError::Io)?;
+    if !protocol_verified {
+        return Err(CliError::usage(
+            "The installed Python Tensorlake SDK did not provide a deploy protocol handshake. Upgrade both `tl` and `tensorlake` to the same release.",
+        ));
+    }
 
     if !status.success() {
         let code = status.code().unwrap_or(1);
@@ -285,6 +304,12 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
     }
 
     Ok(())
+}
+
+fn supports_python_deploy_protocol(event: &serde_json::Value) -> bool {
+    event.get("type").and_then(|value| value.as_str()) == Some("protocol")
+        && event.get("version").and_then(|value| value.as_u64())
+            == Some(PYTHON_DEPLOY_PROTOCOL_VERSION)
 }
 
 async fn terminate_child(child: &mut tokio::process::Child) -> Result<()> {
@@ -300,7 +325,21 @@ async fn terminate_child(child: &mut tokio::process::Child) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{TypeScriptDeployArgs, typescript_deploy_args};
+    use super::{TypeScriptDeployArgs, supports_python_deploy_protocol, typescript_deploy_args};
+    use serde_json::json;
+
+    #[test]
+    fn python_deployer_protocol_fails_closed() {
+        assert!(supports_python_deploy_protocol(
+            &json!({"type": "protocol", "version": 1})
+        ));
+        assert!(!supports_python_deploy_protocol(
+            &json!({"type": "protocol", "version": 2})
+        ));
+        assert!(!supports_python_deploy_protocol(
+            &json!({"type": "status", "version": 1})
+        ));
+    }
 
     #[test]
     fn selects_rust_typescript_deployment_for_esm_entrypoints() {

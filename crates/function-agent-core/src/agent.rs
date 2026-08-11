@@ -143,7 +143,7 @@ enum AgentMessage {
     AssignmentPrepared {
         attempt_id: String,
         fence_token: u64,
-        result: Result<AgentAssignment, String>,
+        result: Box<Result<AgentAssignment, String>>,
     },
     FunctionCallResultPrepared {
         attempt_id: String,
@@ -428,7 +428,7 @@ impl FunctionAgent {
                 .send(AgentMessage::AssignmentPrepared {
                     attempt_id,
                     fence_token,
-                    result,
+                    result: Box::new(result),
                 })
                 .await;
         });
@@ -663,7 +663,7 @@ impl FunctionAgent {
                 result,
             } => {
                 self.pending_assignments.remove(&attempt_id);
-                match result {
+                match *result {
                     Ok(assignment) => {
                         if let Err(error) = self.start_runtime(assignment).await {
                             error!(%error, %attempt_id, "failed to start assigned function runtime");
@@ -683,7 +683,7 @@ impl FunctionAgent {
                             result: AgentRunResult::Failure {
                                 attempt_id,
                                 fence_token,
-                                reason: FailureReason::InternalError,
+                                reason: FailureReason::RuntimeLost,
                                 message: Some(message),
                             },
                         });
@@ -1347,6 +1347,18 @@ async fn materialize_assignment_inputs(
     client: &Client,
     assignment: &mut AgentAssignment,
 ) -> Result<()> {
+    if let Some(blob) = assignment.application_code_blob.as_ref() {
+        ensure!(
+            assignment.application_code_sha256 == blob.sha256,
+            "application code digest does not match its durable blob reference"
+        );
+        let read = assignment
+            .application_code_read
+            .take()
+            .ok_or_else(|| anyhow!("application code blob has no read capability"))?;
+        let bytes = download_blob(client, blob, read).await?;
+        assignment.application_code_base64 = BASE64.encode(bytes);
+    }
     for input in &mut assignment.inputs {
         let (Some(blob), Some(read)) = (input.blob.as_ref(), input.read.take()) else {
             continue;
@@ -1514,6 +1526,86 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn materializes_and_verifies_application_code_blob() {
+        install_default_crypto_provider();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("application.zip");
+        tokio::fs::write(&path, b"zip-code").await.unwrap();
+        let uri = Url::from_file_path(&path).unwrap().to_string();
+        let mut assignment = AgentAssignment {
+            attempt_id: "attempt".into(),
+            fence_token: 1,
+            function_run_id: "run".into(),
+            request_id: "request".into(),
+            namespace: "ns".into(),
+            application: "app".into(),
+            application_version: "v1".into(),
+            function: "function".into(),
+            timeout_ms: 1_000,
+            initialization_timeout_ms: 1_000,
+            inputs: Vec::new(),
+            request_headers: Vec::new(),
+            call_metadata_base64: String::new(),
+            application_code_base64: String::new(),
+            application_code_blob: Some(crate::model::BlobReference {
+                uri: uri.clone(),
+                size_bytes: 8,
+                sha256: hex::encode(Sha256::digest(b"zip-code")),
+            }),
+            application_code_read: Some(crate::state_machine::AgentReadPlan {
+                url: uri,
+                method: "GET".into(),
+                headers: Default::default(),
+                expires_at_ms: u64::MAX,
+            }),
+            application_code_sha256: hex::encode(Sha256::digest(b"zip-code")),
+            execution_history: Vec::new(),
+        };
+
+        materialize_assignment_inputs(&Client::new(), &mut assignment)
+            .await
+            .unwrap();
+
+        assert_eq!(
+            assignment.application_code_base64,
+            BASE64.encode(b"zip-code")
+        );
+        assert!(assignment.application_code_read.is_none());
+    }
+
+    #[tokio::test]
+    async fn assignment_materialization_failure_is_infrastructure_failure() {
+        let mut agent = FunctionAgent::new_validated(config()).unwrap();
+        agent.pending_assignments.insert("attempt".into());
+
+        agent
+            .apply_agent_message(AgentMessage::AssignmentPrepared {
+                attempt_id: "attempt".into(),
+                fence_token: 7,
+                result: Box::new(Err("object store unavailable".into())),
+            })
+            .await;
+
+        let event = agent.outbox.front().expect("failure event");
+        let AgentEventPayload::Result {
+            result:
+                AgentRunResult::Failure {
+                    reason,
+                    attempt_id,
+                    fence_token,
+                    ..
+                },
+        } = &event.payload
+        else {
+            panic!("expected assignment failure event")
+        };
+        assert_eq!(attempt_id, "attempt");
+        assert_eq!(*fence_token, 7);
+        assert_eq!(*reason, FailureReason::RuntimeLost);
+        assert!(!reason.counts_against_user_retries());
+    }
+
     #[test]
     fn config_rejects_unbounded_or_ambiguous_values() {
         let mut invalid = config();
@@ -1627,6 +1719,8 @@ mod tests {
             request_headers: Vec::new(),
             call_metadata_base64: String::new(),
             application_code_base64: String::new(),
+            application_code_blob: None,
+            application_code_read: None,
             application_code_sha256: String::new(),
             execution_history: Vec::new(),
         };
@@ -1677,6 +1771,8 @@ mod tests {
             request_headers: Vec::new(),
             call_metadata_base64: String::new(),
             application_code_base64: String::new(),
+            application_code_blob: None,
+            application_code_read: None,
             application_code_sha256: String::new(),
             execution_history: Vec::new(),
         };

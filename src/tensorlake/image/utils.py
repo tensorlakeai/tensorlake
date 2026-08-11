@@ -50,7 +50,8 @@ def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) ->
     dockerfile_lines.append("USER root")
     dockerfile_lines.append(
         f"RUN PIP_USER=false {install_cmd} "
-        "&& test -x /usr/local/bin/function-executor"
+        "&& test -x /usr/local/bin/tensorlake-python-function-runner "
+        "&& python3 -c 'from tensorlake._cloud_sdk import FunctionAgentCore'"
     )
 
     return "\n".join(dockerfile_lines)

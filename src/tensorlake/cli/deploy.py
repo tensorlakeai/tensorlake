@@ -4,18 +4,25 @@ import json
 import os
 import sys
 import traceback
-from dataclasses import dataclass
 from pathlib import Path
 
-from tensorlake.applications import Function, Image, SDKUsageError, TensorlakeError
-from tensorlake.applications.applications import (
-    filter_applications,
-    functions_for_application,
-)
+from tensorlake.applications import Function, SDKUsageError, TensorlakeError
+from tensorlake.applications.applications import filter_applications
 from tensorlake.applications.registry import get_functions
 from tensorlake.applications.remote.code.loader import load_code
 from tensorlake.applications.remote.curl_command import example_application_curl_command
 from tensorlake.applications.remote.deploy import deploy_applications
+from tensorlake.applications.remote.images import (
+    ApplicationImageBuild as _ApplicationImageBuild,
+)
+from tensorlake.applications.remote.images import (
+    application_image_builds as _application_images,
+)
+from tensorlake.applications.remote.images import (
+    default_application_image_name,
+    explicit_application_image_name,
+    immutable_image_reference,
+)
 from tensorlake.applications.secrets import list_secret_names
 from tensorlake.applications.validation import (
     ValidationMessage,
@@ -28,14 +35,9 @@ from tensorlake.image.sandbox_builder import (
     SandboxImageBuildError,
     build_sandbox_application_image,
 )
+from tensorlake.image.utils import _SDK_VERSION
 
-_DEFAULT_APPLICATION_IMAGE_NAME = "default"
-
-
-@dataclass(frozen=True)
-class _ApplicationImageBuild:
-    image: Image
-    registered_name: str
+_DEPLOY_PROTOCOL_VERSION = 1
 
 
 def _emit(obj):
@@ -101,6 +103,21 @@ def _build_context_from_env() -> Context:
     )
 
 
+def _function_service_context(auth: Context) -> Context:
+    function_service_url = os.environ.get("TENSORLAKE_FUNCTION_SERVICE_URL", "").strip()
+    if not function_service_url:
+        return auth
+    return Context.default(
+        api_url=function_service_url,
+        api_key=auth.api_key,
+        personal_access_token=auth.personal_access_token,
+        namespace=auth.namespace,
+        organization_id=auth.organization_id,
+        project_id=auth.project_id,
+        debug=auth.debug,
+    )
+
+
 def _warning_missing_secrets(auth: Context, secrets: list[str]) -> list[str]:
     """Check for missing secrets and return their names."""
     try:
@@ -122,21 +139,30 @@ def _parse_build_envs(build_envs: list[str]) -> list[tuple[str, str]]:
     return parsed_build_envs
 
 
-def _onprem_enabled() -> bool:
-    return os.environ.get("TENSORLAKE_ONPREM", "").lower() in {
-        "1",
-        "true",
-        "yes",
-        "on",
-    }
-
-
 def deploy(
     application_file_path: str,
     upgrade_running_requests: bool,
     build_envs: list[tuple[str, str]] | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
+    _emit(
+        {
+            "type": "protocol",
+            "version": _DEPLOY_PROTOCOL_VERSION,
+            "sdk_version": _SDK_VERSION,
+        }
+    )
+    if upgrade_running_requests:
+        _emit(
+            {
+                "type": "error",
+                "message": (
+                    "--upgrade-running-requests is not supported by Function Service; "
+                    "existing requests stay pinned to their deployed application version"
+                ),
+            }
+        )
+        sys.exit(1)
     _emit(
         {
             "type": "status",
@@ -184,23 +210,15 @@ def deploy(
 
     functions: list[Function] = get_functions()
 
-    if _onprem_enabled():
-        deploy_applications(
-            applications_file_path=application_file_path,
-            upgrade_running_requests=upgrade_running_requests,
-            load_source_dir_modules=False,
-        )
-        _emit({"type": "done"})
-        return
-
     auth = _build_context_from_env()
+    function_service = _function_service_context(auth)
 
     missing = _warning_missing_secrets(auth, list(list_secret_names()))
     if missing:
         _emit({"type": "missing_secrets", "count": len(missing), "names": missing})
 
     try:
-        asyncio.run(
+        function_images = asyncio.run(
             _prepare_images(
                 functions,
                 context_dir=str(Path(application_file_path).parent),
@@ -215,11 +233,12 @@ def deploy(
         sys.exit(1)
 
     _deploy_applications(
-        api_client=auth.cloud_client,
-        api_url=auth.api_url,
+        api_client=function_service.cloud_client,
+        api_url=function_service.api_url,
         application_file_path=application_file_path,
         upgrade_running_requests=upgrade_running_requests,
         functions=functions,
+        function_images=function_images,
     )
 
 
@@ -227,14 +246,15 @@ async def _prepare_images(
     functions: list[Function],
     context_dir: str,
     build_envs: list[tuple[str, str]] | None = None,
-):
+) -> dict[tuple[str, str], str]:
     image_builds = _application_images(functions)
+    function_images: dict[tuple[str, str], str] = {}
     for image_build in image_builds:
         image = image_build.image
         image_name = image_build.registered_name
         _emit({"type": "build_start", "image": image_name})
         try:
-            await asyncio.to_thread(
+            published = await asyncio.to_thread(
                 build_sandbox_application_image,
                 image,
                 registered_name=image_name,
@@ -254,69 +274,12 @@ async def _prepare_images(
             )
             sys.exit(1)
 
+        immutable_ref = immutable_image_reference(published, image_name)
+        for function_key in image_build.function_keys:
+            function_images[function_key] = immutable_ref
+
     _emit({"type": "build_done"})
-
-
-def default_application_image_name(
-    application_name: str, application_version: str
-) -> str:
-    return f"applications/{application_name}/versions/{application_version}/default"
-
-
-def _append_image_build(
-    image_builds: list[_ApplicationImageBuild],
-    seen_image_ids: set[str],
-    seen_registered_names: dict[str, str],
-    image: Image,
-    registered_name: str,
-) -> None:
-    previous_image_id = seen_registered_names.get(registered_name)
-    if previous_image_id is not None and previous_image_id != image._id:
-        raise SDKUsageError(
-            f"multiple different Image objects use the name '{registered_name}'. "
-            "Use unique Image(name=...) values so each function resolves "
-            "to the intended sandbox image."
-        )
-    seen_registered_names[registered_name] = image._id
-    if image._id in seen_image_ids:
-        return
-    seen_image_ids.add(image._id)
-    image_builds.append(
-        _ApplicationImageBuild(image=image, registered_name=registered_name)
-    )
-
-
-def _application_images(functions: list[Function]) -> list[_ApplicationImageBuild]:
-    image_builds: list[_ApplicationImageBuild] = []
-    seen_image_ids: set[str] = set()
-    seen_image_names: dict[str, str] = {}
-    for application in filter_applications(functions):
-        default_image: Image | None = None
-        default_registered_name = default_application_image_name(
-            application._function_config.function_name,
-            application._application_config.version,
-        )
-        for function in functions_for_application(application, functions):
-            image = function._function_config.image
-            if image is None:
-                if default_image is None:
-                    default_image = Image(name=_DEFAULT_APPLICATION_IMAGE_NAME)
-                _append_image_build(
-                    image_builds,
-                    seen_image_ids,
-                    seen_image_names,
-                    default_image,
-                    default_registered_name,
-                )
-                continue
-            _append_image_build(
-                image_builds,
-                seen_image_ids,
-                seen_image_names,
-                image,
-                image.name,
-            )
-    return image_builds
+    return function_images
 
 
 def _deploy_applications(
@@ -325,6 +288,7 @@ def _deploy_applications(
     application_file_path: str,
     upgrade_running_requests: bool,
     functions: list[Function],
+    function_images: dict[tuple[str, str], str],
 ):
     _emit({"type": "status", "message": "Deploying applications..."})
 
@@ -334,6 +298,7 @@ def _deploy_applications(
             upgrade_running_requests=upgrade_running_requests,
             load_source_dir_modules=False,
             api_client=api_client,
+            function_images=function_images,
         )
 
         for application_function in filter_applications(functions):
