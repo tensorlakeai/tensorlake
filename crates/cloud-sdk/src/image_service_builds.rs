@@ -42,6 +42,11 @@ const IMAGE_SERVICE_INGRESS_PATH: &str = "/images/v4";
 /// catalog name lookup.
 const CAS_IMAGE_REF_PREFIX: &str = "cas-v1:";
 
+/// Tenant application images are visible only to executors serving the
+/// caller's project. Global publication is reserved for allowlisted curated
+/// image publishers.
+const EXECUTOR_FLEET_IMAGE_SCOPE: &str = "executor_fleet";
+
 /// Where the Dockerfile text is injected into the context tar when the
 /// Dockerfile does not live inside the context directory (`-f` outside the
 /// context, or inline Dockerfile text).
@@ -97,7 +102,7 @@ where
     if let Some(import_reference) = plan.import_image_reference.clone() {
         let created = create_build(
             &client,
-            with_registry_credentials(
+            executor_fleet_build_request(
                 json!({
                     "kind": "import",
                     "image_ref": import_reference,
@@ -117,7 +122,7 @@ where
     let (dockerfile_in_context, injected_dockerfile) = context_dockerfile(&plan, dockerfile_path)?;
     let created = create_build(
         &client,
-        with_registry_credentials(
+        executor_fleet_build_request(
             json!({
                 "kind": "dockerfile",
                 "dockerfile_path": dockerfile_in_context,
@@ -197,6 +202,19 @@ fn with_registry_credentials(mut body: Value, registry_credentials_json: Option<
         );
     }
     body
+}
+
+fn executor_fleet_build_request(
+    mut body: Value,
+    registry_credentials_json: Option<String>,
+) -> Value {
+    body.as_object_mut()
+        .expect("Image Service build request body must be an object")
+        .insert(
+            "image_scope".to_string(),
+            Value::String(EXECUTOR_FLEET_IMAGE_SCOPE.to_string()),
+        );
+    with_registry_credentials(body, registry_credentials_json)
 }
 
 /// Builder resource and visibility knobs belong to the legacy platform-api
@@ -726,13 +744,15 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_credentials_attach_only_when_present() {
-        let body = with_registry_credentials(
+    fn build_requests_set_executor_fleet_scope_and_attach_credentials_only_when_present() {
+        let body = executor_fleet_build_request(
             serde_json::json!({ "kind": "import" }),
             Some(r#"{"auths":{}}"#.to_string()),
         );
+        assert_eq!(body["image_scope"], EXECUTOR_FLEET_IMAGE_SCOPE);
         assert_eq!(body["registry_credentials_json"], r#"{"auths":{}}"#);
-        let body = with_registry_credentials(serde_json::json!({ "kind": "import" }), None);
+        let body = executor_fleet_build_request(serde_json::json!({ "kind": "import" }), None);
+        assert_eq!(body["image_scope"], EXECUTOR_FLEET_IMAGE_SCOPE);
         assert!(body.get("registry_credentials_json").is_none());
     }
 
