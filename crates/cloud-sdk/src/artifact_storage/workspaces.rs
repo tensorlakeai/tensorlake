@@ -534,14 +534,19 @@ impl ArtifactStorageClient {
         source: Option<&str>,
         subtree: Option<&str>,
     ) -> Result<Traced<GitMountSource>, SdkError> {
-        let mut params = url::form_urlencoded::Serializer::new(String::new());
-        if let Some(source) = source {
-            params.append_pair("source", source);
-        }
-        if let Some(subtree) = subtree {
-            params.append_pair("subtree", subtree);
-        }
-        let params = params.finish();
+        // Scoped so the `Serializer` is dropped before the await below: it holds a non-`Send`
+        // encoding callback, and leaving it alive across the request makes this future non-`Send`,
+        // which stops callers from renewing mount presence from a spawned task.
+        let params = {
+            let mut params = url::form_urlencoded::Serializer::new(String::new());
+            if let Some(source) = source {
+                params.append_pair("source", source);
+            }
+            if let Some(subtree) = subtree {
+                params.append_pair("subtree", subtree);
+            }
+            params.finish()
+        };
         let suffix = if params.is_empty() {
             "mount-source".to_string()
         } else {

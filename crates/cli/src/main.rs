@@ -627,6 +627,10 @@ enum GitCommands {
         target: String,
         /// Mountpoint directory (created; must be empty)
         path: PathBuf,
+        /// Stateless read-only view of the branch, commit, or subtree: creates no workspace,
+        /// publishes nothing, and refuses writes. Nothing to clean up on unmount
+        #[arg(long, conflicts_with_all = ["publish", "workspace"])]
+        ro: bool,
         /// Publish each explicit snapshot onto the mounted branch
         #[arg(long)]
         publish: bool,
@@ -706,6 +710,30 @@ enum GitCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Show the active workspace snapshot chain and retained recovery chains
+    Log {
+        /// Mounted directory or repository name (default: mount containing the current directory)
+        subject: Option<String>,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
+    /// Show branch, tag, workspace, snapshot, and retained-chain positions
+    Smartlog {
+        /// Mounted directory or repository name (default: mount containing the current directory)
+        subject: Option<String>,
+
+        /// Show the bounded project-wide repository/workspace graph
+        #[arg(long)]
+        project: bool,
+
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+
     /// List a repository's durable workspaces, autosave state, snapshots, and attachments
     Workspaces {
         /// Repository name
@@ -2007,6 +2035,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     | GitCommands::Rebase { .. }
                     | GitCommands::Promote { .. }
                     | GitCommands::Status { .. }
+                    | GitCommands::Log { .. }
+                    | GitCommands::Smartlog { .. }
             ) {
                 return run_git_mount_command(ctx, subcmd).await;
             }
@@ -2712,6 +2742,39 @@ async fn run_fs_command(_ctx: &mut CliContext, _subcmd: FsCommands) -> error::Re
 }
 
 #[cfg(feature = "mount")]
+/// Resolve the mount a `tl git log`/`tl git smartlog` subject refers to, if any.
+///
+/// The subject is either a mount path or a bare repository name. A repository name frequently also
+/// names a directory in the cwd — a clone of that same repository is the usual case — so a path
+/// that is not an attached mount falls back to the repository-name form instead of erroring.
+/// `default_to_cwd` is false only for `--project`, which needs no repository at all.
+#[cfg(feature = "mount")]
+fn git_graph_mount_dir(
+    subject: Option<&str>,
+    default_to_cwd: bool,
+) -> error::Result<Option<PathBuf>> {
+    let candidate = subject.map(std::path::Path::new);
+    match candidate {
+        Some(path) => {
+            if !commands::fs::positional_is_mount_path(path)? {
+                return Ok(None);
+            }
+            // Resolution alone is not enough: a bare repo name that also names a plain directory
+            // (a clone) resolves fine but is not an attached mount. Require the attachment here
+            // so the caller's own check cannot turn that into an error.
+            let Ok(resolved) = commands::fs::resolve_mount_path(Some(path.to_path_buf())) else {
+                return Ok(None);
+            };
+            if commands::fs::require_repository_mount_attachment(&resolved).is_err() {
+                return Ok(None);
+            }
+            Ok(Some(resolved))
+        }
+        None if default_to_cwd => commands::fs::resolve_mount_path(None).map(Some),
+        None => Ok(None),
+    }
+}
+
 async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> error::Result<()> {
     let mut subcmd = match subcmd {
         GitCommands::Prefetch { path } => {
@@ -2724,6 +2787,15 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
         | GitCommands::Status { path, .. }
         | GitCommands::Unmount { path, .. } => Some(commands::fs::resolve_mount_path(path.take())?),
         GitCommands::Mount { .. } => None,
+        // `subject` is either a mount path or a bare repo name. Resolve mount scope only when it
+        // names a path (or was omitted for the non-project form), so `tl git log <repo>` works
+        // from anywhere, exactly like the pre-logical-v1 surface did.
+        GitCommands::Log { subject, .. } => {
+            git_graph_mount_dir(subject.as_deref(), true)?
+        }
+        GitCommands::Smartlog {
+            subject, project, ..
+        } => git_graph_mount_dir(subject.as_deref(), !*project)?,
         GitCommands::Sync { path, target } => {
             if target.is_none()
                 && let Some(candidate) = path.as_ref()
@@ -2756,15 +2828,28 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
         }
         _ => unreachable!("only logical Git mount commands are routed here"),
     };
+    // `unmount --discard` is the escape hatch for a mount whose state file this binary cannot
+    // parse — corrupt, or written by a newer `tl` that knows a mount kind this one does not. Both
+    // calls below parse that state, so gating the hatch on them makes it unreachable in exactly
+    // the situation it exists for, leaving a live mount no installed binary can remove. Discard
+    // already means "drop unpublished local state"; teardown must not additionally require
+    // understanding it.
+    let discarding_teardown = matches!(subcmd, GitCommands::Unmount { discard: true, .. });
     if let Some(path) = mount_dir.as_ref() {
-        commands::fs::require_repository_mount_attachment(path)?;
-        commands::fs::hydrate_scope_from_mount(ctx, path)?;
+        if discarding_teardown {
+            let _ = commands::fs::require_repository_mount_attachment(path);
+            let _ = commands::fs::hydrate_scope_from_mount(ctx, path);
+        } else {
+            commands::fs::require_repository_mount_attachment(path)?;
+            commands::fs::hydrate_scope_from_mount(ctx, path)?;
+        }
     }
     ensure_auth_and_project(ctx).await?;
     let result = match subcmd {
         GitCommands::Mount {
             target,
             path,
+            ro,
             publish,
             workspace,
             foreground,
@@ -2776,6 +2861,7 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
                 &target,
                 workspace.as_deref(),
                 &path,
+                ro,
                 publish,
                 foreground,
                 trace_ops,
@@ -2783,6 +2869,14 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
             )
             .await
         }
+        GitCommands::Log { subject, json } => {
+            commands::fs::git_log(ctx, subject.as_deref(), json).await
+        }
+        GitCommands::Smartlog {
+            subject,
+            project,
+            json,
+        } => commands::fs::git_smartlog(ctx, subject.as_deref(), project, json).await,
         GitCommands::Snapshot { message, .. } => {
             commands::fs::snapshot(
                 ctx,
@@ -2871,7 +2965,9 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
         | GitCommands::Sync { .. }
         | GitCommands::Rebase { .. }
         | GitCommands::Promote { .. }
-        | GitCommands::Status { .. } => {
+        | GitCommands::Status { .. }
+        | GitCommands::Log { .. }
+        | GitCommands::Smartlog { .. } => {
             unreachable!("the logical Git mount family is routed before ordinary Git commands")
         }
         GitCommands::Clone {
@@ -3644,8 +3740,9 @@ mod tests {
 
         // Unimplemented compatibility surfaces are absent rather than falling back to the
         // retired mount engine.
+        // `tl fs` has no read-only mode: filesystems are the shared writable surface. Read-only
+        // views are a repository concept, so `--ro` lives on `tl git mount` only.
         assert!(Cli::try_parse_from(["tl", "fs", "mount", "scratch", "./w", "--ro"]).is_err());
-        assert!(Cli::try_parse_from(["tl", "git", "mount", "demo:main", "./w", "--ro"]).is_err());
         assert!(Cli::try_parse_from(["tl", "fs", "restore", "0a1b2c3d"]).is_err());
         match parse_command(["tl", "fs", "unmount", "./w"]) {
             Commands::Fs(FsCommands::Unmount {
@@ -3668,6 +3765,7 @@ mod tests {
             Commands::Git(GitCommands::Mount {
                 target,
                 path,
+                ro: false,
                 publish: false,
                 workspace: None,
                 foreground: false,
@@ -3754,12 +3852,35 @@ mod tests {
             parse_command(["tl", "git", "unmount"]),
             Commands::Git(GitCommands::Unmount { path: None, .. })
         ));
-        for removed in [
-            vec!["tl", "git", "log", "demo"],
-            vec!["tl", "git", "smartlog", "demo"],
-        ] {
-            assert!(Cli::try_parse_from(removed).is_err());
+        match parse_command(["tl", "git", "log", "demo"]) {
+            Commands::Git(GitCommands::Log { subject, json }) => {
+                assert_eq!(subject.as_deref(), Some("demo"));
+                assert!(!json);
+            }
+            _ => panic!("expected git log command"),
         }
+        match parse_command(["tl", "git", "smartlog", "--project"]) {
+            Commands::Git(GitCommands::Smartlog {
+                subject, project, ..
+            }) => {
+                assert!(subject.is_none());
+                assert!(project);
+            }
+            _ => panic!("expected git smartlog command"),
+        }
+        // `--ro` is the stateless view: it owns no workspace, so it cannot select or publish one.
+        match parse_command(["tl", "git", "mount", "demo", "./w", "--ro"]) {
+            Commands::Git(GitCommands::Mount { ro, publish, .. }) => {
+                assert!(ro);
+                assert!(!publish);
+            }
+            _ => panic!("expected git mount command"),
+        }
+        assert!(Cli::try_parse_from(["tl", "git", "mount", "d", "./w", "--ro", "--publish"]).is_err());
+        assert!(
+            Cli::try_parse_from(["tl", "git", "mount", "d", "./w", "--ro", "--workspace", "0a"])
+                .is_err()
+        );
         match parse_command(["tl", "git", "workspaces", "demo", "--json"]) {
             Commands::Git(GitCommands::Workspaces { repo, json }) => {
                 assert_eq!(repo, "demo");
