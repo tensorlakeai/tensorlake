@@ -59,35 +59,38 @@ curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh
    cd tensorlake
    ```
 
-2. **Choose your install method**
+2. **Choose your development scope**
 
-   **Option A — Global install (recommended):** installs the Python SDK and helper scripts into your user Python environment (`~/.local/`) without activating a virtualenv.
-
-   ```bash
-   make install-global
-   ```
-
-   Then make sure `~/.local/bin` is on your `PATH` (one-time setup):
-
-   ```fish
-   # fish
-   fish_add_path ~/.local/bin
-   ```
-   ```bash
-   # bash / zsh
-   export PATH="$HOME/.local/bin:$PATH"
-   ```
-
-   **Option B — Virtualenv install:** installs into the Poetry-managed virtualenv. The helper scripts are only available while the venv is active.
+   **Public-source changes:** install development dependencies without building the private native
+   Function Agent core:
 
    ```bash
-   make install-dev
-   poetry shell   # activate the venv
+   poetry install --no-root --with=dev
+   make check
+   npm --prefix typescript ci
+   npm --prefix typescript test
    ```
+
+   **Native SDK and Function Agent changes:** check out
+   `tensorlakeai/compute-engine-internal` as a sibling (internal access required), then choose a
+   global or Poetry-managed install:
+
+   ```bash
+   cd ..
+   git clone git@github.com:tensorlakeai/compute-engine-internal.git
+   cd tensorlake
+   make install-global  # or: make install-dev
+   ```
+
+   These commands stage the canonical CEI core and function-specific native bindings only for the
+   build, then restore Tensorlake's fail-closed placeholders. Set
+   `COMPUTE_ENGINE_INTERNAL_DIR` if the repositories are not siblings. End users should install a
+   published wheel with `pip install tensorlake`; official releases do not publish a Python source
+   distribution.
 
    > **Note:** The shared function-executor protocol sources live under `proto/`. Python gRPC stubs are pre-generated and committed to the repository; run `make build_proto` after modifying the shared `.proto` files. The TypeScript SDK packages the same sources into its function-executor capsule during `npm run build:sdk`.
 
-3. **Verify the installation**
+3. **Verify a native installation**
    ```bash
    python -c "import tensorlake; import tensorlake._cloud_sdk"
    function-executor --help
@@ -107,7 +110,8 @@ tensorlake/
 │   └── function_executor/       # gRPC function executor server
 ├── crates/
 │   ├── cli/                     # Rust CLI binary (tl / tensorlake)
-│   └── cloud-sdk/               # Rust cloud SDK
+│   ├── cloud-sdk/               # Rust cloud SDK
+│   └── function-agent-core/     # Private CEI source placeholder and immutable revision
 ├── tensorlake.data/scripts/     # Python wrapper scripts installed alongside the CLI
 ├── tests/                       # Test suite
 ├── Makefile                     # Build and development commands
@@ -143,7 +147,7 @@ make install-dev
 # Same as install-dev but with release optimisations
 make install-dev-release
 
-# Build distributable wheel (does not install the CLI locally)
+# Build a distributable wheel with the sibling CEI Function Agent core
 make build
 
 # Regenerate gRPC stubs from .proto files

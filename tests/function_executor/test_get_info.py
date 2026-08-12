@@ -1,12 +1,14 @@
 import importlib.metadata
 import sys
 import unittest
+from unittest.mock import patch
 
 from testing import (
     FunctionExecutorProcessContextManager,
     rpc_channel,
 )
 
+from tensorlake.function_executor.info import info_response_kv_args
 from tensorlake.function_executor.proto.function_executor_pb2 import (
     InfoRequest,
     InfoResponse,
@@ -17,6 +19,13 @@ from tensorlake.function_executor.proto.function_executor_pb2_grpc import (
 
 
 class TestGetInfo(unittest.TestCase):
+    def test_source_checkout_without_package_metadata(self):
+        with patch(
+            "tensorlake.function_executor.info.importlib.metadata.version",
+            side_effect=importlib.metadata.PackageNotFoundError("tensorlake"),
+        ):
+            self.assertEqual(info_response_kv_args()["sdk_version"], "unknown")
+
     def test_expected_info(self):
         with FunctionExecutorProcessContextManager() as process:
             with rpc_channel(process) as channel:

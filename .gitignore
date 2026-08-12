@@ -170,3 +170,8 @@ cython_debug/
 .vscode
 .tensorlake/
 .worktrees/
+
+# Ephemeral checkout used by trusted Function Agent native builds. The staged private source must
+# never be committed to the public SDK repository.
+.function-agent-core-upstream/
+.function-agent-core-staged

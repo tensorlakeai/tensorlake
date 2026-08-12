@@ -1,0 +1,146 @@
+name: Vendor the private Function Agent core
+description: >
+  Stages the canonical Function Agent core from compute-engine-internal over Tensorlake's
+  resolution placeholder. Remote builds use a repository-scoped GitHub App and a pinned CEI
+  commit; CEI acceptance can instead provide its current local checkout.
+
+inputs:
+  app-id:
+    description: GitHub App ID with contents:read on compute-engine-internal.
+    required: false
+  private-key:
+    description: Private key for the GitHub App.
+    required: false
+  source-ref:
+    description: Exact 40-character CEI commit. Defaults to crates/function-agent-core/CEI_REVISION.
+    required: false
+    default: ''
+  source-directory:
+    description: Optional local path to the CEI repository root; bypasses remote checkout.
+    required: false
+    default: ''
+  source-sha:
+    description: Exact commit represented by source-directory. Verified against its Git checkout.
+    required: false
+    default: ''
+  destination-directory:
+    description: Tensorlake repository root. Defaults to the current GitHub workspace.
+    required: false
+    default: ''
+
+outputs:
+  source-sha:
+    description: Exact CEI commit that supplied the staged core.
+    value: ${{ steps.stage.outputs.sha }}
+
+runs:
+  using: composite
+  steps:
+    - name: Resolve Function Agent core source
+      id: config
+      shell: bash
+      env:
+        INPUT_APP_ID: ${{ inputs.app-id }}
+        INPUT_PRIVATE_KEY: ${{ inputs.private-key }}
+        INPUT_SOURCE_REF: ${{ inputs.source-ref }}
+        INPUT_SOURCE_DIRECTORY: ${{ inputs.source-directory }}
+        INPUT_SOURCE_SHA: ${{ inputs.source-sha }}
+        INPUT_DESTINATION_DIRECTORY: ${{ inputs.destination-directory }}
+      run: |
+        set -euo pipefail
+
+        destination="${INPUT_DESTINATION_DIRECTORY:-${GITHUB_WORKSPACE}}"
+        if [[ ! -f "${destination}/crates/function-agent-core/Cargo.toml" ]]; then
+          echo "::error::Tensorlake destination not found at ${destination}"
+          exit 1
+        fi
+        echo "destination=${destination}" >>"$GITHUB_OUTPUT"
+
+        if [[ -n "${INPUT_SOURCE_DIRECTORY}" ]]; then
+          resolved_sha="$(git -C "${INPUT_SOURCE_DIRECTORY}" rev-parse HEAD)"
+          sha="${INPUT_SOURCE_SHA:-${resolved_sha}}"
+          if [[ -z "${sha}" ]]; then
+            echo "::error::Local Function Agent source did not resolve to a commit"
+            exit 1
+          fi
+          if [[ ! "${sha}" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error::Local Function Agent source did not resolve to a full commit SHA"
+            exit 1
+          fi
+          if [[ "${sha}" != "${resolved_sha}" ]]; then
+            echo "::error::Local Function Agent source is ${resolved_sha}, not requested ${sha}"
+            exit 1
+          fi
+          echo "mode=local" >>"$GITHUB_OUTPUT"
+          echo "source_directory=${INPUT_SOURCE_DIRECTORY}" >>"$GITHUB_OUTPUT"
+          echo "requested_ref=${sha}" >>"$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        if [[ -z "${INPUT_APP_ID}" || -z "${INPUT_PRIVATE_KEY}" ]]; then
+          echo "::error::Remote vendoring requires app-id and private-key"
+          exit 1
+        fi
+        source_ref="${INPUT_SOURCE_REF}"
+        if [[ -z "${source_ref}" ]]; then
+          source_ref="$(tr -d '[:space:]' < "${destination}/crates/function-agent-core/CEI_REVISION")"
+        fi
+        if [[ ! "${source_ref}" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::Function Agent source-ref must be one immutable 40-character CEI commit"
+          exit 1
+        fi
+        echo "mode=remote" >>"$GITHUB_OUTPUT"
+        echo "requested_ref=${source_ref}" >>"$GITHUB_OUTPUT"
+
+    - name: Mint compute-engine-internal access token
+      id: app-token
+      if: steps.config.outputs.mode == 'remote'
+      uses: actions/create-github-app-token@v1
+      with:
+        app-id: ${{ inputs.app-id }}
+        private-key: ${{ inputs.private-key }}
+        owner: tensorlakeai
+        repositories: compute-engine-internal
+
+    - name: Check out canonical Function Agent core
+      if: steps.config.outputs.mode == 'remote'
+      uses: actions/checkout@v4
+      with:
+        repository: tensorlakeai/compute-engine-internal
+        ref: ${{ steps.config.outputs.requested_ref }}
+        token: ${{ steps.app-token.outputs.token }}
+        path: .function-agent-core-upstream
+        sparse-checkout: |
+          function-service/agent-core
+          function-service/bindings/python/src/function_agent.rs
+          function-service/bindings/node/src/function_agent.rs
+        sparse-checkout-cone-mode: false
+        persist-credentials: false
+
+    - name: Stage canonical Function Agent core
+      id: stage
+      shell: bash
+      env:
+        SOURCE_MODE: ${{ steps.config.outputs.mode }}
+        LOCAL_SOURCE_DIRECTORY: ${{ steps.config.outputs.source_directory }}
+        REQUESTED_REF: ${{ steps.config.outputs.requested_ref }}
+        DESTINATION_DIRECTORY: ${{ steps.config.outputs.destination }}
+      run: |
+        set -euo pipefail
+        if [[ "${SOURCE_MODE}" == "local" ]]; then
+          compute_engine_root="${LOCAL_SOURCE_DIRECTORY}"
+          sha="${REQUESTED_REF}"
+        else
+          compute_engine_root="${GITHUB_WORKSPACE}/.function-agent-core-upstream"
+          sha="$(git -C "${GITHUB_WORKSPACE}/.function-agent-core-upstream" rev-parse HEAD)"
+          if [[ "${sha}" != "${REQUESTED_REF}" ]]; then
+            echo "::error::CEI checkout resolved ${sha}, expected ${REQUESTED_REF}"
+            exit 1
+          fi
+        fi
+
+        "${GITHUB_ACTION_PATH}/../../scripts/stage_function_agent_core.sh" \
+          "${compute_engine_root}" "${DESTINATION_DIRECTORY}" "${sha}"
+        echo "FUNCTION_AGENT_CORE_STAGED_SHA=${sha}" >>"$GITHUB_ENV"
+        echo "sha=${sha}" >>"$GITHUB_OUTPUT"
+        echo "Vendored compute-engine-internal@${sha}"

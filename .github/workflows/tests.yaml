@@ -16,16 +16,61 @@ permissions:
   contents: read
 
 jobs:
+  public_source_checks:
+    name: Public Python source checks
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: pip
+
+      - name: Install Poetry
+        uses: snok/install-poetry@v1
+        with:
+          version: 2.0.0
+          virtualenvs-create: true
+          virtualenvs-in-project: true
+
+      - name: Install public dependencies and check formatting
+        run: poetry install --no-root --with=dev && make check
+
+      - name: Run public Python unit tests
+        env:
+          PYTHONPATH: src:tests/applications
+        run: |
+          set -euo pipefail
+          for module in \
+            tests.applications.test_application_manifest \
+            tests.applications.test_code_zip \
+            tests.applications.test_future_validation \
+            tests.applications.test_parse_gitignore \
+            tests.applications.test_request_context_headers \
+            tests.cli.test_parse \
+            tests.utils.test_retries
+          do
+            poetry run python -m unittest "$module"
+          done
+
   rust_full_feature_workspace:
     name: Rust full-feature workspace tests
-    # The customer CLI feature set needs the private gsvc-mount and gsvc-codec cores, which require
-    # access to the artifact_storage repo. Skip on pull requests from forks (they cannot read the
-    # App secrets).
+    # The customer CLI and native function runners need private source from artifact_storage and
+    # compute-engine-internal. Fork pull requests cannot read either repository-scoped App secret.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest-xlarge
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Vendor canonical Function Agent core
+        uses: ./.github/actions/vendor-function-agent-core
+        with:
+          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
+          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -116,10 +161,17 @@ jobs:
 
   windows_build_smoke:
     name: Windows build smoke test
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
+
+      - name: Vendor canonical Function Agent core
+        uses: ./.github/actions/vendor-function-agent-core
+        with:
+          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
+          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -151,10 +203,17 @@ jobs:
 
   run_tests:
     name: Lint and test
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ubuntu-latest-xlarge
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
+
+      - name: Vendor canonical Function Agent core
+        uses: ./.github/actions/vendor-function-agent-core
+        with:
+          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
+          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -202,6 +261,12 @@ jobs:
     environment: prod
     steps:
       - uses: actions/checkout@v4
+
+      - name: Vendor canonical Function Agent core
+        uses: ./.github/actions/vendor-function-agent-core
+        with:
+          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
+          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
       - name: Setup Python
         uses: actions/setup-python@v5

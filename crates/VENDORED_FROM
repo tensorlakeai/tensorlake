@@ -23,8 +23,23 @@ Wire-format coupling still applies even without vendoring: the fast-clone client
 (FastCloneManifest and friends, ingest request/response shapes). If those change upstream, open
 a companion PR here.
 
-Function agent core: `crates/function-agent-core` is vendored from
-`compute-engine-internal/function-service/agent-core`. It is the disposable
-worker half of Function Service protocol v1. Sync it when that protocol or its
-deterministic execution core changes; Function Service remains the durable
-state and fencing authority.
+Function Agent: NO core or function-specific native-binding implementation source is vendored into
+this public repo.
+
+`crates/function-agent-core` is a resolution placeholder for the canonical private crate at
+`compute-engine-internal/function-service/agent-core`. The function-agent modules included by the
+combined Python and Node extensions are placeholders for CEI's canonical binding modules. The full
+CEI commit in `crates/function-agent-core/CEI_REVISION` is injected ephemerally:
+
+  * locally:  `just with-function-agent-core <command>` copies from a sibling CEI checkout and
+              restores the placeholder after the command
+  * CI:       `.github/actions/vendor-function-agent-core` mints a short-lived GitHub App token,
+              sparse-checks out the pinned CEI crate, and stages it for the job
+  * CEI CI:   the same action receives the current local CEI crate, so service and SDK acceptance
+              always compile one source tree instead of coordinating source-copy branches
+
+The placeholder manifest is checked against CEI during staging and intentionally differs only by
+selecting `tls-ring` instead of CEI's `tls-aws-lc` default. Staging carries every core crate input
+and both language bindings, and records an explicit SHA marker so stale files are never accepted as
+trusted source. Function Service remains the durable state and fencing authority; the injected
+core is its disposable worker half.

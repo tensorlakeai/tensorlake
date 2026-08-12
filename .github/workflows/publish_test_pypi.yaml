@@ -31,31 +31,10 @@ jobs:
           echo "## TestPyPI release version" >> $GITHUB_STEP_SUMMARY
           echo "\`${version}\`" >> $GITHUB_STEP_SUMMARY
 
-  build-sdist:
-    needs: [prepare]
-    name: Build source distribution
-    runs-on: namespace-profile-rust-builder-amd64
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Bump version
-        run: python .github/scripts/bump_version.py ${{ needs.prepare.outputs.version }}
-
-      - name: Build sdist
-        uses: PyO3/maturin-action@v1
-        with:
-          command: sdist
-          args: --out dist
-
-      - name: Upload sdist
-        uses: actions/upload-artifact@v4
-        with:
-          name: wheels-sdist
-          path: dist
-
   build-wheels:
     needs: [prepare]
     name: Build wheels on ${{ matrix.platform.os }} (${{ matrix.platform.target }})
+    if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
     runs-on: ${{ matrix.platform.os }}
     strategy:
       fail-fast: false
@@ -78,6 +57,12 @@ jobs:
             rust_target: x86_64-pc-windows-msvc
     steps:
       - uses: actions/checkout@v4
+
+      - name: Vendor canonical Function Agent core
+        uses: ./.github/actions/vendor-function-agent-core
+        with:
+          app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
+          private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
       - name: Bump version
         run: python .github/scripts/bump_version.py ${{ needs.prepare.outputs.version }}
@@ -125,11 +110,12 @@ jobs:
     name: Publish to TestPyPI
     # Dispatch-only: publishing every PR's dev version filled the TestPyPI project's 10 GB
     # size cap (each run uploads the full multi-platform rust wheel set), which then failed
-    # every PR. PRs still build the sdist and all wheels above as a packaging smoke check;
+    # every PR. Trusted PRs still build all wheels above as a packaging smoke check;
     # the publish + integration chain runs on demand. If the cap is raised or old dev
     # releases are pruned, this can go back to running per-PR.
     if: github.event_name == 'workflow_dispatch'
-    needs: [build-sdist, build-wheels]
+    # Only wheels are publishable: an sdist would have to contain the private Function Agent core.
+    needs: [build-wheels]
     runs-on: ubuntu-latest
     environment:
       name: test-pypi
