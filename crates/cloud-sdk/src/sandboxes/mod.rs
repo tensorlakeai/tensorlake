@@ -36,6 +36,18 @@ use models::{
 pub const DEFAULT_SANDBOX_PROXY_URL: &str = "https://sandbox.tensorlake.ai";
 pub const SANDBOX_MANAGEMENT_PORT: u16 = 9501;
 
+/// Wire-only response for claim-time configuration negotiation. Keep the
+/// acknowledgement private so adding the protocol field does not make the
+/// existing public [`CreateSandboxResponse`] source-incompatible for Rust
+/// callers that construct it directly.
+#[derive(Debug, serde::Deserialize)]
+struct ClaimSandboxResponse {
+    #[serde(flatten)]
+    sandbox: CreateSandboxResponse,
+    #[serde(default)]
+    claim_configuration_applied: Option<bool>,
+}
+
 /// A reference to a sandbox process: either its OS **pid** or a managed-process **name**
 /// given at creation. This is the single place the pid/name path segment is built, reused by
 /// the Rust SDK, the Python/Node bindings, and the CLI.
@@ -332,8 +344,8 @@ impl SandboxesClient {
 
     /// Claim a sandbox from a pool and apply sandbox-specific file-system
     /// mounts before the claimed sandbox becomes ready. Fails closed when the
-    /// server does not acknowledge claim-configuration support and attempts
-    /// to terminate the incorrectly configured sandbox returned by that
+    /// server does not acknowledge claim-configuration support and requests
+    /// termination of the incorrectly configured sandbox returned by that
     /// server.
     pub async fn claim_with_request(
         &self,
@@ -344,13 +356,18 @@ impl SandboxesClient {
         let req = self
             .client
             .build_post_json_request(Method::POST, &uri, request)?;
-        let response: Traced<CreateSandboxResponse> = self
+        let response: Traced<ClaimSandboxResponse> = self
             .client
             .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
             .await?;
-        if response.claim_configuration_applied != Some(true) {
+        let claim_configuration_applied = response.claim_configuration_applied;
+        let response = response.map(|response| response.sandbox);
+        if claim_configuration_applied != Some(true) {
             let cleanup = match self.delete(&response.sandbox_id).await {
-                Ok(_) => "the incorrectly configured sandbox was terminated".to_string(),
+                Ok(_) => format!(
+                    "termination was requested for sandbox {:?}",
+                    response.sandbox_id
+                ),
                 Err(error) => format!(
                     "cleanup of sandbox {:?} also failed: {error}",
                     response.sandbox_id

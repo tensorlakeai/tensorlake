@@ -181,7 +181,11 @@ async fn pool_claim_with_file_systems_rejects_server_without_acknowledgment() {
         .expect_err("an old server must not silently ignore claim-time mounts");
 
     assert!(error.to_string().contains("did not acknowledge"));
-    assert!(error.to_string().contains("was terminated"));
+    assert!(
+        error
+            .to_string()
+            .contains("termination was requested for sandbox \"sbx-1\"")
+    );
     let (_, cleanup_request) = server.await.expect("server join");
     assert!(
         String::from_utf8_lossy(&cleanup_request)
