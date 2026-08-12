@@ -21,8 +21,8 @@ use crate::{
 pub use desktop::SandboxDesktopClient;
 
 use models::{
-    ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, CopySandboxResponse,
-    CreateSandboxPoolRequest, CreateSandboxPoolResponse, CreateSandboxRequest,
+    ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, ClaimSandboxRequest,
+    CopySandboxResponse, CreateSandboxPoolRequest, CreateSandboxPoolResponse, CreateSandboxRequest,
     CreateSandboxResponse, CreateSnapshotRequest, CreateSnapshotResponse, DaemonInfo,
     DetachFileSystemRequest, FileSystemMount, GetSandboxLogsRequest, HealthResponse,
     ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
@@ -328,6 +328,41 @@ impl SandboxesClient {
         self.client
             .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
             .await
+    }
+
+    /// Claim a sandbox from a pool and apply sandbox-specific file-system
+    /// mounts before the claimed sandbox becomes ready. Fails closed when the
+    /// server does not acknowledge claim-configuration support and attempts
+    /// to terminate the incorrectly configured sandbox returned by that
+    /// server.
+    pub async fn claim_with_request(
+        &self,
+        pool_id: &str,
+        request: &ClaimSandboxRequest,
+    ) -> Result<Traced<CreateSandboxResponse>, SdkError> {
+        let uri = self.endpoint(&format!("sandbox-pools/{pool_id}/sandboxes"));
+        let req = self
+            .client
+            .build_post_json_request(Method::POST, &uri, request)?;
+        let response: Traced<CreateSandboxResponse> = self
+            .client
+            .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
+            .await?;
+        if response.claim_configuration_applied != Some(true) {
+            let cleanup = match self.delete(&response.sandbox_id).await {
+                Ok(_) => "the incorrectly configured sandbox was terminated".to_string(),
+                Err(error) => format!(
+                    "cleanup of sandbox {:?} also failed: {error}",
+                    response.sandbox_id
+                ),
+            };
+            return Err(SdkError::ClientError(format!(
+                "server did not acknowledge sandbox pool claim configuration for pool \
+                 {pool_id:?}; upgrade the compute-engine server before requesting claim-time \
+                 file systems; {cleanup}"
+            )));
+        }
+        Ok(response)
     }
 
     pub async fn copy(

@@ -23,6 +23,7 @@ from .exceptions import (
 from .models import (
     CLEAR_NETWORK_POLICY,
     ArchivedSandboxInfo,
+    ClaimSandboxRequest,
     ClearNetworkPolicy,
     ContainerResourcesInfo,
     CopySandboxResponse,
@@ -511,7 +512,12 @@ class SandboxClient:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-    def claim(self, pool_id: str) -> Traced[CreateSandboxResponse]:
+    def claim(
+        self,
+        pool_id: str,
+        *,
+        file_systems: list[FileSystemMount] | None = None,
+    ) -> Traced[CreateSandboxResponse]:
         """Claim a sandbox from a pool.
 
         Claims a warm container from the pool, or creates a new one
@@ -519,6 +525,8 @@ class SandboxClient:
 
         Args:
             pool_id: ID of the pool to claim from
+            file_systems: File systems to mount into the claimed sandbox.
+                The sandbox becomes ready only after these mounts converge.
 
         Returns:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
@@ -528,7 +536,13 @@ class SandboxClient:
             SandboxConnectionError: If the server is unreachable
         """
         try:
-            trace_id, response_json = self._rust_client.claim_sandbox(pool_id=pool_id)
+            claim_kwargs: dict[str, str] = {"pool_id": pool_id}
+            if file_systems:
+                request = ClaimSandboxRequest(file_systems=file_systems)
+                claim_kwargs["request_json"] = request.model_dump_json(
+                    by_alias=True, exclude_none=True
+                )
+            trace_id, response_json = self._rust_client.claim_sandbox(**claim_kwargs)
             return Traced(
                 trace_id, CreateSandboxResponse.model_validate_json(response_json)
             )
@@ -1530,8 +1544,8 @@ class SandboxClient:
             name: Optional name for the sandbox. Named sandboxes support
                 suspend/resume. When absent the sandbox is ephemeral.
             file_systems: File systems to mount into the sandbox
-                at boot, each at its own absolute, unique guest mount path.
-                Ignored when claiming from a pool.
+                at boot or warm-pool claim, each at its own absolute, unique
+                guest mount path.
 
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)
@@ -1555,7 +1569,7 @@ class SandboxClient:
         # may fall back to the requested name when caching info locally.
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
-            result = request_client.claim(pool_id)
+            result = request_client.claim(pool_id, file_systems=file_systems)
         else:
             result = request_client.create(
                 image=image,

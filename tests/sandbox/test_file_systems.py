@@ -19,7 +19,11 @@ from tensorlake.sandbox import (
 from tensorlake.sandbox.async_client import AsyncSandboxClient
 from tensorlake.sandbox.client import SandboxClient
 from tensorlake.sandbox.exceptions import SandboxError
-from tensorlake.sandbox.models import CreateSandboxRequest, CreateSandboxResources
+from tensorlake.sandbox.models import (
+    ClaimSandboxRequest,
+    CreateSandboxRequest,
+    CreateSandboxResources,
+)
 
 
 def _sandbox_info_json(file_systems: list[dict]) -> str:
@@ -39,6 +43,7 @@ class _FakeRustClient:
         self.attach_calls: list[tuple[str, str, str]] = []
         self.detach_calls: list[tuple[str, str]] = []
         self.create_request_json: str | None = None
+        self.claim_calls: list[dict[str, str]] = []
 
     def close(self):
         return None
@@ -60,10 +65,15 @@ class _FakeRustClient:
         self.create_request_json = request_json
         return ("trace-create", '{"sandbox_id":"sbx-1","status":"pending"}')
 
+    def claim_sandbox(self, **kwargs):
+        self.claim_calls.append(kwargs)
+        return ("trace-claim", '{"sandbox_id":"sbx-1","status":"pending"}')
+
 
 class _FakeAsyncRustClient:
     def __init__(self):
         self.attach_calls: list[tuple[str, str, str]] = []
+        self.claim_calls: list[dict[str, str]] = []
 
     def close(self):
         return None
@@ -76,6 +86,10 @@ class _FakeAsyncRustClient:
                 [{"file_system_id": file_system_id, "mount_path": mount_path}]
             ),
         )
+
+    async def claim_sandbox_async(self, **kwargs):
+        self.claim_calls.append(kwargs)
+        return ("trace-claim", '{"sandbox_id":"sbx-1","status":"pending"}')
 
 
 def _sync_client(fake: _FakeRustClient) -> SandboxClient:
@@ -195,6 +209,27 @@ class TestFileSystemModels(unittest.TestCase):
         payload = json.loads(request.model_dump_json(by_alias=True, exclude_none=True))
         self.assertNotIn("file_systems", payload)
 
+    def test_claim_request_serializes_file_systems_to_wire_key(self):
+        request = ClaimSandboxRequest(
+            file_systems=[
+                FileSystemMount(
+                    file_system_id="file_system_abc", mount_path="/mnt/skills"
+                )
+            ]
+        )
+        payload = json.loads(request.model_dump_json(by_alias=True, exclude_none=True))
+        self.assertEqual(
+            payload,
+            {
+                "file_systems": [
+                    {
+                        "file_system_id": "file_system_abc",
+                        "mount_path": "/mnt/skills",
+                    }
+                ]
+            },
+        )
+
 
 class TestSandboxClientFileSystems(unittest.TestCase):
     def test_attach_file_system(self):
@@ -245,6 +280,40 @@ class TestSandboxClientFileSystems(unittest.TestCase):
             [{"file_system_id": "file_system_abc", "mount_path": "/mnt/skills"}],
         )
 
+    def test_claim_threads_file_systems(self):
+        fake = _FakeRustClient()
+        client = _sync_client(fake)
+
+        client.claim(
+            "pool-1",
+            file_systems=[
+                FileSystemMount(
+                    file_system_id="file_system_abc", mount_path="/mnt/skills"
+                )
+            ],
+        )
+
+        self.assertEqual(fake.claim_calls[0]["pool_id"], "pool-1")
+        self.assertEqual(
+            json.loads(fake.claim_calls[0]["request_json"]),
+            {
+                "file_systems": [
+                    {
+                        "file_system_id": "file_system_abc",
+                        "mount_path": "/mnt/skills",
+                    }
+                ]
+            },
+        )
+
+    def test_claim_without_file_systems_keeps_bodyless_native_call(self):
+        fake = _FakeRustClient()
+        client = _sync_client(fake)
+
+        client.claim("pool-1")
+
+        self.assertEqual(fake.claim_calls, [{"pool_id": "pool-1"}])
+
 
 class TestAsyncSandboxClientFileSystems(unittest.IsolatedAsyncioTestCase):
     async def test_attach_file_system(self):
@@ -266,6 +335,25 @@ class TestAsyncSandboxClientFileSystems(unittest.IsolatedAsyncioTestCase):
                     file_system_id="file_system_abc", mount_path="/mnt/skills"
                 )
             ],
+        )
+
+    async def test_claim_threads_file_systems(self):
+        fake = _FakeAsyncRustClient()
+        client = _async_client(fake)
+
+        await client.claim(
+            "pool-1",
+            file_systems=[
+                FileSystemMount(
+                    file_system_id="file_system_abc", mount_path="/mnt/skills"
+                )
+            ],
+        )
+
+        self.assertEqual(fake.claim_calls[0]["pool_id"], "pool-1")
+        self.assertEqual(
+            json.loads(fake.claim_calls[0]["request_json"])["file_systems"],
+            [{"file_system_id": "file_system_abc", "mount_path": "/mnt/skills"}],
         )
 
 

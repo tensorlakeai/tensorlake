@@ -7,8 +7,9 @@ images). Register one with :func:`create_file_system`, list them with
 :func:`delete_file_system`.
 
 Once registered, mount a file system into a sandbox at boot via
-``Sandbox.create(file_systems=[...])`` or attach it to a running sandbox
-with :meth:`tensorlake.sandbox.Sandbox.attach_file_system`.
+``Sandbox.create(file_systems=[...])``, include it in a warm-pool claim, or
+attach it to a running sandbox with
+:meth:`tensorlake.sandbox.Sandbox.attach_file_system`.
 """
 
 from __future__ import annotations

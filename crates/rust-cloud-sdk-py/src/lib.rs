@@ -36,9 +36,9 @@ use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuild
 use tensorlake::sandbox_images::SandboxImageBuildEvent;
 use tensorlake::sandbox_templates::SandboxTemplatesClient;
 use tensorlake::sandboxes::models::{
-    ArchivedSandboxesPaginationDirection, CreateSandboxPoolRequest, CreateSandboxRequest,
-    GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType, UpdateSandboxPoolRequest,
-    UpdateSandboxRequest,
+    ArchivedSandboxesPaginationDirection, ClaimSandboxRequest, CreateSandboxPoolRequest,
+    CreateSandboxRequest, GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType,
+    UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
@@ -1602,11 +1602,23 @@ impl CloudSandboxClient {
             .map_err(into_sandbox_py_error)
     }
 
-    fn claim_sandbox(&self, pool_id: String) -> PyResult<(String, String)> {
+    #[pyo3(signature = (pool_id, request_json=None))]
+    fn claim_sandbox(
+        &self,
+        pool_id: String,
+        request_json: Option<String>,
+    ) -> PyResult<(String, String)> {
+        let request = request_json
+            .as_deref()
+            .map(parse_json_payload::<ClaimSandboxRequest>)
+            .transpose()?;
         let client = self.client.clone();
         shared_runtime()
             .block_on(async move {
-                let traced = client.claim(&pool_id).await?;
+                let traced = match request {
+                    Some(request) => client.claim_with_request(&pool_id, &request).await?,
+                    None => client.claim(&pool_id).await?,
+                };
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
                 Ok((trace_id, json))
@@ -1918,17 +1930,24 @@ impl CloudSandboxClient {
         })
     }
 
+    #[pyo3(signature = (pool_id, request_json=None))]
     fn claim_sandbox_async<'py>(
         &self,
         py: Python<'py>,
         pool_id: String,
+        request_json: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
+        let request = request_json
+            .as_deref()
+            .map(parse_json_payload::<ClaimSandboxRequest>)
+            .transpose()?;
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = client
-                .claim(&pool_id)
-                .await
-                .map_err(into_sandbox_py_error)?;
+            let traced = match request {
+                Some(request) => client.claim_with_request(&pool_id, &request).await,
+                None => client.claim(&pool_id).await,
+            }
+            .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))

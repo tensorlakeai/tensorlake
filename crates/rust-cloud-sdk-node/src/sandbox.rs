@@ -25,9 +25,9 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use tensorlake::sandboxes::models::{
-    ArchivedSandboxesPaginationDirection, CreateSandboxPoolRequest, CreateSandboxRequest,
-    GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType, UpdateSandboxPoolRequest,
-    UpdateSandboxRequest,
+    ArchivedSandboxesPaginationDirection, ClaimSandboxRequest, CreateSandboxPoolRequest,
+    CreateSandboxRequest, GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType,
+    UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     SandboxProxyClient, SandboxesClient, resolve_sandbox_proxy_target, select_sandbox_proxy_url,
@@ -379,9 +379,21 @@ impl NativeSandboxClient {
     }
 
     #[napi]
-    pub async fn claim_sandbox(&self, pool_id: String) -> napi::Result<TracedJson> {
+    pub async fn claim_sandbox(
+        &self,
+        pool_id: String,
+        request_json: Option<String>,
+    ) -> napi::Result<TracedJson> {
         let client = self.client.clone();
-        let traced = client.claim(&pool_id).await.map_err(into_napi_error)?;
+        let request = request_json
+            .as_deref()
+            .map(parse_json_payload::<ClaimSandboxRequest>)
+            .transpose()?;
+        let traced = match request {
+            Some(request) => client.claim_with_request(&pool_id, &request).await,
+            None => client.claim(&pool_id).await,
+        }
+        .map_err(into_napi_error)?;
         let json =
             serde_json::to_string(&*traced).map_err(|e| into_napi_error(SdkError::from(e)))?;
         Ok(TracedJson {

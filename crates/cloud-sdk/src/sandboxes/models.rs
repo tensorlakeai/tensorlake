@@ -178,6 +178,16 @@ pub struct CreateSandboxRequest {
     pub file_systems: Vec<FileSystemMount>,
 }
 
+/// Sandbox-specific state to apply while claiming a warm pool container.
+///
+/// Pool templates stay storage-neutral; these mounts belong only to the
+/// sandbox created by the claim.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ClaimSandboxRequest {
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub file_systems: Vec<FileSystemMount>,
+}
+
 /// Request body for detaching a file system from a running sandbox. The
 /// mount path is sent in the body (rather than the URL) so its slashes don't
 /// need URL-encoding.
@@ -427,6 +437,8 @@ impl<'de> Deserialize<'de> for UpdateSandboxPoolRequest {
 pub struct CreateSandboxResponse {
     pub sandbox_id: String,
     pub status: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub claim_configuration_applied: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub reason: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

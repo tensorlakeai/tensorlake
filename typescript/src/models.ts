@@ -102,6 +102,11 @@ export interface FileSystemMount {
   mountPath: string;
 }
 
+export interface ClaimSandboxOptions {
+  /** File systems to mount before the claimed sandbox is reported as running. */
+  fileSystems?: FileSystemMount[];
+}
+
 // --- Sandbox lifecycle ---
 
 export interface CreateSandboxOptions {
@@ -123,7 +128,7 @@ export interface CreateSandboxOptions {
   snapshotId?: string;
   /** Optional name for the sandbox. Named sandboxes support suspend/resume. When absent the sandbox is ephemeral. */
   name?: string;
-  /** File systems to mount into the sandbox at boot, each at its own absolute, unique guest mount path. */
+  /** File systems to mount on fresh creation or warm-pool claim, each at its own absolute, unique guest mount path. */
   fileSystems?: FileSystemMount[];
 }
 

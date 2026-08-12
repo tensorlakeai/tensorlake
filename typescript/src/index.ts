@@ -153,6 +153,7 @@ export type {
   ContainerResourcesInfo,
   NetworkConfig,
   FileSystemMount,
+  ClaimSandboxOptions,
   CopySandboxOptions,
   CopiedSandboxResponse,
   CopySandboxResponse,

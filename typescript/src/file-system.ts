@@ -10,7 +10,7 @@ import { buildContextFromEnv } from "./sandbox-image.js";
  * file-system API is organization/project-scoped.
  *
  * To mount a registered file system into a sandbox, pass
- * `fileSystems` to `Sandbox.create()` (mount at boot) or call
+ * `fileSystems` to `Sandbox.create()` (including warm-pool claims) or call
  * `sandbox.attachFileSystem()` / `sandbox.detachFileSystem()` on a
  * running sandbox.
  */
