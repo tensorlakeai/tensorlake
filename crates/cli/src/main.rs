@@ -2741,7 +2741,6 @@ async fn run_fs_command(_ctx: &mut CliContext, _subcmd: FsCommands) -> error::Re
     ))
 }
 
-#[cfg(feature = "mount")]
 /// Resolve the mount a `tl git log`/`tl git smartlog` subject refers to, if any.
 ///
 /// The subject is either a mount path or a bare repository name. A repository name frequently also
@@ -2775,6 +2774,7 @@ fn git_graph_mount_dir(
     }
 }
 
+#[cfg(feature = "mount")]
 async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> error::Result<()> {
     let mut subcmd = match subcmd {
         GitCommands::Prefetch { path } => {
