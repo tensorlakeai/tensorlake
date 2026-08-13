@@ -242,8 +242,8 @@ class FileSystem(BaseModel):
     File systems are project-scoped resources managed through the
     platform API. Register one with
     :func:`tensorlake.create_file_system`, then mount it into a sandbox
-    at boot (``Sandbox.create(file_systems=[...])``) or attach it to a
-    running sandbox (:meth:`Sandbox.attach_file_system`).
+    at boot or warm-pool claim (``Sandbox.create(file_systems=[...])``), or
+    attach it to a running sandbox (:meth:`Sandbox.attach_file_system`).
     """
 
     id: str | None = None
@@ -270,6 +270,14 @@ class CreateSandboxRequest(BaseModel):
     network: NetworkConfig | None = None
     snapshot_id: str | None = None
     name: str | None = None
+    file_systems: list[FileSystemMount] | None = None
+
+    model_config = {"populate_by_name": True}
+
+
+class ClaimSandboxRequest(BaseModel):
+    """Sandbox-specific state applied while claiming from a warm pool."""
+
     file_systems: list[FileSystemMount] | None = None
 
     model_config = {"populate_by_name": True}

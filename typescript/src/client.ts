@@ -11,6 +11,7 @@ import {
   type ArchivedSandboxInfo,
   type CopySandboxOptions,
   type CopySandboxResponse,
+  type ClaimSandboxOptions,
   type CreateAndConnectOptions,
   type CreatePoolOptions,
   type CreateSandboxOptions,
@@ -522,10 +523,29 @@ export class SandboxClient {
     );
   }
 
-  /** Claim a warm sandbox from a pool, creating one if no warm containers are available. */
-  async claim(poolId: string): Promise<Traced<CreateSandboxResponse>> {
+  /**
+   * Claim a warm sandbox from a pool, creating one if no warm containers are
+   * available. Claim-specific file systems are ready before the sandbox is
+   * reported as running.
+   */
+  async claim(
+    poolId: string,
+    options?: ClaimSandboxOptions,
+  ): Promise<Traced<CreateSandboxResponse>> {
+    const requestJson =
+      options?.fileSystems != null && options.fileSystems.length > 0
+        ? JSON.stringify({
+            file_systems: options.fileSystems.map((fs) => ({
+              file_system_id: fs.fileSystemId,
+              mount_path: fs.mountPath,
+            })),
+          })
+        : undefined;
     return this.tracedJson<CreateSandboxResponse>(
-      () => this.native.claimSandbox(poolId),
+      () =>
+        requestJson == null
+          ? this.native.claimSandbox(poolId)
+          : this.native.claimSandbox(poolId, requestJson),
       "sandboxId",
       { poolId, notFoundKind: "pool" },
     );
@@ -789,7 +809,9 @@ export class SandboxClient {
     const createStart = nowMs();
     const result =
       options?.poolId != null
-        ? await requestClient.claim(options.poolId)
+        ? await requestClient.claim(options.poolId, {
+            fileSystems: options.fileSystems,
+          })
         : await requestClient.create(options);
     logSdkTiming(
       "sandbox.create",

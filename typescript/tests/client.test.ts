@@ -749,6 +749,35 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("sends claim-specific file systems", async () => {
+      const claimSandbox = vi.fn(async () => ({
+        traceId: "t",
+        json: JSON.stringify({ sandbox_id: "sbx-fs", status: "running" }),
+      }));
+      installNativeStub({ client: { claimSandbox } });
+
+      const client = SandboxClient.forLocalhost();
+      const result = await client.claim("pool-1", {
+        fileSystems: [
+          { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
+        ],
+      });
+
+      expect(result.sandboxId).toBe("sbx-fs");
+      expect(claimSandbox).toHaveBeenCalledWith(
+        "pool-1",
+        JSON.stringify({
+          file_systems: [
+            {
+              file_system_id: "file_system_abc",
+              mount_path: "/mnt/skills",
+            },
+          ],
+        }),
+      );
+      client.close();
+    });
+
     it("returns readiness timeout responses without retrying", async () => {
       const claimSandbox = vi.fn(async () => ({
         traceId: "t",
@@ -824,6 +853,33 @@ describe("SandboxClient", () => {
   });
 
   describe("createAndConnect", () => {
+    it("threads file systems through a warm-pool claim", async () => {
+      const claimSandbox = vi.fn(async () => ({
+        traceId: "t",
+        json: JSON.stringify({
+          sandbox_id: "sbx-warm-fs",
+          status: "running",
+          sandbox_url: "https://sbx-warm-fs.sandbox.tensorlake.ai",
+        }),
+      }));
+      installNativeStub({ client: { claimSandbox } });
+
+      const client = SandboxClient.forCloud({ apiKey: "key" });
+      const sandbox = await client.createAndConnect({
+        poolId: "pool-1",
+        fileSystems: [
+          { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
+        ],
+      });
+
+      expect(claimSandbox).toHaveBeenCalledWith(
+        "pool-1",
+        expect.stringContaining('"file_system_id":"file_system_abc"'),
+      );
+      sandbox.close();
+      client.close();
+    });
+
     it("uses server sandbox URL from running create response", async () => {
       const stub = installNativeStub({
         client: {

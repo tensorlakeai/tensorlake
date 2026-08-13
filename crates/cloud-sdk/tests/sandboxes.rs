@@ -3,8 +3,9 @@ use tensorlake::{
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
         models::{
-            ContainerResourcesInfo, CreateSandboxPoolRequest, NetworkConfig, NetworkPolicyUpdate,
-            SandboxPoolRequest, UpdateSandboxPoolRequest, UpdateSandboxRequest,
+            ClaimSandboxRequest, ContainerResourcesInfo, CreateSandboxPoolRequest, FileSystemMount,
+            NetworkConfig, NetworkPolicyUpdate, SandboxPoolRequest, UpdateSandboxPoolRequest,
+            UpdateSandboxRequest,
         },
     },
 };
@@ -99,6 +100,97 @@ async fn direct_empty_post_helper_sends_content_length_zero() {
     let request_text = String::from_utf8_lossy(&request);
     assert!(request_text.starts_with("POST /sandbox-pools/pool-1/sandboxes HTTP/1.1\r\n"));
     assert!(request_text.contains("\r\ncontent-length: 0\r\n"));
+}
+
+#[tokio::test]
+async fn pool_claim_with_file_systems_sends_json_body() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept request");
+        let request = read_http_request(&mut socket).await;
+        let body =
+            r#"{"sandbox_id":"sbx-1","status":"running","claim_configuration_applied":true}"#;
+        write_json_response(&mut socket, body).await;
+        request
+    });
+
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", false);
+    sandboxes
+        .claim_with_request(
+            "pool-1",
+            &ClaimSandboxRequest {
+                file_systems: vec![FileSystemMount {
+                    file_system_id: "file_system_abc".to_string(),
+                    mount_path: "/mnt/skills".to_string(),
+                }],
+            },
+        )
+        .await
+        .expect("claim sandbox with file systems");
+
+    let request = server.await.expect("server join");
+    let request_text = String::from_utf8_lossy(&request);
+    assert!(request_text.starts_with("POST /sandbox-pools/pool-1/sandboxes HTTP/1.1\r\n"));
+    assert!(request_text.contains("\r\ncontent-type: application/json\r\n"));
+    assert!(request.ends_with(
+        br#"{"file_systems":[{"file_system_id":"file_system_abc","mount_path":"/mnt/skills"}]}"#
+    ));
+}
+
+#[tokio::test]
+async fn pool_claim_with_file_systems_rejects_server_without_acknowledgment() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept request");
+        let claim_request = read_http_request(&mut socket).await;
+        let body = r#"{"sandbox_id":"sbx-1","status":"running"}"#;
+        write_json_response(&mut socket, body).await;
+
+        let (mut socket, _) = listener.accept().await.expect("accept cleanup request");
+        let cleanup_request = read_http_request(&mut socket).await;
+        write_json_response(&mut socket, "{}").await;
+        (claim_request, cleanup_request)
+    });
+
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", false);
+    let error = sandboxes
+        .claim_with_request(
+            "pool-1",
+            &ClaimSandboxRequest {
+                file_systems: vec![FileSystemMount {
+                    file_system_id: "file_system_abc".to_string(),
+                    mount_path: "/mnt/skills".to_string(),
+                }],
+            },
+        )
+        .await
+        .expect_err("an old server must not silently ignore claim-time mounts");
+
+    assert!(error.to_string().contains("did not acknowledge"));
+    assert!(
+        error
+            .to_string()
+            .contains("termination was requested for sandbox \"sbx-1\"")
+    );
+    let (_, cleanup_request) = server.await.expect("server join");
+    assert!(
+        String::from_utf8_lossy(&cleanup_request)
+            .starts_with("DELETE /sandboxes/sbx-1 HTTP/1.1\r\n")
+    );
 }
 
 #[tokio::test]

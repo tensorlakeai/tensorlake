@@ -133,7 +133,7 @@ with client.create_and_connect(snapshot_id=snapshot.snapshot_id) as sandbox:
 Pre-warm containers for fast startup:
 
 ```python
-from tensorlake.sandbox import NetworkConfig
+from tensorlake.sandbox import FileSystemMount, NetworkConfig
 
 # Create a pool with warm containers and no internet access
 pool = client.create_pool(
@@ -142,8 +142,17 @@ pool = client.create_pool(
     network=NetworkConfig(allow_internet_access=False),
 )
 
-# Claim a sandbox instantly from the pool
-resp = client.claim(pool.pool_id)
+# Claim a sandbox instantly from the pool. Claim-specific file systems are
+# mounted before the sandbox is reported as running.
+resp = client.claim(
+    pool.pool_id,
+    file_systems=[
+        FileSystemMount(
+            file_system_id="file_system_abc",
+            mount_path="/mnt/skills",
+        )
+    ],
+)
 sandbox = client.connect(resp.sandbox_id)
 
 # Named sandboxes can be reconnected later by name
