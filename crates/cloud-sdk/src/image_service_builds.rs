@@ -79,6 +79,7 @@ where
 {
     warn_ignored_options(&options, &mut emit);
     let is_public = options.is_public;
+    let builder_resources = builder_resource_overrides(&options)?;
     // Forward the local `docker login` state for the guest's registry pulls,
     // the same source the legacy path ships into its builder. The service
     // stages it write-only and the reconciler hands the guest a short-lived
@@ -113,6 +114,7 @@ where
                     "project": project,
                 }),
                 is_public,
+                builder_resources,
                 registry_credentials_json,
             ),
             &mut emit,
@@ -146,6 +148,7 @@ where
                 "project": project,
             }),
             is_public,
+            builder_resources,
             registry_credentials_json,
         ),
         &mut emit,
@@ -230,22 +233,44 @@ fn with_registry_credentials(mut body: Value, registry_credentials_json: Option<
 fn build_request(
     mut body: Value,
     is_public: bool,
+    builder_resources: Option<Value>,
     registry_credentials_json: Option<String>,
 ) -> Value {
+    let object = body
+        .as_object_mut()
+        .expect("Image Service build request body must be an object");
     if is_public {
-        body.as_object_mut()
-            .expect("Image Service build request body must be an object")
-            .insert(
-                "image_scope".to_string(),
-                Value::String("global".to_string()),
-            );
+        object.insert(
+            "image_scope".to_string(),
+            Value::String("global".to_string()),
+        );
+    }
+    if let Some(builder_resources) = builder_resources {
+        object.insert("builder_resources".to_string(), builder_resources);
     }
     with_registry_credentials(body, registry_credentials_json)
 }
 
-/// Builder resource knobs belong to the legacy platform-api rootfs builder;
-/// the Image Service reconciler sizes builder sandboxes from service
-/// configuration. Public visibility is supported through global image scope.
+/// Preserve partial resource overrides so Image Service remains authoritative
+/// for defaults and CPU-to-memory validation.
+fn builder_resource_overrides(options: &CommonBuildOptions) -> Result<Option<Value>> {
+    let mut resources = serde_json::Map::new();
+    if let Some(cpus) = options.cpus {
+        let cpus = serde_json::Number::from_f64(cpus)
+            .ok_or_else(|| SandboxImageBuildError::usage("builder CPUs must be a finite number"))?;
+        resources.insert("cpus".to_string(), Value::Number(cpus));
+    }
+    if let Some(memory_mb) = options.memory_mb {
+        let memory_mb = u64::try_from(memory_mb)
+            .map_err(|_| SandboxImageBuildError::usage("builder memory must not be negative"))?;
+        resources.insert("memory_mb".to_string(), Value::Number(memory_mb.into()));
+    }
+    Ok((!resources.is_empty()).then_some(Value::Object(resources)))
+}
+
+/// Disk sizing and compatibility mode belong to the legacy platform-api
+/// rootfs builder. Image Service accepts CPU and memory overrides, while
+/// public visibility is supported through global image scope.
 fn warn_ignored_options(
     options: &CommonBuildOptions,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
@@ -257,18 +282,12 @@ fn warn_ignored_options(
     if options.builder_disk_mb.is_some() {
         ignored.push("builder_disk_mb");
     }
-    if options.cpus.is_some() {
-        ignored.push("cpus");
-    }
-    if options.memory_mb.is_some() {
-        ignored.push("memory_mb");
-    }
     if options.docker_compat {
         ignored.push("docker_compat");
     }
     if !ignored.is_empty() {
         emit(SandboxImageBuildEvent::Warning(format!(
-            "Image Service builds ignore: {}. Builder resources come from service configuration.",
+            "Image Service builds ignore: {}.",
             ignored.join(", ")
         )));
     }
@@ -453,14 +472,29 @@ async fn create_build(
         )));
     }
     let created: Value = response.json().await?;
-    emit(SandboxImageBuildEvent::Status(format!(
-        "Build {} accepted",
-        created
-            .get("build_id")
-            .and_then(Value::as_str)
-            .unwrap_or("-")
+    emit(SandboxImageBuildEvent::Status(accepted_build_message(
+        &created,
     )));
     Ok(created)
+}
+
+fn accepted_build_message(created: &Value) -> String {
+    let build_id = created
+        .get("build_id")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let resources = created.get("builder_resources");
+    match resources.and_then(|resources| {
+        Some((
+            resources.get("cpus")?.as_f64()?,
+            resources.get("memory_mb")?.as_u64()?,
+        ))
+    }) {
+        Some((cpus, memory_mb)) => {
+            format!("Build {build_id} accepted (builder: {cpus} CPU, {memory_mb} MiB)")
+        }
+        None => format!("Build {build_id} accepted"),
+    }
 }
 
 /// Create the plain (uncompressed) context tar, honoring `.dockerignore`,
@@ -873,15 +907,80 @@ mod tests {
             let body = build_request(
                 serde_json::json!({ "kind": kind }),
                 true,
+                Some(serde_json::json!({"cpus": 2.5, "memory_mb": 6144})),
                 Some(r#"{"auths":{}}"#.to_string()),
             );
             assert_eq!(body["image_scope"], "global");
+            assert_eq!(
+                body["builder_resources"],
+                serde_json::json!({"cpus": 2.5, "memory_mb": 6144})
+            );
             assert_eq!(body["registry_credentials_json"], r#"{"auths":{}}"#);
 
-            let body = build_request(serde_json::json!({ "kind": kind }), false, None);
+            let body = build_request(serde_json::json!({ "kind": kind }), false, None, None);
             assert!(body.get("image_scope").is_none());
+            assert!(body.get("builder_resources").is_none());
             assert!(body.get("registry_credentials_json").is_none());
         }
+    }
+
+    #[test]
+    fn builder_resource_overrides_preserve_partial_requests() {
+        let mut options = common_options();
+        assert_eq!(builder_resource_overrides(&options).unwrap(), None);
+
+        options.cpus = Some(2.5);
+        assert_eq!(
+            builder_resource_overrides(&options).unwrap(),
+            Some(serde_json::json!({"cpus": 2.5}))
+        );
+
+        options.cpus = None;
+        options.memory_mb = Some(6_144);
+        assert_eq!(
+            builder_resource_overrides(&options).unwrap(),
+            Some(serde_json::json!({"memory_mb": 6144}))
+        );
+
+        options.memory_mb = Some(-1);
+        assert!(builder_resource_overrides(&options).is_err());
+        options.memory_mb = None;
+        options.cpus = Some(f64::NAN);
+        assert!(builder_resource_overrides(&options).is_err());
+    }
+
+    #[test]
+    fn accepted_build_message_reports_resolved_resources_when_available() {
+        assert_eq!(
+            accepted_build_message(&serde_json::json!({
+                "build_id": "build-1",
+                "builder_resources": {"cpus": 2.5, "memory_mb": 6144},
+            })),
+            "Build build-1 accepted (builder: 2.5 CPU, 6144 MiB)"
+        );
+        assert_eq!(
+            accepted_build_message(&serde_json::json!({"build_id": "build-1"})),
+            "Build build-1 accepted"
+        );
+    }
+
+    #[test]
+    fn image_service_warns_only_for_unsupported_legacy_options() {
+        let mut options = common_options();
+        options.cpus = Some(2.5);
+        options.memory_mb = Some(6_144);
+        let mut events = Vec::new();
+        warn_ignored_options(&options, &mut |event| events.push(event));
+        assert!(events.is_empty());
+
+        options.builder_disk_mb = Some(20_480);
+        warn_ignored_options(&options, &mut |event| events.push(event));
+        assert_eq!(
+            events,
+            vec![SandboxImageBuildEvent::Warning(
+                "Image Service builds ignore: builder_disk_mb.".to_string()
+            )]
+        );
     }
 
     #[test]
@@ -1073,6 +1172,26 @@ mod tests {
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
             import_image_reference: None,
+        }
+    }
+
+    fn common_options() -> CommonBuildOptions {
+        CommonBuildOptions {
+            api_url: "https://api.tensorlake.dev".to_string(),
+            bearer_token: "token".to_string(),
+            use_scope_headers: false,
+            organization_id: None,
+            project_id: None,
+            namespace: "default".to_string(),
+            registered_name: None,
+            disk_mb: None,
+            builder_disk_mb: None,
+            cpus: None,
+            memory_mb: None,
+            is_public: false,
+            cas: true,
+            user_agent: None,
+            docker_compat: false,
         }
     }
 }
