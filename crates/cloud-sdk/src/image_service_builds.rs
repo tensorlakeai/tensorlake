@@ -7,10 +7,21 @@
 //! project and its reconciler drives the builder sandbox, mounting one
 //! read-only parent volume per pin beside the writable target volume and
 //! snapshotting the target through the CAS filesystem daemon. The client
-//! only creates the build, uploads and seals the context, and polls the
-//! build to completion; it never talks to the builder sandbox.
+//! creates the build, uploads and seals the context, and polls it to
+//! completion. While an active attempt exposes its ephemeral builder sandbox,
+//! the client may also follow `tl-image-builder` output through the existing
+//! project-scoped sandbox APIs; Image Service status remains authoritative.
 
-use std::{collections::HashSet, path::Path, time::Duration};
+use std::{
+    collections::HashSet,
+    future::Future,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use reqwest::{Method, StatusCode, header::CONTENT_LENGTH};
 use serde_json::{Value, json};
@@ -20,9 +31,11 @@ use crate::{
     Client,
     sandbox_images::{
         CommonBuildOptions, DockerfileBuildPlan, SandboxImageBuildError, SandboxImageBuildEvent,
-        SandboxImageContextFile, client_builder, collect_dir_files, normalize_context_file_path,
-        resolve_build_context, resolved_docker_config_json,
+        SandboxImageContextFile, client_builder, collect_dir_files, follow_started_process_output,
+        is_localhost, normalize_context_file_path, resolve_build_context,
+        resolved_docker_config_json, sandbox_lifecycle_client, sandbox_proxy_client,
     },
+    sandboxes::{SandboxesClient, models::ProcessInfo},
 };
 
 type Result<T> = std::result::Result<T, SandboxImageBuildError>;
@@ -54,6 +67,11 @@ const MAX_PINNED_PARENTS: usize = 3;
 
 const BUILD_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const BUILD_POLL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const BUILDER_LOG_CHANNEL_CAPACITY: usize = 256;
+const BUILDER_LOG_DRAIN_GRACE: Duration = Duration::from_secs(2);
+const BUILDER_PROCESS_DISCOVERY_ATTEMPTS: usize = 10;
+const BUILDER_PROCESS_DISCOVERY_INTERVAL: Duration = Duration::from_secs(1);
+const IMAGE_BUILDER_COMMAND: &str = "tl-image-builder";
 
 /// Run a build plan through the Image Service. `dockerfile_path` is the
 /// local Dockerfile path for Dockerfile builds (used only to decide whether
@@ -71,6 +89,8 @@ where
     F: FnMut(SandboxImageBuildEvent),
 {
     warn_ignored_options(&options, &mut emit);
+    let is_public = options.is_public;
+    let builder_resources = builder_resource_overrides(&options)?;
     // Forward the local `docker login` state for the guest's registry pulls,
     // the same source the legacy path ships into its builder. The service
     // stages it write-only and the reconciler hands the guest a short-lived
@@ -97,27 +117,36 @@ where
     if let Some(import_reference) = plan.import_image_reference.clone() {
         let created = create_build(
             &client,
-            with_registry_credentials(
+            build_request(
                 json!({
                     "kind": "import",
                     "image_ref": import_reference,
                     "name": plan.registered_name,
                     "project": project,
                 }),
+                is_public,
+                builder_resources,
                 registry_credentials_json,
             ),
             &mut emit,
         )
         .await?;
-        return wait_for_publication(&client, &project, &created, &plan.registered_name, emit)
-            .await;
+        return wait_for_publication(
+            &client,
+            &ctx,
+            &project,
+            &created,
+            &plan.registered_name,
+            emit,
+        )
+        .await;
     }
 
     let parents = resolve_parents(&client, &project, &plan, &mut emit).await?;
     let (dockerfile_in_context, injected_dockerfile) = context_dockerfile(&plan, dockerfile_path)?;
     let created = create_build(
         &client,
-        with_registry_credentials(
+        build_request(
             json!({
                 "kind": "dockerfile",
                 "dockerfile_path": dockerfile_in_context,
@@ -129,6 +158,8 @@ where
                 "name": plan.registered_name,
                 "project": project,
             }),
+            is_public,
+            builder_resources,
             registry_credentials_json,
         ),
         &mut emit,
@@ -153,7 +184,15 @@ where
     )
     .await?;
 
-    wait_for_publication(&client, &project, &created, &plan.registered_name, emit).await
+    wait_for_publication(
+        &client,
+        &ctx,
+        &project,
+        &created,
+        &plan.registered_name,
+        emit,
+    )
+    .await
 }
 
 /// Base URL for the Image Service.
@@ -199,9 +238,53 @@ fn with_registry_credentials(mut body: Value, registry_credentials_json: Option<
     body
 }
 
-/// Builder resource and visibility knobs belong to the legacy platform-api
-/// rootfs builder; the Image Service reconciler sizes builder sandboxes from
-/// service configuration and the catalog has no public/private bit yet.
+/// Build requests rely on Image Service's executor-fleet default unless the
+/// user explicitly asks for a public image. Deliberately omit that private
+/// scope instead of sending `executor_fleet`: omission preserves compatibility
+/// with older Image Service versions, whose default is also private. Global
+/// admission remains the service's responsibility and is restricted to
+/// allowlisted publishers.
+fn build_request(
+    mut body: Value,
+    is_public: bool,
+    builder_resources: Option<Value>,
+    registry_credentials_json: Option<String>,
+) -> Value {
+    let object = body
+        .as_object_mut()
+        .expect("Image Service build request body must be an object");
+    if is_public {
+        object.insert(
+            "image_scope".to_string(),
+            Value::String("global".to_string()),
+        );
+    }
+    if let Some(builder_resources) = builder_resources {
+        object.insert("builder_resources".to_string(), builder_resources);
+    }
+    with_registry_credentials(body, registry_credentials_json)
+}
+
+/// Preserve partial resource overrides so Image Service remains authoritative
+/// for defaults and CPU-to-memory validation.
+fn builder_resource_overrides(options: &CommonBuildOptions) -> Result<Option<Value>> {
+    let mut resources = serde_json::Map::new();
+    if let Some(cpus) = options.cpus {
+        let cpus = serde_json::Number::from_f64(cpus)
+            .ok_or_else(|| SandboxImageBuildError::usage("builder CPUs must be a finite number"))?;
+        resources.insert("cpus".to_string(), Value::Number(cpus));
+    }
+    if let Some(memory_mb) = options.memory_mb {
+        let memory_mb = u64::try_from(memory_mb)
+            .map_err(|_| SandboxImageBuildError::usage("builder memory must not be negative"))?;
+        resources.insert("memory_mb".to_string(), Value::Number(memory_mb.into()));
+    }
+    Ok((!resources.is_empty()).then_some(Value::Object(resources)))
+}
+
+/// Disk sizing and compatibility mode belong to the legacy platform-api
+/// rootfs builder. Image Service accepts CPU and memory overrides, while
+/// public visibility is supported through global image scope.
 fn warn_ignored_options(
     options: &CommonBuildOptions,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
@@ -213,21 +296,12 @@ fn warn_ignored_options(
     if options.builder_disk_mb.is_some() {
         ignored.push("builder_disk_mb");
     }
-    if options.cpus.is_some() {
-        ignored.push("cpus");
-    }
-    if options.memory_mb.is_some() {
-        ignored.push("memory_mb");
-    }
-    if options.is_public {
-        ignored.push("public");
-    }
     if options.docker_compat {
         ignored.push("docker_compat");
     }
     if !ignored.is_empty() {
         emit(SandboxImageBuildEvent::Warning(format!(
-            "Image Service builds ignore: {}. Builder resources come from service configuration.",
+            "Image Service builds ignore: {}.",
             ignored.join(", ")
         )));
     }
@@ -412,14 +486,29 @@ async fn create_build(
         )));
     }
     let created: Value = response.json().await?;
-    emit(SandboxImageBuildEvent::Status(format!(
-        "Build {} accepted",
-        created
-            .get("build_id")
-            .and_then(Value::as_str)
-            .unwrap_or("-")
+    emit(SandboxImageBuildEvent::Status(accepted_build_message(
+        &created,
     )));
     Ok(created)
+}
+
+fn accepted_build_message(created: &Value) -> String {
+    let build_id = created
+        .get("build_id")
+        .and_then(Value::as_str)
+        .unwrap_or("-");
+    let resources = created.get("builder_resources");
+    match resources.and_then(|resources| {
+        Some((
+            resources.get("cpus")?.as_f64()?,
+            resources.get("memory_mb")?.as_u64()?,
+        ))
+    }) {
+        Some((cpus, memory_mb)) => {
+            format!("Build {build_id} accepted (builder: {cpus} CPU, {memory_mb} MiB)")
+        }
+        None => format!("Build {build_id} accepted"),
+    }
 }
 
 /// Create the plain (uncompressed) context tar, honoring `.dockerignore`,
@@ -587,22 +676,85 @@ fn create_context_tar(
 /// image record.
 async fn wait_for_publication(
     client: &Client,
+    ctx: &crate::sandbox_images::ResolvedBuildContext,
+    project: &str,
+    created: &Value,
+    registered_name: &str,
+    emit: impl FnMut(SandboxImageBuildEvent),
+) -> Result<Value> {
+    wait_for_publication_with_follower(
+        client,
+        ctx,
+        project,
+        created,
+        registered_name,
+        emit,
+        BuildWaitTiming {
+            poll_interval: BUILD_POLL_INTERVAL,
+            poll_timeout: BUILD_POLL_TIMEOUT,
+            log_drain_grace: BUILDER_LOG_DRAIN_GRACE,
+        },
+        |ctx, sandbox_id, sink| async move {
+            let mut emit = |event| sink.try_emit(event);
+            follow_builder_logs(&ctx, &sandbox_id, &mut emit).await
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct BuildWaitTiming {
+    poll_interval: Duration,
+    poll_timeout: Duration,
+    log_drain_grace: Duration,
+}
+
+#[derive(Clone)]
+struct BuilderLogSink {
+    sender: tokio::sync::mpsc::Sender<SandboxImageBuildEvent>,
+    dropped: Arc<AtomicUsize>,
+}
+
+impl BuilderLogSink {
+    fn try_emit(&self, event: SandboxImageBuildEvent) {
+        match self.sender.try_send(event) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_publication_with_follower<Follow, FollowFuture>(
+    client: &Client,
+    ctx: &crate::sandbox_images::ResolvedBuildContext,
     project: &str,
     created: &Value,
     registered_name: &str,
     mut emit: impl FnMut(SandboxImageBuildEvent),
-) -> Result<Value> {
+    timing: BuildWaitTiming,
+    follow_builder: Follow,
+) -> Result<Value>
+where
+    Follow: Fn(crate::sandbox_images::ResolvedBuildContext, String, BuilderLogSink) -> FollowFuture
+        + Clone
+        + Send
+        + 'static,
+    FollowFuture: Future<Output = Result<()>> + Send + 'static,
+{
     let build_id = build_id_of(created)?;
     let path = format!("/builds/{build_id}?project={}", urlencoding_encode(project));
-    let deadline = tokio::time::Instant::now() + BUILD_POLL_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + timing.poll_timeout;
     let mut last_reported = String::new();
+    let mut observed_builders = HashSet::new();
+    let (log_sender, mut log_receiver) = tokio::sync::mpsc::channel(BUILDER_LOG_CHANNEL_CAPACITY);
+    let dropped_logs = Arc::new(AtomicUsize::new(0));
+    let mut followers = tokio::task::JoinSet::new();
     let image_id = loop {
-        if tokio::time::Instant::now() > deadline {
-            return Err(SandboxImageBuildError::other(format!(
-                "build {build_id} did not finish within {}s",
-                BUILD_POLL_TIMEOUT.as_secs()
-            )));
-        }
+        drain_ready_builder_logs(&mut log_receiver, &dropped_logs, &mut emit);
         let request = client.request(Method::GET, &path).build()?;
         let response = client.execute_raw(request).await?;
         if !response.status().is_success() {
@@ -628,6 +780,14 @@ async fn wait_for_publication(
         }
         match status.as_str() {
             "succeeded" => {
+                finish_builder_log_followers(
+                    &mut followers,
+                    &mut log_receiver,
+                    &dropped_logs,
+                    timing.log_drain_grace,
+                    &mut emit,
+                )
+                .await;
                 break build
                     .get("image_id")
                     .and_then(Value::as_str)
@@ -639,6 +799,14 @@ async fn wait_for_publication(
                     })?;
             }
             "failed" => {
+                finish_builder_log_followers(
+                    &mut followers,
+                    &mut log_receiver,
+                    &dropped_logs,
+                    timing.log_drain_grace,
+                    &mut emit,
+                )
+                .await;
                 let error = build
                     .get("error")
                     .and_then(Value::as_str)
@@ -647,18 +815,58 @@ async fn wait_for_publication(
                     "build {build_id} failed: {error}"
                 )));
             }
-            _ => tokio::time::sleep(BUILD_POLL_INTERVAL).await,
+            "running" => {
+                if let Some(builder_sandbox_id) =
+                    take_unobserved_builder(&build, &mut observed_builders)
+                {
+                    emit(SandboxImageBuildEvent::Status(format!(
+                        "Following Image Service builder logs for attempt {attempt}..."
+                    )));
+                    let follower = follow_builder.clone();
+                    let follower_ctx = ctx.clone();
+                    let follower_sandbox_id = builder_sandbox_id.clone();
+                    let warning_sender = log_sender.clone();
+                    let sink = BuilderLogSink {
+                        sender: log_sender.clone(),
+                        dropped: dropped_logs.clone(),
+                    };
+                    followers.spawn(async move {
+                        if let Err(error) =
+                            follower(follower_ctx, follower_sandbox_id, sink).await
+                        {
+                            let _ = warning_sender
+                                .send(SandboxImageBuildEvent::Warning(format!(
+                                    "Could not follow builder logs for attempt {attempt} ({builder_sandbox_id}): {error}"
+                                )))
+                                .await;
+                        }
+                    });
+                }
+            }
+            _ => {}
         }
+        if tokio::time::Instant::now() >= deadline {
+            finish_builder_log_followers(
+                &mut followers,
+                &mut log_receiver,
+                &dropped_logs,
+                Duration::ZERO,
+                &mut emit,
+            )
+            .await;
+            return Err(build_poll_timeout(&build_id, timing.poll_timeout));
+        }
+        stream_builder_logs_until_next_poll(
+            &mut log_receiver,
+            &dropped_logs,
+            (tokio::time::Instant::now() + timing.poll_interval).min(deadline),
+            &mut emit,
+        )
+        .await;
     };
 
     let request = client
-        .request(
-            Method::GET,
-            &format!(
-                "/v1/images/{image_id}?project={}",
-                urlencoding_encode(project)
-            ),
-        )
+        .request(Method::GET, &published_image_path(&image_id, project))
         .build()?;
     let response = client.execute_raw(request).await?;
     if !response.status().is_success() {
@@ -673,6 +881,156 @@ async fn wait_for_publication(
         "Image '{registered_name}' published ({CAS_IMAGE_REF_PREFIX}{image_id})"
     )));
     Ok(image)
+}
+
+fn published_image_path(image_id: &str, project: &str) -> String {
+    format!("/images/{image_id}?project={}", urlencoding_encode(project))
+}
+
+fn build_poll_timeout(build_id: &str, timeout: Duration) -> SandboxImageBuildError {
+    SandboxImageBuildError::other(format!(
+        "build {build_id} did not finish within {}s",
+        timeout.as_secs()
+    ))
+}
+
+fn drain_ready_builder_logs(
+    receiver: &mut tokio::sync::mpsc::Receiver<SandboxImageBuildEvent>,
+    dropped: &AtomicUsize,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) {
+    while let Ok(event) = receiver.try_recv() {
+        emit(event);
+    }
+    emit_dropped_builder_logs(dropped, emit);
+}
+
+fn emit_dropped_builder_logs(dropped: &AtomicUsize, emit: &mut impl FnMut(SandboxImageBuildEvent)) {
+    let dropped = dropped.swap(0, Ordering::Relaxed);
+    if dropped != 0 {
+        emit(SandboxImageBuildEvent::Warning(format!(
+            "Dropped {dropped} builder log events because the CLI could not keep up."
+        )));
+    }
+}
+
+async fn stream_builder_logs_until_next_poll(
+    receiver: &mut tokio::sync::mpsc::Receiver<SandboxImageBuildEvent>,
+    dropped: &AtomicUsize,
+    next_poll: tokio::time::Instant,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) {
+    loop {
+        tokio::select! {
+            event = receiver.recv() => {
+                if let Some(event) = event {
+                    emit(event);
+                }
+            }
+            _ = tokio::time::sleep_until(next_poll) => break,
+        }
+    }
+    emit_dropped_builder_logs(dropped, emit);
+}
+
+async fn finish_builder_log_followers(
+    followers: &mut tokio::task::JoinSet<()>,
+    receiver: &mut tokio::sync::mpsc::Receiver<SandboxImageBuildEvent>,
+    dropped: &AtomicUsize,
+    grace: Duration,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) {
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        drain_ready_builder_logs(receiver, dropped, emit);
+        if followers.is_empty() || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::select! {
+            event = receiver.recv() => {
+                if let Some(event) = event {
+                    emit(event);
+                }
+            }
+            _ = followers.join_next() => {}
+            _ = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    followers.abort_all();
+    while followers.join_next().await.is_some() {}
+    drain_ready_builder_logs(receiver, dropped, emit);
+}
+
+async fn follow_builder_logs(
+    ctx: &crate::sandbox_images::ResolvedBuildContext,
+    sandbox_id: &str,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<()> {
+    let lifecycle_client = sandbox_lifecycle_client(ctx)?;
+    let sandboxes = SandboxesClient::new(
+        lifecycle_client.clone(),
+        ctx.namespace.clone(),
+        is_localhost(&ctx.api_url),
+    );
+    let sandbox = sandboxes.get(sandbox_id).await?.into_inner();
+    let proxy = sandbox_proxy_client(
+        ctx,
+        &lifecycle_client,
+        sandbox_id,
+        sandbox.sandbox_url.as_deref(),
+        sandbox.ingress_endpoint.as_deref(),
+        sandbox.routing_hint,
+    )?;
+    let process = discover_image_builder_process(&proxy).await?;
+    follow_started_process_output(&proxy, process.pid, emit).await
+}
+
+fn take_unobserved_builder(build: &Value, observed: &mut HashSet<(u64, String)>) -> Option<String> {
+    if build.get("status").and_then(Value::as_str) != Some("running") {
+        return None;
+    }
+    let attempt = build.get("attempt_no")?.as_u64()?;
+    let sandbox_id = build.get("builder_sandbox_id")?.as_str()?.to_string();
+    observed
+        .insert((attempt, sandbox_id.clone()))
+        .then_some(sandbox_id)
+}
+
+async fn discover_image_builder_process(
+    proxy: &crate::sandboxes::SandboxProxyClient,
+) -> Result<ProcessInfo> {
+    let mut last_error = None;
+    for attempt in 0..BUILDER_PROCESS_DISCOVERY_ATTEMPTS {
+        match proxy.list_processes().await {
+            Ok(processes) => {
+                if let Some(process) = processes
+                    .into_inner()
+                    .into_iter()
+                    .filter(|process| is_image_builder_command(&process.command))
+                    .min_by_key(|process| process.pid)
+                {
+                    return Ok(process);
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < BUILDER_PROCESS_DISCOVERY_ATTEMPTS {
+            tokio::time::sleep(BUILDER_PROCESS_DISCOVERY_INTERVAL).await;
+        }
+    }
+
+    let detail = last_error
+        .map(|error| format!(" after process-list errors: {error}"))
+        .unwrap_or_default();
+    Err(SandboxImageBuildError::other(format!(
+        "{IMAGE_BUILDER_COMMAND} process was not found{detail}"
+    )))
+}
+
+fn is_image_builder_command(command: &str) -> bool {
+    Path::new(command)
+        .file_name()
+        .is_some_and(|name| name == IMAGE_BUILDER_COMMAND)
 }
 
 #[cfg(test)]
@@ -721,19 +1079,143 @@ mod url_tests {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read as _;
+    use std::{io::Read as _, pin::Pin};
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
+    use crate::ClientBuilder;
 
     #[test]
-    fn registry_credentials_attach_only_when_present() {
-        let body = with_registry_credentials(
-            serde_json::json!({ "kind": "import" }),
-            Some(r#"{"auths":{}}"#.to_string()),
+    fn dockerfile_and_import_requests_apply_global_scope_or_private_default() {
+        for kind in ["import", "dockerfile"] {
+            let body = build_request(
+                serde_json::json!({ "kind": kind }),
+                true,
+                Some(serde_json::json!({"cpus": 2.5, "memory_mb": 6144})),
+                Some(r#"{"auths":{}}"#.to_string()),
+            );
+            assert_eq!(body["image_scope"], "global");
+            assert_eq!(
+                body["builder_resources"],
+                serde_json::json!({"cpus": 2.5, "memory_mb": 6144})
+            );
+            assert_eq!(body["registry_credentials_json"], r#"{"auths":{}}"#);
+
+            let private_body =
+                build_request(serde_json::json!({ "kind": kind }), false, None, None);
+            assert_eq!(private_body, serde_json::json!({ "kind": kind }));
+        }
+    }
+
+    #[test]
+    fn builder_resource_overrides_preserve_partial_requests() {
+        let mut options = common_options();
+        assert_eq!(builder_resource_overrides(&options).unwrap(), None);
+
+        options.cpus = Some(2.5);
+        assert_eq!(
+            builder_resource_overrides(&options).unwrap(),
+            Some(serde_json::json!({"cpus": 2.5}))
         );
-        assert_eq!(body["registry_credentials_json"], r#"{"auths":{}}"#);
-        let body = with_registry_credentials(serde_json::json!({ "kind": "import" }), None);
-        assert!(body.get("registry_credentials_json").is_none());
+
+        options.cpus = None;
+        options.memory_mb = Some(6_144);
+        assert_eq!(
+            builder_resource_overrides(&options).unwrap(),
+            Some(serde_json::json!({"memory_mb": 6144}))
+        );
+
+        options.memory_mb = Some(-1);
+        assert!(builder_resource_overrides(&options).is_err());
+        options.memory_mb = None;
+        options.cpus = Some(f64::NAN);
+        assert!(builder_resource_overrides(&options).is_err());
+    }
+
+    #[test]
+    fn accepted_build_message_reports_resolved_resources_when_available() {
+        assert_eq!(
+            accepted_build_message(&serde_json::json!({
+                "build_id": "build-1",
+                "builder_resources": {"cpus": 2.5, "memory_mb": 6144},
+            })),
+            "Build build-1 accepted (builder: 2.5 CPU, 6144 MiB)"
+        );
+        assert_eq!(
+            accepted_build_message(&serde_json::json!({"build_id": "build-1"})),
+            "Build build-1 accepted"
+        );
+    }
+
+    #[test]
+    fn image_service_warns_only_for_unsupported_legacy_options() {
+        let mut options = common_options();
+        options.cpus = Some(2.5);
+        options.memory_mb = Some(6_144);
+        let mut events = Vec::new();
+        warn_ignored_options(&options, &mut |event| events.push(event));
+        assert!(events.is_empty());
+
+        options.builder_disk_mb = Some(20_480);
+        warn_ignored_options(&options, &mut |event| events.push(event));
+        assert_eq!(
+            events,
+            vec![SandboxImageBuildEvent::Warning(
+                "Image Service builds ignore: builder_disk_mb.".to_string()
+            )]
+        );
+    }
+
+    #[test]
+    fn each_running_attempt_builder_is_observed_once() {
+        let mut observed = HashSet::new();
+        let pending = json!({
+            "status": "pending",
+            "attempt_no": 1,
+            "builder_sandbox_id": "stale-builder",
+        });
+        assert_eq!(take_unobserved_builder(&pending, &mut observed), None);
+
+        let pre_create = json!({ "status": "running", "attempt_no": 1 });
+        assert_eq!(take_unobserved_builder(&pre_create, &mut observed), None);
+
+        let attempt_one = json!({
+            "status": "running",
+            "attempt_no": 1,
+            "builder_sandbox_id": "builder-1",
+        });
+        assert_eq!(
+            take_unobserved_builder(&attempt_one, &mut observed).as_deref(),
+            Some("builder-1")
+        );
+        assert_eq!(take_unobserved_builder(&attempt_one, &mut observed), None);
+
+        let attempt_two = json!({
+            "status": "running",
+            "attempt_no": 2,
+            "builder_sandbox_id": "builder-2",
+        });
+        assert_eq!(
+            take_unobserved_builder(&attempt_two, &mut observed).as_deref(),
+            Some("builder-2")
+        );
+    }
+
+    #[test]
+    fn builder_command_matches_only_the_command_basename() {
+        assert!(is_image_builder_command("tl-image-builder"));
+        assert!(is_image_builder_command("/usr/local/bin/tl-image-builder"));
+        assert!(!is_image_builder_command("tl-rootfs-build"));
+        assert!(!is_image_builder_command("tl-image-builder-helper"));
+    }
+
+    #[test]
+    fn published_image_path_relies_on_the_ingress_version_prefix() {
+        assert_eq!(
+            published_image_path("image-id", "project/id"),
+            "/images/image-id?project=project%2Fid"
+        );
     }
 
     #[test]
@@ -863,6 +1345,207 @@ mod tests {
         assert!(error.to_string().contains("conflicts"), "{error}");
     }
 
+    #[tokio::test]
+    async fn successful_build_wins_over_an_open_log_stream() {
+        let image_id = "a".repeat(64);
+        let (base_url, server) = scripted_image_service(vec![
+            json!({
+                "status": "running",
+                "attempt_no": 1,
+                "builder_sandbox_id": "builder-1",
+            }),
+            json!({
+                "status": "succeeded",
+                "attempt_no": 1,
+                "image_id": image_id,
+            }),
+            json!({"image_id": image_id}),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let mut events = Vec::new();
+
+        let image = wait_for_publication_with_follower(
+            &client,
+            &ctx,
+            "project-1",
+            &json!({"build_id": "build-1"}),
+            "image-1",
+            |event| events.push(event),
+            test_build_wait_timing(),
+            |_ctx, _sandbox_id, sink| async move {
+                sink.try_emit(SandboxImageBuildEvent::BuildLog {
+                    stream: "stdout".to_string(),
+                    message: "still building".to_string(),
+                });
+                std::future::pending::<()>().await;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(image["image_id"], image_id);
+        assert!(events.contains(&SandboxImageBuildEvent::BuildLog {
+            stream: "stdout".to_string(),
+            message: "still building".to_string(),
+        }));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retries_attach_once_warn_once_and_bound_buffered_logs() {
+        let image_id = "b".repeat(64);
+        let (base_url, server) = scripted_image_service(vec![
+            json!({
+                "status": "running",
+                "attempt_no": 1,
+                "builder_sandbox_id": "builder-1",
+            }),
+            json!({
+                "status": "running",
+                "attempt_no": 1,
+                "builder_sandbox_id": "builder-1",
+            }),
+            json!({
+                "status": "pending",
+                "attempt_no": 1,
+                "builder_sandbox_id": "stale-builder",
+            }),
+            json!({
+                "status": "running",
+                "attempt_no": 2,
+                "builder_sandbox_id": "builder-2",
+            }),
+            json!({
+                "status": "succeeded",
+                "attempt_no": 2,
+                "image_id": image_id,
+            }),
+            json!({"image_id": image_id}),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let attempt_one_attaches = Arc::new(AtomicUsize::new(0));
+        let attempt_two_attaches = Arc::new(AtomicUsize::new(0));
+        let mut events = Vec::new();
+        let follow = {
+            let attempt_one_attaches = attempt_one_attaches.clone();
+            let attempt_two_attaches = attempt_two_attaches.clone();
+            move |_ctx, sandbox_id: String, sink: BuilderLogSink| {
+                let attempt_one_attaches = attempt_one_attaches.clone();
+                let attempt_two_attaches = attempt_two_attaches.clone();
+                Box::pin(async move {
+                    match sandbox_id.as_str() {
+                        "builder-1" => {
+                            attempt_one_attaches.fetch_add(1, Ordering::Relaxed);
+                            Err(SandboxImageBuildError::other("stream unavailable"))
+                        }
+                        "builder-2" => {
+                            attempt_two_attaches.fetch_add(1, Ordering::Relaxed);
+                            for index in 0..BUILDER_LOG_CHANNEL_CAPACITY + 50 {
+                                sink.try_emit(SandboxImageBuildEvent::BuildLog {
+                                    stream: "stdout".to_string(),
+                                    message: format!("line {index}"),
+                                });
+                            }
+                            std::future::pending::<()>().await;
+                            Ok(())
+                        }
+                        other => panic!("unexpected builder {other}"),
+                    }
+                }) as Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            }
+        };
+
+        let image = wait_for_publication_with_follower(
+            &client,
+            &ctx,
+            "project-1",
+            &json!({"build_id": "build-1"}),
+            "image-1",
+            |event| events.push(event),
+            test_build_wait_timing(),
+            follow,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(image["image_id"], image_id);
+        assert_eq!(attempt_one_attaches.load(Ordering::Relaxed), 1);
+        assert_eq!(attempt_two_attaches.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    SandboxImageBuildEvent::Warning(message)
+                        if message.contains("stream unavailable")
+                ))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SandboxImageBuildEvent::Warning(message) if message.starts_with("Dropped ")
+        )));
+        server.await.unwrap();
+    }
+
+    fn test_build_wait_timing() -> BuildWaitTiming {
+        BuildWaitTiming {
+            poll_interval: Duration::from_millis(5),
+            poll_timeout: Duration::from_secs(1),
+            log_drain_grace: Duration::from_millis(20),
+        }
+    }
+
+    fn test_build_context(api_url: &str) -> crate::sandbox_images::ResolvedBuildContext {
+        crate::sandbox_images::ResolvedBuildContext {
+            api_url: api_url.to_string(),
+            bearer_token: "token".to_string(),
+            use_scope_headers: false,
+            organization_id: "organization-1".to_string(),
+            project_id: "project-1".to_string(),
+            namespace: "default".to_string(),
+            user_agent: None,
+        }
+    }
+
+    async fn scripted_image_service(
+        responses: Vec<Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = serde_json::to_vec(&response).unwrap();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+        });
+        (format!("http://{address}"), server)
+    }
+
     fn plan_with_context(context_dir: std::path::PathBuf) -> DockerfileBuildPlan {
         DockerfileBuildPlan {
             context_dir,
@@ -874,6 +1557,26 @@ mod tests {
             unresolvable_image_references: Vec::new(),
             ignored_instructions: Vec::new(),
             import_image_reference: None,
+        }
+    }
+
+    fn common_options() -> CommonBuildOptions {
+        CommonBuildOptions {
+            api_url: "https://api.tensorlake.dev".to_string(),
+            bearer_token: "token".to_string(),
+            use_scope_headers: false,
+            organization_id: None,
+            project_id: None,
+            namespace: "default".to_string(),
+            registered_name: None,
+            disk_mb: None,
+            builder_disk_mb: None,
+            cpus: None,
+            memory_mb: None,
+            is_public: false,
+            cas: true,
+            user_agent: None,
+            docker_compat: false,
         }
     }
 }

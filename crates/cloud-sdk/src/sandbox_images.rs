@@ -842,7 +842,7 @@ fn platform_client(ctx: &ResolvedBuildContext) -> Result<Client> {
     .map_err(Into::into)
 }
 
-fn sandbox_lifecycle_client(ctx: &ResolvedBuildContext) -> Result<Client> {
+pub(crate) fn sandbox_lifecycle_client(ctx: &ResolvedBuildContext) -> Result<Client> {
     let lifecycle_url = resolve_sandbox_lifecycle_url(&ctx.api_url);
     client_builder(
         &lifecycle_url,
@@ -1177,7 +1177,7 @@ fn explicit_sandbox_proxy_url_override() -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn sandbox_proxy_client(
+pub(crate) fn sandbox_proxy_client(
     ctx: &ResolvedBuildContext,
     client: &Client,
     sandbox_id: &str,
@@ -2008,6 +2008,19 @@ async fn stream_started_process(
     }
 }
 
+/// Follow an already-started process while preserving the shared reconnect
+/// and replay behavior. The caller deliberately owns interpretation of the
+/// terminal status; Image Service builds, for example, use service state as
+/// their source of truth rather than the observed guest exit code.
+pub(crate) async fn follow_started_process_output(
+    proxy: &SandboxProxyClient,
+    pid: i64,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<()> {
+    let _ = stream_started_process(proxy, pid, emit).await?;
+    Ok(())
+}
+
 async fn follow_process_output(
     proxy: &SandboxProxyClient,
     pid: i64,
@@ -2501,7 +2514,7 @@ async fn ensure_remote_parent_dir(proxy: &SandboxProxyClient, remote_path: &str)
     .await
 }
 
-fn is_localhost(url: &str) -> bool {
+pub(crate) fn is_localhost(url: &str) -> bool {
     if let Ok(parsed) = url::Url::parse(url) {
         return matches!(parsed.host_str(), Some("localhost" | "127.0.0.1"));
     }
