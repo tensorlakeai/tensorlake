@@ -7,8 +7,10 @@
 //! project and its reconciler drives the builder sandbox, mounting one
 //! read-only parent volume per pin beside the writable target volume and
 //! snapshotting the target through the CAS filesystem daemon. The client
-//! only creates the build, uploads and seals the context, and polls the
-//! build to completion; it never talks to the builder sandbox.
+//! creates the build, uploads and seals the context, and polls it to
+//! completion. While an active attempt exposes its ephemeral builder sandbox,
+//! the client may also follow `tl-image-builder` output through the existing
+//! project-scoped sandbox APIs; Image Service status remains authoritative.
 
 use std::{collections::HashSet, path::Path, time::Duration};
 
@@ -20,9 +22,11 @@ use crate::{
     Client,
     sandbox_images::{
         CommonBuildOptions, DockerfileBuildPlan, SandboxImageBuildError, SandboxImageBuildEvent,
-        SandboxImageContextFile, client_builder, collect_dir_files, normalize_context_file_path,
-        resolve_build_context, resolved_docker_config_json,
+        SandboxImageContextFile, client_builder, collect_dir_files, follow_started_process_output,
+        is_localhost, normalize_context_file_path, resolve_build_context,
+        resolved_docker_config_json, sandbox_lifecycle_client, sandbox_proxy_client,
     },
+    sandboxes::{SandboxesClient, models::ProcessInfo},
 };
 
 type Result<T> = std::result::Result<T, SandboxImageBuildError>;
@@ -54,6 +58,9 @@ const MAX_PINNED_PARENTS: usize = 3;
 
 const BUILD_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const BUILD_POLL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const BUILDER_PROCESS_DISCOVERY_ATTEMPTS: usize = 10;
+const BUILDER_PROCESS_DISCOVERY_INTERVAL: Duration = Duration::from_secs(1);
+const IMAGE_BUILDER_COMMAND: &str = "tl-image-builder";
 
 /// Run a build plan through the Image Service. `dockerfile_path` is the
 /// local Dockerfile path for Dockerfile builds (used only to decide whether
@@ -71,6 +78,7 @@ where
     F: FnMut(SandboxImageBuildEvent),
 {
     warn_ignored_options(&options, &mut emit);
+    let is_public = options.is_public;
     // Forward the local `docker login` state for the guest's registry pulls,
     // the same source the legacy path ships into its builder. The service
     // stages it write-only and the reconciler hands the guest a short-lived
@@ -97,27 +105,35 @@ where
     if let Some(import_reference) = plan.import_image_reference.clone() {
         let created = create_build(
             &client,
-            with_registry_credentials(
+            build_request(
                 json!({
                     "kind": "import",
                     "image_ref": import_reference,
                     "name": plan.registered_name,
                     "project": project,
                 }),
+                is_public,
                 registry_credentials_json,
             ),
             &mut emit,
         )
         .await?;
-        return wait_for_publication(&client, &project, &created, &plan.registered_name, emit)
-            .await;
+        return wait_for_publication(
+            &client,
+            &ctx,
+            &project,
+            &created,
+            &plan.registered_name,
+            emit,
+        )
+        .await;
     }
 
     let parents = resolve_parents(&client, &project, &plan, &mut emit).await?;
     let (dockerfile_in_context, injected_dockerfile) = context_dockerfile(&plan, dockerfile_path)?;
     let created = create_build(
         &client,
-        with_registry_credentials(
+        build_request(
             json!({
                 "kind": "dockerfile",
                 "dockerfile_path": dockerfile_in_context,
@@ -129,6 +145,7 @@ where
                 "name": plan.registered_name,
                 "project": project,
             }),
+            is_public,
             registry_credentials_json,
         ),
         &mut emit,
@@ -153,7 +170,15 @@ where
     )
     .await?;
 
-    wait_for_publication(&client, &project, &created, &plan.registered_name, emit).await
+    wait_for_publication(
+        &client,
+        &ctx,
+        &project,
+        &created,
+        &plan.registered_name,
+        emit,
+    )
+    .await
 }
 
 /// Base URL for the Image Service.
@@ -199,9 +224,28 @@ fn with_registry_credentials(mut body: Value, registry_credentials_json: Option<
     body
 }
 
-/// Builder resource and visibility knobs belong to the legacy platform-api
-/// rootfs builder; the Image Service reconciler sizes builder sandboxes from
-/// service configuration and the catalog has no public/private bit yet.
+/// Build requests rely on Image Service's executor-fleet default unless the
+/// user explicitly asks for a public image. Global admission remains the
+/// service's responsibility and is restricted to allowlisted publishers.
+fn build_request(
+    mut body: Value,
+    is_public: bool,
+    registry_credentials_json: Option<String>,
+) -> Value {
+    if is_public {
+        body.as_object_mut()
+            .expect("Image Service build request body must be an object")
+            .insert(
+                "image_scope".to_string(),
+                Value::String("global".to_string()),
+            );
+    }
+    with_registry_credentials(body, registry_credentials_json)
+}
+
+/// Builder resource knobs belong to the legacy platform-api rootfs builder;
+/// the Image Service reconciler sizes builder sandboxes from service
+/// configuration. Public visibility is supported through global image scope.
 fn warn_ignored_options(
     options: &CommonBuildOptions,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
@@ -218,9 +262,6 @@ fn warn_ignored_options(
     }
     if options.memory_mb.is_some() {
         ignored.push("memory_mb");
-    }
-    if options.is_public {
-        ignored.push("public");
     }
     if options.docker_compat {
         ignored.push("docker_compat");
@@ -587,6 +628,7 @@ fn create_context_tar(
 /// image record.
 async fn wait_for_publication(
     client: &Client,
+    ctx: &crate::sandbox_images::ResolvedBuildContext,
     project: &str,
     created: &Value,
     registered_name: &str,
@@ -596,6 +638,7 @@ async fn wait_for_publication(
     let path = format!("/builds/{build_id}?project={}", urlencoding_encode(project));
     let deadline = tokio::time::Instant::now() + BUILD_POLL_TIMEOUT;
     let mut last_reported = String::new();
+    let mut observed_builders = HashSet::new();
     let image_id = loop {
         if tokio::time::Instant::now() > deadline {
             return Err(SandboxImageBuildError::other(format!(
@@ -647,18 +690,34 @@ async fn wait_for_publication(
                     "build {build_id} failed: {error}"
                 )));
             }
+            "running" => {
+                if let Some(builder_sandbox_id) =
+                    take_unobserved_builder(&build, &mut observed_builders)
+                {
+                    emit(SandboxImageBuildEvent::Status(format!(
+                        "Following Image Service builder logs for attempt {attempt}..."
+                    )));
+                    match tokio::time::timeout_at(
+                        deadline,
+                        follow_builder_logs(ctx, &builder_sandbox_id, &mut emit),
+                    )
+                    .await
+                    {
+                        Ok(Ok(())) => {}
+                        Ok(Err(error)) => emit(SandboxImageBuildEvent::Warning(format!(
+                            "Could not follow builder logs for attempt {attempt} ({builder_sandbox_id}): {error}"
+                        ))),
+                        Err(_) => return Err(build_poll_timeout(&build_id)),
+                    }
+                }
+                tokio::time::sleep(BUILD_POLL_INTERVAL).await;
+            }
             _ => tokio::time::sleep(BUILD_POLL_INTERVAL).await,
         }
     };
 
     let request = client
-        .request(
-            Method::GET,
-            &format!(
-                "/v1/images/{image_id}?project={}",
-                urlencoding_encode(project)
-            ),
-        )
+        .request(Method::GET, &published_image_path(&image_id, project))
         .build()?;
     let response = client.execute_raw(request).await?;
     if !response.status().is_success() {
@@ -673,6 +732,89 @@ async fn wait_for_publication(
         "Image '{registered_name}' published ({CAS_IMAGE_REF_PREFIX}{image_id})"
     )));
     Ok(image)
+}
+
+fn published_image_path(image_id: &str, project: &str) -> String {
+    format!("/images/{image_id}?project={}", urlencoding_encode(project))
+}
+
+fn build_poll_timeout(build_id: &str) -> SandboxImageBuildError {
+    SandboxImageBuildError::other(format!(
+        "build {build_id} did not finish within {}s",
+        BUILD_POLL_TIMEOUT.as_secs()
+    ))
+}
+
+async fn follow_builder_logs(
+    ctx: &crate::sandbox_images::ResolvedBuildContext,
+    sandbox_id: &str,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<()> {
+    let lifecycle_client = sandbox_lifecycle_client(ctx)?;
+    let sandboxes = SandboxesClient::new(
+        lifecycle_client.clone(),
+        ctx.namespace.clone(),
+        is_localhost(&ctx.api_url),
+    );
+    let sandbox = sandboxes.get(sandbox_id).await?.into_inner();
+    let proxy = sandbox_proxy_client(
+        ctx,
+        &lifecycle_client,
+        sandbox_id,
+        sandbox.sandbox_url.as_deref(),
+        sandbox.ingress_endpoint.as_deref(),
+        sandbox.routing_hint,
+    )?;
+    let process = discover_image_builder_process(&proxy).await?;
+    follow_started_process_output(&proxy, process.pid, emit).await
+}
+
+fn take_unobserved_builder(build: &Value, observed: &mut HashSet<(u64, String)>) -> Option<String> {
+    if build.get("status").and_then(Value::as_str) != Some("running") {
+        return None;
+    }
+    let attempt = build.get("attempt_no")?.as_u64()?;
+    let sandbox_id = build.get("builder_sandbox_id")?.as_str()?.to_string();
+    observed
+        .insert((attempt, sandbox_id.clone()))
+        .then_some(sandbox_id)
+}
+
+async fn discover_image_builder_process(
+    proxy: &crate::sandboxes::SandboxProxyClient,
+) -> Result<ProcessInfo> {
+    let mut last_error = None;
+    for attempt in 0..BUILDER_PROCESS_DISCOVERY_ATTEMPTS {
+        match proxy.list_processes().await {
+            Ok(processes) => {
+                if let Some(process) = processes
+                    .into_inner()
+                    .into_iter()
+                    .filter(|process| is_image_builder_command(&process.command))
+                    .min_by_key(|process| process.pid)
+                {
+                    return Ok(process);
+                }
+            }
+            Err(error) => last_error = Some(error),
+        }
+        if attempt + 1 < BUILDER_PROCESS_DISCOVERY_ATTEMPTS {
+            tokio::time::sleep(BUILDER_PROCESS_DISCOVERY_INTERVAL).await;
+        }
+    }
+
+    let detail = last_error
+        .map(|error| format!(" after process-list errors: {error}"))
+        .unwrap_or_default();
+    Err(SandboxImageBuildError::other(format!(
+        "{IMAGE_BUILDER_COMMAND} process was not found{detail}"
+    )))
+}
+
+fn is_image_builder_command(command: &str) -> bool {
+    Path::new(command)
+        .file_name()
+        .is_some_and(|name| name == IMAGE_BUILDER_COMMAND)
 }
 
 #[cfg(test)]
@@ -726,14 +868,71 @@ mod tests {
     use super::*;
 
     #[test]
-    fn registry_credentials_attach_only_when_present() {
-        let body = with_registry_credentials(
-            serde_json::json!({ "kind": "import" }),
-            Some(r#"{"auths":{}}"#.to_string()),
+    fn build_requests_apply_public_scope_and_optional_credentials() {
+        for kind in ["import", "dockerfile"] {
+            let body = build_request(
+                serde_json::json!({ "kind": kind }),
+                true,
+                Some(r#"{"auths":{}}"#.to_string()),
+            );
+            assert_eq!(body["image_scope"], "global");
+            assert_eq!(body["registry_credentials_json"], r#"{"auths":{}}"#);
+
+            let body = build_request(serde_json::json!({ "kind": kind }), false, None);
+            assert!(body.get("image_scope").is_none());
+            assert!(body.get("registry_credentials_json").is_none());
+        }
+    }
+
+    #[test]
+    fn each_running_attempt_builder_is_observed_once() {
+        let mut observed = HashSet::new();
+        let pending = json!({
+            "status": "pending",
+            "attempt_no": 1,
+            "builder_sandbox_id": "stale-builder",
+        });
+        assert_eq!(take_unobserved_builder(&pending, &mut observed), None);
+
+        let pre_create = json!({ "status": "running", "attempt_no": 1 });
+        assert_eq!(take_unobserved_builder(&pre_create, &mut observed), None);
+
+        let attempt_one = json!({
+            "status": "running",
+            "attempt_no": 1,
+            "builder_sandbox_id": "builder-1",
+        });
+        assert_eq!(
+            take_unobserved_builder(&attempt_one, &mut observed).as_deref(),
+            Some("builder-1")
         );
-        assert_eq!(body["registry_credentials_json"], r#"{"auths":{}}"#);
-        let body = with_registry_credentials(serde_json::json!({ "kind": "import" }), None);
-        assert!(body.get("registry_credentials_json").is_none());
+        assert_eq!(take_unobserved_builder(&attempt_one, &mut observed), None);
+
+        let attempt_two = json!({
+            "status": "running",
+            "attempt_no": 2,
+            "builder_sandbox_id": "builder-2",
+        });
+        assert_eq!(
+            take_unobserved_builder(&attempt_two, &mut observed).as_deref(),
+            Some("builder-2")
+        );
+    }
+
+    #[test]
+    fn builder_command_matches_only_the_command_basename() {
+        assert!(is_image_builder_command("tl-image-builder"));
+        assert!(is_image_builder_command("/usr/local/bin/tl-image-builder"));
+        assert!(!is_image_builder_command("tl-rootfs-build"));
+        assert!(!is_image_builder_command("tl-image-builder-helper"));
+    }
+
+    #[test]
+    fn published_image_path_relies_on_the_ingress_version_prefix() {
+        assert_eq!(
+            published_image_path("image-id", "project/id"),
+            "/images/image-id?project=project%2Fid"
+        );
     }
 
     #[test]
