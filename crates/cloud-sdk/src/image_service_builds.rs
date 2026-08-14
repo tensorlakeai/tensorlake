@@ -12,7 +12,16 @@
 //! the client may also follow `tl-image-builder` output through the existing
 //! project-scoped sandbox APIs; Image Service status remains authoritative.
 
-use std::{collections::HashSet, path::Path, time::Duration};
+use std::{
+    collections::HashSet,
+    future::Future,
+    path::Path,
+    sync::{
+        Arc,
+        atomic::{AtomicUsize, Ordering},
+    },
+    time::Duration,
+};
 
 use reqwest::{Method, StatusCode, header::CONTENT_LENGTH};
 use serde_json::{Value, json};
@@ -58,6 +67,8 @@ const MAX_PINNED_PARENTS: usize = 3;
 
 const BUILD_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const BUILD_POLL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+const BUILDER_LOG_CHANNEL_CAPACITY: usize = 256;
+const BUILDER_LOG_DRAIN_GRACE: Duration = Duration::from_secs(2);
 const BUILDER_PROCESS_DISCOVERY_ATTEMPTS: usize = 10;
 const BUILDER_PROCESS_DISCOVERY_INTERVAL: Duration = Duration::from_secs(1);
 const IMAGE_BUILDER_COMMAND: &str = "tl-image-builder";
@@ -228,8 +239,11 @@ fn with_registry_credentials(mut body: Value, registry_credentials_json: Option<
 }
 
 /// Build requests rely on Image Service's executor-fleet default unless the
-/// user explicitly asks for a public image. Global admission remains the
-/// service's responsibility and is restricted to allowlisted publishers.
+/// user explicitly asks for a public image. Deliberately omit that private
+/// scope instead of sending `executor_fleet`: omission preserves compatibility
+/// with older Image Service versions, whose default is also private. Global
+/// admission remains the service's responsibility and is restricted to
+/// allowlisted publishers.
 fn build_request(
     mut body: Value,
     is_public: bool,
@@ -666,20 +680,81 @@ async fn wait_for_publication(
     project: &str,
     created: &Value,
     registered_name: &str,
-    mut emit: impl FnMut(SandboxImageBuildEvent),
+    emit: impl FnMut(SandboxImageBuildEvent),
 ) -> Result<Value> {
+    wait_for_publication_with_follower(
+        client,
+        ctx,
+        project,
+        created,
+        registered_name,
+        emit,
+        BuildWaitTiming {
+            poll_interval: BUILD_POLL_INTERVAL,
+            poll_timeout: BUILD_POLL_TIMEOUT,
+            log_drain_grace: BUILDER_LOG_DRAIN_GRACE,
+        },
+        |ctx, sandbox_id, sink| async move {
+            let mut emit = |event| sink.try_emit(event);
+            follow_builder_logs(&ctx, &sandbox_id, &mut emit).await
+        },
+    )
+    .await
+}
+
+#[derive(Clone, Copy)]
+struct BuildWaitTiming {
+    poll_interval: Duration,
+    poll_timeout: Duration,
+    log_drain_grace: Duration,
+}
+
+#[derive(Clone)]
+struct BuilderLogSink {
+    sender: tokio::sync::mpsc::Sender<SandboxImageBuildEvent>,
+    dropped: Arc<AtomicUsize>,
+}
+
+impl BuilderLogSink {
+    fn try_emit(&self, event: SandboxImageBuildEvent) {
+        match self.sender.try_send(event) {
+            Ok(()) => {}
+            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                self.dropped.fetch_add(1, Ordering::Relaxed);
+            }
+            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn wait_for_publication_with_follower<Follow, FollowFuture>(
+    client: &Client,
+    ctx: &crate::sandbox_images::ResolvedBuildContext,
+    project: &str,
+    created: &Value,
+    registered_name: &str,
+    mut emit: impl FnMut(SandboxImageBuildEvent),
+    timing: BuildWaitTiming,
+    follow_builder: Follow,
+) -> Result<Value>
+where
+    Follow: Fn(crate::sandbox_images::ResolvedBuildContext, String, BuilderLogSink) -> FollowFuture
+        + Clone
+        + Send
+        + 'static,
+    FollowFuture: Future<Output = Result<()>> + Send + 'static,
+{
     let build_id = build_id_of(created)?;
     let path = format!("/builds/{build_id}?project={}", urlencoding_encode(project));
-    let deadline = tokio::time::Instant::now() + BUILD_POLL_TIMEOUT;
+    let deadline = tokio::time::Instant::now() + timing.poll_timeout;
     let mut last_reported = String::new();
     let mut observed_builders = HashSet::new();
+    let (log_sender, mut log_receiver) = tokio::sync::mpsc::channel(BUILDER_LOG_CHANNEL_CAPACITY);
+    let dropped_logs = Arc::new(AtomicUsize::new(0));
+    let mut followers = tokio::task::JoinSet::new();
     let image_id = loop {
-        if tokio::time::Instant::now() > deadline {
-            return Err(SandboxImageBuildError::other(format!(
-                "build {build_id} did not finish within {}s",
-                BUILD_POLL_TIMEOUT.as_secs()
-            )));
-        }
+        drain_ready_builder_logs(&mut log_receiver, &dropped_logs, &mut emit);
         let request = client.request(Method::GET, &path).build()?;
         let response = client.execute_raw(request).await?;
         if !response.status().is_success() {
@@ -705,6 +780,14 @@ async fn wait_for_publication(
         }
         match status.as_str() {
             "succeeded" => {
+                finish_builder_log_followers(
+                    &mut followers,
+                    &mut log_receiver,
+                    &dropped_logs,
+                    timing.log_drain_grace,
+                    &mut emit,
+                )
+                .await;
                 break build
                     .get("image_id")
                     .and_then(Value::as_str)
@@ -716,6 +799,14 @@ async fn wait_for_publication(
                     })?;
             }
             "failed" => {
+                finish_builder_log_followers(
+                    &mut followers,
+                    &mut log_receiver,
+                    &dropped_logs,
+                    timing.log_drain_grace,
+                    &mut emit,
+                )
+                .await;
                 let error = build
                     .get("error")
                     .and_then(Value::as_str)
@@ -731,23 +822,47 @@ async fn wait_for_publication(
                     emit(SandboxImageBuildEvent::Status(format!(
                         "Following Image Service builder logs for attempt {attempt}..."
                     )));
-                    match tokio::time::timeout_at(
-                        deadline,
-                        follow_builder_logs(ctx, &builder_sandbox_id, &mut emit),
-                    )
-                    .await
-                    {
-                        Ok(Ok(())) => {}
-                        Ok(Err(error)) => emit(SandboxImageBuildEvent::Warning(format!(
-                            "Could not follow builder logs for attempt {attempt} ({builder_sandbox_id}): {error}"
-                        ))),
-                        Err(_) => return Err(build_poll_timeout(&build_id)),
-                    }
+                    let follower = follow_builder.clone();
+                    let follower_ctx = ctx.clone();
+                    let follower_sandbox_id = builder_sandbox_id.clone();
+                    let warning_sender = log_sender.clone();
+                    let sink = BuilderLogSink {
+                        sender: log_sender.clone(),
+                        dropped: dropped_logs.clone(),
+                    };
+                    followers.spawn(async move {
+                        if let Err(error) =
+                            follower(follower_ctx, follower_sandbox_id, sink).await
+                        {
+                            let _ = warning_sender
+                                .send(SandboxImageBuildEvent::Warning(format!(
+                                    "Could not follow builder logs for attempt {attempt} ({builder_sandbox_id}): {error}"
+                                )))
+                                .await;
+                        }
+                    });
                 }
-                tokio::time::sleep(BUILD_POLL_INTERVAL).await;
             }
-            _ => tokio::time::sleep(BUILD_POLL_INTERVAL).await,
+            _ => {}
         }
+        if tokio::time::Instant::now() >= deadline {
+            finish_builder_log_followers(
+                &mut followers,
+                &mut log_receiver,
+                &dropped_logs,
+                Duration::ZERO,
+                &mut emit,
+            )
+            .await;
+            return Err(build_poll_timeout(&build_id, timing.poll_timeout));
+        }
+        stream_builder_logs_until_next_poll(
+            &mut log_receiver,
+            &dropped_logs,
+            (tokio::time::Instant::now() + timing.poll_interval).min(deadline),
+            &mut emit,
+        )
+        .await;
     };
 
     let request = client
@@ -772,11 +887,78 @@ fn published_image_path(image_id: &str, project: &str) -> String {
     format!("/images/{image_id}?project={}", urlencoding_encode(project))
 }
 
-fn build_poll_timeout(build_id: &str) -> SandboxImageBuildError {
+fn build_poll_timeout(build_id: &str, timeout: Duration) -> SandboxImageBuildError {
     SandboxImageBuildError::other(format!(
         "build {build_id} did not finish within {}s",
-        BUILD_POLL_TIMEOUT.as_secs()
+        timeout.as_secs()
     ))
+}
+
+fn drain_ready_builder_logs(
+    receiver: &mut tokio::sync::mpsc::Receiver<SandboxImageBuildEvent>,
+    dropped: &AtomicUsize,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) {
+    while let Ok(event) = receiver.try_recv() {
+        emit(event);
+    }
+    emit_dropped_builder_logs(dropped, emit);
+}
+
+fn emit_dropped_builder_logs(dropped: &AtomicUsize, emit: &mut impl FnMut(SandboxImageBuildEvent)) {
+    let dropped = dropped.swap(0, Ordering::Relaxed);
+    if dropped != 0 {
+        emit(SandboxImageBuildEvent::Warning(format!(
+            "Dropped {dropped} builder log events because the CLI could not keep up."
+        )));
+    }
+}
+
+async fn stream_builder_logs_until_next_poll(
+    receiver: &mut tokio::sync::mpsc::Receiver<SandboxImageBuildEvent>,
+    dropped: &AtomicUsize,
+    next_poll: tokio::time::Instant,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) {
+    loop {
+        tokio::select! {
+            event = receiver.recv() => {
+                if let Some(event) = event {
+                    emit(event);
+                }
+            }
+            _ = tokio::time::sleep_until(next_poll) => break,
+        }
+    }
+    emit_dropped_builder_logs(dropped, emit);
+}
+
+async fn finish_builder_log_followers(
+    followers: &mut tokio::task::JoinSet<()>,
+    receiver: &mut tokio::sync::mpsc::Receiver<SandboxImageBuildEvent>,
+    dropped: &AtomicUsize,
+    grace: Duration,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) {
+    let deadline = tokio::time::Instant::now() + grace;
+    loop {
+        drain_ready_builder_logs(receiver, dropped, emit);
+        if followers.is_empty() || tokio::time::Instant::now() >= deadline {
+            break;
+        }
+        tokio::select! {
+            event = receiver.recv() => {
+                if let Some(event) = event {
+                    emit(event);
+                }
+            }
+            _ = followers.join_next() => {}
+            _ = tokio::time::sleep_until(deadline) => break,
+        }
+    }
+    followers.abort_all();
+    while followers.join_next().await.is_some() {}
+    drain_ready_builder_logs(receiver, dropped, emit);
 }
 
 async fn follow_builder_logs(
@@ -897,12 +1079,15 @@ mod url_tests {
 
 #[cfg(test)]
 mod tests {
-    use std::io::Read as _;
+    use std::{io::Read as _, pin::Pin};
+
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
+    use crate::ClientBuilder;
 
     #[test]
-    fn build_requests_apply_public_scope_and_optional_credentials() {
+    fn dockerfile_and_import_requests_apply_global_scope_or_private_default() {
         for kind in ["import", "dockerfile"] {
             let body = build_request(
                 serde_json::json!({ "kind": kind }),
@@ -917,10 +1102,9 @@ mod tests {
             );
             assert_eq!(body["registry_credentials_json"], r#"{"auths":{}}"#);
 
-            let body = build_request(serde_json::json!({ "kind": kind }), false, None, None);
-            assert!(body.get("image_scope").is_none());
-            assert!(body.get("builder_resources").is_none());
-            assert!(body.get("registry_credentials_json").is_none());
+            let private_body =
+                build_request(serde_json::json!({ "kind": kind }), false, None, None);
+            assert_eq!(private_body, serde_json::json!({ "kind": kind }));
         }
     }
 
@@ -1159,6 +1343,207 @@ mod tests {
         let error = create_context_tar(dir.path(), None, &files, &tar_path)
             .expect_err("disk and memory paths must not collide");
         assert!(error.to_string().contains("conflicts"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn successful_build_wins_over_an_open_log_stream() {
+        let image_id = "a".repeat(64);
+        let (base_url, server) = scripted_image_service(vec![
+            json!({
+                "status": "running",
+                "attempt_no": 1,
+                "builder_sandbox_id": "builder-1",
+            }),
+            json!({
+                "status": "succeeded",
+                "attempt_no": 1,
+                "image_id": image_id,
+            }),
+            json!({"image_id": image_id}),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let mut events = Vec::new();
+
+        let image = wait_for_publication_with_follower(
+            &client,
+            &ctx,
+            "project-1",
+            &json!({"build_id": "build-1"}),
+            "image-1",
+            |event| events.push(event),
+            test_build_wait_timing(),
+            |_ctx, _sandbox_id, sink| async move {
+                sink.try_emit(SandboxImageBuildEvent::BuildLog {
+                    stream: "stdout".to_string(),
+                    message: "still building".to_string(),
+                });
+                std::future::pending::<()>().await;
+                Ok(())
+            },
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(image["image_id"], image_id);
+        assert!(events.contains(&SandboxImageBuildEvent::BuildLog {
+            stream: "stdout".to_string(),
+            message: "still building".to_string(),
+        }));
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn retries_attach_once_warn_once_and_bound_buffered_logs() {
+        let image_id = "b".repeat(64);
+        let (base_url, server) = scripted_image_service(vec![
+            json!({
+                "status": "running",
+                "attempt_no": 1,
+                "builder_sandbox_id": "builder-1",
+            }),
+            json!({
+                "status": "running",
+                "attempt_no": 1,
+                "builder_sandbox_id": "builder-1",
+            }),
+            json!({
+                "status": "pending",
+                "attempt_no": 1,
+                "builder_sandbox_id": "stale-builder",
+            }),
+            json!({
+                "status": "running",
+                "attempt_no": 2,
+                "builder_sandbox_id": "builder-2",
+            }),
+            json!({
+                "status": "succeeded",
+                "attempt_no": 2,
+                "image_id": image_id,
+            }),
+            json!({"image_id": image_id}),
+        ])
+        .await;
+        let client = ClientBuilder::new(&base_url).build().unwrap();
+        let ctx = test_build_context(&base_url);
+        let attempt_one_attaches = Arc::new(AtomicUsize::new(0));
+        let attempt_two_attaches = Arc::new(AtomicUsize::new(0));
+        let mut events = Vec::new();
+        let follow = {
+            let attempt_one_attaches = attempt_one_attaches.clone();
+            let attempt_two_attaches = attempt_two_attaches.clone();
+            move |_ctx, sandbox_id: String, sink: BuilderLogSink| {
+                let attempt_one_attaches = attempt_one_attaches.clone();
+                let attempt_two_attaches = attempt_two_attaches.clone();
+                Box::pin(async move {
+                    match sandbox_id.as_str() {
+                        "builder-1" => {
+                            attempt_one_attaches.fetch_add(1, Ordering::Relaxed);
+                            Err(SandboxImageBuildError::other("stream unavailable"))
+                        }
+                        "builder-2" => {
+                            attempt_two_attaches.fetch_add(1, Ordering::Relaxed);
+                            for index in 0..BUILDER_LOG_CHANNEL_CAPACITY + 50 {
+                                sink.try_emit(SandboxImageBuildEvent::BuildLog {
+                                    stream: "stdout".to_string(),
+                                    message: format!("line {index}"),
+                                });
+                            }
+                            std::future::pending::<()>().await;
+                            Ok(())
+                        }
+                        other => panic!("unexpected builder {other}"),
+                    }
+                }) as Pin<Box<dyn Future<Output = Result<()>> + Send>>
+            }
+        };
+
+        let image = wait_for_publication_with_follower(
+            &client,
+            &ctx,
+            "project-1",
+            &json!({"build_id": "build-1"}),
+            "image-1",
+            |event| events.push(event),
+            test_build_wait_timing(),
+            follow,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(image["image_id"], image_id);
+        assert_eq!(attempt_one_attaches.load(Ordering::Relaxed), 1);
+        assert_eq!(attempt_two_attaches.load(Ordering::Relaxed), 1);
+        assert_eq!(
+            events
+                .iter()
+                .filter(|event| matches!(
+                    event,
+                    SandboxImageBuildEvent::Warning(message)
+                        if message.contains("stream unavailable")
+                ))
+                .count(),
+            1
+        );
+        assert!(events.iter().any(|event| matches!(
+            event,
+            SandboxImageBuildEvent::Warning(message) if message.starts_with("Dropped ")
+        )));
+        server.await.unwrap();
+    }
+
+    fn test_build_wait_timing() -> BuildWaitTiming {
+        BuildWaitTiming {
+            poll_interval: Duration::from_millis(5),
+            poll_timeout: Duration::from_secs(1),
+            log_drain_grace: Duration::from_millis(20),
+        }
+    }
+
+    fn test_build_context(api_url: &str) -> crate::sandbox_images::ResolvedBuildContext {
+        crate::sandbox_images::ResolvedBuildContext {
+            api_url: api_url.to_string(),
+            bearer_token: "token".to_string(),
+            use_scope_headers: false,
+            organization_id: "organization-1".to_string(),
+            project_id: "project-1".to_string(),
+            namespace: "default".to_string(),
+            user_agent: None,
+        }
+    }
+
+    async fn scripted_image_service(
+        responses: Vec<Value>,
+    ) -> (String, tokio::task::JoinHandle<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            for response in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0_u8; 1024];
+                loop {
+                    let read = stream.read(&mut buffer).await.unwrap();
+                    if read == 0 {
+                        break;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                    if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                let body = serde_json::to_vec(&response).unwrap();
+                let headers = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                );
+                stream.write_all(headers.as_bytes()).await.unwrap();
+                stream.write_all(&body).await.unwrap();
+            }
+        });
+        (format!("http://{address}"), server)
     }
 
     fn plan_with_context(context_dir: std::path::PathBuf) -> DockerfileBuildPlan {
