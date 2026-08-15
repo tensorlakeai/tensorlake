@@ -33,7 +33,8 @@ from .models import (
     CreateSandboxResponse,
     CreateSnapshotResponse,
     FileSystemMount,
-    GPUResources,
+    GpuModel,
+    GpuRequest,
     ListArchivedSandboxesResponse,
     ListSandboxesResponse,
     ListSandboxPoolsResponse,
@@ -160,16 +161,26 @@ def _raise_as_sandbox_error(e: Exception) -> NoReturn:
 
 def _build_gpu_resources(
     gpus: int | None,
-    gpu_model: str | None,
-) -> list[GPUResources] | None:
+    gpu_model: GpuModel | str | None,
+    gpu: GpuRequest | None = None,
+) -> list[GpuRequest] | None:
+    if gpu is not None:
+        if gpus is not None or gpu_model is not None:
+            raise SandboxError("gpu cannot be combined with gpus or gpu_model")
+        return [gpu]
     if gpus is None:
         return None
-    if gpus < 1:
-        raise SandboxError("gpus must be at least 1")
+    if isinstance(gpus, bool) or not isinstance(gpus, int) or gpus < 1:
+        raise SandboxError("gpus must be a positive integer")
     gpu_model = gpu_model or "A10"
-    if gpu_model != "A10":
-        raise SandboxError("only A10 GPU sandboxes are supported for now")
-    return [GPUResources(count=gpus, model=gpu_model)]
+    try:
+        model = GpuModel(gpu_model)
+    except ValueError:
+        supported = ", ".join(model.value for model in GpuModel)
+        raise SandboxError(
+            f"unsupported GPU model {gpu_model!r}; expected one of: {supported}"
+        ) from None
+    return [GpuRequest(count=gpus, model=model)]
 
 
 def _unsupported_request_timeout_kwarg(e: TypeError) -> bool:
@@ -427,7 +438,7 @@ class SandboxClient:
         memory_mb: int = 1024,
         disk_mb: int | None = None,
         gpus: int | None = None,
-        gpu_model: str | None = None,
+        gpu_model: GpuModel | str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -436,6 +447,7 @@ class SandboxClient:
         snapshot_id: str | None = None,
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
+        gpu: GpuRequest | None = None,
     ) -> Traced[CreateSandboxResponse]:
         """Create a new standalone sandbox.
 
@@ -449,7 +461,9 @@ class SandboxClient:
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
                 ``A10`` unless ``gpu_model`` is set.
-            gpu_model: GPU model to allocate. Only ``A10`` is supported.
+            gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.
+            gpu: Typed GPU model and count request. Cannot be combined with
+                ``gpus`` or ``gpu_model``.
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
             allow_internet_access: If True (default), outbound traffic is
@@ -490,7 +504,7 @@ class SandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                gpus=_build_gpu_resources(gpus, gpu_model),
+                gpus=_build_gpu_resources(gpus, gpu_model, gpu),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -1493,7 +1507,7 @@ class SandboxClient:
         memory_mb: int = 1024,
         disk_mb: int | None = None,
         gpus: int | None = None,
-        gpu_model: str | None = None,
+        gpu_model: GpuModel | str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -1506,6 +1520,7 @@ class SandboxClient:
         startup_timeout: float | None = None,
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
+        gpu: GpuRequest | None = None,
     ) -> "Sandbox":
         """Create a sandbox, wait for it to start, and return a connected Sandbox.
 
@@ -1523,7 +1538,9 @@ class SandboxClient:
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
                 ``A10`` unless ``gpu_model`` is set.
-            gpu_model: GPU model to allocate. Only ``A10`` is supported.
+            gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.
+            gpu: Typed GPU model and count request. Cannot be combined with
+                ``gpus`` or ``gpu_model``.
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
             allow_internet_access: If True (default), outbound traffic is
@@ -1586,6 +1603,7 @@ class SandboxClient:
                 snapshot_id=snapshot_id,
                 name=name,
                 file_systems=file_systems,
+                gpu=gpu,
             )
 
         # Fast path: the blocking create/claim response already carries Running status

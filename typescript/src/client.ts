@@ -19,6 +19,7 @@ import {
   type CreateSandboxResponse,
   type CreateSnapshotResponse,
   type GetSandboxLogsOptions,
+  type GpuRequest,
   type ListArchivedSandboxesOptions,
   type ListArchivedSandboxesResponse,
   type SandboxClientOptions,
@@ -43,17 +44,34 @@ import { Sandbox } from "./sandbox.js";
 import { nowMs, logSdkTimingEvent, logSdkTiming } from "./sdk-timings.js";
 import { explicitProxyUrlOverride } from "./url.js";
 
+const GPU_MODELS = new Set<string>([
+  "A100-40GB",
+  "A100-80GB",
+  "H100",
+  "T4",
+  "A6000",
+  "A10",
+]);
+
 function gpuRequest(
+  gpu: GpuRequest | undefined,
   gpus: number | undefined,
   gpuModel: string | undefined,
 ): Array<{ count: number; model: string }> | undefined {
+  if (gpu != null) {
+    if (gpus != null || gpuModel != null) {
+      throw new SandboxError("gpu cannot be combined with gpus or gpuModel");
+    }
+    gpus = gpu.count;
+    gpuModel = gpu.model;
+  }
   if (gpus == null) return undefined;
   if (!Number.isInteger(gpus) || gpus < 1) {
     throw new SandboxError("gpus must be a positive integer");
   }
   gpuModel = gpuModel ?? "A10";
-  if (gpuModel !== "A10") {
-    throw new SandboxError("only A10 GPU sandboxes are supported for now");
+  if (!GPU_MODELS.has(gpuModel)) {
+    throw new SandboxError(`unsupported GPU model: ${gpuModel}`);
   }
   return [{ count: gpus, model: gpuModel }];
 }
@@ -192,7 +210,11 @@ export class SandboxClient {
   async create(
     options?: CreateSandboxOptions,
   ): Promise<Traced<CreateSandboxResponse>> {
-    const gpuResources = gpuRequest(options?.gpus, options?.gpuModel);
+    const gpuResources = gpuRequest(
+      options?.gpu,
+      options?.gpus,
+      options?.gpuModel,
+    );
     const body: Record<string, unknown> = {
       resources: {
         cpus: options?.cpus ?? 1.0,

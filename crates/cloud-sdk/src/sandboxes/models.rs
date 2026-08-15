@@ -1,5 +1,6 @@
 use derive_builder::Builder;
 use serde::{Deserialize, Serialize};
+use std::{fmt, str::FromStr};
 
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -114,10 +115,98 @@ pub struct ContainerResourcesInfo {
     pub ephemeral_disk_mb: i64,
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+/// GPU models supported by the sandbox scheduler.
+///
+/// The serialized values are the canonical names used by Server and the
+/// executor API.
+#[derive(Copy, Clone, Debug, Eq, Hash, PartialEq, Serialize, Deserialize)]
+pub enum GpuModel {
+    #[serde(rename = "A100-40GB")]
+    A10040Gb,
+    #[serde(rename = "A100-80GB")]
+    A10080Gb,
+    #[serde(rename = "H100")]
+    H100,
+    #[serde(rename = "T4")]
+    T4,
+    #[serde(rename = "A6000")]
+    A6000,
+    #[serde(rename = "A10")]
+    A10,
+}
+
+impl GpuModel {
+    pub const ALL: [Self; 6] = [
+        Self::A10040Gb,
+        Self::A10080Gb,
+        Self::H100,
+        Self::T4,
+        Self::A6000,
+        Self::A10,
+    ];
+
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::A10040Gb => "A100-40GB",
+            Self::A10080Gb => "A100-80GB",
+            Self::H100 => "H100",
+            Self::T4 => "T4",
+            Self::A6000 => "A6000",
+            Self::A10 => "A10",
+        }
+    }
+}
+
+impl fmt::Display for GpuModel {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+impl FromStr for GpuModel {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        Self::ALL
+            .into_iter()
+            .find(|model| model.as_str() == value)
+            .ok_or_else(|| format!("unsupported GPU model: {value}"))
+    }
+}
+
+/// A homogeneous GPU allocation for a sandbox.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
+pub struct GpuRequest {
+    pub count: u32,
+    pub model: GpuModel,
+}
+
+impl GpuRequest {
+    pub fn new(model: GpuModel, count: u32) -> Result<Self, String> {
+        if count == 0 {
+            return Err("GPU count must be positive".to_string());
+        }
+        Ok(Self { count, model })
+    }
+}
+
+/// GPU resource request used by the existing sandbox request model.
+///
+/// `model` remains a string for Rust source compatibility. New code can build
+/// a typed [`GpuRequest`] and convert it with [`From`].
+#[derive(Clone, Debug, Eq, PartialEq, Serialize, Deserialize)]
 pub struct GPUResources {
     pub count: u32,
     pub model: String,
+}
+
+impl From<GpuRequest> for GPUResources {
+    fn from(request: GpuRequest) -> Self {
+        Self {
+            count: request.count,
+            model: request.model.to_string(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1132,5 +1221,37 @@ mod tests {
         }"#;
         let info: SnapshotInfo = serde_json::from_str(json).unwrap();
         assert_eq!(info.snapshot_type, Some(SnapshotType::Filesystem));
+    }
+
+    #[test]
+    fn gpu_models_use_server_wire_values() {
+        let wire_values = ["A100-40GB", "A100-80GB", "H100", "T4", "A6000", "A10"];
+        for (model, wire_value) in GpuModel::ALL.into_iter().zip(wire_values) {
+            assert_eq!(model.to_string(), wire_value);
+            assert_eq!(wire_value.parse::<GpuModel>().unwrap(), model);
+            assert_eq!(
+                serde_json::to_string(&model).unwrap(),
+                format!(r#""{wire_value}""#)
+            );
+        }
+    }
+
+    #[test]
+    fn gpu_request_requires_positive_count() {
+        assert!(GpuRequest::new(GpuModel::H100, 0).is_err());
+        assert_eq!(
+            GpuRequest::new(GpuModel::H100, 2).unwrap(),
+            GpuRequest {
+                count: 2,
+                model: GpuModel::H100,
+            }
+        );
+        assert_eq!(
+            GPUResources::from(GpuRequest::new(GpuModel::H100, 2).unwrap()),
+            GPUResources {
+                count: 2,
+                model: "H100".to_string(),
+            }
+        );
     }
 }

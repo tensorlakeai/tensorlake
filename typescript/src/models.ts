@@ -71,6 +71,21 @@ export interface ContainerResourcesInfo {
   ephemeralDiskMb: number;
 }
 
+/** GPU models supported by the sandbox scheduler. */
+export type GpuModel =
+  | "A100-40GB"
+  | "A100-80GB"
+  | "H100"
+  | "T4"
+  | "A6000"
+  | "A10";
+
+/** A homogeneous GPU allocation for a sandbox. */
+export interface GpuRequest {
+  count: number;
+  model: GpuModel;
+}
+
 export interface GPUResources {
   count: number;
   model: string;
@@ -118,8 +133,10 @@ export interface CreateSandboxOptions {
   diskMb?: number;
   /** Number of GPUs to allocate. When provided, defaults to A10 unless gpuModel is set. */
   gpus?: number;
-  /** GPU model to allocate. Only "A10" is supported. */
-  gpuModel?: string;
+  /** GPU model to allocate. The string arm preserves compatibility with existing callers; values are validated at runtime. */
+  gpuModel?: GpuModel | (string & {});
+  /** Typed GPU model and count request. Cannot be combined with gpus or gpuModel. */
+  gpu?: GpuRequest;
   timeoutSecs?: number;
   entrypoint?: string[];
   allowInternetAccess?: boolean;

@@ -1,6 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SandboxClient } from "../src/client.js";
-import { SandboxStatus, SnapshotStatus } from "../src/models.js";
+import {
+  type GpuModel,
+  SandboxStatus,
+  SnapshotStatus,
+} from "../src/models.js";
 import { clearNativeStub, installNativeStub } from "./native-stub.js";
 
 /** Build the native error a non-2xx HTTP response now surfaces from Rust. */
@@ -103,17 +107,58 @@ describe("SandboxClient", () => {
       client.close();
     });
 
-    it("rejects non-A10 GPU resources", async () => {
-      installNativeStub({
+    it.each([
+      "A100-40GB",
+      "A100-80GB",
+      "H100",
+      "T4",
+      "A6000",
+      "A10",
+    ] satisfies GpuModel[])("creates a %s GPU sandbox", async (model) => {
+      const stub = installNativeStub({
         client: {
-          createSandbox: vi.fn(),
+          createSandbox: vi.fn(async (json: string) => {
+            const body = JSON.parse(json);
+            expect(body.resources.gpus).toEqual([{ count: 2, model }]);
+            return {
+              traceId: "t",
+              json: JSON.stringify({ sandbox_id: "sbx-gpu", status: "pending" }),
+            };
+          }),
         },
       });
 
       const client = SandboxClient.forLocalhost();
+      await client.create({ gpus: 2, gpuModel: model });
+      expect(stub.client.createSandbox).toHaveBeenCalledOnce();
+      client.close();
+    });
+
+    it("creates a sandbox with a typed GPU request", async () => {
+      const stub = installNativeStub({
+        client: {
+          createSandbox: vi.fn(async (json: string) => {
+            const body = JSON.parse(json);
+            expect(body.resources.gpus).toEqual([{ count: 2, model: "H100" }]);
+            return {
+              traceId: "t",
+              json: JSON.stringify({ sandbox_id: "sbx-gpu", status: "pending" }),
+            };
+          }),
+        },
+      });
+      const client = SandboxClient.forLocalhost();
+      await client.create({ gpu: { count: 2, model: "H100" } });
+      expect(stub.client.createSandbox).toHaveBeenCalledOnce();
+      client.close();
+    });
+
+    it("rejects conflicting typed and legacy GPU resources", async () => {
+      installNativeStub();
+      const client = SandboxClient.forLocalhost();
       await expect(
-        client.create({ gpus: 1, gpuModel: "H100" }),
-      ).rejects.toThrow("only A10");
+        client.create({ gpu: { count: 1, model: "H100" }, gpus: 1 }),
+      ).rejects.toThrow("cannot be combined");
       client.close();
     });
 

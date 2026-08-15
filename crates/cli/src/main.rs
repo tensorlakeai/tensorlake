@@ -1036,6 +1036,16 @@ enum ApplicationsCommands {
 
 #[derive(Clone, Copy, Debug, ValueEnum)]
 enum GpuModelArg {
+    #[value(name = "A100-40GB")]
+    A10040Gb,
+    #[value(name = "A100-80GB")]
+    A10080Gb,
+    #[value(name = "H100")]
+    H100,
+    #[value(name = "T4")]
+    T4,
+    #[value(name = "A6000")]
+    A6000,
     #[value(name = "A10")]
     A10,
 }
@@ -1043,6 +1053,11 @@ enum GpuModelArg {
 impl GpuModelArg {
     fn as_wire_value(self) -> &'static str {
         match self {
+            Self::A10040Gb => "A100-40GB",
+            Self::A10080Gb => "A100-80GB",
+            Self::H100 => "H100",
+            Self::T4 => "T4",
+            Self::A6000 => "A6000",
             Self::A10 => "A10",
         }
     }
@@ -1112,11 +1127,11 @@ enum SbxCommands {
         disk_mb: Option<u64>,
 
         /// Number of GPUs to request
-        #[arg(long = "gpus", hide = true, value_parser = clap::value_parser!(u32).range(1..))]
+        #[arg(long = "gpus", value_parser = clap::value_parser!(u32).range(1..))]
         gpus: Option<u32>,
 
-        /// GPU model to request
-        #[arg(long = "gpu-model", value_enum, hide = true, requires = "gpus")]
+        /// GPU model to request (defaults to A10 when --gpus is set)
+        #[arg(long = "gpu-model", value_enum, requires = "gpus")]
         gpu_model: Option<GpuModelArg>,
 
         /// Deprecated: root disk size in GB
@@ -4257,27 +4272,29 @@ mod tests {
 
     #[test]
     fn sbx_create_parses_gpu_request_with_explicit_model() {
-        let cli = Cli::try_parse_from([
-            "tl",
-            "sbx",
-            "create",
-            "--gpus",
-            "1",
-            "--gpu-model",
-            "A10",
-            "--image",
-            "tensorlake/ubuntu-minimal",
-        ])
-        .unwrap();
+        for model in ["A100-40GB", "A100-80GB", "H100", "T4", "A6000", "A10"] {
+            let cli = Cli::try_parse_from([
+                "tl",
+                "sbx",
+                "create",
+                "--gpus",
+                "1",
+                "--gpu-model",
+                model,
+                "--image",
+                "tensorlake/ubuntu-minimal",
+            ])
+            .unwrap();
 
-        match cli.command {
-            Some(Commands::Sbx(SbxCommands::Create {
-                gpus, gpu_model, ..
-            })) => {
-                assert_eq!(gpus, Some(1));
-                assert_eq!(gpu_model.map(GpuModelArg::as_wire_value), Some("A10"));
+            match cli.command {
+                Some(Commands::Sbx(SbxCommands::Create {
+                    gpus, gpu_model, ..
+                })) => {
+                    assert_eq!(gpus, Some(1));
+                    assert_eq!(gpu_model.map(GpuModelArg::as_wire_value), Some(model));
+                }
+                _ => panic!("expected sbx create command"),
             }
-            _ => panic!("expected sbx create command"),
         }
     }
 

@@ -54,6 +54,8 @@ from .models import (
     CreateSandboxResponse,
     CreateSnapshotResponse,
     FileSystemMount,
+    GpuModel,
+    GpuRequest,
     ListArchivedSandboxesResponse,
     ListSandboxesResponse,
     ListSandboxPoolsResponse,
@@ -238,7 +240,7 @@ class AsyncSandboxClient:
         memory_mb: int = 1024,
         disk_mb: int | None = None,
         gpus: int | None = None,
-        gpu_model: str | None = None,
+        gpu_model: GpuModel | str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -247,6 +249,7 @@ class AsyncSandboxClient:
         snapshot_id: str | None = None,
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
+        gpu: GpuRequest | None = None,
     ) -> Traced[CreateSandboxResponse]:
         network = None
         if not allow_internet_access or allow_out is not None or deny_out is not None:
@@ -261,7 +264,7 @@ class AsyncSandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                gpus=_build_gpu_resources(gpus, gpu_model),
+                gpus=_build_gpu_resources(gpus, gpu_model, gpu),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -936,7 +939,7 @@ class AsyncSandboxClient:
         memory_mb: int = 1024,
         disk_mb: int | None = None,
         gpus: int | None = None,
-        gpu_model: str | None = None,
+        gpu_model: GpuModel | str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -949,6 +952,7 @@ class AsyncSandboxClient:
         startup_timeout: float | None = None,
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
+        gpu: GpuRequest | None = None,
     ) -> "AsyncSandbox":
         """Create a sandbox, wait for it to start, and return a connection.
 
@@ -985,6 +989,7 @@ class AsyncSandboxClient:
                 snapshot_id=snapshot_id,
                 name=name,
                 file_systems=file_systems,
+                gpu=gpu,
             )
 
         if result.status == SandboxStatus.RUNNING:
