@@ -1448,12 +1448,13 @@ impl ArtifactStorageClient {
             )
         });
 
-        // The head read runs concurrently with SHA-256 preparation on the blocking pool; the
-        // lease request follows preparation so it can DECLARE the prepared blob identities and
-        // fold the first target batch into the lease response — two sequential control round
-        // trips for a small publication (lease+targets, then publish after the parallel direct
-        // PUTs). An older server ignores the declaration and returns no `targets`, selecting
-        // the standalone batched target requests below, which are behavior-identical.
+        // The head read runs concurrently with the prepare-then-lease chain: the lease request
+        // waits only on SHA-256 preparation (it DECLARES the prepared blob identities so the
+        // server folds the first target batch into the lease response), never on the head. A
+        // small publication is therefore two sequential control round trips — lease+targets,
+        // then publish after the parallel direct PUTs — with the head read hidden under them.
+        // An older server ignores the declaration and returns no `targets`, selecting the
+        // standalone batched target requests below (three round trips, exactly the old flow).
         let head_request = send_idempotent(
             self.git_request(
                 Method::GET,
@@ -1470,25 +1471,6 @@ impl ArtifactStorageClient {
                 .await
                 .map(Traced::into_inner)
         };
-        let prepared = async {
-            prepare.await.map_err(|error| {
-                SdkError::ClientError(format!(
-                    "native direct publication preparation failed: {error}"
-                ))
-            })?
-        };
-        let (head, (mutations, unique_blobs)) = tokio::try_join!(head, prepared)?;
-        let blob_requests = unique_blobs
-            .iter()
-            .map(|(blob_id, data)| NativeDirectBlobRequest {
-                blob_id: blob_id.clone(),
-                logical_len: data.logical_len(),
-            })
-            .collect::<Vec<_>>();
-        // Mirrors the server's fixed per-request target ceiling; the lease response's
-        // `max_targets_per_request` arrives too late to size the declaration.
-        const LEASE_DECLARED_TARGETS_MAX: usize = 256;
-        let declared = blob_requests.len().min(LEASE_DECLARED_TARGETS_MAX);
         let (lease_request, _lease_trace) = self.git_request(
             Method::POST,
             project_id,
@@ -1497,15 +1479,36 @@ impl ArtifactStorageClient {
             git_username,
             git_token,
         )?;
-        let mut lease = decode_json::<NativeDirectUploadLeaseResponse>(
-            send_idempotent(lease_request.json(&NativeDirectBlobTargetsRequest {
-                blobs: blob_requests[..declared].to_vec(),
-            }))
-            .await?,
-            String::new(),
-        )
-        .await?
-        .into_inner();
+        // Mirrors the server's fixed per-request target ceiling; the lease response's
+        // `max_targets_per_request` arrives too late to size the declaration.
+        const LEASE_DECLARED_TARGETS_MAX: usize = 256;
+        let prepared_then_lease = async {
+            let (mutations, unique_blobs) = prepare.await.map_err(|error| {
+                SdkError::ClientError(format!(
+                    "native direct publication preparation failed: {error}"
+                ))
+            })??;
+            let blob_requests = unique_blobs
+                .iter()
+                .map(|(blob_id, data)| NativeDirectBlobRequest {
+                    blob_id: blob_id.clone(),
+                    logical_len: data.logical_len(),
+                })
+                .collect::<Vec<_>>();
+            let declared = blob_requests.len().min(LEASE_DECLARED_TARGETS_MAX);
+            let lease = decode_json::<NativeDirectUploadLeaseResponse>(
+                send_idempotent(lease_request.json(&NativeDirectBlobTargetsRequest {
+                    blobs: blob_requests[..declared].to_vec(),
+                }))
+                .await?,
+                String::new(),
+            )
+            .await?
+            .into_inner();
+            Ok::<_, SdkError>((lease, mutations, unique_blobs, blob_requests))
+        };
+        let (head, (mut lease, mutations, unique_blobs, blob_requests)) =
+            tokio::try_join!(head, prepared_then_lease)?;
         if head.snapshot_id.is_none()
             && mutations
                 .iter()
@@ -1557,12 +1560,19 @@ impl ArtifactStorageClient {
         let mut targets = NativeDirectBlobTargetsResponse {
             targets: Vec::with_capacity(blob_requests.len()),
         };
-        let mut remaining: &[NativeDirectBlobRequest] = &blob_requests;
+        let mut remaining: Vec<NativeDirectBlobRequest> = blob_requests.clone();
         if let Some(inline) = lease.targets.take() {
-            // The server minted the declared prefix with the lease: no standalone target round
-            // trip for publications of up to LEASE_DECLARED_TARGETS_MAX distinct blobs.
+            // The server minted targets with the lease: only blobs its response did not cover
+            // (undeclared overflow past the ceiling — or, defensively, anything a future server
+            // sheds from the fold) take the standalone round trip. Coverage is computed from
+            // the returned ids rather than assumed from the declared count, so a partial or
+            // empty fold degrades to the old flow instead of failing the publication.
+            let covered: std::collections::HashSet<&str> = inline
+                .iter()
+                .map(|target| target.blob_id.as_str())
+                .collect();
+            remaining.retain(|request| !covered.contains(request.blob_id.as_str()));
             targets.targets.extend(inline);
-            remaining = &blob_requests[declared..];
         }
         let mut target_requests = Vec::new();
         for batch in remaining.chunks(lease.max_targets_per_request) {
@@ -2319,17 +2329,20 @@ async fn native_direct_request_body(
 }
 
 /// Upload a replayable source. File-backed parts reopen and seek the source for each transport
-/// attempt, avoiding both whole-file memory and reqwest's non-cloneable streaming-body limitation.
+/// attempt, avoiding both whole-file memory and reqwest's non-cloneable streaming-body
+/// limitation. The retry budget matches `send_idempotent` — the direct PUT is the
+/// highest-volume request of a publication and object stores shed load with the same
+/// 503-plus-`Retry-After` shape (S3 SlowDown) the control plane does.
 async fn upload_native_direct_source(
     client: &reqwest::Client,
     url: &str,
     checksum: &str,
     source: &NativeDirectUploadSource,
 ) -> Result<reqwest::Response, SdkError> {
-    const ATTEMPTS: usize = 3;
+    const ATTEMPTS: usize = 5;
     for attempt in 0..ATTEMPTS {
         let body = native_direct_request_body(source).await?;
-        match client
+        let hinted = match client
             .put(url)
             .header(
                 reqwest::header::CONTENT_LENGTH,
@@ -2343,12 +2356,15 @@ async fn upload_native_direct_source(
             Ok(response)
                 if attempt + 1 < ATTEMPTS
                     && (response.status().is_server_error()
-                        || response.status() == StatusCode::TOO_MANY_REQUESTS) => {}
+                        || response.status() == StatusCode::TOO_MANY_REQUESTS) =>
+            {
+                retry_after_hint(&response)
+            }
             Ok(response) => return Ok(response),
-            Err(_) if attempt + 1 < ATTEMPTS => {}
+            Err(_) if attempt + 1 < ATTEMPTS => None,
             Err(error) => return Err(error.into()),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25 << attempt)).await;
+        };
+        tokio::time::sleep(retry_delay(attempt, hinted)).await;
     }
     unreachable!("the final direct upload attempt always returns")
 }
@@ -2364,7 +2380,6 @@ async fn upload_native_direct_source(
 /// storm. Transport errors and hint-less server errors keep a fast exponential fallback.
 async fn send_idempotent(request: reqwest::RequestBuilder) -> Result<reqwest::Response, SdkError> {
     const ATTEMPTS: usize = 5;
-    const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
     for attempt in 0..ATTEMPTS {
         let current = request.try_clone().ok_or_else(|| {
             SdkError::ClientError("direct upload request body cannot be retried".to_string())
@@ -2384,10 +2399,22 @@ async fn send_idempotent(request: reqwest::RequestBuilder) -> Result<reqwest::Re
             }
             Err(error) => return Err(error.into()),
         };
-        let fallback = std::time::Duration::from_millis(50 << attempt);
-        tokio::time::sleep(hinted.unwrap_or(fallback).min(MAX_RETRY_AFTER)).await;
+        tokio::time::sleep(retry_delay(attempt, hinted)).await;
     }
     unreachable!("the final direct request attempt always returns")
+}
+
+/// Backoff for one failed idempotent attempt. A `Retry-After` hint is honored — capped so the
+/// whole budget stays bounded for callers with their own deadlines, and FLOORED at the
+/// exponential fallback so a `Retry-After: 0` (a shape some proxies shed with) cannot strip all
+/// backoff and reintroduce the burn-the-budget-inside-one-burst failure.
+fn retry_delay(attempt: usize, hinted: Option<std::time::Duration>) -> std::time::Duration {
+    const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
+    let fallback = std::time::Duration::from_millis(50 << attempt);
+    match hinted {
+        Some(hint) => hint.clamp(fallback, MAX_RETRY_AFTER),
+        None => fallback,
+    }
 }
 
 /// The server's `Retry-After` delay, when present as whole seconds (the only shape our
@@ -3310,6 +3337,9 @@ mod tests {
                 stream.write_all(response.as_bytes()).await.unwrap();
             }
         });
+        // The SDK ClientBuilder installs the process-wide rustls provider; a bare reqwest
+        // client in an isolated test run must install it itself (AlreadyInstalled is fine).
+        let _ = rustls::crypto::ring::default_provider().install_default();
         let started = std::time::Instant::now();
         let response = super::send_idempotent(reqwest::Client::new().get(&base))
             .await
