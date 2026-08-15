@@ -210,6 +210,11 @@ pub struct NativeDirectUploadLeaseResponse {
     pub max_blob_bytes: u64,
     pub max_targets_per_request: usize,
     pub max_parts_per_file: usize,
+    /// Targets for blobs the client declared in the lease request, folding the first target
+    /// negotiation into this response. `None` from servers that predate the combined flow —
+    /// the caller then issues the standalone targets request(s) exactly as before.
+    #[serde(default)]
+    pub targets: Option<Vec<NativeDirectBlobTarget>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]

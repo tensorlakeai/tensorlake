@@ -1448,10 +1448,12 @@ impl ArtifactStorageClient {
             )
         });
 
-        // Head and lease are independent control requests. Issuing them together keeps the
-        // fixed-cost portion of a small publication to three sequential data-plane round trips:
-        // (head+lease), targets, then publish after the parallel direct PUTs. SHA-256 preparation
-        // runs concurrently on the blocking pool, so multi-GiB inputs add no serial setup phase.
+        // The head read runs concurrently with SHA-256 preparation on the blocking pool; the
+        // lease request follows preparation so it can DECLARE the prepared blob identities and
+        // fold the first target batch into the lease response — two sequential control round
+        // trips for a small publication (lease+targets, then publish after the parallel direct
+        // PUTs). An older server ignores the declaration and returns no `targets`, selecting
+        // the standalone batched target requests below, which are behavior-identical.
         let head_request = send_idempotent(
             self.git_request(
                 Method::GET,
@@ -1463,28 +1465,10 @@ impl ArtifactStorageClient {
             )?
             .0,
         );
-        let lease_request = send_idempotent(
-            self.git_request(
-                Method::POST,
-                project_id,
-                filesystem,
-                Some("fs/upload-leases"),
-                git_username,
-                git_token,
-            )?
-            .0
-            .json(&serde_json::json!({})),
-        );
-        let control = async {
-            let (head_response, lease_response) = tokio::try_join!(head_request, lease_request)?;
-            let head = decode_json::<NativeHeadResponse>(head_response, String::new())
-                .await?
-                .into_inner();
-            let lease =
-                decode_json::<NativeDirectUploadLeaseResponse>(lease_response, String::new())
-                    .await?
-                    .into_inner();
-            Ok::<_, SdkError>((head, lease))
+        let head = async {
+            decode_json::<NativeHeadResponse>(head_request.await?, String::new())
+                .await
+                .map(Traced::into_inner)
         };
         let prepared = async {
             prepare.await.map_err(|error| {
@@ -1493,7 +1477,35 @@ impl ArtifactStorageClient {
                 ))
             })?
         };
-        let ((head, lease), (mutations, unique_blobs)) = tokio::try_join!(control, prepared)?;
+        let (head, (mutations, unique_blobs)) = tokio::try_join!(head, prepared)?;
+        let blob_requests = unique_blobs
+            .iter()
+            .map(|(blob_id, data)| NativeDirectBlobRequest {
+                blob_id: blob_id.clone(),
+                logical_len: data.logical_len(),
+            })
+            .collect::<Vec<_>>();
+        // Mirrors the server's fixed per-request target ceiling; the lease response's
+        // `max_targets_per_request` arrives too late to size the declaration.
+        const LEASE_DECLARED_TARGETS_MAX: usize = 256;
+        let declared = blob_requests.len().min(LEASE_DECLARED_TARGETS_MAX);
+        let (lease_request, _lease_trace) = self.git_request(
+            Method::POST,
+            project_id,
+            filesystem,
+            Some("fs/upload-leases"),
+            git_username,
+            git_token,
+        )?;
+        let mut lease = decode_json::<NativeDirectUploadLeaseResponse>(
+            send_idempotent(lease_request.json(&NativeDirectBlobTargetsRequest {
+                blobs: blob_requests[..declared].to_vec(),
+            }))
+            .await?,
+            String::new(),
+        )
+        .await?
+        .into_inner();
         if head.snapshot_id.is_none()
             && mutations
                 .iter()
@@ -1542,18 +1554,18 @@ impl ArtifactStorageClient {
             )));
         }
 
-        let blob_requests = unique_blobs
-            .iter()
-            .map(|(blob_id, data)| NativeDirectBlobRequest {
-                blob_id: blob_id.clone(),
-                logical_len: data.logical_len(),
-            })
-            .collect::<Vec<_>>();
         let mut targets = NativeDirectBlobTargetsResponse {
             targets: Vec::with_capacity(blob_requests.len()),
         };
+        let mut remaining: &[NativeDirectBlobRequest] = &blob_requests;
+        if let Some(inline) = lease.targets.take() {
+            // The server minted the declared prefix with the lease: no standalone target round
+            // trip for publications of up to LEASE_DECLARED_TARGETS_MAX distinct blobs.
+            targets.targets.extend(inline);
+            remaining = &blob_requests[declared..];
+        }
         let mut target_requests = Vec::new();
-        for batch in blob_requests.chunks(lease.max_targets_per_request) {
+        for batch in remaining.chunks(lease.max_targets_per_request) {
             let targets_path = format!(
                 "fs/upload-leases/{}/targets",
                 encode_path_segment(&lease.lease_id)
@@ -2341,29 +2353,55 @@ async fn upload_native_direct_source(
     unreachable!("the final direct upload attempt always returns")
 }
 
-/// Send an idempotent direct-publication step with a small transport retry budget. Every caller
-/// either uses a read, a lease/target allocation that reattaches by server key, an immutable PUT,
-/// or the operation-id-fenced publish endpoint.
+/// Send an idempotent direct-publication step with a bounded transport retry budget. Every
+/// caller either uses a read, a lease/target allocation that reattaches by server key, an
+/// immutable PUT, or the operation-id-fenced publish endpoint.
+///
+/// Capacity rejections (429/503) carry a `Retry-After` the server means literally: its
+/// admission layer sheds short write bursts with one-second hints, so the backoff honors the
+/// header (bounded) instead of burning the whole budget inside one burst — the 2026-08-14
+/// storage-benchmark failures were three sub-100ms retries spent inside a single 2.5s 503
+/// storm. Transport errors and hint-less server errors keep a fast exponential fallback.
 async fn send_idempotent(request: reqwest::RequestBuilder) -> Result<reqwest::Response, SdkError> {
-    const ATTEMPTS: usize = 3;
+    const ATTEMPTS: usize = 5;
+    const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
     for attempt in 0..ATTEMPTS {
         let current = request.try_clone().ok_or_else(|| {
             SdkError::ClientError("direct upload request body cannot be retried".to_string())
         })?;
-        match current.send().await {
+        let hinted = match current.send().await {
             Ok(response)
                 if attempt + 1 < ATTEMPTS
                     && (response.status().is_server_error()
-                        || response.status() == StatusCode::TOO_MANY_REQUESTS) => {}
+                        || response.status() == StatusCode::TOO_MANY_REQUESTS) =>
+            {
+                retry_after_hint(&response)
+            }
             Ok(response) => return Ok(response),
             Err(error) if attempt + 1 < ATTEMPTS => {
                 let _ = error;
+                None
             }
             Err(error) => return Err(error.into()),
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25 << attempt)).await;
+        };
+        let fallback = std::time::Duration::from_millis(50 << attempt);
+        tokio::time::sleep(hinted.unwrap_or(fallback).min(MAX_RETRY_AFTER)).await;
     }
     unreachable!("the final direct request attempt always returns")
+}
+
+/// The server's `Retry-After` delay, when present as whole seconds (the only shape our
+/// admission layer emits). HTTP-date forms are ignored rather than parsed.
+fn retry_after_hint(response: &reqwest::Response) -> Option<std::time::Duration> {
+    response
+        .headers()
+        .get(reqwest::header::RETRY_AFTER)?
+        .to_str()
+        .ok()?
+        .trim()
+        .parse::<u64>()
+        .ok()
+        .map(std::time::Duration::from_secs)
 }
 
 async fn decode_json<T: DeserializeOwned>(
@@ -3078,6 +3116,212 @@ mod tests {
             1,
             "the repository credential should be reused across write and reads"
         );
+    }
+
+    /// A server that supports the combined flow folds the declared blobs' targets into the
+    /// lease response; the SDK must consume them and issue NO standalone targets request. The
+    /// sibling test above keeps the old-server shape (no `targets` in the lease response) and
+    /// proves the standalone fallback stays byte-identical.
+    #[tokio::test]
+    async fn direct_native_push_consumes_targets_folded_into_the_lease() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let payload = b"combined lease and targets payload".to_vec();
+        let blob_id = hex::encode(Sha256::digest(&payload));
+        let checksum = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(&payload));
+        let requests = Arc::new(Mutex::new(Vec::<(String, String, Vec<u8>)>::new()));
+        let captured = requests.clone();
+        let server_base = base.clone();
+        let server_blob_id = blob_id.clone();
+        let server_payload = payload.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..5 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "request ended before its headers");
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if let Some(offset) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break offset + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                let content_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < header_end + content_len {
+                    let mut chunk = [0u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "request ended before its body");
+                    bytes.extend_from_slice(&chunk[..read]);
+                }
+                let request_line = headers.lines().next().unwrap();
+                let mut request_parts = request_line.split_whitespace();
+                let method = request_parts.next().unwrap().to_string();
+                let path = request_parts.next().unwrap().to_string();
+                let body = bytes[header_end..header_end + content_len].to_vec();
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), path.clone(), body));
+
+                let response_body = match (method.as_str(), path.as_str()) {
+                    ("POST", "/artifact-storage/v1/token") => {
+                        serde_json::to_vec(&serde_json::json!({
+                            "token": "repo-token",
+                            "tokenType": "bearer",
+                            "expiresAt": "2099-01-01T00:00:00Z",
+                            "gitUsername": "repo-user",
+                            "repoPattern": "filesystem",
+                            "scopes": ["fs:read", "fs:write"],
+                        }))
+                        .unwrap()
+                    }
+                    ("GET", "/project/project/repos/filesystem/fs/head") => {
+                        serde_json::to_vec(
+                            &serde_json::json!({"snapshot_id": null, "generation": 0}),
+                        )
+                        .unwrap()
+                    }
+                    ("POST", "/project/project/repos/filesystem/fs/upload-leases") => {
+                        serde_json::to_vec(&serde_json::json!({
+                            "lease_id": "lease-1",
+                            "expires_at_ms": 9_999_999_999_999_u64,
+                            "max_blob_bytes": 268_435_456_u64,
+                            "max_targets_per_request": 256,
+                            "max_parts_per_file": 4096,
+                            "transport": "checksum_presigned_put",
+                            "checksum_algorithm": "sha256",
+                            "targets": [{
+                                "blob_id": server_blob_id,
+                                "logical_len": server_payload.len(),
+                                "already_present": false,
+                                "url": format!("{server_base}/object-store/stage-1"),
+                                "checksum_sha256": checksum,
+                            }],
+                        }))
+                        .unwrap()
+                    }
+                    ("PUT", "/object-store/stage-1") => b"{}".to_vec(),
+                    ("POST", "/project/project/repos/filesystem/fs/publish") => {
+                        serde_json::to_vec(&serde_json::json!({
+                            "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "previous_version_id": null,
+                        }))
+                        .unwrap()
+                    }
+                    other => panic!("unexpected request (a combined-flow client must not issue a standalone targets request): {other:?}"),
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(&response_body).await.unwrap();
+            }
+        });
+
+        let api_client = ClientBuilder::new(&base).build().unwrap();
+        let client = ArtifactStorageClient::new(api_client, &base).unwrap();
+        let result = client
+            .publish_filesystem_files(
+                "project",
+                "filesystem",
+                vec![NativeDirectFileWrite {
+                    path: "data/probe.bin".to_string(),
+                    data: payload.clone(),
+                }],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                "combined publication".to_string(),
+                "operation-combined".to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.version_id,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        server.await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        assert!(
+            !requests
+                .iter()
+                .any(|(_, path, _)| path.contains("/targets")),
+            "folded targets must remove the standalone negotiation round trip"
+        );
+        let lease = requests
+            .iter()
+            .find(|(method, path, _)| method == "POST" && path.ends_with("/fs/upload-leases"))
+            .unwrap();
+        let lease: serde_json::Value = serde_json::from_slice(&lease.2).unwrap();
+        assert_eq!(
+            lease["blobs"].as_array().unwrap().len(),
+            1,
+            "the lease request declares the prepared blob identities"
+        );
+        assert_eq!(lease["blobs"][0]["blob_id"], blob_id);
+        let upload = requests
+            .iter()
+            .find(|(method, path, _)| method == "PUT" && path == "/object-store/stage-1")
+            .unwrap();
+        assert_eq!(upload.2, payload);
+    }
+
+    /// Capacity rejections carry a `Retry-After` the server means literally; the retry budget
+    /// must survive a burst longer than its exponential fallback would (the 2026-08-14 storage
+    /// benchmark lost 5% of its publications to sub-100ms retries inside one 2.5s 503 storm).
+    #[tokio::test]
+    async fn send_idempotent_honors_retry_after_on_capacity_rejections() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let hits = Arc::new(Mutex::new(0usize));
+        let counted = hits.clone();
+        let server = tokio::spawn(async move {
+            for attempt in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0);
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                        break;
+                    }
+                }
+                *counted.lock().unwrap() += 1;
+                let response = if attempt < 2 {
+                    "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                        .to_string()
+                } else {
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}"
+                        .to_string()
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let started = std::time::Instant::now();
+        let response = super::send_idempotent(reqwest::Client::new().get(&base))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        assert!(
+            started.elapsed() >= std::time::Duration::from_millis(1900),
+            "two Retry-After: 1 hints must be honored, waited {:?}",
+            started.elapsed()
+        );
+        server.await.unwrap();
+        assert_eq!(*hits.lock().unwrap(), 3);
     }
 
     #[tokio::test]
