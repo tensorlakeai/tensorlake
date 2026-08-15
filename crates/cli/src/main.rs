@@ -1126,13 +1126,13 @@ enum SbxCommands {
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
-        /// Number of GPUs to request
-        #[arg(long = "gpus", value_parser = clap::value_parser!(u32).range(1..))]
-        gpus: Option<u32>,
+        /// GPU model to request
+        #[arg(long = "gpu", value_enum)]
+        gpu: Option<GpuModelArg>,
 
-        /// GPU model to request (defaults to A10 when --gpus is set)
-        #[arg(long = "gpu-model", value_enum, requires = "gpus")]
-        gpu_model: Option<GpuModelArg>,
+        /// Number of GPU devices to request (default: 1 when --gpu is set)
+        #[arg(long = "devices", value_parser = clap::value_parser!(u32).range(1..), requires = "gpu")]
+        devices: Option<u32>,
 
         /// Deprecated: root disk size in GB
         #[arg(long = "disk", hide = true, conflicts_with = "disk_mb")]
@@ -2097,8 +2097,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         cpus,
                         memory,
                         disk_mb,
-                        gpus,
-                        gpu_model,
+                        gpu,
+                        devices,
                         disk_gb,
                         timeout,
                         entrypoint,
@@ -2130,8 +2130,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 cpus,
                                 memory,
                                 disk_mb,
-                                gpu_count: gpus,
-                                gpu_model: gpu_model.map(GpuModelArg::as_wire_value),
+                                gpu_count: gpu.map(|_| devices.unwrap_or(1)),
+                                gpu_model: gpu.map(GpuModelArg::as_wire_value),
                                 timeout,
                                 entrypoint: &entrypoint,
                                 snapshot_id: snapshot.as_deref(),
@@ -4247,24 +4247,22 @@ mod tests {
     }
 
     #[test]
-    fn sbx_create_parses_gpu_request_with_default_model() {
+    fn sbx_create_parses_gpu_request_with_default_device_count() {
         let cli = Cli::try_parse_from([
             "tl",
             "sbx",
             "create",
-            "--gpus",
-            "1",
+            "--gpu",
+            "H100",
             "--image",
             "tensorlake/ubuntu-minimal",
         ])
         .unwrap();
 
         match cli.command {
-            Some(Commands::Sbx(SbxCommands::Create {
-                gpus, gpu_model, ..
-            })) => {
-                assert_eq!(gpus, Some(1));
-                assert!(gpu_model.is_none());
+            Some(Commands::Sbx(SbxCommands::Create { gpu, devices, .. })) => {
+                assert_eq!(gpu.map(GpuModelArg::as_wire_value), Some("H100"));
+                assert_eq!(devices, None);
             }
             _ => panic!("expected sbx create command"),
         }
@@ -4277,21 +4275,19 @@ mod tests {
                 "tl",
                 "sbx",
                 "create",
-                "--gpus",
-                "1",
-                "--gpu-model",
+                "--gpu",
                 model,
+                "--devices",
+                "2",
                 "--image",
                 "tensorlake/ubuntu-minimal",
             ])
             .unwrap();
 
             match cli.command {
-                Some(Commands::Sbx(SbxCommands::Create {
-                    gpus, gpu_model, ..
-                })) => {
-                    assert_eq!(gpus, Some(1));
-                    assert_eq!(gpu_model.map(GpuModelArg::as_wire_value), Some(model));
+                Some(Commands::Sbx(SbxCommands::Create { gpu, devices, .. })) => {
+                    assert_eq!(gpu.map(GpuModelArg::as_wire_value), Some(model));
+                    assert_eq!(devices, Some(2));
                 }
                 _ => panic!("expected sbx create command"),
             }
@@ -4299,8 +4295,8 @@ mod tests {
     }
 
     #[test]
-    fn sbx_create_rejects_gpu_model_without_gpu_count() {
-        let result = Cli::try_parse_from(["tl", "sbx", "create", "--gpu-model", "A10"]);
+    fn sbx_create_rejects_devices_without_gpu_model() {
+        let result = Cli::try_parse_from(["tl", "sbx", "create", "--devices", "2"]);
 
         assert!(result.is_err());
     }
