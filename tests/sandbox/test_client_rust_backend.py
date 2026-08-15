@@ -4,6 +4,8 @@ from unittest.mock import patch
 
 from tensorlake.sandbox import (
     CLEAR_NETWORK_POLICY,
+    GpuModel,
+    GpuRequest,
     NetworkConfig,
     PoolInUseError,
     SandboxNotFoundError,
@@ -647,7 +649,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             request_json["resources"]["gpus"], [{"count": 1, "model": "A10"}]
         )
 
-    def test_create_rejects_non_a10_gpu_request(self):
+    def test_create_supports_all_gpu_models(self):
         fake = _FakeRustClient()
         with (
             patch("tensorlake.sandbox.client._RUST_SANDBOX_CLIENT_AVAILABLE", True),
@@ -657,8 +659,33 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             ),
         ):
             client = SandboxClient(api_url="http://localhost:8900", api_key="k")
-            with self.assertRaisesRegex(SandboxError, "only A10"):
-                client.create(gpus=1, gpu_model="H100")
+            for model in GpuModel:
+                client.create(gpus=2, gpu_model=model)
+                request_json = json.loads(fake.create_request_json)
+                self.assertEqual(
+                    request_json["resources"]["gpus"],
+                    [{"count": 2, "model": model.value}],
+                )
+
+            client.create(gpu=GpuRequest(count=2, model=GpuModel.H100))
+            request_json = json.loads(fake.create_request_json)
+            self.assertEqual(
+                request_json["resources"]["gpus"],
+                [{"count": 2, "model": "H100"}],
+            )
+
+    def test_create_rejects_unknown_gpu_model(self):
+        fake = _FakeRustClient()
+        with (
+            patch("tensorlake.sandbox.client._RUST_SANDBOX_CLIENT_AVAILABLE", True),
+            patch(
+                "tensorlake.sandbox.client.RustCloudSandboxClient",
+                return_value=fake,
+            ),
+        ):
+            client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+            with self.assertRaisesRegex(SandboxError, "unsupported GPU model"):
+                client.create(gpus=1, gpu_model="V100")
 
         self.assertIsNone(fake.create_request_json)
 

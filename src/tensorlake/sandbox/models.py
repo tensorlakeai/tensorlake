@@ -149,11 +149,26 @@ class ContainerResourcesInfo(BaseModel):
     ephemeral_disk_mb: int
 
 
-class GPUResources(BaseModel):
-    """GPU resource request."""
+class GpuModel(str, Enum):
+    """GPU models supported by the sandbox scheduler."""
 
-    count: int
-    model: str
+    A100_40GB = "A100-40GB"
+    A100_80GB = "A100-80GB"
+    H100 = "H100"
+    T4 = "T4"
+    A6000 = "A6000"
+    A10 = "A10"
+
+
+class GpuRequest(BaseModel):
+    """A homogeneous GPU allocation for a sandbox."""
+
+    count: int = Field(gt=0)
+    model: GpuModel
+
+
+# Preserve the public name used by request/response models in older releases.
+GPUResources = GpuRequest
 
 
 class CreateSandboxResources(BaseModel):
@@ -162,7 +177,7 @@ class CreateSandboxResources(BaseModel):
     cpus: float
     memory_mb: int
     disk_mb: int | None = None
-    gpus: list[GPUResources] | None = None
+    gpus: list[GpuRequest] | None = None
 
 
 class ClearNetworkPolicy(Enum):

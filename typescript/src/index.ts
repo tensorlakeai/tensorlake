@@ -158,6 +158,8 @@ export type {
   CopiedSandboxResponse,
   CopySandboxResponse,
   CreateSandboxOptions,
+  GpuModel,
+  GpuRequest,
   GPUResources,
   CreateSandboxResponse,
   SandboxInfo,

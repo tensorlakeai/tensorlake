@@ -27,6 +27,8 @@ from .models import (
     CopySandboxResponse,
     DaemonInfo,
     FileSystemMount,
+    GpuModel,
+    GpuRequest,
     HealthResponse,
     ListDirectoryResponse,
     ListProcessesResponse,
@@ -245,7 +247,7 @@ class AsyncSandbox:
         memory_mb: int = 1024,
         disk_mb: int | None = None,
         gpus: int | None = None,
-        gpu_model: str | None = None,
+        gpu_model: GpuModel | str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -263,6 +265,7 @@ class AsyncSandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        gpu: GpuRequest | None = None,
     ) -> "AsyncSandbox":
         from .async_client import AsyncSandboxClient
 
@@ -302,6 +305,7 @@ class AsyncSandbox:
             request_timeout=effective_request_timeout,
             name=name,
             file_systems=file_systems,
+            gpu=gpu,
         )
 
     @classmethod

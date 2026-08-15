@@ -27,6 +27,8 @@ from .models import (
     CopySandboxResponse,
     DaemonInfo,
     FileSystemMount,
+    GpuModel,
+    GpuRequest,
     HealthResponse,
     ListDirectoryResponse,
     ListProcessesResponse,
@@ -342,7 +344,7 @@ class Sandbox:
         memory_mb: int = 1024,
         disk_mb: int | None = None,
         gpus: int | None = None,
-        gpu_model: str | None = None,
+        gpu_model: GpuModel | str | None = None,
         timeout_secs: int | None = None,
         entrypoint: list[str] | None = None,
         allow_internet_access: bool = True,
@@ -360,6 +362,7 @@ class Sandbox:
         organization_id: str | None = None,
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
+        gpu: GpuRequest | None = None,
     ) -> "Sandbox":
         """Create a new sandbox and return a connected, running handle.
 
@@ -375,7 +378,9 @@ class Sandbox:
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
                 ``A10`` unless ``gpu_model`` is set.
-            gpu_model: GPU model to allocate. Only ``A10`` is supported.
+            gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.
+            gpu: Typed GPU model and count request. Cannot be combined with
+                ``gpus`` or ``gpu_model``.
             timeout_secs: Sandbox timeout in seconds.
             entrypoint: Custom entrypoint command.
             allow_internet_access: If True (default), outbound traffic is allowed.
@@ -440,6 +445,7 @@ class Sandbox:
             request_timeout=effective_request_timeout,
             name=name,
             file_systems=file_systems,
+            gpu=gpu,
         )
 
     @classmethod
