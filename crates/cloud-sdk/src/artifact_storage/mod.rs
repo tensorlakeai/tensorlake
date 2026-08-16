@@ -1482,6 +1482,9 @@ impl ArtifactStorageClient {
         // Mirrors the server's fixed per-request target ceiling; the lease response's
         // `max_targets_per_request` arrives too late to size the declaration.
         const LEASE_DECLARED_TARGETS_MAX: usize = 256;
+        let bare_lease_request = lease_request
+            .try_clone()
+            .map(|request| request.json(&serde_json::json!({})));
         let prepared_then_lease = async {
             let (mutations, unique_blobs) = prepare.await.map_err(|error| {
                 SdkError::ClientError(format!(
@@ -1496,15 +1499,36 @@ impl ArtifactStorageClient {
                 })
                 .collect::<Vec<_>>();
             let declared = blob_requests.len().min(LEASE_DECLARED_TARGETS_MAX);
-            let lease = decode_json::<NativeDirectUploadLeaseResponse>(
+            let declared_response = decode_json::<NativeDirectUploadLeaseResponse>(
                 send_idempotent(lease_request.json(&NativeDirectBlobTargetsRequest {
                     blobs: blob_requests[..declared].to_vec(),
                 }))
                 .await?,
                 String::new(),
             )
-            .await?
-            .into_inner();
+            .await;
+            let lease = match declared_response {
+                Ok(lease) => lease.into_inner(),
+                // The declaration is an optimization, never a dependency: a server that rejects
+                // it (a per-request target ceiling lowered below this client's mirror of it, a
+                // stricter future validator) must not fail the publication while the standalone
+                // flow would have worked. One bare-lease retry selects that flow; if the bare
+                // lease fails too, ITS error is the real one.
+                Err(_) if declared > 0 => match bare_lease_request {
+                    Some(bare) => decode_json::<NativeDirectUploadLeaseResponse>(
+                        send_idempotent(bare).await?,
+                        String::new(),
+                    )
+                    .await?
+                    .into_inner(),
+                    None => {
+                        return Err(SdkError::ClientError(
+                            "direct upload lease request cannot be retried".to_string(),
+                        ));
+                    }
+                },
+                Err(error) => return Err(error),
+            };
             Ok::<_, SdkError>((lease, mutations, unique_blobs, blob_requests))
         };
         let (head, (mut lease, mutations, unique_blobs, blob_requests)) =
@@ -2358,7 +2382,11 @@ async fn upload_native_direct_source(
                     && (response.status().is_server_error()
                         || response.status() == StatusCode::TOO_MANY_REQUESTS) =>
             {
-                retry_after_hint(&response)
+                let hinted = retry_after_hint(&response);
+                // Drain the (small) error body so the pooled connection is reusable across
+                // retries; see send_idempotent.
+                let _ = response.bytes().await;
+                hinted
             }
             Ok(response) => return Ok(response),
             Err(_) if attempt + 1 < ATTEMPTS => None,
@@ -2373,11 +2401,13 @@ async fn upload_native_direct_source(
 /// caller either uses a read, a lease/target allocation that reattaches by server key, an
 /// immutable PUT, or the operation-id-fenced publish endpoint.
 ///
-/// Capacity rejections (429/503) carry a `Retry-After` the server means literally: its
-/// admission layer sheds short write bursts with one-second hints, so the backoff honors the
-/// header (bounded) instead of burning the whole budget inside one burst — the 2026-08-14
-/// storage-benchmark failures were three sub-100ms retries spent inside a single 2.5s 503
-/// storm. Transport errors and hint-less server errors keep a fast exponential fallback.
+/// Capacity rejections (429/503) carry a `Retry-After` hint that this backoff honors up to a
+/// 2s-per-wait ceiling — enough for the admission layer's one-second burst shedding (the
+/// 2026-08-14 storage-benchmark failures were three sub-100ms retries spent inside a single
+/// 2.5s 503 storm) while keeping the worst-case in-call blocking bounded for callers with
+/// their own deadlines; storms the server prices above the whole budget are surfaced rather
+/// than waited out. Transport errors and hint-less server errors keep a fast exponential
+/// fallback.
 async fn send_idempotent(request: reqwest::RequestBuilder) -> Result<reqwest::Response, SdkError> {
     const ATTEMPTS: usize = 5;
     for attempt in 0..ATTEMPTS {
@@ -2390,7 +2420,12 @@ async fn send_idempotent(request: reqwest::RequestBuilder) -> Result<reqwest::Re
                     && (response.status().is_server_error()
                         || response.status() == StatusCode::TOO_MANY_REQUESTS) =>
             {
-                retry_after_hint(&response)
+                let hinted = retry_after_hint(&response);
+                // Drain the (small) error body so the pooled connection is reusable; dropping
+                // it unread closes the socket and every retry pays a fresh handshake during
+                // exactly the overload window.
+                let _ = response.bytes().await;
+                hinted
             }
             Ok(response) => return Ok(response),
             Err(error) if attempt + 1 < ATTEMPTS => {
@@ -2412,7 +2447,9 @@ fn retry_delay(attempt: usize, hinted: Option<std::time::Duration>) -> std::time
     const MAX_RETRY_AFTER: std::time::Duration = std::time::Duration::from_secs(2);
     let fallback = std::time::Duration::from_millis(50 << attempt);
     match hinted {
-        Some(hint) => hint.clamp(fallback, MAX_RETRY_AFTER),
+        // max-then-min rather than clamp: clamp panics when the floor exceeds the ceiling,
+        // which is one ATTEMPTS bump away (50ms << 6 > 2s) from a retry-path panic.
+        Some(hint) => hint.max(fallback).min(MAX_RETRY_AFTER),
         None => fallback,
     }
 }
@@ -3297,6 +3334,186 @@ mod tests {
             "the lease request declares the prepared blob identities"
         );
         assert_eq!(lease["blobs"][0]["blob_id"], blob_id);
+        let upload = requests
+            .iter()
+            .find(|(method, path, _)| method == "PUT" && path == "/object-store/stage-1")
+            .unwrap();
+        assert_eq!(upload.2, payload);
+    }
+
+    /// A server that rejects the blob declaration itself (a lowered per-request target ceiling,
+    /// a stricter future validator) must not fail the publication: the declaration is an
+    /// optimization, and one bare-lease retry selects the standalone-targets flow that would
+    /// have worked.
+    #[tokio::test]
+    async fn direct_native_push_falls_back_to_a_bare_lease_when_the_declaration_is_rejected() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let payload = b"declaration rejected, bare lease accepted".to_vec();
+        let blob_id = hex::encode(Sha256::digest(&payload));
+        let checksum = base64::engine::general_purpose::STANDARD.encode(Sha256::digest(&payload));
+        let requests = Arc::new(Mutex::new(Vec::<(String, String, Vec<u8>)>::new()));
+        let captured = requests.clone();
+        let server_base = base.clone();
+        let server_blob_id = blob_id.clone();
+        let server_payload = payload.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..7 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "request ended before its headers");
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if let Some(offset) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break offset + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                let content_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap_or(0);
+                while bytes.len() < header_end + content_len {
+                    let mut chunk = [0u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0, "request ended before its body");
+                    bytes.extend_from_slice(&chunk[..read]);
+                }
+                let request_line = headers.lines().next().unwrap();
+                let mut request_parts = request_line.split_whitespace();
+                let method = request_parts.next().unwrap().to_string();
+                let path = request_parts.next().unwrap().to_string();
+                let body = bytes[header_end..header_end + content_len].to_vec();
+                captured
+                    .lock()
+                    .unwrap()
+                    .push((method.clone(), path.clone(), body.clone()));
+
+                let (status_line, response_body) = match (method.as_str(), path.as_str()) {
+                    ("POST", "/artifact-storage/v1/token") => (
+                        "HTTP/1.1 200 OK",
+                        serde_json::to_vec(&serde_json::json!({
+                            "token": "repo-token",
+                            "tokenType": "bearer",
+                            "expiresAt": "2099-01-01T00:00:00Z",
+                            "gitUsername": "repo-user",
+                            "repoPattern": "filesystem",
+                            "scopes": ["fs:read", "fs:write"],
+                        }))
+                        .unwrap(),
+                    ),
+                    ("GET", "/project/project/repos/filesystem/fs/head") => (
+                        "HTTP/1.1 200 OK",
+                        serde_json::to_vec(
+                            &serde_json::json!({"snapshot_id": null, "generation": 0}),
+                        )
+                        .unwrap(),
+                    ),
+                    ("POST", "/project/project/repos/filesystem/fs/upload-leases") => {
+                        let parsed: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                        let declared = parsed
+                            .get("blobs")
+                            .and_then(|blobs| blobs.as_array())
+                            .is_some_and(|blobs| !blobs.is_empty());
+                        if declared {
+                            (
+                                "HTTP/1.1 400 Bad Request",
+                                b"direct upload target request takes 1..=8 blobs".to_vec(),
+                            )
+                        } else {
+                            (
+                                "HTTP/1.1 200 OK",
+                                serde_json::to_vec(&serde_json::json!({
+                                    "lease_id": "lease-1",
+                                    "expires_at_ms": 9_999_999_999_999_u64,
+                                    "max_blob_bytes": 268_435_456_u64,
+                                    "max_targets_per_request": 256,
+                                    "max_parts_per_file": 4096,
+                                    "transport": "checksum_presigned_put",
+                                    "checksum_algorithm": "sha256",
+                                }))
+                                .unwrap(),
+                            )
+                        }
+                    }
+                    (
+                        "POST",
+                        "/project/project/repos/filesystem/fs/upload-leases/lease-1/targets",
+                    ) => (
+                        "HTTP/1.1 200 OK",
+                        serde_json::to_vec(&serde_json::json!({
+                            "targets": [{
+                                "blob_id": server_blob_id,
+                                "logical_len": server_payload.len(),
+                                "already_present": false,
+                                "url": format!("{server_base}/object-store/stage-1"),
+                                "checksum_sha256": checksum,
+                            }],
+                        }))
+                        .unwrap(),
+                    ),
+                    ("PUT", "/object-store/stage-1") => ("HTTP/1.1 200 OK", b"{}".to_vec()),
+                    ("POST", "/project/project/repos/filesystem/fs/publish") => (
+                        "HTTP/1.1 200 OK",
+                        serde_json::to_vec(&serde_json::json!({
+                            "version_id": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                            "previous_version_id": null,
+                        }))
+                        .unwrap(),
+                    ),
+                    other => panic!("unexpected request: {other:?}"),
+                };
+                let response = format!(
+                    "{status_line}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    response_body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.write_all(&response_body).await.unwrap();
+            }
+        });
+
+        let api_client = ClientBuilder::new(&base).build().unwrap();
+        let client = ArtifactStorageClient::new(api_client, &base).unwrap();
+        let result = client
+            .publish_filesystem_files(
+                "project",
+                "filesystem",
+                vec![NativeDirectFileWrite {
+                    path: "data/probe.bin".to_string(),
+                    data: payload.clone(),
+                }],
+                Vec::new(),
+                Vec::new(),
+                Vec::new(),
+                "fallback publication".to_string(),
+                "operation-fallback".to_string(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            result.version_id,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        );
+        server.await.unwrap();
+
+        let requests = requests.lock().unwrap();
+        let leases: Vec<_> = requests
+            .iter()
+            .filter(|(method, path, _)| method == "POST" && path.ends_with("/fs/upload-leases"))
+            .collect();
+        assert_eq!(leases.len(), 2, "one declared attempt, one bare retry");
+        assert!(
+            requests
+                .iter()
+                .any(|(_, path, _)| path.contains("/targets")),
+            "the bare-lease retry selects the standalone targets flow"
+        );
         let upload = requests
             .iter()
             .find(|(method, path, _)| method == "PUT" && path == "/object-store/stage-1")
