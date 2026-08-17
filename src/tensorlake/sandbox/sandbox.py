@@ -383,10 +383,12 @@ class Sandbox:
                 ``gpus`` or ``gpu_model``.
             timeout_secs: Sandbox timeout in seconds.
             entrypoint: Custom entrypoint command.
-            allow_internet_access: If True (default), outbound traffic is
-                allowed while ``allow_out`` is empty. A non-empty
-                ``allow_out`` is default-deny in both modes; the flag then
-                only controls implicit access to the DNS resolver.
+            allow_internet_access: While ``allow_out`` is empty: True (the
+                default) allows all outbound traffic except ``deny_out``
+                matches; False blocks all egress, including DNS. A
+                non-empty ``allow_out`` is default-deny in both modes; the
+                flag then only controls implicit access to the DNS
+                resolver.
             allow_out: Destinations to allow (IPs, CIDRs, or hostnames).
                 When non-empty, all unlisted destinations are blocked.
             deny_out: Destinations to deny; takes precedence over allow_out.

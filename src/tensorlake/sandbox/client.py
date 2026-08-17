@@ -466,12 +466,13 @@ class SandboxClient:
                 ``gpus`` or ``gpu_model``.
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
-            allow_internet_access: If True (default), all outbound traffic
-                is allowed unless denied — but only while *allow_out* is
-                empty. A non-empty *allow_out* is default-deny in both
-                modes; the flag then only controls whether the sandbox's
-                DNS resolver is implicitly allowed (True) or must itself be
-                listed in *allow_out* (False).
+            allow_internet_access: A simple switch while *allow_out* is
+                empty: True (the default) allows all outbound traffic
+                except *deny_out* matches; False blocks all egress,
+                including DNS. A non-empty *allow_out* is default-deny in
+                both modes; the flag then only controls whether the
+                sandbox's DNS resolver is implicitly allowed (True) or
+                must itself be listed in *allow_out* (False).
             allow_out: Destinations to allow: IPs, CIDRs, or hostnames
                 (e.g. ``["8.8.8.8", "10.0.0.0/8", "api.example.com"]``).
                 When non-empty, all unlisted destinations are blocked.
@@ -1548,12 +1549,13 @@ class SandboxClient:
                 ``gpus`` or ``gpu_model``.
             timeout_secs: Timeout in seconds (optional)
             entrypoint: Custom entrypoint command (optional)
-            allow_internet_access: If True (default), all outbound traffic
-                is allowed unless denied — but only while *allow_out* is
-                empty. A non-empty *allow_out* is default-deny in both
-                modes; the flag then only controls whether the sandbox's
-                DNS resolver is implicitly allowed (True) or must itself be
-                listed in *allow_out* (False).
+            allow_internet_access: A simple switch while *allow_out* is
+                empty: True (the default) allows all outbound traffic
+                except *deny_out* matches; False blocks all egress,
+                including DNS. A non-empty *allow_out* is default-deny in
+                both modes; the flag then only controls whether the
+                sandbox's DNS resolver is implicitly allowed (True) or
+                must itself be listed in *allow_out* (False).
             allow_out: Destinations to allow: IPs, CIDRs, or hostnames
                 (e.g. ``["8.8.8.8", "10.0.0.0/8", "api.example.com"]``).
                 When non-empty, all unlisted destinations are blocked.
