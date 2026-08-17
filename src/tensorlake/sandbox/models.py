@@ -201,9 +201,15 @@ class NetworkConfig(BaseModel):
     ``allow_out``: a destination matched by both is blocked. Established and
     related connections are always permitted (stateful firewall).
 
-    When ``allow_internet_access`` is ``True`` (the default), outbound traffic
-    is allowed unless matched by ``deny_out``. When ``False``, outbound is
-    blocked unless matched by ``allow_out`` (and not by ``deny_out``).
+    When ``allow_out`` is empty, ``allow_internet_access`` is a simple switch:
+    ``True`` (the default) allows all outbound traffic except ``deny_out``
+    matches; ``False`` blocks all egress, including DNS. A non-empty
+    ``allow_out`` makes the sandbox default-deny in both modes: only the
+    listed destinations are reachable. ``allow_internet_access`` then only
+    controls DNS: ``True`` implicitly allows the sandbox's resolver, so
+    hostname entries work; ``False`` blocks DNS unless the resolver's IP is
+    itself listed in ``allow_out``, so hostname entries need the resolver IP
+    alongside them (or use IP/CIDR entries only).
 
     Entries may be IPv4 addresses, CIDR ranges, or DNS hostnames (an optional
     ``:port`` suffix is accepted but does not make the rule port-specific).
