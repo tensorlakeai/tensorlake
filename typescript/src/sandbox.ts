@@ -38,6 +38,7 @@ import {
   type SandboxProcessLogFiltersResponse,
   type SendSignalResponse,
   type FileSystemMount,
+  type AttachFileSystemOptions,
   type SnapshotInfo,
   type StartProcessOptions,
   SandboxStatus,
@@ -793,12 +794,14 @@ export class Sandbox {
   async attachFileSystem(
     fileSystemId: string,
     mountPath: string,
+    options?: AttachFileSystemOptions,
   ): Promise<Traced<SandboxInfo>> {
     const client = this.requireLifecycleClient("attachFileSystem");
     const info = await client.attachFileSystem(
       this.lifecycleIdentifier,
       fileSystemId,
       mountPath,
+      options,
     );
     this._setLifecycleIdentifier(info.sandboxId);
     this._setName(info.name ?? null);

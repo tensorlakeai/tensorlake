@@ -696,19 +696,29 @@ class Sandbox:
         self,
         file_system_id: str,
         mount_path: str,
+        *,
+        read_only: bool = False,
+        prefetch: bool = False,
     ) -> Traced[SandboxInfo]:
         """Attach a registered file system to this running sandbox.
 
         Args:
-            file_system_id: The registered file system's id.
+            file_system_id: The registered file system's name (created with
+                ``tl fs create <name>``).
             mount_path: Absolute, unique guest mount path (e.g. ``/mnt/skills``).
+            read_only: Mount the file system read-only.
+            prefetch: Eagerly download the file system's contents.
 
         Returns:
             Traced[SandboxInfo] with this sandbox's updated file systems.
         """
         self._require_lifecycle_client("attach_file_system")
         traced = self._lifecycle_client.attach_file_system(
-            self._lifecycle_identifier(), file_system_id, mount_path
+            self._lifecycle_identifier(),
+            file_system_id,
+            mount_path,
+            read_only=read_only,
+            prefetch=prefetch,
         )
         self._sandbox_id = traced.sandbox_id
         self._cached_info = traced.value

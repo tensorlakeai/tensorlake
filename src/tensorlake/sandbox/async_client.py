@@ -447,18 +447,24 @@ class AsyncSandboxClient:
         sandbox_id: str,
         file_system_id: str,
         mount_path: str,
+        *,
+        read_only: bool = False,
+        prefetch: bool = False,
     ) -> Traced[SandboxInfo]:
         """Attach a registered file system to a running sandbox.
 
         The returned ``SandboxInfo`` already reflects the new
         ``file_systems`` entry; the mount completes asynchronously on the
-        dataplane.
+        dataplane. ``read_only`` mounts the file system read-only;
+        ``prefetch`` eagerly downloads its contents.
         """
         try:
             trace_id, response_json = await self._rust_client.attach_file_system_async(
                 sandbox_id=sandbox_id,
                 file_system_id=file_system_id,
                 mount_path=mount_path,
+                read_only=read_only,
+                prefetch=prefetch,
             )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:

@@ -823,6 +823,51 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("includes claim mount modes only when true", async () => {
+      const claimSandbox = vi.fn(async () => ({
+        traceId: "t",
+        json: JSON.stringify({ sandbox_id: "sbx-fs", status: "running" }),
+      }));
+      installNativeStub({ client: { claimSandbox } });
+
+      const client = SandboxClient.forLocalhost();
+      await client.claim("pool-1", {
+        fileSystems: [
+          {
+            fileSystemId: "file_system_abc",
+            mountPath: "/mnt/skills",
+            readOnly: true,
+            prefetch: true,
+          },
+          {
+            fileSystemId: "file_system_def",
+            mountPath: "/mnt/data",
+            readOnly: false,
+            prefetch: false,
+          },
+        ],
+      });
+
+      expect(claimSandbox).toHaveBeenCalledWith(
+        "pool-1",
+        JSON.stringify({
+          file_systems: [
+            {
+              file_system_id: "file_system_abc",
+              mount_path: "/mnt/skills",
+              read_only: true,
+              prefetch: true,
+            },
+            {
+              file_system_id: "file_system_def",
+              mount_path: "/mnt/data",
+            },
+          ],
+        }),
+      );
+      client.close();
+    });
+
     it("returns readiness timeout responses without retrying", async () => {
       const claimSandbox = vi.fn(async () => ({
         traceId: "t",

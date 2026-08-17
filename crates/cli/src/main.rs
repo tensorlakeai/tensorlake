@@ -1183,8 +1183,11 @@ enum SbxCommands {
         network_deny: Vec<String>,
 
         /// Mount a registered file system at boot as
-        /// `<file_system_id>:<mount_path>` (can be repeated)
-        #[arg(short = 'f', long = "filesystem", value_name = "ID:PATH")]
+        /// `<file_system_id>:<mount_path>[:<opts>]`, where `<opts>` is a
+        /// comma-separated list of `ro` (read-only) and/or `prefetch`
+        /// (eagerly download contents), e.g. `data:/mnt/data:ro,prefetch`
+        /// (can be repeated)
+        #[arg(short = 'f', long = "filesystem", value_name = "ID:PATH[:OPTS]")]
         file_systems: Vec<String>,
     },
 
@@ -1517,6 +1520,14 @@ enum SbxFsCommands {
         /// Absolute guest mount path (e.g. `/mnt/skills`)
         #[arg(short, long)]
         path: String,
+
+        /// Mount the file system read-only
+        #[arg(long = "read-only")]
+        read_only: bool,
+
+        /// Eagerly download the file system's contents into the sandbox
+        #[arg(long)]
+        prefetch: bool,
 
         /// Print the updated sandbox as JSON
         #[arg(long)]
@@ -2481,6 +2492,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             sandbox_id,
                             file_system_id,
                             path,
+                            read_only,
+                            prefetch,
                             json,
                         } => {
                             commands::sbx::fs::attach(
@@ -2488,6 +2501,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 &sandbox_id,
                                 &file_system_id,
                                 &path,
+                                read_only,
+                                prefetch,
                                 json,
                             )
                             .await
@@ -2805,9 +2820,7 @@ async fn run_git_mount_command(ctx: &mut CliContext, subcmd: GitCommands) -> err
         // `subject` is either a mount path or a bare repo name. Resolve mount scope only when it
         // names a path (or was omitted for the non-project form), so `tl git log <repo>` works
         // from anywhere, exactly like the pre-logical-v1 surface did.
-        GitCommands::Log { subject, .. } => {
-            git_graph_mount_dir(subject.as_deref(), true)?
-        }
+        GitCommands::Log { subject, .. } => git_graph_mount_dir(subject.as_deref(), true)?,
         GitCommands::Smartlog {
             subject, project, ..
         } => git_graph_mount_dir(subject.as_deref(), !*project)?,
@@ -3891,10 +3904,21 @@ mod tests {
             }
             _ => panic!("expected git mount command"),
         }
-        assert!(Cli::try_parse_from(["tl", "git", "mount", "d", "./w", "--ro", "--publish"]).is_err());
         assert!(
-            Cli::try_parse_from(["tl", "git", "mount", "d", "./w", "--ro", "--workspace", "0a"])
-                .is_err()
+            Cli::try_parse_from(["tl", "git", "mount", "d", "./w", "--ro", "--publish"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "tl",
+                "git",
+                "mount",
+                "d",
+                "./w",
+                "--ro",
+                "--workspace",
+                "0a"
+            ])
+            .is_err()
         );
         match parse_command(["tl", "git", "workspaces", "demo", "--json"]) {
             Commands::Git(GitCommands::Workspaces { repo, json }) => {
