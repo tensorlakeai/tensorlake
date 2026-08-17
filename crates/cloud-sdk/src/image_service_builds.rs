@@ -625,11 +625,7 @@ fn create_context_tar(
         }
     }
     if let Some(dockerfile_text) = injected_dockerfile {
-        let mut header = tar::Header::new_gnu();
-        header.set_size(dockerfile_text.len() as u64);
-        header.set_mode(0o644);
-        header.set_mtime(0);
-        header.set_cksum();
+        let mut header = synthetic_file_header(dockerfile_text.len() as u64, 0o644);
         tar.append_data(
             &mut header,
             INJECTED_DOCKERFILE_PATH,
@@ -649,14 +645,7 @@ fn create_context_tar(
                 "in-memory build context file '{relative_path}' conflicts with another context file"
             )));
         }
-        let mut header = tar::Header::new_gnu();
-        header.set_entry_type(tar::EntryType::Regular);
-        header.set_size(file.contents.len() as u64);
-        header.set_mode(file.mode & 0o777);
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        header.set_cksum();
+        let mut header = synthetic_file_header(file.contents.len() as u64, file.mode);
         tar.append_data(
             &mut header,
             relative_path,
@@ -670,6 +659,18 @@ fn create_context_tar(
     let mut hasher = Sha256::new();
     let bytes = std::io::copy(&mut file, &mut hasher)?;
     Ok((bytes, format!("{:x}", hasher.finalize())))
+}
+
+fn synthetic_file_header(size: u64, mode: u32) -> tar::Header {
+    let mut header = tar::Header::new_gnu();
+    header.set_entry_type(tar::EntryType::Regular);
+    header.set_size(size);
+    header.set_mode(mode & 0o777);
+    header.set_uid(0);
+    header.set_gid(0);
+    header.set_mtime(0);
+    header.set_cksum();
+    header
 }
 
 /// Poll the build to a terminal status, then fetch and return the published
@@ -1276,6 +1277,11 @@ mod tests {
             let mut entry = entry.unwrap();
             let name = entry.path().unwrap().to_string_lossy().to_string();
             if name == INJECTED_DOCKERFILE_PATH {
+                assert_eq!(entry.header().entry_type(), tar::EntryType::Regular);
+                assert_eq!(entry.header().uid().unwrap(), 0);
+                assert_eq!(entry.header().gid().unwrap(), 0);
+                assert_eq!(entry.header().mode().unwrap(), 0o644);
+                assert_eq!(entry.header().mtime().unwrap(), 0);
                 let mut text = String::new();
                 entry.read_to_string(&mut text).unwrap();
                 assert_eq!(text, "FROM scratch\n");
