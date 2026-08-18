@@ -197,7 +197,7 @@ fn print_post_create_tip(
     eprintln!();
     eprintln!("Get started:");
     eprintln!("  tl sbx ssh {display_id}");
-    eprintln!("  tl sbx exec {display_id} -- bash -c \"echo Hello, World!\"");
+    eprintln!("  tl sbx exec {display_id} -- bash -c 'echo Hello, World!'");
     if is_ephemeral {
         eprintln!("  tl sbx name {display_id} <name>  # make persistent (enables suspend/resume)");
     }
@@ -236,7 +236,7 @@ fn print_post_create_tip(
         (
             "write files into your sandbox via the HTTP API?",
             format!(
-                "  curl -X PUT \"{proxy_url}/api/v1/files?path=/tmp/hello.txt\"{header_flags} \\\n     -H \"Content-Type: application/octet-stream\" \\\n     -d \"Hello from sandbox!\""
+                "  curl -X PUT \"{proxy_url}/api/v1/files?path=/tmp/hello.txt\"{header_flags} \\\n     -H \"Content-Type: application/octet-stream\" \\\n     -d 'Hello from sandbox!'"
             ),
         ),
         (
