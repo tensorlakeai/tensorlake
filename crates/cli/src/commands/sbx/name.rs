@@ -38,7 +38,7 @@ fn print_post_name_tip(name: &str) {
     eprintln!();
     eprintln!("Since your sandbox has a name, you can access it with commands like:");
     eprintln!("  tl sbx ssh {name}");
-    eprintln!("  tl sbx exec {name} -- bash -c \"echo Hello, World!\"");
+    eprintln!("  tl sbx exec {name} -- bash -c 'echo Hello, World!'");
     eprintln!("  tl sbx cp ./myfile.py {name}:/tmp/myfile.py");
     eprintln!("  tl sbx suspend {name}");
     eprintln!();
