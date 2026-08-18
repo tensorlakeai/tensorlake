@@ -66,7 +66,10 @@ def mount_status_from_raw(raw: dict, local_path: Optional[str] = None) -> MountS
     """
     return MountStatus(
         path=str(raw.get("path") or raw.get("mount_path") or local_path or ""),
-        filesystem=raw.get("filesystem") or raw.get("file_system") or None,
+        filesystem=raw.get("filesystem")
+        or raw.get("file_system")
+        or raw.get("repository")
+        or None,
         mounted=bool(raw.get("mounted", raw.get("active", True))),
         raw=raw,
     )

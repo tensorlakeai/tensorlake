@@ -512,6 +512,12 @@ class TestFilesystemClient(unittest.TestCase):
         self.assertEqual(defaulted.path, "/mnt/y")
         self.assertTrue(defaulted.mounted)
 
+        # Live `tl fs status --json` reports the name under "repository".
+        from_cli = mount_status_from_raw(
+            {"path": "/mnt/z", "repository": "my-fs", "mounted": True}
+        )
+        self.assertEqual(from_cli.filesystem, "my-fs")
+
     def test_error_translation_without_status(self):
         stub = _StubNative(
             errors={"push_filesystem_files": ("internal", None, "commit job failed")}
