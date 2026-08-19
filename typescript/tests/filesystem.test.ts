@@ -15,6 +15,7 @@ import {
   FilesystemAPIError,
   FilesystemError,
   FilesystemNotFoundError,
+  ReadOnlyMountNotSupportedError,
   fileEntryFromWire,
   mountStatusFromRaw,
   trimSlashes,
@@ -667,5 +668,18 @@ describe("FilesystemClient", () => {
     expect(failure).toBeInstanceOf(FilesystemError);
     expect(failure).not.toBeInstanceOf(FilesystemAPIError);
     expect(String(failure.message)).toContain("commit job failed");
+  });
+
+  // `tl fs mount` has no --ro; readonly requests must fail honestly (before
+  // shelling out) instead of surfacing an opaque CLI parse error.
+  it("mount(readonly: true) throws ReadOnlyMountNotSupportedError", async () => {
+    const client = clientWith(new StubNative());
+    const failure = await client
+      .mount("my-fs", "/tmp/mnt", true)
+      .catch((e) => e);
+    expect(failure).toBeInstanceOf(ReadOnlyMountNotSupportedError);
+    // The error must point at the supported read-only alternatives.
+    expect(String(failure.message)).toContain("readOnly: true");
+    expect(String(failure.message)).toContain("tl git mount --ro");
   });
 });

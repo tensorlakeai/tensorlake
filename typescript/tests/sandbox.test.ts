@@ -1128,6 +1128,68 @@ describe("Sandbox", () => {
       ]);
     });
 
+    it("create() includes the snapshot pin only when set", async () => {
+      let captured: Record<string, unknown> | undefined;
+      installNativeStub({
+        client: {
+          createSandbox: vi.fn(async (json: string) => {
+            captured = JSON.parse(json);
+            return { traceId: "t", json: fsSandboxInfoBody() };
+          }),
+        },
+      });
+
+      const client = new SandboxClient(
+        { apiUrl: "http://localhost:8900" },
+        /* _internal */ true,
+      );
+      await client.create({
+        fileSystems: [
+          {
+            fileSystemId: "file_system_abc",
+            mountPath: "/mnt/skills",
+            readOnly: true,
+            snapshotId: "0abc123def",
+          },
+          {
+            fileSystemId: "file_system_def",
+            mountPath: "/mnt/data",
+          },
+        ],
+      });
+      expect(captured?.file_systems).toEqual([
+        {
+          file_system_id: "file_system_abc",
+          mount_path: "/mnt/skills",
+          read_only: true,
+          snapshot_id: "0abc123def",
+        },
+        { file_system_id: "file_system_def", mount_path: "/mnt/data" },
+      ]);
+    });
+
+    it("create() rejects a snapshot pin without readOnly before calling native", async () => {
+      const createSandbox = vi.fn();
+      installNativeStub({ client: { createSandbox } });
+
+      const client = new SandboxClient(
+        { apiUrl: "http://localhost:8900" },
+        /* _internal */ true,
+      );
+      await expect(
+        client.create({
+          fileSystems: [
+            {
+              fileSystemId: "file_system_abc",
+              mountPath: "/mnt/skills",
+              snapshotId: "0abc123def",
+            },
+          ],
+        }),
+      ).rejects.toThrow(/snapshot-pinned mounts are read-only/);
+      expect(createSandbox).not.toHaveBeenCalled();
+    });
+
     it("create() omits file_systems when none are provided", async () => {
       let captured: Record<string, unknown> | undefined;
       installNativeStub({
@@ -1269,6 +1331,79 @@ describe("Sandbox", () => {
         { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
       ]);
       expect(attachFileSystem).toHaveBeenCalledOnce();
+      sbx.close();
+    });
+
+    it("attachFileSystem() threads the snapshot pin and surfaces it in the response", async () => {
+      const stub = installNativeStub({
+        client: {
+          attachFileSystem: vi.fn(
+            async (
+              sandboxId: string,
+              fileSystemId: string,
+              mountPath: string,
+              readOnly?: boolean,
+              prefetch?: boolean,
+              snapshotId?: string | null,
+            ) => {
+              expect(sandboxId).toBe("sbx-abc");
+              expect(fileSystemId).toBe("file_system_abc");
+              expect(mountPath).toBe("/mnt/skills");
+              expect(readOnly).toBe(true);
+              expect(prefetch).toBe(false);
+              expect(snapshotId).toBe("0abc123def");
+              return {
+                traceId: "t",
+                json: fsSandboxInfoBody({
+                  file_systems: [
+                    {
+                      file_system_id: "file_system_abc",
+                      mount_path: "/mnt/skills",
+                      read_only: true,
+                      snapshot_id: "0abc123def",
+                    },
+                  ],
+                }),
+              };
+            },
+          ),
+        },
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-abc",
+        apiUrl: "http://localhost:8900",
+      });
+      const info = await sbx.attachFileSystem("file_system_abc", "/mnt/skills", {
+        readOnly: true,
+        snapshotId: "0abc123def",
+      });
+      expect(info.fileSystems).toEqual([
+        {
+          fileSystemId: "file_system_abc",
+          mountPath: "/mnt/skills",
+          readOnly: true,
+          snapshotId: "0abc123def",
+        },
+      ]);
+      expect(stub.client.attachFileSystem).toHaveBeenCalledOnce();
+      sbx.close();
+    });
+
+    it("attachFileSystem() rejects a snapshot pin without readOnly before calling native", async () => {
+      const attachFileSystem = vi.fn();
+      installNativeStub({ client: { attachFileSystem } });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-abc",
+        apiUrl: "http://localhost:8900",
+      });
+      await expect(
+        sbx.attachFileSystem("file_system_abc", "/mnt/skills", {
+          snapshotId: "0abc123def",
+        }),
+      ).rejects.toThrow(/snapshot-pinned mounts are read-only/);
+      expect(attachFileSystem).not.toHaveBeenCalled();
       sbx.close();
     });
 

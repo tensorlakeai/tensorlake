@@ -32,6 +32,7 @@ export {
   FilesystemAPIError,
   MountError,
   CliNotFoundError,
+  ReadOnlyMountNotSupportedError,
 } from "./filesystem-models.js";
 export type {
   FilesystemInfo,

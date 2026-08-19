@@ -14,6 +14,7 @@ from .exceptions import (
     FilesystemException,
     FilesystemNotFoundError,
     MountError,
+    ReadOnlyMountNotSupportedError,
 )
 from .models import (
     FileEntry,
@@ -43,4 +44,5 @@ __all__ = [
     "FilesystemAPIError",
     "MountError",
     "CliNotFoundError",
+    "ReadOnlyMountNotSupportedError",
 ]

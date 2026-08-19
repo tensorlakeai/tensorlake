@@ -53,6 +53,7 @@ from .models import (
     SnapshotType,
     SnapshotWaitCondition,
     UpdateSandboxRequest,
+    _validate_mount_snapshot_pins,
     snapshot_satisfies_wait_condition,
 )
 
@@ -493,9 +494,12 @@ class SandboxClient:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
 
         Raises:
+            ValueError: If a file system mount pins ``snapshot_id`` without
+                ``read_only=True``
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
+        _validate_mount_snapshot_pins(file_systems)
         network = None
         if not allow_internet_access or allow_out is not None or deny_out is not None:
             network = NetworkConfig(
@@ -552,9 +556,12 @@ class SandboxClient:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
 
         Raises:
+            ValueError: If a file system mount pins ``snapshot_id`` without
+                ``read_only=True``
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
+        _validate_mount_snapshot_pins(file_systems)
         try:
             claim_kwargs: dict[str, str] = {"pool_id": pool_id}
             if file_systems:
@@ -1015,6 +1022,7 @@ class SandboxClient:
         *,
         read_only: bool = False,
         prefetch: bool = False,
+        snapshot_id: str | None = None,
     ) -> Traced[SandboxInfo]:
         """Attach a registered file system to a running sandbox.
 
@@ -1029,15 +1037,29 @@ class SandboxClient:
             mount_path: Absolute, unique guest mount path (e.g. ``/mnt/skills``).
             read_only: Mount the file system read-only.
             prefetch: Eagerly download the file system's contents.
+            snapshot_id: Pin the mount to a specific filesystem snapshot.
+                Requires ``read_only=True``.
 
         Returns:
             Traced[SandboxInfo] with the sandbox's updated file systems.
 
         Raises:
+            ValueError: If ``snapshot_id`` is set without ``read_only=True``
             SandboxNotFoundError: If the sandbox doesn't exist
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
+        _validate_mount_snapshot_pins(
+            [
+                FileSystemMount(
+                    file_system_id=file_system_id,
+                    mount_path=mount_path,
+                    read_only=read_only,
+                    prefetch=prefetch,
+                    snapshot_id=snapshot_id,
+                )
+            ]
+        )
         try:
             trace_id, response_json = self._rust_client.attach_file_system(
                 sandbox_id=sandbox_id,
@@ -1045,6 +1067,7 @@ class SandboxClient:
                 mount_path=mount_path,
                 read_only=read_only,
                 prefetch=prefetch,
+                snapshot_id=snapshot_id,
             )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:

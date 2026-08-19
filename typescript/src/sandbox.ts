@@ -789,7 +789,8 @@ export class Sandbox {
    * Attach a registered file system to this running sandbox at `mountPath`.
    *
    * Returns the updated sandbox info; the new mount appears in
-   * `fileSystems`.
+   * `fileSystems`. `options.snapshotId` pins the mount to a specific
+   * filesystem snapshot and requires `options.readOnly: true`.
    */
   async attachFileSystem(
     fileSystemId: string,

@@ -30,7 +30,9 @@ async fn parse_sandbox_response(resp: Response, action: &str) -> Result<SandboxI
     resp.json().await.map_err(CliError::Http)
 }
 
-/// Render a sandbox's currently-mounted file systems as a table.
+/// Render a sandbox's currently-mounted file systems as a table. A
+/// snapshot-pinned mount shows its pin as `<name>@<snapshot_id>`, mirroring
+/// the `--filesystem <name>[@<snapshot_id>]:<path>[:<opts>]` input syntax.
 fn print_mounts_table(mounts: &[FileSystemMount]) {
     if mounts.is_empty() {
         println!("No file systems mounted.");
@@ -46,8 +48,12 @@ fn print_mounts_table(mounts: &[FileSystemMount]) {
         if mount.prefetch {
             options.push("prefetch");
         }
+        let source = match &mount.snapshot_id {
+            Some(snapshot_id) => format!("{}@{snapshot_id}", mount.file_system_id),
+            None => mount.file_system_id.clone(),
+        };
         table.add_row(vec![
-            Cell::new(mount.file_system_id.as_str()),
+            Cell::new(source),
             Cell::new(mount.mount_path.as_str()),
             Cell::new(options.join(",")),
         ]);
@@ -55,20 +61,23 @@ fn print_mounts_table(mounts: &[FileSystemMount]) {
     println!("{table}");
 }
 
-#[allow(clippy::too_many_arguments)]
-pub async fn attach(
-    ctx: &CliContext,
-    sandbox_id: &str,
+/// Build the attach request body. The option keys are present only when set:
+/// older servers deserialize attach bodies with `deny_unknown_fields` and
+/// reject an explicit `false` (or an unknown pin field). A snapshot pin
+/// without `--read-only` is rejected here, mirroring the server's 400 so
+/// users fail fast offline.
+fn build_attach_body(
     file_system_id: &str,
     mount_path: &str,
     read_only: bool,
     prefetch: bool,
-    output_json: bool,
-) -> Result<()> {
-    let client = ctx.client()?;
-    let url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}/file_systems"));
-    // The option keys are present only when set: older servers deserialize
-    // attach bodies with `deny_unknown_fields` and reject an explicit `false`.
+    snapshot_id: Option<&str>,
+) -> Result<serde_json::Value> {
+    if snapshot_id.is_some() && !read_only {
+        return Err(CliError::usage(
+            "--snapshot requires --read-only: snapshot-pinned mounts are read-only".to_string(),
+        ));
+    }
     let mut body = serde_json::json!({
         "file_system_id": file_system_id,
         "mount_path": mount_path,
@@ -79,6 +88,26 @@ pub async fn attach(
     if prefetch {
         body["prefetch"] = serde_json::Value::Bool(true);
     }
+    if let Some(snapshot_id) = snapshot_id {
+        body["snapshot_id"] = serde_json::Value::String(snapshot_id.to_string());
+    }
+    Ok(body)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub async fn attach(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    file_system_id: &str,
+    mount_path: &str,
+    read_only: bool,
+    prefetch: bool,
+    snapshot_id: Option<&str>,
+    output_json: bool,
+) -> Result<()> {
+    let client = ctx.client()?;
+    let url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}/file_systems"));
+    let body = build_attach_body(file_system_id, mount_path, read_only, prefetch, snapshot_id)?;
 
     let resp = client
         .post(&url)
@@ -146,4 +175,48 @@ pub async fn list(ctx: &CliContext, sandbox_id: &str, output_json: bool) -> Resu
 
     print_mounts_table(&info.file_systems);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attach_body_omits_unset_mount_modes() {
+        let body = build_attach_body("skills", "/mnt/skills", false, false, None).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills",
+            })
+        );
+    }
+
+    #[test]
+    fn attach_body_includes_snapshot_pin_with_read_only() {
+        let body =
+            build_attach_body("skills", "/mnt/skills", true, false, Some("0abc123def")).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills",
+                "read_only": true,
+                "snapshot_id": "0abc123def",
+            })
+        );
+    }
+
+    #[test]
+    fn attach_body_rejects_snapshot_pin_without_read_only() {
+        let error = build_attach_body("skills", "/mnt/skills", false, true, Some("0abc123def"))
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot-pinned mounts are read-only"),
+            "unexpected error: {error}"
+        );
+    }
 }

@@ -705,6 +705,7 @@ class Sandbox:
         *,
         read_only: bool = False,
         prefetch: bool = False,
+        snapshot_id: str | None = None,
     ) -> Traced[SandboxInfo]:
         """Attach a registered file system to this running sandbox.
 
@@ -714,6 +715,8 @@ class Sandbox:
             mount_path: Absolute, unique guest mount path (e.g. ``/mnt/skills``).
             read_only: Mount the file system read-only.
             prefetch: Eagerly download the file system's contents.
+            snapshot_id: Pin the mount to a specific filesystem snapshot.
+                Requires ``read_only=True``.
 
         Returns:
             Traced[SandboxInfo] with this sandbox's updated file systems.
@@ -725,6 +728,7 @@ class Sandbox:
             mount_path,
             read_only=read_only,
             prefetch=prefetch,
+            snapshot_id=snapshot_id,
         )
         self._sandbox_id = traced.sandbox_id
         self._cached_info = traced.value

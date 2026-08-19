@@ -1183,11 +1183,18 @@ enum SbxCommands {
         network_deny: Vec<String>,
 
         /// Mount a registered file system at boot as
-        /// `<file_system_id>:<mount_path>[:<opts>]`, where `<opts>` is a
-        /// comma-separated list of `ro` (read-only) and/or `prefetch`
-        /// (eagerly download contents), e.g. `data:/mnt/data:ro,prefetch`
-        /// (can be repeated)
-        #[arg(short = 'f', long = "filesystem", value_name = "ID:PATH[:OPTS]")]
+        /// `<name>[@<snapshot_id>]:<mount_path>[:<opts>]`, where `<opts>` is
+        /// a comma-separated list of `ro` (read-only) and/or `prefetch`
+        /// (eagerly download contents), e.g. `data:/mnt/data:ro,prefetch`.
+        /// `@<snapshot_id>` pins the mount to a filesystem snapshot and
+        /// requires `ro` (pinned mounts are read-only), e.g.
+        /// `data@0abc123:/mnt/data:ro`; `@` cannot appear in file system
+        /// names, so everything after it is the snapshot id (can be repeated)
+        #[arg(
+            short = 'f',
+            long = "filesystem",
+            value_name = "NAME[@SNAPSHOT]:PATH[:OPTS]"
+        )]
         file_systems: Vec<String>,
     },
 
@@ -1528,6 +1535,11 @@ enum SbxFsCommands {
         /// Eagerly download the file system's contents into the sandbox
         #[arg(long)]
         prefetch: bool,
+
+        /// Pin the mount to a filesystem snapshot id; requires --read-only
+        /// (snapshot-pinned mounts are read-only)
+        #[arg(long = "snapshot", value_name = "SNAPSHOT_ID")]
+        snapshot_id: Option<String>,
 
         /// Print the updated sandbox as JSON
         #[arg(long)]
@@ -2494,6 +2506,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             path,
                             read_only,
                             prefetch,
+                            snapshot_id,
                             json,
                         } => {
                             commands::sbx::fs::attach(
@@ -2503,6 +2516,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 &path,
                                 read_only,
                                 prefetch,
+                                snapshot_id.as_deref(),
                                 json,
                             )
                             .await

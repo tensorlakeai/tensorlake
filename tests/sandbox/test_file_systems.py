@@ -49,16 +49,25 @@ class _FakeRustClient:
         return None
 
     def attach_file_system(
-        self, *, sandbox_id, file_system_id, mount_path, read_only, prefetch
+        self,
+        *,
+        sandbox_id,
+        file_system_id,
+        mount_path,
+        read_only,
+        prefetch,
+        snapshot_id,
     ):
         self.attach_calls.append(
-            (sandbox_id, file_system_id, mount_path, read_only, prefetch)
+            (sandbox_id, file_system_id, mount_path, read_only, prefetch, snapshot_id)
         )
         mount = {"file_system_id": file_system_id, "mount_path": mount_path}
         if read_only:
             mount["read_only"] = True
         if prefetch:
             mount["prefetch"] = True
+        if snapshot_id is not None:
+            mount["snapshot_id"] = snapshot_id
         return ("trace-attach", _sandbox_info_json([mount]))
 
     def detach_file_system(self, *, sandbox_id, mount_path):
@@ -83,16 +92,25 @@ class _FakeAsyncRustClient:
         return None
 
     async def attach_file_system_async(
-        self, *, sandbox_id, file_system_id, mount_path, read_only, prefetch
+        self,
+        *,
+        sandbox_id,
+        file_system_id,
+        mount_path,
+        read_only,
+        prefetch,
+        snapshot_id,
     ):
         self.attach_calls.append(
-            (sandbox_id, file_system_id, mount_path, read_only, prefetch)
+            (sandbox_id, file_system_id, mount_path, read_only, prefetch, snapshot_id)
         )
         mount = {"file_system_id": file_system_id, "mount_path": mount_path}
         if read_only:
             mount["read_only"] = True
         if prefetch:
             mount["prefetch"] = True
+        if snapshot_id is not None:
+            mount["snapshot_id"] = snapshot_id
         return ("trace-attach", _sandbox_info_json([mount]))
 
     async def claim_sandbox_async(self, **kwargs):
@@ -242,6 +260,46 @@ class TestFileSystemModels(unittest.TestCase):
         self.assertTrue(present.read_only)
         self.assertTrue(present.prefetch)
 
+    def test_file_system_mount_serializes_snapshot_pin_only_when_set(self):
+        unpinned = FileSystemMount(
+            file_system_id="file_system_abc",
+            mount_path="/mnt/skills",
+            read_only=True,
+        )
+        self.assertNotIn("snapshot_id", json.loads(unpinned.model_dump_json()))
+
+        pinned = FileSystemMount(
+            file_system_id="file_system_abc",
+            mount_path="/mnt/skills",
+            read_only=True,
+            snapshot_id="0abc123def",
+        )
+        self.assertEqual(
+            json.loads(pinned.model_dump_json()),
+            {
+                "file_system_id": "file_system_abc",
+                "mount_path": "/mnt/skills",
+                "read_only": True,
+                "snapshot_id": "0abc123def",
+            },
+        )
+
+    def test_file_system_mount_parses_absent_and_present_snapshot_pin(self):
+        absent = FileSystemMount.model_validate(
+            {"file_system_id": "file_system_abc", "mount_path": "/mnt/skills"}
+        )
+        self.assertIsNone(absent.snapshot_id)
+
+        present = FileSystemMount.model_validate(
+            {
+                "file_system_id": "file_system_abc",
+                "mount_path": "/mnt/skills",
+                "read_only": True,
+                "snapshot_id": "0abc123def",
+            }
+        )
+        self.assertEqual(present.snapshot_id, "0abc123def")
+
     def test_create_request_serializes_file_systems_to_wire_key(self):
         request = CreateSandboxRequest(
             resources=CreateSandboxResources(cpus=1.0, memory_mb=1024),
@@ -332,7 +390,7 @@ class TestSandboxClientFileSystems(unittest.TestCase):
 
         self.assertEqual(
             fake.attach_calls,
-            [("sbx-1", "file_system_abc", "/mnt/skills", False, False)],
+            [("sbx-1", "file_system_abc", "/mnt/skills", False, False, None)],
         )
         self.assertEqual(traced.trace_id, "trace-attach")
         self.assertEqual(
@@ -358,7 +416,7 @@ class TestSandboxClientFileSystems(unittest.TestCase):
 
         self.assertEqual(
             fake.attach_calls,
-            [("sbx-1", "file_system_abc", "/mnt/skills", True, True)],
+            [("sbx-1", "file_system_abc", "/mnt/skills", True, True, None)],
         )
         self.assertEqual(
             traced.value.file_systems,
@@ -371,6 +429,47 @@ class TestSandboxClientFileSystems(unittest.TestCase):
                 )
             ],
         )
+
+    def test_attach_file_system_threads_snapshot_pin(self):
+        fake = _FakeRustClient()
+        client = _sync_client(fake)
+
+        traced = client.attach_file_system(
+            "sbx-1",
+            "file_system_abc",
+            "/mnt/skills",
+            read_only=True,
+            snapshot_id="0abc123def",
+        )
+
+        self.assertEqual(
+            fake.attach_calls,
+            [("sbx-1", "file_system_abc", "/mnt/skills", True, False, "0abc123def")],
+        )
+        self.assertEqual(
+            traced.value.file_systems,
+            [
+                FileSystemMount(
+                    file_system_id="file_system_abc",
+                    mount_path="/mnt/skills",
+                    read_only=True,
+                    snapshot_id="0abc123def",
+                )
+            ],
+        )
+
+    def test_attach_file_system_rejects_snapshot_pin_without_read_only(self):
+        fake = _FakeRustClient()
+        client = _sync_client(fake)
+
+        with self.assertRaisesRegex(ValueError, "snapshot-pinned mounts are read-only"):
+            client.attach_file_system(
+                "sbx-1",
+                "file_system_abc",
+                "/mnt/skills",
+                snapshot_id="0abc123def",
+            )
+        self.assertEqual(fake.attach_calls, [])
 
     def test_detach_file_system(self):
         fake = _FakeRustClient()
@@ -433,6 +532,46 @@ class TestSandboxClientFileSystems(unittest.TestCase):
                 {"file_system_id": "file_system_def", "mount_path": "/mnt/data"},
             ],
         )
+
+    def test_create_body_includes_snapshot_pin_and_rejects_writable_pin(self):
+        fake = _FakeRustClient()
+        client = _sync_client(fake)
+
+        client.create(
+            image="python:3.11",
+            file_systems=[
+                FileSystemMount(
+                    file_system_id="file_system_abc",
+                    mount_path="/mnt/skills",
+                    read_only=True,
+                    snapshot_id="0abc123def",
+                ),
+            ],
+        )
+        payload = json.loads(fake.create_request_json)
+        self.assertEqual(
+            payload["file_systems"],
+            [
+                {
+                    "file_system_id": "file_system_abc",
+                    "mount_path": "/mnt/skills",
+                    "read_only": True,
+                    "snapshot_id": "0abc123def",
+                }
+            ],
+        )
+
+        with self.assertRaisesRegex(ValueError, "snapshot-pinned mounts are read-only"):
+            client.create(
+                image="python:3.11",
+                file_systems=[
+                    FileSystemMount(
+                        file_system_id="file_system_abc",
+                        mount_path="/mnt/skills",
+                        snapshot_id="0abc123def",
+                    ),
+                ],
+            )
 
     def test_claim_threads_file_systems(self):
         fake = _FakeRustClient()
@@ -498,6 +637,48 @@ class TestSandboxClientFileSystems(unittest.TestCase):
             },
         )
 
+    def test_claim_body_includes_snapshot_pin_and_rejects_writable_pin(self):
+        fake = _FakeRustClient()
+        client = _sync_client(fake)
+
+        client.claim(
+            "pool-1",
+            file_systems=[
+                FileSystemMount(
+                    file_system_id="file_system_abc",
+                    mount_path="/mnt/skills",
+                    read_only=True,
+                    snapshot_id="0abc123def",
+                ),
+            ],
+        )
+        self.assertEqual(
+            json.loads(fake.claim_calls[0]["request_json"]),
+            {
+                "file_systems": [
+                    {
+                        "file_system_id": "file_system_abc",
+                        "mount_path": "/mnt/skills",
+                        "read_only": True,
+                        "snapshot_id": "0abc123def",
+                    }
+                ]
+            },
+        )
+
+        with self.assertRaisesRegex(ValueError, "snapshot-pinned mounts are read-only"):
+            client.claim(
+                "pool-1",
+                file_systems=[
+                    FileSystemMount(
+                        file_system_id="file_system_abc",
+                        mount_path="/mnt/skills",
+                        snapshot_id="0abc123def",
+                    ),
+                ],
+            )
+        self.assertEqual(len(fake.claim_calls), 1)
+
     def test_claim_without_file_systems_keeps_bodyless_native_call(self):
         fake = _FakeRustClient()
         client = _sync_client(fake)
@@ -518,7 +699,7 @@ class TestAsyncSandboxClientFileSystems(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             fake.attach_calls,
-            [("sbx-1", "file_system_abc", "/mnt/skills", False, False)],
+            [("sbx-1", "file_system_abc", "/mnt/skills", False, False, None)],
         )
         self.assertEqual(traced.trace_id, "trace-attach")
         self.assertEqual(
@@ -544,7 +725,7 @@ class TestAsyncSandboxClientFileSystems(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             fake.attach_calls,
-            [("sbx-1", "file_system_abc", "/mnt/skills", True, True)],
+            [("sbx-1", "file_system_abc", "/mnt/skills", True, True, None)],
         )
         self.assertEqual(
             traced.value.file_systems,
@@ -557,6 +738,47 @@ class TestAsyncSandboxClientFileSystems(unittest.IsolatedAsyncioTestCase):
                 )
             ],
         )
+
+    async def test_attach_file_system_threads_snapshot_pin(self):
+        fake = _FakeAsyncRustClient()
+        client = _async_client(fake)
+
+        traced = await client.attach_file_system(
+            "sbx-1",
+            "file_system_abc",
+            "/mnt/skills",
+            read_only=True,
+            snapshot_id="0abc123def",
+        )
+
+        self.assertEqual(
+            fake.attach_calls,
+            [("sbx-1", "file_system_abc", "/mnt/skills", True, False, "0abc123def")],
+        )
+        self.assertEqual(
+            traced.value.file_systems,
+            [
+                FileSystemMount(
+                    file_system_id="file_system_abc",
+                    mount_path="/mnt/skills",
+                    read_only=True,
+                    snapshot_id="0abc123def",
+                )
+            ],
+        )
+
+    async def test_attach_file_system_rejects_snapshot_pin_without_read_only(self):
+        fake = _FakeAsyncRustClient()
+        client = _async_client(fake)
+
+        with self.assertRaisesRegex(ValueError, "snapshot-pinned mounts are read-only"):
+            await client.attach_file_system(
+                "sbx-1",
+                "file_system_abc",
+                "/mnt/skills",
+                snapshot_id="0abc123def",
+            )
+        self.assertEqual(fake.attach_calls, [])
 
     async def test_claim_threads_file_systems(self):
         fake = _FakeAsyncRustClient()
@@ -576,6 +798,23 @@ class TestAsyncSandboxClientFileSystems(unittest.IsolatedAsyncioTestCase):
             json.loads(fake.claim_calls[0]["request_json"])["file_systems"],
             [{"file_system_id": "file_system_abc", "mount_path": "/mnt/skills"}],
         )
+
+    async def test_claim_rejects_writable_snapshot_pin(self):
+        fake = _FakeAsyncRustClient()
+        client = _async_client(fake)
+
+        with self.assertRaisesRegex(ValueError, "snapshot-pinned mounts are read-only"):
+            await client.claim(
+                "pool-1",
+                file_systems=[
+                    FileSystemMount(
+                        file_system_id="file_system_abc",
+                        mount_path="/mnt/skills",
+                        snapshot_id="0abc123def",
+                    ),
+                ],
+            )
+        self.assertEqual(fake.claim_calls, [])
 
 
 class TestFileSystemRegistry(unittest.TestCase):

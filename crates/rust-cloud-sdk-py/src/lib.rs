@@ -1755,7 +1755,7 @@ impl CloudSandboxClient {
         })
     }
 
-    #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false))]
+    #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false, snapshot_id=None))]
     fn attach_file_system(
         &self,
         sandbox_id: String,
@@ -1763,11 +1763,13 @@ impl CloudSandboxClient {
         mount_path: String,
         read_only: bool,
         prefetch: bool,
+        snapshot_id: Option<String>,
     ) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
             let file_system_id = file_system_id.clone();
             let mount_path = mount_path.clone();
+            let snapshot_id = snapshot_id.clone();
             async move {
                 let traced = client
                     .attach_file_system(
@@ -1776,6 +1778,7 @@ impl CloudSandboxClient {
                         &mount_path,
                         read_only,
                         prefetch,
+                        snapshot_id.as_deref(),
                     )
                     .await?;
                 let trace_id = traced.trace_id.clone();
@@ -2167,7 +2170,7 @@ impl CloudSandboxClient {
         })
     }
 
-    #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false))]
+    #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false, snapshot_id=None))]
     fn attach_file_system_async<'py>(
         &self,
         py: Python<'py>,
@@ -2176,6 +2179,7 @@ impl CloudSandboxClient {
         mount_path: String,
         read_only: bool,
         prefetch: bool,
+        snapshot_id: Option<String>,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
@@ -2183,6 +2187,7 @@ impl CloudSandboxClient {
                 let sandbox_id = sandbox_id.clone();
                 let file_system_id = file_system_id.clone();
                 let mount_path = mount_path.clone();
+                let snapshot_id = snapshot_id.clone();
                 async move {
                     c.attach_file_system(
                         &sandbox_id,
@@ -2190,6 +2195,7 @@ impl CloudSandboxClient {
                         &mount_path,
                         read_only,
                         prefetch,
+                        snapshot_id.as_deref(),
                     )
                     .await
                 }

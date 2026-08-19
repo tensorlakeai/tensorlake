@@ -115,6 +115,11 @@ export interface NetworkConfig {
  * `readOnly` and `prefetch` are optional mount modes; they are sent on the
  * wire only when `true` (older servers reject unknown mount fields, so
  * `false` is expressed by omission).
+ *
+ * `snapshotId` pins the mount to a specific filesystem snapshot. A pinned
+ * mount must also set `readOnly: true` (the server rejects a writable pin
+ * with HTTP 400). It is sent only when set, for the same compatibility
+ * reason as the mount modes.
  */
 export interface FileSystemMount {
   fileSystemId: string;
@@ -123,6 +128,8 @@ export interface FileSystemMount {
   readOnly?: boolean;
   /** Eagerly download the file system's contents. */
   prefetch?: boolean;
+  /** Pin the mount to a specific filesystem snapshot (requires `readOnly`). */
+  snapshotId?: string;
 }
 
 /** Optional mount modes for attaching a file system to a running sandbox. */
@@ -131,6 +138,8 @@ export interface AttachFileSystemOptions {
   readOnly?: boolean;
   /** Eagerly download the file system's contents. */
   prefetch?: boolean;
+  /** Pin the mount to a specific filesystem snapshot (requires `readOnly`). */
+  snapshotId?: string;
 }
 
 export interface ClaimSandboxOptions {

@@ -56,16 +56,38 @@ const GPU_MODELS = new Set<string>([
 ]);
 
 /**
+ * Client-side mirror of the server's HTTP 400 for invalid snapshot pins: a
+ * mount that pins `snapshotId` must also be `readOnly`, so callers fail fast
+ * (and offline) instead of round-tripping to the server.
+ */
+function requireReadOnlySnapshotPin(
+  fileSystemId: string,
+  mountPath: string,
+  readOnly: boolean | undefined,
+  snapshotId: string | undefined,
+): void {
+  if (snapshotId != null && readOnly !== true) {
+    throw new SandboxError(
+      `file system mount '${fileSystemId}' at '${mountPath}' sets snapshotId ` +
+        "without readOnly: snapshot-pinned mounts are read-only",
+    );
+  }
+}
+
+/**
  * Map a `FileSystemMount` to its wire form. `read_only` and `prefetch` are
- * included only when `true`: older servers deserialize mount bodies with
- * `deny_unknown_fields` and would reject an explicit `false`.
+ * included only when `true`, and `snapshot_id` only when set: older servers
+ * deserialize mount bodies with `deny_unknown_fields` and would reject an
+ * explicit `false` (or an unknown pin field).
  */
 function fileSystemMountToWire(fs: FileSystemMount): Record<string, unknown> {
+  requireReadOnlySnapshotPin(fs.fileSystemId, fs.mountPath, fs.readOnly, fs.snapshotId);
   return {
     file_system_id: fs.fileSystemId,
     mount_path: fs.mountPath,
     ...(fs.readOnly === true ? { read_only: true } : {}),
     ...(fs.prefetch === true ? { prefetch: true } : {}),
+    ...(fs.snapshotId != null ? { snapshot_id: fs.snapshotId } : {}),
   };
 }
 
@@ -528,6 +550,9 @@ export class SandboxClient {
    *
    * The mount completes asynchronously on the dataplane; the returned
    * `SandboxInfo` already reflects the new entry in `fileSystems`.
+   *
+   * `options.snapshotId` pins the mount to a specific filesystem snapshot
+   * and requires `options.readOnly: true`.
    */
   async attachFileSystem(
     sandboxId: string,
@@ -535,6 +560,12 @@ export class SandboxClient {
     mountPath: string,
     options?: AttachFileSystemOptions,
   ): Promise<Traced<SandboxInfo>> {
+    requireReadOnlySnapshotPin(
+      fileSystemId,
+      mountPath,
+      options?.readOnly,
+      options?.snapshotId,
+    );
     return this.tracedJson<SandboxInfo>(
       () =>
         this.native.attachFileSystem(
@@ -543,6 +574,7 @@ export class SandboxClient {
           mountPath,
           options?.readOnly === true,
           options?.prefetch === true,
+          options?.snapshotId ?? null,
         ),
       "sandboxId",
       { sandboxId, notFoundKind: "sandbox" },
