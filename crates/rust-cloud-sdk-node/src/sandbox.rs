@@ -558,14 +558,24 @@ impl NativeSandboxClient {
         sandbox_id: String,
         file_system_id: String,
         mount_path: String,
+        read_only: Option<bool>,
+        prefetch: Option<bool>,
     ) -> napi::Result<TracedJson> {
+        let read_only = read_only.unwrap_or(false);
+        let prefetch = prefetch.unwrap_or(false);
         with_retry(self.client.clone(), 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             let file_system_id = file_system_id.clone();
             let mount_path = mount_path.clone();
             async move {
                 let traced = c
-                    .attach_file_system(&sandbox_id, &file_system_id, &mount_path)
+                    .attach_file_system(
+                        &sandbox_id,
+                        &file_system_id,
+                        &mount_path,
+                        read_only,
+                        prefetch,
+                    )
                     .await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced)?;

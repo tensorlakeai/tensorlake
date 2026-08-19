@@ -87,30 +87,55 @@ pub struct CreateArgs<'a> {
     pub no_internet: bool,
     pub network_allow: &'a [String],
     pub network_deny: &'a [String],
-    /// Boot-time file system mounts, each as `<file_system_id>:<mount_path>`.
+    /// Boot-time file system mounts, each as
+    /// `<file_system_id>:<mount_path>[:<opts>]`.
     pub file_systems: &'a [String],
 }
 
-/// Parse `--filesystem <id>:<path>` flags into the request
-/// `file_systems` array. Splits on the first `:` (file system ids and
-/// absolute mount paths never contain one).
+const FILESYSTEM_FLAG_USAGE: &str = "--filesystem must be <file_system_id>:<mount_path>[:<opts>] where <opts> is a \
+     comma-separated list of `ro` and/or `prefetch`";
+
+/// Parse `--filesystem <id>:<path>[:<opts>]` flags into the request
+/// `file_systems` array. The id ends at the first `:` and the mount path at
+/// the second (file system ids and absolute mount paths never contain one);
+/// the optional trailing segment is a comma-separated option list drawn from
+/// `ro` and `prefetch`. The option keys are added to the wire object only when
+/// set: older servers reject unknown mount fields, so an explicit `false`
+/// must never be sent.
 fn parse_file_system_mounts(raw: &[String]) -> Result<Vec<serde_json::Value>> {
     raw.iter()
         .map(|entry| {
-            let (file_system_id, mount_path) = entry.split_once(':').ok_or_else(|| {
-                CliError::usage(format!(
-                    "--filesystem must be <file_system_id>:<mount_path>, got {entry:?}"
-                ))
+            let (file_system_id, rest) = entry.split_once(':').ok_or_else(|| {
+                CliError::usage(format!("{FILESYSTEM_FLAG_USAGE}, got {entry:?}"))
             })?;
+            let (mount_path, opts) = match rest.split_once(':') {
+                Some((mount_path, opts)) => (mount_path, Some(opts)),
+                None => (rest, None),
+            };
             if file_system_id.is_empty() || mount_path.is_empty() {
                 return Err(CliError::usage(format!(
-                    "--filesystem must be <file_system_id>:<mount_path>, got {entry:?}"
+                    "{FILESYSTEM_FLAG_USAGE}, got {entry:?}"
                 )));
             }
-            Ok(serde_json::json!({
+            let mut mount = serde_json::json!({
                 "file_system_id": file_system_id,
                 "mount_path": mount_path,
-            }))
+            });
+            if let Some(opts) = opts {
+                for opt in opts.split(',') {
+                    match opt {
+                        "ro" => mount["read_only"] = serde_json::Value::Bool(true),
+                        "prefetch" => mount["prefetch"] = serde_json::Value::Bool(true),
+                        _ => {
+                            return Err(CliError::usage(format!(
+                                "unknown --filesystem option {opt:?} in {entry:?}: \
+                                 valid options are `ro` and `prefetch`"
+                            )));
+                        }
+                    }
+                }
+            }
+            Ok(mount)
         })
         .collect()
 }
@@ -402,6 +427,72 @@ mod tests {
     fn parse_file_system_mounts_rejects_empty_sides() {
         assert!(parse_file_system_mounts(&[":/mnt".to_string()]).is_err());
         assert!(parse_file_system_mounts(&["file_system_abc:".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_file_system_mounts_without_opts_omits_mount_modes() {
+        let mounts = parse_file_system_mounts(&["skills:/mnt/skills".to_string()]).unwrap();
+        assert_eq!(
+            mounts[0],
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills",
+            })
+        );
+    }
+
+    #[test]
+    fn parse_file_system_mounts_parses_ro_opt() {
+        let mounts = parse_file_system_mounts(&["skills:/mnt/skills:ro".to_string()]).unwrap();
+        assert_eq!(
+            mounts[0],
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills",
+                "read_only": true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_file_system_mounts_parses_prefetch_opt() {
+        let mounts =
+            parse_file_system_mounts(&["skills:/mnt/skills:prefetch".to_string()]).unwrap();
+        assert_eq!(
+            mounts[0],
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills",
+                "prefetch": true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_file_system_mounts_parses_combined_opts() {
+        let mounts =
+            parse_file_system_mounts(&["skills:/mnt/skills:ro,prefetch".to_string()]).unwrap();
+        assert_eq!(
+            mounts[0],
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills",
+                "read_only": true,
+                "prefetch": true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_file_system_mounts_rejects_unknown_opt() {
+        let error = parse_file_system_mounts(&["skills:/mnt/skills:rw".to_string()]).unwrap_err();
+        assert!(error.to_string().contains("unknown --filesystem option"));
+    }
+
+    #[test]
+    fn parse_file_system_mounts_rejects_empty_opt() {
+        assert!(parse_file_system_mounts(&["skills:/mnt/skills:".to_string()]).is_err());
+        assert!(parse_file_system_mounts(&["skills:/mnt/skills:ro,".to_string()]).is_err());
     }
 
     #[test]

@@ -5,7 +5,7 @@ from enum import Enum
 from typing import Annotated, Any
 from urllib.parse import urlparse, urlunparse
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_serializer
 
 _SANDBOX_MANAGEMENT_PORT = 9501
 
@@ -248,13 +248,30 @@ class NetworkConfig(BaseModel):
 class FileSystemMount(BaseModel):
     """A file system mounted into a sandbox at a guest path.
 
-    ``file_system_id`` is the registered file system's id (e.g.
-    ``file_system_...``) and ``mount_path`` is an absolute, unique guest path
-    (e.g. ``/mnt/skills``).
+    ``file_system_id`` is the Artifact Storage file-system name created with
+    ``tl fs create <name>`` and ``mount_path`` is an absolute, unique guest
+    path (e.g. ``/mnt/skills``).
+
+    ``read_only`` mounts the file system read-only; ``prefetch`` eagerly
+    downloads its contents. Both serialize onto the wire only when ``True``:
+    older servers reject mount bodies carrying unknown fields, so ``False``
+    is expressed by omission.
     """
 
     file_system_id: str
     mount_path: str
+    read_only: bool = False
+    prefetch: bool = False
+
+    @model_serializer(mode="wrap")
+    def _omit_false_mount_modes(self, handler):
+        data = handler(self)
+        if isinstance(data, dict):
+            if not self.read_only:
+                data.pop("read_only", None)
+            if not self.prefetch:
+                data.pop("prefetch", None)
+        return data
 
 
 class FileSystem(BaseModel):

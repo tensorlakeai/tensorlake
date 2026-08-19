@@ -1755,11 +1755,14 @@ impl CloudSandboxClient {
         })
     }
 
+    #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false))]
     fn attach_file_system(
         &self,
         sandbox_id: String,
         file_system_id: String,
         mount_path: String,
+        read_only: bool,
+        prefetch: bool,
     ) -> PyResult<(String, String)> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
@@ -1767,7 +1770,13 @@ impl CloudSandboxClient {
             let mount_path = mount_path.clone();
             async move {
                 let traced = client
-                    .attach_file_system(&sandbox_id, &file_system_id, &mount_path)
+                    .attach_file_system(
+                        &sandbox_id,
+                        &file_system_id,
+                        &mount_path,
+                        read_only,
+                        prefetch,
+                    )
                     .await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
@@ -2158,12 +2167,15 @@ impl CloudSandboxClient {
         })
     }
 
+    #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false))]
     fn attach_file_system_async<'py>(
         &self,
         py: Python<'py>,
         sandbox_id: String,
         file_system_id: String,
         mount_path: String,
+        read_only: bool,
+        prefetch: bool,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
@@ -2172,8 +2184,14 @@ impl CloudSandboxClient {
                 let file_system_id = file_system_id.clone();
                 let mount_path = mount_path.clone();
                 async move {
-                    c.attach_file_system(&sandbox_id, &file_system_id, &mount_path)
-                        .await
+                    c.attach_file_system(
+                        &sandbox_id,
+                        &file_system_id,
+                        &mount_path,
+                        read_only,
+                        prefetch,
+                    )
+                    .await
                 }
             })
             .await

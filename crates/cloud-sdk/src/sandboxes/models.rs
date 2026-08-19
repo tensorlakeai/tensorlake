@@ -235,13 +235,23 @@ fn default_allow_internet_access() -> bool {
 
 /// One file system mounted into a sandbox at an absolute guest path.
 ///
-/// `file_system_id` is the registered file system's id (e.g.
-/// `file_system_...`) and `mount_path` is an absolute, unique guest path
+/// `file_system_id` is the Artifact Storage file-system name created with
+/// `tl fs create <name>` and `mount_path` is an absolute, unique guest path
 /// (e.g. `/mnt/skills`).
-#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+///
+/// `read_only` and `prefetch` are optional mount modes. They serialize only
+/// when `true`: older servers deserialize mount bodies with
+/// `deny_unknown_fields` and would reject an explicit `false`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FileSystemMount {
     pub file_system_id: String,
     pub mount_path: String,
+    /// Mount the file system read-only inside the guest.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub read_only: bool,
+    /// Eagerly download the complete file system into the guest cache.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub prefetch: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1013,6 +1023,63 @@ mod tests {
                 deny_out: vec![],
             })
         );
+    }
+
+    #[test]
+    fn file_system_mount_omits_false_mount_modes() {
+        let mount = FileSystemMount {
+            file_system_id: "skills".to_string(),
+            mount_path: "/mnt/skills".to_string(),
+            read_only: false,
+            prefetch: false,
+        };
+        assert_eq!(
+            serde_json::to_value(&mount).unwrap(),
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills"
+            })
+        );
+    }
+
+    #[test]
+    fn file_system_mount_serializes_true_mount_modes() {
+        let mount = FileSystemMount {
+            file_system_id: "skills".to_string(),
+            mount_path: "/mnt/skills".to_string(),
+            read_only: true,
+            prefetch: true,
+        };
+        assert_eq!(
+            serde_json::to_value(&mount).unwrap(),
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills",
+                "read_only": true,
+                "prefetch": true
+            })
+        );
+    }
+
+    #[test]
+    fn file_system_mount_deserializes_absent_and_present_mount_modes() {
+        let absent: FileSystemMount = serde_json::from_value(serde_json::json!({
+            "file_system_id": "skills",
+            "mount_path": "/mnt/skills"
+        }))
+        .unwrap();
+        assert!(!absent.read_only);
+        assert!(!absent.prefetch);
+
+        let present: FileSystemMount = serde_json::from_value(serde_json::json!({
+            "file_system_id": "skills",
+            "mount_path": "/mnt/skills",
+            "read_only": true,
+            "prefetch": true
+        }))
+        .unwrap();
+        assert!(present.read_only);
+        assert!(present.prefetch);
     }
 
     #[test]

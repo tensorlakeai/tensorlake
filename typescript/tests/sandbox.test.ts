@@ -1086,6 +1086,48 @@ describe("Sandbox", () => {
       ]);
     });
 
+    it("create() includes mount modes only when true", async () => {
+      let captured: Record<string, unknown> | undefined;
+      installNativeStub({
+        client: {
+          createSandbox: vi.fn(async (json: string) => {
+            captured = JSON.parse(json);
+            return { traceId: "t", json: fsSandboxInfoBody() };
+          }),
+        },
+      });
+
+      const client = new SandboxClient(
+        { apiUrl: "http://localhost:8900" },
+        /* _internal */ true,
+      );
+      await client.create({
+        fileSystems: [
+          {
+            fileSystemId: "file_system_abc",
+            mountPath: "/mnt/skills",
+            readOnly: true,
+            prefetch: true,
+          },
+          {
+            fileSystemId: "file_system_def",
+            mountPath: "/mnt/data",
+            readOnly: false,
+            prefetch: false,
+          },
+        ],
+      });
+      expect(captured?.file_systems).toEqual([
+        {
+          file_system_id: "file_system_abc",
+          mount_path: "/mnt/skills",
+          read_only: true,
+          prefetch: true,
+        },
+        { file_system_id: "file_system_def", mount_path: "/mnt/data" },
+      ]);
+    });
+
     it("create() omits file_systems when none are provided", async () => {
       let captured: Record<string, unknown> | undefined;
       installNativeStub({
@@ -1138,6 +1180,95 @@ describe("Sandbox", () => {
         { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
       ]);
       expect(stub.client.attachFileSystem).toHaveBeenCalledOnce();
+      sbx.close();
+    });
+
+    it("attachFileSystem() threads mount modes and surfaces them in the response", async () => {
+      const stub = installNativeStub({
+        client: {
+          attachFileSystem: vi.fn(
+            async (
+              sandboxId: string,
+              fileSystemId: string,
+              mountPath: string,
+              readOnly?: boolean,
+              prefetch?: boolean,
+            ) => {
+              expect(sandboxId).toBe("sbx-abc");
+              expect(fileSystemId).toBe("file_system_abc");
+              expect(mountPath).toBe("/mnt/skills");
+              expect(readOnly).toBe(true);
+              expect(prefetch).toBe(true);
+              return {
+                traceId: "t",
+                json: fsSandboxInfoBody({
+                  file_systems: [
+                    {
+                      file_system_id: "file_system_abc",
+                      mount_path: "/mnt/skills",
+                      read_only: true,
+                      prefetch: true,
+                    },
+                  ],
+                }),
+              };
+            },
+          ),
+        },
+      });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-abc",
+        apiUrl: "http://localhost:8900",
+      });
+      const info = await sbx.attachFileSystem("file_system_abc", "/mnt/skills", {
+        readOnly: true,
+        prefetch: true,
+      });
+      expect(info.fileSystems).toEqual([
+        {
+          fileSystemId: "file_system_abc",
+          mountPath: "/mnt/skills",
+          readOnly: true,
+          prefetch: true,
+        },
+      ]);
+      expect(stub.client.attachFileSystem).toHaveBeenCalledOnce();
+      sbx.close();
+    });
+
+    it("attachFileSystem() sends false mount modes when no options are given", async () => {
+      const attachFileSystem = vi.fn(
+        async (
+          _sandboxId: string,
+          _fileSystemId: string,
+          _mountPath: string,
+          readOnly?: boolean,
+          prefetch?: boolean,
+        ) => {
+          expect(readOnly).toBe(false);
+          expect(prefetch).toBe(false);
+          return {
+            traceId: "t",
+            json: fsSandboxInfoBody({
+              file_systems: [
+                { file_system_id: "file_system_abc", mount_path: "/mnt/skills" },
+              ],
+            }),
+          };
+        },
+      );
+      installNativeStub({ client: { attachFileSystem } });
+
+      const sbx = await Sandbox.connect({
+        sandboxId: "sbx-abc",
+        apiUrl: "http://localhost:8900",
+      });
+      const info = await sbx.attachFileSystem("file_system_abc", "/mnt/skills");
+      expect(info.fileSystems).toEqual([
+        { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
+      ]);
+      expect(attachFileSystem).toHaveBeenCalledOnce();
       sbx.close();
     });
 

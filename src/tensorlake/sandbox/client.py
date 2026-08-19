@@ -1012,6 +1012,9 @@ class SandboxClient:
         sandbox_id: str,
         file_system_id: str,
         mount_path: str,
+        *,
+        read_only: bool = False,
+        prefetch: bool = False,
     ) -> Traced[SandboxInfo]:
         """Attach a registered file system to a running sandbox.
 
@@ -1021,8 +1024,11 @@ class SandboxClient:
 
         Args:
             sandbox_id: ID or name of the running sandbox.
-            file_system_id: The registered file system's id.
+            file_system_id: The registered file system's name (created with
+                ``tl fs create <name>``).
             mount_path: Absolute, unique guest mount path (e.g. ``/mnt/skills``).
+            read_only: Mount the file system read-only.
+            prefetch: Eagerly download the file system's contents.
 
         Returns:
             Traced[SandboxInfo] with the sandbox's updated file systems.
@@ -1037,6 +1043,8 @@ class SandboxClient:
                 sandbox_id=sandbox_id,
                 file_system_id=file_system_id,
                 mount_path=mount_path,
+                read_only=read_only,
+                prefetch=prefetch,
             )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:

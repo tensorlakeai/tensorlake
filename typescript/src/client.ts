@@ -9,6 +9,7 @@ import {
 } from "./native-sandbox.js";
 import {
   type ArchivedSandboxInfo,
+  type AttachFileSystemOptions,
   type CopySandboxOptions,
   type CopySandboxResponse,
   type ClaimSandboxOptions,
@@ -18,6 +19,7 @@ import {
   type CreateSandboxPoolResponse,
   type CreateSandboxResponse,
   type CreateSnapshotResponse,
+  type FileSystemMount,
   type GetSandboxLogsOptions,
   type GpuRequest,
   type ListArchivedSandboxesOptions,
@@ -52,6 +54,20 @@ const GPU_MODELS = new Set<string>([
   "A6000",
   "A10",
 ]);
+
+/**
+ * Map a `FileSystemMount` to its wire form. `read_only` and `prefetch` are
+ * included only when `true`: older servers deserialize mount bodies with
+ * `deny_unknown_fields` and would reject an explicit `false`.
+ */
+function fileSystemMountToWire(fs: FileSystemMount): Record<string, unknown> {
+  return {
+    file_system_id: fs.fileSystemId,
+    mount_path: fs.mountPath,
+    ...(fs.readOnly === true ? { read_only: true } : {}),
+    ...(fs.prefetch === true ? { prefetch: true } : {}),
+  };
+}
 
 function gpuRequest(
   gpu: GpuRequest | undefined,
@@ -230,10 +246,7 @@ export class SandboxClient {
     if (options?.snapshotId != null) body.snapshot_id = options.snapshotId;
     if (options?.name != null) body.name = options.name;
     if (options?.fileSystems != null && options.fileSystems.length > 0) {
-      body.file_systems = options.fileSystems.map((fs) => ({
-        file_system_id: fs.fileSystemId,
-        mount_path: fs.mountPath,
-      }));
+      body.file_systems = options.fileSystems.map(fileSystemMountToWire);
     }
 
     if (
@@ -520,9 +533,17 @@ export class SandboxClient {
     sandboxId: string,
     fileSystemId: string,
     mountPath: string,
+    options?: AttachFileSystemOptions,
   ): Promise<Traced<SandboxInfo>> {
     return this.tracedJson<SandboxInfo>(
-      () => this.native.attachFileSystem(sandboxId, fileSystemId, mountPath),
+      () =>
+        this.native.attachFileSystem(
+          sandboxId,
+          fileSystemId,
+          mountPath,
+          options?.readOnly === true,
+          options?.prefetch === true,
+        ),
       "sandboxId",
       { sandboxId, notFoundKind: "sandbox" },
     );
@@ -557,10 +578,7 @@ export class SandboxClient {
     const requestJson =
       options?.fileSystems != null && options.fileSystems.length > 0
         ? JSON.stringify({
-            file_systems: options.fileSystems.map((fs) => ({
-              file_system_id: fs.fileSystemId,
-              mount_path: fs.mountPath,
-            })),
+            file_systems: options.fileSystems.map(fileSystemMountToWire),
           })
         : undefined;
     return this.tracedJson<CreateSandboxResponse>(

@@ -129,6 +129,7 @@ async fn pool_claim_with_file_systems_sends_json_body() {
                 file_systems: vec![FileSystemMount {
                     file_system_id: "file_system_abc".to_string(),
                     mount_path: "/mnt/skills".to_string(),
+                    ..Default::default()
                 }],
             },
         )
@@ -174,6 +175,7 @@ async fn pool_claim_with_file_systems_rejects_server_without_acknowledgment() {
                 file_systems: vec![FileSystemMount {
                     file_system_id: "file_system_abc".to_string(),
                     mount_path: "/mnt/skills".to_string(),
+                    ..Default::default()
                 }],
             },
         )

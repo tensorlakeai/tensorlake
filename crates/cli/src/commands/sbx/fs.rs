@@ -37,29 +37,48 @@ fn print_mounts_table(mounts: &[FileSystemMount]) {
         return;
     }
 
-    let mut table = new_table(&["File System ID", "Mount Path"]);
+    let mut table = new_table(&["File System ID", "Mount Path", "Options"]);
     for mount in mounts {
+        let mut options = Vec::new();
+        if mount.read_only {
+            options.push("ro");
+        }
+        if mount.prefetch {
+            options.push("prefetch");
+        }
         table.add_row(vec![
             Cell::new(mount.file_system_id.as_str()),
             Cell::new(mount.mount_path.as_str()),
+            Cell::new(options.join(",")),
         ]);
     }
     println!("{table}");
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn attach(
     ctx: &CliContext,
     sandbox_id: &str,
     file_system_id: &str,
     mount_path: &str,
+    read_only: bool,
+    prefetch: bool,
     output_json: bool,
 ) -> Result<()> {
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}/file_systems"));
-    let body = serde_json::json!({
+    // The option keys are present only when set: older servers deserialize
+    // attach bodies with `deny_unknown_fields` and reject an explicit `false`.
+    let mut body = serde_json::json!({
         "file_system_id": file_system_id,
         "mount_path": mount_path,
     });
+    if read_only {
+        body["read_only"] = serde_json::Value::Bool(true);
+    }
+    if prefetch {
+        body["prefetch"] = serde_json::Value::Bool(true);
+    }
 
     let resp = client
         .post(&url)

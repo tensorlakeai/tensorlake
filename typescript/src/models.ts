@@ -108,13 +108,29 @@ export interface NetworkConfig {
 /**
  * One file system mounted into a sandbox at an absolute guest path.
  *
- * `fileSystemId` is the registered file system's id (e.g.
- * `file_system_...`) and `mountPath` is an absolute, unique guest path
+ * `fileSystemId` is the Artifact Storage file-system name created with
+ * `tl fs create <name>` and `mountPath` is an absolute, unique guest path
  * (e.g. `/mnt/skills`).
+ *
+ * `readOnly` and `prefetch` are optional mount modes; they are sent on the
+ * wire only when `true` (older servers reject unknown mount fields, so
+ * `false` is expressed by omission).
  */
 export interface FileSystemMount {
   fileSystemId: string;
   mountPath: string;
+  /** Mount the file system read-only. */
+  readOnly?: boolean;
+  /** Eagerly download the file system's contents. */
+  prefetch?: boolean;
+}
+
+/** Optional mount modes for attaching a file system to a running sandbox. */
+export interface AttachFileSystemOptions {
+  /** Mount the file system read-only. */
+  readOnly?: boolean;
+  /** Eagerly download the file system's contents. */
+  prefetch?: boolean;
 }
 
 export interface ClaimSandboxOptions {

@@ -531,16 +531,24 @@ impl SandboxesClient {
     ///
     /// The mount completes asynchronously on the dataplane; the returned
     /// [`SandboxInfo`] already reflects the new entry in `file_systems`.
+    ///
+    /// `read_only` and `prefetch` select optional mount modes; they are sent
+    /// on the wire only when `true` so older servers (which reject unknown
+    /// fields) keep accepting attach bodies.
     pub async fn attach_file_system(
         &self,
         sandbox_id: &str,
         file_system_id: &str,
         mount_path: &str,
+        read_only: bool,
+        prefetch: bool,
     ) -> Result<Traced<SandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
         let body = FileSystemMount {
             file_system_id: file_system_id.to_string(),
             mount_path: mount_path.to_string(),
+            read_only,
+            prefetch,
         };
         let req = self
             .client
