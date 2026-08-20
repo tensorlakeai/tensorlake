@@ -79,6 +79,20 @@ class TestContext(unittest.TestCase):
             self.assertIsNone(client.kwargs["organization_id"])
             self.assertIsNone(client.kwargs["project_id"])
 
+    def test_rust_cloud_client_prefers_api_key_over_pat_without_forwarding_scope(self):
+        with patch.object(common_module, "CloudClient", _FakeCloudClient):
+            context = Context.default(
+                api_key="tl_apiKey_test",
+                personal_access_token="tl_pat_test",
+                organization_id="org-stale",
+                project_id="project-stale",
+            )
+            client = context.rust_cloud_client
+
+            self.assertEqual(client.kwargs["api_key"], "tl_apiKey_test")
+            self.assertIsNone(client.kwargs["organization_id"])
+            self.assertIsNone(client.kwargs["project_id"])
+
     def test_rust_cloud_client_requires_authentication(self):
         context = Context.default()
         with self.assertRaises(SystemExit):

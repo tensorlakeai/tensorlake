@@ -379,6 +379,22 @@ mod tests {
     }
 
     #[test]
+    fn secrets_client_prefers_api_key_over_pat_without_scope_headers() {
+        let raw_request = execute_and_capture_request(test_ctx(
+            "http://unused",
+            Some("tl_apiKey_test"),
+            Some("tl_pat_test"),
+            Some("org-stale"),
+            Some("project-stale"),
+        ));
+
+        assert!(raw_request.contains("authorization: bearer tl_apikey_test"));
+        assert!(!raw_request.contains("authorization: bearer tl_pat_test"));
+        assert!(!raw_request.contains("x-forwarded-organization-id:"));
+        assert!(!raw_request.contains("x-forwarded-project-id:"));
+    }
+
+    #[test]
     fn read_env_file_returns_secret_pairs() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join(".env");

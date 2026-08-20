@@ -443,6 +443,25 @@ describe("createSandboxImage", () => {
     expect(captured.options.projectId).toBe("proj_1");
   });
 
+  it("prefers API key auth without PAT scope headers when both are set", async () => {
+    vi.stubEnv("TENSORLAKE_API_KEY", "tl_apiKey_test");
+    vi.stubEnv("TENSORLAKE_PAT", "tl_pat_test");
+    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_stale");
+    vi.stubEnv("TENSORLAKE_PROJECT_ID", "project_stale");
+
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-api-key-precedence`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM python:3.12-slim\n", "utf8");
+
+    const { captured } = makeFakeBinding();
+    await createSandboxImage(dockerfilePath);
+    expect(captured.options.bearerToken).toBe("tl_apiKey_test");
+    expect(captured.options.useScopeHeaders).toBe(false);
+  });
+
   it("rejects an unknown source type", async () => {
     makeFakeBinding();
     await expect(

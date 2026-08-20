@@ -566,7 +566,14 @@ fn new_base_client(
 
 #[cfg(test)]
 mod tests {
-    use super::ensure_rustls_provider;
+    use super::{ClientBuilder, ensure_rustls_provider};
+    use reqwest::Method;
+    use std::{
+        io::{Read, Write},
+        net::TcpListener,
+        sync::mpsc,
+        thread,
+    };
 
     #[test]
     fn installs_rustls_provider() {
@@ -575,5 +582,45 @@ mod tests {
             rustls::crypto::CryptoProvider::get_default().is_some(),
             "rustls crypto provider should be installed"
         );
+    }
+
+    #[test]
+    fn api_key_bearer_is_preserved_for_proxy_without_implicit_scope_headers() {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("listener");
+        let address = listener.local_addr().expect("listener address");
+        let (tx, rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("connection");
+            let mut buffer = [0_u8; 4096];
+            let bytes_read = stream.read(&mut buffer).expect("request");
+            tx.send(String::from_utf8_lossy(&buffer[..bytes_read]).to_string())
+                .expect("captured request");
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                .expect("response");
+        });
+
+        let api_url = format!("http://{address}");
+        let client = ClientBuilder::new(&api_url)
+            .bearer_token("tl_apiKey_test")
+            .build()
+            .expect("client");
+        let proxy_client = client
+            .with_base_url_without_timeout(&api_url)
+            .expect("proxy client");
+        let request = proxy_client
+            .request(Method::POST, "/sandbox-proxy/processes")
+            .build()
+            .expect("request");
+        tokio::runtime::Runtime::new()
+            .expect("runtime")
+            .block_on(proxy_client.execute_raw(request))
+            .expect("response");
+        let raw_request = rx.recv().expect("captured request").to_lowercase();
+        server.join().expect("server");
+
+        assert!(raw_request.contains("authorization: bearer tl_apikey_test"));
+        assert!(!raw_request.contains("x-forwarded-organization-id:"));
+        assert!(!raw_request.contains("x-forwarded-project-id:"));
     }
 }
