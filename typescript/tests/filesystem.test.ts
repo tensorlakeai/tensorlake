@@ -307,6 +307,14 @@ describe("filesystem models", () => {
     const defaulted = mountStatusFromRaw({}, "/mnt/y");
     expect(defaulted.path).toBe("/mnt/y");
     expect(defaulted.mounted).toBe(true);
+
+    // Live `tl fs status --json` reports the name under "repository".
+    const fromCli = mountStatusFromRaw({
+      path: "/mnt/z",
+      repository: "my-fs",
+      mounted: true,
+    });
+    expect(fromCli.filesystem).toBe("my-fs");
   });
 });
 

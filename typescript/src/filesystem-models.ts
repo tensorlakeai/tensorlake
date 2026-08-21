@@ -152,9 +152,10 @@ export function mountStatusFromRaw(
         ? Boolean(raw.active)
         : true;
   const path = String(raw.path || raw.mount_path || localPath || "");
-  const filesystem = (raw.filesystem || raw.file_system || null) as
-    | string
-    | null;
+  const filesystem = (raw.filesystem ||
+    raw.file_system ||
+    raw.repository ||
+    null) as string | null;
   return { path, filesystem, mounted, raw };
 }
 
