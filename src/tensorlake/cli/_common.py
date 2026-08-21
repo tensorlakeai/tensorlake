@@ -75,9 +75,10 @@ class Context:
         return self.organization_id_value
 
     def list_secret_names(self, page_size: int = 100) -> list[str]:
-        org_id = self.organization_id
-        project_id = self.project_id
-        if org_id is None or project_id is None:
+        api_key_scoped = self.api_key is not None
+        org_id = None if api_key_scoped else self.organization_id
+        project_id = None if api_key_scoped else self.project_id
+        if not api_key_scoped and (org_id is None or project_id is None):
             return []
 
         try:

@@ -114,17 +114,22 @@ export class CloudClient {
    * Look up a registered sandbox image (template) by its registered name.
    *
    * Returns the template, or `null` when no image with that name exists.
-   * Routed through the platform sandbox-templates API, which requires the
-   * organization/project scope (from the client or the `options` override).
+   * API-key clients may omit organization/project IDs and use the
+   * token-scoped Platform API route directly. Explicit scope remains
+   * available for PAT callers.
    */
   async findSandboxImageByName(
     imageName: string,
     options?: { organizationId?: string; projectId?: string },
   ): Promise<SandboxTemplate | null> {
-    const scope = this.resolveScope(options?.organizationId, options?.projectId);
+    const base = this.platformProjectPath(
+      "sandbox-templates",
+      options?.organizationId,
+      options?.projectId,
+    );
     const response = await this.http.requestResponse(
       "GET",
-      `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/sandbox-templates/by-name/${encodeURIComponent(imageName)}`,
+      `${base}/by-name/${encodeURIComponent(imageName)}`,
       { allowedErrorStatusCodes: new Set([404]) },
     );
     if (response.status === 404) {
@@ -136,14 +141,17 @@ export class CloudClient {
 
   /**
    * List all registered sandbox images (templates), following pagination to
-   * the end. Routed through the platform sandbox-templates API, which requires
-   * the organization/project scope (from the client or the `options` override).
+   * the end. API-key clients may omit organization/project IDs and use the
+   * token-scoped Platform API route directly.
    */
   async listSandboxImages(
     options?: { organizationId?: string; projectId?: string },
   ): Promise<SandboxTemplate[]> {
-    const scope = this.resolveScope(options?.organizationId, options?.projectId);
-    const base = `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/sandbox-templates`;
+    const base = this.platformProjectPath(
+      "sandbox-templates",
+      options?.organizationId,
+      options?.projectId,
+    );
     let path: string | null = `${base}?pageSize=100`;
     const templates: SandboxTemplate[] = [];
     while (path !== null) {
@@ -336,10 +344,14 @@ export class CloudClient {
     projectId?: string;
     pageSize?: number;
   }): Promise<SecretsList> {
-    const scope = this.resolveScope(options?.organizationId, options?.projectId);
+    const base = this.platformProjectPath(
+      "secrets",
+      options?.organizationId,
+      options?.projectId,
+    );
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
-      `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/secrets?pageSize=${options?.pageSize ?? 100}`,
+      `${base}?pageSize=${options?.pageSize ?? 100}`,
     );
     return fromSnakeKeys(raw) as SecretsList;
   }
@@ -348,10 +360,14 @@ export class CloudClient {
     secretId: string,
     options?: { organizationId?: string; projectId?: string },
   ): Promise<Secret> {
-    const scope = this.resolveScope(options?.organizationId, options?.projectId);
+    const base = this.platformProjectPath(
+      "secrets",
+      options?.organizationId,
+      options?.projectId,
+    );
     const raw = await this.http.requestJson<Record<string, unknown>>(
       "GET",
-      `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/secrets/${encodeURIComponent(secretId)}`,
+      `${base}/${encodeURIComponent(secretId)}`,
     );
     return fromSnakeKeys(raw) as Secret;
   }
@@ -360,10 +376,14 @@ export class CloudClient {
     secrets: NewSecret | NewSecret[],
     options?: { organizationId?: string; projectId?: string },
   ): Promise<UpsertSecretResponse> {
-    const scope = this.resolveScope(options?.organizationId, options?.projectId);
+    const base = this.platformProjectPath(
+      "secrets",
+      options?.organizationId,
+      options?.projectId,
+    );
     const raw = await this.http.requestJson<Record<string, unknown> | Record<string, unknown>[]>(
       "PUT",
-      `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/secrets`,
+      base,
       { body: secrets },
     );
     if (Array.isArray(raw)) {
@@ -376,10 +396,14 @@ export class CloudClient {
     secretId: string,
     options?: { organizationId?: string; projectId?: string },
   ): Promise<void> {
-    const scope = this.resolveScope(options?.organizationId, options?.projectId);
+    const base = this.platformProjectPath(
+      "secrets",
+      options?.organizationId,
+      options?.projectId,
+    );
     await this.http.requestResponse(
       "DELETE",
-      `/platform/v1/organizations/${encodeURIComponent(scope.organizationId)}/projects/${encodeURIComponent(scope.projectId)}/secrets/${encodeURIComponent(secretId)}`,
+      `${base}/${encodeURIComponent(secretId)}`,
     );
   }
 
@@ -532,6 +556,24 @@ export class CloudClient {
       organizationId: resolvedOrganizationId,
       projectId: resolvedProjectId,
     };
+  }
+
+  private platformProjectPath(
+    resource: "sandbox-templates" | "secrets",
+    organizationId?: string,
+    projectId?: string,
+  ): string {
+    const resolvedOrganizationId = organizationId ?? this.organizationId;
+    const resolvedProjectId = projectId ?? this.projectId;
+    if (!resolvedOrganizationId && !resolvedProjectId) {
+      return `/platform/v1/${resource}`;
+    }
+    if (!resolvedOrganizationId || !resolvedProjectId) {
+      throw new Error(
+        "organizationId and projectId must be provided together",
+      );
+    }
+    return `/platform/v1/organizations/${encodeURIComponent(resolvedOrganizationId)}/projects/${encodeURIComponent(resolvedProjectId)}/${resource}`;
   }
 }
 

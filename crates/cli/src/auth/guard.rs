@@ -41,6 +41,17 @@ pub async fn ensure_auth(ctx: &mut CliContext) -> Result<()> {
     Ok(())
 }
 
+/// Ensure credentials are available for a Platform API route that derives
+/// project scope directly from an API key. PAT callers still need explicit
+/// organization/project context.
+pub async fn ensure_auth_for_api_key_scoped_project(ctx: &mut CliContext) -> Result<()> {
+    ensure_auth(ctx).await?;
+    if ctx.api_key.is_some() {
+        return Ok(());
+    }
+    ensure_auth_and_project(ctx).await
+}
+
 /// Ensure authentication and org/project are available.
 /// Triggers login and/or init flows as needed.
 pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
@@ -137,4 +148,29 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
     *ctx = CliContext::from_resolved(resolved);
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ensure_auth_for_api_key_scoped_project;
+    use crate::auth::context::CliContext;
+    use crate::config::resolver::ResolvedConfig;
+
+    #[tokio::test]
+    async fn api_key_scoped_guard_does_not_require_introspection_or_local_scope() {
+        let mut ctx = CliContext::from_resolved(ResolvedConfig {
+            api_url: "http://127.0.0.1:1".to_string(),
+            cloud_url: "https://cloud.tensorlake.ai".to_string(),
+            namespace: "default".to_string(),
+            api_key: Some("tl_apiKey_test".to_string()),
+            personal_access_token: None,
+            organization_id: None,
+            project_id: None,
+            debug: false,
+        });
+
+        ensure_auth_for_api_key_scoped_project(&mut ctx)
+            .await
+            .expect("API-key-scoped routes do not need introspection");
+    }
 }

@@ -546,11 +546,13 @@ export async function deleteSandboxImage(imageName: string): Promise<void> {
     throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
   }
 
+  const useScopeHeaders =
+    context.personalAccessToken != null && context.apiKey == null;
   const client = new CloudClient({
     apiUrl: context.apiUrl,
     apiKey: bearerToken,
-    organizationId: context.organizationId,
-    projectId: context.projectId,
+    organizationId: useScopeHeaders ? context.organizationId : undefined,
+    projectId: useScopeHeaders ? context.projectId : undefined,
     namespace: context.namespace,
   });
   try {
@@ -565,9 +567,8 @@ export async function deleteSandboxImage(imageName: string): Promise<void> {
  *
  * Returns the registered sandbox template, or `null` if no image with that
  * name exists. Uses the same environment-based Tensorlake auth as
- * `createSandboxImage`, and requires organization/project context
- * (`TENSORLAKE_ORGANIZATION_ID` and `TENSORLAKE_PROJECT_ID`) since the lookup
- * is routed through the platform sandbox-templates API.
+ * `createSandboxImage`. API keys derive project scope from the bearer token;
+ * PAT callers still require organization/project context.
  */
 export async function findSandboxImageByName(
   imageName: string,
@@ -581,7 +582,9 @@ export async function findSandboxImageByName(
   if (!bearerToken) {
     throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
   }
-  if (!context.organizationId || !context.projectId) {
+  const useScopeHeaders =
+    context.personalAccessToken != null && context.apiKey == null;
+  if (useScopeHeaders && (!context.organizationId || !context.projectId)) {
     throw new Error(
       "Looking up a sandbox image by name requires organization and project " +
         "context (TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID).",
@@ -591,8 +594,8 @@ export async function findSandboxImageByName(
   const client = new CloudClient({
     apiUrl: context.apiUrl,
     apiKey: bearerToken,
-    organizationId: context.organizationId,
-    projectId: context.projectId,
+    organizationId: useScopeHeaders ? context.organizationId : undefined,
+    projectId: useScopeHeaders ? context.projectId : undefined,
     namespace: context.namespace,
   });
   try {
@@ -607,9 +610,8 @@ export async function findSandboxImageByName(
  *
  * Returns the registered sandbox templates (each with `id`, `name`,
  * `snapshotId`, `public`, etc.). Uses the same environment-based Tensorlake
- * auth as `createSandboxImage`, and requires organization/project context
- * (`TENSORLAKE_ORGANIZATION_ID` and `TENSORLAKE_PROJECT_ID`) since the listing
- * is routed through the platform sandbox-templates API.
+ * auth as `createSandboxImage`. API keys derive project scope from the bearer
+ * token; PAT callers still require organization/project context.
  */
 export async function listSandboxImages(): Promise<SandboxTemplate[]> {
   const context = buildContextFromEnv();
@@ -617,7 +619,9 @@ export async function listSandboxImages(): Promise<SandboxTemplate[]> {
   if (!bearerToken) {
     throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
   }
-  if (!context.organizationId || !context.projectId) {
+  const useScopeHeaders =
+    context.personalAccessToken != null && context.apiKey == null;
+  if (useScopeHeaders && (!context.organizationId || !context.projectId)) {
     throw new Error(
       "Listing sandbox images requires organization and project context " +
         "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID).",
@@ -627,8 +631,8 @@ export async function listSandboxImages(): Promise<SandboxTemplate[]> {
   const client = new CloudClient({
     apiUrl: context.apiUrl,
     apiKey: bearerToken,
-    organizationId: context.organizationId,
-    projectId: context.projectId,
+    organizationId: useScopeHeaders ? context.organizationId : undefined,
+    projectId: useScopeHeaders ? context.projectId : undefined,
     namespace: context.namespace,
   });
   try {

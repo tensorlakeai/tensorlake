@@ -32,7 +32,7 @@ use crate::{
     sandbox_images::{
         CommonBuildOptions, DockerfileBuildPlan, SandboxImageBuildError, SandboxImageBuildEvent,
         SandboxImageContextFile, client_builder, collect_dir_files, follow_started_process_output,
-        is_localhost, normalize_context_file_path, resolve_build_context,
+        is_localhost, normalize_context_file_path, resolve_image_service_build_context,
         resolved_docker_config_json, sandbox_lifecycle_client, sandbox_proxy_client,
     },
     sandboxes::{SandboxesClient, models::ProcessInfo},
@@ -101,14 +101,17 @@ where
             "Forwarding local registry credentials to the build".to_string(),
         ));
     }
-    let ctx = resolve_build_context(options).await?;
-    let project = ctx.project_id.clone();
+    let ctx = resolve_image_service_build_context(options).await?;
+    let project = ctx
+        .project_id
+        .clone()
+        .expect("Image Service context always resolves a project");
     let image_service_url = image_service_url(&ctx.api_url);
     let client = client_builder(
         &image_service_url,
         &ctx.bearer_token,
         ctx.use_scope_headers,
-        Some(&ctx.organization_id),
+        ctx.organization_id.as_deref(),
         Some(&project),
         ctx.user_agent.as_deref(),
     )
@@ -1513,8 +1516,8 @@ mod tests {
             api_url: api_url.to_string(),
             bearer_token: "token".to_string(),
             use_scope_headers: false,
-            organization_id: "organization-1".to_string(),
-            project_id: "project-1".to_string(),
+            organization_id: Some("organization-1".to_string()),
+            project_id: Some("project-1".to_string()),
             namespace: "default".to_string(),
             user_agent: None,
         }

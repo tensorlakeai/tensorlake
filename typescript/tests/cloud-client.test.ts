@@ -444,6 +444,36 @@ describe("CloudClient", () => {
     client.close();
   });
 
+  it("uses the API-key-scoped sandbox templates route when scope is omitted", async () => {
+    mockFetch((url, init) => {
+      expect(url).toBe(
+        "http://localhost:8900/platform/v1/sandbox-templates/by-name/tensorlake%2Ftest%3A1",
+      );
+      expect(init?.method).toBe("GET");
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer tl_apiKey_test");
+      expect(headers).not.toHaveProperty("X-Forwarded-Organization-Id");
+      expect(headers).not.toHaveProperty("X-Forwarded-Project-Id");
+      return new Response(
+        JSON.stringify({
+          id: "tpl-1",
+          name: "tensorlake/test:1",
+          snapshot_id: "snap-1",
+        }),
+        { status: 200, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const client = new CloudClient({
+      apiUrl: "http://localhost:8900",
+      apiKey: "tl_apiKey_test",
+    });
+    const template = await client.findSandboxImageByName("tensorlake/test:1");
+
+    expect(template?.snapshotId).toBe("snap-1");
+    client.close();
+  });
+
   it("returns null when a sandbox image is not found", async () => {
     mockFetch(
       () => new Response(JSON.stringify({ message: "not found" }), { status: 404 }),
@@ -509,6 +539,59 @@ describe("CloudClient", () => {
       `${base}?pageSize=100`,
       `${base}?pageSize=100&cursor=abc`,
     ]);
+    client.close();
+  });
+
+  it("uses API-key-scoped secrets routes when scope is omitted", async () => {
+    const requested: Array<{ url: string; method: string | undefined }> = [];
+    mockFetch((url, init) => {
+      requested.push({ url, method: init?.method });
+      const headers = init?.headers as Record<string, string>;
+      expect(headers.Authorization).toBe("Bearer tl_apiKey_test");
+      expect(headers).not.toHaveProperty("X-Forwarded-Organization-Id");
+      expect(headers).not.toHaveProperty("X-Forwarded-Project-Id");
+
+      if (init?.method === "GET" && url.endsWith("?pageSize=25")) {
+        return new Response(
+          JSON.stringify({
+            items: [],
+            pagination: { next: null, prev: null, total: 0 },
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      if (init?.method === "PUT") {
+        return new Response(
+          JSON.stringify({ id: "secret/1", name: "TOKEN", created_at: "now" }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        );
+      }
+      return new Response(null, { status: 204 });
+    });
+
+    const client = new CloudClient({
+      apiUrl: "http://localhost:8900",
+      apiKey: "tl_apiKey_test",
+    });
+    await client.listSecrets({ pageSize: 25 });
+    await client.upsertSecrets({ name: "TOKEN", value: "value" });
+    await client.deleteSecret("secret/1");
+
+    expect(requested).toEqual([
+      {
+        url: "http://localhost:8900/platform/v1/secrets?pageSize=25",
+        method: "GET",
+      },
+      {
+        url: "http://localhost:8900/platform/v1/secrets",
+        method: "PUT",
+      },
+      {
+        url: "http://localhost:8900/platform/v1/secrets/secret%2F1",
+        method: "DELETE",
+      },
+    ]);
+    expect(requested.every(({ url }) => !url.includes("/keys/introspect"))).toBe(true);
     client.close();
   });
 

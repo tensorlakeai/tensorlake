@@ -53,18 +53,23 @@ pub async fn set(ctx: &CliContext, env_file: Option<&Path>, pairs: &[String]) ->
 
     let upsert_secrets = parse_secret_pairs(&entries)?;
 
-    let (organization_id, project_id) = org_and_project(ctx)?;
-    let request = UpsertSecretRequest::builder()
-        .organization_id(organization_id)
-        .project_id(project_id)
-        .secrets(UpsertSecret::Multiple(upsert_secrets.clone()))
-        .build()
-        .map_err(|e| CliError::usage(e.to_string()))?;
-
-    secrets_client(ctx)?
-        .upsert(request)
-        .await
-        .map_err(map_set_sdk_error)?;
+    let client = secrets_client(ctx)?;
+    let secrets = UpsertSecret::Multiple(upsert_secrets.clone());
+    if ctx.api_key.is_some() {
+        client
+            .upsert_api_key_scoped(secrets)
+            .await
+            .map_err(map_set_sdk_error)?;
+    } else {
+        let (organization_id, project_id) = org_and_project(ctx)?;
+        let request = UpsertSecretRequest::builder()
+            .organization_id(organization_id)
+            .project_id(project_id)
+            .secrets(secrets)
+            .build()
+            .map_err(|e| CliError::usage(e.to_string()))?;
+        client.upsert(request).await.map_err(map_set_sdk_error)?;
+    }
 
     let count = upsert_secrets.len();
     if count == 1 {
@@ -130,21 +135,32 @@ pub async fn unset(ctx: &CliContext, names: &[String]) -> Result<()> {
         .filter_map(|s| s.get("name").and_then(|n| n.as_str()).map(|name| (name, s)))
         .collect();
 
-    let (organization_id, project_id) = org_and_project(ctx)?;
     let client = secrets_client(ctx)?;
+    let explicit_scope = if ctx.api_key.is_some() {
+        None
+    } else {
+        Some(org_and_project(ctx)?)
+    };
     let mut num = 0;
 
     for name in names {
         if let Some(secret) = secrets_map.get(name.as_str())
             && let Some(id) = secret.get("id").and_then(|v| v.as_str())
         {
-            let request = DeleteSecretRequest::builder()
-                .organization_id(organization_id.clone())
-                .project_id(project_id.clone())
-                .secret_id(id)
-                .build()
-                .map_err(|e| CliError::usage(e.to_string()))?;
-            client.delete(&request).await.map_err(map_unset_sdk_error)?;
+            if let Some((organization_id, project_id)) = &explicit_scope {
+                let request = DeleteSecretRequest::builder()
+                    .organization_id(organization_id)
+                    .project_id(project_id)
+                    .secret_id(id)
+                    .build()
+                    .map_err(|e| CliError::usage(e.to_string()))?;
+                client.delete(&request).await.map_err(map_unset_sdk_error)?;
+            } else {
+                client
+                    .delete_api_key_scoped(id)
+                    .await
+                    .map_err(map_unset_sdk_error)?;
+            }
             num += 1;
         }
     }
@@ -158,17 +174,20 @@ pub async fn unset(ctx: &CliContext, names: &[String]) -> Result<()> {
 }
 
 async fn get_all_secrets(ctx: &CliContext) -> Result<Vec<serde_json::Value>> {
-    let (organization_id, project_id) = org_and_project(ctx)?;
-    let request = ListSecretsRequest::builder()
-        .organization_id(organization_id)
-        .project_id(project_id)
-        .page_size(100)
-        .build()
-        .map_err(|e| CliError::usage(e.to_string()))?;
-    let resp = secrets_client(ctx)?
-        .list(&request)
-        .await
-        .map_err(map_list_sdk_error)?;
+    let client = secrets_client(ctx)?;
+    let resp = if ctx.api_key.is_some() {
+        client.list_api_key_scoped(Some(100)).await
+    } else {
+        let (organization_id, project_id) = org_and_project(ctx)?;
+        let request = ListSecretsRequest::builder()
+            .organization_id(organization_id)
+            .project_id(project_id)
+            .page_size(100)
+            .build()
+            .map_err(|e| CliError::usage(e.to_string()))?;
+        client.list(&request).await
+    }
+    .map_err(map_list_sdk_error)?;
 
     Ok(resp
         .items

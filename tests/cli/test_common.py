@@ -9,11 +9,10 @@ from tensorlake.cli._common import Context
 class _FakeCloudClient:
     def __init__(self, **kwargs):
         self.kwargs = kwargs
+        self.list_secrets_calls = []
 
     def list_secrets_json(self, organization_id, project_id, page_size):
-        assert organization_id == "org-1"
-        assert project_id == "proj-1"
-        assert page_size == 100
+        self.list_secrets_calls.append((organization_id, project_id, page_size))
         return json.dumps(
             {
                 "items": [
@@ -107,8 +106,11 @@ class TestContext(unittest.TestCase):
             )
             secret_names = context.list_secret_names(page_size=100)
             self.assertEqual(secret_names, ["SECRET_A", "SECRET_B"])
+            self.assertEqual(
+                context.cloud_client.list_secrets_calls, [(None, None, 100)]
+            )
 
-    def test_list_secret_names_uses_provided_org_project_without_introspection(self):
+    def test_list_secret_names_api_key_ignores_stale_scope_without_introspection(self):
         with patch.object(common_module, "CloudClient", _FailIntrospectCloudClient):
             context = Context.default(
                 api_key="api-key",
@@ -118,11 +120,37 @@ class TestContext(unittest.TestCase):
             secret_names = context.list_secret_names(page_size=100)
 
             self.assertEqual(secret_names, ["SECRET_A", "SECRET_B"])
+            self.assertEqual(
+                context.cloud_client.list_secrets_calls, [(None, None, 100)]
+            )
 
-    def test_list_secret_names_without_org_or_project_returns_empty(self):
+    def test_list_secret_names_api_key_does_not_require_local_scope(self):
         with patch.object(common_module, "CloudClient", _FakeCloudClient):
             context = Context.default(api_key="api-key")
-            self.assertEqual(context.list_secret_names(page_size=100), [])
+            self.assertEqual(
+                context.list_secret_names(page_size=100),
+                ["SECRET_A", "SECRET_B"],
+            )
+            self.assertEqual(
+                context.cloud_client.list_secrets_calls, [(None, None, 100)]
+            )
+
+    def test_list_secret_names_pat_keeps_explicit_scope(self):
+        with patch.object(common_module, "CloudClient", _FakeCloudClient):
+            context = Context.default(
+                personal_access_token="pat-token",
+                organization_id="org-1",
+                project_id="proj-1",
+            )
+
+            self.assertEqual(
+                context.list_secret_names(page_size=100),
+                ["SECRET_A", "SECRET_B"],
+            )
+            self.assertEqual(
+                context.cloud_client.list_secrets_calls,
+                [("org-1", "proj-1", 100)],
+            )
 
 
 if __name__ == "__main__":

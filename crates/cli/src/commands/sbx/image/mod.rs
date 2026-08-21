@@ -72,8 +72,15 @@ fn is_progress_status(message: &str) -> bool {
         || message.starts_with(UPLOAD_CONTEXT_PROGRESS_PREFIX)
 }
 
-/// Build the sandbox-templates API base URL for the current org/project.
-pub fn templates_base_url(ctx: &CliContext) -> Result<(String, String, String)> {
+/// Build the sandbox-templates API base URL. API keys use the token-scoped
+/// root route; PATs keep the explicitly addressed compatibility route.
+pub fn templates_base_url(ctx: &CliContext) -> Result<String> {
+    if ctx.api_key.is_some() {
+        return Ok(format!(
+            "{}/platform/v1/sandbox-templates",
+            ctx.api_url.trim_end_matches('/')
+        ));
+    }
     let org_id = ctx
         .effective_organization_id()
         .ok_or_else(|| CliError::auth("Organization ID is required for --image"))?;
@@ -86,7 +93,7 @@ pub fn templates_base_url(ctx: &CliContext) -> Result<(String, String, String)> 
         org_id,
         proj_id
     );
-    Ok((base, org_id, proj_id))
+    Ok(base)
 }
 
 pub fn org_and_project(ctx: &CliContext) -> Result<(String, String)> {
@@ -101,6 +108,9 @@ pub fn org_and_project(ctx: &CliContext) -> Result<(String, String)> {
 
 pub fn sandbox_templates_client(ctx: &CliContext) -> Result<SandboxTemplatesClient> {
     let client = ctx.scoped_cloud_client()?;
+    if ctx.api_key.is_some() {
+        return Ok(SandboxTemplatesClient::new_api_key_scoped(client));
+    }
     let (org_id, proj_id) = org_and_project(ctx)?;
     Ok(SandboxTemplatesClient::new(client, org_id, proj_id))
 }
@@ -227,8 +237,41 @@ pub fn absolute_api_url(api_url: &str, next: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{absolute_api_url, item_matches_image_ref};
+    use super::{absolute_api_url, item_matches_image_ref, templates_base_url};
+    use crate::auth::context::CliContext;
+    use crate::config::resolver::ResolvedConfig;
     use serde_json::json;
+
+    fn test_context(api_key: Option<&str>, personal_access_token: Option<&str>) -> CliContext {
+        CliContext::from_resolved(ResolvedConfig {
+            api_url: "https://api.tensorlake.ai/".to_string(),
+            cloud_url: "https://cloud.tensorlake.ai".to_string(),
+            namespace: "default".to_string(),
+            api_key: api_key.map(str::to_string),
+            personal_access_token: personal_access_token.map(str::to_string),
+            organization_id: Some("org-1".to_string()),
+            project_id: Some("proj-1".to_string()),
+            debug: false,
+        })
+    }
+
+    #[test]
+    fn api_key_templates_url_uses_token_scoped_root_route() {
+        let ctx = test_context(Some("tl_apiKey_test"), Some("tl_pat_test"));
+        assert_eq!(
+            templates_base_url(&ctx).unwrap(),
+            "https://api.tensorlake.ai/platform/v1/sandbox-templates"
+        );
+    }
+
+    #[test]
+    fn pat_templates_url_keeps_explicit_project_route() {
+        let ctx = test_context(None, Some("tl_pat_test"));
+        assert_eq!(
+            templates_base_url(&ctx).unwrap(),
+            "https://api.tensorlake.ai/platform/v1/organizations/org-1/projects/proj-1/sandbox-templates"
+        );
+    }
 
     #[test]
     fn item_matches_image_ref_matches_name_or_id() {

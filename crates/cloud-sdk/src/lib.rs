@@ -305,6 +305,14 @@ impl Sdk {
         )
     }
 
+    /// Get a sandbox-template client scoped by the authenticated API key.
+    ///
+    /// Unlike [`Sdk::sandbox_templates`], this client uses the token-scoped
+    /// Platform API routes and does not need organization/project discovery.
+    pub fn sandbox_templates_for_api_key(&self) -> SandboxTemplatesClient {
+        SandboxTemplatesClient::new_api_key_scoped(self.client.clone())
+    }
+
     /// Get a client for managing the project-scoped file-system registry.
     pub fn file_systems(&self, organization_id: &str, project_id: &str) -> FileSystemsClient {
         FileSystemsClient::new(
@@ -352,18 +360,14 @@ impl Sdk {
     /// # Example
     ///
     /// ```rust,no_run
-    /// use tensorlake::{Sdk, secrets::models::ListSecretsRequest};
+    /// use tensorlake::Sdk;
     ///
     /// async fn example() -> Result<(), Box<dyn std::error::Error>> {
     ///     let sdk = Sdk::new("https://api.tensorlake.ai", "your-api-key")?;
     ///     let secrets_client = sdk.secrets();
     ///
-    ///     // Use the secrets client
-    ///     let request = ListSecretsRequest::builder()
-    ///         .organization_id("org-id".to_string())
-    ///         .project_id("project-id".to_string())
-    ///         .build()?;
-    ///     secrets_client.list(&request).await?;
+    ///     // API keys use the token-scoped route directly.
+    ///     secrets_client.list_api_key_scoped(Some(100)).await?;
     ///     Ok(())
     /// }
     /// ```

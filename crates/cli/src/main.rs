@@ -34,7 +34,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::num::NonZeroUsize;
 
 use auth::context::CliContext;
-use auth::guard::{ensure_auth, ensure_auth_and_project};
+use auth::guard::{ensure_auth, ensure_auth_and_project, ensure_auth_for_api_key_scoped_project};
 use config::resolver;
 use error::CliError;
 
@@ -2044,7 +2044,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
         Commands::App(subcmd) => run_app_command(ctx, subcmd).await,
         Commands::Cron(subcmd) => run_cron_command(ctx, subcmd).await,
         Commands::Secrets(subcmd) => {
-            ensure_auth_and_project(ctx).await?;
+            ensure_auth_for_api_key_scoped_project(ctx).await?;
             match subcmd {
                 SecretsCommands::Ls => commands::secrets::list(ctx).await,
                 SecretsCommands::Set { env_file, secrets } => {
@@ -2098,7 +2098,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                 }
             }
             other => {
-                ensure_auth_and_project(ctx).await?;
+                if matches!(&other, SbxCommands::Image(_)) {
+                    ensure_auth_for_api_key_scoped_project(ctx).await?;
+                } else {
+                    ensure_auth_and_project(ctx).await?;
+                }
                 match other {
                     SbxCommands::Ls {
                         all,

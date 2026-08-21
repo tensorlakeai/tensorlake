@@ -210,8 +210,8 @@ class TestDeleteSandboxImage(unittest.TestCase):
             "https://api.tensorlake.test",
             "tl_apiKey_abc",
             "tensorlake/test:1",
-            "org_1",
-            "proj_1",
+            None,
+            None,
             "default",
         )
 
@@ -256,8 +256,8 @@ class TestFindSandboxImageByName(unittest.TestCase):
             "https://api.tensorlake.test",
             "tl_apiKey_abc",
             "tensorlake/test:1",
-            "org_1",
-            "proj_1",
+            None,
+            None,
             "default",
         )
 
@@ -277,12 +277,57 @@ class TestFindSandboxImageByName(unittest.TestCase):
             with self.assertRaises(sbm.SandboxImageLookupError):
                 sbm.find_sandbox_image_by_name("image")
 
-    def test_requires_org_and_project_context(self):
+    def test_api_key_does_not_require_or_forward_local_scope(self):
         ctx = _make_ctx(organization_id=None, project_id=None)
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm, "_rust_find_sandbox_image_by_name", return_value=None
+            ) as rust_find,
+        ):
+            self.assertIsNone(sbm.find_sandbox_image_by_name("image"))
+
+        rust_find.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_apiKey_abc",
+            "image",
+            None,
+            None,
+            "default",
+        )
+
+    def test_pat_requires_org_and_project_context(self):
+        ctx = _make_ctx(
+            api_key=None,
+            personal_access_token="tl_pat_test",
+            organization_id=None,
+            project_id=None,
+        )
 
         with patch.object(sbm, "_build_context_from_env", return_value=ctx):
             with self.assertRaises(sbm.SandboxImageLookupError):
                 sbm.find_sandbox_image_by_name("image")
+
+    def test_pat_keeps_explicit_scope(self):
+        ctx = _make_ctx(api_key=None, personal_access_token="tl_pat_test")
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm, "_rust_find_sandbox_image_by_name", return_value=None
+            ) as rust_find,
+        ):
+            self.assertIsNone(sbm.find_sandbox_image_by_name("image"))
+
+        rust_find.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_pat_test",
+            "image",
+            "org_1",
+            "proj_1",
+            "default",
+        )
 
     def test_empty_name_raises_type_error(self):
         with self.assertRaises(TypeError):
@@ -317,8 +362,8 @@ class TestListSandboxImages(unittest.TestCase):
         rust_list.assert_called_once_with(
             "https://api.tensorlake.test",
             "tl_apiKey_abc",
-            "org_1",
-            "proj_1",
+            None,
+            None,
             "default",
         )
 
@@ -338,12 +383,55 @@ class TestListSandboxImages(unittest.TestCase):
             with self.assertRaises(sbm.SandboxImageLookupError):
                 sbm.list_sandbox_images()
 
-    def test_requires_org_and_project_context(self):
+    def test_api_key_does_not_require_or_forward_local_scope(self):
         ctx = _make_ctx(organization_id=None, project_id=None)
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm, "_rust_list_sandbox_images", return_value="[]"
+            ) as rust_list,
+        ):
+            self.assertEqual(sbm.list_sandbox_images(), [])
+
+        rust_list.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_apiKey_abc",
+            None,
+            None,
+            "default",
+        )
+
+    def test_pat_requires_org_and_project_context(self):
+        ctx = _make_ctx(
+            api_key=None,
+            personal_access_token="tl_pat_test",
+            organization_id=None,
+            project_id=None,
+        )
 
         with patch.object(sbm, "_build_context_from_env", return_value=ctx):
             with self.assertRaises(sbm.SandboxImageLookupError):
                 sbm.list_sandbox_images()
+
+    def test_pat_keeps_explicit_scope(self):
+        ctx = _make_ctx(api_key=None, personal_access_token="tl_pat_test")
+
+        with (
+            patch.object(sbm, "_build_context_from_env", return_value=ctx),
+            patch.object(
+                sbm, "_rust_list_sandbox_images", return_value="[]"
+            ) as rust_list,
+        ):
+            self.assertEqual(sbm.list_sandbox_images(), [])
+
+        rust_list.assert_called_once_with(
+            "https://api.tensorlake.test",
+            "tl_pat_test",
+            "org_1",
+            "proj_1",
+            "default",
+        )
 
 
 class TestImportSandboxImage(unittest.TestCase):
