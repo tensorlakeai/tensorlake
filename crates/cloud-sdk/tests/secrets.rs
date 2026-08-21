@@ -1,8 +1,83 @@
 use tensorlake::secrets::models::*;
+use tensorlake::{ClientBuilder, secrets::SecretsClient};
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpListener;
 
 use crate::common::random_string;
 
 mod common;
+
+#[tokio::test]
+async fn api_key_scoped_secrets_use_root_routes_without_introspection() {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+
+        let (mut socket, _) = listener.accept().await.expect("accept list request");
+        requests.push(read_http_request(&mut socket).await);
+        write_json_response(
+            &mut socket,
+            r#"{"items":[],"pagination":{"next":null,"prev":null,"total":0}}"#,
+        )
+        .await;
+
+        let (mut socket, _) = listener.accept().await.expect("accept upsert request");
+        requests.push(read_http_request(&mut socket).await);
+        write_json_response(
+            &mut socket,
+            r#"{"id":"secret/1","name":"TOKEN","createdAt":"2026-08-20T00:00:00Z"}"#,
+        )
+        .await;
+
+        let (mut socket, _) = listener.accept().await.expect("accept delete request");
+        requests.push(read_http_request(&mut socket).await);
+        socket
+            .write_all(b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("write delete response");
+
+        requests
+    });
+
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .bearer_token("tl_apiKey_test")
+        .build()
+        .expect("build client");
+    let secrets = SecretsClient::new(client);
+
+    secrets
+        .list_api_key_scoped(Some(100))
+        .await
+        .expect("list secrets");
+    secrets
+        .upsert_api_key_scoped(UpsertSecret::from(("TOKEN", "value")))
+        .await
+        .expect("upsert secret");
+    secrets
+        .delete_api_key_scoped("secret/1")
+        .await
+        .expect("delete secret");
+
+    let requests = server.await.expect("server join");
+    let requests: Vec<String> = requests
+        .iter()
+        .map(|request| String::from_utf8_lossy(request).to_string())
+        .collect();
+    assert!(requests[0].starts_with("GET /platform/v1/secrets?pageSize=100 HTTP/1.1\r\n"));
+    assert!(requests[1].starts_with("PUT /platform/v1/secrets HTTP/1.1\r\n"));
+    assert!(requests[2].starts_with("DELETE /platform/v1/secrets/secret%2F1 HTTP/1.1\r\n"));
+    for request in requests {
+        let request = request.to_lowercase();
+        assert!(request.contains("authorization: bearer tl_apikey_test"));
+        assert!(!request.contains("/platform/v1/keys/introspect"));
+        assert!(!request.contains("x-forwarded-organization-id:"));
+        assert!(!request.contains("x-forwarded-project-id:"));
+    }
+}
 
 #[tokio::test]
 #[cfg_attr(not(feature = "integration-tests"), ignore)]
@@ -187,4 +262,34 @@ async fn test_secrets_operations() {
     if let Err(err) = result {
         panic!("{err}");
     }
+}
+
+async fn write_json_response(socket: &mut tokio::net::TcpStream, body: &str) {
+    let response = format!(
+        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .expect("write response");
+}
+
+async fn read_http_request(socket: &mut tokio::net::TcpStream) -> Vec<u8> {
+    let mut request = Vec::new();
+    let mut buf = [0_u8; 4096];
+
+    loop {
+        let read = socket.read(&mut buf).await.expect("read request");
+        if read == 0 {
+            break;
+        }
+        request.extend_from_slice(&buf[..read]);
+        if request.windows(4).any(|window| window == b"\r\n\r\n") {
+            break;
+        }
+    }
+
+    request
 }

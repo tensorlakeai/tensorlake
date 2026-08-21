@@ -5,7 +5,7 @@ use crate::error::Result;
 use crate::output::table::new_table;
 
 pub async fn run(ctx: &CliContext, output_json: bool) -> Result<()> {
-    let (base_url, _, _) = super::templates_base_url(ctx)?;
+    let base_url = super::templates_base_url(ctx)?;
     let client = ctx.client()?;
 
     let items = super::list_all_images(ctx, &client, &base_url).await?;

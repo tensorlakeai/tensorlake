@@ -20,7 +20,7 @@ pub async fn run(ctx: &CliContext, name_or_id: &str) -> Result<()> {
 }
 
 async fn delete_resolved_image(ctx: &CliContext, name_or_id: &str) -> Result<()> {
-    let (base_url, _, _) = super::templates_base_url(ctx)?;
+    let base_url = super::templates_base_url(ctx)?;
     let client = ctx.client()?;
     let item = super::find_image_item_in_paginated_list(ctx, &client, &base_url, name_or_id)
         .await?

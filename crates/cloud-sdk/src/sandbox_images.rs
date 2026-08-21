@@ -279,8 +279,8 @@ pub(crate) struct ResolvedBuildContext {
     pub(crate) api_url: String,
     pub(crate) bearer_token: String,
     pub(crate) use_scope_headers: bool,
-    pub(crate) organization_id: String,
-    pub(crate) project_id: String,
+    pub(crate) organization_id: Option<String>,
+    pub(crate) project_id: Option<String>,
     pub(crate) namespace: String,
     pub(crate) user_agent: Option<String>,
 }
@@ -544,7 +544,7 @@ where
         ));
     }
 
-    let ctx = resolve_build_context(options.clone()).await?;
+    let ctx = resolve_build_context(options.clone())?;
 
     emit(SandboxImageBuildEvent::Status(
         "Preparing rootfs build...".to_string(),
@@ -766,13 +766,10 @@ where
     })
 }
 
-pub(crate) async fn resolve_build_context(
-    options: CommonBuildOptions,
-) -> Result<ResolvedBuildContext> {
-    let client = unscoped_client(&options)?;
+pub(crate) fn resolve_build_context(options: CommonBuildOptions) -> Result<ResolvedBuildContext> {
     let (organization_id, project_id) = if options.use_scope_headers {
         match (options.organization_id.clone(), options.project_id.clone()) {
-            (Some(organization_id), Some(project_id)) => (organization_id, project_id),
+            (Some(organization_id), Some(project_id)) => (Some(organization_id), Some(project_id)),
             _ => {
                 return Err(SandboxImageBuildError::auth(
                     "Organization ID and project ID are required for sandbox image builds with PAT authentication",
@@ -780,8 +777,10 @@ pub(crate) async fn resolve_build_context(
             }
         }
     } else {
-        let scope = introspect_scope(&client).await?;
-        (scope.organization_id, scope.project_id)
+        // API keys are self-scoping. Platform template/build routes derive the
+        // exact project from the bearer credential, so no introspection or
+        // local organization/project value is needed.
+        (None, None)
     };
 
     Ok(ResolvedBuildContext {
@@ -790,6 +789,30 @@ pub(crate) async fn resolve_build_context(
         use_scope_headers: options.use_scope_headers,
         organization_id,
         project_id,
+        namespace: options.namespace,
+        user_agent: options.user_agent,
+    })
+}
+
+/// Resolve an explicit project for the CAS Image Service, whose current API
+/// still carries the project identifier in request bodies and query strings.
+/// The token-scoped Platform API path above intentionally avoids this lookup;
+/// this compatibility resolver is only used by CAS builds.
+pub(crate) async fn resolve_image_service_build_context(
+    options: CommonBuildOptions,
+) -> Result<ResolvedBuildContext> {
+    if options.use_scope_headers {
+        return resolve_build_context(options);
+    }
+
+    let client = unscoped_client(&options)?;
+    let scope = introspect_scope(&client).await?;
+    Ok(ResolvedBuildContext {
+        api_url: options.api_url,
+        bearer_token: options.bearer_token,
+        use_scope_headers: false,
+        organization_id: Some(scope.organization_id),
+        project_id: Some(scope.project_id),
         namespace: options.namespace,
         user_agent: options.user_agent,
     })
@@ -834,8 +857,8 @@ fn platform_client(ctx: &ResolvedBuildContext) -> Result<Client> {
         &ctx.api_url,
         &ctx.bearer_token,
         ctx.use_scope_headers,
-        Some(&ctx.organization_id),
-        Some(&ctx.project_id),
+        ctx.organization_id.as_deref(),
+        ctx.project_id.as_deref(),
         ctx.user_agent.as_deref(),
     )
     .build()
@@ -848,8 +871,8 @@ pub(crate) fn sandbox_lifecycle_client(ctx: &ResolvedBuildContext) -> Result<Cli
         &lifecycle_url,
         &ctx.bearer_token,
         ctx.use_scope_headers,
-        Some(&ctx.organization_id),
-        Some(&ctx.project_id),
+        ctx.organization_id.as_deref(),
+        ctx.project_id.as_deref(),
         ctx.user_agent.as_deref(),
     )
     .build()
@@ -992,11 +1015,23 @@ async fn prepare_rootfs_build(
     // registry. The final-stage FROM is treated separately so its resolution
     // becomes the lineage parent; the additional references (earlier stages,
     // COPY --from, RUN --mount=,from) become preload-only local images.
-    let templates = crate::sandbox_templates::SandboxTemplatesClient::new(
-        client.clone(),
-        ctx.organization_id.clone(),
-        ctx.project_id.clone(),
-    );
+    let templates = match (&ctx.organization_id, &ctx.project_id) {
+        (Some(organization_id), Some(project_id)) => {
+            crate::sandbox_templates::SandboxTemplatesClient::new(
+                client.clone(),
+                organization_id.clone(),
+                project_id.clone(),
+            )
+        }
+        (None, None) => {
+            crate::sandbox_templates::SandboxTemplatesClient::new_api_key_scoped(client.clone())
+        }
+        _ => {
+            return Err(SandboxImageBuildError::auth(
+                "Sandbox image build scope is incomplete",
+            ));
+        }
+    };
 
     // Skip the lookup when the final-stage FROM is `FROM <stage-alias>` —
     // the value is an internal reference to an earlier-defined stage, not
@@ -1130,10 +1165,13 @@ async fn complete_rootfs_build(
 }
 
 fn sandbox_template_builds_path(ctx: &ResolvedBuildContext) -> String {
-    format!(
-        "/platform/v1/organizations/{}/projects/{}/sandbox-template-builds",
-        ctx.organization_id, ctx.project_id
-    )
+    match (&ctx.organization_id, &ctx.project_id) {
+        (Some(organization_id), Some(project_id)) => format!(
+            "/platform/v1/organizations/{organization_id}/projects/{project_id}/sandbox-template-builds"
+        ),
+        (None, None) => "/platform/v1/sandbox-template-builds".to_string(),
+        _ => unreachable!("resolved build context validates scope pairs"),
+    }
 }
 
 fn sandbox_proxy_base(
@@ -3108,15 +3146,16 @@ mod tests {
         assert!(message.contains("rootfs builder exited with status 1"));
     }
     use super::{
-        BuilderFailureDiagnostics, CompleteSandboxTemplateBuildRequest, PreparedRootfsBuilder,
-        PreparedRootfsParent, PreparedSandboxTemplateBuild, SandboxImageBuildError,
-        SandboxImageBuildEvent, SandboxImageContextFile, build_rootfs_spec, collect_dir_files,
-        complete_request_from_metadata, contains_disk_space_evidence, contains_oom_killer_evidence,
-        create_context_archive, default_registered_name, load_dockerfile_plan,
-        load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
+        BuilderFailureDiagnostics, CommonBuildOptions, CompleteSandboxTemplateBuildRequest,
+        PreparedRootfsBuilder, PreparedRootfsParent, PreparedSandboxTemplateBuild,
+        SandboxImageBuildError, SandboxImageBuildEvent, SandboxImageContextFile, build_rootfs_spec,
+        collect_dir_files, complete_request_from_metadata, contains_disk_space_evidence,
+        contains_oom_killer_evidence, create_context_archive, default_registered_name,
+        load_dockerfile_plan, load_dockerfile_text_plan, logical_dockerfile_lines, normalize_posix,
         parse_df_line_usage_percent, parse_df_max_usage_percent, prepare_request_body,
-        process_terminal_status, rootfs_builder_env, rootfs_builder_executable, rootfs_disk_bytes,
-        rootfs_disk_bytes_to_mb, sandbox_proxy_base_with_explicit, splice_signed_upload,
+        process_terminal_status, resolve_build_context, rootfs_builder_env,
+        rootfs_builder_executable, rootfs_disk_bytes, rootfs_disk_bytes_to_mb,
+        sandbox_proxy_base_with_explicit, sandbox_template_builds_path, splice_signed_upload,
         streaming_process_payload, template_build_payload, upload_percent,
     };
     use crate::sandboxes::models::ProcessInfo;
@@ -3124,6 +3163,48 @@ mod tests {
     use std::fs::File;
     use std::io::{Read, Write};
     use std::path::PathBuf;
+
+    fn common_build_options(use_scope_headers: bool) -> CommonBuildOptions {
+        CommonBuildOptions {
+            api_url: "https://api.tensorlake.ai".to_string(),
+            bearer_token: "token".to_string(),
+            use_scope_headers,
+            organization_id: Some("org-1".to_string()),
+            project_id: Some("proj-1".to_string()),
+            namespace: "default".to_string(),
+            registered_name: Some("image".to_string()),
+            disk_mb: None,
+            builder_disk_mb: None,
+            cpus: None,
+            memory_mb: None,
+            is_public: false,
+            cas: false,
+            user_agent: None,
+            docker_compat: false,
+        }
+    }
+
+    #[test]
+    fn api_key_build_context_uses_token_scoped_route_without_local_scope() {
+        let context = resolve_build_context(common_build_options(false)).unwrap();
+        assert_eq!(context.organization_id, None);
+        assert_eq!(context.project_id, None);
+        assert_eq!(
+            sandbox_template_builds_path(&context),
+            "/platform/v1/sandbox-template-builds"
+        );
+    }
+
+    #[test]
+    fn pat_build_context_keeps_explicit_project_route() {
+        let context = resolve_build_context(common_build_options(true)).unwrap();
+        assert_eq!(context.organization_id.as_deref(), Some("org-1"));
+        assert_eq!(context.project_id.as_deref(), Some("proj-1"));
+        assert_eq!(
+            sandbox_template_builds_path(&context),
+            "/platform/v1/organizations/org-1/projects/proj-1/sandbox-template-builds"
+        );
+    }
 
     #[test]
     fn oom_dmesg_parser_detects_kernel_oom_entries() {

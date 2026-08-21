@@ -159,8 +159,8 @@ def _rust_find_sandbox_image_by_name(
     api_url: str,
     token: str,
     image_name: str,
-    organization_id: str,
-    project_id: str,
+    organization_id: str | None,
+    project_id: str | None,
     namespace: str | None,
 ) -> str | None:
     try:
@@ -187,8 +187,8 @@ def _rust_find_sandbox_image_by_name(
 def _rust_list_sandbox_images(
     api_url: str,
     token: str,
-    organization_id: str,
-    project_id: str,
+    organization_id: str | None,
+    project_id: str | None,
     namespace: str | None,
 ) -> str:
     try:
@@ -354,13 +354,14 @@ def delete_sandbox_image(image_name: str) -> None:
             "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
         )
 
+    use_explicit_scope = ctx.personal_access_token is not None and ctx.api_key is None
     try:
         _rust_delete_sandbox_image(
             ctx.api_url,
             token,
             image_name,
-            ctx.organization_id,
-            ctx.project_id,
+            ctx.organization_id if use_explicit_scope else None,
+            ctx.project_id if use_explicit_scope else None,
             ctx.namespace,
         )
     except SandboxImageError:
@@ -399,9 +400,9 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
 
     Returns the registered sandbox template as a dict, or ``None`` if no image
     with that name exists. Uses the same environment-based Tensorlake auth as
-    :func:`build_sandbox_image`, and requires organization/project context
-    (``TENSORLAKE_ORGANIZATION_ID`` and ``TENSORLAKE_PROJECT_ID``) since the
-    lookup is routed through the platform sandbox-templates API.
+    :func:`build_sandbox_image`. API keys derive project scope from the bearer
+    token; PAT callers still require ``TENSORLAKE_ORGANIZATION_ID`` and
+    ``TENSORLAKE_PROJECT_ID``.
 
     Raises:
         TypeError: ``image_name`` is not a non-empty string.
@@ -417,7 +418,8 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
         raise SandboxImageLookupError(
             "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
         )
-    if not ctx.organization_id or not ctx.project_id:
+    use_explicit_scope = ctx.personal_access_token is not None and ctx.api_key is None
+    if use_explicit_scope and (not ctx.organization_id or not ctx.project_id):
         raise SandboxImageLookupError(
             "Looking up a sandbox image by name requires organization and "
             "project context (TENSORLAKE_ORGANIZATION_ID and "
@@ -429,8 +431,8 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
             ctx.api_url,
             token,
             image_name,
-            ctx.organization_id,
-            ctx.project_id,
+            ctx.organization_id if use_explicit_scope else None,
+            ctx.project_id if use_explicit_scope else None,
             ctx.namespace,
         )
     except SandboxImageError:
@@ -453,10 +455,9 @@ def list_sandbox_images() -> list[dict]:
 
     Returns the registered sandbox templates as a list of dicts (each with
     ``id``, ``name``, ``snapshot_id``, ``public``, etc.). Uses the same
-    environment-based Tensorlake auth as :func:`build_sandbox_image`, and
-    requires organization/project context (``TENSORLAKE_ORGANIZATION_ID`` and
-    ``TENSORLAKE_PROJECT_ID``) since the listing is routed through the platform
-    sandbox-templates API.
+    environment-based Tensorlake auth as :func:`build_sandbox_image`. API keys
+    derive project scope from the bearer token; PAT callers still require
+    ``TENSORLAKE_ORGANIZATION_ID`` and ``TENSORLAKE_PROJECT_ID``.
 
     Raises:
         SandboxImageLookupError: Credentials or project context are missing, or
@@ -468,7 +469,8 @@ def list_sandbox_images() -> list[dict]:
         raise SandboxImageLookupError(
             "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
         )
-    if not ctx.organization_id or not ctx.project_id:
+    use_explicit_scope = ctx.personal_access_token is not None and ctx.api_key is None
+    if use_explicit_scope and (not ctx.organization_id or not ctx.project_id):
         raise SandboxImageLookupError(
             "Listing sandbox images requires organization and project context "
             "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID)."
@@ -478,8 +480,8 @@ def list_sandbox_images() -> list[dict]:
         result_json = _rust_list_sandbox_images(
             ctx.api_url,
             token,
-            ctx.organization_id,
-            ctx.project_id,
+            ctx.organization_id if use_explicit_scope else None,
+            ctx.project_id if use_explicit_scope else None,
             ctx.namespace,
         )
     except SandboxImageError:

@@ -2,7 +2,7 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
 pub async fn run(ctx: &CliContext, name_or_id: &str) -> Result<()> {
-    let (base_url, _, _) = super::templates_base_url(ctx)?;
+    let base_url = super::templates_base_url(ctx)?;
     let client = ctx.client()?;
     let direct_url = format!("{}/{}", base_url, name_or_id);
 

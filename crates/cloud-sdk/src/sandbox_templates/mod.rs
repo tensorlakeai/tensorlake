@@ -47,8 +47,7 @@ fn next_request_path(next: &str) -> String {
 #[derive(Clone)]
 pub struct SandboxTemplatesClient {
     client: Client,
-    organization_id: String,
-    project_id: String,
+    scope: Option<(String, String)>,
 }
 
 impl SandboxTemplatesClient {
@@ -59,16 +58,27 @@ impl SandboxTemplatesClient {
     ) -> Self {
         Self {
             client,
-            organization_id: organization_id.into(),
-            project_id: project_id.into(),
+            scope: Some((organization_id.into(), project_id.into())),
+        }
+    }
+
+    /// Create a client whose project scope is derived from the authenticated
+    /// API key. This uses the token-scoped Platform API routes and avoids a
+    /// separate key-introspection request.
+    pub fn new_api_key_scoped(client: Client) -> Self {
+        Self {
+            client,
+            scope: None,
         }
     }
 
     fn endpoint(&self) -> String {
-        format!(
-            "/platform/v1/organizations/{}/projects/{}/sandbox-templates",
-            self.organization_id, self.project_id
-        )
+        match &self.scope {
+            Some((organization_id, project_id)) => format!(
+                "/platform/v1/organizations/{organization_id}/projects/{project_id}/sandbox-templates"
+            ),
+            None => "/platform/v1/sandbox-templates".to_string(),
+        }
     }
 
     pub async fn create(
@@ -144,7 +154,18 @@ impl SandboxTemplatesClient {
 
 #[cfg(test)]
 mod tests {
-    use super::next_request_path;
+    use super::{SandboxTemplatesClient, next_request_path};
+    use crate::ClientBuilder;
+
+    #[test]
+    fn api_key_scoped_client_uses_root_endpoint() {
+        let client = ClientBuilder::new("https://api.tensorlake.ai")
+            .bearer_token("tl_apiKey_test")
+            .build()
+            .unwrap();
+        let templates = SandboxTemplatesClient::new_api_key_scoped(client);
+        assert_eq!(templates.endpoint(), "/platform/v1/sandbox-templates");
+    }
 
     #[test]
     fn next_request_path_keeps_absolute_path_and_query() {

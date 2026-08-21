@@ -248,8 +248,8 @@ class CloudClient:
 
     def list_secrets_json(
         self,
-        organization_id: str,
-        project_id: str,
+        organization_id: str | None = None,
+        project_id: str | None = None,
         page_size: int = 100,
     ) -> str:
         try:

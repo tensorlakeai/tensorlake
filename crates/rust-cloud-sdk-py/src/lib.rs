@@ -189,20 +189,33 @@ impl CloudApiClient {
     /// Look up a registered sandbox image (template) by name.
     ///
     /// Returns the template JSON, or `None` when no image with that name
-    /// exists. Routed through the platform sandbox-templates API, which
-    /// requires the organization/project scope passed here.
+    /// exists. When organization/project are both omitted, the authenticated
+    /// API key supplies the scope through the token-scoped Platform API route.
     fn find_sandbox_image_by_name(
         &self,
-        organization_id: String,
-        project_id: String,
+        organization_id: Option<String>,
+        project_id: Option<String>,
         image_name: String,
     ) -> PyResult<Option<String>> {
+        let scope = match (organization_id, project_id) {
+            (Some(organization_id), Some(project_id)) => Some((organization_id, project_id)),
+            (None, None) => None,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "organization_id and project_id must be provided together",
+                ));
+            }
+        };
         self.run_with_retry(5, move |client| {
-            let organization_id = organization_id.clone();
-            let project_id = project_id.clone();
+            let scope = scope.clone();
             let image_name = image_name.clone();
             async move {
-                let templates = SandboxTemplatesClient::new(client, organization_id, project_id);
+                let templates = match scope {
+                    Some((organization_id, project_id)) => {
+                        SandboxTemplatesClient::new(client, organization_id, project_id)
+                    }
+                    None => SandboxTemplatesClient::new_api_key_scoped(client),
+                };
                 match templates.find_by_name(&image_name).await? {
                     Some(traced) => {
                         let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
@@ -216,14 +229,31 @@ impl CloudApiClient {
 
     /// List all registered sandbox images (templates) for the given scope.
     ///
-    /// Returns a JSON array of templates. Routed through the platform
-    /// sandbox-templates API, which requires the organization/project scope.
-    fn list_sandbox_images(&self, organization_id: String, project_id: String) -> PyResult<String> {
+    /// Returns a JSON array of templates. When organization/project are both
+    /// omitted, the authenticated API key supplies the scope.
+    fn list_sandbox_images(
+        &self,
+        organization_id: Option<String>,
+        project_id: Option<String>,
+    ) -> PyResult<String> {
+        let scope = match (organization_id, project_id) {
+            (Some(organization_id), Some(project_id)) => Some((organization_id, project_id)),
+            (None, None) => None,
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "organization_id and project_id must be provided together",
+                ));
+            }
+        };
         self.run_with_retry(5, move |client| {
-            let organization_id = organization_id.clone();
-            let project_id = project_id.clone();
+            let scope = scope.clone();
             async move {
-                let templates = SandboxTemplatesClient::new(client, organization_id, project_id);
+                let templates = match scope {
+                    Some((organization_id, project_id)) => {
+                        SandboxTemplatesClient::new(client, organization_id, project_id)
+                    }
+                    None => SandboxTemplatesClient::new_api_key_scoped(client),
+                };
                 let traced = templates.list().await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
             }
@@ -1280,17 +1310,26 @@ impl CloudApiClient {
         })
     }
 
-    #[pyo3(signature = (organization_id, project_id, page_size=100))]
+    #[pyo3(signature = (organization_id=None, project_id=None, page_size=100))]
     fn list_secrets_json(
         &self,
-        organization_id: String,
-        project_id: String,
+        organization_id: Option<String>,
+        project_id: Option<String>,
         page_size: i32,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |client| {
-            let path = format!(
+        let path = match (organization_id, project_id) {
+            (Some(organization_id), Some(project_id)) => format!(
                 "/platform/v1/organizations/{organization_id}/projects/{project_id}/secrets"
-            );
+            ),
+            (None, None) => "/platform/v1/secrets".to_string(),
+            _ => {
+                return Err(pyo3::exceptions::PyValueError::new_err(
+                    "organization_id and project_id must be provided together",
+                ));
+            }
+        };
+        self.run_with_retry(5, move |client| {
+            let path = path.clone();
             async move {
                 let request = client
                     .request(Method::GET, &path)
