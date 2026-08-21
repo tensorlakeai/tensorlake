@@ -48,6 +48,22 @@ struct ClaimSandboxResponse {
     claim_configuration_applied: Option<bool>,
 }
 
+/// Client-side mirror of the server's HTTP 400 for invalid snapshot pins:
+/// a mount that pins `snapshot_id` must also be `read_only`, so callers fail
+/// fast (and offline) instead of round-tripping to the server.
+fn validate_mount_snapshot_pins(mounts: &[FileSystemMount]) -> Result<(), SdkError> {
+    for mount in mounts {
+        if mount.snapshot_id.is_some() && !mount.read_only {
+            return Err(SdkError::ClientError(format!(
+                "file system mount {:?} at {:?} sets snapshot_id without read_only: \
+                 snapshot-pinned mounts are read-only",
+                mount.file_system_id, mount.mount_path
+            )));
+        }
+    }
+    Ok(())
+}
+
 /// A reference to a sandbox process: either its OS **pid** or a managed-process **name**
 /// given at creation. This is the single place the pid/name path segment is built, reused by
 /// the Rust SDK, the Python/Node bindings, and the CLI.
@@ -325,6 +341,7 @@ impl SandboxesClient {
         &self,
         request: &CreateSandboxRequest,
     ) -> Result<Traced<CreateSandboxResponse>, SdkError> {
+        validate_mount_snapshot_pins(&request.file_systems)?;
         let uri = self.endpoint("sandboxes");
         let req = self
             .client
@@ -352,6 +369,7 @@ impl SandboxesClient {
         pool_id: &str,
         request: &ClaimSandboxRequest,
     ) -> Result<Traced<CreateSandboxResponse>, SdkError> {
+        validate_mount_snapshot_pins(&request.file_systems)?;
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}/sandboxes"));
         let req = self
             .client
@@ -535,6 +553,10 @@ impl SandboxesClient {
     /// `read_only` and `prefetch` select optional mount modes; they are sent
     /// on the wire only when `true` so older servers (which reject unknown
     /// fields) keep accepting attach bodies.
+    ///
+    /// `snapshot_id` pins the mount to a specific filesystem snapshot and
+    /// requires `read_only`; it is sent only when set for the same
+    /// compatibility reason.
     pub async fn attach_file_system(
         &self,
         sandbox_id: &str,
@@ -542,6 +564,7 @@ impl SandboxesClient {
         mount_path: &str,
         read_only: bool,
         prefetch: bool,
+        snapshot_id: Option<&str>,
     ) -> Result<Traced<SandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
         let body = FileSystemMount {
@@ -549,7 +572,9 @@ impl SandboxesClient {
             mount_path: mount_path.to_string(),
             read_only,
             prefetch,
+            snapshot_id: snapshot_id.map(str::to_string),
         };
+        validate_mount_snapshot_pins(std::slice::from_ref(&body))?;
         let req = self
             .client
             .build_post_json_request(Method::POST, &uri, &body)?;
@@ -1190,8 +1215,9 @@ impl SandboxProxyClient {
 #[cfg(test)]
 mod process_ref_tests {
     use super::{
-        ProcessRef, resolve_sandbox_proxy_target, sandbox_proxy_hostname,
+        FileSystemMount, ProcessRef, resolve_sandbox_proxy_target, sandbox_proxy_hostname,
         sandbox_url_from_ingress_endpoint, select_sandbox_proxy_url, validate_managed_name,
+        validate_mount_snapshot_pins,
     };
 
     #[test]
@@ -1321,5 +1347,35 @@ mod process_ref_tests {
             sandbox_proxy_hostname("https://sbx-1.sandbox.gcp-use4.tensorlake.ai").unwrap();
 
         assert_eq!(hostname, "sbx-1.sandbox.gcp-use4.tensorlake.ai");
+    }
+
+    #[test]
+    fn snapshot_pin_without_read_only_is_a_client_error() {
+        let pinned_writable = FileSystemMount {
+            file_system_id: "skills".to_string(),
+            mount_path: "/mnt/skills".to_string(),
+            read_only: false,
+            prefetch: false,
+            snapshot_id: Some("0abc123def".to_string()),
+        };
+        let error = validate_mount_snapshot_pins(std::slice::from_ref(&pinned_writable))
+            .expect_err("a writable snapshot pin must be rejected client-side");
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot-pinned mounts are read-only"),
+            "unexpected error: {error}"
+        );
+
+        let pinned_read_only = FileSystemMount {
+            read_only: true,
+            ..pinned_writable.clone()
+        };
+        let unpinned = FileSystemMount {
+            snapshot_id: None,
+            ..pinned_writable
+        };
+        validate_mount_snapshot_pins(&[pinned_read_only, unpinned])
+            .expect("read-only pins and unpinned mounts are valid");
     }
 }

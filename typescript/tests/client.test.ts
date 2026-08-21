@@ -868,6 +868,69 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("includes the claim snapshot pin only when set", async () => {
+      const claimSandbox = vi.fn(async () => ({
+        traceId: "t",
+        json: JSON.stringify({ sandbox_id: "sbx-fs", status: "running" }),
+      }));
+      installNativeStub({ client: { claimSandbox } });
+
+      const client = SandboxClient.forLocalhost();
+      await client.claim("pool-1", {
+        fileSystems: [
+          {
+            fileSystemId: "file_system_abc",
+            mountPath: "/mnt/skills",
+            readOnly: true,
+            snapshotId: "0abc123def",
+          },
+          {
+            fileSystemId: "file_system_def",
+            mountPath: "/mnt/data",
+          },
+        ],
+      });
+
+      expect(claimSandbox).toHaveBeenCalledWith(
+        "pool-1",
+        JSON.stringify({
+          file_systems: [
+            {
+              file_system_id: "file_system_abc",
+              mount_path: "/mnt/skills",
+              read_only: true,
+              snapshot_id: "0abc123def",
+            },
+            {
+              file_system_id: "file_system_def",
+              mount_path: "/mnt/data",
+            },
+          ],
+        }),
+      );
+      client.close();
+    });
+
+    it("rejects a claim snapshot pin without readOnly before calling native", async () => {
+      const claimSandbox = vi.fn();
+      installNativeStub({ client: { claimSandbox } });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(
+        client.claim("pool-1", {
+          fileSystems: [
+            {
+              fileSystemId: "file_system_abc",
+              mountPath: "/mnt/skills",
+              snapshotId: "0abc123def",
+            },
+          ],
+        }),
+      ).rejects.toThrow(/snapshot-pinned mounts are read-only/);
+      expect(claimSandbox).not.toHaveBeenCalled();
+      client.close();
+    });
+
     it("returns readiness timeout responses without retrying", async () => {
       const claimSandbox = vi.fn(async () => ({
         traceId: "t",

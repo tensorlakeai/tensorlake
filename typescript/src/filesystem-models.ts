@@ -201,6 +201,18 @@ export class MountError extends FilesystemError {
   }
 }
 
+export class ReadOnlyMountNotSupportedError extends MountError {
+  constructor() {
+    super(
+      "read-only local mounts are not supported: `tl fs mount` has no --ro " +
+        "mode. Mount the filesystem into a sandbox read-only instead " +
+        "(readOnly: true / `tl sbx create -f NAME:PATH:ro`), or use " +
+        "`tl git mount --ro` for repositories.",
+    );
+    this.name = "ReadOnlyMountNotSupportedError";
+  }
+}
+
 export class CliNotFoundError extends MountError {
   constructor(detail: string) {
     super(

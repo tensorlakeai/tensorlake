@@ -37,6 +37,7 @@ import {
   FilesystemError,
   FilesystemNotFoundError,
   MountError,
+  ReadOnlyMountNotSupportedError,
   fileEntryFromWire,
   mountStatusFromRaw,
   trimSlashes,
@@ -191,10 +192,12 @@ class FsCli {
   // names/paths can never be parsed as CLI flags (e.g. a path literally
   // named "--discard" must stay a path, not become the destructive flag).
   async mount(filesystem: string, localPath: string, readonly: boolean): Promise<void> {
-    const args = ["mount"];
-    if (readonly) args.push("--ro");
-    args.push("--", filesystem, localPath);
-    await this.run(args);
+    if (readonly) {
+      // `tl fs mount` has no --ro flag; shelling it out anyway would surface
+      // an opaque CLI parse error. Fail honestly instead.
+      throw new ReadOnlyMountNotSupportedError();
+    }
+    await this.run(["mount", "--", filesystem, localPath]);
   }
 
   async unmount(localPath: string, discard: boolean): Promise<void> {
@@ -384,7 +387,13 @@ export class FilesystemClient {
 
   // -- local mounts -------------------------------------------------------------
 
-  /** Mount a filesystem to a local path (requires the `tl` CLI). */
+  /**
+   * Mount a filesystem to a local path (requires the `tl` CLI).
+   *
+   * `readonly: true` is not supported for local mounts and throws
+   * {@link ReadOnlyMountNotSupportedError}; use a sandbox read-only mount
+   * (`readOnly: true`) or `tl git mount --ro` instead.
+   */
   async mount(
     name: string,
     localPath: string,
@@ -825,7 +834,13 @@ export class Filesystem {
 
   // -- mounts -------------------------------------------------------------------
 
-  /** Mount this filesystem to a local path (requires the `tl` CLI). */
+  /**
+   * Mount this filesystem to a local path (requires the `tl` CLI).
+   *
+   * `readonly: true` is not supported for local mounts and throws
+   * {@link ReadOnlyMountNotSupportedError}; use a sandbox read-only mount
+   * (`readOnly: true`) or `tl git mount --ro` instead.
+   */
   async mount(localPath: string, readonly = false): Promise<FilesystemMount> {
     return await this.client.mount(this.name, localPath, readonly);
   }

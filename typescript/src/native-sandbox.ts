@@ -103,6 +103,7 @@ export interface NativeSandboxClient {
     mountPath: string,
     readOnly?: boolean | null,
     prefetch?: boolean | null,
+    snapshotId?: string | null,
   ): Promise<TracedJson>;
   detachFileSystem(
     sandboxId: string,

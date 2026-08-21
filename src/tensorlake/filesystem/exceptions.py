@@ -65,6 +65,24 @@ class MountError(FilesystemError):
     pass
 
 
+class ReadOnlyMountNotSupportedError(MountError):
+    """Raised when a read-only local mount is requested.
+
+    ``tl fs mount`` has no read-only mode. Read-only views exist elsewhere:
+    mount the filesystem into a sandbox with ``read_only=True`` (e.g.
+    ``tl sbx create -f NAME:PATH:ro``), or use ``tl git mount --ro`` for
+    repositories.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(
+            "read-only local mounts are not supported: `tl fs mount` has no "
+            "--ro mode. Mount the filesystem into a sandbox read-only instead "
+            "(read_only=True / `tl sbx create -f NAME:PATH:ro`), or use "
+            "`tl git mount --ro` for repositories."
+        )
+
+
 class CliNotFoundError(MountError):
     """Raised when the `tl` CLI required for mount operations is unavailable."""
 

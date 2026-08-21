@@ -16,7 +16,7 @@ import subprocess
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
-from .exceptions import CliNotFoundError, MountError
+from .exceptions import CliNotFoundError, MountError, ReadOnlyMountNotSupportedError
 
 _DEFAULT_INSTALL_PATH = Path.home() / ".tensorlake" / "bin" / "tl"
 
@@ -107,10 +107,11 @@ class FsCli:
     # names/paths can never be parsed as CLI flags (e.g. a path literally
     # named "--discard" must stay a path, not become the destructive flag).
     def mount(self, filesystem: str, local_path: str, readonly: bool) -> None:
-        args = ["mount"]
         if readonly:
-            args.append("--ro")
-        args += ["--", filesystem, local_path]
+            # `tl fs mount` has no --ro flag; shelling it out anyway would
+            # surface an opaque CLI parse error. Fail honestly instead.
+            raise ReadOnlyMountNotSupportedError()
+        args = ["mount", "--", filesystem, local_path]
         self._run(args)
 
     def unmount(self, local_path: str, discard: bool = False) -> None:

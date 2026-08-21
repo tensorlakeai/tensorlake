@@ -155,7 +155,13 @@ class FilesystemClient:
     # -- local mounts ----------------------------------------------------------
 
     def mount(self, name: str, local_path: str, readonly: bool = False) -> "Mount":
-        """Mount a filesystem to a local path (requires the ``tl`` CLI)."""
+        """Mount a filesystem to a local path (requires the ``tl`` CLI).
+
+        ``readonly=True`` is not supported for local mounts and raises
+        :class:`~tensorlake.filesystem.ReadOnlyMountNotSupportedError`; use a
+        sandbox read-only mount (``read_only=True``) or ``tl git mount --ro``
+        instead.
+        """
         self._cli.mount(name, local_path, readonly)
         return Mount(self, name, local_path, readonly)
 
@@ -439,7 +445,13 @@ class Filesystem:
     # -- mounts ---------------------------------------------------------------------
 
     def mount(self, local_path: str, readonly: bool = False) -> "Mount":
-        """Mount this filesystem to a local path (requires the ``tl`` CLI)."""
+        """Mount this filesystem to a local path (requires the ``tl`` CLI).
+
+        ``readonly=True`` is not supported for local mounts and raises
+        :class:`~tensorlake.filesystem.ReadOnlyMountNotSupportedError`; use a
+        sandbox read-only mount (``read_only=True``) or ``tl git mount --ro``
+        instead.
+        """
         return self._client.mount(self._name, local_path, readonly)
 
 

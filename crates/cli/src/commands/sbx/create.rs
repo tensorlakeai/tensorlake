@@ -88,26 +88,43 @@ pub struct CreateArgs<'a> {
     pub network_allow: &'a [String],
     pub network_deny: &'a [String],
     /// Boot-time file system mounts, each as
-    /// `<file_system_id>:<mount_path>[:<opts>]`.
+    /// `<name>[@<snapshot_id>]:<mount_path>[:<opts>]`.
     pub file_systems: &'a [String],
 }
 
-const FILESYSTEM_FLAG_USAGE: &str = "--filesystem must be <file_system_id>:<mount_path>[:<opts>] where <opts> is a \
-     comma-separated list of `ro` and/or `prefetch`";
+const FILESYSTEM_FLAG_USAGE: &str = "--filesystem must be <name>[@<snapshot_id>]:<mount_path>[:<opts>] where <opts> \
+     is a comma-separated list of `ro` and/or `prefetch`, and a `@<snapshot_id>` pin requires \
+     `ro`";
 
-/// Parse `--filesystem <id>:<path>[:<opts>]` flags into the request
-/// `file_systems` array. The id ends at the first `:` and the mount path at
-/// the second (file system ids and absolute mount paths never contain one);
-/// the optional trailing segment is a comma-separated option list drawn from
-/// `ro` and `prefetch`. The option keys are added to the wire object only when
-/// set: older servers reject unknown mount fields, so an explicit `false`
-/// must never be sent.
+/// Parse `--filesystem <name>[@<snapshot>]:<path>[:<opts>]` flags into the
+/// request `file_systems` array. Everything before the first `:` names the
+/// file system, optionally pinned to a snapshot after `@` (`@` cannot appear
+/// in file system names and snapshot ids are hex-ish, so the split is
+/// unambiguous); the mount path ends at the next `:` (file system names and
+/// absolute mount paths never contain one); the optional trailing segment is
+/// a comma-separated option list drawn from `ro` and `prefetch`. A snapshot
+/// pin requires `ro`: pinned mounts are read-only, and rejecting the combo
+/// here mirrors the server's 400 so users fail fast offline. The option and
+/// pin keys are added to the wire object only when set: older servers reject
+/// unknown mount fields, so an explicit `false` (or a null pin) must never
+/// be sent.
 fn parse_file_system_mounts(raw: &[String]) -> Result<Vec<serde_json::Value>> {
     raw.iter()
         .map(|entry| {
-            let (file_system_id, rest) = entry.split_once(':').ok_or_else(|| {
+            let (mount_source, rest) = entry.split_once(':').ok_or_else(|| {
                 CliError::usage(format!("{FILESYSTEM_FLAG_USAGE}, got {entry:?}"))
             })?;
+            let (file_system_id, snapshot_id) = match mount_source.split_once('@') {
+                Some((name, snapshot)) => {
+                    if name.is_empty() || snapshot.is_empty() || snapshot.contains('@') {
+                        return Err(CliError::usage(format!(
+                            "{FILESYSTEM_FLAG_USAGE}, got {entry:?}"
+                        )));
+                    }
+                    (name, Some(snapshot))
+                }
+                None => (mount_source, None),
+            };
             let (mount_path, opts) = match rest.split_once(':') {
                 Some((mount_path, opts)) => (mount_path, Some(opts)),
                 None => (rest, None),
@@ -121,10 +138,14 @@ fn parse_file_system_mounts(raw: &[String]) -> Result<Vec<serde_json::Value>> {
                 "file_system_id": file_system_id,
                 "mount_path": mount_path,
             });
+            let mut read_only = false;
             if let Some(opts) = opts {
                 for opt in opts.split(',') {
                     match opt {
-                        "ro" => mount["read_only"] = serde_json::Value::Bool(true),
+                        "ro" => {
+                            read_only = true;
+                            mount["read_only"] = serde_json::Value::Bool(true);
+                        }
                         "prefetch" => mount["prefetch"] = serde_json::Value::Bool(true),
                         _ => {
                             return Err(CliError::usage(format!(
@@ -134,6 +155,15 @@ fn parse_file_system_mounts(raw: &[String]) -> Result<Vec<serde_json::Value>> {
                         }
                     }
                 }
+            }
+            if let Some(snapshot_id) = snapshot_id {
+                if !read_only {
+                    return Err(CliError::usage(format!(
+                        "snapshot pin @{snapshot_id} in {entry:?} requires `ro`: \
+                         snapshot-pinned mounts are read-only"
+                    )));
+                }
+                mount["snapshot_id"] = serde_json::Value::String(snapshot_id.to_string());
             }
             Ok(mount)
         })
@@ -493,6 +523,69 @@ mod tests {
     fn parse_file_system_mounts_rejects_empty_opt() {
         assert!(parse_file_system_mounts(&["skills:/mnt/skills:".to_string()]).is_err());
         assert!(parse_file_system_mounts(&["skills:/mnt/skills:ro,".to_string()]).is_err());
+    }
+
+    #[test]
+    fn parse_file_system_mounts_parses_snapshot_pin_with_ro() {
+        let mounts =
+            parse_file_system_mounts(&["skills@0abc123def:/mnt/skills:ro".to_string()]).unwrap();
+        assert_eq!(
+            mounts[0],
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills",
+                "read_only": true,
+                "snapshot_id": "0abc123def",
+            })
+        );
+    }
+
+    #[test]
+    fn parse_file_system_mounts_parses_snapshot_pin_with_combined_opts() {
+        let mounts =
+            parse_file_system_mounts(&["skills@0abc123def:/mnt/skills:ro,prefetch".to_string()])
+                .unwrap();
+        assert_eq!(
+            mounts[0],
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills",
+                "read_only": true,
+                "prefetch": true,
+                "snapshot_id": "0abc123def",
+            })
+        );
+    }
+
+    #[test]
+    fn parse_file_system_mounts_rejects_snapshot_pin_without_ro() {
+        let error =
+            parse_file_system_mounts(&["skills@0abc123def:/mnt/skills".to_string()]).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot-pinned mounts are read-only"),
+            "unexpected error: {error}"
+        );
+        let error =
+            parse_file_system_mounts(&["skills@0abc123def:/mnt/skills:prefetch".to_string()])
+                .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("snapshot-pinned mounts are read-only"),
+            "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn parse_file_system_mounts_rejects_malformed_snapshot_pin() {
+        // A bare or one-sided `@` never names a valid mount source.
+        assert!(parse_file_system_mounts(&["@:/mnt/skills:ro".to_string()]).is_err());
+        assert!(parse_file_system_mounts(&["@0abc123def:/mnt/skills:ro".to_string()]).is_err());
+        assert!(parse_file_system_mounts(&["skills@:/mnt/skills:ro".to_string()]).is_err());
+        // `@` cannot appear in file system names or snapshot ids.
+        assert!(parse_file_system_mounts(&["skills@0abc@def:/mnt/skills:ro".to_string()]).is_err());
     }
 
     #[test]

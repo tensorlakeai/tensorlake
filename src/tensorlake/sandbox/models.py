@@ -256,22 +256,46 @@ class FileSystemMount(BaseModel):
     downloads its contents. Both serialize onto the wire only when ``True``:
     older servers reject mount bodies carrying unknown fields, so ``False``
     is expressed by omission.
+
+    ``snapshot_id`` pins the mount to a specific filesystem snapshot. A
+    pinned mount must also set ``read_only=True`` (the server rejects a
+    writable pin with HTTP 400). It serializes only when set, for the same
+    compatibility reason as the mount modes.
     """
 
     file_system_id: str
     mount_path: str
     read_only: bool = False
     prefetch: bool = False
+    snapshot_id: str | None = None
 
     @model_serializer(mode="wrap")
-    def _omit_false_mount_modes(self, handler):
+    def _omit_unset_mount_modes(self, handler):
         data = handler(self)
         if isinstance(data, dict):
             if not self.read_only:
                 data.pop("read_only", None)
             if not self.prefetch:
                 data.pop("prefetch", None)
+            if self.snapshot_id is None:
+                data.pop("snapshot_id", None)
         return data
+
+
+def _validate_mount_snapshot_pins(mounts: "list[FileSystemMount] | None") -> None:
+    """Client-side mirror of the server's HTTP 400 for invalid snapshot pins.
+
+    A mount that pins ``snapshot_id`` must also be ``read_only``; raising here
+    lets callers fail fast (and offline) instead of round-tripping to the
+    server.
+    """
+    for mount in mounts or []:
+        if mount.snapshot_id is not None and not mount.read_only:
+            raise ValueError(
+                f"file system mount {mount.file_system_id!r} at "
+                f"{mount.mount_path!r} sets snapshot_id without read_only=True: "
+                "snapshot-pinned mounts are read-only"
+            )
 
 
 class FileSystem(BaseModel):

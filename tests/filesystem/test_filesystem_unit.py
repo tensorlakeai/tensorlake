@@ -25,7 +25,9 @@ from tensorlake.filesystem import (
     FilesystemInfo,
     FilesystemNotFoundError,
     FilesystemVersion,
+    ReadOnlyMountNotSupportedError,
 )
+from tensorlake.filesystem._cli import FsCli
 from tensorlake.filesystem.client import mount_status_from_raw
 
 _PROJECT = "proj_test"
@@ -522,6 +524,22 @@ class TestFilesystemClient(unittest.TestCase):
             fs.write_file("a.txt", b"x")
         self.assertNotIsInstance(caught.exception, FilesystemAPIError)
         self.assertIn("commit job failed", str(caught.exception))
+
+
+class TestReadOnlyLocalMount(unittest.TestCase):
+    """`tl fs mount` has no --ro; readonly requests must fail honestly."""
+
+    def test_fs_cli_mount_readonly_raises_not_supported(self):
+        with self.assertRaises(ReadOnlyMountNotSupportedError) as caught:
+            FsCli().mount("my-fs", "/tmp/mnt", readonly=True)
+        # The error must point at the supported read-only alternatives.
+        self.assertIn("read_only=True", str(caught.exception))
+        self.assertIn("tl git mount --ro", str(caught.exception))
+
+    def test_client_mount_readonly_raises_not_supported(self):
+        client = _client_with_stub(_StubNative())
+        with self.assertRaises(ReadOnlyMountNotSupportedError):
+            client.mount("my-fs", "/tmp/mnt", readonly=True)
 
 
 if __name__ == "__main__":
