@@ -223,9 +223,11 @@ def _run_rust_image_create(
     is_public: bool,
     docker_compat: bool,
     cas: bool,
+    allow_pat: bool = False,
     emit: EmitFn,
 ) -> dict:
-    ctx, token = _resolve_build_credentials()
+    ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
+    use_explicit_scope = allow_pat and ctx.api_key is None
 
     emit({"type": "status", "message": f"Building image '{registered_name}'..."})
 
@@ -239,10 +241,10 @@ def _run_rust_image_create(
         cpus,
         memory_mb,
         is_public,
-        ctx.organization_id,
-        ctx.project_id,
+        ctx.organization_id if use_explicit_scope else None,
+        ctx.project_id if use_explicit_scope else None,
         ctx.namespace,
-        ctx.personal_access_token is not None and ctx.api_key is None,
+        use_explicit_scope,
         USER_AGENT,
         docker_compat,
         dockerfile_text,
@@ -263,9 +265,11 @@ def _run_rust_image_import(
     builder_disk_mb: int | None,
     is_public: bool,
     docker_compat: bool,
+    allow_pat: bool = False,
     emit: EmitFn,
 ) -> dict:
-    ctx, token = _resolve_build_credentials()
+    ctx, token = _resolve_build_credentials(allow_pat=allow_pat)
+    use_explicit_scope = allow_pat and ctx.api_key is None
 
     emit(
         {
@@ -286,10 +290,10 @@ def _run_rust_image_import(
         cpus,
         memory_mb,
         is_public,
-        ctx.organization_id,
-        ctx.project_id,
+        ctx.organization_id if use_explicit_scope else None,
+        ctx.project_id if use_explicit_scope else None,
         ctx.namespace,
-        ctx.personal_access_token is not None and ctx.api_key is None,
+        use_explicit_scope,
         USER_AGENT,
         docker_compat,
         cas=False,
@@ -298,13 +302,16 @@ def _run_rust_image_import(
     return _finish_image_registration(result_json, registered_name, emit)
 
 
-def _resolve_build_credentials() -> tuple[Context, str]:
+def _resolve_build_credentials(*, allow_pat: bool = False) -> tuple[Context, str]:
     ctx = _build_context_from_env()
-    token = ctx.api_key or ctx.personal_access_token
+    token = ctx.api_key or (ctx.personal_access_token if allow_pat else None)
     if not token:
-        raise SandboxImageBuildError(
-            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
-        )
+        if ctx.personal_access_token and not allow_pat:
+            raise SandboxImageBuildError(
+                "Sandbox image SDKs require TENSORLAKE_API_KEY. "
+                "Personal access tokens are CLI-only."
+            )
+        raise SandboxImageBuildError("Missing TENSORLAKE_API_KEY credentials.")
     return ctx, token
 
 
@@ -348,20 +355,22 @@ def delete_sandbox_image(image_name: str) -> None:
         raise TypeError("image_name must be a non-empty string")
 
     ctx = _build_context_from_env()
-    token = ctx.api_key or ctx.personal_access_token
+    token = ctx.api_key
     if not token:
-        raise SandboxImageDeleteError(
-            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
-        )
+        if ctx.personal_access_token:
+            raise SandboxImageDeleteError(
+                "Sandbox image SDKs require TENSORLAKE_API_KEY. "
+                "Personal access tokens are CLI-only."
+            )
+        raise SandboxImageDeleteError("Missing TENSORLAKE_API_KEY credentials.")
 
-    use_explicit_scope = ctx.personal_access_token is not None and ctx.api_key is None
     try:
         _rust_delete_sandbox_image(
             ctx.api_url,
             token,
             image_name,
-            ctx.organization_id if use_explicit_scope else None,
-            ctx.project_id if use_explicit_scope else None,
+            None,
+            None,
             ctx.namespace,
         )
     except SandboxImageError:
@@ -400,9 +409,7 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
 
     Returns the registered sandbox template as a dict, or ``None`` if no image
     with that name exists. Uses the same environment-based Tensorlake auth as
-    :func:`build_sandbox_image`. API keys derive project scope from the bearer
-    token; PAT callers still require ``TENSORLAKE_ORGANIZATION_ID`` and
-    ``TENSORLAKE_PROJECT_ID``.
+    :func:`build_sandbox_image`. Ingress derives project scope from the API key.
 
     Raises:
         TypeError: ``image_name`` is not a non-empty string.
@@ -413,26 +420,22 @@ def find_sandbox_image_by_name(image_name: str) -> dict | None:
         raise TypeError("image_name must be a non-empty string")
 
     ctx = _build_context_from_env()
-    token = ctx.api_key or ctx.personal_access_token
+    token = ctx.api_key
     if not token:
-        raise SandboxImageLookupError(
-            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
-        )
-    use_explicit_scope = ctx.personal_access_token is not None and ctx.api_key is None
-    if use_explicit_scope and (not ctx.organization_id or not ctx.project_id):
-        raise SandboxImageLookupError(
-            "Looking up a sandbox image by name requires organization and "
-            "project context (TENSORLAKE_ORGANIZATION_ID and "
-            "TENSORLAKE_PROJECT_ID)."
-        )
+        if ctx.personal_access_token:
+            raise SandboxImageLookupError(
+                "Sandbox image SDKs require TENSORLAKE_API_KEY. "
+                "Personal access tokens are CLI-only."
+            )
+        raise SandboxImageLookupError("Missing TENSORLAKE_API_KEY credentials.")
 
     try:
         result_json = _rust_find_sandbox_image_by_name(
             ctx.api_url,
             token,
             image_name,
-            ctx.organization_id if use_explicit_scope else None,
-            ctx.project_id if use_explicit_scope else None,
+            None,
+            None,
             ctx.namespace,
         )
     except SandboxImageError:
@@ -455,33 +458,29 @@ def list_sandbox_images() -> list[dict]:
 
     Returns the registered sandbox templates as a list of dicts (each with
     ``id``, ``name``, ``snapshot_id``, ``public``, etc.). Uses the same
-    environment-based Tensorlake auth as :func:`build_sandbox_image`. API keys
-    derive project scope from the bearer token; PAT callers still require
-    ``TENSORLAKE_ORGANIZATION_ID`` and ``TENSORLAKE_PROJECT_ID``.
+    environment-based Tensorlake API-key auth as :func:`build_sandbox_image`.
+    Ingress derives project scope from the API key.
 
     Raises:
         SandboxImageLookupError: Credentials or project context are missing, or
             the list request failed.
     """
     ctx = _build_context_from_env()
-    token = ctx.api_key or ctx.personal_access_token
+    token = ctx.api_key
     if not token:
-        raise SandboxImageLookupError(
-            "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
-        )
-    use_explicit_scope = ctx.personal_access_token is not None and ctx.api_key is None
-    if use_explicit_scope and (not ctx.organization_id or not ctx.project_id):
-        raise SandboxImageLookupError(
-            "Listing sandbox images requires organization and project context "
-            "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID)."
-        )
+        if ctx.personal_access_token:
+            raise SandboxImageLookupError(
+                "Sandbox image SDKs require TENSORLAKE_API_KEY. "
+                "Personal access tokens are CLI-only."
+            )
+        raise SandboxImageLookupError("Missing TENSORLAKE_API_KEY credentials.")
 
     try:
         result_json = _rust_list_sandbox_images(
             ctx.api_url,
             token,
-            ctx.organization_id if use_explicit_scope else None,
-            ctx.project_id if use_explicit_scope else None,
+            None,
+            None,
             ctx.namespace,
         )
     except SandboxImageError:
@@ -564,6 +563,7 @@ def build_sandbox_image(
     context_dir: str | None = None,
     verbose: bool = False,
     emit: EmitFn | None = None,
+    _allow_pat: bool = False,
 ) -> dict:
     """Build a sandbox image from an :class:`Image` or a Dockerfile path.
 
@@ -672,6 +672,7 @@ def build_sandbox_image(
                 is_public=is_public,
                 docker_compat=docker_compat,
                 cas=False,
+                allow_pat=_allow_pat,
                 emit=emit,
             )
         except SandboxImageError:
@@ -692,6 +693,7 @@ def import_sandbox_image(
     docker_compat: bool = False,
     verbose: bool = False,
     emit: EmitFn | None = None,
+    _allow_pat: bool = False,
 ) -> dict:
     """Import a registry image directly into a sandbox image — no Docker.
 
@@ -756,6 +758,7 @@ def import_sandbox_image(
             builder_disk_mb=builder_disk_mb,
             is_public=is_public,
             docker_compat=docker_compat,
+            allow_pat=_allow_pat,
             emit=emit,
         )
     except SandboxImageError:
@@ -777,6 +780,7 @@ def build_sandbox_application_image(
     context_dir: str | None = None,
     verbose: bool = False,
     emit: EmitFn | None = None,
+    _allow_pat: bool = False,
 ) -> dict:
     """Build an Applications runtime image as a registered sandbox template.
 
@@ -818,6 +822,7 @@ def build_sandbox_application_image(
             is_public=is_public,
             docker_compat=False,
             cas=True,
+            allow_pat=_allow_pat,
             emit=emit,
         )
     except SandboxImageError:

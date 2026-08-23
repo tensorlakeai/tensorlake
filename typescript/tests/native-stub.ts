@@ -123,7 +123,13 @@ function makeClient(proxy: FakeFns): FakeFns {
 
 function makeRepository(): FakeFns {
   return {
-    gitRepoUrl: vi.fn((repo: string) => `https://git.tensorlake.ai/project_1/${repo}`),
+    createFilesystem: vi.fn(async () => JSON.stringify({
+      trace_id: "t",
+      default_branch: "main",
+    })),
+    listFilesystems: vi.fn(tracedJson('{"project":"project_1","repos":[],"next_after":null}')),
+    deleteFilesystem: vi.fn(tracedId()),
+    gitRepoUrl: vi.fn(async (repo: string) => `https://git.tensorlake.ai/project_1/${repo}`),
     createRepo: vi.fn(tracedJson()),
     listRepos: vi.fn(tracedJson('{"project":"project_1","repos":[]}')),
     deleteRepo: vi.fn(tracedId()),

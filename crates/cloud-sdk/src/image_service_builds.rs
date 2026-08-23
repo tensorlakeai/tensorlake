@@ -32,7 +32,7 @@ use crate::{
     sandbox_images::{
         CommonBuildOptions, DockerfileBuildPlan, SandboxImageBuildError, SandboxImageBuildEvent,
         SandboxImageContextFile, client_builder, collect_dir_files, follow_started_process_output,
-        is_localhost, normalize_context_file_path, resolve_image_service_build_context,
+        is_localhost, normalize_context_file_path, resolve_build_context,
         resolved_docker_config_json, sandbox_lifecycle_client, sandbox_proxy_client,
     },
     sandboxes::{SandboxesClient, models::ProcessInfo},
@@ -101,18 +101,16 @@ where
             "Forwarding local registry credentials to the build".to_string(),
         ));
     }
-    let ctx = resolve_image_service_build_context(options).await?;
-    let project = ctx
-        .project_id
-        .clone()
-        .expect("Image Service context always resolves a project");
+    // Ingress authenticates the bearer credential and injects the canonical project header.
+    // Image Service deliberately accepts no project selector in bodies or query strings.
+    let ctx = resolve_build_context(options)?;
     let image_service_url = image_service_url(&ctx.api_url);
     let client = client_builder(
         &image_service_url,
         &ctx.bearer_token,
         ctx.use_scope_headers,
         ctx.organization_id.as_deref(),
-        Some(&project),
+        ctx.project_id.as_deref(),
         ctx.user_agent.as_deref(),
     )
     .build()?;
@@ -125,7 +123,6 @@ where
                     "kind": "import",
                     "image_ref": import_reference,
                     "name": plan.registered_name,
-                    "project": project,
                 }),
                 is_public,
                 builder_resources,
@@ -134,18 +131,10 @@ where
             &mut emit,
         )
         .await?;
-        return wait_for_publication(
-            &client,
-            &ctx,
-            &project,
-            &created,
-            &plan.registered_name,
-            emit,
-        )
-        .await;
+        return wait_for_publication(&client, &ctx, &created, &plan.registered_name, emit).await;
     }
 
-    let parents = resolve_parents(&client, &project, &plan, &mut emit).await?;
+    let parents = resolve_parents(&client, &plan, &mut emit).await?;
     let (dockerfile_in_context, injected_dockerfile) = context_dockerfile(&plan, dockerfile_path)?;
     let created = create_build(
         &client,
@@ -159,7 +148,6 @@ where
                     .cloned()
                     .collect::<std::collections::BTreeMap<String, String>>(),
                 "name": plan.registered_name,
-                "project": project,
             }),
             is_public,
             builder_resources,
@@ -177,7 +165,6 @@ where
     })?;
     upload_and_seal_context(
         &client,
-        &project,
         &build_id,
         &upload,
         &plan,
@@ -187,15 +174,7 @@ where
     )
     .await?;
 
-    wait_for_publication(
-        &client,
-        &ctx,
-        &project,
-        &created,
-        &plan.registered_name,
-        emit,
-    )
-    .await
+    wait_for_publication(&client, &ctx, &created, &plan.registered_name, emit).await
 }
 
 /// Base URL for the Image Service.
@@ -318,7 +297,6 @@ fn warn_ignored_options(
 /// marked unresolvable (`$` expansions, `@` digest pins) never reach here.
 async fn resolve_parents(
     client: &Client,
-    project: &str,
     plan: &DockerfileBuildPlan,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<Vec<Value>> {
@@ -337,7 +315,7 @@ async fn resolve_parents(
     for reference in candidates {
         let image_id = match direct_pin_image_id(reference)? {
             Some(image_id) => Some(image_id),
-            None => lookup_catalog_name(client, project, reference).await?,
+            None => lookup_catalog_name(client, reference).await?,
         };
         let Some(image_id) = image_id else {
             continue; // external registry reference, pulled by the guest
@@ -383,12 +361,8 @@ fn direct_pin_image_id(reference: &str) -> Result<Option<String>> {
 /// `400` both mean "not a registered image" (absent, or a reference shape
 /// the name grammar rejects) and fall through to a registry pull, matching
 /// how the legacy path treats template-registry misses.
-async fn lookup_catalog_name(
-    client: &Client,
-    project: &str,
-    reference: &str,
-) -> Result<Option<String>> {
-    let path = format!("/names/{reference}?project={}", urlencoding_encode(project));
+async fn lookup_catalog_name(client: &Client, reference: &str) -> Result<Option<String>> {
+    let path = format!("/names/{reference}");
     let request = client.request(Method::GET, &path).build()?;
     let response = client.execute_raw(request).await?;
     match response.status() {
@@ -411,21 +385,6 @@ async fn lookup_catalog_name(
             )))
         }
     }
-}
-
-/// Minimal query-value encoding; project identifiers are constrained but
-/// encode defensively.
-fn urlencoding_encode(value: &str) -> String {
-    let mut out = String::with_capacity(value.len());
-    for byte in value.bytes() {
-        match byte {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
-                out.push(byte as char)
-            }
-            other => out.push_str(&format!("%{other:02X}")),
-        }
-    }
-    out
 }
 
 /// Decide where the Dockerfile lives in the uploaded context: its own
@@ -521,7 +480,6 @@ fn accepted_build_message(created: &Value) -> String {
 /// Authorization header corrupts a presigned request.
 async fn upload_and_seal_context(
     client: &Client,
-    project: &str,
     build_id: &str,
     upload: &Value,
     plan: &DockerfileBuildPlan,
@@ -589,7 +547,7 @@ async fn upload_and_seal_context(
     ));
     let request = client
         .request(Method::POST, &format!("/builds/{build_id}/context/seal"))
-        .json(&json!({ "project": project, "digest": digest }))
+        .json(&json!({ "digest": digest }))
         .build()?;
     let response = client.execute_raw(request).await?;
     if !response.status().is_success() {
@@ -681,7 +639,6 @@ fn synthetic_file_header(size: u64, mode: u32) -> tar::Header {
 async fn wait_for_publication(
     client: &Client,
     ctx: &crate::sandbox_images::ResolvedBuildContext,
-    project: &str,
     created: &Value,
     registered_name: &str,
     emit: impl FnMut(SandboxImageBuildEvent),
@@ -689,7 +646,6 @@ async fn wait_for_publication(
     wait_for_publication_with_follower(
         client,
         ctx,
-        project,
         created,
         registered_name,
         emit,
@@ -735,7 +691,6 @@ impl BuilderLogSink {
 async fn wait_for_publication_with_follower<Follow, FollowFuture>(
     client: &Client,
     ctx: &crate::sandbox_images::ResolvedBuildContext,
-    project: &str,
     created: &Value,
     registered_name: &str,
     mut emit: impl FnMut(SandboxImageBuildEvent),
@@ -750,7 +705,7 @@ where
     FollowFuture: Future<Output = Result<()>> + Send + 'static,
 {
     let build_id = build_id_of(created)?;
-    let path = format!("/builds/{build_id}?project={}", urlencoding_encode(project));
+    let path = format!("/builds/{build_id}");
     let deadline = tokio::time::Instant::now() + timing.poll_timeout;
     let mut last_reported = String::new();
     let mut observed_builders = HashSet::new();
@@ -870,7 +825,7 @@ where
     };
 
     let request = client
-        .request(Method::GET, &published_image_path(&image_id, project))
+        .request(Method::GET, &published_image_path(&image_id))
         .build()?;
     let response = client.execute_raw(request).await?;
     if !response.status().is_success() {
@@ -887,8 +842,8 @@ where
     Ok(image)
 }
 
-fn published_image_path(image_id: &str, project: &str) -> String {
-    format!("/images/{image_id}?project={}", urlencoding_encode(project))
+fn published_image_path(image_id: &str) -> String {
+    format!("/images/{image_id}")
 }
 
 fn build_poll_timeout(build_id: &str, timeout: Duration) -> SandboxImageBuildError {
@@ -1215,11 +1170,8 @@ mod tests {
     }
 
     #[test]
-    fn published_image_path_relies_on_the_ingress_version_prefix() {
-        assert_eq!(
-            published_image_path("image-id", "project/id"),
-            "/images/image-id?project=project%2Fid"
-        );
+    fn published_image_path_relies_on_ingress_for_project_scope() {
+        assert_eq!(published_image_path("image-id"), "/images/image-id");
     }
 
     #[test]
@@ -1378,7 +1330,6 @@ mod tests {
         let image = wait_for_publication_with_follower(
             &client,
             &ctx,
-            "project-1",
             &json!({"build_id": "build-1"}),
             "image-1",
             |event| events.push(event),
@@ -1472,7 +1423,6 @@ mod tests {
         let image = wait_for_publication_with_follower(
             &client,
             &ctx,
-            "project-1",
             &json!({"build_id": "build-1"}),
             "image-1",
             |event| events.push(event),

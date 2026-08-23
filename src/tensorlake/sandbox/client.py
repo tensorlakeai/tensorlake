@@ -337,14 +337,15 @@ class SandboxClient:
     ) -> "SandboxClient":
         """Create a client for the Tensorlake cloud platform.
 
-        In the cloud, resources are scoped by *organization_id* and
-        *project_id* (sent as headers). The *namespace* parameter is
-        not used.
+        The API key is the complete cloud SDK contract: ingress authenticates it and selects the
+        authorized organization/project. Explicit scope remains available only as a low-level
+        compatibility override and is forwarded as headers without client-side discovery. The
+        *namespace* parameter is not used.
 
         Args:
             api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var)
-            organization_id: Organization ID for multi-tenant access
-            project_id: Project ID for scoping resources
+            organization_id: Optional explicit organization header override
+            project_id: Optional explicit project header override
             api_url: Cloud API URL override
         """
         return cls(

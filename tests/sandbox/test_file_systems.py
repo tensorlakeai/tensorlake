@@ -1,12 +1,13 @@
 """Offline tests for the file-systems feature.
 
-These tests mock the Rust backend (``_rust_client``) and the platform
-``CloudApiClient`` so they run without a live server or a built native module.
+These tests mock the Rust backend (``_rust_client``) and the Artifact Storage
+filesystem client so they run without a live server or a built native module.
 """
 
 import json
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from tensorlake.sandbox import (
@@ -141,47 +142,22 @@ def _async_client(fake: _FakeAsyncRustClient) -> AsyncSandboxClient:
         )
 
 
-class _FakeCloudApiClient:
+class _FakeFilesystemClient:
     def __init__(self):
         self.create_args: tuple | None = None
-        self.list_args: tuple | None = None
+        self.list_calls = 0
         self.delete_args: tuple | None = None
-        self.closed = False
 
-    def close(self):
-        self.closed = True
+    def create(self, name):
+        self.create_args = (name,)
+        return SimpleNamespace(name=name)
 
-    def create_file_system(self, org, project, name, description):
-        self.create_args = (org, project, name, description)
-        return json.dumps(
-            {
-                "id": "file_system_abc",
-                "name": name,
-                "description": description,
-                "region": "us-east-1",
-                "status": "ready",
-                "createdAt": "2026-06-25T00:00:00Z",
-                "updatedAt": "2026-06-25T00:00:00Z",
-            }
-        )
+    def list(self):
+        self.list_calls += 1
+        return [SimpleNamespace(name="skills", status="ready")]
 
-    def list_file_systems(self, org, project):
-        self.list_args = (org, project)
-        return json.dumps(
-            [
-                {
-                    "id": "file_system_abc",
-                    "name": "skills",
-                    "region": "us-east-1",
-                    "status": "ready",
-                    "createdAt": "2026-06-25T00:00:00Z",
-                    "updatedAt": "2026-06-25T00:00:00Z",
-                }
-            ]
-        )
-
-    def delete_file_system(self, org, project, file_system_id):
-        self.delete_args = (org, project, file_system_id)
+    def delete(self, file_system_id):
+        self.delete_args = (file_system_id,)
 
 
 class TestFileSystemModels(unittest.TestCase):
@@ -834,47 +810,51 @@ class TestFileSystemRegistry(unittest.TestCase):
         self._env.stop()
 
     def test_create_file_system(self):
-        fake = _FakeCloudApiClient()
+        fake = _FakeFilesystemClient()
         with patch(
-            "tensorlake.sandbox.file_system._cloud_api_client",
+            "tensorlake.sandbox.file_system._filesystem_client",
             return_value=fake,
         ):
             fs = create_file_system("skills", description="skills volume")
 
-        self.assertEqual(
-            fake.create_args, ("org-1", "proj-1", "skills", "skills volume")
-        )
-        self.assertEqual(fs.id, "file_system_abc")
+        self.assertEqual(fake.create_args, ("skills",))
+        self.assertEqual(fs.id, "skills")
         self.assertEqual(fs.name, "skills")
-        self.assertTrue(fake.closed)
+        self.assertEqual(fs.description, "skills volume")
 
     def test_list_file_systems(self):
-        fake = _FakeCloudApiClient()
+        fake = _FakeFilesystemClient()
         with patch(
-            "tensorlake.sandbox.file_system._cloud_api_client",
+            "tensorlake.sandbox.file_system._filesystem_client",
             return_value=fake,
         ):
             result = list_file_systems()
 
-        self.assertEqual(fake.list_args, ("org-1", "proj-1"))
-        self.assertEqual([f.id for f in result], ["file_system_abc"])
-        self.assertTrue(fake.closed)
+        self.assertEqual(fake.list_calls, 1)
+        self.assertEqual([f.id for f in result], ["skills"])
 
     def test_delete_file_system(self):
-        fake = _FakeCloudApiClient()
+        fake = _FakeFilesystemClient()
         with patch(
-            "tensorlake.sandbox.file_system._cloud_api_client",
+            "tensorlake.sandbox.file_system._filesystem_client",
             return_value=fake,
         ):
             delete_file_system("file_system_abc")
 
-        self.assertEqual(fake.delete_args, ("org-1", "proj-1", "file_system_abc"))
-        self.assertTrue(fake.closed)
+        self.assertEqual(fake.delete_args, ("file_system_abc",))
 
-    def test_missing_project_context_raises(self):
-        with patch.dict(os.environ, {"TENSORLAKE_ORGANIZATION_ID": ""}, clear=False):
-            with self.assertRaises(SandboxError):
-                list_file_systems()
+    def test_project_context_is_not_required(self):
+        with patch.dict(
+            os.environ,
+            {"TENSORLAKE_ORGANIZATION_ID": "", "TENSORLAKE_PROJECT_ID": ""},
+            clear=False,
+        ):
+            fake = _FakeFilesystemClient()
+            with patch(
+                "tensorlake.sandbox.file_system._filesystem_client",
+                return_value=fake,
+            ):
+                self.assertEqual([f.id for f in list_file_systems()], ["skills"])
 
     def test_create_requires_non_empty_name(self):
         with self.assertRaises(TypeError):

@@ -1,5 +1,4 @@
 import * as defaults from "./defaults.js";
-import { CloudClient } from "./cloud-client.js";
 import { SandboxError } from "./errors.js";
 import type { Traced } from "./http.js";
 import {
@@ -13,7 +12,9 @@ import { buildContextFromEnv } from "./sandbox-image.js";
 export interface RepositoryClientOptions {
   apiUrl?: string;
   apiKey?: string;
+  /** @deprecated Scope is selected by ingress for SDK API keys. */
   organizationId?: string;
+  /** @deprecated Scope is selected by ingress for SDK API keys. */
   projectId?: string;
   requestTimeout?: number;
   timeoutMs?: number;
@@ -197,6 +198,10 @@ export class RepositoryClient {
 
   constructor(options?: RepositoryClientOptions) {
     this.requestTimeoutMs = resolveRequestTimeoutMs(options);
+    const apiKey = options?.apiKey ?? defaults.API_KEY;
+    if (!apiKey) {
+      throw new SandboxError("Missing TENSORLAKE_API_KEY credentials.");
+    }
     const binding = loadNativeSandboxBinding();
     if (typeof binding.NativeRepositoryClient !== "function") {
       throw new SandboxError(
@@ -205,9 +210,9 @@ export class RepositoryClient {
     }
     this.native = new binding.NativeRepositoryClient(
       options?.apiUrl ?? defaults.API_URL,
-      options?.apiKey ?? defaults.API_KEY ?? null,
-      options?.organizationId ?? null,
-      options?.projectId ?? null,
+      apiKey,
+      null,
+      null,
       null,
       this.requestTimeoutMs / 1000,
     );
@@ -217,8 +222,6 @@ export class RepositoryClient {
     return new RepositoryClient({
       apiUrl: options?.apiUrl ?? "https://api.tensorlake.ai",
       apiKey: options?.apiKey,
-      organizationId: options?.organizationId,
-      projectId: options?.projectId,
       requestTimeout: options?.requestTimeout,
       timeoutMs: options?.timeoutMs,
     });
@@ -237,7 +240,6 @@ export class RepositoryClient {
     return new RepositoryClient({
       apiUrl: context.apiUrl,
       apiKey: context.apiKey,
-      projectId: context.projectId ?? await projectIdFromApiKey(context.apiUrl, context.apiKey),
     });
   }
 
@@ -245,8 +247,8 @@ export class RepositoryClient {
     // The native client releases its connection pool on GC; nothing to do.
   }
 
-  url(repo: string): string {
-    return this.native.gitRepoUrl(repo);
+  async url(repo: string): Promise<string> {
+    return callNative(() => this.native.gitRepoUrl(repo));
   }
 
   async create(
@@ -400,58 +402,4 @@ function validateTimeoutMs(timeoutMs: number): void {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new SandboxError("timeoutMs must be a positive number of milliseconds");
   }
-}
-
-async function projectIdFromApiKey(apiUrl: string, apiKey: string): Promise<string> {
-  const client = new CloudClient({ apiUrl, apiKey });
-  try {
-    const projectId = extractProjectId(await client.introspectApiKey());
-    if (!projectId) {
-      throw new SandboxError("Repository API key did not include project context.");
-    }
-    return projectId;
-  } finally {
-    client.close();
-  }
-}
-
-function extractProjectId(value: unknown): string | undefined {
-  if (value == null || typeof value !== "object") {
-    return undefined;
-  }
-  const object = value as Record<string, unknown>;
-  for (const key of ["projectId", "project_id"]) {
-    const candidate = object[key];
-    if (typeof candidate === "string" && candidate.length > 0) {
-      return candidate;
-    }
-  }
-
-  const project = object.project;
-  if (typeof project === "string" && project.length > 0) {
-    return project;
-  }
-  if (project != null && typeof project === "object") {
-    const projectObject = project as Record<string, unknown>;
-    for (const key of ["id", "projectId", "project_id"]) {
-      const candidate = projectObject[key];
-      if (typeof candidate === "string" && candidate.length > 0) {
-        return candidate;
-      }
-    }
-  }
-
-  for (const key of ["scope", "apiKey", "api_key", "key"]) {
-    const nested = extractProjectId(object[key]);
-    if (nested) {
-      return nested;
-    }
-  }
-
-  const projects = object.projects;
-  if (Array.isArray(projects) && projects.length === 1) {
-    return extractProjectId(projects[0]);
-  }
-
-  return undefined;
 }

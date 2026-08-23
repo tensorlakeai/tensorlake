@@ -6,6 +6,7 @@ import {
   RequestFailedError,
   RequestNotFinishedError,
 } from "../src/errors.js";
+import { clearNativeStub, installNativeStub } from "./native-stub.js";
 
 vi.mock("undici", async (importOriginal) => {
   const actual = await importOriginal<typeof import("undici")>();
@@ -15,6 +16,7 @@ vi.mock("undici", async (importOriginal) => {
 describe("APIClient", () => {
 
   afterEach(() => {
+    clearNativeStub();
     vi.mocked(undici.fetch).mockReset();
     vi.restoreAllMocks();
   });
@@ -89,44 +91,32 @@ describe("APIClient", () => {
     client.close();
   });
 
-  it("creates a file system through the scoped platform route", async () => {
-    mockFetch((url, init) => {
-      expect(url).toBe(
-        "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems",
-      );
-      expect(init?.method).toBe("POST");
-      expect(init?.body).toBe('{"name":"skills"}');
-      return new Response(
-        JSON.stringify({ id: "file_system_abc", name: "skills" }),
-        { status: 200, headers: { "Content-Type": "application/json" } },
-      );
-    });
-
+  it("creates a file system through Artifact Storage with only an API key", async () => {
+    const stub = installNativeStub();
     const client = new APIClient({
       apiUrl: "http://localhost:8900",
-      organizationId: "org-1",
-      projectId: "proj-1",
+      apiKey: "api-key",
     });
     const fs = await client.createFileSystem("skills");
-    expect(fs.id).toBe("file_system_abc");
+    expect(fs.id).toBe("skills");
+    expect(stub.repository.createFilesystem).toHaveBeenCalledWith("skills");
+    expect(stub.repositoryCtorArgs.slice(0, 4)).toEqual([
+      "http://localhost:8900",
+      "api-key",
+      null,
+      null,
+    ]);
     client.close();
   });
 
-  it("deletes a file system through the scoped platform route", async () => {
-    mockFetch((url, init) => {
-      expect(url).toBe(
-        "http://localhost:8900/platform/v1/organizations/org-1/projects/proj-1/file-systems/file_system_abc",
-      );
-      expect(init?.method).toBe("DELETE");
-      return new Response(null, { status: 204 });
-    });
-
+  it("deletes a file system through Artifact Storage", async () => {
+    const stub = installNativeStub();
     const client = new APIClient({
       apiUrl: "http://localhost:8900",
-      organizationId: "org-1",
-      projectId: "proj-1",
+      apiKey: "api-key",
     });
-    await client.deleteFileSystem("file_system_abc");
+    await client.deleteFileSystem("skills");
+    expect(stub.repository.deleteFilesystem).toHaveBeenCalledWith("skills");
     client.close();
   });
 });

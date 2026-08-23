@@ -181,8 +181,6 @@ import { FilesystemClient } from "tensorlake";
 
 const client = new FilesystemClient({
   apiKey: "your-api-key",
-  organizationId: "org_...",
-  projectId: "proj_...",
 });
 const fs = await client.create("agent-artifacts");
 

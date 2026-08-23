@@ -32,7 +32,7 @@ describe("RepositoryClient", () => {
     vi.restoreAllMocks();
   });
 
-  it("constructs the native client with project context", () => {
+  it("passes only the API key to the native client", () => {
     const stub = installNativeStub();
     const client = new RepositoryClient({
       apiUrl: "http://localhost:8900",
@@ -44,15 +44,15 @@ describe("RepositoryClient", () => {
     expect(stub.repositoryCtorArgs).toEqual([
       "http://localhost:8900",
       "k",
-      "org-1",
-      "project-1",
+      null,
+      null,
       null,
       300,
     ]);
     client.close();
   });
 
-  it("constructs from env with API key project context", async () => {
+  it("constructs from env without forwarding project context", async () => {
     const saved = saveRepositoryEnv();
     try {
       process.env.TENSORLAKE_API_URL = "http://localhost:8900";
@@ -67,7 +67,7 @@ describe("RepositoryClient", () => {
         "http://localhost:8900",
         "k",
         null,
-        "project-1",
+        null,
         null,
         300,
       ]);

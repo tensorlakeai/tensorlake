@@ -77,6 +77,8 @@ export type SandboxImageSource = string | Image;
 
 export interface CreateSandboxImageDeps {
   emit?: (event: Record<string, unknown>) => void;
+  /** @internal Standalone CLI entry points allow PAT auth; SDK callers do not. */
+  _allowPat?: boolean;
 }
 
 // --- Native binding loader -------------------------------------------------
@@ -374,10 +376,18 @@ export async function createSandboxImage(
       );
     }
 
-    const bearerToken = context.apiKey ?? context.personalAccessToken;
+    const usePat = deps._allowPat === true && context.apiKey == null;
+    const bearerToken = context.apiKey ?? (usePat ? context.personalAccessToken : undefined);
     if (!bearerToken) {
+      if (context.personalAccessToken && !deps._allowPat) {
+        throw new Error(
+          "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
+        );
+      }
       throw new Error(
-        "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.",
+        deps._allowPat
+          ? "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
+          : "Missing TENSORLAKE_API_KEY credentials.",
       );
     }
 
@@ -396,11 +406,10 @@ export async function createSandboxImage(
         cpus: options.cpus,
         memoryMb: options.memoryMb,
         isPublic: options.isPublic ?? false,
-        organizationId: context.organizationId,
-        projectId: context.projectId,
+        organizationId: usePat ? context.organizationId : undefined,
+        projectId: usePat ? context.projectId : undefined,
         namespace: context.namespace,
-        useScopeHeaders:
-          context.personalAccessToken != null && context.apiKey == null,
+        useScopeHeaders: usePat,
         userAgent: undefined,
         dockerCompat: options.dockerCompat ?? false,
         dockerfileText,
@@ -475,9 +484,19 @@ export async function importSandboxImage(
     );
   }
 
-  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  const usePat = deps._allowPat === true && context.apiKey == null;
+  const bearerToken = context.apiKey ?? (usePat ? context.personalAccessToken : undefined);
   if (!bearerToken) {
-    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
+    if (context.personalAccessToken && !deps._allowPat) {
+      throw new Error(
+        "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
+      );
+    }
+    throw new Error(
+      deps._allowPat
+        ? "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
+        : "Missing TENSORLAKE_API_KEY credentials.",
+    );
   }
 
   emit({
@@ -498,11 +517,10 @@ export async function importSandboxImage(
       cpus: options.cpus,
       memoryMb: options.memoryMb,
       isPublic: options.isPublic ?? false,
-      organizationId: context.organizationId,
-      projectId: context.projectId,
+      organizationId: usePat ? context.organizationId : undefined,
+      projectId: usePat ? context.projectId : undefined,
       namespace: context.namespace,
-      useScopeHeaders:
-        context.personalAccessToken != null && context.apiKey == null,
+      useScopeHeaders: usePat,
       userAgent: undefined,
       dockerCompat: options.dockerCompat ?? false,
     },
@@ -541,18 +559,19 @@ export async function deleteSandboxImage(imageName: string): Promise<void> {
   }
 
   const context = buildContextFromEnv();
-  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  const bearerToken = context.apiKey;
   if (!bearerToken) {
-    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
+    if (context.personalAccessToken) {
+      throw new Error(
+        "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
+      );
+    }
+    throw new Error("Missing TENSORLAKE_API_KEY credentials.");
   }
 
-  const useScopeHeaders =
-    context.personalAccessToken != null && context.apiKey == null;
   const client = new CloudClient({
     apiUrl: context.apiUrl,
     apiKey: bearerToken,
-    organizationId: useScopeHeaders ? context.organizationId : undefined,
-    projectId: useScopeHeaders ? context.projectId : undefined,
     namespace: context.namespace,
   });
   try {
@@ -567,8 +586,7 @@ export async function deleteSandboxImage(imageName: string): Promise<void> {
  *
  * Returns the registered sandbox template, or `null` if no image with that
  * name exists. Uses the same environment-based Tensorlake auth as
- * `createSandboxImage`. API keys derive project scope from the bearer token;
- * PAT callers still require organization/project context.
+ * `createSandboxImage`. Ingress derives project scope from the API key.
  */
 export async function findSandboxImageByName(
   imageName: string,
@@ -578,24 +596,19 @@ export async function findSandboxImageByName(
   }
 
   const context = buildContextFromEnv();
-  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  const bearerToken = context.apiKey;
   if (!bearerToken) {
-    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
-  }
-  const useScopeHeaders =
-    context.personalAccessToken != null && context.apiKey == null;
-  if (useScopeHeaders && (!context.organizationId || !context.projectId)) {
-    throw new Error(
-      "Looking up a sandbox image by name requires organization and project " +
-        "context (TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID).",
-    );
+    if (context.personalAccessToken) {
+      throw new Error(
+        "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
+      );
+    }
+    throw new Error("Missing TENSORLAKE_API_KEY credentials.");
   }
 
   const client = new CloudClient({
     apiUrl: context.apiUrl,
     apiKey: bearerToken,
-    organizationId: useScopeHeaders ? context.organizationId : undefined,
-    projectId: useScopeHeaders ? context.projectId : undefined,
     namespace: context.namespace,
   });
   try {
@@ -610,29 +623,23 @@ export async function findSandboxImageByName(
  *
  * Returns the registered sandbox templates (each with `id`, `name`,
  * `snapshotId`, `public`, etc.). Uses the same environment-based Tensorlake
- * auth as `createSandboxImage`. API keys derive project scope from the bearer
- * token; PAT callers still require organization/project context.
+ * auth as `createSandboxImage`. Ingress derives project scope from the API key.
  */
 export async function listSandboxImages(): Promise<SandboxTemplate[]> {
   const context = buildContextFromEnv();
-  const bearerToken = context.apiKey ?? context.personalAccessToken;
+  const bearerToken = context.apiKey;
   if (!bearerToken) {
-    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
-  }
-  const useScopeHeaders =
-    context.personalAccessToken != null && context.apiKey == null;
-  if (useScopeHeaders && (!context.organizationId || !context.projectId)) {
-    throw new Error(
-      "Listing sandbox images requires organization and project context " +
-        "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID).",
-    );
+    if (context.personalAccessToken) {
+      throw new Error(
+        "Sandbox image SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
+      );
+    }
+    throw new Error("Missing TENSORLAKE_API_KEY credentials.");
   }
 
   const client = new CloudClient({
     apiUrl: context.apiUrl,
     apiKey: bearerToken,
-    organizationId: useScopeHeaders ? context.organizationId : undefined,
-    projectId: useScopeHeaders ? context.projectId : undefined,
     namespace: context.namespace,
   });
   try {
@@ -700,7 +707,7 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
       dockerCompat: parsed.values.docker_compat,
       isPublic: parsed.values.public,
     },
-    { emit: ndjsonStdoutEmit },
+    { emit: ndjsonStdoutEmit, _allowPat: true },
   );
 }
 
@@ -762,6 +769,6 @@ export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
       dockerCompat: parsed.values.docker_compat,
       isPublic: parsed.values.public,
     },
-    { emit: ndjsonStdoutEmit },
+    { emit: ndjsonStdoutEmit, _allowPat: true },
   );
 }

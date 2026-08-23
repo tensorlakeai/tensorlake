@@ -52,8 +52,6 @@ export interface RequestOutput {
   contentType: string;
 }
 
-export type ApiKeyIntrospection = Record<string, unknown>;
-
 export interface NewSecret {
   name: string;
   value: string;

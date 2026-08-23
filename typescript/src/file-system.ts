@@ -1,40 +1,18 @@
-import { CloudClient } from "./cloud-client.js";
 import type { FileSystem } from "./cloud-models.js";
-import { buildContextFromEnv } from "./sandbox-image.js";
+import { FilesystemClient } from "./filesystem.js";
 
 /**
- * Project-scoped file-system registry helpers (create, list, delete).
+ * Compatibility helpers for Artifact Storage filesystems.
  *
- * Uses the same environment-based Tensorlake auth as `createSandboxImage`, and
- * requires `TENSORLAKE_ORGANIZATION_ID` and `TENSORLAKE_PROJECT_ID` because the
- * file-system API is organization/project-scoped.
+ * New code should use {@link FilesystemClient} directly. These helpers retain
+ * the original create/list/delete API and authenticate with
+ * `TENSORLAKE_API_KEY`; ingress selects the project scope.
  *
  * To mount a registered file system into a sandbox, pass
  * `fileSystems` to `Sandbox.create()` (including warm-pool claims) or call
  * `sandbox.attachFileSystem()` / `sandbox.detachFileSystem()` on a
  * running sandbox.
  */
-
-function requireCloudClient(): CloudClient {
-  const context = buildContextFromEnv();
-  const bearerToken = context.apiKey ?? context.personalAccessToken;
-  if (!bearerToken) {
-    throw new Error("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.");
-  }
-  if (!context.organizationId || !context.projectId) {
-    throw new Error(
-      "Managing file systems requires organization and project context " +
-        "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID).",
-    );
-  }
-  return new CloudClient({
-    apiUrl: context.apiUrl,
-    apiKey: bearerToken,
-    organizationId: context.organizationId,
-    projectId: context.projectId,
-    namespace: context.namespace,
-  });
-}
 
 /** Register a new file system for the current project. */
 export async function createFileSystem(
@@ -44,22 +22,23 @@ export async function createFileSystem(
   if (typeof name !== "string" || name.length === 0) {
     throw new TypeError("name must be a non-empty string");
   }
-  const client = requireCloudClient();
-  try {
-    return await client.createFileSystem({ name, description });
-  } finally {
-    client.close();
-  }
+  const filesystem = await new FilesystemClient().create(name);
+  return {
+    id: filesystem.name,
+    name: filesystem.name,
+    description,
+    status: "ready",
+  };
 }
 
 /** List all registered file systems for the current project. */
 export async function listFileSystems(): Promise<FileSystem[]> {
-  const client = requireCloudClient();
-  try {
-    return await client.listFileSystems();
-  } finally {
-    client.close();
-  }
+  const filesystems = await new FilesystemClient().list();
+  return filesystems.map((filesystem) => ({
+    id: filesystem.name,
+    name: filesystem.name,
+    status: filesystem.status,
+  }));
 }
 
 /** Delete a registered file system by its id (e.g. `file_system_...`). */
@@ -69,10 +48,5 @@ export async function deleteFileSystem(
   if (typeof fileSystemId !== "string" || fileSystemId.length === 0) {
     throw new TypeError("fileSystemId must be a non-empty string");
   }
-  const client = requireCloudClient();
-  try {
-    await client.deleteFileSystem(fileSystemId);
-  } finally {
-    client.close();
-  }
+  await new FilesystemClient().delete(fileSystemId);
 }
