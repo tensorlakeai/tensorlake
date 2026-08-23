@@ -29,8 +29,6 @@ use tensorlake::artifact_storage::models::{
     NativeDirectFilePathWrite, NativeDirectFileWrite, REPO_KIND_FILESYSTEM,
 };
 use tensorlake::document_ai::DocumentAiClient;
-use tensorlake::file_systems::FileSystemsClient;
-use tensorlake::file_systems::models::CreateFileSystemRequest;
 use tensorlake::images::ImagesClient;
 use tensorlake::images::models::{ApplicationBuildContext, CreateApplicationBuildRequest};
 use tensorlake::sandbox_images::SandboxImageBuildEvent;
@@ -126,6 +124,18 @@ impl CloudApiClient {
 
     fn close(&self) {
         // reqwest clients are closed when dropped; this is a no-op for API parity.
+    }
+
+    /// Return the project selected by ingress for Artifact Storage operations.
+    ///
+    /// This uses the ordinary short-lived Artifact Storage credential mint. It does not
+    /// introspect the API key, and the resulting credential remains cached for subsequent
+    /// repository/filesystem requests.
+    fn artifact_storage_project_id(&self) -> PyResult<String> {
+        let client = self.artifact_storage.clone();
+        shared_runtime()
+            .block_on(async move { client.resolve_authorized_project_id().await })
+            .map_err(into_py_error)
     }
 
     fn upsert_application(
@@ -260,68 +270,6 @@ impl CloudApiClient {
         })
     }
 
-    /// Register a new file system for the given project scope.
-    ///
-    /// Returns the created `FileSystem` JSON. Routed through the platform
-    /// file-systems API, which requires the organization/project scope.
-    #[pyo3(signature = (organization_id, project_id, name, description=None))]
-    fn create_file_system(
-        &self,
-        organization_id: String,
-        project_id: String,
-        name: String,
-        description: Option<String>,
-    ) -> PyResult<String> {
-        self.run_with_retry(5, move |client| {
-            let organization_id = organization_id.clone();
-            let project_id = project_id.clone();
-            let request = CreateFileSystemRequest {
-                name: name.clone(),
-                description: description.clone(),
-            };
-            async move {
-                let file_systems = FileSystemsClient::new(client, organization_id, project_id);
-                let traced = file_systems.create(&request).await?;
-                serde_json::to_string(&*traced).map_err(SdkError::from)
-            }
-        })
-    }
-
-    /// List all registered file systems for the given project scope.
-    ///
-    /// Returns a JSON array of file systems. Routed through the platform
-    /// file-systems API, which requires the organization/project scope.
-    fn list_file_systems(&self, organization_id: String, project_id: String) -> PyResult<String> {
-        self.run_with_retry(5, move |client| {
-            let organization_id = organization_id.clone();
-            let project_id = project_id.clone();
-            async move {
-                let file_systems = FileSystemsClient::new(client, organization_id, project_id);
-                let traced = file_systems.list().await?;
-                serde_json::to_string(&*traced).map_err(SdkError::from)
-            }
-        })
-    }
-
-    /// Delete a registered file system by id for the given project scope.
-    fn delete_file_system(
-        &self,
-        organization_id: String,
-        project_id: String,
-        file_system_id: String,
-    ) -> PyResult<()> {
-        self.run_with_retry(5, move |client| {
-            let organization_id = organization_id.clone();
-            let project_id = project_id.clone();
-            let file_system_id = file_system_id.clone();
-            async move {
-                let file_systems = FileSystemsClient::new(client, organization_id, project_id);
-                file_systems.delete(&file_system_id).await?;
-                Ok(())
-            }
-        })
-    }
-
     fn git_repo_url(&self, project_id: String, repo: String) -> PyResult<String> {
         let client = self.artifact_storage_client();
         Ok(client.git_repo_url(&project_id, &repo))
@@ -334,16 +282,11 @@ impl CloudApiClient {
         repo: String,
         default_branch: Option<String>,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             let default_branch = default_branch.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client
                     .create_repo(&project_id, &repo, default_branch.as_deref())
                     .await?;
@@ -365,14 +308,9 @@ impl CloudApiClient {
     }
 
     fn list_git_repos(&self, project_id: String) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client.list_repos(&project_id).await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
             }
@@ -380,15 +318,10 @@ impl CloudApiClient {
     }
 
     fn delete_git_repo(&self, project_id: String, repo: String) -> PyResult<()> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 client.delete_repo(&project_id, &repo).await?;
                 Ok(())
             }
@@ -401,16 +334,11 @@ impl CloudApiClient {
         repo: String,
         base_repo: String,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             let base_repo = base_repo.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client.fork_repo(&project_id, &repo, &base_repo).await?;
                 let url = client.git_repo_url(&project_id, &repo);
                 let response = serde_json::json!({
@@ -425,15 +353,10 @@ impl CloudApiClient {
     }
 
     fn archive_git_repo(&self, project_id: String, repo: String) -> PyResult<()> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 client.archive_repo(&project_id, &repo).await?;
                 Ok(())
             }
@@ -441,15 +364,10 @@ impl CloudApiClient {
     }
 
     fn restore_git_repo(&self, project_id: String, repo: String) -> PyResult<()> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 client.restore_repo(&project_id, &repo).await?;
                 Ok(())
             }
@@ -457,15 +375,10 @@ impl CloudApiClient {
     }
 
     fn git_repo_info(&self, project_id: String, repo: String) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client.repo_info(&project_id, &repo).await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
             }
@@ -473,15 +386,10 @@ impl CloudApiClient {
     }
 
     fn list_git_branches(&self, project_id: String, repo: String) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client.list_branches(&project_id, &repo).await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
             }
@@ -489,15 +397,10 @@ impl CloudApiClient {
     }
 
     fn list_git_refs(&self, project_id: String, repo: String) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client.list_refs(&project_id, &repo).await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
             }
@@ -505,16 +408,11 @@ impl CloudApiClient {
     }
 
     fn delete_git_branch(&self, project_id: String, repo: String, branch: String) -> PyResult<()> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             let branch = branch.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 client.delete_branch(&project_id, &repo, &branch).await?;
                 Ok(())
             }
@@ -522,15 +420,10 @@ impl CloudApiClient {
     }
 
     fn list_git_operations(&self, project_id: String, repo: String) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client.list_operations(&project_id, &repo).await?;
                 serde_json::to_string(&*traced).map_err(SdkError::from)
             }
@@ -539,15 +432,10 @@ impl CloudApiClient {
 
     #[pyo3(signature = (project_id, repo=None))]
     fn git_credential(&self, project_id: String, repo: Option<String>) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let credential = match repo.as_deref() {
                     Some(repo) => client.git_credential_for_repo(&project_id, repo).await?,
                     None => client.git_credential_for_project(&project_id).await?,
@@ -563,16 +451,11 @@ impl CloudApiClient {
         repo: String,
         job_id: String,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             let job_id = job_id.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let credential = client.git_credential_for_repo(&project_id, &repo).await?;
                 let traced = client
                     .commit_job_status(
@@ -597,8 +480,7 @@ impl CloudApiClient {
         message: String,
         expect_oid: Option<String>,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             let root = root.clone();
@@ -606,10 +488,6 @@ impl CloudApiClient {
             let message = message.clone();
             let expect_oid = expect_oid.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let credential = client.git_credential_for_repo(&project_id, &repo).await?;
                 let opts = PushOptions {
                     branch,
@@ -1094,8 +972,7 @@ impl CloudApiClient {
         message: Option<String>,
         base: Option<String>,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             let ours = ours.clone();
@@ -1103,10 +980,6 @@ impl CloudApiClient {
             let message = message.clone();
             let base = base.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let request = MergeRequest {
                     ours,
                     theirs,
@@ -1129,16 +1002,11 @@ impl CloudApiClient {
         repo: String,
         commit: String,
     ) -> PyResult<String> {
-        self.run_with_retry(5, move |api_client| {
-            let api_url = self.api_url.clone();
+        self.run_artifact_with_retry(5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
             let commit = commit.clone();
             async move {
-                let client = ArtifactStorageClient::new(
-                    api_client,
-                    tensorlake::resolve_artifact_storage_url(&api_url),
-                )?;
                 let traced = client
                     .get_commit_conflicts(&project_id, &repo, &commit)
                     .await?;
@@ -1297,16 +1165,6 @@ impl CloudApiClient {
                 let bytes = response.bytes().await?;
                 Ok((bytes.to_vec(), content_type))
             }
-        })
-    }
-
-    fn introspect_api_key_json(&self) -> PyResult<String> {
-        self.run_with_retry(5, move |client| async move {
-            let request = client
-                .request(Method::POST, "/platform/v1/keys/introspect")
-                .build()?;
-            let response = client.execute(request).await?;
-            Ok(response.text().await?)
         })
     }
 

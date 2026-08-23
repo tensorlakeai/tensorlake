@@ -1,4 +1,5 @@
 import { CloudClient } from "./cloud-client.js";
+import { FilesystemClient } from "./filesystem.js";
 import {
   RequestExecutionError,
   RequestFailedError,
@@ -15,9 +16,21 @@ import type {
 
 export class APIClient {
   private readonly cloudClient: CloudClient;
+  private readonly filesystemOptions: {
+    apiKey?: string;
+    apiUrl?: string;
+    organizationId?: string;
+    projectId?: string;
+  };
 
   constructor(options?: CloudClientOptions) {
     this.cloudClient = new CloudClient(options);
+    this.filesystemOptions = {
+      apiKey: options?.apiKey,
+      apiUrl: options?.apiUrl,
+      organizationId: options?.organizationId,
+      projectId: options?.projectId,
+    };
   }
 
   close(): void {
@@ -47,23 +60,34 @@ export class APIClient {
   async createFileSystem(
     name: string,
     description?: string,
-    options?: { organizationId?: string; projectId?: string },
+    _options?: { organizationId?: string; projectId?: string },
   ): Promise<FileSystem> {
-    return this.cloudClient.createFileSystem({ name, description }, options);
+    const filesystem = await new FilesystemClient(this.filesystemOptions).create(name);
+    return {
+      id: filesystem.name,
+      name: filesystem.name,
+      description,
+      status: "ready",
+    };
   }
 
-  async listFileSystems(options?: {
+  async listFileSystems(_options?: {
     organizationId?: string;
     projectId?: string;
   }): Promise<FileSystem[]> {
-    return this.cloudClient.listFileSystems(options);
+    const filesystems = await new FilesystemClient(this.filesystemOptions).list();
+    return filesystems.map((filesystem) => ({
+      id: filesystem.name,
+      name: filesystem.name,
+      status: filesystem.status,
+    }));
   }
 
   async deleteFileSystem(
     fileSystemId: string,
-    options?: { organizationId?: string; projectId?: string },
+    _options?: { organizationId?: string; projectId?: string },
   ): Promise<void> {
-    await this.cloudClient.deleteFileSystem(fileSystemId, options);
+    await new FilesystemClient(this.filesystemOptions).delete(fileSystemId);
   }
 
   async applications(): Promise<ApplicationSummary[]> {

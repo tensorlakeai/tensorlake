@@ -236,11 +236,12 @@ class CloudClient:
         except Exception as e:
             _raise_as_tensorlake_error(e)
 
-    # -- Auth operations --
+    # -- Artifact Storage operations --
 
-    def introspect_api_key_json(self) -> str:
+    def _artifact_storage_project_id(self) -> str:
+        """Project selected by ingress during the normal Artifact Storage credential mint."""
         try:
-            return self._client.introspect_api_key_json()
+            return self._client.artifact_storage_project_id()
         except Exception as e:
             _raise_as_tensorlake_error(e)
 

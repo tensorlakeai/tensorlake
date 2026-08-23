@@ -87,31 +87,32 @@ class FilesystemClient:
     ):
         """Create a client.
 
-        Any argument left as ``None`` is resolved from the environment
-        (``TENSORLAKE_API_KEY`` / ``TENSORLAKE_PAT``, ``TENSORLAKE_API_URL``,
-        ``TENSORLAKE_ORGANIZATION_ID``, ``TENSORLAKE_PROJECT_ID``).
+        The SDK authenticates with ``api_key`` or ``TENSORLAKE_API_KEY``. Project scope is
+        selected by ingress from the API key; no organization/project lookup is performed.
+        The optional organization/project values are retained only for the separately installed
+        ``tl`` CLI used by local mount operations.
         """
         ctx = build_context_from_env()
-        token = api_key or ctx.api_key or ctx.personal_access_token
+        native_organization_id = organization_id
+        native_project_id = project_id
+        token = api_key or ctx.api_key
         if not token:
-            raise FilesystemError(
-                "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials."
-            )
+            if ctx.personal_access_token:
+                raise FilesystemError(
+                    "Filesystem SDKs require TENSORLAKE_API_KEY. "
+                    "Personal access tokens are CLI-only."
+                )
+            raise FilesystemError("Missing TENSORLAKE_API_KEY credentials.")
         organization_id = organization_id or ctx.organization_id
         project_id = project_id or ctx.project_id
-        if not organization_id or not project_id:
-            raise FilesystemError(
-                "Filesystem operations require organization and project context "
-                "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID)."
-            )
         self._native = NativeFilesystems(
             api_url=api_url or ctx.api_url,
             bearer_token=token,
-            organization_id=organization_id,
-            project_id=project_id,
+            organization_id=native_organization_id,
+            project_id=native_project_id,
         )
         self._cli = FsCli(
-            api_key=api_key,
+            api_key=token,
             organization_id=organization_id,
             project_id=project_id,
             api_url=api_url or ctx.api_url,

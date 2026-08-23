@@ -35,6 +35,7 @@ pub struct ArtifactStorageClient {
     git_client: reqwest::Client,
     git_base_url: String,
     git_credentials: Arc<tokio::sync::Mutex<GitCredentialCache>>,
+    authorized_project_id: Arc<tokio::sync::OnceCell<String>>,
 }
 
 #[derive(Clone)]
@@ -65,6 +66,7 @@ impl ArtifactStorageClient {
                 .build()?,
             git_base_url: trim_base_url(git_base_url.into()),
             git_credentials: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            authorized_project_id: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
@@ -85,6 +87,7 @@ impl ArtifactStorageClient {
                 .build()?,
             git_base_url: trim_base_url(git_base_url.into()),
             git_credentials: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
+            authorized_project_id: Arc::new(tokio::sync::OnceCell::new()),
         })
     }
 
@@ -123,6 +126,33 @@ impl ArtifactStorageClient {
         self.api_client.execute_json(req).await
     }
 
+    /// Resolve the project selected by ingress from the ordinary Artifact Storage credential.
+    ///
+    /// API-key clients deliberately do not introspect the API key. They send it to the normal
+    /// token-mint route, where ingress supplies the authorized project. Artifact Storage puts
+    /// that project in the minted credential's `iss` claim because the direct data-plane URL is
+    /// project-qualified. The credential is cached under the resolved project so this is the
+    /// same mint every Artifact Storage operation already needs, not an additional lookup.
+    pub async fn resolve_authorized_project_id(&self) -> Result<String, SdkError> {
+        self.authorized_project_id
+            .get_or_try_init(|| async {
+                let credential = match Self::git_credential_from_env() {
+                    Some(credential) => credential,
+                    None => self.mint_token("").await?.into_inner(),
+                };
+                let project_id = project_id_from_git_credential(&credential)?;
+                if git_credential_is_fresh(&credential) {
+                    self.git_credentials
+                        .lock()
+                        .await
+                        .insert((project_id.clone(), None), credential);
+                }
+                Ok(project_id)
+            })
+            .await
+            .cloned()
+    }
+
     pub fn git_credential_from_env() -> Option<GitCredential> {
         std::env::var("TENSORLAKE_GIT_TOKEN")
             .ok()
@@ -150,10 +180,21 @@ impl ArtifactStorageClient {
             return Ok(credential);
         }
         let key = (project_id.to_string(), Some(repo.to_string()));
-        if let Some(credential) = self.git_credentials.lock().await.get(&key).cloned()
-            && git_credential_is_fresh(&credential)
         {
-            return Ok(credential);
+            let credentials = self.git_credentials.lock().await;
+            if let Some(credential) = credentials.get(&key).cloned()
+                && git_credential_is_fresh(&credential)
+            {
+                return Ok(credential);
+            }
+            // A project-wide credential minted while resolving API-key scope is already valid
+            // for this repository. Reusing it avoids a second token request on the first call.
+            if let Some(credential) = credentials.get(&(project_id.to_string(), None)).cloned()
+                && credential.repo_pattern == "*"
+                && git_credential_is_fresh(&credential)
+            {
+                return Ok(credential);
+            }
         }
         let credential = self
             .mint_token_for_repo(project_id, Some(repo))
@@ -2299,6 +2340,32 @@ fn git_credential_is_fresh(credential: &GitCredential) -> bool {
         .unwrap_or(false)
 }
 
+fn project_id_from_git_credential(credential: &GitCredential) -> Result<String, SdkError> {
+    use base64::Engine as _;
+
+    let payload = credential.token.split('.').nth(1).ok_or_else(|| {
+        SdkError::ClientError("Artifact Storage returned an invalid credential".to_string())
+    })?;
+    let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
+        .decode(payload)
+        .map_err(|_| {
+            SdkError::ClientError("Artifact Storage returned an invalid credential".to_string())
+        })?;
+    let claims: serde_json::Value = serde_json::from_slice(&bytes).map_err(|_| {
+        SdkError::ClientError("Artifact Storage returned an invalid credential".to_string())
+    })?;
+    claims
+        .get("iss")
+        .and_then(serde_json::Value::as_str)
+        .filter(|project_id| !project_id.trim().is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            SdkError::ClientError(
+                "Artifact Storage credential did not contain an authorized project".to_string(),
+            )
+        })
+}
+
 /// A paged collection must always make forward progress. Treat an empty or repeated cursor as a
 /// malformed server response rather than spinning forever in an SDK call.
 fn advance_pagination_cursor(
@@ -2508,8 +2575,8 @@ mod tests {
     use super::{
         ArtifactStorageClient, advance_pagination_cursor, encode_path_segment,
         git_credential_is_fresh, native_file_content_id, prepare_native_direct_publication,
-        repo_list_query, resolve_artifact_storage_url, sha256_hex, validate_native_direct_targets,
-        validate_signed_blob_url, verify_native_leaf_content,
+        project_id_from_git_credential, repo_list_query, resolve_artifact_storage_url, sha256_hex,
+        validate_native_direct_targets, validate_signed_blob_url, verify_native_leaf_content,
     };
     use crate::ClientBuilder;
     use crate::artifact_storage::models::{
@@ -2517,6 +2584,80 @@ mod tests {
         NativeDirectFileWrite, NativeDirectMutation, NativeDirectPathTransfer,
         REPO_KIND_FILESYSTEM,
     };
+
+    #[test]
+    fn project_id_comes_from_normal_artifact_credential() {
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"iss":"project_123"}"#);
+        let credential = GitCredential {
+            token: format!("header.{payload}.signature"),
+            token_type: "bearer".to_string(),
+            expires_at: "2099-01-01T00:00:00Z".to_string(),
+            git_username: "t".to_string(),
+            repo_pattern: "*".to_string(),
+            scopes: vec![],
+        };
+        assert_eq!(
+            project_id_from_git_credential(&credential).unwrap(),
+            "project_123"
+        );
+    }
+
+    #[tokio::test]
+    async fn authorized_project_uses_one_normal_credential_mint_and_caches_it() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let payload =
+            base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(br#"{"iss":"project_123"}"#);
+        let body = serde_json::json!({
+            "token": format!("header.{payload}.signature"),
+            "tokenType": "bearer",
+            "expiresAt": "2099-01-01T00:00:00Z",
+            "gitUsername": "t",
+            "repoPattern": "*",
+            "scopes": []
+        })
+        .to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+            body.len(),
+            body
+        );
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut bytes = Vec::new();
+            loop {
+                let mut chunk = [0u8; 4096];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "request ended before its headers");
+                bytes.extend_from_slice(&chunk[..read]);
+                if bytes.windows(4).any(|part| part == b"\r\n\r\n") {
+                    break;
+                }
+            }
+            stream.write_all(response.as_bytes()).await.unwrap();
+            String::from_utf8(bytes).unwrap()
+        });
+
+        let api_client = ClientBuilder::new(&base)
+            .bearer_token("tl_apiKey_test")
+            .build()
+            .unwrap();
+        let client = ArtifactStorageClient::new(api_client, &base).unwrap();
+        assert_eq!(
+            client.resolve_authorized_project_id().await.unwrap(),
+            "project_123"
+        );
+        assert_eq!(
+            client.resolve_authorized_project_id().await.unwrap(),
+            "project_123"
+        );
+
+        let request = server.await.unwrap().to_lowercase();
+        assert!(request.starts_with("post /artifact-storage/v1/token http/1.1"));
+        assert!(request.contains("authorization: bearer tl_apikey_test"));
+        assert!(!request.contains("/platform/v1/keys/introspect"));
+    }
 
     #[test]
     fn resolves_git_url_from_api_url() {

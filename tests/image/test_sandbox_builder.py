@@ -85,8 +85,8 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             BUILD_CPUS,
             BUILD_MEMORY_MB,
             False,
-            "org_1",
-            "proj_1",
+            None,
+            None,
             "default",
             False,
             sbm.USER_AGENT,
@@ -96,6 +96,29 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             cas=False,
             emit=ANY,
         )
+
+    def test_private_cli_path_allows_pat_and_forwards_explicit_scope(self):
+        ctx = _make_ctx(
+            api_key=None,
+            personal_access_token="tl_pat_test",
+            organization_id="org_cli",
+            project_id="proj_cli",
+        )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            dockerfile_path = Path(tmpdir) / "Dockerfile"
+            dockerfile_path.write_text("FROM python:3.12-slim\n", encoding="utf-8")
+            build_ctx, rust_builder = _make_build_patches(ctx)
+            with build_ctx, rust_builder as rust_builder_mock:
+                sbm.build_sandbox_image(
+                    str(dockerfile_path),
+                    _allow_pat=True,
+                )
+
+        args = rust_builder_mock.call_args.args
+        self.assertEqual(args[1], "tl_pat_test")
+        self.assertEqual(args[9:11], ("org_cli", "proj_cli"))
+        self.assertIs(args[12], True)
 
 
 class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
@@ -131,8 +154,8 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             BUILD_CPUS,
             BUILD_MEMORY_MB,
             True,
-            "org_1",
-            "proj_1",
+            None,
+            None,
             "default",
             False,
             sbm.USER_AGENT,
@@ -309,25 +332,18 @@ class TestFindSandboxImageByName(unittest.TestCase):
             with self.assertRaises(sbm.SandboxImageLookupError):
                 sbm.find_sandbox_image_by_name("image")
 
-    def test_pat_keeps_explicit_scope(self):
+    def test_pat_is_cli_only(self):
         ctx = _make_ctx(api_key=None, personal_access_token="tl_pat_test")
 
         with (
             patch.object(sbm, "_build_context_from_env", return_value=ctx),
-            patch.object(
-                sbm, "_rust_find_sandbox_image_by_name", return_value=None
-            ) as rust_find,
+            patch.object(sbm, "_rust_find_sandbox_image_by_name") as rust_find,
         ):
-            self.assertIsNone(sbm.find_sandbox_image_by_name("image"))
-
-        rust_find.assert_called_once_with(
-            "https://api.tensorlake.test",
-            "tl_pat_test",
-            "image",
-            "org_1",
-            "proj_1",
-            "default",
-        )
+            with self.assertRaisesRegex(
+                sbm.SandboxImageLookupError, "TENSORLAKE_API_KEY"
+            ):
+                sbm.find_sandbox_image_by_name("image")
+        rust_find.assert_not_called()
 
     def test_empty_name_raises_type_error(self):
         with self.assertRaises(TypeError):
@@ -414,24 +430,18 @@ class TestListSandboxImages(unittest.TestCase):
             with self.assertRaises(sbm.SandboxImageLookupError):
                 sbm.list_sandbox_images()
 
-    def test_pat_keeps_explicit_scope(self):
+    def test_pat_is_cli_only(self):
         ctx = _make_ctx(api_key=None, personal_access_token="tl_pat_test")
 
         with (
             patch.object(sbm, "_build_context_from_env", return_value=ctx),
-            patch.object(
-                sbm, "_rust_list_sandbox_images", return_value="[]"
-            ) as rust_list,
+            patch.object(sbm, "_rust_list_sandbox_images") as rust_list,
         ):
-            self.assertEqual(sbm.list_sandbox_images(), [])
-
-        rust_list.assert_called_once_with(
-            "https://api.tensorlake.test",
-            "tl_pat_test",
-            "org_1",
-            "proj_1",
-            "default",
-        )
+            with self.assertRaisesRegex(
+                sbm.SandboxImageLookupError, "TENSORLAKE_API_KEY"
+            ):
+                sbm.list_sandbox_images()
+        rust_list.assert_not_called()
 
 
 class TestImportSandboxImage(unittest.TestCase):
@@ -458,8 +468,8 @@ class TestImportSandboxImage(unittest.TestCase):
             BUILD_CPUS,
             BUILD_MEMORY_MB,
             False,
-            "org_1",
-            "proj_1",
+            None,
+            None,
             "default",
             False,
             sbm.USER_AGENT,

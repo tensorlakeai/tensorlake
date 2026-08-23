@@ -7,6 +7,8 @@ import {
   __setNativeBindingForTest,
   createSandboxImage,
   importSandboxImage,
+  runCreateSandboxImageCli,
+  runImportSandboxImageCli,
 } from "../src/sandbox-image.js";
 import { Image, dockerfileContent } from "../src/image.js";
 
@@ -418,11 +420,11 @@ describe("createSandboxImage", () => {
     makeFakeBinding();
 
     await expect(createSandboxImage(dockerfilePath)).rejects.toThrow(
-      /Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT/,
+      /Missing TENSORLAKE_API_KEY/,
     );
   });
 
-  it("uses PAT auth with scope headers when only TENSORLAKE_PAT is set", async () => {
+  it("rejects PAT-only SDK auth", async () => {
     vi.stubEnv("TENSORLAKE_API_KEY", "");
     vi.stubEnv("TENSORLAKE_PAT", "tl_pat_xyz");
     vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_1");
@@ -435,12 +437,35 @@ describe("createSandboxImage", () => {
     const dockerfilePath = path.join(tempDir, "Dockerfile");
     await writeFile(dockerfilePath, "FROM python:3.12-slim\n", "utf8");
 
+    makeFakeBinding();
+    await expect(createSandboxImage(dockerfilePath)).rejects.toThrow(
+      /Personal access tokens are CLI-only/,
+    );
+  });
+
+  it("allows PAT auth from the standalone CLI", async () => {
+    vi.stubEnv("TENSORLAKE_API_KEY", "");
+    vi.stubEnv("TENSORLAKE_PAT", "tl_pat_xyz");
+    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_1");
+    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_1");
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    const tempDir = await mkdir(
+      path.join(os.tmpdir(), `tensorlake-images-${Date.now()}-cli-pat`),
+      { recursive: true },
+    );
+    const dockerfilePath = path.join(tempDir, "Dockerfile");
+    await writeFile(dockerfilePath, "FROM python:3.12-slim\n", "utf8");
+
     const { captured } = makeFakeBinding();
-    await createSandboxImage(dockerfilePath);
-    expect(captured.options.bearerToken).toBe("tl_pat_xyz");
-    expect(captured.options.useScopeHeaders).toBe(true);
-    expect(captured.options.organizationId).toBe("org_1");
-    expect(captured.options.projectId).toBe("proj_1");
+    await runCreateSandboxImageCli([dockerfilePath]);
+
+    expect(captured.options).toMatchObject({
+      bearerToken: "tl_pat_xyz",
+      organizationId: "org_1",
+      projectId: "proj_1",
+      useScopeHeaders: true,
+    });
   });
 
   it("prefers API key auth without PAT scope headers when both are set", async () => {
@@ -602,8 +627,26 @@ describe("importSandboxImage", () => {
     makeFakeBinding();
 
     await expect(importSandboxImage("pytorch/pytorch:2.4.1")).rejects.toThrow(
-      /Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT/,
+      /Missing TENSORLAKE_API_KEY/,
     );
+  });
+
+  it("allows PAT auth from the standalone import CLI", async () => {
+    vi.stubEnv("TENSORLAKE_API_KEY", "");
+    vi.stubEnv("TENSORLAKE_PAT", "tl_pat_xyz");
+    vi.stubEnv("TENSORLAKE_ORGANIZATION_ID", "org_1");
+    vi.stubEnv("TENSORLAKE_PROJECT_ID", "proj_1");
+    vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+
+    const { captured } = makeFakeBinding();
+    await runImportSandboxImageCli(["pytorch/pytorch:2.4.1"]);
+
+    expect(captured.options).toMatchObject({
+      bearerToken: "tl_pat_xyz",
+      organizationId: "org_1",
+      projectId: "proj_1",
+      useScopeHeaders: true,
+    });
   });
 });
 

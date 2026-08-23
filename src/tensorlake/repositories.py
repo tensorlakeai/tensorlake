@@ -22,8 +22,6 @@ class _EnvContext:
     api_url: str
     api_key: str | None
     personal_access_token: str | None
-    organization_id: str | None
-    project_id: str | None
     namespace: str
 
 
@@ -203,40 +201,8 @@ def _build_context_from_env() -> _EnvContext:
         api_url=_non_empty_env("TENSORLAKE_API_URL") or "https://api.tensorlake.ai",
         api_key=_non_empty_env("TENSORLAKE_API_KEY"),
         personal_access_token=_non_empty_env("TENSORLAKE_PAT"),
-        organization_id=_non_empty_env("TENSORLAKE_ORGANIZATION_ID"),
-        project_id=_non_empty_env("TENSORLAKE_PROJECT_ID"),
         namespace=_non_empty_env("INDEXIFY_NAMESPACE") or "default",
     )
-
-
-def _extract_project_id(payload: Any) -> str | None:
-    if not isinstance(payload, dict):
-        return None
-
-    for key in ("project_id", "projectId"):
-        value = payload.get(key)
-        if isinstance(value, str) and value:
-            return value
-
-    project = payload.get("project")
-    if isinstance(project, str) and project:
-        return project
-    if isinstance(project, dict):
-        for key in ("id", "project_id", "projectId"):
-            value = project.get(key)
-            if isinstance(value, str) and value:
-                return value
-
-    for key in ("scope", "api_key", "apiKey", "key"):
-        found = _extract_project_id(payload.get(key))
-        if found:
-            return found
-
-    projects = payload.get("projects")
-    if isinstance(projects, list) and len(projects) == 1:
-        return _extract_project_id(projects[0])
-
-    return None
 
 
 class RepositoryClient:
@@ -249,6 +215,11 @@ class RepositoryClient:
         organization_id: str | None = None,
         project_id: str | None = None,
     ):
+        """Create an API-key client.
+
+        ``organization_id`` and ``project_id`` are deprecated compatibility arguments and are
+        ignored; ingress selects the project authorized by the API key.
+        """
         ctx = _build_context_from_env()
         token = api_key or ctx.api_key
         if not token:
@@ -266,16 +237,20 @@ class RepositoryClient:
             project_id=None,
             namespace=ctx.namespace,
         )
-        self.project_id = (
-            project_id or ctx.project_id or self._project_id_from_api_key()
-        )
+        # Explicit/env scope is intentionally ignored for SDK API-key traffic. Ingress chooses
+        # the authorized project, which the ordinary Artifact Storage credential carries to the
+        # direct data plane.
+        self._project_id: str | None = None
 
-    def _project_id_from_api_key(self) -> str:
-        payload = _load_json(self._client.introspect_api_key_json())
-        project_id = _extract_project_id(payload)
-        if not project_id:
-            raise RepositoryError("Repository API key did not include project context.")
-        return project_id
+    @property
+    def project_id(self) -> str:
+        """Project selected by ingress, resolved lazily on the first repository operation."""
+        if self._project_id is None:
+            # The normal Artifact Storage credential mint is already required for repository
+            # traffic. The native client caches and reuses it, so this is neither API-key
+            # introspection nor a separate identity lookup.
+            self._project_id = self._client._artifact_storage_project_id()
+        return self._project_id
 
     @classmethod
     def from_env(cls) -> "RepositoryClient":

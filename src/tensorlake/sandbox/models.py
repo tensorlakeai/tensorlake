@@ -299,11 +299,10 @@ def _validate_mount_snapshot_pins(mounts: "list[FileSystemMount] | None") -> Non
 
 
 class FileSystem(BaseModel):
-    """A registered file system.
+    """Compatibility view of an Artifact Storage filesystem.
 
-    File systems are project-scoped resources managed through the
-    platform API. Register one with
-    :func:`tensorlake.create_file_system`, then mount it into a sandbox
+    New code should use :class:`tensorlake.filesystem.FilesystemClient`.
+    Create one with :func:`tensorlake.create_file_system`, then mount it into a sandbox
     at boot or warm-pool claim (``Sandbox.create(file_systems=[...])``), or
     attach it to a running sandbox (:meth:`Sandbox.attach_file_system`).
     """
