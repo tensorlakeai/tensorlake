@@ -18,7 +18,10 @@ from tensorlake._cloud_sdk import CloudApiClient, CloudApiClientError
 url = sys.argv[1]
 client = CloudApiClient(api_url=url, api_key="invalid")
 try:
-    client.introspect_api_key_json()
+    # Exercise the ordinary API-key-authenticated Artifact Storage credential
+    # path. This verifies the wheel's TLS stack without relying on API-key
+    # introspection, which is intentionally not part of the SDK contract.
+    client.artifact_storage_project_id()
 except CloudApiClientError as exc:
     kind = exc.args[0] if exc.args else None
     if kind in ("sdk_usage", "remote_api"):
