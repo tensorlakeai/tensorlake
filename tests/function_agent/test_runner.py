@@ -6,6 +6,8 @@ import contextlib
 import hashlib
 import io
 import json
+import os
+import pickle
 import unittest
 import zipfile
 from typing import Any, Coroutine
@@ -75,6 +77,73 @@ class PythonFunctionRunnerTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(await core.outputs.get(), {"type": "initialized"})
+
+    async def test_resolved_environment_is_set_before_application_import(self) -> None:
+        function_name = "embedded_agent_import_secret_test"
+        module_name = "embedded_agent_import_secret_test_module"
+        target = "TL_TEST_IMPORT_SECRET"
+        canary = "credential-canary-value"
+        self.addCleanup(os.environ.pop, target, None)
+        code = self._code_zip(
+            f"""\
+import os
+from tensorlake.applications import function
+
+IMPORTED_VALUE = os.environ.get("{target}")
+
+@function()
+def {function_name}() -> str:
+    return IMPORTED_VALUE
+""",
+            function_name,
+            module_name,
+        )
+        core = FakeNativeCore()
+        protocol = ProtocolWriter(core, asyncio.get_running_loop())  # type: ignore[arg-type]
+        runner = PythonFunctionRunner(protocol)
+        serve = asyncio.create_task(runner.serve(core))  # type: ignore[arg-type]
+        self.addAsyncCleanup(self._stop, serve)
+        core.push(
+            {
+                "type": "assignment",
+                "assignment": {
+                    "attempt_id": "attempt-secret",
+                    "fence_token": 3,
+                    "function_run_id": "run-secret",
+                    "request_id": "request-secret",
+                    "namespace": "default",
+                    "application": "secret-test",
+                    "application_version": "v1",
+                    "function": function_name,
+                    "timeout_ms": 5_000,
+                    "initialization_timeout_ms": 5_000,
+                    "inputs": [
+                        {
+                            "data_base64": "",
+                            "metadata_base64": "",
+                            "content_type": "application/octet-stream",
+                        }
+                    ],
+                    "request_headers": [],
+                    "call_metadata_base64": "",
+                    "application_code_base64": base64.b64encode(code).decode("ascii"),
+                    "application_code_sha256": hashlib.sha256(code).hexdigest(),
+                    "resolved_environment": [{"target": target, "value": canary}],
+                },
+            }
+        )
+
+        initialized = await self._output(core)
+        result = await self._output(core)
+        self.assertEqual(initialized, {"type": "initialized"})
+        self.assertEqual(result["type"], "success")
+        self.assertEqual(
+            pickle.loads(
+                base64.b64decode(result["result"]["output_base64"], validate=True)
+            ),
+            canary,
+        )
+        self.assertNotIn(canary, json.dumps([initialized, result]))
 
     async def test_application_state_round_trip_and_value_result(self) -> None:
         function_name = "embedded_agent_stateful_test"

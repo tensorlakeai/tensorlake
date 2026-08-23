@@ -15,6 +15,7 @@ tls-ring = ["rustls/ring"]
 anyhow.workspace = true
 base64.workspace = true
 hex.workspace = true
+p256.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
 serde.workspace = true
@@ -25,6 +26,8 @@ tokio.workspace = true
 tracing.workspace = true
 url.workspace = true
 urlencoding.workspace = true
+uuid.workspace = true
+zeroize.workspace = true
 
 [dev-dependencies]
 tempfile.workspace = true

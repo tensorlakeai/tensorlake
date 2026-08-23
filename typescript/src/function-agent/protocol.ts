@@ -11,6 +11,9 @@ export interface NativeFunctionAgentOptions {
   maxEventsPerHeartbeat?: number;
   maxOutboxEvents?: number;
   shutdownTimeoutMs?: number;
+  secretServiceWorkloadUrl?: string;
+  secretServiceServerCaBase64?: string;
+  credentialRequestTimeoutMs?: number;
 }
 
 export interface NativeFunctionAgentCore {
@@ -45,6 +48,7 @@ export interface Assignment {
   call_metadata_base64: string;
   application_code_base64: string;
   application_code_sha256: string;
+  resolved_environment?: Array<{ target: string; value: string }>;
 }
 
 export type AgentInput =
