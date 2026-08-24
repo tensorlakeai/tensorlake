@@ -45,7 +45,9 @@ class FunctionManifest(pydantic.BaseModel):
     name: str
     description: str
     docstring: str = ""
-    secret_names: List[str]
+    # Function Service resolves submitted names to stable IDs and deliberately
+    # omits names from persisted/read-back manifests.
+    secret_names: List[str] = pydantic.Field(default_factory=list)
     initialization_timeout_sec: int
     timeout_sec: int
     resources: FunctionResourcesManifest
