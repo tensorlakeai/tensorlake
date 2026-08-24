@@ -41,6 +41,7 @@ from .models import (
     ProcessUser,
     ProcessUserSpec,
     RestartPolicyConfig,
+    SandboxCredentialReference,
     SandboxInfo,
     SandboxLogLevel,
     SandboxLogsResponse,
@@ -357,6 +358,7 @@ class Sandbox:
         startup_timeout: float | None = None,
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
+        credential_references: list[SandboxCredentialReference] | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
         organization_id: str | None = None,
@@ -401,6 +403,8 @@ class Sandbox:
             file_systems: File systems to mount into the sandbox
                 at boot or warm-pool claim, each at its own absolute, unique
                 guest mount path.
+            credential_references: Protected GitHub credentials for a freshly
+                created sandbox. Warm-pool claims do not support this field.
             api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
             api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
             organization_id: Organization ID for multi-tenant access.
@@ -451,6 +455,7 @@ class Sandbox:
             request_timeout=effective_request_timeout,
             name=name,
             file_systems=file_systems,
+            credential_references=credential_references,
             gpu=gpu,
         )
 

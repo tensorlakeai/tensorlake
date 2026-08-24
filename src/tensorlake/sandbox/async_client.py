@@ -61,6 +61,7 @@ from .models import (
     ListSandboxPoolsResponse,
     ListSnapshotsResponse,
     NetworkConfig,
+    SandboxCredentialReference,
     SandboxInfo,
     SandboxLogLevel,
     SandboxLogsResponse,
@@ -250,6 +251,7 @@ class AsyncSandboxClient:
         snapshot_id: str | None = None,
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
+        credential_references: list[SandboxCredentialReference] | None = None,
         gpu: GpuRequest | None = None,
     ) -> Traced[CreateSandboxResponse]:
         _validate_mount_snapshot_pins(file_systems)
@@ -274,6 +276,7 @@ class AsyncSandboxClient:
             snapshot_id=snapshot_id,
             name=name,
             file_systems=file_systems,
+            credential_references=credential_references,
         )
         try:
             trace_id, response_json = await self._rust_client.create_sandbox_async(
@@ -976,6 +979,7 @@ class AsyncSandboxClient:
         startup_timeout: float | None = None,
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
+        credential_references: list[SandboxCredentialReference] | None = None,
         gpu: GpuRequest | None = None,
     ) -> "AsyncSandbox":
         """Create a sandbox, wait for it to start, and return a connection.
@@ -996,6 +1000,10 @@ class AsyncSandboxClient:
 
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
+            if credential_references:
+                raise ValueError(
+                    "credential_references are not supported for warm-pool claims"
+                )
             result = await request_client.claim(pool_id, file_systems=file_systems)
         else:
             result = await request_client.create(
@@ -1013,6 +1021,7 @@ class AsyncSandboxClient:
                 snapshot_id=snapshot_id,
                 name=name,
                 file_systems=file_systems,
+                credential_references=credential_references,
                 gpu=gpu,
             )
 

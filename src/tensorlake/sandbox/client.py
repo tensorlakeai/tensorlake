@@ -40,6 +40,7 @@ from .models import (
     ListSandboxPoolsResponse,
     ListSnapshotsResponse,
     NetworkConfig,
+    SandboxCredentialReference,
     SandboxInfo,
     SandboxLogLevel,
     SandboxLogsResponse,
@@ -448,6 +449,7 @@ class SandboxClient:
         snapshot_id: str | None = None,
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
+        credential_references: list[SandboxCredentialReference] | None = None,
         gpu: GpuRequest | None = None,
     ) -> Traced[CreateSandboxResponse]:
         """Create a new standalone sandbox.
@@ -489,6 +491,8 @@ class SandboxClient:
                 suspend/resume. When absent the sandbox is ephemeral.
             file_systems: File systems to mount into the sandbox
                 at boot, each at its own absolute, unique guest mount path.
+            credential_references: Protected GitHub credentials to bind by
+                name or stable secret ID. Values are never put in URLs or env.
 
         Returns:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
@@ -522,6 +526,7 @@ class SandboxClient:
             snapshot_id=snapshot_id,
             name=name,
             file_systems=file_systems,
+            credential_references=credential_references,
         )
 
         try:
@@ -1557,6 +1562,7 @@ class SandboxClient:
         startup_timeout: float | None = None,
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
+        credential_references: list[SandboxCredentialReference] | None = None,
         gpu: GpuRequest | None = None,
     ) -> "Sandbox":
         """Create a sandbox, wait for it to start, and return a connected Sandbox.
@@ -1606,6 +1612,8 @@ class SandboxClient:
             file_systems: File systems to mount into the sandbox
                 at boot or warm-pool claim, each at its own absolute, unique
                 guest mount path.
+            credential_references: Protected GitHub credentials for a freshly
+                created sandbox. Warm-pool claims do not support this field.
 
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)
@@ -1629,6 +1637,10 @@ class SandboxClient:
         # may fall back to the requested name when caching info locally.
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
+            if credential_references:
+                raise ValueError(
+                    "credential_references are not supported for warm-pool claims"
+                )
             result = request_client.claim(pool_id, file_systems=file_systems)
         else:
             result = request_client.create(
@@ -1646,6 +1658,7 @@ class SandboxClient:
                 snapshot_id=snapshot_id,
                 name=name,
                 file_systems=file_systems,
+                credential_references=credential_references,
                 gpu=gpu,
             )
 

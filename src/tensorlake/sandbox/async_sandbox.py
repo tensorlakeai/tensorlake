@@ -40,6 +40,7 @@ from .models import (
     ProcessInfo,
     ProcessUser,
     RestartPolicyConfig,
+    SandboxCredentialReference,
     SandboxInfo,
     SandboxLogLevel,
     SandboxLogsResponse,
@@ -260,6 +261,7 @@ class AsyncSandbox:
         startup_timeout: float | None = None,
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
+        credential_references: list[SandboxCredentialReference] | None = None,
         api_key: str | None = _defaults.API_KEY,
         api_url: str = _defaults.API_URL,
         organization_id: str | None = None,
@@ -305,6 +307,7 @@ class AsyncSandbox:
             request_timeout=effective_request_timeout,
             name=name,
             file_systems=file_systems,
+            credential_references=credential_references,
             gpu=gpu,
         )
 

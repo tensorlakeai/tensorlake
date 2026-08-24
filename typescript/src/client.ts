@@ -270,6 +270,27 @@ export class SandboxClient {
     if (options?.fileSystems != null && options.fileSystems.length > 0) {
       body.file_systems = options.fileSystems.map(fileSystemMountToWire);
     }
+    if (
+      options?.credentialReferences != null &&
+      options.credentialReferences.length > 0
+    ) {
+      body.credential_references = options.credentialReferences.map(
+        (reference) => ({
+          ...(reference.secretId != null
+            ? { secret_id: reference.secretId }
+            : { name: reference.name }),
+          purpose: reference.purpose ?? "git_https",
+          target: reference.target ?? "github.com",
+          version_policy:
+            reference.versionPolicy?.policy === "pinned"
+              ? {
+                  policy: "pinned",
+                  version_id: reference.versionPolicy.versionId,
+                }
+              : { policy: "active" },
+        }),
+      );
+    }
 
     if (
       options?.allowInternetAccess === false ||
@@ -870,6 +891,15 @@ export class SandboxClient {
       options?.startupTimeout ??
       this.requestTimeoutMs / 1000;
     const requestClient = this.withRequestTimeout(requestTimeout);
+    if (
+      options?.poolId != null &&
+      options.credentialReferences != null &&
+      options.credentialReferences.length > 0
+    ) {
+      throw new TypeError(
+        "credentialReferences are not supported for warm-pool claims",
+      );
+    }
     logSdkTimingEvent("sandbox.create", "start", {
       request_timeout_s: requestTimeout,
       image: options?.image,

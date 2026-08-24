@@ -149,6 +149,28 @@ export interface ClaimSandboxOptions {
 
 // --- Sandbox lifecycle ---
 
+export type SandboxCredentialVersionPolicy =
+  | { policy: "active" }
+  | { policy: "pinned"; versionId: string };
+
+/** A GitHub App credential selector resolved once when the sandbox is created. */
+export type SandboxCredentialSelector = (
+  | { secretId: string; name?: never }
+  | { name: string; secretId?: never }
+) & {
+  purpose?: "git_https";
+  target?: "github.com";
+  versionPolicy?: SandboxCredentialVersionPolicy;
+};
+
+/** Non-sensitive stable credential metadata returned by get/list operations. */
+export interface SandboxCredentialReference {
+  secretId: string;
+  purpose: "git_https";
+  target: "github.com";
+  versionPolicy: SandboxCredentialVersionPolicy;
+}
+
 export interface CreateSandboxOptions {
   /** Optional sandbox image name, such as `tensorlake/ubuntu-minimal` or a registered Sandbox Image. When omitted, Tensorlake uses the default managed environment. */
   image?: string;
@@ -172,6 +194,8 @@ export interface CreateSandboxOptions {
   name?: string;
   /** File systems to mount on fresh creation or warm-pool claim, each at its own absolute, unique guest mount path. */
   fileSystems?: FileSystemMount[];
+  /** Protected GitHub credentials for fresh sandbox creation. Values never enter URLs or environment variables. */
+  credentialReferences?: SandboxCredentialSelector[];
 }
 
 export interface UpdateSandboxOptions {
@@ -250,6 +274,8 @@ export interface SandboxInfo {
   routingHint?: string;
   /** File systems currently mounted into the sandbox, each at its own guest mount path. Empty when none are mounted. */
   fileSystems?: FileSystemMount[];
+  /** Stable credential references only; grants and values are never returned. */
+  credentialReferences?: SandboxCredentialReference[];
 }
 
 export interface SandboxPortAccess {

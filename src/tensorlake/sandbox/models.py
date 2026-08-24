@@ -2,10 +2,18 @@
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse, urlunparse
+from uuid import UUID
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_serializer
+from pydantic import (
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    model_serializer,
+    model_validator,
+)
 
 _SANDBOX_MANAGEMENT_PORT = 9501
 
@@ -73,6 +81,55 @@ class SandboxStatus(str, Enum):
     SUSPENDED = "suspended"
     TERMINATED = "terminated"
     TIMEOUT = "timeout"
+
+
+class SandboxCredentialPurpose(str, Enum):
+    """Supported protected uses for a sandbox credential."""
+
+    GIT_HTTPS = "git_https"
+
+
+class SandboxCredentialVersionPolicy(BaseModel):
+    """Select the active version or pin one immutable version."""
+
+    policy: Literal["active", "pinned"] = "active"
+    version_id: UUID | None = None
+
+    @model_validator(mode="after")
+    def validate_policy(self):
+        if (self.policy == "active") != (self.version_id is None):
+            raise ValueError(
+                "version_id is required only when credential policy is 'pinned'"
+            )
+        return self
+
+
+class SandboxCredentialReference(BaseModel):
+    """A protected GitHub credential bound to a sandbox.
+
+    Supply exactly one of ``name`` (resolved once by the service) or the
+    stable ``secret_id``. Metadata responses contain only ``secret_id``.
+    """
+
+    secret_id: UUID | None = None
+    name: str | None = None
+    purpose: SandboxCredentialPurpose = SandboxCredentialPurpose.GIT_HTTPS
+    target: Literal["github.com"] = "github.com"
+    version_policy: SandboxCredentialVersionPolicy = Field(
+        default_factory=SandboxCredentialVersionPolicy
+    )
+
+    @model_validator(mode="after")
+    def validate_selector(self):
+        if (self.secret_id is None) == (self.name is None):
+            raise ValueError("exactly one of secret_id or name is required")
+        if self.name is not None and (
+            not self.name.strip() or self.name != self.name.strip()
+        ):
+            raise ValueError(
+                "credential name must be non-empty without outer whitespace"
+            )
+        return self
 
 
 class SnapshotStatus(str, Enum):
@@ -333,6 +390,7 @@ class CreateSandboxRequest(BaseModel):
     snapshot_id: str | None = None
     name: str | None = None
     file_systems: list[FileSystemMount] | None = None
+    credential_references: list[SandboxCredentialReference] | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -438,6 +496,9 @@ class SandboxInfo(BaseModel):
     sandbox_url: str | None = None
     routing_hint: str | None = None
     file_systems: list[FileSystemMount] = Field(default_factory=list)
+    credential_references: list[SandboxCredentialReference] = Field(
+        default_factory=list
+    )
 
     model_config = {"populate_by_name": True}
 
