@@ -63,7 +63,7 @@ Create a sandbox, run a command, and clean up:
 
 ```bash
 # Create a sandbox
-tl sbx create --image tensorlake/tensorlake/ubuntu-minimal
+tl sbx create
 
 # Run a command inside it
 tl sbx exec <sandbox-id> -- sh -lc "printf 'Hello from the sandbox!\n'"
@@ -87,7 +87,9 @@ tl sbx update <sandbox-id> --clear-network
 tl sbx terminate <sandbox-id>
 ```
 
-`--image` expects a sandbox image name such as `tensorlake/ubuntu-minimal` or a registered Sandbox Image name, not an arbitrary Docker image reference.
+Omit `--image` to use Tensorlake's default managed environment. To select a
+custom environment, pass the name of a registered Sandbox Image; arbitrary
+Docker image references are not supported.
 
 ### Create a Sandbox Programmatically
 
@@ -97,7 +99,7 @@ from tensorlake.sandbox import SandboxClient
 client = SandboxClient.for_cloud(api_key="your-api-key")
 
 # Create a sandbox and connect to it
-with client.create_and_connect(image="tensorlake/ubuntu-minimal") as sandbox:
+with client.create_and_connect() as sandbox:
     # Run a command
     result = sandbox.run("sh", ["-lc", "printf 'Hello from the sandbox!\\n'"])
     print(result.stdout)  # "Hello from the sandbox!"
@@ -156,7 +158,7 @@ resp = client.claim(
 sandbox = client.connect(resp.sandbox_id)
 
 # Named sandboxes can be reconnected later by name
-named = client.create(image="tensorlake/ubuntu-minimal", name="stable-name")
+named = client.create(name="stable-name")
 sandbox = client.connect("stable-name")
 ```
 
