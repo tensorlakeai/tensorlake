@@ -18,9 +18,9 @@ class _FakeCloudClient:
     def close(self):
         self.closed = True
 
-    def introspect_api_key_json(self):
-        self.calls.append(("introspect",))
-        return json.dumps({"project_id": "project-from-key"})
+    def _artifact_storage_project_id(self):
+        self.calls.append(("artifact_scope",))
+        return "project-from-key"
 
     def git_repo_url(self, project_id, repo):
         self.calls.append(("url", project_id, repo))
@@ -208,9 +208,14 @@ class TestRepositoryClient(unittest.TestCase):
         created = client.create("linux", default_branch="main")
 
         fake = _FakeCloudClient.instances[-1]
+        self.assertIsNone(fake.kwargs["organization_id"])
+        self.assertIsNone(fake.kwargs["project_id"])
         self.assertEqual(
             fake.calls,
-            [("create", "project-1", "linux", "main")],
+            [
+                ("artifact_scope",),
+                ("create", "project-from-key", "linux", "main"),
+            ],
         )
         self.assertEqual(created.repo, "linux")
         self.assertEqual(created.trace_id, "tr-create")
@@ -220,7 +225,7 @@ class TestRepositoryClient(unittest.TestCase):
         repos = client.list()
 
         self.assertEqual(repos[0].name, "linux")
-        self.assertEqual(repos[0].full_name, "project-1/linux")
+        self.assertEqual(repos[0].full_name, "project-from-key/linux")
         self.assertEqual(repos[0].default_branch, "main")
 
     def test_info_and_credential(self):
@@ -247,7 +252,18 @@ class TestRepositoryClient(unittest.TestCase):
         fake = _FakeCloudClient.instances[-1]
         self.assertEqual(
             fake.calls,
-            [("push", "project-1", "linux", "/tmp/linux", "feature", "sync", "abc")],
+            [
+                ("artifact_scope",),
+                (
+                    "push",
+                    "project-from-key",
+                    "linux",
+                    "/tmp/linux",
+                    "feature",
+                    "sync",
+                    "abc",
+                ),
+            ],
         )
         self.assertEqual(report.ref_name, "refs/heads/feature")
         self.assertEqual(report.bytes_uploaded, 12)
@@ -268,9 +284,10 @@ class TestRepositoryClient(unittest.TestCase):
         self.assertEqual(
             fake.calls,
             [
+                ("artifact_scope",),
                 (
                     "merge",
-                    "project-1",
+                    "project-from-key",
                     "linux",
                     "main",
                     "feature",
@@ -279,7 +296,7 @@ class TestRepositoryClient(unittest.TestCase):
                     False,
                     "merge feature",
                     "base-oid",
-                )
+                ),
             ],
         )
         self.assertEqual(report.merge_base, "base-oid")
@@ -297,8 +314,9 @@ class TestRepositoryClient(unittest.TestCase):
         self.assertEqual(
             fake.calls,
             [
-                ("commit_conflicts", "project-1", "linux", "merge-oid"),
-                ("commit_conflicts", "project-1", "linux", "clean-oid"),
+                ("artifact_scope",),
+                ("commit_conflicts", "project-from-key", "linux", "merge-oid"),
+                ("commit_conflicts", "project-from-key", "linux", "clean-oid"),
             ],
         )
         self.assertIsNotNone(record)
@@ -309,15 +327,15 @@ class TestRepositoryClient(unittest.TestCase):
         self.assertEqual(record.paths[0].terms[1].oid, "base-blob")
         self.assertIsNone(clean)
 
-    def test_derives_project_context_from_api_key(self):
-        with patch.dict(os.environ, {"TENSORLAKE_PROJECT_ID": ""}, clear=False):
-            client = RepositoryClient()
-            created = client.create("linux")
+    def test_uses_normal_artifact_credential_scope_without_introspection(self):
+        # Stale local scope is ignored for SDK API-key traffic.
+        client = RepositoryClient(project_id="stale-explicit-project")
+        created = client.create("linux")
 
         fake = _FakeCloudClient.instances[-1]
         self.assertEqual(
             fake.calls,
-            [("introspect",), ("create", "project-from-key", "linux", None)],
+            [("artifact_scope",), ("create", "project-from-key", "linux", None)],
         )
         self.assertEqual(
             created.url, "https://git.tensorlake.ai/project-from-key/linux"

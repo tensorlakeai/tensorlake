@@ -261,6 +261,7 @@ async def _prepare_images(
                 build_env_vars=build_envs,
                 context_dir=context_dir,
                 emit=_emit,
+                _allow_pat=True,
             )
         except (asyncio.CancelledError, KeyboardInterrupt) as error:
             raise error

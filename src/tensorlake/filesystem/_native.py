@@ -41,8 +41,8 @@ class NativeFilesystems:
         self,
         api_url: str,
         bearer_token: str,
-        organization_id: str,
-        project_id: str,
+        organization_id: Optional[str] = None,
+        project_id: Optional[str] = None,
     ):
         module = _native_module()
         self._error_type = module.CloudApiClientError
@@ -57,6 +57,11 @@ class NativeFilesystems:
 
     @property
     def project_id(self) -> str:
+        # Resolve lazily on the first actual operation. API keys carry their scope through
+        # ingress, and Artifact Storage returns it in the ordinary short-lived data-plane
+        # credential. Client construction therefore performs no network request.
+        if self._project_id is None:
+            self._project_id = self._client.artifact_storage_project_id()
         return self._project_id
 
     def _call(self, operation: Callable[[], Any], not_found: Optional[Exception]):
@@ -84,7 +89,7 @@ class NativeFilesystems:
         adopted a pre-existing filesystem inside the native binding.
         """
         raw = self._call(
-            lambda: self._client.create_filesystem(self._project_id, name),
+            lambda: self._client.create_filesystem(self.project_id, name),
             not_found=None,
         )
         return str(json.loads(raw).get("default_branch") or "main")
@@ -93,30 +98,28 @@ class NativeFilesystems:
         self, name: str, base: str, snapshot: Optional[str] = None
     ) -> str:
         raw = self._call(
-            lambda: self._client.fork_filesystem(
-                self._project_id, name, base, snapshot
-            ),
+            lambda: self._client.fork_filesystem(self.project_id, name, base, snapshot),
             not_found=FilesystemNotFoundError(base),
         )
         return str(json.loads(raw).get("default_branch") or "main")
 
     def filesystem_meta(self, name: str) -> Dict[str, Any]:
         raw = self._call(
-            lambda: self._client.filesystem_meta(self._project_id, name),
+            lambda: self._client.filesystem_meta(self.project_id, name),
             not_found=FilesystemNotFoundError(name),
         )
         return json.loads(raw)
 
     def list_filesystems(self) -> List[Dict[str, Any]]:
         raw = self._call(
-            lambda: self._client.list_filesystems(self._project_id),
+            lambda: self._client.list_filesystems(self.project_id),
             not_found=None,
         )
         return json.loads(raw).get("repos", [])
 
     def delete_filesystem(self, name: str) -> None:
         self._call(
-            lambda: self._client.delete_filesystem(self._project_id, name),
+            lambda: self._client.delete_filesystem(self.project_id, name),
             not_found=FilesystemNotFoundError(name),
         )
 
@@ -125,7 +128,7 @@ class NativeFilesystems:
         # missing filesystem — surface it as an API error for the caller to
         # interpret, never as FilesystemNotFoundError.
         raw = self._call(
-            lambda: self._client.filesystem_ref_status(self._project_id, name, refspec),
+            lambda: self._client.filesystem_ref_status(self.project_id, name, refspec),
             not_found=None,
         )
         return json.loads(raw)
@@ -135,7 +138,7 @@ class NativeFilesystems:
     ) -> Dict[str, Any]:
         raw = self._call(
             lambda: self._client.retain_filesystem_snapshot(
-                self._project_id, name, message, request_id
+                self.project_id, name, message, request_id
             ),
             not_found=FilesystemNotFoundError(name),
         )
@@ -143,7 +146,7 @@ class NativeFilesystems:
 
     def list_snapshots(self, name: str) -> List[Dict[str, Any]]:
         raw = self._call(
-            lambda: self._client.list_filesystem_snapshots(self._project_id, name),
+            lambda: self._client.list_filesystem_snapshots(self.project_id, name),
             not_found=FilesystemNotFoundError(name),
         )
         return json.loads(raw).get("snapshots", [])
@@ -151,7 +154,7 @@ class NativeFilesystems:
     def delete_snapshot(self, name: str, snapshot: str) -> None:
         self._call(
             lambda: self._client.delete_filesystem_snapshot(
-                self._project_id, name, snapshot
+                self.project_id, name, snapshot
             ),
             not_found=FilesystemNotFoundError(name),
         )
@@ -160,7 +163,7 @@ class NativeFilesystems:
         return bytes(
             self._call(
                 lambda: self._client.read_filesystem_file(
-                    self._project_id, name, path, version
+                    self.project_id, name, path, version
                 ),
                 not_found=FileNotFoundInFilesystemError(name, path),
             )
@@ -169,7 +172,7 @@ class NativeFilesystems:
     def list_tree(self, name: str, dir_path: str, version: str) -> List[Dict[str, Any]]:
         raw = self._call(
             lambda: self._client.list_filesystem_tree(
-                self._project_id, name, dir_path, version
+                self.project_id, name, dir_path, version
             ),
             not_found=FileNotFoundInFilesystemError(name, dir_path or "/"),
         )
@@ -188,7 +191,7 @@ class NativeFilesystems:
     ) -> Dict[str, Any]:
         raw = self._call(
             lambda: self._client.push_filesystem_files(
-                self._project_id,
+                self.project_id,
                 name,
                 files,
                 deletes,
@@ -212,7 +215,7 @@ class NativeFilesystems:
     ) -> Dict[str, Any]:
         raw = self._call(
             lambda: self._client.push_filesystem_paths(
-                self._project_id,
+                self.project_id,
                 name,
                 files,
                 message,

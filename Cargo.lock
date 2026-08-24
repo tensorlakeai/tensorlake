@@ -1444,7 +1444,7 @@ checksum = "42703706b716c37f96a77aea830392ad231f44c9e9a67872fa5548707e11b11c"
 [[package]]
 name = "fuser"
 version = "0.18.0"
-source = "git+https://github.com/tensorlakeai/fuser?branch=configurable-buffer-size#2565863131bb3865b068228a715b1efd9a7bfcb3"
+source = "git+https://github.com/tensorlakeai/fuser?branch=configurable-buffer-size#74ef944c871949ce9fe24d24fac5db479060aa66"
 dependencies = [
  "bitflags",
  "libc",
@@ -1672,7 +1672,7 @@ dependencies = [
 
 [[package]]
 name = "gsvc-fs-client"
-version = "0.5.113"
+version = "0.5.114"
 dependencies = [
  "anyhow",
  "base64",
@@ -5444,7 +5444,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.113"
+version = "0.5.114"
 dependencies = [
  "anyhow",
  "base64",
@@ -5497,7 +5497,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.113"
+version = "0.5.114"
 dependencies = [
  "anyhow",
  "base64",
@@ -5551,7 +5551,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-function-agent-core"
-version = "0.5.113"
+version = "0.5.114"
 dependencies = [
  "anyhow",
  "base64",
@@ -5574,7 +5574,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.113"
+version = "0.5.114"
 dependencies = [
  "anyhow",
  "base64",
@@ -5594,7 +5594,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.113"
+version = "0.5.114"
 dependencies = [
  "base64",
  "futures",

@@ -64,7 +64,9 @@ const FILESYSTEM_REPO_KIND = "filesystem";
 export interface FilesystemClientOptions {
   apiKey?: string;
   apiUrl?: string;
+  /** @deprecated Scope is selected by ingress for SDK API keys; used only by local `tl` mounts. */
   organizationId?: string;
+  /** @deprecated Scope is selected by ingress for SDK API keys; used only by local `tl` mounts. */
   projectId?: string;
   /** @internal Test seam: bypass the native binding loader. */
   nativeClient?: NativeRepositoryClient;
@@ -239,27 +241,25 @@ export class FilesystemClient {
   private readonly cli: FsCli;
 
   /**
-   * Any option left unset is resolved from the environment
-   * (`TENSORLAKE_API_KEY` / `TENSORLAKE_PAT`, `TENSORLAKE_API_URL`,
-   * `TENSORLAKE_ORGANIZATION_ID`, `TENSORLAKE_PROJECT_ID`).
+   * The SDK authenticates with `apiKey` or `TENSORLAKE_API_KEY`. Project scope is selected by
+   * ingress from the API key; no organization/project lookup is performed. Organization/project
+   * options are retained only for the separately installed `tl` CLI used by local mounts.
    */
   constructor(options: FilesystemClientOptions = {}) {
     const context = buildContextFromEnv();
-    const token =
-      options.apiKey ?? context.apiKey ?? context.personalAccessToken;
+    const token = options.apiKey ?? context.apiKey;
     if (!token) {
+      if (context.personalAccessToken) {
+        throw new FilesystemError(
+          "Filesystem SDKs require TENSORLAKE_API_KEY. Personal access tokens are CLI-only.",
+        );
+      }
       throw new FilesystemError(
-        "Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.",
+        "Missing TENSORLAKE_API_KEY credentials.",
       );
     }
     const organizationId = options.organizationId ?? context.organizationId;
     const projectId = options.projectId ?? context.projectId;
-    if (!organizationId || !projectId) {
-      throw new FilesystemError(
-        "Filesystem operations require organization and project context " +
-          "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID).",
-      );
-    }
     if (options.nativeClient) {
       this.native = options.nativeClient;
     } else {
@@ -272,22 +272,20 @@ export class FilesystemClient {
       this.native = new binding.NativeRepositoryClient(
         options.apiUrl ?? context.apiUrl,
         token,
-        organizationId,
-        projectId,
+        null,
+        null,
         `tensorlake-typescript-sdk/${defaults.SDK_VERSION}`,
         null,
       );
     }
     const envOverrides: Record<string, string> = {
-      TENSORLAKE_ORGANIZATION_ID: organizationId,
-      TENSORLAKE_PROJECT_ID: projectId,
+      TENSORLAKE_API_KEY: token,
       // The CLI must target the same deployment the data plane does, or a
       // mount could resolve a same-named filesystem in the wrong environment.
       TENSORLAKE_API_URL: options.apiUrl ?? context.apiUrl,
     };
-    if (options.apiKey) {
-      envOverrides.TENSORLAKE_API_KEY = options.apiKey;
-    }
+    if (organizationId) envOverrides.TENSORLAKE_ORGANIZATION_ID = organizationId;
+    if (projectId) envOverrides.TENSORLAKE_PROJECT_ID = projectId;
     this.cli = new FsCli(envOverrides);
   }
 

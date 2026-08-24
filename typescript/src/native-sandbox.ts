@@ -137,7 +137,7 @@ export interface NativeSandboxClient {
 }
 
 export interface NativeRepositoryClient {
-  gitRepoUrl(repo: string): string;
+  gitRepoUrl(repo: string): Promise<string>;
   createRepo(repo: string, defaultBranch?: string | null): Promise<TracedJson>;
   listRepos(): Promise<TracedJson>;
   deleteRepo(repo: string): Promise<string>;

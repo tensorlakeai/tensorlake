@@ -794,64 +794,6 @@ pub(crate) fn resolve_build_context(options: CommonBuildOptions) -> Result<Resol
     })
 }
 
-/// Resolve an explicit project for the CAS Image Service, whose current API
-/// still carries the project identifier in request bodies and query strings.
-/// The token-scoped Platform API path above intentionally avoids this lookup;
-/// this compatibility resolver is only used by CAS builds.
-pub(crate) async fn resolve_image_service_build_context(
-    options: CommonBuildOptions,
-) -> Result<ResolvedBuildContext> {
-    if options.use_scope_headers {
-        return resolve_build_context(options);
-    }
-
-    let client = unscoped_client(&options)?;
-    let scope = introspect_scope(&client).await?;
-    Ok(ResolvedBuildContext {
-        api_url: options.api_url,
-        bearer_token: options.bearer_token,
-        use_scope_headers: false,
-        organization_id: Some(scope.organization_id),
-        project_id: Some(scope.project_id),
-        namespace: options.namespace,
-        user_agent: options.user_agent,
-    })
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct IntrospectScope {
-    organization_id: String,
-    project_id: String,
-}
-
-async fn introspect_scope(client: &Client) -> Result<IntrospectScope> {
-    let request = client.build_empty_post_request("/platform/v1/keys/introspect")?;
-    let response = client.execute_raw(request).await?;
-    if !response.status().is_success() {
-        let status = response.status();
-        let body = response.text().await.unwrap_or_default();
-        return Err(SandboxImageBuildError::auth(format!(
-            "API key introspection failed (HTTP {}): {}",
-            status, body
-        )));
-    }
-    response.json().await.map_err(Into::into)
-}
-
-fn unscoped_client(options: &CommonBuildOptions) -> Result<Client> {
-    client_builder(
-        &options.api_url,
-        &options.bearer_token,
-        false,
-        options.organization_id.as_deref(),
-        options.project_id.as_deref(),
-        options.user_agent.as_deref(),
-    )
-    .build()
-    .map_err(Into::into)
-}
-
 fn platform_client(ctx: &ResolvedBuildContext) -> Result<Client> {
     client_builder(
         &ctx.api_url,

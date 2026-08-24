@@ -544,6 +544,7 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(
             build_image.call_args.kwargs["registered_name"], registered_name
         )
+        self.assertIs(build_image.call_args.kwargs["_allow_pat"], True)
         self.assertEqual(
             deploy_apps.call_args.kwargs["function_images"],
             {

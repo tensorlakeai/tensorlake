@@ -1,10 +1,8 @@
-"""Project-scoped file system registry operations.
+"""Compatibility helpers for Artifact Storage filesystems.
 
-File systems are managed through the platform API (the same
-environment-based Tensorlake auth and organization/project scope as sandbox
-images). Register one with :func:`create_file_system`, list them with
-:func:`list_file_systems`, and remove one with
-:func:`delete_file_system`.
+New code should use :class:`tensorlake.filesystem.FilesystemClient` directly.
+These helpers retain the original create/list/delete API while routing it to
+the current Artifact Storage implementation.
 
 Once registered, mount a file system into a sandbox at boot via
 ``Sandbox.create(file_systems=[...])``, include it in a warm-pool claim, or
@@ -14,52 +12,22 @@ attach it to a running sandbox with
 
 from __future__ import annotations
 
-import json
-from typing import Any
-
-from tensorlake._tracing import USER_AGENT
-from tensorlake.cli._common import Context, build_context_from_env
-
 from .exceptions import SandboxError
 from .models import FileSystem
 
 
-def _require_project_context() -> Context:
-    """Resolve and validate the auth + project context, or raise."""
-    ctx = build_context_from_env()
-    token = ctx.api_key or ctx.personal_access_token
-    if not token:
-        raise SandboxError("Missing TENSORLAKE_API_KEY or TENSORLAKE_PAT credentials.")
-    if not ctx.organization_id or not ctx.project_id:
-        raise SandboxError(
-            "File system operations require organization and project context "
-            "(TENSORLAKE_ORGANIZATION_ID and TENSORLAKE_PROJECT_ID)."
-        )
-    return ctx
+def _filesystem_client():
+    # Lazy to avoid a package-initialization cycle through tensorlake.sandbox.
+    from tensorlake.filesystem import FilesystemClient
 
-
-def _cloud_api_client(ctx: Context) -> Any:
-    try:
-        from tensorlake._cloud_sdk import CloudApiClient
-    except ImportError:
-        from _cloud_sdk import CloudApiClient
-
-    return CloudApiClient(
-        api_url=ctx.api_url,
-        api_key=ctx.api_key or ctx.personal_access_token,
-        organization_id=ctx.organization_id,
-        project_id=ctx.project_id,
-        namespace=ctx.namespace,
-        user_agent=USER_AGENT,
-    )
+    return FilesystemClient()
 
 
 def create_file_system(name: str, description: str | None = None) -> FileSystem:
-    """Register a new file system for the current project.
+    """Create an Artifact Storage filesystem for the API key's project.
 
-    Uses the same environment-based Tensorlake auth as sandbox images, and
-    requires organization/project context (``TENSORLAKE_ORGANIZATION_ID`` and
-    ``TENSORLAKE_PROJECT_ID``).
+    ``description`` is retained for source compatibility but Artifact Storage
+    filesystems do not currently persist descriptions.
 
     Args:
         name: Human-readable file system name.
@@ -76,26 +44,20 @@ def create_file_system(name: str, description: str | None = None) -> FileSystem:
     if not isinstance(name, str) or not name:
         raise TypeError("name must be a non-empty string")
 
-    ctx = _require_project_context()
-    client = _cloud_api_client(ctx)
     try:
-        result_json = client.create_file_system(
-            ctx.organization_id, ctx.project_id, name, description
-        )
+        filesystem = _filesystem_client().create(name)
     except Exception as e:
         raise SandboxError(f"{type(e).__name__}: {e}") from e
-    finally:
-        client.close()
-
-    return FileSystem.model_validate_json(result_json)
+    return FileSystem(
+        id=filesystem.name,
+        name=filesystem.name,
+        description=description,
+        status="ready",
+    )
 
 
 def list_file_systems() -> list[FileSystem]:
-    """List all registered file systems for the current project.
-
-    Uses the same environment-based Tensorlake auth as sandbox images, and
-    requires organization/project context (``TENSORLAKE_ORGANIZATION_ID`` and
-    ``TENSORLAKE_PROJECT_ID``).
+    """List Artifact Storage filesystems for the API key's project.
 
     Returns:
         The registered file systems as a list of :class:`FileSystem`.
@@ -104,26 +66,18 @@ def list_file_systems() -> list[FileSystem]:
         SandboxError: Credentials or project context are missing, or the
             request failed.
     """
-    ctx = _require_project_context()
-    client = _cloud_api_client(ctx)
     try:
-        result_json = client.list_file_systems(ctx.organization_id, ctx.project_id)
+        filesystems = _filesystem_client().list()
     except Exception as e:
         raise SandboxError(f"{type(e).__name__}: {e}") from e
-    finally:
-        client.close()
-
-    if not result_json:
-        return []
-    return [FileSystem.model_validate(item) for item in json.loads(result_json)]
+    return [
+        FileSystem(id=filesystem.name, name=filesystem.name, status=filesystem.status)
+        for filesystem in filesystems
+    ]
 
 
 def delete_file_system(file_system_id: str) -> None:
-    """Delete a registered file system by its id (e.g. ``file_system_...``).
-
-    Uses the same environment-based Tensorlake auth as sandbox images, and
-    requires organization/project context (``TENSORLAKE_ORGANIZATION_ID`` and
-    ``TENSORLAKE_PROJECT_ID``).
+    """Delete an Artifact Storage filesystem by name.
 
     Args:
         file_system_id: The registered file system's id.
@@ -136,11 +90,7 @@ def delete_file_system(file_system_id: str) -> None:
     if not isinstance(file_system_id, str) or not file_system_id:
         raise TypeError("file_system_id must be a non-empty string")
 
-    ctx = _require_project_context()
-    client = _cloud_api_client(ctx)
     try:
-        client.delete_file_system(ctx.organization_id, ctx.project_id, file_system_id)
+        _filesystem_client().delete(file_system_id)
     except Exception as e:
         raise SandboxError(f"{type(e).__name__}: {e}") from e
-    finally:
-        client.close()

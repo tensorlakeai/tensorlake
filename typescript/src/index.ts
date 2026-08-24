@@ -132,7 +132,6 @@ export type {
   RequestErrorInfo,
   RequestMetadata,
   RequestOutput,
-  ApiKeyIntrospection,
   NewSecret,
   Secret,
   SecretsPagination,

@@ -157,7 +157,10 @@ export class SandboxClient {
     );
   }
 
-  /** Create a client for the TensorLake cloud platform. */
+  /**
+   * Create an API-key client for TensorLake Cloud. Ingress selects the authorized
+   * organization/project; explicit scope options are forwarded only as compatibility headers.
+   */
   static forCloud(options?: {
     apiKey?: string;
     organizationId?: string;

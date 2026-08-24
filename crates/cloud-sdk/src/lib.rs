@@ -71,7 +71,6 @@ pub mod artifact_storage;
 pub mod cron;
 pub mod document_ai;
 pub mod error;
-pub mod file_systems;
 mod image_service_builds;
 pub mod images;
 pub mod sandbox_images;
@@ -82,7 +81,6 @@ use applications::*;
 use artifact_storage::*;
 use cron::*;
 use document_ai::*;
-use file_systems::*;
 use images::*;
 use sandbox_templates::*;
 use sandboxes::*;
@@ -311,15 +309,6 @@ impl Sdk {
     /// Platform API routes and does not need organization/project discovery.
     pub fn sandbox_templates_for_api_key(&self) -> SandboxTemplatesClient {
         SandboxTemplatesClient::new_api_key_scoped(self.client.clone())
-    }
-
-    /// Get a client for managing the project-scoped file-system registry.
-    pub fn file_systems(&self, organization_id: &str, project_id: &str) -> FileSystemsClient {
-        FileSystemsClient::new(
-            self.client.clone(),
-            organization_id.to_string(),
-            project_id.to_string(),
-        )
     }
 
     /// Get a client for managing sandbox lifecycle, pools, and snapshots.

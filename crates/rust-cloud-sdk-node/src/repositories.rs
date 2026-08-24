@@ -95,16 +95,19 @@ impl NativeRepositoryClient {
         Ok(Self { client, project_id })
     }
 
-    fn project_id(&self) -> napi::Result<&str> {
-        self.project_id
-            .as_deref()
-            .filter(|value| !value.is_empty())
-            .ok_or_else(|| usage_error("Repository operations require projectId".to_string()))
+    async fn project_id(&self) -> napi::Result<String> {
+        if let Some(project_id) = self.project_id.as_deref().filter(|value| !value.is_empty()) {
+            return Ok(project_id.to_string());
+        }
+        self.client
+            .resolve_authorized_project_id()
+            .await
+            .map_err(into_napi_error)
     }
 
     #[napi]
-    pub fn git_repo_url(&self, repo: String) -> napi::Result<String> {
-        Ok(self.client.git_repo_url(self.project_id()?, &repo))
+    pub async fn git_repo_url(&self, repo: String) -> napi::Result<String> {
+        Ok(self.client.git_repo_url(&self.project_id().await?, &repo))
     }
 
     #[napi]
@@ -113,7 +116,7 @@ impl NativeRepositoryClient {
         repo: String,
         default_branch: Option<String>,
     ) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -138,7 +141,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn list_repos(&self) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             async move {
@@ -153,7 +156,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn delete_repo(&self, repo: String) -> napi::Result<String> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -169,7 +172,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn fork_repo(&self, repo: String, base_repo: String) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -193,7 +196,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn archive_repo(&self, repo: String) -> napi::Result<String> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -209,7 +212,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn restore_repo(&self, repo: String) -> napi::Result<String> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -225,7 +228,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn repo_info(&self, repo: String) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -241,7 +244,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn list_branches(&self, repo: String) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -257,7 +260,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn list_refs(&self, repo: String) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -273,7 +276,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn delete_branch(&self, repo: String, branch: String) -> napi::Result<String> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -290,7 +293,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn list_operations(&self, repo: String) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -306,7 +309,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn git_credential(&self, repo: Option<String>) -> napi::Result<String> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -323,7 +326,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn commit_status(&self, repo: String, job_id: String) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -356,7 +359,7 @@ impl NativeRepositoryClient {
         message: String,
         expect_oid: Option<String>,
     ) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -403,7 +406,7 @@ impl NativeRepositoryClient {
         message: Option<String>,
         base: Option<String>,
     ) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -433,7 +436,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn commit_conflicts(&self, repo: String, commit: String) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let repo = repo.clone();
@@ -457,7 +460,7 @@ impl NativeRepositoryClient {
     /// pre-existing filesystem.
     #[napi]
     pub async fn create_filesystem(&self, name: String) -> napi::Result<String> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         let maybe_executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
@@ -538,7 +541,7 @@ impl NativeRepositoryClient {
         base: String,
         snapshot: Option<String>,
     ) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         let report = self
             .client
             .fork_filesystem(&project_id, &name, &base, snapshot.as_deref())
@@ -560,7 +563,7 @@ impl NativeRepositoryClient {
     /// List every filesystem in the project (all pages, cache-fenced).
     #[napi]
     pub async fn list_filesystems(&self) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             async move {
@@ -578,7 +581,7 @@ impl NativeRepositoryClient {
     /// Point-read one filesystem's identity (name, status, kind, default branch).
     #[napi]
     pub async fn filesystem_meta(&self, name: String) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
@@ -606,7 +609,7 @@ impl NativeRepositoryClient {
     /// Delete a filesystem. Returns the trace id.
     #[napi]
     pub async fn delete_filesystem(&self, name: String) -> napi::Result<String> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         let maybe_executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
@@ -663,7 +666,7 @@ impl NativeRepositoryClient {
                 "native filesystem status must target the main head".to_string(),
             ));
         }
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
@@ -690,7 +693,7 @@ impl NativeRepositoryClient {
         message: String,
         request_id: String,
     ) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         let report = self
             .client
             .retain_current_native_filesystem_snapshot(&project_id, &name, message, request_id)
@@ -704,7 +707,7 @@ impl NativeRepositoryClient {
 
     #[napi]
     pub async fn list_filesystem_snapshots(&self, name: String) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         let report = self
             .client
             .list_native_filesystem_snapshots(&project_id, &name)
@@ -722,7 +725,7 @@ impl NativeRepositoryClient {
         name: String,
         snapshot: String,
     ) -> napi::Result<String> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         self.client
             .delete_native_filesystem_snapshot(&project_id, &name, &snapshot)
             .await
@@ -761,7 +764,7 @@ impl NativeRepositoryClient {
                 ));
             }
         };
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
@@ -798,7 +801,7 @@ impl NativeRepositoryClient {
         dir_path: String,
         version: String,
     ) -> napi::Result<TracedJson> {
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
@@ -863,7 +866,7 @@ impl NativeRepositoryClient {
                 "native filesystem writes must target the main head".to_string(),
             ));
         }
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         let client = self.client.clone();
         let result: Result<TracedJson, SdkError> = async move {
             let operation_id =
@@ -927,7 +930,7 @@ impl NativeRepositoryClient {
                 "native filesystem writes must target the main head".to_string(),
             ));
         }
-        let project_id = self.project_id()?.to_string();
+        let project_id = self.project_id().await?;
         let operation_id =
             idempotency_key.unwrap_or_else(|| format!("sdk-{}", uuid::Uuid::new_v4()));
         let writes = files
