@@ -26,9 +26,6 @@ function parseArgs(args: readonly string[]): NativeFunctionAgentOptions {
     ...(values.has("secret-service-workload-url")
       ? { secretServiceWorkloadUrl: values.get("secret-service-workload-url") }
       : {}),
-    ...(values.has("secret-service-server-ca-base64")
-      ? { secretServiceServerCaBase64: values.get("secret-service-server-ca-base64") }
-      : {}),
     ...(values.has("credential-request-timeout-ms")
       ? { credentialRequestTimeoutMs: Number(values.get("credential-request-timeout-ms")) }
       : {}),

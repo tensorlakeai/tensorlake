@@ -12,7 +12,6 @@ export interface NativeFunctionAgentOptions {
   maxOutboxEvents?: number;
   shutdownTimeoutMs?: number;
   secretServiceWorkloadUrl?: string;
-  secretServiceServerCaBase64?: string;
   credentialRequestTimeoutMs?: number;
 }
 

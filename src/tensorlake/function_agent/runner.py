@@ -1286,7 +1286,6 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--agent-id")
     parser.add_argument("--incarnation")
     parser.add_argument("--secret-service-workload-url")
-    parser.add_argument("--secret-service-server-ca-base64")
     parser.add_argument("--credential-request-timeout-ms", type=int, default=10_000)
     return parser.parse_args()
 
@@ -1298,7 +1297,6 @@ async def _run(args: argparse.Namespace) -> None:
         agent_id=args.agent_id,
         incarnation=args.incarnation,
         secret_service_workload_url=args.secret_service_workload_url,
-        secret_service_server_ca_base64=args.secret_service_server_ca_base64,
         credential_request_timeout_ms=args.credential_request_timeout_ms,
     )
     protocol = ProtocolWriter(core, asyncio.get_running_loop())
