@@ -29,9 +29,10 @@ use models::{
     ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
     ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
     NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent,
-    SandboxCredentialPurpose, SandboxCredentialVersionPolicy, SandboxInfo, SandboxLogsResponse,
-    SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse,
-    SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
+    SandboxCredentialPurpose, SandboxCredentialSelector, SandboxCredentialVersionPolicy,
+    SandboxInfo, SandboxLogsResponse, SandboxPoolInfo, SandboxPoolRequest,
+    SandboxProcessLogFiltersResponse, SendSignalResponse, SignBlobRequest, SnapshotInfo,
+    SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 
 pub const DEFAULT_SANDBOX_PROXY_URL: &str = "https://sandbox.tensorlake.ai";
@@ -349,7 +350,9 @@ impl SandboxesClient {
         request: &CreateSandboxRequest,
     ) -> Result<Traced<CreateSandboxResponse>, SdkError> {
         validate_mount_snapshot_pins(&request.file_systems)?;
-        let request = self.resolve_credential_names(request).await?;
+        let mut request = request.clone();
+        self.resolve_credential_names(&mut request.credential_references)
+            .await?;
         let uri = self.endpoint("sandboxes");
         let req = self
             .client
@@ -361,11 +364,10 @@ impl SandboxesClient {
 
     async fn resolve_credential_names(
         &self,
-        request: &CreateSandboxRequest,
-    ) -> Result<CreateSandboxRequest, SdkError> {
-        let mut resolved_request = request.clone();
+        references: &mut [SandboxCredentialSelector],
+    ) -> Result<(), SdkError> {
         let mut targets = std::collections::HashSet::new();
-        for reference in &resolved_request.credential_references {
+        for reference in references.iter() {
             if reference.purpose != SandboxCredentialPurpose::GitHttps
                 || reference.target != "github.com"
                 || !targets.insert((reference.purpose.clone(), reference.target.clone()))
@@ -391,7 +393,7 @@ impl SandboxesClient {
             }
         }
 
-        for reference in &mut resolved_request.credential_references {
+        for reference in references {
             let Some(name) = reference.name.as_deref() else {
                 continue;
             };
@@ -410,7 +412,7 @@ impl SandboxesClient {
             reference.secret_id = Some(resolved.id);
             reference.name = None;
         }
-        Ok(resolved_request)
+        Ok(())
     }
 
     pub async fn claim(&self, pool_id: &str) -> Result<Traced<CreateSandboxResponse>, SdkError> {
@@ -421,21 +423,23 @@ impl SandboxesClient {
             .await
     }
 
-    /// Claim a sandbox from a pool and apply sandbox-specific file-system
-    /// mounts before the claimed sandbox becomes ready. Fails closed when the
-    /// server does not acknowledge claim-configuration support and requests
-    /// termination of the incorrectly configured sandbox returned by that
-    /// server.
+    /// Claim a sandbox from a pool and apply sandbox-specific file systems and
+    /// credentials before it becomes ready. Fails closed when the server does
+    /// not acknowledge claim-configuration support and requests termination of
+    /// the incorrectly configured sandbox returned by that server.
     pub async fn claim_with_request(
         &self,
         pool_id: &str,
         request: &ClaimSandboxRequest,
     ) -> Result<Traced<CreateSandboxResponse>, SdkError> {
         validate_mount_snapshot_pins(&request.file_systems)?;
+        let mut request = request.clone();
+        self.resolve_credential_names(&mut request.credential_references)
+            .await?;
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}/sandboxes"));
         let req = self
             .client
-            .build_post_json_request(Method::POST, &uri, request)?;
+            .build_post_json_request(Method::POST, &uri, &request)?;
         let response: Traced<ClaimSandboxResponse> = self
             .client
             .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])

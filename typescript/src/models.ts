@@ -145,6 +145,8 @@ export interface AttachFileSystemOptions {
 export interface ClaimSandboxOptions {
   /** File systems to mount before the claimed sandbox is reported as running. */
   fileSystems?: FileSystemMount[];
+  /** Protected GitHub credentials to bind before the claimed sandbox is reported as running. */
+  credentialReferences?: SandboxCredentialSelector[];
 }
 
 // --- Sandbox lifecycle ---
@@ -194,7 +196,7 @@ export interface CreateSandboxOptions {
   name?: string;
   /** File systems to mount on fresh creation or warm-pool claim, each at its own absolute, unique guest mount path. */
   fileSystems?: FileSystemMount[];
-  /** Protected GitHub credentials for fresh sandbox creation. Values never enter URLs or environment variables. */
+  /** Protected GitHub credentials for fresh creation or a warm-pool claim. Values never enter URLs or environment variables. */
   credentialReferences?: SandboxCredentialSelector[];
 }
 

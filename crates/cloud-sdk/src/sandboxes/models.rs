@@ -325,12 +325,16 @@ pub struct CreateSandboxRequest {
 
 /// Sandbox-specific state to apply while claiming a warm pool container.
 ///
-/// Pool templates stay storage-neutral; these mounts belong only to the
-/// sandbox created by the claim.
+/// Pool templates stay storage- and credential-neutral; this state belongs
+/// only to the sandbox created by the claim.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClaimSandboxRequest {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_systems: Vec<FileSystemMount>,
+    /// Protected credentials available through the claimed sandbox's guest
+    /// Git broker. Friendly names are resolved before this request is sent.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_references: Vec<SandboxCredentialSelector>,
 }
 
 /// Request body for detaching a file system from a running sandbox. The

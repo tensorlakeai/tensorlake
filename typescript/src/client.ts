@@ -25,6 +25,7 @@ import {
   type ListArchivedSandboxesOptions,
   type ListArchivedSandboxesResponse,
   type SandboxClientOptions,
+  type SandboxCredentialSelector,
   type SandboxInfo,
   type SandboxLogsResponse,
   type SandboxPortAccess,
@@ -88,6 +89,25 @@ function fileSystemMountToWire(fs: FileSystemMount): Record<string, unknown> {
     ...(fs.readOnly === true ? { read_only: true } : {}),
     ...(fs.prefetch === true ? { prefetch: true } : {}),
     ...(fs.snapshotId != null ? { snapshot_id: fs.snapshotId } : {}),
+  };
+}
+
+function sandboxCredentialSelectorToWire(
+  reference: SandboxCredentialSelector,
+): Record<string, unknown> {
+  return {
+    ...(reference.secretId != null
+      ? { secret_id: reference.secretId }
+      : { name: reference.name }),
+    purpose: reference.purpose ?? "git_https",
+    target: reference.target ?? "github.com",
+    version_policy:
+      reference.versionPolicy?.policy === "pinned"
+        ? {
+            policy: "pinned",
+            version_id: reference.versionPolicy.versionId,
+          }
+        : { policy: "active" },
   };
 }
 
@@ -278,20 +298,7 @@ export class SandboxClient {
       options.credentialReferences.length > 0
     ) {
       body.credential_references = options.credentialReferences.map(
-        (reference) => ({
-          ...(reference.secretId != null
-            ? { secret_id: reference.secretId }
-            : { name: reference.name }),
-          purpose: reference.purpose ?? "git_https",
-          target: reference.target ?? "github.com",
-          version_policy:
-            reference.versionPolicy?.policy === "pinned"
-              ? {
-                  policy: "pinned",
-                  version_id: reference.versionPolicy.versionId,
-                }
-              : { policy: "active" },
-        }),
+        sandboxCredentialSelectorToWire,
       );
     }
 
@@ -624,19 +631,27 @@ export class SandboxClient {
 
   /**
    * Claim a warm sandbox from a pool, creating one if no warm containers are
-   * available. Claim-specific file systems are ready before the sandbox is
-   * reported as running.
+   * available. Claim-specific file systems and credentials are ready before
+   * the sandbox is reported as running.
    */
   async claim(
     poolId: string,
     options?: ClaimSandboxOptions,
   ): Promise<Traced<CreateSandboxResponse>> {
+    const body: Record<string, unknown> = {};
+    if (options?.fileSystems != null && options.fileSystems.length > 0) {
+      body.file_systems = options.fileSystems.map(fileSystemMountToWire);
+    }
+    if (
+      options?.credentialReferences != null &&
+      options.credentialReferences.length > 0
+    ) {
+      body.credential_references = options.credentialReferences.map(
+        sandboxCredentialSelectorToWire,
+      );
+    }
     const requestJson =
-      options?.fileSystems != null && options.fileSystems.length > 0
-        ? JSON.stringify({
-            file_systems: options.fileSystems.map(fileSystemMountToWire),
-          })
-        : undefined;
+      Object.keys(body).length === 0 ? undefined : JSON.stringify(body);
     return this.tracedJson<CreateSandboxResponse>(
       () =>
         requestJson == null
@@ -894,15 +909,6 @@ export class SandboxClient {
       options?.startupTimeout ??
       this.requestTimeoutMs / 1000;
     const requestClient = this.withRequestTimeout(requestTimeout);
-    if (
-      options?.poolId != null &&
-      options.credentialReferences != null &&
-      options.credentialReferences.length > 0
-    ) {
-      throw new TypeError(
-        "credentialReferences are not supported for warm-pool claims",
-      );
-    }
     logSdkTimingEvent("sandbox.create", "start", {
       request_timeout_s: requestTimeout,
       image: options?.image,
@@ -916,6 +922,7 @@ export class SandboxClient {
       options?.poolId != null
         ? await requestClient.claim(options.poolId, {
             fileSystems: options.fileSystems,
+            credentialReferences: options.credentialReferences,
           })
         : await requestClient.create(options);
     logSdkTiming(

@@ -399,6 +399,7 @@ class ClaimSandboxRequest(BaseModel):
     """Sandbox-specific state applied while claiming from a warm pool."""
 
     file_systems: list[FileSystemMount] | None = None
+    credential_references: list[SandboxCredentialReference] | None = None
 
     model_config = {"populate_by_name": True}
 

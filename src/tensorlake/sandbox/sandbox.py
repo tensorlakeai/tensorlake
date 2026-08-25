@@ -403,8 +403,8 @@ class Sandbox:
             file_systems: File systems to mount into the sandbox
                 at boot or warm-pool claim, each at its own absolute, unique
                 guest mount path.
-            credential_references: Protected GitHub credentials for a freshly
-                created sandbox. Warm-pool claims do not support this field.
+            credential_references: Protected GitHub credentials to bind to the
+                created or warm-pool-claimed sandbox.
             api_key: Tensorlake API key (defaults to TENSORLAKE_API_KEY env var).
             api_url: API server URL (defaults to TENSORLAKE_API_URL env var).
             organization_id: Organization ID for multi-tenant access.

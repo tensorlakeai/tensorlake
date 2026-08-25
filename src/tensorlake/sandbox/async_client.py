@@ -295,12 +295,16 @@ class AsyncSandboxClient:
         pool_id: str,
         *,
         file_systems: list[FileSystemMount] | None = None,
+        credential_references: list[SandboxCredentialReference] | None = None,
     ) -> Traced[CreateSandboxResponse]:
         _validate_mount_snapshot_pins(file_systems)
         try:
             claim_kwargs: dict[str, str] = {"pool_id": pool_id}
-            if file_systems:
-                request = ClaimSandboxRequest(file_systems=file_systems)
+            if file_systems or credential_references:
+                request = ClaimSandboxRequest(
+                    file_systems=file_systems,
+                    credential_references=credential_references,
+                )
                 claim_kwargs["request_json"] = request.model_dump_json(
                     by_alias=True, exclude_none=True
                 )
@@ -1000,11 +1004,11 @@ class AsyncSandboxClient:
 
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
-            if credential_references:
-                raise ValueError(
-                    "credential_references are not supported for warm-pool claims"
-                )
-            result = await request_client.claim(pool_id, file_systems=file_systems)
+            result = await request_client.claim(
+                pool_id,
+                file_systems=file_systems,
+                credential_references=credential_references,
+            )
         else:
             result = await request_client.create(
                 image=image,

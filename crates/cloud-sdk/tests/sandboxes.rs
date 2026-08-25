@@ -189,25 +189,45 @@ async fn direct_empty_post_helper_sends_content_length_zero() {
 }
 
 #[tokio::test]
-async fn pool_claim_with_file_systems_sends_json_body() {
-    let listener = TcpListener::bind("127.0.0.1:0")
+async fn pool_claim_resolves_credentials_and_sends_claim_configuration() {
+    let lifecycle_listener = TcpListener::bind("127.0.0.1:0")
         .await
-        .expect("bind test listener");
-    let address = listener.local_addr().expect("listener address");
+        .expect("bind lifecycle listener");
+    let lifecycle_address = lifecycle_listener.local_addr().expect("lifecycle address");
+    let management_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind management listener");
+    let management_address = management_listener
+        .local_addr()
+        .expect("management address");
 
-    let server = tokio::spawn(async move {
-        let (mut socket, _) = listener.accept().await.expect("accept request");
+    let lifecycle_server = tokio::spawn(async move {
+        let (mut socket, _) = lifecycle_listener.accept().await.expect("accept request");
         let request = read_http_request(&mut socket).await;
         let body =
             r#"{"sandbox_id":"sbx-1","status":"running","claim_configuration_applied":true}"#;
         write_json_response(&mut socket, body).await;
         request
     });
+    let management_server = tokio::spawn(async move {
+        let (mut socket, _) = management_listener.accept().await.expect("accept lookup");
+        let request = read_http_request(&mut socket).await;
+        write_json_response(
+            &mut socket,
+            r#"{"id":"56fd06c4-7e53-45b4-99d4-4b177db5893f"}"#,
+        )
+        .await;
+        request
+    });
 
-    let client = ClientBuilder::new(&format!("http://{address}"))
+    let lifecycle_client = ClientBuilder::new(&format!("http://{lifecycle_address}"))
         .build()
-        .expect("build client");
-    let sandboxes = SandboxesClient::new(client, "default", false);
+        .expect("build lifecycle client");
+    let management_client = ClientBuilder::new(&format!("http://{management_address}"))
+        .build()
+        .expect("build management client");
+    let sandboxes =
+        SandboxesClient::new(lifecycle_client, "default", false).with_log_client(management_client);
     sandboxes
         .claim_with_request(
             "pool-1",
@@ -217,18 +237,32 @@ async fn pool_claim_with_file_systems_sends_json_body() {
                     mount_path: "/mnt/skills".to_string(),
                     ..Default::default()
                 }],
+                credential_references: vec![SandboxCredentialSelector {
+                    secret_id: None,
+                    name: Some("github app".to_string()),
+                    purpose: SandboxCredentialPurpose::GitHttps,
+                    target: "github.com".to_string(),
+                    version_policy: SandboxCredentialVersionPolicy::Active,
+                }],
             },
         )
         .await
-        .expect("claim sandbox with file systems");
+        .expect("claim sandbox with configuration");
 
-    let request = server.await.expect("server join");
+    let lookup_request = management_server.await.expect("management server");
+    assert!(
+        String::from_utf8_lossy(&lookup_request)
+            .starts_with("GET /v1/secret-names/github%20app HTTP/1.1\r\n")
+    );
+
+    let request = lifecycle_server.await.expect("lifecycle server");
     let request_text = String::from_utf8_lossy(&request);
     assert!(request_text.starts_with("POST /sandbox-pools/pool-1/sandboxes HTTP/1.1\r\n"));
     assert!(request_text.contains("\r\ncontent-type: application/json\r\n"));
     assert!(request.ends_with(
-        br#"{"file_systems":[{"file_system_id":"file_system_abc","mount_path":"/mnt/skills"}]}"#
+        br#"{"file_systems":[{"file_system_id":"file_system_abc","mount_path":"/mnt/skills"}],"credential_references":[{"secret_id":"56fd06c4-7e53-45b4-99d4-4b177db5893f","purpose":"git_https","target":"github.com","version_policy":{"policy":"active"}}]}"#
     ));
+    assert!(!request_text.contains("github app"));
 }
 
 #[tokio::test]
@@ -263,6 +297,7 @@ async fn pool_claim_with_file_systems_rejects_server_without_acknowledgment() {
                     mount_path: "/mnt/skills".to_string(),
                     ..Default::default()
                 }],
+                credential_references: Vec::new(),
             },
         )
         .await
