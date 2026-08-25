@@ -3,14 +3,100 @@ use tensorlake::{
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
         models::{
-            ClaimSandboxRequest, ContainerResourcesInfo, CreateSandboxPoolRequest, FileSystemMount,
-            NetworkConfig, NetworkPolicyUpdate, SandboxPoolRequest, UpdateSandboxPoolRequest,
+            ClaimSandboxRequest, ContainerResourcesInfo, CreateSandboxPoolRequest,
+            CreateSandboxRequest, CreateSandboxResources, FileSystemMount, NetworkConfig,
+            NetworkPolicyUpdate, SandboxCredentialPurpose, SandboxCredentialSelector,
+            SandboxCredentialVersionPolicy, SandboxPoolRequest, UpdateSandboxPoolRequest,
             UpdateSandboxRequest,
         },
     },
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+
+#[tokio::test]
+async fn sandbox_create_resolves_credential_names_before_sending_stable_ids() {
+    let management_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind management listener");
+    let management_address = management_listener
+        .local_addr()
+        .expect("management address");
+    let lifecycle_listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind lifecycle listener");
+    let lifecycle_address = lifecycle_listener.local_addr().expect("lifecycle address");
+
+    let management_server = tokio::spawn(async move {
+        let (mut socket, _) = management_listener.accept().await.expect("accept lookup");
+        let request = read_http_request(&mut socket).await;
+        write_json_response(
+            &mut socket,
+            r#"{"id":"56fd06c4-7e53-45b4-99d4-4b177db5893f"}"#,
+        )
+        .await;
+        request
+    });
+    let lifecycle_server = tokio::spawn(async move {
+        let (mut socket, _) = lifecycle_listener.accept().await.expect("accept create");
+        let request = read_http_request(&mut socket).await;
+        write_json_response(&mut socket, r#"{"sandbox_id":"sbx-1","status":"pending"}"#).await;
+        request
+    });
+
+    let lifecycle_client = ClientBuilder::new(&format!("http://{lifecycle_address}"))
+        .bearer_token("tl_apiKey_test")
+        .build()
+        .expect("build lifecycle client");
+    let management_client = ClientBuilder::new(&format!("http://{management_address}"))
+        .bearer_token("tl_apiKey_test")
+        .build()
+        .expect("build management client");
+    let sandboxes =
+        SandboxesClient::new(lifecycle_client, "default", false).with_log_client(management_client);
+    sandboxes
+        .create(&CreateSandboxRequest {
+            image: None,
+            resources: CreateSandboxResources {
+                cpus: 1.0,
+                memory_mb: 1024,
+                disk_mb: None,
+                gpu_configs: None,
+            },
+            timeout_secs: None,
+            entrypoint: None,
+            network: None,
+            snapshot_id: None,
+            name: None,
+            file_systems: Vec::new(),
+            credential_references: vec![SandboxCredentialSelector {
+                secret_id: None,
+                name: Some("github app".to_string()),
+                purpose: SandboxCredentialPurpose::GitHttps,
+                target: "github.com".to_string(),
+                version_policy: SandboxCredentialVersionPolicy::Active,
+            }],
+        })
+        .await
+        .expect("create sandbox");
+
+    let lookup_request = management_server.await.expect("management server");
+    let lookup = String::from_utf8_lossy(&lookup_request);
+    assert!(lookup.starts_with("GET /v1/secret-names/github%20app HTTP/1.1\r\n"));
+    assert!(
+        lookup
+            .to_lowercase()
+            .contains("authorization: bearer tl_apikey_test")
+    );
+
+    let create = lifecycle_server.await.expect("lifecycle server");
+    let body = String::from_utf8_lossy(&create);
+    assert!(create.ends_with(
+        br#""credential_references":[{"secret_id":"56fd06c4-7e53-45b4-99d4-4b177db5893f","purpose":"git_https","target":"github.com","version_policy":{"policy":"active"}}]}"#
+    ));
+    assert!(!body.contains("github app"));
+    assert!(!body.contains("\"name\""));
+}
 
 #[tokio::test]
 async fn sandbox_proxy_raw_and_empty_posts_send_content_length_and_routing_headers() {

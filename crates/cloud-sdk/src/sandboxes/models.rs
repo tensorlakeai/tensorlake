@@ -233,6 +233,38 @@ fn default_allow_internet_access() -> bool {
     true
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SandboxCredentialPurpose {
+    GitHttps,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "policy")]
+pub enum SandboxCredentialVersionPolicy {
+    #[default]
+    Active,
+    Pinned {
+        version_id: uuid::Uuid,
+    },
+}
+
+/// Client-facing sandbox credential selector. A friendly `name` is resolved
+/// through the authenticated Secret Service management API immediately before
+/// sandbox creation; only `secret_id` is sent to Sandbox Engine.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxCredentialSelector {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub secret_id: Option<uuid::Uuid>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    pub purpose: SandboxCredentialPurpose,
+    pub target: String,
+    #[serde(default)]
+    pub version_policy: SandboxCredentialVersionPolicy,
+}
+
 /// One file system mounted into a sandbox at an absolute guest path.
 ///
 /// `file_system_id` is the Artifact Storage file-system name created with
@@ -285,6 +317,10 @@ pub struct CreateSandboxRequest {
     /// absolute, unique guest mount path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_systems: Vec<FileSystemMount>,
+    /// Protected credentials available through the guest Git broker. Friendly
+    /// names are a client-only convenience and never cross the sandbox API.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub credential_references: Vec<SandboxCredentialSelector>,
 }
 
 /// Sandbox-specific state to apply while claiming a warm pool container.

@@ -6,6 +6,7 @@ use futures::{StreamExt, TryStreamExt};
 use reqwest::Method;
 use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
+use serde::Deserialize;
 use serde_json::Value;
 use std::path::Path;
 use tokio::fs::File;
@@ -27,10 +28,10 @@ use models::{
     DetachFileSystemRequest, FileSystemMount, GetSandboxLogsRequest, HealthResponse,
     ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
     ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
-    NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo,
-    SandboxLogsResponse, SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse,
-    SendSignalResponse, SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxPoolRequest,
-    UpdateSandboxRequest,
+    NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent,
+    SandboxCredentialPurpose, SandboxCredentialVersionPolicy, SandboxInfo, SandboxLogsResponse,
+    SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse,
+    SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 
 pub const DEFAULT_SANDBOX_PROXY_URL: &str = "https://sandbox.tensorlake.ai";
@@ -46,6 +47,11 @@ struct ClaimSandboxResponse {
     sandbox: CreateSandboxResponse,
     #[serde(default)]
     claim_configuration_applied: Option<bool>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ResolvedSecretName {
+    id: uuid::Uuid,
 }
 
 /// Client-side mirror of the server's HTTP 400 for invalid snapshot pins:
@@ -315,7 +321,8 @@ impl SandboxesClient {
         }
     }
 
-    /// Use a separate client/base URL for log-reader endpoints.
+    /// Use a separate Platform API client/base URL for log-reader endpoints
+    /// and Secret Service name resolution.
     pub fn with_log_client(mut self, log_client: Client) -> Self {
         self.log_client = log_client;
         self
@@ -342,13 +349,68 @@ impl SandboxesClient {
         request: &CreateSandboxRequest,
     ) -> Result<Traced<CreateSandboxResponse>, SdkError> {
         validate_mount_snapshot_pins(&request.file_systems)?;
+        let request = self.resolve_credential_names(request).await?;
         let uri = self.endpoint("sandboxes");
         let req = self
             .client
-            .build_post_json_request(Method::POST, &uri, request)?;
+            .build_post_json_request(Method::POST, &uri, &request)?;
         self.client
             .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
             .await
+    }
+
+    async fn resolve_credential_names(
+        &self,
+        request: &CreateSandboxRequest,
+    ) -> Result<CreateSandboxRequest, SdkError> {
+        let mut resolved_request = request.clone();
+        let mut targets = std::collections::HashSet::new();
+        for reference in &resolved_request.credential_references {
+            if reference.purpose != SandboxCredentialPurpose::GitHttps
+                || reference.target != "github.com"
+                || !targets.insert((reference.purpose.clone(), reference.target.clone()))
+                || matches!(
+                    &reference.version_policy,
+                    SandboxCredentialVersionPolicy::Pinned { version_id } if version_id.is_nil()
+                )
+            {
+                return Err(SdkError::ClientError(
+                    "sandbox credential reference is invalid or duplicated".to_string(),
+                ));
+            }
+
+            match (&reference.secret_id, &reference.name) {
+                (Some(secret_id), None) if !secret_id.is_nil() => {}
+                (None, Some(name)) if !name.is_empty() && name.trim() == name => {}
+                _ => {
+                    return Err(SdkError::ClientError(
+                        "exactly one non-empty sandbox credential name or secret_id is required"
+                            .to_string(),
+                    ));
+                }
+            }
+        }
+
+        for reference in &mut resolved_request.credential_references {
+            let Some(name) = reference.name.as_deref() else {
+                continue;
+            };
+            let endpoint = if self.use_namespaced_endpoints {
+                format!(
+                    "/v1/namespaces/{}/secret-names/{}",
+                    urlencoding::encode(&self.namespace),
+                    urlencoding::encode(name),
+                )
+            } else {
+                format!("/v1/secret-names/{}", urlencoding::encode(name))
+            };
+            let request = self.log_client.request(Method::GET, &endpoint).build()?;
+            let resolved: Traced<ResolvedSecretName> =
+                self.log_client.execute_json(request).await?;
+            reference.secret_id = Some(resolved.id);
+            reference.name = None;
+        }
+        Ok(resolved_request)
     }
 
     pub async fn claim(&self, pool_id: &str) -> Result<Traced<CreateSandboxResponse>, SdkError> {

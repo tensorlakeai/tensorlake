@@ -13,7 +13,7 @@ from tensorlake.sandbox.models import (
 
 
 class TestSandboxCredentialModels(unittest.TestCase):
-    def test_serializes_name_selector_without_value_or_grant(self) -> None:
+    def test_serializes_client_side_name_selector_without_value_or_grant(self) -> None:
         request = CreateSandboxRequest(
             resources=CreateSandboxResources(cpus=1.0, memory_mb=1024),
             credential_references=[SandboxCredentialReference(name="github-app")],

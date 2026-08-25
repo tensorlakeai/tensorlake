@@ -600,6 +600,7 @@ where
             snapshot_id: None,
             name: None,
             file_systems: Vec::new(),
+            credential_references: Vec::new(),
         })
         .await?;
     let sandbox_id = created.sandbox_id.clone();

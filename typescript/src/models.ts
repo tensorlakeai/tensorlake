@@ -153,7 +153,7 @@ export type SandboxCredentialVersionPolicy =
   | { policy: "active" }
   | { policy: "pinned"; versionId: string };
 
-/** A GitHub App credential selector resolved once when the sandbox is created. */
+/** A GitHub App credential selector whose name the SDK resolves before sandbox creation. */
 export type SandboxCredentialSelector = (
   | { secretId: string; name?: never }
   | { name: string; secretId?: never }

@@ -107,8 +107,9 @@ class SandboxCredentialVersionPolicy(BaseModel):
 class SandboxCredentialReference(BaseModel):
     """A protected GitHub credential bound to a sandbox.
 
-    Supply exactly one of ``name`` (resolved once by the service) or the
-    stable ``secret_id``. Metadata responses contain only ``secret_id``.
+    Supply exactly one of ``name`` (resolved once by the SDK immediately
+    before creation) or the stable ``secret_id``. Sandbox Engine receives and
+    metadata responses contain only ``secret_id``.
     """
 
     secret_id: UUID | None = None

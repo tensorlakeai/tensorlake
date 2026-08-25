@@ -493,7 +493,8 @@ class SandboxClient:
             file_systems: File systems to mount into the sandbox
                 at boot, each at its own absolute, unique guest mount path.
             credential_references: Protected GitHub credentials to bind by
-                name or stable secret ID. Values are never put in URLs or env.
+                name or stable secret ID. The SDK resolves names before the
+                create request. Values are never put in URLs or env.
 
         Returns:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
