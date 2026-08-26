@@ -823,6 +823,35 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("sends claim-specific credential references", async () => {
+      const claimSandbox = vi.fn(async () => ({
+        traceId: "t",
+        json: JSON.stringify({ sandbox_id: "sbx-git", status: "running" }),
+      }));
+      installNativeStub({ client: { claimSandbox } });
+
+      const client = SandboxClient.forLocalhost();
+      const result = await client.claim("pool-1", {
+        credentialReferences: [{ name: "github-app" }],
+      });
+
+      expect(result.sandboxId).toBe("sbx-git");
+      expect(claimSandbox).toHaveBeenCalledWith(
+        "pool-1",
+        JSON.stringify({
+          credential_references: [
+            {
+              name: "github-app",
+              purpose: "git_https",
+              target: "github.com",
+              version_policy: { policy: "active" },
+            },
+          ],
+        }),
+      );
+      client.close();
+    });
+
     it("includes claim mount modes only when true", async () => {
       const claimSandbox = vi.fn(async () => ({
         traceId: "t",
@@ -1006,7 +1035,7 @@ describe("SandboxClient", () => {
   });
 
   describe("createAndConnect", () => {
-    it("threads file systems through a warm-pool claim", async () => {
+    it("threads file systems and credentials through a warm-pool claim", async () => {
       const claimSandbox = vi.fn(async () => ({
         traceId: "t",
         json: JSON.stringify({
@@ -1023,11 +1052,27 @@ describe("SandboxClient", () => {
         fileSystems: [
           { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
         ],
+        credentialReferences: [{ name: "github-app" }],
       });
 
       expect(claimSandbox).toHaveBeenCalledWith(
         "pool-1",
-        expect.stringContaining('"file_system_id":"file_system_abc"'),
+        JSON.stringify({
+          file_systems: [
+            {
+              file_system_id: "file_system_abc",
+              mount_path: "/mnt/skills",
+            },
+          ],
+          credential_references: [
+            {
+              name: "github-app",
+              purpose: "git_https",
+              target: "github.com",
+              version_policy: { policy: "active" },
+            },
+          ],
+        }),
       );
       sandbox.close();
       client.close();

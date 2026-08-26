@@ -548,6 +548,7 @@ class SandboxClient:
         pool_id: str,
         *,
         file_systems: list[FileSystemMount] | None = None,
+        credential_references: list[SandboxCredentialReference] | None = None,
     ) -> Traced[CreateSandboxResponse]:
         """Claim a sandbox from a pool.
 
@@ -558,6 +559,8 @@ class SandboxClient:
             pool_id: ID of the pool to claim from
             file_systems: File systems to mount into the claimed sandbox.
                 The sandbox becomes ready only after these mounts converge.
+            credential_references: Protected GitHub credentials to bind to the
+                claimed sandbox.
 
         Returns:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
@@ -571,8 +574,11 @@ class SandboxClient:
         _validate_mount_snapshot_pins(file_systems)
         try:
             claim_kwargs: dict[str, str] = {"pool_id": pool_id}
-            if file_systems:
-                request = ClaimSandboxRequest(file_systems=file_systems)
+            if file_systems or credential_references:
+                request = ClaimSandboxRequest(
+                    file_systems=file_systems,
+                    credential_references=credential_references,
+                )
                 claim_kwargs["request_json"] = request.model_dump_json(
                     by_alias=True, exclude_none=True
                 )
@@ -1614,8 +1620,8 @@ class SandboxClient:
             file_systems: File systems to mount into the sandbox
                 at boot or warm-pool claim, each at its own absolute, unique
                 guest mount path.
-            credential_references: Protected GitHub credentials for a freshly
-                created sandbox. Warm-pool claims do not support this field.
+            credential_references: Protected GitHub credentials to bind to the
+                created or claimed sandbox.
 
         Returns:
             Connected Sandbox instance (auto-terminates in context manager)
@@ -1639,11 +1645,11 @@ class SandboxClient:
         # may fall back to the requested name when caching info locally.
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
-            if credential_references:
-                raise ValueError(
-                    "credential_references are not supported for warm-pool claims"
-                )
-            result = request_client.claim(pool_id, file_systems=file_systems)
+            result = request_client.claim(
+                pool_id,
+                file_systems=file_systems,
+                credential_references=credential_references,
+            )
         else:
             result = request_client.create(
                 image=image,

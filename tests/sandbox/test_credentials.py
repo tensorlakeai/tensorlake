@@ -1,15 +1,66 @@
 import json
 import unittest
+from unittest.mock import patch
 from uuid import UUID
 
 from pydantic import ValidationError
 
+from tensorlake.sandbox.async_client import AsyncSandboxClient
+from tensorlake.sandbox.client import SandboxClient
 from tensorlake.sandbox.models import (
+    ClaimSandboxRequest,
     CreateSandboxRequest,
     CreateSandboxResources,
     SandboxCredentialReference,
     SandboxCredentialVersionPolicy,
 )
+
+
+class _FakeRustClient:
+    def __init__(self) -> None:
+        self.claim_calls: list[dict[str, str]] = []
+
+    def close(self) -> None:
+        pass
+
+    def claim_sandbox(self, **kwargs: str) -> tuple[str, str]:
+        self.claim_calls.append(kwargs)
+        return "trace-claim", '{"sandbox_id":"sbx-1","status":"pending"}'
+
+
+class _FakeAsyncRustClient:
+    def __init__(self) -> None:
+        self.claim_calls: list[dict[str, str]] = []
+
+    def close(self) -> None:
+        pass
+
+    async def claim_sandbox_async(self, **kwargs: str) -> tuple[str, str]:
+        self.claim_calls.append(kwargs)
+        return "trace-claim", '{"sandbox_id":"sbx-1","status":"pending"}'
+
+
+def _sync_client(fake: _FakeRustClient) -> SandboxClient:
+    with (
+        patch("tensorlake.sandbox.client._RUST_SANDBOX_CLIENT_AVAILABLE", True),
+        patch("tensorlake.sandbox.client.RustCloudSandboxClient", return_value=fake),
+    ):
+        return SandboxClient(
+            api_url="http://localhost:8900", api_key="key", _internal=True
+        )
+
+
+def _async_client(fake: _FakeAsyncRustClient) -> AsyncSandboxClient:
+    with (
+        patch("tensorlake.sandbox.async_client._RUST_SANDBOX_CLIENT_AVAILABLE", True),
+        patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+            return_value=fake,
+        ),
+    ):
+        return AsyncSandboxClient(
+            api_url="http://localhost:8900", api_key="key", _internal=True
+        )
 
 
 class TestSandboxCredentialModels(unittest.TestCase):
@@ -44,6 +95,37 @@ class TestSandboxCredentialModels(unittest.TestCase):
         )
         self.assertIsNone(reference.name)
 
+    def test_serializes_pool_claim_credential_reference(self) -> None:
+        request = ClaimSandboxRequest(
+            credential_references=[SandboxCredentialReference(name="github-app")]
+        )
+        self.assertEqual(
+            json.loads(request.model_dump_json(exclude_none=True)),
+            {
+                "credential_references": [
+                    {
+                        "name": "github-app",
+                        "purpose": "git_https",
+                        "target": "github.com",
+                        "version_policy": {"policy": "active"},
+                    }
+                ]
+            },
+        )
+
+    def test_sync_claim_sends_credential_reference(self) -> None:
+        fake = _FakeRustClient()
+        client = _sync_client(fake)
+
+        client.claim(
+            "pool-1",
+            credential_references=[SandboxCredentialReference(name="github-app")],
+        )
+
+        self.assertEqual(fake.claim_calls[0]["pool_id"], "pool-1")
+        payload = json.loads(fake.claim_calls[0]["request_json"])
+        self.assertEqual(payload["credential_references"][0]["name"], "github-app")
+
     def test_rejects_ambiguous_selector_and_invalid_version_policy(self) -> None:
         with self.assertRaises(ValidationError):
             SandboxCredentialReference()
@@ -54,6 +136,21 @@ class TestSandboxCredentialModels(unittest.TestCase):
             )
         with self.assertRaises(ValidationError):
             SandboxCredentialVersionPolicy(policy="pinned")
+
+
+class TestAsyncSandboxCredentialClaims(unittest.IsolatedAsyncioTestCase):
+    async def test_async_claim_sends_credential_reference(self) -> None:
+        fake = _FakeAsyncRustClient()
+        client = _async_client(fake)
+
+        await client.claim(
+            "pool-1",
+            credential_references=[SandboxCredentialReference(name="github-app")],
+        )
+
+        self.assertEqual(fake.claim_calls[0]["pool_id"], "pool-1")
+        payload = json.loads(fake.claim_calls[0]["request_json"])
+        self.assertEqual(payload["credential_references"][0]["name"], "github-app")
 
 
 if __name__ == "__main__":

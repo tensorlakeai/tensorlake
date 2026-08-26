@@ -135,7 +135,11 @@ with client.create_and_connect(snapshot_id=snapshot.snapshot_id) as sandbox:
 Pre-warm containers for fast startup:
 
 ```python
-from tensorlake.sandbox import FileSystemMount, NetworkConfig
+from tensorlake.sandbox import (
+    FileSystemMount,
+    NetworkConfig,
+    SandboxCredentialReference,
+)
 
 # Create a pool with warm containers and no internet access
 pool = client.create_pool(
@@ -153,6 +157,9 @@ resp = client.claim(
             file_system_id="file_system_abc",
             mount_path="/mnt/skills",
         )
+    ],
+    credential_references=[
+        SandboxCredentialReference(name="github-app"),
     ],
 )
 sandbox = client.connect(resp.sandbox_id)
