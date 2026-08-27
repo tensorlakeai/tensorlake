@@ -863,6 +863,7 @@ pub async fn push(
     branch: &str,
     message: &str,
     expect_oid: Option<String>,
+    create: bool,
     output_json: bool,
 ) -> Result<()> {
     use tensorlake::artifact_storage::ingest::PushOptions;
@@ -874,6 +875,48 @@ pub async fn push(
         .git_credential_for_repo(&project_id, repo)
         .await
         .map_err(map_sdk_error)?;
+
+    // The server creates repos lazily on ingest, which turns an argument mixup into data
+    // silently landing in a phantom repo (`tl git push main` created and pushed to a repo
+    // named "main" in prod, 2026-08-27 — tensorlakeai/tensorlake#931). Gate on existence:
+    // pushing to a missing repo is an error unless --create says otherwise.
+    let exists = match client
+        .repo_meta_with_credential(
+            &project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+        )
+        .await
+    {
+        Ok(_) => true,
+        Err(tensorlake::error::SdkError::ServerError { status, .. })
+            if status == reqwest::StatusCode::NOT_FOUND =>
+        {
+            false
+        }
+        Err(err) => return Err(map_sdk_error(err)),
+    };
+    if !exists {
+        if !create {
+            return Err(CliError::usage(format!(
+                "repo '{repo}' does not exist in this project.\n\
+                 note: the first argument of `tl git push` is the REPO, not the branch \
+                 (`tl git push <repo> <branch>`).\n\
+                 To create '{repo}' and push in one step, re-run with --create, or create it \
+                 first with `tl git repo create {repo}`."
+            )));
+        }
+        client
+            .create_repo(&project_id, repo, Some(branch))
+            .await
+            .map_err(map_sdk_error)?;
+        println!(
+            "{} repo {} (did not exist)",
+            console::style("created").yellow().bold(),
+            console::style(repo).cyan()
+        );
+    }
 
     let bar = indicatif::ProgressBar::new_spinner();
     bar.enable_steady_tick(std::time::Duration::from_millis(120));

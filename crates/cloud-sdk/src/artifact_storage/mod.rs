@@ -1750,6 +1750,7 @@ impl ArtifactStorageClient {
         git_username: &str,
         git_token: &str,
     ) -> Result<(reqwest::RequestBuilder, String), SdkError> {
+        validate_repo_name(repo)?;
         let base = format!(
             "{}/project/{}/repos/{}",
             self.git_base_url,
@@ -2329,6 +2330,55 @@ fn trim_base_url(url: String) -> String {
 
 fn encode_path_segment(segment: &str) -> String {
     urlencoding::encode(segment).into_owned()
+}
+
+/// Client-side guard for the `{repo}` path segment, applied before any repo-addressed URL is
+/// built. An empty or path-shaped name must fail HERE, not on the wire: an empty segment
+/// collapses (`/repos//ingest/sessions` routes as `/repos/ingest/sessions`), which
+/// mis-addresses the request instead of erroring — observed live on 2026-08-27, when a push
+/// with an empty repo name reached the server addressed to a repo named "ingest"
+/// (tensorlakeai/tensorlake#931). Everything else (charset policy, collisions) stays the
+/// server's call; this rejects only names that cannot survive the URL round trip.
+fn validate_repo_name(repo: &str) -> Result<(), SdkError> {
+    if repo.is_empty() {
+        return Err(SdkError::ClientError(
+            "repository name is empty (the first argument of `tl git push` is the repo, \
+             not the branch)"
+                .to_string(),
+        ));
+    }
+    if repo.len() > 512 {
+        return Err(SdkError::ClientError(format!(
+            "repository name is {} bytes; the limit is 512",
+            repo.len()
+        )));
+    }
+    if repo
+        .chars()
+        .any(|c| c == '/' || c == '\\' || c.is_whitespace() || c.is_control())
+    {
+        return Err(SdkError::ClientError(format!(
+            "repository name {repo:?} contains a path separator, whitespace, or control \
+             character"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod repo_name_tests {
+    use super::*;
+
+    #[test]
+    fn repo_name_guard_rejects_unroutable_names_only() {
+        assert!(validate_repo_name("linux-local1").is_ok());
+        assert!(validate_repo_name("Repo.Name_01").is_ok());
+        assert!(validate_repo_name("").is_err());
+        assert!(validate_repo_name("a/b").is_err());
+        assert!(validate_repo_name("a b").is_err());
+        assert!(validate_repo_name("a\nb").is_err());
+        assert!(validate_repo_name(&"x".repeat(513)).is_err());
+    }
 }
 
 fn git_credential_is_fresh(credential: &GitCredential) -> bool {
