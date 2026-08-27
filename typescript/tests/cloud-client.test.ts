@@ -542,7 +542,7 @@ describe("CloudClient", () => {
     client.close();
   });
 
-  it("uses API-key-scoped secrets routes when scope is omitted", async () => {
+  it("uses the configured namespace for API-key-scoped secrets", async () => {
     const requested: Array<{ url: string; method: string | undefined }> = [];
     mockFetch((url, init) => {
       requested.push({ url, method: init?.method });
@@ -574,6 +574,7 @@ describe("CloudClient", () => {
     const client = new CloudClient({
       apiUrl: "http://localhost:8900",
       apiKey: "tl_apiKey_test",
+      namespace: "customer namespace",
     });
     await client.listSecrets({ pageSize: 25 });
     await client.upsertSecrets({ name: "TOKEN", value: "value" });
@@ -581,15 +582,15 @@ describe("CloudClient", () => {
 
     expect(requested).toEqual([
       {
-        url: "http://localhost:8900/v1/secrets",
+        url: "http://localhost:8900/v1/namespaces/customer%20namespace/secrets",
         method: "GET",
       },
       {
-        url: "http://localhost:8900/v1/secrets",
+        url: "http://localhost:8900/v1/namespaces/customer%20namespace/secrets",
         method: "POST",
       },
       {
-        url: "http://localhost:8900/v1/secrets/secret%2F1",
+        url: "http://localhost:8900/v1/namespaces/customer%20namespace/secrets/secret%2F1",
         method: "DELETE",
       },
     ]);
@@ -623,7 +624,10 @@ describe("CloudClient", () => {
       );
     });
 
-    const client = new CloudClient({ apiUrl: "http://localhost:8900" });
+    const client = new CloudClient({
+      apiUrl: "http://localhost:8900",
+      namespace: "customer",
+    });
     const secret = await client.upsertSecrets(
       { name: "TOKEN", value: "rotated" },
       { organizationId: "org", projectId: "project" },
@@ -632,15 +636,15 @@ describe("CloudClient", () => {
     expect(secret).toMatchObject({ id: "secret/1", name: "TOKEN" });
     expect(requested).toEqual([
       {
-        url: "http://localhost:8900/v1/namespaces/project/secrets",
+        url: "http://localhost:8900/v1/namespaces/customer/secrets",
         method: "POST",
       },
       {
-        url: "http://localhost:8900/v1/namespaces/project/secret-names/TOKEN",
+        url: "http://localhost:8900/v1/namespaces/customer/secret-names/TOKEN",
         method: "GET",
       },
       {
-        url: "http://localhost:8900/v1/namespaces/project/secrets/secret%2F1/versions",
+        url: "http://localhost:8900/v1/namespaces/customer/secrets/secret%2F1/versions",
         method: "POST",
       },
     ]);

@@ -1175,18 +1175,18 @@ impl CloudApiClient {
         project_id: Option<String>,
         page_size: i32,
     ) -> PyResult<String> {
-        let path = match (organization_id, project_id) {
-            (Some(_), Some(project_id)) => format!(
-                "/v1/namespaces/{}/secrets",
-                urlencoding::encode(&project_id)
-            ),
-            (None, None) => "/v1/secrets".to_string(),
+        match (organization_id, project_id) {
+            (Some(_), Some(_)) | (None, None) => {}
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "organization_id and project_id must be provided together",
                 ));
             }
-        };
+        }
+        let path = format!(
+            "/v1/namespaces/{}/secrets",
+            urlencoding::encode(&self.namespace)
+        );
         self.run_with_retry(5, move |client| {
             let path = path.clone();
             async move {

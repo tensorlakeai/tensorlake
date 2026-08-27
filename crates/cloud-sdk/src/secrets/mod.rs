@@ -15,6 +15,8 @@ use crate::{
 
 use models::*;
 
+const DEFAULT_SECRET_NAMESPACE: &str = "default";
+
 #[derive(Clone)]
 pub struct SecretsClient {
     client: Client,
@@ -65,22 +67,43 @@ impl SecretsClient {
 
     /// Create new secrets or rotate existing secrets in a namespace.
     /// `organization_id` remains in the request type for source compatibility;
-    /// Secret Service isolation is keyed exclusively by the project public ID.
+    /// ingress derives project isolation from authenticated scope. Existing
+    /// callers use the default namespace; namespace-aware callers should use
+    /// `upsert_in_namespace`.
     pub async fn upsert(
         &self,
         request: UpsertSecretRequest,
     ) -> Result<Traced<UpsertSecretResponse>, SdkError> {
-        let path = namespace_secrets_path(&request.project_id);
+        self.upsert_in_namespace(request, DEFAULT_SECRET_NAMESPACE)
+            .await
+    }
+
+    pub async fn upsert_in_namespace(
+        &self,
+        request: UpsertSecretRequest,
+        namespace: &str,
+    ) -> Result<Traced<UpsertSecretResponse>, SdkError> {
+        let path = namespace_secrets_path(namespace);
         self.upsert_at(&path, request.secrets).await
     }
 
-    /// Upsert in the project bound to the authenticated API key. Ingress
-    /// derives the namespace from verified authentication context.
+    /// Upsert in the default namespace of the project bound to the API key.
+    /// Ingress derives project isolation from verified authentication context.
     pub async fn upsert_api_key_scoped(
         &self,
         secrets: UpsertSecret,
     ) -> Result<Traced<UpsertSecretResponse>, SdkError> {
-        self.upsert_at("/v1/secrets", secrets).await
+        self.upsert_api_key_scoped_in_namespace(DEFAULT_SECRET_NAMESPACE, secrets)
+            .await
+    }
+
+    pub async fn upsert_api_key_scoped_in_namespace(
+        &self,
+        namespace: &str,
+        secrets: UpsertSecret,
+    ) -> Result<Traced<UpsertSecretResponse>, SdkError> {
+        self.upsert_at(&namespace_secrets_path(namespace), secrets)
+            .await
     }
 
     async fn upsert_at(
@@ -166,18 +189,34 @@ impl SecretsClient {
         &self,
         request: &models::ListSecretsRequest,
     ) -> Result<Traced<SecretsList>, SdkError> {
-        self.list_at(
-            &namespace_secrets_path(&request.project_id),
-            request.page_size,
-        )
-        .await
+        self.list_in_namespace(request, DEFAULT_SECRET_NAMESPACE)
+            .await
+    }
+
+    pub async fn list_in_namespace(
+        &self,
+        request: &models::ListSecretsRequest,
+        namespace: &str,
+    ) -> Result<Traced<SecretsList>, SdkError> {
+        self.list_at(&namespace_secrets_path(namespace), request.page_size)
+            .await
     }
 
     pub async fn list_api_key_scoped(
         &self,
         page_size: Option<i32>,
     ) -> Result<Traced<SecretsList>, SdkError> {
-        self.list_at("/v1/secrets", page_size).await
+        self.list_api_key_scoped_in_namespace(DEFAULT_SECRET_NAMESPACE, page_size)
+            .await
+    }
+
+    pub async fn list_api_key_scoped_in_namespace(
+        &self,
+        namespace: &str,
+        page_size: Option<i32>,
+    ) -> Result<Traced<SecretsList>, SdkError> {
+        self.list_at(&namespace_secrets_path(namespace), page_size)
+            .await
     }
 
     async fn list_at(
@@ -205,17 +244,39 @@ impl SecretsClient {
         &self,
         request: &models::GetSecretRequest,
     ) -> Result<Traced<Secret>, SdkError> {
+        self.get_in_namespace(request, DEFAULT_SECRET_NAMESPACE)
+            .await
+    }
+
+    pub async fn get_in_namespace(
+        &self,
+        request: &models::GetSecretRequest,
+        namespace: &str,
+    ) -> Result<Traced<Secret>, SdkError> {
         self.get_at(&format!(
             "{}/{}",
-            namespace_secrets_path(&request.project_id),
+            namespace_secrets_path(namespace),
             urlencoding::encode(&request.secret_id)
         ))
         .await
     }
 
     pub async fn get_api_key_scoped(&self, secret_id: &str) -> Result<Traced<Secret>, SdkError> {
-        self.get_at(&format!("/v1/secrets/{}", urlencoding::encode(secret_id)))
+        self.get_api_key_scoped_in_namespace(DEFAULT_SECRET_NAMESPACE, secret_id)
             .await
+    }
+
+    pub async fn get_api_key_scoped_in_namespace(
+        &self,
+        namespace: &str,
+        secret_id: &str,
+    ) -> Result<Traced<Secret>, SdkError> {
+        self.get_at(&format!(
+            "{}/{}",
+            namespace_secrets_path(namespace),
+            urlencoding::encode(secret_id)
+        ))
+        .await
     }
 
     async fn get_at(&self, path: &str) -> Result<Traced<Secret>, SdkError> {
@@ -230,17 +291,39 @@ impl SecretsClient {
         &self,
         request: &models::DeleteSecretRequest,
     ) -> Result<Traced<()>, SdkError> {
+        self.delete_in_namespace(request, DEFAULT_SECRET_NAMESPACE)
+            .await
+    }
+
+    pub async fn delete_in_namespace(
+        &self,
+        request: &models::DeleteSecretRequest,
+        namespace: &str,
+    ) -> Result<Traced<()>, SdkError> {
         self.delete_at(&format!(
             "{}/{}",
-            namespace_secrets_path(&request.project_id),
+            namespace_secrets_path(namespace),
             urlencoding::encode(&request.secret_id)
         ))
         .await
     }
 
     pub async fn delete_api_key_scoped(&self, secret_id: &str) -> Result<Traced<()>, SdkError> {
-        self.delete_at(&format!("/v1/secrets/{}", urlencoding::encode(secret_id)))
+        self.delete_api_key_scoped_in_namespace(DEFAULT_SECRET_NAMESPACE, secret_id)
             .await
+    }
+
+    pub async fn delete_api_key_scoped_in_namespace(
+        &self,
+        namespace: &str,
+        secret_id: &str,
+    ) -> Result<Traced<()>, SdkError> {
+        self.delete_at(&format!(
+            "{}/{}",
+            namespace_secrets_path(namespace),
+            urlencoding::encode(secret_id)
+        ))
+        .await
     }
 
     async fn delete_at(&self, path: &str) -> Result<Traced<()>, SdkError> {
@@ -249,6 +332,6 @@ impl SecretsClient {
     }
 }
 
-fn namespace_secrets_path(project_id: &str) -> String {
-    format!("/v1/namespaces/{}/secrets", urlencoding::encode(project_id))
+fn namespace_secrets_path(namespace: &str) -> String {
+    format!("/v1/namespaces/{}/secrets", urlencoding::encode(namespace))
 }

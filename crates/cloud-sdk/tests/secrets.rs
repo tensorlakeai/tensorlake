@@ -8,7 +8,7 @@ use crate::common::random_string;
 mod common;
 
 #[tokio::test]
-async fn api_key_scoped_secrets_use_root_routes_without_introspection() {
+async fn api_key_scoped_secrets_use_default_namespace_without_introspection() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -63,10 +63,12 @@ async fn api_key_scoped_secrets_use_root_routes_without_introspection() {
         .iter()
         .map(|request| String::from_utf8_lossy(request).to_string())
         .collect();
-    assert!(requests[0].starts_with("GET /v1/secrets HTTP/1.1\r\n"));
-    assert!(requests[1].starts_with("POST /v1/secrets HTTP/1.1\r\n"));
+    assert!(requests[0].starts_with("GET /v1/namespaces/default/secrets HTTP/1.1\r\n"));
+    assert!(requests[1].starts_with("POST /v1/namespaces/default/secrets HTTP/1.1\r\n"));
     assert!(requests[1].to_lowercase().contains("idempotency-key:"));
-    assert!(requests[2].starts_with("DELETE /v1/secrets/secret%2F1 HTTP/1.1\r\n"));
+    assert!(
+        requests[2].starts_with("DELETE /v1/namespaces/default/secrets/secret%2F1 HTTP/1.1\r\n")
+    );
     for request in requests {
         let request = request.to_lowercase();
         assert!(request.contains("authorization: bearer tl_apikey_test"));
@@ -108,7 +110,10 @@ async fn upsert_rotates_an_existing_secret_through_secret_service() {
         .build()
         .expect("client");
     SecretsClient::new(client)
-        .upsert_api_key_scoped(UpsertSecret::from(("TOKEN", "rotated")))
+        .upsert_api_key_scoped_in_namespace(
+            "customer namespace",
+            UpsertSecret::from(("TOKEN", "rotated")),
+        )
         .await
         .expect("upsert");
 
@@ -117,9 +122,16 @@ async fn upsert_rotates_an_existing_secret_through_secret_service() {
         .iter()
         .map(|request| String::from_utf8_lossy(request).to_string())
         .collect::<Vec<_>>();
-    assert!(requests[0].starts_with("POST /v1/secrets HTTP/1.1\r\n"));
-    assert!(requests[1].starts_with("GET /v1/secret-names/TOKEN HTTP/1.1\r\n"));
-    assert!(requests[2].starts_with("POST /v1/secrets/secret%2F1/versions HTTP/1.1\r\n"));
+    assert!(
+        requests[0].starts_with("POST /v1/namespaces/customer%20namespace/secrets HTTP/1.1\r\n")
+    );
+    assert!(
+        requests[1]
+            .starts_with("GET /v1/namespaces/customer%20namespace/secret-names/TOKEN HTTP/1.1\r\n")
+    );
+    assert!(requests[2].starts_with(
+        "POST /v1/namespaces/customer%20namespace/secrets/secret%2F1/versions HTTP/1.1\r\n"
+    ));
     assert!(requests[2].contains(r#"{"value":"rotated"}"#));
     assert!(requests[2].to_lowercase().contains("idempotency-key:"));
 }

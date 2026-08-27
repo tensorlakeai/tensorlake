@@ -521,12 +521,12 @@ export class CloudClient {
     const resolvedOrganizationId = organizationId ?? this.organizationId;
     const resolvedProjectId = projectId ?? this.projectId;
     if (!resolvedOrganizationId && !resolvedProjectId) {
-      return "/v1/secrets";
+      return this.namespacePath("secrets");
     }
     if (!resolvedOrganizationId || !resolvedProjectId) {
       throw new Error("organizationId and projectId must be provided together");
     }
-    return `/v1/namespaces/${encodeURIComponent(resolvedProjectId)}/secrets`;
+    return this.namespacePath("secrets");
   }
 }
 
