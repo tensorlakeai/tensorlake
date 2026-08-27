@@ -287,8 +287,13 @@ pub struct PushReport {
     pub created: bool,
     pub files: usize,
     pub bytes_total: u64,
+    /// Distinct chunks across the whole push, small staged files included. The negotiation
+    /// population (non-small files only) is intentionally narrower; this field is the honest
+    /// denominator for `chunks_uploaded`.
     pub chunks_total: usize,
-    /// Chunks the server lacked at first negotiation (uploaded by this push).
+    /// Chunks actually uploaded by this push across every path: tokened full streams,
+    /// small staged entries, and missing-chunk uploads. Can slightly exceed `chunks_total`
+    /// when a shared chunk streams inside more than one tokened file.
     pub chunks_uploaded: usize,
     pub bytes_uploaded: u64,
     /// Client-computed git blob oid per file (`(repo_path, hex oid)`), from the chunk pass.
@@ -1293,6 +1298,18 @@ impl ArtifactStorageClient {
             .collect();
         distinct.sort_unstable();
         distinct.dedup();
+        // The report's `chunks_total` counts distinct chunks across the whole push — small
+        // staged files included — so `chunks_uploaded` stays a subset of it and
+        // `total - uploaded` measures real dedup. `distinct` above remains negotiation-only.
+        let distinct_chunk_count = {
+            let mut all: Vec<[u8; 32]> = chunked
+                .iter()
+                .flat_map(|f| f.chunks.iter().map(|(h, _)| *h))
+                .collect();
+            all.sort_unstable();
+            all.dedup();
+            all.len()
+        };
         let missing = self
             .negotiate_missing(
                 project_id,
@@ -1817,7 +1834,7 @@ impl ArtifactStorageClient {
                     created: false,
                     files: chunked.len(),
                     bytes_total: total_bytes,
-                    chunks_total: distinct.len(),
+                    chunks_total: distinct_chunk_count,
                     chunks_uploaded: uploaded_chunks,
                     bytes_uploaded: uploaded_bytes,
                     file_chunks: if opts.collect_file_chunks {
@@ -1999,7 +2016,7 @@ impl ArtifactStorageClient {
                 created: resp.created,
                 files: chunked.len(),
                 bytes_total: total_bytes,
-                chunks_total: distinct.len(),
+                chunks_total: distinct_chunk_count,
                 chunks_uploaded: uploaded_chunks,
                 bytes_uploaded: uploaded_bytes,
                 file_chunks: if opts.collect_file_chunks {
