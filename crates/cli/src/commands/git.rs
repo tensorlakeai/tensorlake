@@ -915,7 +915,8 @@ pub async fn push(
             })
         );
     } else {
-        // Small files skip chunk negotiation, so uploads can exceed the negotiated count;
+        // `chunks_total` counts distinct chunks push-wide, but a chunk shared by several
+        // tokened full-stream files uploads once per file, so uploads can still exceed it;
         // saturate instead of panicking on the subtraction.
         let deduped = report.chunks_total.saturating_sub(report.chunks_uploaded);
         println!(
