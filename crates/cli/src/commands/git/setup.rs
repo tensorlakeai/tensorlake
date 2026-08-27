@@ -148,6 +148,15 @@ pub(crate) fn configure_credential_helper(
         Some(root),
         &["config", "--local", "--add", &helper_key, &helper_value],
     )?;
+    // Opt this checkout into `packfile-uris`: the server then answers a full clone/fetch with
+    // a direct (presigned object-store) URL for the stored base pack plus a small inline
+    // delta, instead of streaming every pack byte through the service. Stock git only sends
+    // the capability when fetch.uriProtocols is configured, so without this line the fastest
+    // serving path is unreachable from plain git.
+    git_ok(
+        Some(root),
+        &["config", "--local", "fetch.uriProtocols", "https"],
+    )?;
     println!("registered credential helper for {git_base_url} (repo-local git config)");
     Ok(())
 }
