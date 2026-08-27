@@ -53,6 +53,72 @@ class FakeCore implements NativeFunctionAgentCore {
 }
 
 describe("embedded TypeScript function agent", () => {
+  it("sets resolved environment before importing the application module", async () => {
+    const target = "TL_TS_IMPORT_SECRET";
+    const canary = "typescript-credential-canary";
+    const previous = process.env[target];
+    delete process.env[target];
+    try {
+      const module = `
+const importedValue = process.env.${target};
+const definition = {
+  name: "import_secret",
+  handler: async () => importedValue,
+  parameters: [],
+  returns: { jsonSchema: {} },
+  options: { timeout: 300 },
+};
+export function __tensorlakeGetFunction(name) {
+  if (name !== "import_secret") throw new Error("unknown function " + name);
+  return definition;
+}
+`;
+      const archive = zipSync({
+        ".tensorlake_code_manifest.json": new TextEncoder().encode(JSON.stringify({
+          format_version: 2,
+          runtime: "typescript",
+          minimum_node_major: 18,
+          module: "runtime.mjs",
+          functions: { import_secret: { name: "import_secret" } },
+        })),
+        "runtime.mjs": new TextEncoder().encode(module),
+      });
+      const core = new FakeCore([{
+        type: "assignment",
+        assignment: {
+          attempt_id: "attempt-secret",
+          fence_token: 2,
+          function_run_id: "run-secret",
+          request_id: "request-secret",
+          namespace: "ns",
+          application: "app",
+          application_version: "v1",
+          function: "import_secret",
+          timeout_ms: 10_000,
+          initialization_timeout_ms: 10_000,
+          inputs: [],
+          request_headers: [],
+          call_metadata_base64: "",
+          application_code_base64: Buffer.from(archive).toString("base64"),
+          application_code_sha256: createHash("sha256").update(archive).digest("hex"),
+          resolved_environment: [{ target, value: canary }],
+        },
+      }]);
+
+      await expect(new FunctionAgentRunner(core).run()).rejects.toThrow("fake core stopped");
+      expect(core.outputs[0]).toEqual({ type: "initialized" });
+      const success = core.outputs[1];
+      expect(success).toMatchObject({ type: "success", attempt_id: "attempt-secret" });
+      const result = success?.result as { output_base64: string };
+      expect(JSON.parse(Buffer.from(result.output_base64, "base64").toString("utf8")))
+        .toBe(canary);
+      expect(JSON.stringify(core.outputs)).not.toContain(canary);
+    } finally {
+      if (previous == null) delete process.env[target];
+      else process.env[target] = previous;
+    }
+  });
+
   it("loads an application assignment and returns its value through the native core", async () => {
     const module = `
 const definition = {

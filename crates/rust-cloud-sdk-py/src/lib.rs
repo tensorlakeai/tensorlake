@@ -1176,10 +1176,11 @@ impl CloudApiClient {
         page_size: i32,
     ) -> PyResult<String> {
         let path = match (organization_id, project_id) {
-            (Some(organization_id), Some(project_id)) => format!(
-                "/platform/v1/organizations/{organization_id}/projects/{project_id}/secrets"
+            (Some(_), Some(project_id)) => format!(
+                "/v1/namespaces/{}/secrets",
+                urlencoding::encode(&project_id)
             ),
-            (None, None) => "/platform/v1/secrets".to_string(),
+            (None, None) => "/v1/secrets".to_string(),
             _ => {
                 return Err(pyo3::exceptions::PyValueError::new_err(
                     "organization_id and project_id must be provided together",
@@ -1189,12 +1190,33 @@ impl CloudApiClient {
         self.run_with_retry(5, move |client| {
             let path = path.clone();
             async move {
-                let request = client
-                    .request(Method::GET, &path)
-                    .query(&[("pageSize", page_size)])
-                    .build()?;
+                let request = client.request(Method::GET, &path).build()?;
                 let response = client.execute(request).await?;
-                Ok(response.text().await?)
+                let metadata: Vec<serde_json::Value> = response.json().await?;
+                let limit = page_size.max(0) as usize;
+                let total = metadata.len();
+                let items = metadata
+                    .into_iter()
+                    .take(limit)
+                    .map(|item| {
+                        let created_at_ms = item
+                            .get("created_at_ms")
+                            .and_then(serde_json::Value::as_i64)
+                            .unwrap_or_default();
+                        serde_json::json!({
+                            "id": item.get("id").cloned().unwrap_or_default(),
+                            "name": item.get("name").cloned().unwrap_or_default(),
+                            "createdAt": chrono::DateTime::from_timestamp_millis(created_at_ms)
+                                .map(|value| value.to_rfc3339())
+                                .unwrap_or_else(|| created_at_ms.to_string()),
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                Ok(serde_json::json!({
+                    "items": items,
+                    "pagination": {"next": null, "prev": null, "total": total}
+                })
+                .to_string())
             }
         })
     }

@@ -98,6 +98,8 @@ MAX_REQUEST_STATE_VALUE_BYTES = 1024 * 1024
 _CURRENT_ATTEMPT: contextvars.ContextVar["Attempt"] = contextvars.ContextVar(
     "tensorlake_function_agent_attempt"
 )
+_RUNTIME_HOOKS_LOCK = threading.Lock()
+_RUNTIME_HOOKS_INSTALLED = False
 
 
 def _b64decode(value: str) -> bytes:
@@ -106,6 +108,54 @@ def _b64decode(value: str) -> bytes:
 
 def _b64encode(value: bytes) -> str:
     return base64.b64encode(value).decode("ascii")
+
+
+_RESERVED_ENVIRONMENT_TARGETS = {
+    "PYTHONFAULTHANDLER",
+    "LD_PRELOAD",
+    "LD_LIBRARY_PATH",
+    "DYLD_INSERT_LIBRARIES",
+    "PYTHONHOME",
+    "PYTHONPATH",
+    "NODE_OPTIONS",
+    "NODE_PATH",
+}
+
+
+def _apply_resolved_environment(assignment: dict[str, Any]) -> None:
+    raw_environment = assignment.pop("resolved_environment", [])
+    if not isinstance(raw_environment, list):
+        raise ValueError("Resolved environment must be a list")
+    resolved: list[tuple[str, str]] = []
+    targets: set[str] = set()
+    for item in raw_environment:
+        if not isinstance(item, dict) or set(item) != {"target", "value"}:
+            raise ValueError("Resolved environment entry is invalid")
+        target = item["target"]
+        value = item["value"]
+        if (
+            not isinstance(target, str)
+            or not target
+            or len(target) > 256
+            or not (target[0].isalpha() or target[0] == "_")
+            or not all(
+                character.isascii() and (character.isalnum() or character == "_")
+                for character in target
+            )
+            or target in _RESERVED_ENVIRONMENT_TARGETS
+            or target.startswith("TENSORLAKE_")
+            or target in targets
+            or not isinstance(value, str)
+            or "\x00" in value
+        ):
+            raise ValueError("Resolved environment entry is invalid")
+        targets.add(target)
+        resolved.append((target, value))
+    for target, value in resolved:
+        os.environ[target] = value
+    for item in raw_environment:
+        item["value"] = ""
+    raw_environment.clear()
 
 
 class ProtocolWriter:
@@ -1022,6 +1072,7 @@ class PythonFunctionRunner:
     def _assignment(self, assignment: dict[str, Any]) -> None:
         attempt_id = assignment["attempt_id"]
         try:
+            _apply_resolved_environment(assignment)
             if not self._initialized:
                 self._initialize(assignment)
             if not self._protocol_initialized:
@@ -1118,23 +1169,30 @@ class PythonFunctionRunner:
             attempt.cancel()
 
     def _install_runtime_hooks(self) -> None:
-        set_run_future_hook(lambda future: _CURRENT_ATTEMPT.get().run_future(future))
-        set_wait_futures_hook(
-            lambda futures, timeout, return_when: _CURRENT_ATTEMPT.get().wait_futures(
-                futures, timeout, return_when
+        global _RUNTIME_HOOKS_INSTALLED
+        with _RUNTIME_HOOKS_LOCK:
+            if _RUNTIME_HOOKS_INSTALLED:
+                return
+            set_run_future_hook(
+                lambda future: _CURRENT_ATTEMPT.get().run_future(future)
             )
-        )
-        set_await_future_hook(
-            lambda future: _CURRENT_ATTEMPT.get().await_future(future)
-        )
-        set_register_coroutine_hook(
-            lambda coroutine, future: _CURRENT_ATTEMPT.get().register_coroutine(
-                coroutine, future
+            set_wait_futures_hook(
+                lambda futures, timeout, return_when: _CURRENT_ATTEMPT.get().wait_futures(
+                    futures, timeout, return_when
+                )
             )
-        )
-        set_coroutine_to_future_hook(
-            lambda coroutine: _CURRENT_ATTEMPT.get().coroutine_to_future(coroutine)
-        )
+            set_await_future_hook(
+                lambda future: _CURRENT_ATTEMPT.get().await_future(future)
+            )
+            set_register_coroutine_hook(
+                lambda coroutine, future: _CURRENT_ATTEMPT.get().register_coroutine(
+                    coroutine, future
+                )
+            )
+            set_coroutine_to_future_hook(
+                lambda coroutine: _CURRENT_ATTEMPT.get().coroutine_to_future(coroutine)
+            )
+            _RUNTIME_HOOKS_INSTALLED = True
 
 
 def _future_durable_id(
@@ -1227,6 +1285,8 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--registration-token", required=True)
     parser.add_argument("--agent-id")
     parser.add_argument("--incarnation")
+    parser.add_argument("--secret-service-workload-url")
+    parser.add_argument("--credential-request-timeout-ms", type=int, default=10_000)
     return parser.parse_args()
 
 
@@ -1236,6 +1296,8 @@ async def _run(args: argparse.Namespace) -> None:
         args.registration_token,
         agent_id=args.agent_id,
         incarnation=args.incarnation,
+        secret_service_workload_url=args.secret_service_workload_url,
+        credential_request_timeout_ms=args.credential_request_timeout_ms,
     )
     protocol = ProtocolWriter(core, asyncio.get_running_loop())
     await PythonFunctionRunner(protocol).serve(core)
