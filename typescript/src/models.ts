@@ -120,6 +120,13 @@ export interface NetworkConfig {
  * mount must also set `readOnly: true` (the server rejects a writable pin
  * with HTTP 400). It is sent only when set, for the same compatibility
  * reason as the mount modes.
+ *
+ * `owner` presents the mounted files as owned by a guest user: `NAME`,
+ * `UID`, `NAME:GROUP`, or `UID:GID` (e.g. `"agent"` or `"1001:1001"`),
+ * resolved against the sandbox image's own user database when the mount
+ * attaches. Unset keeps the image default (the baked `tl-user` account when
+ * the image has one, otherwise root). It is sent only when set, for the
+ * same compatibility reason as the mount modes.
  */
 export interface FileSystemMount {
   fileSystemId: string;
@@ -130,6 +137,8 @@ export interface FileSystemMount {
   prefetch?: boolean;
   /** Pin the mount to a specific filesystem snapshot (requires `readOnly`). */
   snapshotId?: string;
+  /** Present the mounted files as owned by this guest user spec. */
+  owner?: string;
 }
 
 /** Optional mount modes for attaching a file system to a running sandbox. */
@@ -140,6 +149,8 @@ export interface AttachFileSystemOptions {
   prefetch?: boolean;
   /** Pin the mount to a specific filesystem snapshot (requires `readOnly`). */
   snapshotId?: string;
+  /** Present the mounted files as owned by this guest user spec. */
+  owner?: string;
 }
 
 export interface ClaimSandboxOptions {

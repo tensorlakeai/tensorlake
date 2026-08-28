@@ -248,6 +248,13 @@ fn default_allow_internet_access() -> bool {
 /// writable pin with HTTP 400). The field serializes only when set: older
 /// servers reject mount bodies carrying unknown fields, so "unpinned" is
 /// expressed by omission.
+///
+/// `owner` optionally presents the mounted files as owned by a guest user:
+/// `NAME`, `UID`, `NAME:GROUP`, or `UID:GID` (e.g. `agent` or `1001:1001`),
+/// resolved against the sandbox image's own user database when the mount
+/// attaches. Unset means the image default (the baked `tl-user` account when
+/// the image has one, otherwise root). The field serializes only when set,
+/// for the same compatibility reason as the pin.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct FileSystemMount {
     pub file_system_id: String,
@@ -262,6 +269,9 @@ pub struct FileSystemMount {
     /// `read_only`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
+    /// Present the mounted files as owned by this guest user spec.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub owner: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1043,6 +1053,7 @@ mod tests {
             read_only: false,
             prefetch: false,
             snapshot_id: None,
+            owner: None,
         };
         assert_eq!(
             serde_json::to_value(&mount).unwrap(),
@@ -1061,6 +1072,7 @@ mod tests {
             read_only: true,
             prefetch: true,
             snapshot_id: None,
+            owner: None,
         };
         assert_eq!(
             serde_json::to_value(&mount).unwrap(),
@@ -1081,6 +1093,7 @@ mod tests {
             read_only: true,
             prefetch: false,
             snapshot_id: Some("0abc123def".to_string()),
+            owner: None,
         };
         assert_eq!(
             serde_json::to_value(&pinned).unwrap(),

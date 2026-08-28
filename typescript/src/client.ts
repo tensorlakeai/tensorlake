@@ -88,6 +88,7 @@ function fileSystemMountToWire(fs: FileSystemMount): Record<string, unknown> {
     ...(fs.readOnly === true ? { read_only: true } : {}),
     ...(fs.prefetch === true ? { prefetch: true } : {}),
     ...(fs.snapshotId != null ? { snapshot_id: fs.snapshotId } : {}),
+    ...(fs.owner != null ? { owner: fs.owner } : {}),
   };
 }
 
@@ -578,6 +579,7 @@ export class SandboxClient {
           options?.readOnly === true,
           options?.prefetch === true,
           options?.snapshotId ?? null,
+          options?.owner ?? null,
         ),
       "sandboxId",
       { sandboxId, notFoundKind: "sandbox" },

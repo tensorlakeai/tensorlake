@@ -261,6 +261,16 @@ class FileSystemMount(BaseModel):
     pinned mount must also set ``read_only=True`` (the server rejects a
     writable pin with HTTP 400). It serializes only when set, for the same
     compatibility reason as the mount modes.
+
+    ``owner`` presents the mounted files as owned by a guest user: ``NAME``,
+    ``UID``, ``NAME:GROUP``, or ``UID:GID`` (e.g. ``"agent"`` or
+    ``"1001:1001"``), resolved against the sandbox image's own user database
+    when the mount attaches. A named user or group must exist in the image; a
+    bare numeric id is used as-is. Unset means the image default: the baked
+    ``tl-user`` account when the image has one, otherwise root. The mount is
+    reachable by every guest user either way; the owner decides which file
+    modes apply to whom. It serializes only when set, for the same
+    compatibility reason as the mount modes.
     """
 
     file_system_id: str
@@ -268,6 +278,7 @@ class FileSystemMount(BaseModel):
     read_only: bool = False
     prefetch: bool = False
     snapshot_id: str | None = None
+    owner: str | None = None
 
     @model_serializer(mode="wrap")
     def _omit_unset_mount_modes(self, handler):
@@ -279,6 +290,8 @@ class FileSystemMount(BaseModel):
                 data.pop("prefetch", None)
             if self.snapshot_id is None:
                 data.pop("snapshot_id", None)
+            if self.owner is None:
+                data.pop("owner", None)
         return data
 
 
@@ -296,6 +309,39 @@ def _validate_mount_snapshot_pins(mounts: "list[FileSystemMount] | None") -> Non
                 f"{mount.mount_path!r} sets snapshot_id without read_only=True: "
                 "snapshot-pinned mounts are read-only"
             )
+
+
+def _validate_mount_owners(mounts: "list[FileSystemMount] | None") -> None:
+    """Client-side mirror of the server's HTTP 400 for malformed mount owners.
+
+    Only the shape is checked (``NAME``, ``UID``, ``NAME:GROUP``, or
+    ``UID:GID``); a named user or group resolves against the sandbox image's
+    own user database when the mount attaches. Raising here lets callers fail
+    fast (and offline) instead of round-tripping to the server.
+    """
+    for mount in mounts or []:
+        owner = mount.owner
+        if owner is None:
+            continue
+
+        def _reject(reason: str) -> None:
+            raise ValueError(
+                f"file system mount {mount.file_system_id!r} at "
+                f"{mount.mount_path!r} has an invalid owner {owner!r}: {reason}"
+            )
+
+        if not owner or len(owner.encode()) > 256:
+            _reject("owner must contain 1 to 256 bytes")
+        if not all(33 <= ord(ch) <= 126 and ch not in "\"'" for ch in owner):
+            _reject("owner must contain only non-whitespace printable ASCII characters")
+        parts = owner.split(":")
+        if len(parts) > 2 or any(not part for part in parts):
+            _reject("owner must be NAME, UID, NAME:GROUP, or UID:GID")
+        # An all-digit part is unconditionally numeric to the guest resolver,
+        # so an id that does not fit a 32-bit uid/gid can never resolve.
+        for part in parts:
+            if part.isascii() and part.isdigit() and int(part) > 0xFFFFFFFF:
+                _reject("a numeric owner id must fit a 32-bit uid/gid")
 
 
 class FileSystem(BaseModel):

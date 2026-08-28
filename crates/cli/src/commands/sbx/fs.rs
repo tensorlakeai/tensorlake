@@ -43,10 +43,13 @@ fn print_mounts_table(mounts: &[FileSystemMount]) {
     for mount in mounts {
         let mut options = Vec::new();
         if mount.read_only {
-            options.push("ro");
+            options.push("ro".to_string());
         }
         if mount.prefetch {
-            options.push("prefetch");
+            options.push("prefetch".to_string());
+        }
+        if let Some(owner) = &mount.owner {
+            options.push(format!("owner={owner}"));
         }
         let source = match &mount.snapshot_id {
             Some(snapshot_id) => format!("{}@{snapshot_id}", mount.file_system_id),
@@ -72,6 +75,7 @@ fn build_attach_body(
     read_only: bool,
     prefetch: bool,
     snapshot_id: Option<&str>,
+    owner: Option<&str>,
 ) -> Result<serde_json::Value> {
     if snapshot_id.is_some() && !read_only {
         return Err(CliError::usage(
@@ -91,6 +95,9 @@ fn build_attach_body(
     if let Some(snapshot_id) = snapshot_id {
         body["snapshot_id"] = serde_json::Value::String(snapshot_id.to_string());
     }
+    if let Some(owner) = owner {
+        body["owner"] = serde_json::Value::String(owner.to_string());
+    }
     Ok(body)
 }
 
@@ -103,11 +110,19 @@ pub async fn attach(
     read_only: bool,
     prefetch: bool,
     snapshot_id: Option<&str>,
+    owner: Option<&str>,
     output_json: bool,
 ) -> Result<()> {
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}/file_systems"));
-    let body = build_attach_body(file_system_id, mount_path, read_only, prefetch, snapshot_id)?;
+    let body = build_attach_body(
+        file_system_id,
+        mount_path,
+        read_only,
+        prefetch,
+        snapshot_id,
+        owner,
+    )?;
 
     let resp = client
         .post(&url)
@@ -183,7 +198,7 @@ mod tests {
 
     #[test]
     fn attach_body_omits_unset_mount_modes() {
-        let body = build_attach_body("skills", "/mnt/skills", false, false, None).unwrap();
+        let body = build_attach_body("skills", "/mnt/skills", false, false, None, None).unwrap();
         assert_eq!(
             body,
             serde_json::json!({
@@ -195,8 +210,15 @@ mod tests {
 
     #[test]
     fn attach_body_includes_snapshot_pin_with_read_only() {
-        let body =
-            build_attach_body("skills", "/mnt/skills", true, false, Some("0abc123def")).unwrap();
+        let body = build_attach_body(
+            "skills",
+            "/mnt/skills",
+            true,
+            false,
+            Some("0abc123def"),
+            None,
+        )
+        .unwrap();
         assert_eq!(
             body,
             serde_json::json!({
@@ -210,13 +232,34 @@ mod tests {
 
     #[test]
     fn attach_body_rejects_snapshot_pin_without_read_only() {
-        let error = build_attach_body("skills", "/mnt/skills", false, true, Some("0abc123def"))
-            .unwrap_err();
+        let error = build_attach_body(
+            "skills",
+            "/mnt/skills",
+            false,
+            true,
+            Some("0abc123def"),
+            None,
+        )
+        .unwrap_err();
         assert!(
             error
                 .to_string()
                 .contains("snapshot-pinned mounts are read-only"),
             "unexpected error: {error}"
+        );
+    }
+
+    #[test]
+    fn attach_body_includes_owner_only_when_set() {
+        let body =
+            build_attach_body("skills", "/mnt/skills", false, false, None, Some("agent")).unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "file_system_id": "skills",
+                "mount_path": "/mnt/skills",
+                "owner": "agent",
+            })
         );
     }
 }

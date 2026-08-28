@@ -408,6 +408,7 @@ class AsyncSandbox:
         read_only: bool = False,
         prefetch: bool = False,
         snapshot_id: str | None = None,
+        owner: str | None = None,
     ) -> Traced[SandboxInfo]:
         """Attach a registered file system to this running sandbox.
 
@@ -419,6 +420,12 @@ class AsyncSandbox:
             prefetch: Eagerly download the file system's contents.
             snapshot_id: Pin the mount to a specific filesystem snapshot.
                 Requires ``read_only=True``.
+            owner: Present the mounted files as owned by this guest user:
+                ``NAME``, ``UID``, ``NAME:GROUP``, or ``UID:GID`` (e.g.
+                ``"agent"`` or ``"1001:1001"``), resolved against the sandbox
+                image's own user database when the mount attaches. Unset keeps
+                the image default (the baked ``tl-user`` account when the
+                image has one, otherwise root).
 
         Returns:
             Traced[SandboxInfo] with this sandbox's updated file systems.
@@ -431,6 +438,7 @@ class AsyncSandbox:
             read_only=read_only,
             prefetch=prefetch,
             snapshot_id=snapshot_id,
+            owner=owner,
         )
         self._sandbox_id = traced.sandbox_id
         self._cached_info = traced.value
