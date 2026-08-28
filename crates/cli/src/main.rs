@@ -505,7 +505,7 @@ enum GitCommands {
     },
     /// Push the current Git worktree to a repo as one commit (resumable chunk upload)
     Push {
-        /// Repo name
+        /// Repo name (NOT the branch — `tl git push <repo> <branch>`)
         repo: String,
         /// Target branch
         #[arg(default_value = "main")]
@@ -516,6 +516,10 @@ enum GitCommands {
         /// Force-with-lease: require the branch to currently equal this commit oid
         #[arg(long)]
         expect_oid: Option<String>,
+        /// Create the repo if it does not exist (without this, pushing to a missing repo is
+        /// an error rather than a silent repo creation)
+        #[arg(long)]
+        create: bool,
         /// Output JSON
         #[arg(long)]
         json: bool,
@@ -3057,8 +3061,9 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
             branch,
             message,
             expect_oid,
+            create,
             json,
-        } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, json).await,
+        } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, create, json).await,
         GitCommands::Merge {
             repo,
             ours,
