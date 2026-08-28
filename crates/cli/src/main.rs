@@ -503,16 +503,17 @@ enum GitCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Push the current Git worktree to a repo as one commit (resumable chunk upload)
+    /// Push your local branch's git history to a repo (resumable; same commits and SHAs as
+    /// `git push`). Pass --snapshot to instead push the worktree as one server-built commit.
     Push {
         /// Repo name (NOT the branch — `tl git push <repo> <branch>`)
         repo: String,
-        /// Target branch
+        /// Branch to push (local branch of this name; also the target ref)
         #[arg(default_value = "main")]
         branch: String,
-        /// Commit message
-        #[arg(short, long, default_value = "tl push")]
-        message: String,
+        /// Commit message (snapshot mode only)
+        #[arg(short, long)]
+        message: Option<String>,
         /// Force-with-lease: require the branch to currently equal this commit oid
         #[arg(long)]
         expect_oid: Option<String>,
@@ -520,6 +521,10 @@ enum GitCommands {
         /// an error rather than a silent repo creation)
         #[arg(long)]
         create: bool,
+        /// Push the worktree as ONE server-built commit (the pre-0.5.116 behavior) instead
+        /// of your git history
+        #[arg(long)]
+        snapshot: bool,
         /// Output JSON
         #[arg(long)]
         json: bool,
@@ -3062,8 +3067,21 @@ async fn run_git_command(ctx: &CliContext, subcmd: GitCommands) -> error::Result
             message,
             expect_oid,
             create,
+            snapshot,
             json,
-        } => commands::git::push(ctx, &repo, &branch, &message, expect_oid, create, json).await,
+        } => {
+            commands::git::push(
+                ctx,
+                &repo,
+                &branch,
+                message.as_deref(),
+                expect_oid,
+                create,
+                snapshot,
+                json,
+            )
+            .await
+        }
         GitCommands::Merge {
             repo,
             ours,

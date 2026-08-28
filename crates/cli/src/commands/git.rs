@@ -857,17 +857,224 @@ fn parse_remote_message(raw: &str) -> String {
 /// `tl git push` — resumable chunked push of the current Git worktree as one commit.
 /// Retrying after any failure is safe and cheap: the client re-negotiates and uploads only what
 /// the server still lacks.
+/// The history push (artifact_storage #279): send the local branch's REAL commits — same
+/// SHAs a `git push` would publish — through the resumable upload surface. Negotiation is
+/// git-native: the server's advertised tips that exist locally become `^have` exclusions, the
+/// local git builds the pack, and the server's ordinary receive-pack finalizes it.
+#[allow(clippy::too_many_arguments)]
+async fn push_history(
+    client: &ArtifactStorageClient,
+    project_id: &str,
+    repo: &str,
+    branch: &str,
+    root: &std::path::Path,
+    credential: &tensorlake::artifact_storage::models::GitCredential,
+    expect_oid: Option<String>,
+    output_json: bool,
+) -> Result<()> {
+    use tensorlake::artifact_storage::history_push::{GitPushProgress, GitPushRefUpdate};
+
+    let ref_name = format!("refs/heads/{branch}");
+    let tip = run_git(
+        root,
+        &["rev-parse", "--verify", &format!("{ref_name}^{{commit}}")],
+    )
+    .map_err(|_| {
+        CliError::usage(format!(
+            "local branch '{branch}' not found — a history push sends your local \
+                 branch's commits. Use --snapshot to push the worktree as one commit instead."
+        ))
+    })?;
+
+    let refs = client
+        .list_refs_with_credential(
+            project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+        )
+        .await
+        .map_err(map_sdk_error)?
+        .into_inner()
+        .refs;
+    let server_tip = refs
+        .iter()
+        .find(|r| r.name == ref_name)
+        .map(|r| r.oid.clone());
+    if server_tip.as_deref() == Some(tip.as_str()) {
+        println!(
+            "{} {ref_name} is already {tip}",
+            style("up-to-date").green()
+        );
+        return Ok(());
+    }
+    // Force-with-lease wins over the advertised tip; otherwise CAS on what the server showed.
+    let old_oid = expect_oid.or(server_tip);
+
+    // Every advertised tip we HAVE locally excludes its closure from the pack — the same
+    // pruning `git push` negotiates. Tips we don't have prune nothing (and must not be
+    // passed to rev-list, which would error on the unknown object).
+    let mut haves = Vec::new();
+    for r in &refs {
+        if haves.len() >= 256 {
+            break;
+        }
+        if run_git(root, &["cat-file", "-e", &format!("{}^{{commit}}", r.oid)]).is_ok() {
+            haves.push(r.oid.clone());
+        }
+    }
+
+    let bar = indicatif::ProgressBar::new_spinner();
+    bar.enable_steady_tick(std::time::Duration::from_millis(120));
+    bar.set_message("packing objects...");
+
+    // git owns pack generation: `--revs` reads `<tip>` + `^<have>` lines, `--delta-base-offset`
+    // matches what a push client negotiates (self-contained OFS deltas, no thin bases).
+    let mut child = std::process::Command::new("git")
+        .arg("-C")
+        .arg(root)
+        .args([
+            "pack-objects",
+            "--revs",
+            "--delta-base-offset",
+            "-q",
+            "--stdout",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .map_err(|e| CliError::usage(format!("spawning git pack-objects: {e}")))?;
+    {
+        use std::io::Write as _;
+        let mut stdin = child.stdin.take().expect("piped stdin");
+        let mut revs = format!("{tip}\n");
+        for have in &haves {
+            revs.push('^');
+            revs.push_str(have);
+            revs.push('\n');
+        }
+        stdin
+            .write_all(revs.as_bytes())
+            .map_err(|e| CliError::usage(format!("writing revs to pack-objects: {e}")))?;
+    }
+    let stdout = child.stdout.take().expect("piped stdout");
+
+    let progress_bar = bar.clone();
+    let report = client
+        .push_git_pack(
+            project_id,
+            repo,
+            &credential.git_username,
+            &credential.token,
+            stdout,
+            vec![GitPushRefUpdate {
+                name: ref_name.clone(),
+                old_oid,
+                new_oid: tip.clone(),
+            }],
+            Some(Box::new(move |p| match p {
+                GitPushProgress::PartUploaded { parts, bytes } => {
+                    progress_bar.set_message(format!(
+                        "uploaded {parts} part(s), {:.1} MiB",
+                        bytes as f64 / (1024.0 * 1024.0)
+                    ))
+                }
+                GitPushProgress::Finalizing { phase } => {
+                    progress_bar.set_message(format!("server finalize: {phase}"))
+                }
+            })),
+        )
+        .await;
+    // The pack child is done once its stdout closed; surface a pack failure over an upload
+    // error (a dead generator explains everything downstream).
+    let pack_status = child
+        .wait()
+        .map_err(|e| CliError::usage(format!("waiting for pack-objects: {e}")))?;
+    bar.finish_and_clear();
+    if !pack_status.success() {
+        return Err(CliError::usage(
+            "git pack-objects failed (bad local objects, or negotiation excluded everything)"
+                .to_string(),
+        ));
+    }
+    let report = report.map_err(map_sdk_error)?;
+
+    if output_json {
+        println!(
+            "{}",
+            serde_json::json!({
+                "unpack_ok": report.unpack_ok,
+                "refs": report
+                    .refs
+                    .iter()
+                    .map(|r| serde_json::json!({"name": r.name, "error": r.error}))
+                    .collect::<Vec<_>>(),
+                "tip": tip,
+            })
+        );
+    } else {
+        for r in &report.refs {
+            match &r.error {
+                None => println!(
+                    "{} {} -> {}",
+                    style("pushed").green().bold(),
+                    style(&r.name).cyan(),
+                    &tip[..12.min(tip.len())]
+                ),
+                Some(err) => println!(
+                    "{} {}: {err}",
+                    style("rejected").red().bold(),
+                    style(&r.name).cyan()
+                ),
+            }
+        }
+    }
+    if !report.unpack_ok || report.refs.iter().any(|r| r.error.is_some()) {
+        return Err(CliError::usage("push did not fully apply".to_string()));
+    }
+    Ok(())
+}
+
+/// Run one git command in `dir`, returning trimmed stdout; a non-zero exit is an error
+/// carrying stderr. History pushes shell out to the local git for exactly what git is
+/// authoritative about: ref resolution, object presence, and pack generation.
+fn run_git(dir: &std::path::Path, args: &[&str]) -> Result<String> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .map_err(|e| CliError::usage(format!("running git: {e}")))?;
+    if !out.status.success() {
+        return Err(CliError::usage(format!(
+            "git {} failed: {}",
+            args.first().unwrap_or(&""),
+            String::from_utf8_lossy(&out.stderr).trim()
+        )));
+    }
+    Ok(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn push(
     ctx: &CliContext,
     repo: &str,
     branch: &str,
-    message: &str,
+    message: Option<&str>,
     expect_oid: Option<String>,
     create: bool,
+    snapshot: bool,
     output_json: bool,
 ) -> Result<()> {
     use tensorlake::artifact_storage::ingest::PushOptions;
 
+    if !snapshot && message.is_some() {
+        return Err(CliError::usage(
+            "-m/--message names the snapshot commit; history pushes send your existing \
+             commits unchanged. Pass --snapshot to push the worktree as one commit, or drop -m.",
+        ));
+    }
     let root = current_git_worktree_root("tl git push")?;
     let project_id = project_id(ctx)?;
     let client = artifact_storage_client(ctx)?;
@@ -918,12 +1125,26 @@ pub async fn push(
         );
     }
 
+    if !snapshot {
+        return push_history(
+            &client,
+            &project_id,
+            repo,
+            branch,
+            &root,
+            &credential,
+            expect_oid,
+            output_json,
+        )
+        .await;
+    }
+
     let bar = indicatif::ProgressBar::new_spinner();
     bar.enable_steady_tick(std::time::Duration::from_millis(120));
     bar.set_message("hashing worktree files...");
     let opts = PushOptions {
         branch: branch.to_string(),
-        message: message.to_string(),
+        message: message.unwrap_or("tl push").to_string(),
         base: None,
         expect_oid,
         progress: Some(super::push_progress_spinner(&bar)),
