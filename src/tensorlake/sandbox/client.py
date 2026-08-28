@@ -462,7 +462,9 @@ class SandboxClient:
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
-                ``A10`` unless ``gpu_model`` is set.
+                ``A10`` unless ``gpu_model`` is set. GPU sandboxes require a
+                CAS image; when ``image`` is omitted, the server selects its
+                configured GPU default.
             gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.
             gpu: Typed GPU model and count request. Cannot be combined with
                 ``gpus`` or ``gpu_model``.
@@ -1575,7 +1577,9 @@ class SandboxClient:
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
-                ``A10`` unless ``gpu_model`` is set.
+                ``A10`` unless ``gpu_model`` is set. GPU sandboxes require a
+                CAS image; when ``image`` is omitted, the server selects its
+                configured GPU default.
             gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.
             gpu: Typed GPU model and count request. Cannot be combined with
                 ``gpus`` or ``gpu_model``.

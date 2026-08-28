@@ -1135,7 +1135,8 @@ enum SbxCommands {
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
-        /// GPU model to request
+        /// GPU model to request. GPU sandboxes require a CAS image; omit
+        /// --image to use the server's configured GPU default.
         #[arg(long = "gpu", value_enum)]
         gpu: Option<GpuModelArg>,
 
@@ -1159,7 +1160,7 @@ enum SbxCommands {
         #[arg(short, long, conflicts_with = "image")]
         snapshot: Option<String>,
 
-        /// Create from a registered image name
+        /// Create from a registered image name. With --gpu, this must be a CAS image.
         #[arg(short, long, conflicts_with = "snapshot")]
         image: Option<String>,
 
