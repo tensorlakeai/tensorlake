@@ -908,6 +908,35 @@ async fn push_history(
         );
         return Ok(());
     }
+    // git's own push rule: refuse a non-fast-forward unless the user states intent.
+    // --expect-oid is that statement (force-with-lease). Without it, a server tip we have
+    // locally must be an ancestor of what we're pushing; one we DON'T have locally means our
+    // view is stale in a way we can't verify — fetch first, or force with the lease.
+    if expect_oid.is_none() {
+        if let Some(server_tip) = server_tip.as_deref() {
+            let have_server_tip = run_git(
+                root,
+                &["cat-file", "-e", &format!("{server_tip}^{{commit}}")],
+            )
+            .is_ok();
+            if !have_server_tip {
+                return Err(CliError::usage(format!(
+                    "the server's {ref_name} ({server_tip}) is not in your local repo. Either your view \
+                     is stale (`git fetch` the repo, then rebase or merge) or the server branch \
+                     has unrelated history — e.g. it was seeded by a snapshot push — in which \
+                     case fetching cannot help and pushing means REPLACING it. Force-with-lease \
+                     via --expect-oid {server_tip} states that intent."
+                )));
+            }
+            if run_git(root, &["merge-base", "--is-ancestor", server_tip, &tip]).is_err() {
+                return Err(CliError::usage(format!(
+                    "non-fast-forward: the server's {ref_name} ({server_tip}) is not an ancestor of \
+                     your {branch} ({tip}). Rebase or merge first, or force-with-lease via \
+                     --expect-oid {server_tip}."
+                )));
+            }
+        }
+    }
     // Force-with-lease wins over the advertised tip; otherwise CAS on what the server showed.
     let old_oid = expect_oid.or(server_tip);
 
@@ -986,19 +1015,31 @@ async fn push_history(
             })),
         )
         .await;
-    // The pack child is done once its stdout closed; surface a pack failure over an upload
-    // error (a dead generator explains everything downstream).
-    let pack_status = child
-        .wait()
-        .map_err(|e| CliError::usage(format!("waiting for pack-objects: {e}")))?;
     bar.finish_and_clear();
-    if !pack_status.success() {
-        return Err(CliError::usage(
-            "git pack-objects failed (bad local objects, or negotiation excluded everything)"
-                .to_string(),
-        ));
-    }
-    let report = report.map_err(map_sdk_error)?;
+    let report = match report {
+        Ok(report) => {
+            // Success drained stdout to EOF, so the child has exited; a nonzero status here
+            // means pack-objects itself failed while producing what we uploaded — fail loud.
+            let pack_status = child
+                .wait()
+                .map_err(|e| CliError::usage(format!("waiting for pack-objects: {e}")))?;
+            if !pack_status.success() {
+                return Err(CliError::usage(
+                    "git pack-objects failed while producing the pack (bad local objects?)"
+                        .to_string(),
+                ));
+            }
+            report
+        }
+        Err(e) => {
+            // The upload failed mid-stream: the child is likely blocked writing into a pipe
+            // nobody reads (or already died of EPIPE when the reader dropped). Kill it and
+            // surface the UPLOAD error — the child's exit status is downstream noise.
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(map_sdk_error(e));
+        }
+    };
 
     if output_json {
         println!(
