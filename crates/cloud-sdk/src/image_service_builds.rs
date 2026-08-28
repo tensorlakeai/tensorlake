@@ -361,7 +361,7 @@ fn cas_catalog_reference(reference: &str) -> std::borrow::Cow<'_, str> {
     let Some(remainder) = reference.strip_prefix("tensorlake/") else {
         return std::borrow::Cow::Borrowed(reference);
     };
-    if remainder == "cas" || remainder.starts_with("cas/") {
+    if remainder == "cas" || remainder.starts_with("cas/") || remainder.starts_with("cas:") {
         return std::borrow::Cow::Borrowed(reference);
     }
     std::borrow::Cow::Owned(format!("tensorlake/cas/{remainder}"))
@@ -1229,6 +1229,7 @@ mod tests {
                 "tensorlake/cas/ubuntu-minimal",
                 "tensorlake/cas/ubuntu-minimal",
             ),
+            ("tensorlake/cas:latest", "tensorlake/cas:latest"),
             ("ubuntu:24.04", "ubuntu:24.04"),
             ("ghcr.io/team/image:v1", "ghcr.io/team/image:v1"),
         ] {

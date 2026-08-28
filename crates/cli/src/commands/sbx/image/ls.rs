@@ -1,20 +1,35 @@
 use comfy_table::Cell;
-use serde::Serialize;
 
 use crate::auth::context::CliContext;
 use crate::error::Result;
 use crate::output::table::new_table;
 
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "camelCase")]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct ListedImage {
     name: String,
-    #[serde(rename = "type")]
     image_type: String,
     id: Option<String>,
     reference: String,
     snapshot_id: Option<String>,
     public: bool,
+    source: serde_json::Value,
+}
+
+impl ListedImage {
+    /// Preserve the complete source object for machine consumers and add only
+    /// the source-derived type discriminator. `image ls --json` historically
+    /// returned the raw TLSnap catalog objects, so replacing them with a
+    /// reduced common model would silently remove fields used by scripts.
+    fn json_value(&self) -> serde_json::Value {
+        let mut value = self.source.clone();
+        if let Some(object) = value.as_object_mut() {
+            object.insert(
+                "type".to_string(),
+                serde_json::Value::String(self.image_type.clone()),
+            );
+        }
+        value
+    }
 }
 
 pub async fn run(ctx: &CliContext, output_json: bool, cas_only: bool) -> Result<()> {
@@ -45,7 +60,11 @@ pub async fn run(ctx: &CliContext, output_json: bool, cas_only: bool) -> Result<
     });
 
     if output_json {
-        println!("{}", serde_json::to_string_pretty(&images)?);
+        let values = images
+            .iter()
+            .map(ListedImage::json_value)
+            .collect::<Vec<_>>();
+        println!("{}", serde_json::to_string_pretty(&values)?);
         return Ok(());
     }
 
@@ -84,6 +103,7 @@ fn tlsnap_image(item: &serde_json::Value) -> ListedImage {
         id: string_field(item, &["id"]),
         snapshot_id: string_field(item, &["snapshotId", "snapshot_id"]),
         public: bool_field(item, &["public"]),
+        source: item.clone(),
     }
 }
 
@@ -98,6 +118,7 @@ fn cas_image(item: &serde_json::Value) -> ListedImage {
         id,
         snapshot_id: None,
         public: bool_field(item, &["public"]),
+        source: item.clone(),
     }
 }
 
@@ -135,6 +156,35 @@ mod tests {
     }
 
     #[test]
+    fn json_output_preserves_tlsnap_catalog_fields_and_adds_type() {
+        let source = json!({
+            "id": "template-1",
+            "name": "python",
+            "snapshotId": "snapshot-1",
+            "snapshotSandboxId": "sandbox-1",
+            "snapshotUri": "s3://snapshots/snapshot-1",
+            "snapshotFormatVersion": "durable_archive_v1",
+            "rootfsDiskBytes": 10_737_418_240_u64,
+            "public": true,
+        });
+        let output = tlsnap_image(&source).json_value();
+
+        assert_eq!(output["type"], "TLSnap");
+        for field in [
+            "id",
+            "name",
+            "snapshotId",
+            "snapshotSandboxId",
+            "snapshotUri",
+            "snapshotFormatVersion",
+            "rootfsDiskBytes",
+            "public",
+        ] {
+            assert_eq!(output[field], source[field], "field {field} changed");
+        }
+    }
+
+    #[test]
     fn normalizes_cas_catalog_items() {
         let image = cas_image(&json!({
             "name": "gpu-python",
@@ -147,5 +197,9 @@ mod tests {
         assert_eq!(image.id.as_deref(), Some("abc123"));
         assert_eq!(image.snapshot_id, None);
         assert!(!image.public);
+        let output = image.json_value();
+        assert_eq!(output["type"], "CAS");
+        assert_eq!(output["image_id"], "abc123");
+        assert_eq!(output["image"], "cas-v1:abc123");
     }
 }
