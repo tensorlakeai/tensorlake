@@ -10,6 +10,7 @@ use crate::{
     error::SdkError,
 };
 
+pub mod history_push;
 pub mod ingest;
 pub mod merge;
 pub mod models;
@@ -1741,7 +1742,7 @@ impl ArtifactStorageClient {
         .await
     }
 
-    fn git_request(
+    pub(crate) fn git_request(
         &self,
         method: Method,
         project_id: &str,
@@ -2585,7 +2586,7 @@ fn retry_after_hint(response: &reqwest::Response) -> Option<std::time::Duration>
         .map(std::time::Duration::from_secs)
 }
 
-async fn decode_json<T: DeserializeOwned>(
+pub(crate) async fn decode_json<T: DeserializeOwned>(
     response: reqwest::Response,
     trace_id: String,
 ) -> Result<Traced<T>, SdkError> {
