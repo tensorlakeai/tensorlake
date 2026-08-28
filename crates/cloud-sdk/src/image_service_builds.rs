@@ -189,7 +189,7 @@ where
 ///
 /// `TENSORLAKE_IMAGE_SERVICE_URL` overrides it for pointing at a local
 /// Image Service directly during development.
-fn image_service_url(api_url: &str) -> String {
+pub(crate) fn image_service_url(api_url: &str) -> String {
     resolve_image_service_url(api_url, std::env::var(IMAGE_SERVICE_URL_ENV).ok())
 }
 
@@ -313,16 +313,32 @@ async fn resolve_parents(
     let mut parents = Vec::new();
     let mut pinned_references = Vec::new();
     for reference in candidates {
+        let catalog_reference = cas_catalog_reference(reference);
         let image_id = match direct_pin_image_id(reference)? {
             Some(image_id) => Some(image_id),
-            None => lookup_catalog_name(client, reference).await?,
+            None => lookup_catalog_name(client, catalog_reference.as_ref()).await?,
         };
+        if image_id.is_none() && catalog_reference.as_ref() != reference {
+            return Err(SandboxImageBuildError::usage(format!(
+                "CAS base image '{}' was not found while resolving Dockerfile reference \
+                 '{}'. Publish the CAS base first or use an existing tensorlake/cas image.",
+                catalog_reference, reference
+            )));
+        }
         let Some(image_id) = image_id else {
             continue; // external registry reference, pulled by the guest
         };
-        emit(SandboxImageBuildEvent::Status(format!(
-            "Resolved '{reference}' to registered image {CAS_IMAGE_REF_PREFIX}{image_id}"
-        )));
+        if catalog_reference.as_ref() == reference {
+            emit(SandboxImageBuildEvent::Status(format!(
+                "Resolved '{reference}' to registered image {CAS_IMAGE_REF_PREFIX}{image_id}"
+            )));
+        } else {
+            emit(SandboxImageBuildEvent::Status(format!(
+                "Resolved '{reference}' through CAS image '{}' to \
+                 {CAS_IMAGE_REF_PREFIX}{image_id}",
+                catalog_reference
+            )));
+        }
         pinned_references.push(reference.to_string());
         parents.push(json!({ "reference": reference, "image_id": image_id }));
     }
@@ -335,6 +351,20 @@ async fn resolve_parents(
         )));
     }
     Ok(parents)
+}
+
+/// Map Tensorlake-managed Dockerfile references onto their CAS catalog
+/// namespace. The original reference is retained in the submitted parent pin
+/// because BuildKit binds the mounted context to the exact token written in
+/// the Dockerfile; only the authenticated catalog lookup uses this name.
+fn cas_catalog_reference(reference: &str) -> std::borrow::Cow<'_, str> {
+    let Some(remainder) = reference.strip_prefix("tensorlake/") else {
+        return std::borrow::Cow::Borrowed(reference);
+    };
+    if remainder == "cas" || remainder.starts_with("cas/") {
+        return std::borrow::Cow::Borrowed(reference);
+    }
+    std::borrow::Cow::Owned(format!("tensorlake/cas/{remainder}"))
 }
 
 /// `cas-v1:<64 lowercase hex>` pins an image id directly. The prefix with a
@@ -1185,6 +1215,25 @@ mod tests {
         assert_eq!(direct_pin_image_id("team/base").unwrap(), None);
         assert!(direct_pin_image_id("cas-v1:NOT-HEX").is_err());
         assert!(direct_pin_image_id(&format!("cas-v1:{}", "a".repeat(63))).is_err());
+    }
+
+    #[test]
+    fn tensorlake_references_use_the_cas_catalog_namespace() {
+        for (reference, expected) in [
+            ("tensorlake/ubuntu-minimal", "tensorlake/cas/ubuntu-minimal"),
+            (
+                "tensorlake/ubuntu-minimal:latest",
+                "tensorlake/cas/ubuntu-minimal:latest",
+            ),
+            (
+                "tensorlake/cas/ubuntu-minimal",
+                "tensorlake/cas/ubuntu-minimal",
+            ),
+            ("ubuntu:24.04", "ubuntu:24.04"),
+            ("ghcr.io/team/image:v1", "ghcr.io/team/image:v1"),
+        ] {
+            assert_eq!(cas_catalog_reference(reference), expected);
+        }
     }
 
     #[test]

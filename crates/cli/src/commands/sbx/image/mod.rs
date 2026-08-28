@@ -9,7 +9,8 @@ use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use indicatif::{ProgressBar, ProgressStyle};
 use tensorlake::{
-    sandbox_images::SandboxImageBuildEvent, sandbox_templates::SandboxTemplatesClient,
+    sandbox_images::{SandboxImageBuildEvent, cas_image_service_url},
+    sandbox_templates::SandboxTemplatesClient,
 };
 
 const BUILD_CONTEXT_PROGRESS_PREFIX: &str = "Creating build context archive:";
@@ -206,6 +207,47 @@ pub async fn list_all_images(
     }
 
     Ok(all_items)
+}
+
+/// Collect all project-owned CAS image names from Image Service. The service
+/// returns an opaque cursor rather than a URL so the authenticated ingress
+/// remains the only public routing contract.
+pub async fn list_all_cas_images(
+    ctx: &CliContext,
+    client: &reqwest::Client,
+) -> Result<Vec<serde_json::Value>> {
+    let base_url = format!("{}/images", cas_image_service_url(&ctx.api_url));
+    let mut cursor: Option<String> = None;
+    let mut all_items = Vec::new();
+
+    loop {
+        let mut request = client.get(&base_url).query(&[("page_size", "100")]);
+        if let Some(cursor) = cursor.as_deref() {
+            request = request.query(&[("cursor", cursor)]);
+        }
+        let response = request.send().await.map_err(CliError::Http)?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return Err(CliError::Other(anyhow::anyhow!(
+                "failed to list CAS images from Image Service (HTTP {}): {}",
+                status,
+                body
+            )));
+        }
+        let result: serde_json::Value = response.json().await.map_err(CliError::Http)?;
+        if let Some(items) = result.get("items").and_then(serde_json::Value::as_array) {
+            all_items.extend(items.iter().cloned());
+        }
+        cursor = result
+            .get("pagination")
+            .and_then(|pagination| pagination.get("next"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string);
+        if cursor.is_none() {
+            return Ok(all_items);
+        }
+    }
 }
 
 fn find_image_item_in_page(
