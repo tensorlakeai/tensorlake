@@ -1550,6 +1550,13 @@ enum SbxFsCommands {
         #[arg(long = "snapshot", value_name = "SNAPSHOT_ID")]
         snapshot_id: Option<String>,
 
+        /// Present the mounted files as owned by this guest user: NAME, UID,
+        /// NAME:GROUP, or UID:GID (e.g. `agent` or `1001:1001`), resolved
+        /// against the sandbox image's own user database. Defaults to the
+        /// image's baked `tl-user` account, else root.
+        #[arg(long, value_name = "OWNER")]
+        owner: Option<String>,
+
         /// Print the updated sandbox as JSON
         #[arg(long)]
         json: bool,
@@ -2520,6 +2527,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             read_only,
                             prefetch,
                             snapshot_id,
+                            owner,
                             json,
                         } => {
                             commands::sbx::fs::attach(
@@ -2530,6 +2538,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 read_only,
                                 prefetch,
                                 snapshot_id.as_deref(),
+                                owner.as_deref(),
                                 json,
                             )
                             .await

@@ -58,9 +58,18 @@ class _FakeRustClient:
         read_only,
         prefetch,
         snapshot_id,
+        owner,
     ):
         self.attach_calls.append(
-            (sandbox_id, file_system_id, mount_path, read_only, prefetch, snapshot_id)
+            (
+                sandbox_id,
+                file_system_id,
+                mount_path,
+                read_only,
+                prefetch,
+                snapshot_id,
+                owner,
+            )
         )
         mount = {"file_system_id": file_system_id, "mount_path": mount_path}
         if read_only:
@@ -69,6 +78,8 @@ class _FakeRustClient:
             mount["prefetch"] = True
         if snapshot_id is not None:
             mount["snapshot_id"] = snapshot_id
+        if owner is not None:
+            mount["owner"] = owner
         return ("trace-attach", _sandbox_info_json([mount]))
 
     def detach_file_system(self, *, sandbox_id, mount_path):
@@ -101,9 +112,18 @@ class _FakeAsyncRustClient:
         read_only,
         prefetch,
         snapshot_id,
+        owner,
     ):
         self.attach_calls.append(
-            (sandbox_id, file_system_id, mount_path, read_only, prefetch, snapshot_id)
+            (
+                sandbox_id,
+                file_system_id,
+                mount_path,
+                read_only,
+                prefetch,
+                snapshot_id,
+                owner,
+            )
         )
         mount = {"file_system_id": file_system_id, "mount_path": mount_path}
         if read_only:
@@ -112,6 +132,8 @@ class _FakeAsyncRustClient:
             mount["prefetch"] = True
         if snapshot_id is not None:
             mount["snapshot_id"] = snapshot_id
+        if owner is not None:
+            mount["owner"] = owner
         return ("trace-attach", _sandbox_info_json([mount]))
 
     async def claim_sandbox_async(self, **kwargs):
@@ -276,6 +298,42 @@ class TestFileSystemModels(unittest.TestCase):
         )
         self.assertEqual(present.snapshot_id, "0abc123def")
 
+    def test_file_system_mount_serializes_owner_only_when_set(self):
+        default_owner = FileSystemMount(
+            file_system_id="file_system_abc",
+            mount_path="/mnt/skills",
+        )
+        self.assertNotIn("owner", json.loads(default_owner.model_dump_json()))
+
+        owned = FileSystemMount(
+            file_system_id="file_system_abc",
+            mount_path="/mnt/skills",
+            owner="agent",
+        )
+        self.assertEqual(
+            json.loads(owned.model_dump_json()),
+            {
+                "file_system_id": "file_system_abc",
+                "mount_path": "/mnt/skills",
+                "owner": "agent",
+            },
+        )
+
+    def test_file_system_mount_parses_absent_and_present_owner(self):
+        absent = FileSystemMount.model_validate(
+            {"file_system_id": "file_system_abc", "mount_path": "/mnt/skills"}
+        )
+        self.assertIsNone(absent.owner)
+
+        present = FileSystemMount.model_validate(
+            {
+                "file_system_id": "file_system_abc",
+                "mount_path": "/mnt/skills",
+                "owner": "1001:1001",
+            }
+        )
+        self.assertEqual(present.owner, "1001:1001")
+
     def test_create_request_serializes_file_systems_to_wire_key(self):
         request = CreateSandboxRequest(
             resources=CreateSandboxResources(cpus=1.0, memory_mb=1024),
@@ -366,7 +424,7 @@ class TestSandboxClientFileSystems(unittest.TestCase):
 
         self.assertEqual(
             fake.attach_calls,
-            [("sbx-1", "file_system_abc", "/mnt/skills", False, False, None)],
+            [("sbx-1", "file_system_abc", "/mnt/skills", False, False, None, None)],
         )
         self.assertEqual(traced.trace_id, "trace-attach")
         self.assertEqual(
@@ -392,7 +450,7 @@ class TestSandboxClientFileSystems(unittest.TestCase):
 
         self.assertEqual(
             fake.attach_calls,
-            [("sbx-1", "file_system_abc", "/mnt/skills", True, True, None)],
+            [("sbx-1", "file_system_abc", "/mnt/skills", True, True, None, None)],
         )
         self.assertEqual(
             traced.value.file_systems,
@@ -420,7 +478,17 @@ class TestSandboxClientFileSystems(unittest.TestCase):
 
         self.assertEqual(
             fake.attach_calls,
-            [("sbx-1", "file_system_abc", "/mnt/skills", True, False, "0abc123def")],
+            [
+                (
+                    "sbx-1",
+                    "file_system_abc",
+                    "/mnt/skills",
+                    True,
+                    False,
+                    "0abc123def",
+                    None,
+                )
+            ],
         )
         self.assertEqual(
             traced.value.file_systems,
@@ -432,6 +500,22 @@ class TestSandboxClientFileSystems(unittest.TestCase):
                     snapshot_id="0abc123def",
                 )
             ],
+        )
+
+    def test_attach_file_system_rejects_malformed_owner_offline(self):
+        fake = _FakeRustClient()
+        client = _sync_client(fake)
+
+        for bad in ["", ":", "agent:", "a:b:c", "with space", "4294967296"]:
+            with self.assertRaisesRegex(ValueError, "invalid owner"):
+                client.attach_file_system(
+                    "sbx-1",
+                    "file_system_abc",
+                    "/mnt/skills",
+                    owner=bad,
+                )
+        self.assertEqual(
+            fake.attach_calls, [], "malformed owners must fail before the wire"
         )
 
     def test_attach_file_system_rejects_snapshot_pin_without_read_only(self):
@@ -446,6 +530,32 @@ class TestSandboxClientFileSystems(unittest.TestCase):
                 snapshot_id="0abc123def",
             )
         self.assertEqual(fake.attach_calls, [])
+
+    def test_attach_file_system_threads_owner(self):
+        fake = _FakeRustClient()
+        client = _sync_client(fake)
+
+        traced = client.attach_file_system(
+            "sbx-1",
+            "file_system_abc",
+            "/mnt/skills",
+            owner="agent",
+        )
+
+        self.assertEqual(
+            fake.attach_calls,
+            [("sbx-1", "file_system_abc", "/mnt/skills", False, False, None, "agent")],
+        )
+        self.assertEqual(
+            traced.value.file_systems,
+            [
+                FileSystemMount(
+                    file_system_id="file_system_abc",
+                    mount_path="/mnt/skills",
+                    owner="agent",
+                )
+            ],
+        )
 
     def test_detach_file_system(self):
         fake = _FakeRustClient()
@@ -675,7 +785,7 @@ class TestAsyncSandboxClientFileSystems(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             fake.attach_calls,
-            [("sbx-1", "file_system_abc", "/mnt/skills", False, False, None)],
+            [("sbx-1", "file_system_abc", "/mnt/skills", False, False, None, None)],
         )
         self.assertEqual(traced.trace_id, "trace-attach")
         self.assertEqual(
@@ -701,7 +811,7 @@ class TestAsyncSandboxClientFileSystems(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             fake.attach_calls,
-            [("sbx-1", "file_system_abc", "/mnt/skills", True, True, None)],
+            [("sbx-1", "file_system_abc", "/mnt/skills", True, True, None, None)],
         )
         self.assertEqual(
             traced.value.file_systems,
@@ -729,7 +839,17 @@ class TestAsyncSandboxClientFileSystems(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(
             fake.attach_calls,
-            [("sbx-1", "file_system_abc", "/mnt/skills", True, False, "0abc123def")],
+            [
+                (
+                    "sbx-1",
+                    "file_system_abc",
+                    "/mnt/skills",
+                    True,
+                    False,
+                    "0abc123def",
+                    None,
+                )
+            ],
         )
         self.assertEqual(
             traced.value.file_systems,
@@ -739,6 +859,42 @@ class TestAsyncSandboxClientFileSystems(unittest.IsolatedAsyncioTestCase):
                     mount_path="/mnt/skills",
                     read_only=True,
                     snapshot_id="0abc123def",
+                )
+            ],
+        )
+
+    async def test_attach_file_system_threads_owner(self):
+        fake = _FakeAsyncRustClient()
+        client = _async_client(fake)
+
+        traced = await client.attach_file_system(
+            "sbx-1",
+            "file_system_abc",
+            "/mnt/skills",
+            owner="1001:1001",
+        )
+
+        self.assertEqual(
+            fake.attach_calls,
+            [
+                (
+                    "sbx-1",
+                    "file_system_abc",
+                    "/mnt/skills",
+                    False,
+                    False,
+                    None,
+                    "1001:1001",
+                )
+            ],
+        )
+        self.assertEqual(
+            traced.value.file_systems,
+            [
+                FileSystemMount(
+                    file_system_id="file_system_abc",
+                    mount_path="/mnt/skills",
+                    owner="1001:1001",
                 )
             ],
         )

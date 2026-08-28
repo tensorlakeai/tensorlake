@@ -104,6 +104,7 @@ export interface NativeSandboxClient {
     readOnly?: boolean | null,
     prefetch?: boolean | null,
     snapshotId?: string | null,
+    owner?: string | null,
   ): Promise<TracedJson>;
   detachFileSystem(
     sandboxId: string,

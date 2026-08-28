@@ -64,6 +64,47 @@ fn validate_mount_snapshot_pins(mounts: &[FileSystemMount]) -> Result<(), SdkErr
     Ok(())
 }
 
+/// Client-side mirror of the server's HTTP 400 for malformed mount owner
+/// specs (`NAME`, `UID`, `NAME:GROUP`, or `UID:GID`), so callers fail fast
+/// (and offline) instead of round-tripping to the server. Only the shape is
+/// checked — a named user or group resolves against the sandbox image's own
+/// user database when the mount attaches.
+fn validate_mount_owners(mounts: &[FileSystemMount]) -> Result<(), SdkError> {
+    const MAX_MOUNT_OWNER_BYTES: usize = 256;
+    for mount in mounts {
+        let Some(owner) = mount.owner.as_deref() else {
+            continue;
+        };
+        let reject = |reason: &str| {
+            Err(SdkError::ClientError(format!(
+                "file system mount {:?} at {:?} has an invalid owner {owner:?}: {reason}",
+                mount.file_system_id, mount.mount_path
+            )))
+        };
+        if owner.is_empty() || owner.len() > MAX_MOUNT_OWNER_BYTES {
+            return reject("owner must contain 1 to 256 bytes");
+        }
+        if !owner
+            .bytes()
+            .all(|byte| byte.is_ascii_graphic() && byte != b'"' && byte != b'\'')
+        {
+            return reject("owner must contain only non-whitespace printable ASCII characters");
+        }
+        let parts = owner.split(':').collect::<Vec<_>>();
+        if parts.len() > 2 || parts.iter().any(|part| part.is_empty()) {
+            return reject("owner must be NAME, UID, NAME:GROUP, or UID:GID");
+        }
+        // An all-digit part is unconditionally numeric to the guest resolver,
+        // so a u32 overflow can never resolve.
+        for part in parts {
+            if part.bytes().all(|byte| byte.is_ascii_digit()) && part.parse::<u32>().is_err() {
+                return reject("a numeric owner id must fit a 32-bit uid/gid");
+            }
+        }
+    }
+    Ok(())
+}
+
 /// A reference to a sandbox process: either its OS **pid** or a managed-process **name**
 /// given at creation. This is the single place the pid/name path segment is built, reused by
 /// the Rust SDK, the Python/Node bindings, and the CLI.
@@ -342,6 +383,7 @@ impl SandboxesClient {
         request: &CreateSandboxRequest,
     ) -> Result<Traced<CreateSandboxResponse>, SdkError> {
         validate_mount_snapshot_pins(&request.file_systems)?;
+        validate_mount_owners(&request.file_systems)?;
         let uri = self.endpoint("sandboxes");
         let req = self
             .client
@@ -370,6 +412,7 @@ impl SandboxesClient {
         request: &ClaimSandboxRequest,
     ) -> Result<Traced<CreateSandboxResponse>, SdkError> {
         validate_mount_snapshot_pins(&request.file_systems)?;
+        validate_mount_owners(&request.file_systems)?;
         let uri = self.endpoint(&format!("sandbox-pools/{pool_id}/sandboxes"));
         let req = self
             .client
@@ -557,6 +600,12 @@ impl SandboxesClient {
     /// `snapshot_id` pins the mount to a specific filesystem snapshot and
     /// requires `read_only`; it is sent only when set for the same
     /// compatibility reason.
+    ///
+    /// `owner` presents the mounted files as owned by a guest user spec
+    /// (`NAME`, `UID`, `NAME:GROUP`, or `UID:GID`), resolved against the
+    /// sandbox image's own user database at attach time; unset keeps the
+    /// image default. It is sent only when set for the same compatibility
+    /// reason.
     pub async fn attach_file_system(
         &self,
         sandbox_id: &str,
@@ -565,6 +614,7 @@ impl SandboxesClient {
         read_only: bool,
         prefetch: bool,
         snapshot_id: Option<&str>,
+        owner: Option<&str>,
     ) -> Result<Traced<SandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
         let body = FileSystemMount {
@@ -573,8 +623,10 @@ impl SandboxesClient {
             read_only,
             prefetch,
             snapshot_id: snapshot_id.map(str::to_string),
+            owner: owner.map(str::to_string),
         };
         validate_mount_snapshot_pins(std::slice::from_ref(&body))?;
+        validate_mount_owners(std::slice::from_ref(&body))?;
         let req = self
             .client
             .build_post_json_request(Method::POST, &uri, &body)?;
@@ -1217,7 +1269,7 @@ mod process_ref_tests {
     use super::{
         FileSystemMount, ProcessRef, resolve_sandbox_proxy_target, sandbox_proxy_hostname,
         sandbox_url_from_ingress_endpoint, select_sandbox_proxy_url, validate_managed_name,
-        validate_mount_snapshot_pins,
+        validate_mount_owners, validate_mount_snapshot_pins,
     };
 
     #[test]
@@ -1357,6 +1409,7 @@ mod process_ref_tests {
             read_only: false,
             prefetch: false,
             snapshot_id: Some("0abc123def".to_string()),
+            owner: None,
         };
         let error = validate_mount_snapshot_pins(std::slice::from_ref(&pinned_writable))
             .expect_err("a writable snapshot pin must be rejected client-side");
@@ -1377,5 +1430,31 @@ mod process_ref_tests {
         };
         validate_mount_snapshot_pins(&[pinned_read_only, unpinned])
             .expect("read-only pins and unpinned mounts are valid");
+    }
+
+    #[test]
+    fn malformed_mount_owner_is_a_client_error() {
+        let mount = |owner: Option<&str>| FileSystemMount {
+            file_system_id: "skills".to_string(),
+            mount_path: "/mnt/skills".to_string(),
+            read_only: false,
+            prefetch: false,
+            snapshot_id: None,
+            owner: owner.map(str::to_string),
+        };
+
+        for good in [None, Some("agent"), Some("1001:1001"), Some("agent:wheel")] {
+            validate_mount_owners(std::slice::from_ref(&mount(good)))
+                .expect("well-formed owners are valid");
+        }
+
+        for bad in ["", ":", "agent:", "a:b:c", "with space", "4294967296"] {
+            let error = validate_mount_owners(std::slice::from_ref(&mount(Some(bad))))
+                .expect_err("malformed owner specs must be rejected client-side");
+            assert!(
+                error.to_string().contains("invalid owner"),
+                "unexpected error for {bad:?}: {error}"
+            );
+        }
     }
 }
