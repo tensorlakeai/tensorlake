@@ -129,6 +129,10 @@ enum Commands {
         /// Overwrite existing files
         #[arg(short, long)]
         force: bool,
+
+        /// Application language (python/py or typescript/ts)
+        #[arg(long, value_enum, default_value = "python")]
+        language: commands::new::Language,
     },
 
     /// Deploy applications to Tensorlake Cloud
@@ -982,6 +986,10 @@ enum AppCommands {
         /// Overwrite existing files
         #[arg(short, long)]
         force: bool,
+
+        /// Application language (python/py or typescript/ts)
+        #[arg(long, value_enum, default_value = "python")]
+        language: commands::new::Language,
     },
 
     /// Deploy applications to Tensorlake Cloud
@@ -2033,7 +2041,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
             directory,
             no_confirm,
         } => commands::init::run(ctx, directory.as_deref(), no_confirm).await,
-        Commands::New { name, force } => commands::new::run(&name, force),
+        Commands::New {
+            name,
+            force,
+            language,
+        } => commands::new::run(&name, force, language),
         Commands::Deploy { args } => run_deploy_command(ctx, &args).await,
         Commands::BuildImages {
             application_file_path,
@@ -2572,7 +2584,11 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
 
 async fn run_app_command(ctx: &mut CliContext, subcmd: AppCommands) -> error::Result<()> {
     match subcmd {
-        AppCommands::New { name, force } => commands::new::run(&name, force),
+        AppCommands::New {
+            name,
+            force,
+            language,
+        } => commands::new::run(&name, force, language),
         AppCommands::Deploy { args } => run_deploy_command(ctx, &args).await,
         AppCommands::Invoke {
             application,
@@ -3216,11 +3232,33 @@ mod tests {
     #[test]
     fn orchestrate_commands_are_grouped_under_app() {
         match parse_command(["tl", "app", "new", "hello_world"]) {
-            Commands::App(AppCommands::New { name, force }) => {
+            Commands::App(AppCommands::New {
+                name,
+                force,
+                language,
+            }) => {
                 assert_eq!(name, "hello_world");
                 assert!(!force);
+                assert_eq!(language, commands::new::Language::Python);
             }
             _ => panic!("expected app new command"),
+        }
+
+        for value in ["py", "python"] {
+            match parse_command(["tl", "app", "new", "hello_world", "--language", value]) {
+                Commands::App(AppCommands::New { language, .. }) => {
+                    assert_eq!(language, commands::new::Language::Python);
+                }
+                _ => panic!("expected Python app new command"),
+            }
+        }
+        for value in ["ts", "typescript"] {
+            match parse_command(["tl", "app", "new", "hello_world", "--language", value]) {
+                Commands::App(AppCommands::New { language, .. }) => {
+                    assert_eq!(language, commands::new::Language::Typescript);
+                }
+                _ => panic!("expected TypeScript app new command"),
+            }
         }
         match parse_command(["tl", "app", "deploy", "hello_world.py"]) {
             Commands::App(AppCommands::Deploy { args }) => {
