@@ -12,6 +12,24 @@ use crate::output::table::new_table;
 
 const APPLICATION_DETAILS_LABEL_WIDTH: usize = 20;
 const APPLICATION_REQUEST_POLL_INTERVAL: Duration = Duration::from_millis(250);
+const FUNCTION_SERVICE_URL_ENV: &str = "TENSORLAKE_FUNCTION_SERVICE_URL";
+
+/// Base URL for application lifecycle requests.
+///
+/// Cloud clients should use the configured API origin so ingress can
+/// authenticate the request and inject trusted project identity. The override
+/// is reserved for trusted local installations that expose Function Service
+/// separately.
+pub(crate) fn application_service_url(api_url: &str) -> String {
+    resolve_application_service_url(api_url, std::env::var(FUNCTION_SERVICE_URL_ENV).ok())
+}
+
+fn resolve_application_service_url(api_url: &str, override_url: Option<String>) -> String {
+    override_url
+        .map(|value| value.trim().trim_end_matches('/').to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| api_url.trim_end_matches('/').to_string())
+}
 
 #[derive(Debug, Deserialize)]
 struct InvokeApplicationResponse {
@@ -89,7 +107,7 @@ async fn invoke_request(ctx: &CliContext, application: &str, json: Option<&str>)
     let client = ctx.client()?;
     let url = format!(
         "{}/v1/namespaces/{}/applications/{}",
-        ctx.api_url.trim_end_matches('/'),
+        application_service_url(&ctx.api_url),
         urlencoding::encode(&ctx.namespace),
         urlencoding::encode(application),
     );
@@ -240,7 +258,7 @@ async fn request_output_with_interval(
 fn application_request_url(ctx: &CliContext, application: &str, request_id: &str) -> String {
     format!(
         "{}/v1/namespaces/{}/applications/{}/requests/{}",
-        ctx.api_url.trim_end_matches('/'),
+        application_service_url(&ctx.api_url),
         urlencoding::encode(&ctx.namespace),
         urlencoding::encode(application),
         urlencoding::encode(request_id),
@@ -251,7 +269,7 @@ async fn find_request_application(ctx: &CliContext, request_id: &str) -> Result<
     let client = ctx.client()?;
     let applications_url = format!(
         "{}/v1/namespaces/{}/applications",
-        ctx.api_url.trim_end_matches('/'),
+        application_service_url(&ctx.api_url),
         urlencoding::encode(&ctx.namespace),
     );
     let mut cursor: Option<String> = None;
@@ -319,7 +337,8 @@ pub async fn ls(ctx: &CliContext) -> Result<()> {
     let resp = client
         .get(format!(
             "{}/v1/namespaces/{}/applications",
-            ctx.api_url, ctx.namespace
+            application_service_url(&ctx.api_url),
+            urlencoding::encode(&ctx.namespace),
         ))
         .send()
         .await
@@ -397,8 +416,8 @@ pub async fn describe(ctx: &CliContext, application: &str) -> Result<()> {
     let resp = client
         .get(format!(
             "{}/v1/namespaces/{}/applications/{}",
-            ctx.api_url,
-            ctx.namespace,
+            application_service_url(&ctx.api_url),
+            urlencoding::encode(&ctx.namespace),
             urlencoding::encode(application)
         ))
         .send()
@@ -591,7 +610,7 @@ fn format_application_state(value: Option<&serde_json::Value>) -> String {
 mod tests {
     use super::{
         find_request_application, format_application_details, invoke_request, public_endpoint_id,
-        request_output_with_interval,
+        request_output_with_interval, resolve_application_service_url,
     };
     use crate::auth::context::CliContext;
     use crate::config::resolver::ResolvedConfig;
@@ -610,6 +629,25 @@ mod tests {
             project_id: None,
             debug: false,
         })
+    }
+
+    #[test]
+    fn application_service_url_defaults_to_api_origin_and_accepts_local_override() {
+        assert_eq!(
+            resolve_application_service_url("https://api.tensorlake.ai/", None),
+            "https://api.tensorlake.ai"
+        );
+        assert_eq!(
+            resolve_application_service_url(
+                "https://api.tensorlake.ai",
+                Some("  http://functions.test:8930/  ".to_string()),
+            ),
+            "http://functions.test:8930"
+        );
+        assert_eq!(
+            resolve_application_service_url("https://api.tensorlake.ai/", Some("  ".to_string()),),
+            "https://api.tensorlake.ai"
+        );
     }
 
     async fn invocation_server(

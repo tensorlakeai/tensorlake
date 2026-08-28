@@ -306,10 +306,11 @@ function-agent core. Application source remains a separate ZIP that is uploaded
 with the manifest; it is not copied into the runtime image. Reusing an
 application version with different code or configuration is rejected; an
 identical redeploy is idempotent.
-Deployments normally route image and application requests through
-`TENSORLAKE_API_URL`. Split local installations can set
-`TENSORLAKE_IMAGE_SERVICE_URL` and `TENSORLAKE_FUNCTION_SERVICE_URL`
-independently.
+Image and application requests normally route through `TENSORLAKE_API_URL` so
+ingress can authenticate them and attach trusted project identity. Application
+deployment, invocation, output, listing, and inspection all use that same
+origin. Trusted split local installations can set `TENSORLAKE_IMAGE_SERVICE_URL`
+and `TENSORLAKE_FUNCTION_SERVICE_URL` independently.
 
 #### Call via HTTP
 

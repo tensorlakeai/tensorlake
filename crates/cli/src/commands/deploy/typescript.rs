@@ -1139,7 +1139,7 @@ async fn upsert_application(
 ) -> Result<()> {
     let client = ctx.client()?;
     let mut application = application.clone();
-    let function_service_url = function_service_url(&ctx.api_url);
+    let function_service_url = crate::commands::applications::application_service_url(&ctx.api_url);
     ensure_public_endpoint_id(
         &function_service_url,
         &ctx.namespace,
@@ -1189,19 +1189,6 @@ async fn upsert_application(
         delay *= 2;
     }
     unreachable!()
-}
-
-fn function_service_url(api_url: &str) -> String {
-    resolve_function_service_url(
-        api_url,
-        std::env::var("TENSORLAKE_FUNCTION_SERVICE_URL").ok(),
-    )
-}
-
-fn resolve_function_service_url(api_url: &str, override_url: Option<String>) -> String {
-    override_url
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| api_url.to_string())
 }
 
 fn allows_unauthenticated_requests(application: &Value) -> bool {
@@ -1290,7 +1277,6 @@ mod tests {
         application_with_resolved_images, bundle_application, canonical_entrypoint,
         discover_deployment_with_timeout, ensure_public_endpoint_id, load_function_runner_capsule,
         published_image_reference, registered_image_component, render_image_operation,
-        resolve_function_service_url,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1415,21 +1401,6 @@ mod tests {
         let sanitized = registered_image_component("My Application");
         assert!(sanitized.starts_with("id-"));
         assert_eq!(sanitized.len(), 35);
-    }
-
-    #[test]
-    fn function_service_url_defaults_to_api_origin() {
-        assert_eq!(
-            resolve_function_service_url("https://api.tensorlake.ai", None),
-            "https://api.tensorlake.ai"
-        );
-        assert_eq!(
-            resolve_function_service_url(
-                "https://api.tensorlake.ai",
-                Some("http://functions.test:8930".to_string())
-            ),
-            "http://functions.test:8930"
-        );
     }
 
     #[tokio::test]
