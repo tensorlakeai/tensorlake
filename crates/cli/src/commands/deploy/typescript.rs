@@ -37,7 +37,7 @@ const RESOLVED_VIRTUAL_ENTRY: &str = "\0tensorlake:application-entry";
 const RUNTIME_MODULE: &str = "runtime.mjs";
 const CODE_MANIFEST_FILE: &str = ".tensorlake_code_manifest.json";
 const MAX_CODE_SIZE: u64 = 5 * 1024 * 1024;
-const DEFAULT_NODE_IMAGE: &str = "node:24-bookworm-slim";
+const DEFAULT_NODE_IMAGE: &str = "node:24-trixie";
 const CAS_IMAGE_REF_PREFIX: &str = "cas-v1:";
 const FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH: &str =
     ".tensorlake/typescript-function-runner-runtime.tgz";
@@ -1305,7 +1305,7 @@ mod tests {
     #[test]
     fn renders_node_24_application_dockerfile() {
         let dockerfile = application_dockerfile(None).unwrap();
-        assert!(dockerfile.contains("FROM node:24-bookworm-slim"));
+        assert!(dockerfile.contains("FROM node:24-trixie"));
         assert!(dockerfile.contains("COPY .tensorlake/typescript-function-runner-runtime.tgz"));
         assert!(!dockerfile.contains("tensorlake@"));
         assert!(dockerfile.contains("--no-bin-links"));
