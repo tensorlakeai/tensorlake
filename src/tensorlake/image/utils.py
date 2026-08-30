@@ -17,7 +17,7 @@ def dockerfile_content(img: Image, extra_env_vars: List[tuple] | None = None) ->
     builder expects: a default ``WORKDIR /app`` (skipped when the image
     declares its own WORKDIR), ``PIP_BREAK_SYSTEM_PACKAGES=1`` for PEP 668
     Linux distros, and a trailing ``python3 -m pip install`` so the SDK is
-    available at runtime on the default Ubuntu base image.
+    available at runtime on the selected base image.
     """
     dockerfile_lines: List[str] = [f"FROM {img._base_image}"]
     if not image_has_workdir(img):
