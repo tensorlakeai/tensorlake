@@ -98,7 +98,7 @@ rayon = "1"
 redb = "4.1"
 tempfile = "3"
 tracing = "0.1"
-tracing-subscriber = "0.3"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 
 # Compression & archives
 # zlib-rs matches artifact_storage's flate2 feature choice, which the (ephemerally vendored)
