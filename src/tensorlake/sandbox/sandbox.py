@@ -19,6 +19,8 @@ from .exceptions import (
     RemoteAPIError,
     SandboxConnectionError,
     SandboxError,
+    SandboxNotFoundError,
+    SandboxNotRoutableError,
 )
 from .models import (
     CheckpointType,
@@ -162,6 +164,13 @@ def _resolve_process_arg(process: object, pid: object) -> str:
     if process is _PROCESS_ARG_UNSET:
         raise TypeError("missing required argument: `process`")
     return str(process)
+
+
+# ``get_or_create``: how many connect-or-create attempts to make when a
+# named sandbox is caught mid-handoff (for example, its previous holder is
+# still terminating), and the base delay between attempts.
+_GET_OR_CREATE_ATTEMPTS = 4
+_GET_OR_CREATE_RETRY_DELAY_SEC = 0.5
 
 
 class Sandbox:
@@ -398,6 +407,9 @@ class Sandbox:
             request_timeout: Max seconds to wait for HTTP operations.
             startup_timeout: Deprecated alias for ``request_timeout``.
             name: Optional name; named sandboxes support suspend/resume.
+                Fails with HTTP 409 (``RemoteAPIError``) when the name is
+                already claimed. To attach to the existing sandbox instead,
+                use :meth:`get_or_create`.
             file_systems: File systems to mount into the sandbox
                 at boot or warm-pool claim, each at its own absolute, unique
                 guest mount path.
@@ -507,6 +519,260 @@ class Sandbox:
             proxy_url=proxy_url,
             routing_hint=routing_hint,
             request_timeout=request_timeout,
+        )
+
+    @classmethod
+    def get_or_create(
+        cls,
+        name: str,
+        *,
+        resume: bool = True,
+        image: str | None = None,
+        cpus: float = 1.0,
+        memory_mb: int = 1024,
+        disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: GpuModel | str | None = None,
+        timeout_secs: int | None = None,
+        entrypoint: list[str] | None = None,
+        allow_internet_access: bool = True,
+        allow_out: list[str] | None = None,
+        deny_out: list[str] | None = None,
+        snapshot_id: str | None = None,
+        proxy_url: str | None = None,
+        request_timeout: float | None = None,
+        file_systems: list[FileSystemMount] | None = None,
+        api_key: str | None = _defaults.API_KEY,
+        api_url: str = _defaults.API_URL,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+        gpu: GpuRequest | None = None,
+    ) -> "Sandbox":
+        """Return the one sandbox bound to ``name``. Create it on first use.
+
+        This is the recommended call for an agent session that derives its
+        sandbox name from its session ID. It declares the intent "this name
+        is my session's sandbox": when a sandbox already holds the name, the
+        call attaches to it instead of failing with HTTP 409 the way
+        ``create`` does.
+
+        The steps, all handled internally:
+
+        1. ``connect(name)`` — finds the sandbox, running or suspended.
+        2. When nothing holds the name, ``create(name=...)`` with the given
+           configuration.
+        3. When that create loses a race against another caller (HTTP 409),
+           connect to the winner.
+        4. When the sandbox is still starting (another caller's create is
+           in flight), wait until it is ``Running``, the same way
+           :meth:`create` blocks for its own caller.
+        5. When the sandbox is suspended, ``resume()`` it. Disable with
+           ``resume=False``.
+
+        Concurrent callers that use the same name all converge on the same
+        sandbox. The configuration arguments (``image``, ``cpus``, ...)
+        apply only when the call creates a new sandbox; an existing sandbox
+        is returned as-is, with whatever configuration it already has.
+
+        Args:
+            name: Sandbox name; unique within the namespace. Derive it
+                deterministically from your session ID, for example
+                ``f"agent-{session_id}"``.
+            resume: If True (the default), resume a suspended sandbox before
+                returning, so the handle is immediately usable. If False,
+                the returned handle can point at a suspended sandbox; call
+                ``resume()`` yourself before you run anything.
+
+        All other arguments match :meth:`create` and are used only when a
+        new sandbox must be created. ``pool_id`` is the one exception: a
+        pool claim cannot carry a name, so a claimed sandbox could never
+        be found again by a later call. To use a warm pool, ``create``
+        with ``pool_id`` and name the sandbox afterwards with
+        ``client.update(sandbox_id, name=...)``.
+
+        Returns:
+            Connected Sandbox handle for the named sandbox.
+
+        Raises:
+            SandboxError: If the name stays claimed but its sandbox cannot
+                be attached to after several attempts (for example, the
+                previous holder is stuck terminating), or if a sandbox that
+                is still starting does not reach ``Running`` within
+                ``request_timeout``.
+            RemoteAPIError: If the create step fails with a non-409 error.
+        """
+        connect_kwargs: dict[str, Any] = {
+            "proxy_url": proxy_url,
+            "api_key": api_key,
+            "api_url": api_url,
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "namespace": namespace,
+            "request_timeout": request_timeout,
+        }
+        wait_timeout = (
+            request_timeout
+            if request_timeout is not None
+            else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+        )
+        last_conflict: RemoteAPIError | None = None
+        for attempt in range(_GET_OR_CREATE_ATTEMPTS):
+            if attempt:
+                # Reachable only after a lost create race whose winner is
+                # not connectable yet (for example, the name's previous
+                # holder is still terminating). Give the server a moment.
+                time.sleep(_GET_OR_CREATE_RETRY_DELAY_SEC * attempt)
+            try:
+                try:
+                    sandbox = cls.connect(name, **connect_kwargs)
+                except SandboxNotRoutableError:
+                    # Another caller's create is still starting the sandbox,
+                    # so it has no proxy routing (sandbox_url) yet. Match
+                    # create(): wait until connect can bind to it.
+                    sandbox = cls._connect_when_routable(
+                        name, connect_kwargs, wait_timeout
+                    )
+                    if sandbox is None:
+                        # The starting sandbox disappeared or terminated;
+                        # the name may be free again.
+                        continue
+                # With an explicit proxy_url, connect skips resolution and
+                # cannot see that the name is free; this info() call is then
+                # the existence check that routes a free name to the create
+                # step below. Otherwise connect already cached the info, so
+                # this adds no request.
+                status = sandbox.info().status
+            except SandboxNotFoundError:
+                try:
+                    return cls.create(
+                        image=image,
+                        cpus=cpus,
+                        memory_mb=memory_mb,
+                        disk_mb=disk_mb,
+                        gpus=gpus,
+                        gpu_model=gpu_model,
+                        timeout_secs=timeout_secs,
+                        entrypoint=entrypoint,
+                        allow_internet_access=allow_internet_access,
+                        allow_out=allow_out,
+                        deny_out=deny_out,
+                        snapshot_id=snapshot_id,
+                        proxy_url=proxy_url,
+                        request_timeout=request_timeout,
+                        name=name,
+                        file_systems=file_systems,
+                        api_key=api_key,
+                        api_url=api_url,
+                        organization_id=organization_id,
+                        project_id=project_id,
+                        namespace=namespace,
+                        gpu=gpu,
+                    )
+                except RemoteAPIError as e:
+                    if e.status_code != 409:
+                        raise
+                    # Lost the create race: another caller claimed the name
+                    # first. Loop back and attach to the winner.
+                    last_conflict = e
+                    continue
+            if status == SandboxStatus.PENDING:
+                # Another caller's create is still starting this sandbox.
+                # Match create(): block until Running, then pick up fresh
+                # proxy routing before handing the sandbox out.
+                info = sandbox._fresh_running_info_for_rebind(
+                    time.monotonic() + wait_timeout, poll_interval=0.5
+                )
+                sandbox._rebind_proxy(info)
+            elif resume and status in (
+                SandboxStatus.SUSPENDING,
+                SandboxStatus.SUSPENDED,
+            ):
+                if status == SandboxStatus.SUSPENDING:
+                    # The server rejects resume while a suspend is still in
+                    # progress; wait for the suspend to settle first.
+                    status = cls._wait_out_suspending(sandbox, wait_timeout, name)
+                if status == SandboxStatus.SUSPENDED:
+                    sandbox.resume(timeout=wait_timeout)
+                elif status == SandboxStatus.TERMINATED:
+                    # The sandbox died while suspending; the name may be
+                    # free again.
+                    continue
+                else:
+                    # Another caller resumed it first. The resumed sandbox
+                    # may live elsewhere, so this handle's routing from
+                    # before the suspend is stale. Match the PENDING
+                    # branch: block until Running with fresh proxy routing.
+                    info = sandbox._fresh_running_info_for_rebind(
+                        time.monotonic() + wait_timeout, poll_interval=0.5
+                    )
+                    sandbox._rebind_proxy(info)
+            return sandbox
+        raise SandboxError(
+            f"get_or_create({name!r}): the name is claimed, but its sandbox "
+            f"could not be attached to after {_GET_OR_CREATE_ATTEMPTS} attempts"
+        ) from last_conflict
+
+    @staticmethod
+    def _wait_out_suspending(
+        sandbox: "Sandbox",
+        wait_timeout: float,
+        name: str,
+    ) -> SandboxStatus:
+        """Poll until the sandbox leaves ``Suspending``.
+
+        The lifecycle API rejects resume while a suspend is still in
+        progress, so :meth:`get_or_create` must wait for the suspend to
+        settle before it can resume the sandbox.
+
+        Raises:
+            SandboxError: If the sandbox is still ``Suspending`` after
+                ``wait_timeout`` seconds.
+        """
+        deadline = time.monotonic() + wait_timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            # info() serves the cached SUSPENDING info from connect(); the
+            # status accessor always fetches fresh state from the server.
+            status = sandbox.status
+            if status != SandboxStatus.SUSPENDING:
+                return status
+        raise SandboxError(
+            f"get_or_create({name!r}): the sandbox holding the name did not "
+            f"finish suspending within {wait_timeout}s"
+        )
+
+    @classmethod
+    def _connect_when_routable(
+        cls,
+        name: str,
+        connect_kwargs: dict[str, Any],
+        wait_timeout: float,
+    ) -> "Sandbox | None":
+        """Poll ``connect`` until the named sandbox has proxy routing.
+
+        Used by :meth:`get_or_create` when the name's sandbox is still
+        starting and has no ``sandbox_url`` yet. Returns ``None`` when the
+        sandbox disappears or terminates while starting, so the caller can
+        retry the name.
+
+        Raises:
+            SandboxError: If the sandbox does not become connectable within
+                ``wait_timeout``.
+        """
+        deadline = time.monotonic() + wait_timeout
+        while time.monotonic() < deadline:
+            time.sleep(0.5)
+            try:
+                return cls.connect(name, **connect_kwargs)
+            except SandboxNotFoundError:
+                return None
+            except SandboxNotRoutableError as e:
+                if e.status == SandboxStatus.TERMINATED:
+                    return None
+        raise SandboxError(
+            f"get_or_create({name!r}): the sandbox holding the name did not "
+            f"become connectable within {wait_timeout}s"
         )
 
     # --- Class-level snapshot management ---

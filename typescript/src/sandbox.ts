@@ -3,7 +3,11 @@ import {
   type ConnectDesktopOptions,
   Desktop,
 } from "./desktop.js";
-import { SandboxError } from "./errors.js";
+import {
+  RemoteAPIError,
+  SandboxError,
+  SandboxNotFoundError,
+} from "./errors.js";
 import { type Traced } from "./http.js";
 import {
   assembleCommandResult,
@@ -21,6 +25,7 @@ import {
   type CreateAndConnectOptions,
   type CreatePtySessionOptions,
   type DaemonInfo,
+  type GetOrCreateOptions,
   type GetSandboxLogsOptions,
   type HealthResponse,
   type ListDirectoryResponse,
@@ -545,6 +550,12 @@ function sendPtyFrame(socket: WebSocket, frame: Buffer): Promise<void> {
  * Provides process management, file operations, and I/O streaming
  * through the sandbox proxy.
  */
+// `getOrCreate`: how many connect-or-create attempts to make when a named
+// sandbox is caught mid-handoff (for example, its previous holder is still
+// terminating), and the base delay between attempts.
+const GET_OR_CREATE_ATTEMPTS = 4;
+const GET_OR_CREATE_RETRY_DELAY_MS = 500;
+
 export class Sandbox {
   readonly sandboxId: string;
   traceId: string | null = null;
@@ -600,6 +611,10 @@ export class Sandbox {
    *
    * Covers both fresh sandbox creation and restore-from-snapshot (set
    * `snapshotId`). Blocks until the sandbox is `Running`.
+   *
+   * When `name` is already claimed, the server rejects the create with
+   * HTTP 409 (`RemoteAPIError`). To attach to the existing sandbox
+   * instead, use {@link Sandbox.getOrCreate}.
    */
   static async create(
     options?: CreateAndConnectOptions & Partial<SandboxClientOptions>,
@@ -613,9 +628,11 @@ export class Sandbox {
   /**
    * Attach to an existing sandbox and return a connected handle.
    *
-   * When `proxyUrl` is omitted, resolves the sandbox first so the handle uses
-   * the correct cloud/region ingress endpoint. Does **not** auto-resume a
-   * suspended sandbox — call `sandbox.resume()` explicitly.
+   * The handle is lazy: when `proxyUrl` is omitted, the sandbox is resolved
+   * on the first request so the handle uses the correct cloud/region ingress
+   * endpoint. Connecting does not verify that the sandbox exists. Does
+   * **not** auto-resume a suspended sandbox — call `sandbox.resume()`
+   * explicitly.
    */
   static async connect(
     options: ConnectOptions & Partial<SandboxClientOptions>,
@@ -631,6 +648,149 @@ export class Sandbox {
     sandbox.lifecycleClient = client;
     return sandbox;
   }
+
+  /**
+   * Return the one sandbox bound to `name`. Create it on first use.
+   *
+   * This is the recommended call for an agent session that derives its
+   * sandbox name from its session ID. It declares the intent "this name is
+   * my session's sandbox": when a sandbox already holds the name, the call
+   * attaches to it instead of failing with HTTP 409 the way `create` does.
+   *
+   * The steps, all handled internally:
+   *
+   * 1. `connect` by name — finds the sandbox, running or suspended.
+   * 2. When nothing holds the name, `create` with the given configuration.
+   * 3. When that create loses a race against another caller (HTTP 409),
+   *    connect to the winner.
+   * 4. When the sandbox is still starting (another caller's create is in
+   *    flight), wait until it is `Running`, the same way `create` blocks
+   *    for its own caller.
+   * 5. When the sandbox is suspended, `resume()` it. Disable with
+   *    `resume: false`.
+   *
+   * Concurrent callers that use the same name all converge on the same
+   * sandbox. The configuration options (`image`, `cpus`, ...) apply only
+   * when the call creates a new sandbox; an existing sandbox is returned
+   * as-is, with whatever configuration it already has.
+   *
+   * `poolId` is not accepted: a pool claim cannot carry a name, so a
+   * claimed sandbox could never be found again by a later call. To use a
+   * warm pool, `create` with `poolId` and name the sandbox afterwards
+   * with `client.update(sandboxId, { name })`.
+   *
+   * @param name Sandbox name; unique within the namespace. Derive it
+   *   deterministically from your session ID, for example
+   *   `agent-${sessionId}`.
+   * @param options Create options plus `resume` (default true: resume a
+   *   suspended sandbox before returning). Used only when a new sandbox
+   *   must be created, except connection-level options.
+   * @throws {SandboxError} If the name stays claimed but its sandbox cannot
+   *   be attached to after several attempts (for example, the previous
+   *   holder is stuck terminating), or if a sandbox that is still starting
+   *   does not reach `Running` within `requestTimeout`.
+   * @throws {RemoteAPIError} If the create step fails with a non-409 error.
+   */
+  static async getOrCreate(
+    name: string,
+    options?: GetOrCreateOptions & Partial<SandboxClientOptions>,
+  ): Promise<Sandbox> {
+    const { resume = true, ...createOptions } = options ?? {};
+    // The type omits poolId, but plain-JS callers can still pass it. Reject
+    // it here: the claim request has no name field on the wire, so the
+    // claimed sandbox would be unnamed and every later call would claim
+    // another one instead of converging.
+    if ((createOptions as { poolId?: string }).poolId != null) {
+      throw new SandboxError(
+        "getOrCreate does not accept poolId: a pool claim cannot name the " +
+          "sandbox. Use create({ poolId }) and then " +
+          "client.update(sandboxId, { name }).",
+      );
+    }
+    let lastConflict: RemoteAPIError | undefined;
+    for (let attempt = 0; attempt < GET_OR_CREATE_ATTEMPTS; attempt++) {
+      if (attempt > 0) {
+        // Reachable only after a lost create race whose winner is not
+        // connectable yet (for example, the name's previous holder is
+        // still terminating). Give the server a moment.
+        await sleep(GET_OR_CREATE_RETRY_DELAY_MS * attempt);
+      }
+      try {
+        const sandbox = await Sandbox.connect({
+          ...createOptions,
+          sandboxId: name,
+        });
+        // connect returns a lazy handle without checking that the name
+        // exists; this status fetch is the existence check that routes a
+        // free name to the create step below.
+        const status = await sandbox.status();
+        if (status === SandboxStatus.PENDING) {
+          // Another caller's create is still starting this sandbox. Match
+          // create(): block until Running, then pick up fresh proxy
+          // routing before handing the sandbox out.
+          const waitTimeout = createOptions.requestTimeout ?? 300;
+          await sandbox.refreshRoutingWhenRunning(
+            Date.now() + waitTimeout * 1000,
+            0.5,
+            waitTimeout,
+          );
+        } else if (
+          resume &&
+          (status === SandboxStatus.SUSPENDED ||
+            status === SandboxStatus.SUSPENDING)
+        ) {
+          const waitTimeout = createOptions.requestTimeout ?? 300;
+          let settled: SandboxStatus = status;
+          if (settled === SandboxStatus.SUSPENDING) {
+            // The server rejects resume while a suspend is still in
+            // progress; wait for the suspend to settle first.
+            settled = await sandbox.waitOutSuspending(waitTimeout, name);
+          }
+          if (settled === SandboxStatus.SUSPENDED) {
+            await sandbox.resume({ timeout: waitTimeout });
+          } else if (settled === SandboxStatus.TERMINATED) {
+            // The sandbox died while suspending; the name may be free
+            // again. Retry the loop.
+            continue;
+          } else {
+            // Another caller resumed it first. The resumed sandbox may
+            // live elsewhere, so this handle's routing from before the
+            // suspend is stale. Match the PENDING branch: block until
+            // Running with fresh proxy routing.
+            await sandbox.refreshRoutingWhenRunning(
+              Date.now() + waitTimeout * 1000,
+              0.5,
+              waitTimeout,
+            );
+          }
+        }
+        return sandbox;
+      } catch (err) {
+        if (!(err instanceof SandboxNotFoundError)) throw err;
+        try {
+          return await Sandbox.create({ ...createOptions, name });
+        } catch (createErr) {
+          if (
+            createErr instanceof RemoteAPIError &&
+            createErr.statusCode === 409
+          ) {
+            // Lost the create race: another caller claimed the name first.
+            // Loop back and attach to the winner.
+            lastConflict = createErr;
+            continue;
+          }
+          throw createErr;
+        }
+      }
+    }
+    const giveUp = new SandboxError(
+      `getOrCreate('${name}'): the name is claimed, but its sandbox could ` +
+        `not be attached to after ${GET_OR_CREATE_ATTEMPTS} attempts`,
+    );
+    giveUp.cause = lastConflict;
+    throw giveUp;
+  }
+
 
   // --- Static snapshot management ---
 
@@ -757,7 +917,43 @@ export class Sandbox {
       timeout: Math.max(0, (deadline - Date.now()) / 1000),
     });
     if (!wait) return;
+    await this.refreshRoutingWhenRunning(deadline, pollInterval, timeout);
+  }
 
+  /**
+   * Poll until the sandbox leaves `Suspending`.
+   *
+   * The lifecycle API rejects resume while a suspend is still in progress,
+   * so `getOrCreate` must wait for the suspend to settle before it can
+   * resume the sandbox.
+   */
+  private async waitOutSuspending(
+    waitTimeout: number,
+    name: string,
+  ): Promise<SandboxStatus> {
+    const deadline = Date.now() + waitTimeout * 1000;
+    while (Date.now() < deadline) {
+      await sleep(500);
+      const status = await this.status();
+      if (status !== SandboxStatus.SUSPENDING) return status;
+    }
+    throw new SandboxError(
+      `getOrCreate('${name}'): the sandbox holding the name did not finish ` +
+        `suspending within ${waitTimeout}s`,
+    );
+  }
+
+  /**
+   * Poll until the sandbox is `Running` with routing info, then rebind this
+   * handle's cached proxy routing. Shared by `resume()` and the
+   * `getOrCreate` path that attaches to a still-starting sandbox.
+   */
+  private async refreshRoutingWhenRunning(
+    deadline: number,
+    pollInterval: number,
+    timeout: number,
+  ): Promise<void> {
+    const client = this.requireLifecycleClient("refresh proxy routing");
     while (Date.now() < deadline) {
       const info = await client.get(this.lifecycleIdentifier);
       if (

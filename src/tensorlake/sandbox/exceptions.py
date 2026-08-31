@@ -1,5 +1,10 @@
 """Exception hierarchy for sandbox operations."""
 
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .models import SandboxStatus
+
 
 class SandboxException(Exception):
     """Base exception for all sandbox-related errors."""
@@ -30,6 +35,38 @@ class SandboxNotFoundError(SandboxError):
     @property
     def sandbox_id(self) -> str:
         return self._sandbox_id
+
+
+class SandboxNotRoutableError(SandboxError):
+    """Raised when a sandbox exists but has no proxy routing yet.
+
+    A sandbox that is not ``Running`` (for example, one that is still
+    starting) has no ``sandbox_url``, so a connected handle cannot be
+    built for it. Wait for the sandbox to reach ``Running`` and connect
+    again, or pass an explicit ``proxy_url``.
+    """
+
+    def __init__(self, sandbox_id: str, status: "SandboxStatus | None" = None):
+        self._sandbox_id = sandbox_id
+        self._status = status
+        status_part = (
+            f" (status: {getattr(status, 'value', status)})"
+            if status is not None
+            else ""
+        )
+        super().__init__(
+            f"Sandbox {sandbox_id} did not include proxy routing "
+            f"information{status_part}; it may still be starting. Wait for "
+            "it to be Running and connect again, or pass an explicit proxy_url."
+        )
+
+    @property
+    def sandbox_id(self) -> str:
+        return self._sandbox_id
+
+    @property
+    def status(self) -> "SandboxStatus | None":
+        return self._status
 
 
 class PoolNotFoundError(SandboxError):
