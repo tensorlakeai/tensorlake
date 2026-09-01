@@ -121,7 +121,7 @@ describe("Sandbox.getOrCreate", () => {
 
   it("resumes the race winner when it is suspended", async () => {
     vi.useFakeTimers();
-    const winner = sandboxMock(SandboxStatus.SUSPENDING);
+    const winner = sandboxMock(SandboxStatus.SUSPENDED);
     vi.spyOn(Sandbox, "connect")
       .mockRejectedValueOnce(new SandboxNotFoundError(NAME))
       .mockResolvedValueOnce(winner);
@@ -135,6 +135,27 @@ describe("Sandbox.getOrCreate", () => {
 
     expect(result).toBe(winner);
     expect(winner.resume).toHaveBeenCalledTimes(1);
+  });
+
+  it("waits for a suspending sandbox to settle before resume", async () => {
+    // The server rejects resume while a suspend is still in progress, so
+    // getOrCreate must wait until the sandbox is Suspended before resume().
+    const settle = vi.fn(async () => SandboxStatus.SUSPENDED);
+    const winner = {
+      sandboxId: "sbx-uuid-1",
+      status: vi.fn(async () => SandboxStatus.SUSPENDING),
+      resume: vi.fn(async () => undefined),
+      waitOutSuspending: settle,
+    } as unknown as Sandbox;
+    vi.spyOn(Sandbox, "connect").mockResolvedValue(winner);
+    const create = vi.spyOn(Sandbox, "create");
+
+    const result = await Sandbox.getOrCreate(NAME);
+
+    expect(result).toBe(winner);
+    expect(settle).toHaveBeenCalledTimes(1);
+    expect(winner.resume).toHaveBeenCalledTimes(1);
+    expect(create).not.toHaveBeenCalled();
   });
 
   it("waits for a pending sandbox to become running", async () => {

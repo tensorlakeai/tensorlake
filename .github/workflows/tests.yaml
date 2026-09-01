@@ -250,6 +250,7 @@ jobs:
             tests.sandbox.test_sandbox_rust_backend \
             tests.sandbox.test_sandbox_rust_backend_async \
             tests.sandbox.test_file_systems \
+            tests.sandbox.test_get_or_create \
             tests.image.test_sandbox_builder \
             tests.function_agent.test_runner
 
