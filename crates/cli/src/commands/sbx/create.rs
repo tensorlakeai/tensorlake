@@ -47,9 +47,8 @@ pub async fn create_with_request(
         let status = resp.status();
         let body = resp.text().await.unwrap_or_default();
         return Err(CliError::Other(anyhow::anyhow!(
-            "failed to create sandbox (HTTP {}): {}",
-            status,
-            body
+            "{}",
+            format_create_error(status, &body)
         )));
     }
 
@@ -68,6 +67,36 @@ pub async fn create_with_request(
     }
 
     Ok(create_result)
+}
+
+fn format_create_error(status: reqwest::StatusCode, body: &str) -> String {
+    #[derive(Deserialize)]
+    struct ServerError<'a> {
+        #[serde(default)]
+        code: Option<&'a str>,
+        message: &'a str,
+    }
+
+    if let Ok(error) = serde_json::from_str::<ServerError<'_>>(body)
+        && error.code == Some("GPU_REQUIRES_CAS_SNAPSHOT")
+    {
+        return format!(
+            "{}\n\nTo see compatible images, run `tl sbx image ls --cas`.",
+            error.message
+        );
+    }
+    if let Ok(error) = serde_json::from_str::<ServerError<'_>>(body) {
+        return format!(
+            "failed to create sandbox (HTTP {status}): {}",
+            error.message
+        );
+    }
+    let body = body.trim();
+    if body.is_empty() {
+        format!("failed to create sandbox (HTTP {status})")
+    } else {
+        format!("failed to create sandbox (HTTP {status}): {body}")
+    }
 }
 
 pub struct CreateArgs<'a> {
@@ -432,8 +461,30 @@ fn build_create_request_body(
 mod tests {
     use super::{
         CreateSandboxResult, GpuRequest, PostCreateProxyTarget, build_create_request_body,
-        format_ready_message, parse_file_system_mounts, post_create_proxy_base_with_explicit,
+        format_create_error, format_ready_message, parse_file_system_mounts,
+        post_create_proxy_base_with_explicit,
     };
+
+    #[test]
+    fn gpu_cas_error_adds_catalog_guidance() {
+        let message = format_create_error(
+            reqwest::StatusCode::BAD_REQUEST,
+            r#"{"code":"GPU_REQUIRES_CAS_SNAPSHOT","message":"Image 'base' uses TLSnap."}"#,
+        );
+        assert!(message.contains("Image 'base' uses TLSnap."));
+        assert!(message.contains("tl sbx image ls --cas"));
+    }
+
+    #[test]
+    fn ordinary_server_error_keeps_status_and_message() {
+        assert_eq!(
+            format_create_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                r#"{"code":"OTHER","message":"bad request"}"#,
+            ),
+            "failed to create sandbox (HTTP 400 Bad Request): bad request"
+        );
+    }
 
     #[test]
     fn parse_file_system_mounts_builds_wire_objects() {
