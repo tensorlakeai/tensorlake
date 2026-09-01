@@ -1,9 +1,13 @@
 import { createHash } from "node:crypto";
-import { registerApplication } from "tensorlake/applications";
+import { Image, registerApplication } from "tensorlake/applications";
 
 // Function Agent resolves declared secrets before importing this module. Reading
 // here verifies that import-time installation works, not only handler-time access.
 const secretAtImport = process.env.E2E_SECRET;
+
+const image = new Image({
+  baseImage: "node:24-trixie",
+});
 
 export const secretsE2E = registerApplication(
   "typescript_secrets_e2e",
@@ -28,5 +32,6 @@ export const secretsE2E = registerApplication(
   },
   {
     secrets: ["E2E_SECRET"],
+    image,
   },
 );
