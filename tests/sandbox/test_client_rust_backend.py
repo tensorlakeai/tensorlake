@@ -9,6 +9,8 @@ from tensorlake.sandbox import (
     NetworkConfig,
     PoolInUseError,
     SandboxNotFoundError,
+    SandboxNotRoutableError,
+    SandboxStatus,
     SnapshotStatus,
     SnapshotType,
     SnapshotWaitCondition,
@@ -601,6 +603,40 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                 }
             ],
         )
+
+    def test_connect_raises_not_routable_when_sandbox_not_running(self):
+        # A sandbox that is not Running yet has no sandbox_url. Without an
+        # explicit proxy override, connect must raise SandboxNotRoutableError
+        # (which get_or_create handles) instead of a generic proxy error.
+        class _PendingRustClient(_FakeRustClient):
+            def get_sandbox_json(self, sandbox_id):
+                self.last_get_sandbox_id = sandbox_id
+                return (
+                    "trace-get-sandbox",
+                    json.dumps(
+                        {
+                            "id": "sbx-1",
+                            "namespace": "default",
+                            "status": "pending",
+                            "resources": {
+                                "cpus": 1.0,
+                                "memory_mb": 512,
+                                "ephemeral_disk_mb": 1024,
+                            },
+                        }
+                    ),
+                )
+
+        client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")
+        fake = _PendingRustClient()
+        client._rust_client = fake
+
+        with self.assertRaises(SandboxNotRoutableError) as ctx:
+            client.connect("stable-name")
+
+        self.assertEqual(ctx.exception.sandbox_id, "sbx-1")
+        self.assertEqual(ctx.exception.status, SandboxStatus.PENDING)
+        self.assertEqual(fake.connect_proxy_calls, [])
 
     def test_create_uses_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")

@@ -40,6 +40,7 @@ sha2 = "0.10"
 # against; the default miniz_oxide backend has produced a divergent test result.
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
 crc32fast = "1"
+zstd = "0.13"
 rayon = "1"
 hex = "0.4"
 tempfile = "3"

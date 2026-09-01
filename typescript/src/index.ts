@@ -208,6 +208,7 @@ export type {
   SandboxClientOptions,
   SandboxOptions,
   CreateAndConnectOptions,
+  GetOrCreateOptions,
   SuspendResumeOptions,
   CheckpointOptions,
   ConnectOptions,

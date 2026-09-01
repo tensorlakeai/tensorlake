@@ -19,6 +19,7 @@ from .exceptions import (
     SandboxConnectionError,
     SandboxError,
     SandboxNotFoundError,
+    SandboxNotRoutableError,
 )
 from .models import (
     CLEAR_NETWORK_POLICY,
@@ -1512,6 +1513,13 @@ class SandboxClient:
             routing_hint = routing_hint or routing_info.routing_hint
             if isinstance(routing_info, SandboxInfo):
                 cached_info = routing_info
+            if not routing_info.sandbox_url and not explicit_proxy_url:
+                # A sandbox that is not Running yet has no sandbox_url, so
+                # a proxy-backed handle cannot be built for it.
+                raise SandboxNotRoutableError(
+                    proxy_sandbox_id,
+                    getattr(routing_info, "status", None),
+                )
             selected_proxy_url = self._rust_client.select_sandbox_proxy_url(
                 sandbox_id=proxy_sandbox_id,
                 sandbox_url=routing_info.sandbox_url,

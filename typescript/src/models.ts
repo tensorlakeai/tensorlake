@@ -672,6 +672,18 @@ export interface CreateAndConnectOptions extends CreateSandboxOptions {
   startupTimeout?: number;
 }
 
+/**
+ * Options for `Sandbox.getOrCreate`: everything `create` accepts (used only
+ * when a new sandbox must be created; `name` comes from the first argument),
+ * plus `resume`. `poolId` is excluded: a pool claim cannot carry a name, so
+ * a claimed sandbox could never be found again by a later call.
+ */
+export interface GetOrCreateOptions
+  extends Omit<CreateAndConnectOptions, "name" | "poolId"> {
+  /** Resume a suspended sandbox before returning. Default: true. */
+  resume?: boolean;
+}
+
 export interface SuspendResumeOptions {
   /** If false, fire-and-return without waiting for completion. Default: true. */
   wait?: boolean;

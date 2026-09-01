@@ -11,7 +11,7 @@ import asyncio
 import json
 import os
 from collections.abc import Mapping
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
@@ -19,7 +19,13 @@ import httpx
 from tensorlake._tracing import USER_AGENT, Traced, TracedIterator, inject_traceparent
 
 from . import _defaults
-from .exceptions import RemoteAPIError, SandboxConnectionError, SandboxError
+from .exceptions import (
+    RemoteAPIError,
+    SandboxConnectionError,
+    SandboxError,
+    SandboxNotFoundError,
+    SandboxNotRoutableError,
+)
 from .models import (
     CheckpointType,
     ClearNetworkPolicy,
@@ -52,6 +58,8 @@ from .models import (
     StdinMode,
 )
 from .sandbox import (
+    _GET_OR_CREATE_ATTEMPTS,
+    _GET_OR_CREATE_RETRY_DELAY_SEC,
     _PROCESS_ARG_UNSET,
     _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE,
     RustCloudSandboxProxyClient,
@@ -342,6 +350,208 @@ class AsyncSandbox:
             proxy_url=proxy_url,
             routing_hint=routing_hint,
             request_timeout=request_timeout,
+        )
+
+    @classmethod
+    async def get_or_create(
+        cls,
+        name: str,
+        *,
+        resume: bool = True,
+        image: str | None = None,
+        cpus: float = 1.0,
+        memory_mb: int = 1024,
+        disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: GpuModel | str | None = None,
+        timeout_secs: int | None = None,
+        entrypoint: list[str] | None = None,
+        allow_internet_access: bool = True,
+        allow_out: list[str] | None = None,
+        deny_out: list[str] | None = None,
+        snapshot_id: str | None = None,
+        proxy_url: str | None = None,
+        request_timeout: float | None = None,
+        file_systems: list[FileSystemMount] | None = None,
+        api_key: str | None = _defaults.API_KEY,
+        api_url: str = _defaults.API_URL,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+        gpu: GpuRequest | None = None,
+    ) -> "AsyncSandbox":
+        """Return the one sandbox bound to ``name``. Create it on first use.
+
+        Async mirror of :meth:`Sandbox.get_or_create`; see that method for
+        the full semantics. In short: connect by name; create when the name
+        is free; on a lost create race (HTTP 409), attach to the winner;
+        wait for a still-starting sandbox to reach ``Running``; resume a
+        suspended sandbox unless ``resume=False``.
+        """
+        connect_kwargs: dict[str, Any] = {
+            "proxy_url": proxy_url,
+            "api_key": api_key,
+            "api_url": api_url,
+            "organization_id": organization_id,
+            "project_id": project_id,
+            "namespace": namespace,
+            "request_timeout": request_timeout,
+        }
+        wait_timeout = (
+            request_timeout
+            if request_timeout is not None
+            else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+        )
+        last_conflict: RemoteAPIError | None = None
+        for attempt in range(_GET_OR_CREATE_ATTEMPTS):
+            if attempt:
+                # Reachable only after a lost create race whose winner is
+                # not connectable yet (for example, the name's previous
+                # holder is still terminating). Give the server a moment.
+                await asyncio.sleep(_GET_OR_CREATE_RETRY_DELAY_SEC * attempt)
+            try:
+                try:
+                    sandbox = await cls.connect(name, **connect_kwargs)
+                except SandboxNotRoutableError:
+                    # Another caller's create is still starting the sandbox,
+                    # so it has no proxy routing (sandbox_url) yet. Match
+                    # create(): wait until connect can bind to it.
+                    sandbox = await cls._connect_when_routable(
+                        name, connect_kwargs, wait_timeout
+                    )
+                    if sandbox is None:
+                        # The starting sandbox disappeared or terminated;
+                        # the name may be free again.
+                        continue
+                # With an explicit proxy_url, connect skips resolution and
+                # cannot see that the name is free; this info() call is then
+                # the existence check that routes a free name to the create
+                # step below. Otherwise connect already cached the info, so
+                # this adds no request.
+                status = (await sandbox.info()).status
+            except SandboxNotFoundError:
+                try:
+                    return await cls.create(
+                        image=image,
+                        cpus=cpus,
+                        memory_mb=memory_mb,
+                        disk_mb=disk_mb,
+                        gpus=gpus,
+                        gpu_model=gpu_model,
+                        timeout_secs=timeout_secs,
+                        entrypoint=entrypoint,
+                        allow_internet_access=allow_internet_access,
+                        allow_out=allow_out,
+                        deny_out=deny_out,
+                        snapshot_id=snapshot_id,
+                        proxy_url=proxy_url,
+                        request_timeout=request_timeout,
+                        name=name,
+                        file_systems=file_systems,
+                        api_key=api_key,
+                        api_url=api_url,
+                        organization_id=organization_id,
+                        project_id=project_id,
+                        namespace=namespace,
+                        gpu=gpu,
+                    )
+                except RemoteAPIError as e:
+                    if e.status_code != 409:
+                        raise
+                    # Lost the create race: another caller claimed the name
+                    # first. Loop back and attach to the winner.
+                    last_conflict = e
+                    continue
+            if status == SandboxStatus.PENDING:
+                # Another caller's create is still starting this sandbox.
+                # Match create(): block until Running, then pick up fresh
+                # proxy routing before handing the sandbox out.
+                info = await sandbox._fresh_running_info_for_rebind(
+                    asyncio.get_running_loop().time() + wait_timeout,
+                    poll_interval=0.5,
+                )
+                sandbox._rebind_proxy(info)
+            elif resume and status in (
+                SandboxStatus.SUSPENDING,
+                SandboxStatus.SUSPENDED,
+            ):
+                if status == SandboxStatus.SUSPENDING:
+                    # The server rejects resume while a suspend is still in
+                    # progress; wait for the suspend to settle first.
+                    status = await cls._wait_out_suspending(sandbox, wait_timeout, name)
+                if status == SandboxStatus.SUSPENDED:
+                    await sandbox.resume(timeout=wait_timeout)
+                elif status == SandboxStatus.TERMINATED:
+                    # The sandbox died while suspending; the name may be
+                    # free again.
+                    continue
+                else:
+                    # Another caller resumed it first. The resumed sandbox
+                    # may live elsewhere, so this handle's routing from
+                    # before the suspend is stale. Match the PENDING
+                    # branch: block until Running with fresh proxy routing.
+                    info = await sandbox._fresh_running_info_for_rebind(
+                        asyncio.get_running_loop().time() + wait_timeout,
+                        poll_interval=0.5,
+                    )
+                    sandbox._rebind_proxy(info)
+            return sandbox
+        raise SandboxError(
+            f"get_or_create({name!r}): the name is claimed, but its sandbox "
+            f"could not be attached to after {_GET_OR_CREATE_ATTEMPTS} attempts"
+        ) from last_conflict
+
+    @staticmethod
+    async def _wait_out_suspending(
+        sandbox: "AsyncSandbox",
+        wait_timeout: float,
+        name: str,
+    ) -> SandboxStatus:
+        """Poll until the sandbox leaves ``Suspending``.
+
+        Async mirror of :meth:`Sandbox._wait_out_suspending`; see that
+        method for the semantics.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_timeout
+        while loop.time() < deadline:
+            await asyncio.sleep(0.5)
+            # info() serves the cached SUSPENDING info from connect(); the
+            # status method always fetches fresh state from the server.
+            status = await sandbox.status()
+            if status != SandboxStatus.SUSPENDING:
+                return status
+        raise SandboxError(
+            f"get_or_create({name!r}): the sandbox holding the name did not "
+            f"finish suspending within {wait_timeout}s"
+        )
+
+    @classmethod
+    async def _connect_when_routable(
+        cls,
+        name: str,
+        connect_kwargs: dict[str, Any],
+        wait_timeout: float,
+    ) -> "AsyncSandbox | None":
+        """Poll ``connect`` until the named sandbox has proxy routing.
+
+        Async mirror of :meth:`Sandbox._connect_when_routable`; see that
+        method for the semantics.
+        """
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + wait_timeout
+        while loop.time() < deadline:
+            await asyncio.sleep(0.5)
+            try:
+                return await cls.connect(name, **connect_kwargs)
+            except SandboxNotFoundError:
+                return None
+            except SandboxNotRoutableError as e:
+                if e.status == SandboxStatus.TERMINATED:
+                    return None
+        raise SandboxError(
+            f"get_or_create({name!r}): the sandbox holding the name did not "
+            f"become connectable within {wait_timeout}s"
         )
 
     # --- Lifecycle ---
