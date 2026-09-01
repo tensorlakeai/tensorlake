@@ -13,8 +13,6 @@ import zipfile
 from typing import Any, Coroutine
 
 from tensorlake._cloud_sdk import FunctionAgentCore
-from tensorlake.applications.function.user_data_serializer import serialize_value
-from tensorlake.applications.metadata import serialize_metadata
 from tensorlake.applications.request_context.request_state import (
     REQUEST_STATE_USER_DATA_SERIALIZER,
 )
@@ -260,7 +258,7 @@ def {function_name}(value: dict) -> dict:
         module_name = "embedded_agent_async_test_module"
         code = self._code_zip(
             f"""\
-from tensorlake.applications import application, function
+from tensorlake.applications import RequestError, application, function
 
 @function()
 async def {child_name}(value: int) -> int:
@@ -269,7 +267,11 @@ async def {child_name}(value: int) -> int:
 @application()
 @function()
 async def {function_name}() -> int:
-    return await {child_name}(5)
+    try:
+        await {child_name}(5)
+    except RequestError:
+        return 10
+    raise AssertionError("expected child RequestError")
 """,
             function_name,
             module_name,
@@ -320,22 +322,13 @@ async def {function_name}() -> int:
             },
         )
 
-        child_data, child_metadata = serialize_value(
-            value=10,
-            serializer=serializer,
-            value_id=call_batch["calls"][0]["function_call_id"],
-            type_hint=int,
-        )
         core.push(
             {
                 "type": "call_result",
                 "attempt_id": "attempt-async",
                 "function_call_id": call_batch["calls"][0]["function_call_id"],
-                "outcome": "success",
-                "output_base64": base64.b64encode(child_data).decode("ascii"),
-                "metadata_base64": base64.b64encode(
-                    serialize_metadata(child_metadata)
-                ).decode("ascii"),
+                "outcome": "failure",
+                "reason": "request_error",
             }
         )
 
