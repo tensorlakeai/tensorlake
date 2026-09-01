@@ -1579,6 +1579,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tracing",
+ "zstd 0.13.3",
 ]
 
 [[package]]
