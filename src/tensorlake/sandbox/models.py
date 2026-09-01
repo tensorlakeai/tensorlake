@@ -2,7 +2,7 @@
 
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse, urlunparse
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_serializer
@@ -61,6 +61,18 @@ def _parse_timestamp(v: int | float | datetime | None) -> datetime | None:
 
 OptionalTimestamp = Annotated[datetime | None, BeforeValidator(_parse_timestamp)]
 Timestamp = Annotated[datetime, BeforeValidator(_parse_timestamp)]
+
+
+# What ``Sandbox.get_or_create`` did to bind the name, exposed as
+# ``sandbox.bind_outcome``:
+#
+# - ``"created"``: nothing held the name; the call created a new sandbox.
+# - ``"attached"``: a sandbox already held the name and needed no resume.
+#   Includes a sandbox that was still starting (the call waited for it) and
+#   a suspended sandbox when ``resume=False``.
+# - ``"resumed"``: the sandbox was suspended when the call found it and is
+#   running now.
+GetOrCreateOutcome = Literal["created", "attached", "resumed"]
 
 
 class SandboxStatus(str, Enum):

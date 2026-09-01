@@ -4,7 +4,7 @@
 
 [package]
 name = "gsvc-fs-client"
-version = "0.5.119"
+version = "0.5.120"
 edition = "2024"
 license = "Apache-2.0"
 description = "Resolution placeholder for TensorLake private filesystem client code"

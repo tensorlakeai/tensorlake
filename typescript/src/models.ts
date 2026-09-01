@@ -684,6 +684,19 @@ export interface GetOrCreateOptions
   resume?: boolean;
 }
 
+/**
+ * What `Sandbox.getOrCreate` did to bind the name, exposed as
+ * `sandbox.bindOutcome`:
+ *
+ * - `"created"`: nothing held the name; the call created a new sandbox.
+ * - `"attached"`: a sandbox already held the name and needed no resume.
+ *   Includes a sandbox that was still starting (the call waited for it)
+ *   and a suspended sandbox when `resume: false`.
+ * - `"resumed"`: the sandbox was suspended when the call found it and is
+ *   running now.
+ */
+export type GetOrCreateOutcome = "created" | "attached" | "resumed";
+
 export interface SuspendResumeOptions {
   /** If false, fire-and-return without waiting for completion. Default: true. */
   wait?: boolean;

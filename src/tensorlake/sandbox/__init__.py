@@ -35,6 +35,7 @@ from .models import (
     DirectoryEntry,
     FileSystem,
     FileSystemMount,
+    GetOrCreateOutcome,
     GpuModel,
     GpuRequest,
     GPUResources,
@@ -90,6 +91,7 @@ __all__ = [
     "Desktop",
     # Lifecycle models
     "SandboxStatus",
+    "GetOrCreateOutcome",
     "SandboxInfo",
     "SandboxPortAccess",
     "CreateSandboxResponse",

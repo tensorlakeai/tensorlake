@@ -35,6 +35,7 @@ describe("Sandbox.getOrCreate", () => {
     const result = await Sandbox.getOrCreate(NAME);
 
     expect(result).toBe(existing);
+    expect(result.bindOutcome).toBe("attached");
     expect(connect).toHaveBeenCalledTimes(1);
     expect(connect).toHaveBeenCalledWith({ sandboxId: NAME });
     expect(create).not.toHaveBeenCalled();
@@ -48,6 +49,7 @@ describe("Sandbox.getOrCreate", () => {
     const result = await Sandbox.getOrCreate(NAME);
 
     expect(result).toBe(existing);
+    expect(result.bindOutcome).toBe("resumed");
     expect(existing.resume).toHaveBeenCalledTimes(1);
   });
 
@@ -58,6 +60,9 @@ describe("Sandbox.getOrCreate", () => {
     const result = await Sandbox.getOrCreate(NAME, { resume: false });
 
     expect(result).toBe(existing);
+    // No resume happened, so the outcome is a plain attach even though the
+    // sandbox is suspended.
+    expect(result.bindOutcome).toBe("attached");
     // The status fetch stays: connect returns a lazy handle, so it is the
     // only proof the name exists.
     expect(existing.status).toHaveBeenCalledTimes(1);
@@ -94,6 +99,7 @@ describe("Sandbox.getOrCreate", () => {
     const result = await Sandbox.getOrCreate(NAME, { image: "my-agent" });
 
     expect(result).toBe(created);
+    expect(result.bindOutcome).toBe("created");
     expect(create).toHaveBeenCalledWith({ image: "my-agent", name: NAME });
     // A fresh create is already running; no status/resume round-trip.
     expect(created.status).not.toHaveBeenCalled();
@@ -153,9 +159,32 @@ describe("Sandbox.getOrCreate", () => {
     const result = await Sandbox.getOrCreate(NAME);
 
     expect(result).toBe(winner);
+    expect(result.bindOutcome).toBe("resumed");
     expect(settle).toHaveBeenCalledTimes(1);
     expect(winner.resume).toHaveBeenCalledTimes(1);
     expect(create).not.toHaveBeenCalled();
+  });
+
+  it("reports resumed when another caller resumed the suspending sandbox", async () => {
+    // The sandbox was suspended when found and is running on return; the
+    // outcome describes what happened to the sandbox, not who sent the
+    // resume request.
+    const refresh = vi.fn(async () => undefined);
+    const winner = {
+      sandboxId: "sbx-uuid-1",
+      status: vi.fn(async () => SandboxStatus.SUSPENDING),
+      resume: vi.fn(async () => undefined),
+      waitOutSuspending: vi.fn(async () => SandboxStatus.RUNNING),
+      refreshRoutingWhenRunning: refresh,
+    } as unknown as Sandbox;
+    vi.spyOn(Sandbox, "connect").mockResolvedValue(winner);
+
+    const result = await Sandbox.getOrCreate(NAME);
+
+    expect(result).toBe(winner);
+    expect(result.bindOutcome).toBe("resumed");
+    expect(winner.resume).not.toHaveBeenCalled();
+    expect(refresh).toHaveBeenCalledTimes(1);
   });
 
   it("waits for a pending sandbox to become running", async () => {
@@ -175,6 +204,7 @@ describe("Sandbox.getOrCreate", () => {
     const result = await Sandbox.getOrCreate(NAME);
 
     expect(result).toBe(pendingSandbox);
+    expect(result.bindOutcome).toBe("attached");
     expect(create).not.toHaveBeenCalled();
     expect(refresh).toHaveBeenCalledTimes(1);
     expect(pendingSandbox.resume).not.toHaveBeenCalled();
