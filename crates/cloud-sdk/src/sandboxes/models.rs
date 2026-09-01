@@ -215,6 +215,9 @@ pub struct CreateSandboxResources {
     pub memory_mb: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_mb: Option<u64>,
+    /// GPU allocation. The server accepts GPU sandboxes only with a CAS
+    /// (`content_addressed_streaming_v1`) image; omitting `image` asks the
+    /// server to select its configured GPU default.
     #[serde(rename = "gpus", skip_serializing_if = "Option::is_none")]
     pub gpu_configs: Option<Vec<GPUResources>>,
 }

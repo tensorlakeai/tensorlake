@@ -494,6 +494,13 @@ where
     run_build_plan(plan, options.common, Vec::new(), emit).await
 }
 
+/// Resolve the authenticated Image Service ingress used for CAS catalog
+/// operations. Exposed for CLI catalog listing so builds and lists honor the
+/// same local-development override.
+pub fn cas_image_service_url(api_url: &str) -> String {
+    crate::image_service_builds::image_service_url(api_url)
+}
+
 /// Shared build pipeline: provision the rootfs-builder sandbox, materialize the
 /// filesystem from `plan`, and register the resulting snapshot. Both the
 /// Dockerfile build and registry import paths funnel through here once they

@@ -1135,7 +1135,8 @@ enum SbxCommands {
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
-        /// GPU model to request
+        /// GPU model to request. GPU sandboxes require a CAS image; omit
+        /// --image to use the server's configured GPU default.
         #[arg(long = "gpu", value_enum)]
         gpu: Option<GpuModelArg>,
 
@@ -1159,7 +1160,7 @@ enum SbxCommands {
         #[arg(short, long, conflicts_with = "image")]
         snapshot: Option<String>,
 
-        /// Create from a registered image name
+        /// Create from a registered image name. With --gpu, this must be a CAS image.
         #[arg(short, long, conflicts_with = "snapshot")]
         image: Option<String>,
 
@@ -1649,7 +1650,7 @@ enum ImageCommands {
         /// Service build plane (non-default). CAS images cold-boot by
         /// faulting content on demand instead of localizing a monolithic
         /// snapshot. Routed through the API host's /images/v4 path.
-        #[arg(long, hide = true)]
+        #[arg(long)]
         cas: bool,
 
         /// Dockerfile build arg, KEY=VALUE. Repeatable. CAS builds only.
@@ -1701,7 +1702,7 @@ enum ImageCommands {
         /// Image Service build plane (non-default). CAS images cold-boot by
         /// faulting content on demand instead of localizing a monolithic
         /// snapshot. Routed through the API host's /images/v4 path.
-        #[arg(long, hide = true)]
+        #[arg(long)]
         cas: bool,
 
         /// Print the sandbox image result JSON to stdout
@@ -1711,6 +1712,10 @@ enum ImageCommands {
 
     /// List all sandbox images
     Ls {
+        /// Show only CAS (content-addressed streaming) images
+        #[arg(long)]
+        cas: bool,
+
         /// Print the sandbox image list as JSON to stdout
         #[arg(long = "json")]
         json: bool,
@@ -2509,8 +2514,8 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                             )
                             .await
                         }
-                        ImageCommands::Ls { json } => {
-                            commands::sbx::image::ls::run(ctx, json).await
+                        ImageCommands::Ls { cas, json } => {
+                            commands::sbx::image::ls::run(ctx, json, cas).await
                         }
                         ImageCommands::Describe { name_or_id } => {
                             commands::sbx::image::describe::run(ctx, &name_or_id).await
@@ -4664,6 +4669,17 @@ mod tests {
                 assert!(cas)
             }
             _ => panic!("expected sbx image import command"),
+        }
+    }
+
+    #[test]
+    fn image_ls_parses_cas_filter() {
+        match parse_command(["tl", "sbx", "image", "ls", "--cas", "--json"]) {
+            Commands::Sbx(SbxCommands::Image(ImageCommands::Ls { cas, json })) => {
+                assert!(cas);
+                assert!(json);
+            }
+            _ => panic!("expected sbx image ls command"),
         }
     }
 

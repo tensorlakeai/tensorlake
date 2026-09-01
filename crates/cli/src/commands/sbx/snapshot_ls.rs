@@ -43,7 +43,8 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
     let mut table = new_table(&[
         "ID",
         "Status",
-        "Type",
+        "Checkpoint Type",
+        "Format",
         "Sandbox ID",
         "Base Image",
         "Size",
@@ -61,6 +62,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
             .and_then(|v| v.as_str())
             .unwrap_or("-");
         let snapshot_type = format_snapshot_type(snapshot);
+        let snapshot_format = format_snapshot_format(snapshot);
         let sandbox_id = snapshot
             .get("sandbox_id")
             .and_then(|v| v.as_str())
@@ -76,6 +78,7 @@ pub async fn run(ctx: &CliContext) -> Result<()> {
             Cell::new(snapshot_id),
             Cell::new(status),
             Cell::new(snapshot_type),
+            Cell::new(snapshot_format),
             Cell::new(sandbox_id),
             Cell::new(base_image),
             Cell::new(size),
@@ -112,9 +115,23 @@ fn format_snapshot_type(snapshot: &serde_json::Value) -> String {
         .unwrap_or_else(|| "-".to_string())
 }
 
+fn format_snapshot_format(snapshot: &serde_json::Value) -> String {
+    snapshot
+        .get("snapshot_format_version")
+        .and_then(|v| v.as_str())
+        .map(|format| match format {
+            "content_addressed_streaming_v1" => "CAS",
+            "durable_archive_v1" => "TLSnap",
+            "local_directory_v1" => "Local",
+            other => other,
+        })
+        .unwrap_or("-")
+        .to_string()
+}
+
 #[cfg(test)]
 mod tests {
-    use super::format_snapshot_type;
+    use super::{format_snapshot_format, format_snapshot_type};
 
     #[test]
     fn format_snapshot_type_uses_snapshot_type_field() {
@@ -132,5 +149,31 @@ mod tests {
     fn format_snapshot_type_handles_missing_field() {
         let snapshot = serde_json::json!({});
         assert_eq!(format_snapshot_type(&snapshot), "-");
+    }
+
+    #[test]
+    fn format_snapshot_format_uses_short_labels_for_known_formats() {
+        let cases = [
+            ("content_addressed_streaming_v1", "CAS"),
+            ("durable_archive_v1", "TLSnap"),
+            ("local_directory_v1", "Local"),
+        ];
+
+        for (format, expected) in cases {
+            let snapshot = serde_json::json!({"snapshot_format_version": format});
+            assert_eq!(format_snapshot_format(&snapshot), expected);
+        }
+    }
+
+    #[test]
+    fn format_snapshot_format_preserves_unknown_formats() {
+        let snapshot = serde_json::json!({"snapshot_format_version": "future_format_v2"});
+        assert_eq!(format_snapshot_format(&snapshot), "future_format_v2");
+    }
+
+    #[test]
+    fn format_snapshot_format_handles_missing_field() {
+        let snapshot = serde_json::json!({});
+        assert_eq!(format_snapshot_format(&snapshot), "-");
     }
 }

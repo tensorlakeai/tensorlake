@@ -161,13 +161,13 @@ export interface ClaimSandboxOptions {
 // --- Sandbox lifecycle ---
 
 export interface CreateSandboxOptions {
-  /** Optional sandbox image name, such as `tensorlake/ubuntu-minimal` or a registered Sandbox Image. When omitted, Tensorlake uses the default managed environment. */
+  /** Optional sandbox image name. GPU sandboxes require a CAS image; when omitted with a GPU request, Tensorlake uses the server's configured GPU default. */
   image?: string;
   cpus?: number;
   memoryMb?: number;
   /** Root disk size in megabytes. When omitted, the server uses its default disk size. */
   diskMb?: number;
-  /** Number of GPUs to allocate. When provided, defaults to A10 unless gpuModel is set. */
+  /** Number of GPUs to allocate. Defaults to A10 unless gpuModel is set. GPU sandboxes require a CAS image. */
   gpus?: number;
   /** GPU model to allocate. The string arm preserves compatibility with existing callers; values are validated at runtime. */
   gpuModel?: GpuModel | (string & {});
