@@ -672,7 +672,7 @@ class Attempt:
                 f"Application function call requires one HTTP payload, got {len(inputs)}"
             )
         payload = inputs[0]
-        data = _b64decode(payload["data_base64"])
+        data = _b64decode(payload.get("data_base64", ""))
         content_type = payload.get("content_type", "application/octet-stream")
         parameters = list(function_signature(self.function).parameters.values())
         if not data and not parameters:

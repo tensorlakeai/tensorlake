@@ -13,6 +13,8 @@ import zipfile
 from typing import Any, Coroutine
 
 from tensorlake._cloud_sdk import FunctionAgentCore
+from tensorlake.applications.function.user_data_serializer import serialize_value
+from tensorlake.applications.metadata import serialize_metadata
 from tensorlake.applications.request_context.request_state import (
     REQUEST_STATE_USER_DATA_SERIALIZER,
 )
@@ -250,6 +252,108 @@ def {function_name}(value: dict) -> dict:
                 dict,
             ),
             expected,
+        )
+
+    async def test_async_application_awaits_child_function_result(self) -> None:
+        function_name = "embedded_agent_async_parent"
+        child_name = "embedded_agent_async_child"
+        module_name = "embedded_agent_async_test_module"
+        code = self._code_zip(
+            f"""\
+from tensorlake.applications import application, function
+
+@function()
+async def {child_name}(value: int) -> int:
+    return value * 2
+
+@application()
+@function()
+async def {function_name}() -> int:
+    return await {child_name}(5)
+""",
+            function_name,
+            module_name,
+        )
+        serializer = serializer_by_name(APPLICATION_FUNCTION_CALL_SERIALIZER_NAME)
+        core = FakeNativeCore()
+        protocol = ProtocolWriter(core, asyncio.get_running_loop())  # type: ignore[arg-type]
+        runner = PythonFunctionRunner(protocol)
+        serve = asyncio.create_task(runner.serve(core))  # type: ignore[arg-type]
+        self.addAsyncCleanup(self._stop, serve)
+        core.push(
+            {
+                "type": "assignment",
+                "assignment": {
+                    "attempt_id": "attempt-async",
+                    "fence_token": 11,
+                    "function_run_id": "run-async",
+                    "request_id": "request-async",
+                    "namespace": "default",
+                    "application": "async-test",
+                    "application_version": "v1",
+                    "function": function_name,
+                    "timeout_ms": 5_000,
+                    "initialization_timeout_ms": 5_000,
+                    # Empty base64 fields are omitted by the Rust protocol's
+                    # serde defaults for a no-argument application request.
+                    "inputs": [{}],
+                    "request_headers": [],
+                    "call_metadata_base64": "",
+                    "application_code_base64": base64.b64encode(code).decode("ascii"),
+                    "application_code_sha256": hashlib.sha256(code).hexdigest(),
+                },
+            }
+        )
+
+        self.assertEqual(await self._output(core), {"type": "initialized"})
+        call_batch = await self._output(core)
+        self.assertEqual(call_batch["type"], "call_batch")
+        self.assertEqual(len(call_batch["calls"]), 1)
+        self.assertEqual(call_batch["calls"][0]["function_name"], child_name)
+        watch = await self._output(core)
+        self.assertEqual(watch["type"], "watch")
+        self.assertEqual(
+            await self._output(core),
+            {
+                "type": "suspend",
+                "attempt_id": "attempt-async",
+            },
+        )
+
+        child_data, child_metadata = serialize_value(
+            value=10,
+            serializer=serializer,
+            value_id=call_batch["calls"][0]["function_call_id"],
+            type_hint=int,
+        )
+        core.push(
+            {
+                "type": "call_result",
+                "attempt_id": "attempt-async",
+                "function_call_id": call_batch["calls"][0]["function_call_id"],
+                "outcome": "success",
+                "output_base64": base64.b64encode(child_data).decode("ascii"),
+                "metadata_base64": base64.b64encode(
+                    serialize_metadata(child_metadata)
+                ).decode("ascii"),
+            }
+        )
+
+        self.assertEqual(
+            await self._output(core),
+            {
+                "type": "resume",
+                "attempt_id": "attempt-async",
+            },
+        )
+        result = await self._output(core)
+        self.assertEqual(result["type"], "success")
+        self.assertEqual(
+            serializer.deserialize(
+                base64.b64decode(result["result"]["output_base64"], validate=True),
+                int,
+            ),
+            10,
         )
 
     @staticmethod
