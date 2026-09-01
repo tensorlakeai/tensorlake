@@ -69,6 +69,37 @@ describe("Sandbox", () => {
     });
   });
 
+  describe("sandboxId", () => {
+    it("is null-outcome and switches from name to canonical id after status()", async () => {
+      const stub = installNativeStub({
+        client: {
+          getSandbox: vi.fn(async (id: string) => ({
+            traceId: "t",
+            json: JSON.stringify({
+              sandbox_id: "sbx-canonical",
+              name: id,
+              status: "running",
+              sandbox_url: "https://sbx-canonical.sandbox.tensorlake.ai",
+            }),
+          })),
+        },
+      });
+
+      const sbx = await Sandbox.connect({ sandboxId: "demo-name" });
+      // A handle opened by name knows only the name until the server
+      // answers; `create`/`connect` handles have no bind outcome.
+      expect(sbx.sandboxId).toBe("demo-name");
+      expect(sbx.bindOutcome).toBeNull();
+
+      await sbx.status();
+
+      expect(stub.client.getSandbox).toHaveBeenCalledWith("demo-name");
+      expect(sbx.sandboxId).toBe("sbx-canonical");
+      expect(sbx.name).toBe("demo-name");
+      sbx.close();
+    });
+  });
+
   describe("copy", () => {
     it("uses the lifecycle client", async () => {
       const stub = installNativeStub({

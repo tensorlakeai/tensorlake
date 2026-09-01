@@ -209,6 +209,7 @@ export type {
   SandboxOptions,
   CreateAndConnectOptions,
   GetOrCreateOptions,
+  GetOrCreateOutcome,
   SuspendResumeOptions,
   CheckpointOptions,
   ConnectOptions,

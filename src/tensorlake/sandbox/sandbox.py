@@ -29,6 +29,7 @@ from .models import (
     CopySandboxResponse,
     DaemonInfo,
     FileSystemMount,
+    GetOrCreateOutcome,
     GpuModel,
     GpuRequest,
     HealthResponse,
@@ -222,6 +223,7 @@ class Sandbox:
 
         self._identifier = sandbox_identifier
         self._sandbox_id: str | None = None
+        self._bind_outcome: GetOrCreateOutcome | None = None
         self._trace_id: str | None = None
         self._cached_info: SandboxInfo | None = None
         self._owns_sandbox: bool = False
@@ -577,6 +579,16 @@ class Sandbox:
         apply only when the call creates a new sandbox; an existing sandbox
         is returned as-is, with whatever configuration it already has.
 
+        The returned handle records what the call did in
+        :attr:`bind_outcome`: ``"created"``, ``"attached"``, or
+        ``"resumed"``. See :data:`~tensorlake.sandbox.GetOrCreateOutcome`.
+
+        For about a second after ``terminate()``, the name still resolves
+        and the sandbox still reports ``running``. A ``get_or_create`` in
+        that window attaches to the dying sandbox. When you recreate right
+        after a terminate, check ``status`` after the call, or wait for the
+        old sandbox to report ``terminated`` first.
+
         Args:
             name: Sandbox name; unique within the namespace. Derive it
                 deterministically from your session ID, for example
@@ -647,7 +659,7 @@ class Sandbox:
                 status = sandbox.info().status
             except SandboxNotFoundError:
                 try:
-                    return cls.create(
+                    created = cls.create(
                         image=image,
                         cpus=cpus,
                         memory_mb=memory_mb,
@@ -678,6 +690,8 @@ class Sandbox:
                     # first. Loop back and attach to the winner.
                     last_conflict = e
                     continue
+                created._bind_outcome = "created"
+                return created
             if status == SandboxStatus.PENDING:
                 # Another caller's create is still starting this sandbox.
                 # Match create(): block until Running, then pick up fresh
@@ -709,6 +723,9 @@ class Sandbox:
                         time.monotonic() + wait_timeout, poll_interval=0.5
                     )
                     sandbox._rebind_proxy(info)
+                sandbox._bind_outcome = "resumed"
+                return sandbox
+            sandbox._bind_outcome = "attached"
             return sandbox
         raise SandboxError(
             f"get_or_create({name!r}): the name is claimed, but its sandbox "
@@ -1194,6 +1211,15 @@ class Sandbox:
             return self._sandbox_id
         self._sandbox_id = self._fetch_info().sandbox_id
         return self._sandbox_id
+
+    @property
+    def bind_outcome(self) -> GetOrCreateOutcome | None:
+        """What :meth:`get_or_create` did to bind the name.
+
+        ``"created"``, ``"attached"``, or ``"resumed"``; ``None`` for
+        handles from :meth:`create` or :meth:`connect`.
+        """
+        return self._bind_outcome
 
     @property
     def trace_id(self) -> str | None:

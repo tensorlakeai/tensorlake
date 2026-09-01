@@ -26,6 +26,7 @@ import {
   type CreatePtySessionOptions,
   type DaemonInfo,
   type GetOrCreateOptions,
+  type GetOrCreateOutcome,
   type GetSandboxLogsOptions,
   type HealthResponse,
   type ListDirectoryResponse,
@@ -556,9 +557,20 @@ function sendPtyFrame(socket: WebSocket, frame: Buffer): Promise<void> {
 const GET_OR_CREATE_ATTEMPTS = 4;
 const GET_OR_CREATE_RETRY_DELAY_MS = 500;
 
+// `bindOutcome` is read-only for callers; `getOrCreate` is the one writer.
+function markBindOutcome(sandbox: Sandbox, outcome: GetOrCreateOutcome): Sandbox {
+  (sandbox as { bindOutcome: GetOrCreateOutcome }).bindOutcome = outcome;
+  return sandbox;
+}
+
 export class Sandbox {
-  readonly sandboxId: string;
   traceId: string | null = null;
+  /**
+   * What {@link Sandbox.getOrCreate} did to bind the name: `"created"`,
+   * `"attached"`, or `"resumed"`. `null` for handles from `create` or
+   * `connect`.
+   */
+  readonly bindOutcome: GetOrCreateOutcome | null = null;
   private readonly proxy: SandboxProxyConnection;
   private ownsSandbox = false;
   private lifecycleClient: SandboxClient | null = null;
@@ -566,9 +578,19 @@ export class Sandbox {
   private sandboxName: string | null = null;
 
   constructor(options: SandboxOptions) {
-    this.sandboxId = options.sandboxId;
     this.lifecycleIdentifier = options.sandboxId;
     this.proxy = new SandboxProxyConnection(this, options);
+  }
+
+  /**
+   * The server-assigned sandbox ID.
+   *
+   * A handle opened by name (`connect({ sandboxId: name })`) reports the
+   * name until its first server response, then the canonical ID. Handles
+   * from `create` and `getOrCreate` carry the canonical ID from the start.
+   */
+  get sandboxId(): string {
+    return this.lifecycleIdentifier;
   }
 
   private get baseUrl(): string {
@@ -674,6 +696,16 @@ export class Sandbox {
    * when the call creates a new sandbox; an existing sandbox is returned
    * as-is, with whatever configuration it already has.
    *
+   * The returned handle carries the canonical `sandboxId` (not the name)
+   * and records what the call did in `bindOutcome`: `"created"`,
+   * `"attached"`, or `"resumed"`. See {@link GetOrCreateOutcome}.
+   *
+   * For about a second after `terminate()`, the name still resolves and
+   * the sandbox still reports `running`. A `getOrCreate` in that window
+   * attaches to the dying sandbox. When you recreate right after a
+   * terminate, check `status()` after the call, or wait for the old
+   * sandbox to report `terminated` first.
+   *
    * `poolId` is not accepted: a pool claim cannot carry a name, so a
    * claimed sandbox could never be found again by a later call. To use a
    * warm pool, `create` with `poolId` and name the sandbox afterwards
@@ -763,12 +795,14 @@ export class Sandbox {
               waitTimeout,
             );
           }
+          return markBindOutcome(sandbox, "resumed");
         }
-        return sandbox;
+        return markBindOutcome(sandbox, "attached");
       } catch (err) {
         if (!(err instanceof SandboxNotFoundError)) throw err;
         try {
-          return await Sandbox.create({ ...createOptions, name });
+          const created = await Sandbox.create({ ...createOptions, name });
+          return markBindOutcome(created, "created");
         } catch (createErr) {
           if (
             createErr instanceof RemoteAPIError &&

@@ -43,6 +43,7 @@ class TestGetOrCreate(unittest.TestCase):
         ):
             result = Sandbox.get_or_create(_NAME)
         self.assertIs(result, existing)
+        self.assertEqual(existing._bind_outcome, "attached")
         self.assertEqual(connect.call_count, 1)
         self.assertEqual(connect.call_args.args, (_NAME,))
         create.assert_not_called()
@@ -56,6 +57,7 @@ class TestGetOrCreate(unittest.TestCase):
         ):
             result = Sandbox.get_or_create(_NAME)
         self.assertIs(result, existing)
+        self.assertEqual(existing._bind_outcome, "resumed")
         existing.resume.assert_called_once_with(timeout=300.0)
         create.assert_not_called()
 
@@ -78,6 +80,9 @@ class TestGetOrCreate(unittest.TestCase):
         ):
             result = Sandbox.get_or_create(_NAME, resume=False)
         self.assertIs(result, existing)
+        # No resume happened, so the outcome is a plain attach even though
+        # the sandbox is suspended.
+        self.assertEqual(existing._bind_outcome, "attached")
         existing.resume.assert_not_called()
         # The info() call stays even with resume=False: it is the existence
         # check when connect skipped resolution (explicit proxy_url), and it
@@ -111,6 +116,7 @@ class TestGetOrCreate(unittest.TestCase):
         ):
             result = Sandbox.get_or_create(_NAME, image="my-agent")
         self.assertIs(result, created)
+        self.assertEqual(created._bind_outcome, "created")
         self.assertEqual(connect.call_count, 1)
         create.assert_called_once()
         self.assertEqual(create.call_args.kwargs["name"], _NAME)
@@ -204,6 +210,10 @@ class TestGetOrCreate(unittest.TestCase):
         ):
             result = Sandbox.get_or_create(_NAME)
         self.assertIs(result, winner)
+        # The sandbox was suspended when found and is running on return; the
+        # outcome describes what happened to the sandbox, not who sent the
+        # resume request.
+        self.assertEqual(winner._bind_outcome, "resumed")
         winner.resume.assert_not_called()
         winner._fresh_running_info_for_rebind.assert_called_once()
         winner._rebind_proxy.assert_called_once_with(running_info)
@@ -247,6 +257,7 @@ class TestGetOrCreate(unittest.TestCase):
         ):
             result = Sandbox.get_or_create(_NAME)
         self.assertIs(result, pending)
+        self.assertEqual(pending._bind_outcome, "attached")
         create.assert_not_called()
         pending._fresh_running_info_for_rebind.assert_called_once()
         pending._rebind_proxy.assert_called_once_with(running_info)
@@ -381,6 +392,7 @@ class TestAsyncGetOrCreate(unittest.IsolatedAsyncioTestCase):
         ):
             result = await AsyncSandbox.get_or_create(_NAME)
         self.assertIs(result, existing)
+        self.assertEqual(existing._bind_outcome, "resumed")
         existing.resume.assert_awaited_once_with(timeout=300.0)
         create.assert_not_awaited()
 
@@ -413,6 +425,7 @@ class TestAsyncGetOrCreate(unittest.IsolatedAsyncioTestCase):
         ):
             result = await AsyncSandbox.get_or_create(_NAME)
         self.assertIs(result, existing)
+        self.assertEqual(existing._bind_outcome, "resumed")
         existing.resume.assert_awaited_once_with(timeout=300.0)
         create.assert_not_awaited()
 
@@ -430,6 +443,7 @@ class TestAsyncGetOrCreate(unittest.IsolatedAsyncioTestCase):
         ):
             result = await AsyncSandbox.get_or_create(_NAME, image="my-agent")
         self.assertIs(result, created)
+        self.assertEqual(created._bind_outcome, "created")
         self.assertEqual(create.await_args.kwargs["name"], _NAME)
 
     async def test_unverified_connect_handle_missing_sandbox_is_created(self):
@@ -460,6 +474,7 @@ class TestAsyncGetOrCreate(unittest.IsolatedAsyncioTestCase):
         ):
             result = await AsyncSandbox.get_or_create(_NAME)
         self.assertIs(result, pending)
+        self.assertEqual(pending._bind_outcome, "attached")
         create.assert_not_awaited()
         pending._fresh_running_info_for_rebind.assert_awaited_once()
         pending._rebind_proxy.assert_called_once_with(running_info)
