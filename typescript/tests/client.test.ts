@@ -36,6 +36,36 @@ describe("SandboxClient", () => {
   });
 
   describe("create", () => {
+    it("inherits snapshot resources when no overrides are provided", async () => {
+      const createSandbox = vi.fn(async (body: string) => {
+        expect(JSON.parse(body)).toEqual({ snapshot_id: "snap-memory" });
+        return {
+          traceId: "t",
+          json: JSON.stringify({ sandbox_id: "sbx-restored", status: "running" }),
+        };
+      });
+      installNativeStub({ client: { createSandbox } });
+
+      const client = SandboxClient.forLocalhost();
+      await client.create({ snapshotId: "snap-memory" });
+      client.close();
+    });
+
+    it("sends only explicit resource overrides when restoring a snapshot", async () => {
+      const createSandbox = vi.fn(async (body: string) => {
+        expect(JSON.parse(body).resources).toEqual({ cpus: 2 });
+        return {
+          traceId: "t",
+          json: JSON.stringify({ sandbox_id: "sbx-restored", status: "running" }),
+        };
+      });
+      installNativeStub({ client: { createSandbox } });
+
+      const client = SandboxClient.forLocalhost();
+      await client.create({ snapshotId: "snap-memory", cpus: 2 });
+      client.close();
+    });
+
     it("creates a sandbox with defaults", async () => {
       const stub = installNativeStub({
         client: {

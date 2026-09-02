@@ -702,6 +702,25 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(request_json["resources"]["cpus"], 2.0)
         self.assertEqual(request_json["resources"]["memory_mb"], 1024)
 
+    async def test_create_snapshot_restore_inherits_resources_when_omitted(self):
+        fake = _FakeAsyncRustClient()
+        client = _make_client(fake)
+
+        await client.create(snapshot_id="snap-memory")
+
+        request_json = json.loads(fake.create_request_json)
+        self.assertEqual(request_json["snapshot_id"], "snap-memory")
+        self.assertNotIn("resources", request_json)
+
+    async def test_create_snapshot_restore_sends_only_explicit_resource_overrides(self):
+        fake = _FakeAsyncRustClient()
+        client = _make_client(fake)
+
+        await client.create(snapshot_id="snap-memory", cpus=2.0)
+
+        request_json = json.loads(fake.create_request_json)
+        self.assertEqual(request_json["resources"], {"cpus": 2.0})
+
     async def test_create_sends_disk_override_when_provided(self):
         fake = _FakeAsyncRustClient()
         client = _make_client(fake)

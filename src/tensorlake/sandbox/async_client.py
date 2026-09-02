@@ -239,8 +239,8 @@ class AsyncSandboxClient:
     async def create(
         self,
         image: str | None = None,
-        cpus: float = 1.0,
-        memory_mb: int = 1024,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
         disk_mb: int | None = None,
         gpus: int | None = None,
         gpu_model: GpuModel | str | None = None,
@@ -263,14 +263,21 @@ class AsyncSandboxClient:
                 allow_out=allow_out or [],
                 deny_out=deny_out or [],
             )
+        if snapshot_id is None:
+            cpus = 1.0 if cpus is None else cpus
+            memory_mb = 1024 if memory_mb is None else memory_mb
+        resources = CreateSandboxResources(
+            cpus=cpus,
+            memory_mb=memory_mb,
+            disk_mb=disk_mb,
+            gpus=_build_gpu_resources(gpus, gpu_model, gpu),
+        )
+        if all(value is None for value in resources.model_dump().values()):
+            resources = None
+
         request_model = CreateSandboxRequest(
             image=image,
-            resources=CreateSandboxResources(
-                cpus=cpus,
-                memory_mb=memory_mb,
-                disk_mb=disk_mb,
-                gpus=_build_gpu_resources(gpus, gpu_model, gpu),
-            ),
+            resources=resources,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
             network=network,
@@ -975,8 +982,8 @@ class AsyncSandboxClient:
     async def create_and_connect(
         self,
         image: str | None = None,
-        cpus: float = 1.0,
-        memory_mb: int = 1024,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
         disk_mb: int | None = None,
         gpus: int | None = None,
         gpu_model: GpuModel | str | None = None,

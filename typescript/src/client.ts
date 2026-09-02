@@ -257,14 +257,19 @@ export class SandboxClient {
       options?.gpus,
       options?.gpuModel,
     );
-    const body: Record<string, unknown> = {
-      resources: {
-        cpus: options?.cpus ?? 1.0,
-        memory_mb: options?.memoryMb ?? 1024,
-        ...(options?.diskMb != null ? { disk_mb: options.diskMb } : {}),
-        ...(gpuResources != null ? { gpus: gpuResources } : {}),
-      },
+    const restoringSnapshot = options?.snapshotId != null;
+    const resources: Record<string, unknown> = {
+      ...(!restoringSnapshot || options?.cpus != null
+        ? { cpus: options?.cpus ?? 1.0 }
+        : {}),
+      ...(!restoringSnapshot || options?.memoryMb != null
+        ? { memory_mb: options?.memoryMb ?? 1024 }
+        : {}),
+      ...(options?.diskMb != null ? { disk_mb: options.diskMb } : {}),
+      ...(gpuResources != null ? { gpus: gpuResources } : {}),
     };
+    const body: Record<string, unknown> = {};
+    if (Object.keys(resources).length > 0) body.resources = resources;
 
     if (options?.image != null) body.image = options.image;
     if (options?.timeoutSecs != null) body.timeout_secs = options.timeoutSecs;

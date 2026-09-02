@@ -351,8 +351,8 @@ class Sandbox:
     def create(
         cls,
         image: str | None = None,
-        cpus: float = 1.0,
-        memory_mb: int = 1024,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
         disk_mb: int | None = None,
         gpus: int | None = None,
         gpu_model: GpuModel | str | None = None,
@@ -383,8 +383,10 @@ class Sandbox:
         Args:
             image: Sandbox image name. When omitted, Tensorlake uses the
                 default managed environment.
-            cpus: Number of CPUs to allocate.
-            memory_mb: Memory in megabytes.
+            cpus: Number of CPUs to allocate. Defaults to 1 for a fresh
+                sandbox; omitted snapshot restores inherit this value.
+            memory_mb: Memory in megabytes. Defaults to 1024 for a fresh
+                sandbox; omitted snapshot restores inherit this value.
             disk_mb: Root disk size in megabytes. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
@@ -532,8 +534,8 @@ class Sandbox:
         *,
         resume: bool = True,
         image: str | None = None,
-        cpus: float = 1.0,
-        memory_mb: int = 1024,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
         disk_mb: int | None = None,
         gpus: int | None = None,
         gpu_model: GpuModel | str | None = None,
