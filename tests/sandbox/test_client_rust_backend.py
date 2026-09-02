@@ -651,6 +651,27 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(request_json["resources"]["cpus"], 2.0)
         self.assertEqual(request_json["resources"]["memory_mb"], 1024)
 
+    def test_create_snapshot_restore_inherits_resources_when_omitted(self):
+        fake = _FakeRustClient()
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = fake
+
+        client.create(snapshot_id="snap-memory")
+
+        request_json = json.loads(fake.create_request_json)
+        self.assertEqual(request_json["snapshot_id"], "snap-memory")
+        self.assertNotIn("resources", request_json)
+
+    def test_create_snapshot_restore_sends_only_explicit_resource_overrides(self):
+        fake = _FakeRustClient()
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = fake
+
+        client.create(snapshot_id="snap-memory", cpus=2.0)
+
+        request_json = json.loads(fake.create_request_json)
+        self.assertEqual(request_json["resources"], {"cpus": 2.0})
+
     def test_create_sends_gpu_request(self):
         fake = _FakeRustClient()
         with (

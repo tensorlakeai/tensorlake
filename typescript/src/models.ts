@@ -163,7 +163,9 @@ export interface ClaimSandboxOptions {
 export interface CreateSandboxOptions {
   /** Optional sandbox image name. GPU sandboxes require a CAS image; when omitted with a GPU request, Tensorlake uses the server's configured GPU default. */
   image?: string;
+  /** CPU count. Defaults to 1 for fresh creates; snapshot restores inherit it when omitted. */
   cpus?: number;
+  /** Memory in MB. Defaults to 1024 for fresh creates; snapshot restores inherit it when omitted. */
   memoryMb?: number;
   /** Root disk size in megabytes. When omitted, the server uses its default disk size. */
   diskMb?: number;

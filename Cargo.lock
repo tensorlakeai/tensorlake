@@ -1584,7 +1584,7 @@ dependencies = [
 
 [[package]]
 name = "gsvc-fs-client"
-version = "0.5.120"
+version = "0.5.121"
 dependencies = [
  "anyhow",
  "base64",
@@ -5281,7 +5281,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.120"
+version = "0.5.121"
 dependencies = [
  "anyhow",
  "base64",
@@ -5334,7 +5334,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.120"
+version = "0.5.121"
 dependencies = [
  "anyhow",
  "base64",
@@ -5388,7 +5388,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-function-agent-core"
-version = "0.5.120"
+version = "0.5.121"
 dependencies = [
  "anyhow",
  "base64",
@@ -5408,7 +5408,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.120"
+version = "0.5.121"
 dependencies = [
  "anyhow",
  "napi",
@@ -5427,7 +5427,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.120"
+version = "0.5.121"
 dependencies = [
  "futures",
  "pyo3",

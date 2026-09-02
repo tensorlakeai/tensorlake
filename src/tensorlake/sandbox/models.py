@@ -186,8 +186,8 @@ GPUResources = GpuRequest
 class CreateSandboxResources(BaseModel):
     """Resource overrides accepted when creating a sandbox."""
 
-    cpus: float
-    memory_mb: int
+    cpus: float | None = None
+    memory_mb: int | None = None
     disk_mb: int | None = None
     gpus: list[GpuRequest] | None = None
 
@@ -383,7 +383,7 @@ class CreateSandboxRequest(BaseModel):
     """Request payload for creating a sandbox."""
 
     image: str | None = None
-    resources: CreateSandboxResources
+    resources: CreateSandboxResources | None = None
     timeout_secs: int | None = None
     entrypoint: list[str] | None = None
     network: NetworkConfig | None = None

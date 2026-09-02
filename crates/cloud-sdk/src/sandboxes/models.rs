@@ -211,7 +211,12 @@ impl From<GpuRequest> for GPUResources {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxResources {
+    #[serde(default = "unspecified_cpus", skip_serializing_if = "is_unspecified_f64")]
     pub cpus: f64,
+    #[serde(
+        default = "unspecified_memory_mb",
+        skip_serializing_if = "is_unspecified_i64"
+    )]
     pub memory_mb: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub disk_mb: Option<u64>,
@@ -220,6 +225,42 @@ pub struct CreateSandboxResources {
     /// server to select its configured GPU default.
     #[serde(rename = "gpus", skip_serializing_if = "Option::is_none")]
     pub gpu_configs: Option<Vec<GPUResources>>,
+}
+
+fn unspecified_cpus() -> f64 {
+    -1.0
+}
+
+fn unspecified_memory_mb() -> i64 {
+    -1
+}
+
+fn is_unspecified_f64(value: &f64) -> bool {
+    *value == unspecified_cpus()
+}
+
+fn is_unspecified_i64(value: &i64) -> bool {
+    *value == unspecified_memory_mb()
+}
+
+impl Default for CreateSandboxResources {
+    fn default() -> Self {
+        Self {
+            cpus: unspecified_cpus(),
+            memory_mb: unspecified_memory_mb(),
+            disk_mb: None,
+            gpu_configs: None,
+        }
+    }
+}
+
+impl CreateSandboxResources {
+    fn is_empty(&self) -> bool {
+        is_unspecified_f64(&self.cpus)
+            && is_unspecified_i64(&self.memory_mb)
+            && self.disk_mb.is_none()
+            && self.gpu_configs.is_none()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -281,6 +322,9 @@ pub struct FileSystemMount {
 pub struct CreateSandboxRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Resource overrides for the new sandbox. Snapshot restores may leave
+    /// this empty to inherit the snapshot's CPU, memory, disk, and GPU allocation.
+    #[serde(default, skip_serializing_if = "CreateSandboxResources::is_empty")]
     pub resources: CreateSandboxResources,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeout_secs: Option<i64>,
@@ -1064,6 +1108,37 @@ mod tests {
                 "file_system_id": "skills",
                 "mount_path": "/mnt/skills"
             })
+        );
+    }
+
+    #[test]
+    fn create_sandbox_request_allows_snapshot_resource_inheritance() {
+        let request: CreateSandboxRequest = serde_json::from_value(serde_json::json!({
+            "snapshot_id": "snap-memory"
+        }))
+        .unwrap();
+
+        assert_eq!(request.snapshot_id.as_deref(), Some("snap-memory"));
+        assert!(request.resources.is_empty());
+        assert_eq!(
+            serde_json::to_value(&request).unwrap(),
+            serde_json::json!({"snapshot_id": "snap-memory"})
+        );
+
+        let cpu_override: CreateSandboxRequest =
+            serde_json::from_value(serde_json::json!({
+                "snapshot_id": "snap-memory",
+                "resources": {"cpus": 2.0}
+            }))
+            .unwrap();
+        assert_eq!(cpu_override.resources.cpus, 2.0);
+        assert_eq!(cpu_override.resources.memory_mb, unspecified_memory_mb());
+
+        let invalid_zero: CreateSandboxResources =
+            serde_json::from_value(serde_json::json!({"cpus": 0.0})).unwrap();
+        assert_eq!(
+            serde_json::to_value(&invalid_zero).unwrap(),
+            serde_json::json!({"cpus": 0.0})
         );
     }
 
