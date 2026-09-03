@@ -14,6 +14,7 @@ tls-ring = ["rustls/ring"]
 [dependencies]
 anyhow.workspace = true
 base64.workspace = true
+chrono.workspace = true
 hex.workspace = true
 p256.workspace = true
 reqwest.workspace = true

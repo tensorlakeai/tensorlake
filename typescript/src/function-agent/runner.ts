@@ -179,7 +179,7 @@ export class FunctionAgentRunner {
 
   constructor(private readonly core: NativeFunctionAgentCore) {}
 
-  async run(): Promise<never> {
+  async run(): Promise<void> {
     for (;;) {
       const input = JSON.parse(await this.core.nextInput()) as AgentInput;
       switch (input.type) {
@@ -198,6 +198,8 @@ export class FunctionAgentRunner {
         case "cancel":
           this.attempts.get(input.attempt_id)?.cancel();
           break;
+        case "shutdown":
+          return;
       }
     }
   }

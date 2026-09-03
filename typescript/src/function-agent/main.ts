@@ -32,7 +32,7 @@ function parseArgs(args: readonly string[]): NativeFunctionAgentOptions {
   };
 }
 
-export async function main(args: readonly string[] = process.argv.slice(2)): Promise<never> {
+export async function main(args: readonly string[] = process.argv.slice(2)): Promise<void> {
   const binding = loadNative<NativeFunctionAgentBinding>();
   const core = new binding.FunctionAgentCore(parseArgs(args));
   return new FunctionAgentRunner(core).run();

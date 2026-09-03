@@ -32,7 +32,7 @@ class FakeCore implements NativeFunctionAgentCore {
     const output = JSON.parse(outputJson) as Record<string, unknown>;
     this.outputs.push(output);
     this.onOutput?.(output, this);
-    if (output.type === "success") this.stop();
+    if (output.type === "success") this.push({ type: "shutdown" });
   }
 
   push(input: Record<string, unknown>): void {
@@ -105,7 +105,7 @@ export function __tensorlakeGetFunction(name) {
         },
       }]);
 
-      await expect(new FunctionAgentRunner(core).run()).rejects.toThrow("fake core stopped");
+      await expect(new FunctionAgentRunner(core).run()).resolves.toBeUndefined();
       expect(core.outputs[0]).toEqual({ type: "initialized" });
       const success = core.outputs[1];
       expect(success).toMatchObject({ type: "success", attempt_id: "attempt-secret" });
@@ -172,7 +172,7 @@ export function __tensorlakeGetFunction(name) {
       },
     }]);
 
-    await expect(new FunctionAgentRunner(core).run()).rejects.toThrow("fake core stopped");
+    await expect(new FunctionAgentRunner(core).run()).resolves.toBeUndefined();
     expect(core.outputs[0]).toEqual({ type: "initialized" });
     expect(core.outputs[1]).toMatchObject({
       type: "success",
@@ -259,7 +259,7 @@ export function __tensorlakeGetFunction(name) {
       },
     );
 
-    await expect(new FunctionAgentRunner(core).run()).rejects.toThrow("fake core stopped");
+    await expect(new FunctionAgentRunner(core).run()).resolves.toBeUndefined();
     expect(core.outputs.map((output) => output.type)).toEqual([
       "initialized",
       "call_batch",

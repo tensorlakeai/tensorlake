@@ -61,7 +61,8 @@ export type AgentInput =
       type: "request_state_result";
       result: RequestStateResult;
     }
-  | { type: "cancel"; attempt_id: string };
+  | { type: "cancel"; attempt_id: string }
+  | { type: "shutdown" };
 
 export type CallResult =
   | {
