@@ -744,7 +744,7 @@ class TestBuildSandboxApplicationImage(unittest.TestCase):
                 memory_mb=BUILD_MEMORY_MB,
             )
 
-        self.assertIs(rust_builder_mock.call_args.kwargs["cas"], True)
+        self.assertIs(rust_builder_mock.call_args.kwargs["cas"], False)
 
         dockerfile_text = captured["dockerfile_text"]
         self.assertIsInstance(dockerfile_text, str)

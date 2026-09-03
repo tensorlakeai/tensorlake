@@ -11,7 +11,6 @@ from ..interface.function import Function
 
 _DEFAULT_APPLICATION_IMAGE_NAME = "default"
 _IMAGE_NAME_COMPONENT = re.compile(r"[a-z0-9]+(?:[._-][a-z0-9]+)*\Z")
-_CAS_IMAGE_ID = re.compile(r"[0-9a-f]{64}\Z")
 
 
 @dataclass(frozen=True)
@@ -44,16 +43,6 @@ def explicit_application_image_name(
         f"/versions/{registered_image_component(application_version)}"
         f"/images/{registered_image_component(image_name)}"
     )
-
-
-def immutable_image_reference(published: dict, registered_name: str) -> str:
-    image_id = published.get("image_id")
-    if not isinstance(image_id, str) or not _CAS_IMAGE_ID.fullmatch(image_id):
-        raise SDKUsageError(
-            "Image Service did not return an immutable image ID for "
-            f"'{registered_name}'"
-        )
-    return f"cas-v1:{image_id}"
 
 
 def _append_image_build(
@@ -144,15 +133,12 @@ def prepare_application_images(
 ) -> dict[tuple[str, str], str]:
     function_images: dict[tuple[str, str], str] = {}
     for image_build in application_image_builds(functions):
-        published = build_sandbox_application_image(
+        build_sandbox_application_image(
             image_build.image,
             registered_name=image_build.registered_name,
             build_env_vars=build_envs,
             context_dir=context_dir,
         )
-        immutable_ref = immutable_image_reference(
-            published, image_build.registered_name
-        )
         for function_key in image_build.function_keys:
-            function_images[function_key] = immutable_ref
+            function_images[function_key] = image_build.registered_name
     return function_images

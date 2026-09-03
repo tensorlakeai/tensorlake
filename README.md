@@ -297,11 +297,9 @@ tl secrets set OPENAI_API_KEY "your-openai-key"
 tl deploy examples/readme_example/city_guide.py
 ```
 
-`tl deploy` publishes a version-scoped runtime image for every function through
-Image Service and stores the returned immutable `cas-v1:<image_id>` reference
-in the application manifest. The catalog name is only a build handle and may
-move without changing an already-deployed function. The image contains the
-dependencies declared by `Image`, the language runner, and the native
+`tl deploy` builds a version-scoped runtime image for every function and stores
+its registered sandbox-template name in the application manifest. The image
+contains the dependencies declared by `Image`, the language runner, and the native
 function-agent core. Application source remains a separate ZIP that is uploaded
 with the manifest; it is not copied into the runtime image. Reusing an
 application version with different code or configuration is rejected; an

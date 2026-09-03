@@ -21,7 +21,6 @@ from tensorlake.applications.remote.images import (
 from tensorlake.applications.remote.images import (
     default_application_image_name,
     explicit_application_image_name,
-    immutable_image_reference,
 )
 from tensorlake.applications.secrets import list_secret_names
 from tensorlake.applications.validation import (
@@ -254,7 +253,7 @@ async def _prepare_images(
         image_name = image_build.registered_name
         _emit({"type": "build_start", "image": image_name})
         try:
-            published = await asyncio.to_thread(
+            await asyncio.to_thread(
                 build_sandbox_application_image,
                 image,
                 registered_name=image_name,
@@ -275,9 +274,8 @@ async def _prepare_images(
             )
             sys.exit(1)
 
-        immutable_ref = immutable_image_reference(published, image_name)
         for function_key in image_build.function_keys:
-            function_images[function_key] = immutable_ref
+            function_images[function_key] = image_name
 
     _emit({"type": "build_done"})
     return function_images

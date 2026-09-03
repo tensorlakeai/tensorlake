@@ -317,7 +317,7 @@ class TestFunctionManifestImages(unittest.TestCase):
                 (
                     default_application_function._function_config.function_name,
                     function._function_config.function_name,
-                ): f"cas-v1:{'a' * 64}"
+                ): "applications/test/versions/v1/default"
                 for function in get_functions()
             },
         )
@@ -326,11 +326,11 @@ class TestFunctionManifestImages(unittest.TestCase):
         self.assertEqual(manifest["runtime"], "python")
         self.assertEqual(
             manifest["functions"]["function_with_default_image"]["image"],
-            f"cas-v1:{'a' * 64}",
+            "applications/test/versions/v1/default",
         )
 
-    def test_resolved_images_must_be_immutable(self):
-        with self.assertRaisesRegex(TensorlakeError, "is not immutable"):
+    def test_resolved_images_must_not_be_empty(self):
+        with self.assertRaisesRegex(TensorlakeError, "is empty"):
             create_application_manifest(
                 application_function=default_application_function,
                 all_functions=get_functions(),
@@ -338,7 +338,7 @@ class TestFunctionManifestImages(unittest.TestCase):
                     (
                         default_application_function._function_config.function_name,
                         function._function_config.function_name,
-                    ): "mutable-image-name"
+                    ): ""
                     for function in get_functions()
                 },
             )
