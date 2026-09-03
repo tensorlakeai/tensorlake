@@ -38,7 +38,7 @@ class FakeDeployClient:
 
 class TestDeployPublicEndpoint(unittest.TestCase):
     def _deployed_manifest(self, client: FakeDeployClient) -> dict:
-        image_ref = f"cas-v1:{'a' * 64}"
+        image_ref = "applications/public_endpoint_app/versions/v1/default"
         with (
             patch(
                 "tensorlake.applications.remote.deploy.get_functions",

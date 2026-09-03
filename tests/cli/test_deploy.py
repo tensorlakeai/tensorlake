@@ -9,9 +9,6 @@ from tensorlake.applications import Image, application, function
 from tensorlake.applications import registry as registry_module
 from tensorlake.cli import deploy as deploy_module
 
-_IMAGE_ID = "a" * 64
-_IMAGE_REF = f"cas-v1:{_IMAGE_ID}"
-
 
 @contextmanager
 def isolated_registry():
@@ -33,12 +30,6 @@ class TestDeployHelpers(unittest.TestCase):
             name,
             r"^applications/id-[0-9a-f]{32}/versions/id-[0-9a-f]{32}/images/id-[0-9a-f]{32}$",
         )
-
-    def test_immutable_image_reference_rejects_mutable_build_results(self):
-        with self.assertRaisesRegex(deploy_module.SDKUsageError, "immutable image ID"):
-            deploy_module.immutable_image_reference(
-                {"image_id": "mutable-name"}, "application-image"
-            )
 
     def test_format_error_message_does_not_include_exception_payload(self):
         message = deploy_module._format_error_message(
@@ -422,7 +413,7 @@ class TestDeployEntrypoints(unittest.TestCase):
                 patch.object(
                     deploy_module,
                     "build_sandbox_application_image",
-                    return_value={"image_id": _IMAGE_ID},
+                    return_value={"id": "template-id"},
                 ) as build_image,
                 patch.object(deploy_module, "_deploy_applications") as deploy_apps,
                 patch.object(deploy_module, "_emit") as emit,
@@ -500,7 +491,11 @@ class TestDeployEntrypoints(unittest.TestCase):
                     run_query_agent._function_config.function_name,
                 )
             ],
-            _IMAGE_REF,
+            deploy_module.explicit_application_image_name(
+                finance_query._function_config.function_name,
+                finance_query._application_config.version,
+                "agent-image",
+            ),
         )
         emit.assert_any_call({"type": "build_done"})
 
@@ -525,7 +520,7 @@ class TestDeployEntrypoints(unittest.TestCase):
                 patch.object(
                     deploy_module,
                     "build_sandbox_application_image",
-                    return_value={"image_id": _IMAGE_ID},
+                    return_value={"id": "template-id"},
                 ) as build_image,
                 patch.object(deploy_module, "_deploy_applications") as deploy_apps,
                 patch.object(deploy_module, "_emit") as emit,
@@ -551,11 +546,11 @@ class TestDeployEntrypoints(unittest.TestCase):
                 (
                     default_image_app._function_config.function_name,
                     default_image_app._function_config.function_name,
-                ): _IMAGE_REF,
+                ): registered_name,
                 (
                     default_image_app._function_config.function_name,
                     helper._function_config.function_name,
-                ): _IMAGE_REF,
+                ): registered_name,
             },
         )
         emit.assert_any_call({"type": "build_start", "image": registered_name})
@@ -595,7 +590,7 @@ class TestDeployEntrypoints(unittest.TestCase):
             patch.object(
                 deploy_module,
                 "build_sandbox_application_image",
-                return_value={"image_id": _IMAGE_ID},
+                return_value={"id": "template-id"},
             ) as build_image,
             patch.object(deploy_module, "_deploy_applications") as deploy_apps,
             patch.object(deploy_module, "_emit") as emit,

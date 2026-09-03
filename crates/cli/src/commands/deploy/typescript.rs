@@ -37,8 +37,7 @@ const RESOLVED_VIRTUAL_ENTRY: &str = "\0tensorlake:application-entry";
 const RUNTIME_MODULE: &str = "runtime.mjs";
 const CODE_MANIFEST_FILE: &str = ".tensorlake_code_manifest.json";
 const MAX_CODE_SIZE: u64 = 5 * 1024 * 1024;
-const DEFAULT_NODE_IMAGE: &str = "node:24-bookworm-slim";
-const CAS_IMAGE_REF_PREFIX: &str = "cas-v1:";
+const DEFAULT_NODE_IMAGE: &str = "node:24-trixie";
 const FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH: &str =
     ".tensorlake/typescript-function-runner-runtime.tgz";
 const FUNCTION_RUNNER_LINUX_X64_BINDING: &str =
@@ -872,7 +871,7 @@ async fn build_application_images(
     let discovery = &bundle.discovery;
     let context_directory = entry_file.parent().unwrap_or_else(|| Path::new("."));
     let empty_context_directory = bundle._temp.path().join("image-context");
-    let mut built = BTreeMap::<String, (String, String)>::new();
+    let mut built = BTreeMap::<String, String>::new();
     let mut function_images = BTreeMap::new();
     for application in &discovery.applications {
         let application_name = required_string(application, "name", "application")?;
@@ -912,7 +911,7 @@ async fn build_application_images(
                     bundle.function_runner_capsule.runtime_id
                 ),
             };
-            if let Some((previous, immutable_ref)) = built.get(&registered_name) {
+            if let Some(previous) = built.get(&registered_name) {
                 if previous != &fingerprint {
                     return Err(CliError::usage(format!(
                         "Different Image definitions use the registered name '{registered_name}'"
@@ -920,7 +919,7 @@ async fn build_application_images(
                 }
                 function_images.insert(
                     (application_name.to_string(), function_name.to_string()),
-                    immutable_ref.clone(),
+                    registered_name.clone(),
                 );
                 continue;
             }
@@ -946,7 +945,7 @@ async fn build_application_images(
                     cpus: None,
                     memory_mb: None,
                     is_public: false,
-                    cas: true,
+                    cas: false,
                     user_agent: Some(format!(
                         "Tensorlake CLI (rust/{})",
                         env!("CARGO_PKG_VERSION")
@@ -968,39 +967,17 @@ async fn build_application_images(
                 build_args: Vec::new(),
             };
             let mut renderer = ImageBuildEventRenderer::new();
-            let published = build_sandbox_image(options, |event| renderer.render(event))
+            build_sandbox_image(options, |event| renderer.render(event))
                 .await
                 .map_err(|error| CliError::Other(error.into()))?;
-            let immutable_ref = published_image_reference(&published)?;
-            built.insert(registered_name, (fingerprint, immutable_ref.clone()));
+            built.insert(registered_name.clone(), fingerprint);
             function_images.insert(
                 (application_name.to_string(), function_name.to_string()),
-                immutable_ref,
+                registered_name,
             );
         }
     }
     Ok(function_images)
-}
-
-fn published_image_reference(image: &Value) -> Result<String> {
-    let image_id = image
-        .get("image_id")
-        .and_then(Value::as_str)
-        .ok_or_else(|| {
-            CliError::Other(anyhow::anyhow!(
-                "Image Service publication returned no immutable image_id"
-            ))
-        })?;
-    if image_id.len() != 64
-        || !image_id
-            .bytes()
-            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
-    {
-        return Err(CliError::Other(anyhow::anyhow!(
-            "Image Service publication returned an invalid immutable image_id"
-        )));
-    }
-    Ok(format!("{CAS_IMAGE_REF_PREFIX}{image_id}"))
 }
 
 fn registered_image_component(value: &str) -> String {
@@ -1139,7 +1116,7 @@ async fn upsert_application(
 ) -> Result<()> {
     let client = ctx.client()?;
     let mut application = application.clone();
-    let function_service_url = function_service_url(&ctx.api_url);
+    let function_service_url = crate::commands::applications::application_service_url(&ctx.api_url);
     ensure_public_endpoint_id(
         &function_service_url,
         &ctx.namespace,
@@ -1189,19 +1166,6 @@ async fn upsert_application(
         delay *= 2;
     }
     unreachable!()
-}
-
-fn function_service_url(api_url: &str) -> String {
-    resolve_function_service_url(
-        api_url,
-        std::env::var("TENSORLAKE_FUNCTION_SERVICE_URL").ok(),
-    )
-}
-
-fn resolve_function_service_url(api_url: &str, override_url: Option<String>) -> String {
-    override_url
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or_else(|| api_url.to_string())
 }
 
 fn allows_unauthenticated_requests(application: &Value) -> bool {
@@ -1289,8 +1253,7 @@ mod tests {
         FUNCTION_RUNNER_LINUX_X64_BINDING, SerializedImageOperation, application_dockerfile,
         application_with_resolved_images, bundle_application, canonical_entrypoint,
         discover_deployment_with_timeout, ensure_public_endpoint_id, load_function_runner_capsule,
-        published_image_reference, registered_image_component, render_image_operation,
-        resolve_function_service_url,
+        registered_image_component, render_image_operation,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1319,7 +1282,7 @@ mod tests {
     #[test]
     fn renders_node_24_application_dockerfile() {
         let dockerfile = application_dockerfile(None).unwrap();
-        assert!(dockerfile.contains("FROM node:24-bookworm-slim"));
+        assert!(dockerfile.contains("FROM node:24-trixie"));
         assert!(dockerfile.contains("COPY .tensorlake/typescript-function-runner-runtime.tgz"));
         assert!(!dockerfile.contains("tensorlake@"));
         assert!(dockerfile.contains("--no-bin-links"));
@@ -1383,11 +1346,11 @@ mod tests {
         let images = BTreeMap::from([
             (
                 ("app".to_string(), "default_fn".to_string()),
-                format!("cas-v1:{}", "a".repeat(64)),
+                "applications/app/versions/v1/default".to_string(),
             ),
             (
                 ("app".to_string(), "custom_fn".to_string()),
-                format!("cas-v1:{}", "b".repeat(64)),
+                "applications/app/versions/v1/images/logical-image".to_string(),
             ),
         ]);
 
@@ -1395,41 +1358,20 @@ mod tests {
 
         assert_eq!(
             resolved["functions"]["default_fn"]["image"],
-            format!("cas-v1:{}", "a".repeat(64))
+            "applications/app/versions/v1/default"
         );
         assert_eq!(
             resolved["functions"]["custom_fn"]["image"],
-            format!("cas-v1:{}", "b".repeat(64))
+            "applications/app/versions/v1/images/logical-image"
         );
     }
 
     #[test]
-    fn validates_published_image_ids_and_registered_name_components() {
-        let image_id = "a".repeat(64);
-        assert_eq!(
-            published_image_reference(&json!({ "image_id": image_id })).unwrap(),
-            format!("cas-v1:{}", "a".repeat(64))
-        );
-        assert!(published_image_reference(&json!({ "image_id": "mutable-name" })).is_err());
+    fn validates_registered_name_components() {
         assert_eq!(registered_image_component("app-v1"), "app-v1");
         let sanitized = registered_image_component("My Application");
         assert!(sanitized.starts_with("id-"));
         assert_eq!(sanitized.len(), 35);
-    }
-
-    #[test]
-    fn function_service_url_defaults_to_api_origin() {
-        assert_eq!(
-            resolve_function_service_url("https://api.tensorlake.ai", None),
-            "https://api.tensorlake.ai"
-        );
-        assert_eq!(
-            resolve_function_service_url(
-                "https://api.tensorlake.ai",
-                Some("http://functions.test:8930".to_string())
-            ),
-            "http://functions.test:8930"
-        );
     }
 
     #[tokio::test]

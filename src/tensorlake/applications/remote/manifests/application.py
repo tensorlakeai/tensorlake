@@ -96,14 +96,9 @@ def create_application_manifest(
                 raise TensorlakeError(
                     f"runtime image was not prepared for function '{function_name}'"
                 )
-            image_id = image.removeprefix("cas-v1:")
-            if (
-                not image.startswith("cas-v1:")
-                or len(image_id) != 64
-                or any(byte not in "0123456789abcdef" for byte in image_id)
-            ):
+            if not image.strip():
                 raise TensorlakeError(
-                    f"runtime image for function '{function_name}' is not immutable"
+                    f"runtime image for function '{function_name}' is empty"
                 )
             manifest.image = image
 

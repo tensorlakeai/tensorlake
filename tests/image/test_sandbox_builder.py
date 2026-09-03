@@ -744,7 +744,7 @@ class TestBuildSandboxApplicationImage(unittest.TestCase):
                 memory_mb=BUILD_MEMORY_MB,
             )
 
-        self.assertIs(rust_builder_mock.call_args.kwargs["cas"], True)
+        self.assertIs(rust_builder_mock.call_args.kwargs["cas"], False)
 
         dockerfile_text = captured["dockerfile_text"]
         self.assertIsInstance(dockerfile_text, str)
@@ -769,9 +769,9 @@ class TestBuildSandboxApplicationImage(unittest.TestCase):
 
 
 class TestApplicationDockerfileContent(unittest.TestCase):
-    def test_default_image_uses_ubuntu_minimal_base(self):
+    def test_default_image_uses_python_314_trixie_base(self):
         dockerfile = dockerfile_content(Image(name="default-base"))
-        self.assertTrue(dockerfile.startswith("FROM tensorlake/ubuntu-minimal\n"))
+        self.assertTrue(dockerfile.startswith("FROM python:3.14-trixie\n"))
 
     def test_sdk_install_uses_python3_module_pip(self):
         dockerfile = dockerfile_content(Image(name="install-command"))

@@ -12,7 +12,7 @@ import {
 
 const verificationImage = new Image({
   name: "typescript-server-verification-runtime",
-  baseImage: "node:24-bookworm-slim",
+  baseImage: "node:24-trixie",
 });
 
 const double = registerFunction(

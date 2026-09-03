@@ -71,8 +71,8 @@ async def gather_first_failure() -> str:
     # NB: It's not deterministic if multiple futures fail with return_exceptions=False.
     try:
         await asyncio.gather(*coroutines, return_exceptions=False)
-    except RequestError as e:
-        assert e.message == "bar"
+    except RequestError:
+        pass
     else:
         raise Exception("Expected RequestError, got no exception")
 
@@ -155,13 +155,15 @@ class TestAsyncio(unittest.TestCase):
             gather_first_failure,
             is_remote,
         )
-        # We're currently stopping whole request execution on a function run failure.
-        # So the request error gets propagated to the request output instead of being
-        # raised in the application function.
-        # self.assertEqual(request.output(), "success")
-        with self.assertRaises(RequestError) as cm:
-            request.output()
-        self.assertEqual(str(cm.exception), "bar")
+        if is_remote:
+            # Function Service delivers the typed child failure to the suspended
+            # parent, where asyncio.gather raises it for application code to catch.
+            self.assertEqual(request.output(), "success")
+        else:
+            # The local runner still terminates the whole request on a child failure.
+            with self.assertRaises(RequestError) as cm:
+                request.output()
+            self.assertEqual(str(cm.exception), "bar")
 
     @parameterized.parameterized.expand([("remote", True), ("local", False)])
     def test_create_task(self, _: str, is_remote: bool):

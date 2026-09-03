@@ -8,7 +8,7 @@ use crate::common::random_string;
 mod common;
 
 #[tokio::test]
-async fn api_key_scoped_secrets_use_root_routes_without_introspection() {
+async fn api_key_scoped_secrets_use_default_namespace_without_introspection() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind test listener");
@@ -19,17 +19,13 @@ async fn api_key_scoped_secrets_use_root_routes_without_introspection() {
 
         let (mut socket, _) = listener.accept().await.expect("accept list request");
         requests.push(read_http_request(&mut socket).await);
-        write_json_response(
-            &mut socket,
-            r#"{"items":[],"pagination":{"next":null,"prev":null,"total":0}}"#,
-        )
-        .await;
+        write_json_response(&mut socket, r#"[]"#).await;
 
         let (mut socket, _) = listener.accept().await.expect("accept upsert request");
         requests.push(read_http_request(&mut socket).await);
         write_json_response(
             &mut socket,
-            r#"{"id":"secret/1","name":"TOKEN","createdAt":"2026-08-20T00:00:00Z"}"#,
+            r#"{"id":"secret/1","name":"TOKEN","created_at_ms":1787184000000}"#,
         )
         .await;
 
@@ -67,9 +63,12 @@ async fn api_key_scoped_secrets_use_root_routes_without_introspection() {
         .iter()
         .map(|request| String::from_utf8_lossy(request).to_string())
         .collect();
-    assert!(requests[0].starts_with("GET /platform/v1/secrets?pageSize=100 HTTP/1.1\r\n"));
-    assert!(requests[1].starts_with("PUT /platform/v1/secrets HTTP/1.1\r\n"));
-    assert!(requests[2].starts_with("DELETE /platform/v1/secrets/secret%2F1 HTTP/1.1\r\n"));
+    assert!(requests[0].starts_with("GET /v1/namespaces/default/secrets HTTP/1.1\r\n"));
+    assert!(requests[1].starts_with("POST /v1/namespaces/default/secrets HTTP/1.1\r\n"));
+    assert!(requests[1].to_lowercase().contains("idempotency-key:"));
+    assert!(
+        requests[2].starts_with("DELETE /v1/namespaces/default/secrets/secret%2F1 HTTP/1.1\r\n")
+    );
     for request in requests {
         let request = request.to_lowercase();
         assert!(request.contains("authorization: bearer tl_apikey_test"));
@@ -77,6 +76,64 @@ async fn api_key_scoped_secrets_use_root_routes_without_introspection() {
         assert!(!request.contains("x-forwarded-organization-id:"));
         assert!(!request.contains("x-forwarded-project-id:"));
     }
+}
+
+#[tokio::test]
+async fn upsert_rotates_an_existing_secret_through_secret_service() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        let (mut socket, _) = listener.accept().await.expect("create");
+        requests.push(read_http_request(&mut socket).await);
+        socket
+            .write_all(b"HTTP/1.1 409 Conflict\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+            .await
+            .expect("conflict");
+
+        let (mut socket, _) = listener.accept().await.expect("lookup");
+        requests.push(read_http_request(&mut socket).await);
+        write_json_response(&mut socket, r#"{"id":"secret/1"}"#).await;
+
+        let (mut socket, _) = listener.accept().await.expect("rotate");
+        requests.push(read_http_request(&mut socket).await);
+        write_json_response(
+            &mut socket,
+            r#"{"id":"secret/1","name":"TOKEN","created_at_ms":1787184000000}"#,
+        )
+        .await;
+        requests
+    });
+
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .bearer_token("tl_apiKey_test")
+        .build()
+        .expect("client");
+    SecretsClient::new(client)
+        .upsert_api_key_scoped_in_namespace(
+            "customer namespace",
+            UpsertSecret::from(("TOKEN", "rotated")),
+        )
+        .await
+        .expect("upsert");
+
+    let requests = server.await.expect("server");
+    let requests = requests
+        .iter()
+        .map(|request| String::from_utf8_lossy(request).to_string())
+        .collect::<Vec<_>>();
+    assert!(
+        requests[0].starts_with("POST /v1/namespaces/customer%20namespace/secrets HTTP/1.1\r\n")
+    );
+    assert!(
+        requests[1]
+            .starts_with("GET /v1/namespaces/customer%20namespace/secret-names/TOKEN HTTP/1.1\r\n")
+    );
+    assert!(requests[2].starts_with(
+        "POST /v1/namespaces/customer%20namespace/secrets/secret%2F1/versions HTTP/1.1\r\n"
+    ));
+    assert!(requests[2].contains(r#"{"value":"rotated"}"#));
+    assert!(requests[2].to_lowercase().contains("idempotency-key:"));
 }
 
 #[tokio::test]

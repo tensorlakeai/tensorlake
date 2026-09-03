@@ -273,60 +273,59 @@ export class CloudClient {
     projectId?: string;
     pageSize?: number;
   }): Promise<SecretsList> {
-    const base = this.platformProjectPath(
-      "secrets",
+    const base = this.secretCollectionPath(
       options?.organizationId,
       options?.projectId,
     );
-    const raw = await this.http.requestJson<Record<string, unknown>>(
-      "GET",
-      `${base}?pageSize=${options?.pageSize ?? 100}`,
+    const raw = await this.http.requestJson<SecretMetadata[]>("GET", base);
+    const pageSize = Math.max(0, options?.pageSize ?? 100);
+    return Object.assign(
+      {
+        items: raw.slice(0, pageSize).map(secretFromMetadata),
+        pagination: { total: raw.length },
+      },
+      { traceId: raw.traceId },
     );
-    return fromSnakeKeys(raw) as SecretsList;
   }
 
   async getSecret(
     secretId: string,
     options?: { organizationId?: string; projectId?: string },
   ): Promise<Secret> {
-    const base = this.platformProjectPath(
-      "secrets",
+    const base = this.secretCollectionPath(
       options?.organizationId,
       options?.projectId,
     );
-    const raw = await this.http.requestJson<Record<string, unknown>>(
+    const raw = await this.http.requestJson<SecretMetadata>(
       "GET",
       `${base}/${encodeURIComponent(secretId)}`,
     );
-    return fromSnakeKeys(raw) as Secret;
+    return Object.assign(secretFromMetadata(raw), { traceId: raw.traceId });
   }
 
   async upsertSecrets(
     secrets: NewSecret | NewSecret[],
     options?: { organizationId?: string; projectId?: string },
   ): Promise<UpsertSecretResponse> {
-    const base = this.platformProjectPath(
-      "secrets",
+    const base = this.secretCollectionPath(
       options?.organizationId,
       options?.projectId,
     );
-    const raw = await this.http.requestJson<Record<string, unknown> | Record<string, unknown>[]>(
-      "PUT",
-      base,
-      { body: secrets },
-    );
-    if (Array.isArray(raw)) {
-      return raw.map((secret) => fromSnakeKeys(secret) as Secret);
+    if (Array.isArray(secrets)) {
+      const results: Secret[] = [];
+      for (const secret of secrets) {
+        results.push(await this.upsertSecret(base, secret));
+      }
+      return results;
     }
-    return fromSnakeKeys(raw) as Secret;
+    return this.upsertSecret(base, secrets);
   }
 
   async deleteSecret(
     secretId: string,
     options?: { organizationId?: string; projectId?: string },
   ): Promise<void> {
-    const base = this.platformProjectPath(
-      "secrets",
+    const base = this.secretCollectionPath(
       options?.organizationId,
       options?.projectId,
     );
@@ -334,6 +333,33 @@ export class CloudClient {
       "DELETE",
       `${base}/${encodeURIComponent(secretId)}`,
     );
+  }
+
+  private async upsertSecret(base: string, secret: NewSecret): Promise<Secret> {
+    let response = await this.http.requestResponse("POST", base, {
+      json: secret,
+      headers: { "Idempotency-Key": nanoid() },
+      allowedErrorStatusCodes: new Set([409]),
+    });
+    if (response.status === 409) {
+      const prefix = base.slice(0, -"/secrets".length);
+      const existing = await this.http.requestJson<{ id: string }>(
+        "GET",
+        `${prefix}/secret-names/${encodeURIComponent(secret.name)}`,
+      );
+      response = await this.http.requestResponse(
+        "POST",
+        `${base}/${encodeURIComponent(existing.id)}/versions`,
+        {
+          json: { value: secret.value },
+          headers: { "Idempotency-Key": nanoid() },
+        },
+      );
+    }
+    const metadata = await parseJsonResponse<SecretMetadata>(response);
+    return Object.assign(secretFromMetadata(metadata), {
+      traceId: response.traceId,
+    });
   }
 
   async startImageBuild(
@@ -471,7 +497,7 @@ export class CloudClient {
   }
 
   private platformProjectPath(
-    resource: "sandbox-templates" | "secrets",
+    resource: "sandbox-templates",
     organizationId?: string,
     projectId?: string,
   ): string {
@@ -487,6 +513,35 @@ export class CloudClient {
     }
     return `/platform/v1/organizations/${encodeURIComponent(resolvedOrganizationId)}/projects/${encodeURIComponent(resolvedProjectId)}/${resource}`;
   }
+
+  private secretCollectionPath(
+    organizationId?: string,
+    projectId?: string,
+  ): string {
+    const resolvedOrganizationId = organizationId ?? this.organizationId;
+    const resolvedProjectId = projectId ?? this.projectId;
+    if (!resolvedOrganizationId && !resolvedProjectId) {
+      return this.namespacePath("secrets");
+    }
+    if (!resolvedOrganizationId || !resolvedProjectId) {
+      throw new Error("organizationId and projectId must be provided together");
+    }
+    return this.namespacePath("secrets");
+  }
+}
+
+type SecretMetadata = {
+  id: string;
+  name: string;
+  created_at_ms: number;
+};
+
+function secretFromMetadata(metadata: SecretMetadata): Secret {
+  return {
+    id: metadata.id,
+    name: metadata.name,
+    createdAt: new Date(metadata.created_at_ms),
+  };
 }
 
 const UNAUTHENTICATED_REQUESTS = "unauthenticated_requests";

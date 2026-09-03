@@ -48,6 +48,17 @@ installPromiseInstrumentation();
 
 type Message = Record<string, unknown>;
 
+const RESERVED_ENVIRONMENT_TARGETS = new Set([
+  "PYTHONFAULTHANDLER",
+  "LD_PRELOAD",
+  "LD_LIBRARY_PATH",
+  "DYLD_INSERT_LIBRARIES",
+  "PYTHONHOME",
+  "PYTHONPATH",
+  "NODE_OPTIONS",
+  "NODE_PATH",
+]);
+
 interface CodeManifest {
   format_version?: number;
   runtime?: string;
@@ -132,6 +143,29 @@ function serializeArgument(value: unknown): Message {
   };
 }
 
+function applyResolvedEnvironment(assignment: Assignment): void {
+  const rawEnvironment = assignment.resolved_environment ?? [];
+  const targets = new Set<string>();
+  for (const item of rawEnvironment) {
+    if (
+      item == null
+      || typeof item.target !== "string"
+      || !/^[A-Za-z_][A-Za-z0-9_]{0,255}$/.test(item.target)
+      || RESERVED_ENVIRONMENT_TARGETS.has(item.target)
+      || item.target.startsWith("TENSORLAKE_")
+      || targets.has(item.target)
+      || typeof item.value !== "string"
+      || item.value.includes("\0")
+    ) {
+      throw new Error("Resolved environment entry is invalid");
+    }
+    targets.add(item.target);
+  }
+  for (const item of rawEnvironment) process.env[item.target] = item.value;
+  for (const item of rawEnvironment) item.value = "";
+  assignment.resolved_environment = [];
+}
+
 function failureFromResult(result: Exclude<CallResult, { outcome: "success" }>): Error {
   if (result.outcome === "timed_out") return new TimeoutError();
   if (result.reason === "request_error") return new RequestError("Function call failed");
@@ -170,6 +204,7 @@ export class FunctionAgentRunner {
 
   private async startAssignment(assignment: Assignment): Promise<void> {
     try {
+      applyResolvedEnvironment(assignment);
       const application = await this.loadApplication(assignment);
       if (!this.initializationSent) {
         await this.submit({ type: "initialized" });

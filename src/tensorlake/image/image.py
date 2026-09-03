@@ -4,7 +4,7 @@ from typing import Dict, List
 
 from tensorlake.vendor.nanoid.nanoid import generate as nanoid_generate
 
-_DEFAULT_BASE_IMAGE_NAME = "tensorlake/ubuntu-minimal"
+_DEFAULT_BASE_IMAGE_NAME = "python:3.14-trixie"
 
 
 class _ImageBuildOperationType(Enum):

@@ -57,7 +57,7 @@ pub async fn set(ctx: &CliContext, env_file: Option<&Path>, pairs: &[String]) ->
     let secrets = UpsertSecret::Multiple(upsert_secrets.clone());
     if ctx.api_key.is_some() {
         client
-            .upsert_api_key_scoped(secrets)
+            .upsert_api_key_scoped_in_namespace(&ctx.namespace, secrets)
             .await
             .map_err(map_set_sdk_error)?;
     } else {
@@ -68,7 +68,10 @@ pub async fn set(ctx: &CliContext, env_file: Option<&Path>, pairs: &[String]) ->
             .secrets(secrets)
             .build()
             .map_err(|e| CliError::usage(e.to_string()))?;
-        client.upsert(request).await.map_err(map_set_sdk_error)?;
+        client
+            .upsert_in_namespace(request, &ctx.namespace)
+            .await
+            .map_err(map_set_sdk_error)?;
     }
 
     let count = upsert_secrets.len();
@@ -154,10 +157,13 @@ pub async fn unset(ctx: &CliContext, names: &[String]) -> Result<()> {
                     .secret_id(id)
                     .build()
                     .map_err(|e| CliError::usage(e.to_string()))?;
-                client.delete(&request).await.map_err(map_unset_sdk_error)?;
+                client
+                    .delete_in_namespace(&request, &ctx.namespace)
+                    .await
+                    .map_err(map_unset_sdk_error)?;
             } else {
                 client
-                    .delete_api_key_scoped(id)
+                    .delete_api_key_scoped_in_namespace(&ctx.namespace, id)
                     .await
                     .map_err(map_unset_sdk_error)?;
             }
@@ -176,7 +182,9 @@ pub async fn unset(ctx: &CliContext, names: &[String]) -> Result<()> {
 async fn get_all_secrets(ctx: &CliContext) -> Result<Vec<serde_json::Value>> {
     let client = secrets_client(ctx)?;
     let resp = if ctx.api_key.is_some() {
-        client.list_api_key_scoped(Some(100)).await
+        client
+            .list_api_key_scoped_in_namespace(&ctx.namespace, Some(100))
+            .await
     } else {
         let (organization_id, project_id) = org_and_project(ctx)?;
         let request = ListSecretsRequest::builder()
@@ -185,7 +193,7 @@ async fn get_all_secrets(ctx: &CliContext) -> Result<Vec<serde_json::Value>> {
             .page_size(100)
             .build()
             .map_err(|e| CliError::usage(e.to_string()))?;
-        client.list(&request).await
+        client.list_in_namespace(&request, &ctx.namespace).await
     }
     .map_err(map_list_sdk_error)?;
 

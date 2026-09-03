@@ -19,6 +19,47 @@ def {function_name}(name: str) -> str:
     return f"Hello, {name}!"
 "#;
 
+pub const TYPESCRIPT_TEMPLATE: &str = r#"import { registerApplication } from "tensorlake/applications";
+
+export const app = registerApplication(
+  "{function_name}",
+  async (name: string): Promise<string> => `Hello, ${name}!`,
+);
+"#;
+
+pub const TYPESCRIPT_PACKAGE_TEMPLATE: &str = r#"{
+  "name": "{package_name}",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "tensorlake": "^{sdk_version}"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.0"
+  }
+}
+"#;
+
+pub const TYPESCRIPT_CONFIG_TEMPLATE: &str = r#"{
+  "compilerOptions": {
+    "target": "ES2023",
+    "module": "ESNext",
+    "moduleResolution": "bundler",
+    "lib": ["ES2023", "DOM", "DOM.Iterable"],
+    "strict": true,
+    "skipLibCheck": true,
+    "noEmit": true
+  },
+  "include": ["application.ts"]
+}
+"#;
+
 pub const README_TEMPLATE: &str = r#"# {app_name}
 
 A Tensorlake application created with `tl app new`.
@@ -66,4 +107,40 @@ print(output)
 - [Dependency Management](https://docs.tensorlake.ai/applications/images) - Add packages
 - [Parallel Processing](https://docs.tensorlake.ai/applications/map-reduce) - Scale with map-reduce
 - [Complete Documentation](https://docs.tensorlake.ai)
+"#;
+
+pub const TYPESCRIPT_README_TEMPLATE: &str = r#"# {app_name}
+
+A TypeScript Tensorlake application created with `tl app new`.
+
+## Quick Start
+
+Install dependencies:
+
+```bash
+npm install
+```
+
+Deploy your application:
+
+```bash
+tl app deploy application.ts
+```
+
+Invoke it with a JSON string:
+
+```bash
+curl https://api.tensorlake.ai/applications/{function_name} \
+  -H "Authorization: Bearer $TENSORLAKE_API_KEY" \
+  --json '"World"'
+```
+
+## Next Steps
+
+- Modify `application.ts` to process your own input.
+- Add `registerFunction` functions for multi-step or parallel workflows.
+- Declare runtime secrets with the function or application's `secrets` option.
+- Run `npm run typecheck` during development.
+
+[Read the complete documentation](https://docs.tensorlake.ai/applications/introduction).
 "#;

@@ -542,7 +542,7 @@ describe("CloudClient", () => {
     client.close();
   });
 
-  it("uses API-key-scoped secrets routes when scope is omitted", async () => {
+  it("uses the configured namespace for API-key-scoped secrets", async () => {
     const requested: Array<{ url: string; method: string | undefined }> = [];
     mockFetch((url, init) => {
       requested.push({ url, method: init?.method });
@@ -551,19 +551,21 @@ describe("CloudClient", () => {
       expect(headers).not.toHaveProperty("X-Forwarded-Organization-Id");
       expect(headers).not.toHaveProperty("X-Forwarded-Project-Id");
 
-      if (init?.method === "GET" && url.endsWith("?pageSize=25")) {
+      if (init?.method === "GET") {
+        return new Response(JSON.stringify([]), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      if (init?.method === "POST") {
+        expect(headers).toHaveProperty("Idempotency-Key");
         return new Response(
           JSON.stringify({
-            items: [],
-            pagination: { next: null, prev: null, total: 0 },
+            id: "secret/1",
+            name: "TOKEN",
+            created_at_ms: 1_787_184_000_000,
           }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
-        );
-      }
-      if (init?.method === "PUT") {
-        return new Response(
-          JSON.stringify({ id: "secret/1", name: "TOKEN", created_at: "now" }),
-          { status: 200, headers: { "Content-Type": "application/json" } },
+          { status: 201, headers: { "Content-Type": "application/json" } },
         );
       }
       return new Response(null, { status: 204 });
@@ -572,6 +574,7 @@ describe("CloudClient", () => {
     const client = new CloudClient({
       apiUrl: "http://localhost:8900",
       apiKey: "tl_apiKey_test",
+      namespace: "customer namespace",
     });
     await client.listSecrets({ pageSize: 25 });
     await client.upsertSecrets({ name: "TOKEN", value: "value" });
@@ -579,19 +582,72 @@ describe("CloudClient", () => {
 
     expect(requested).toEqual([
       {
-        url: "http://localhost:8900/platform/v1/secrets?pageSize=25",
+        url: "http://localhost:8900/v1/namespaces/customer%20namespace/secrets",
         method: "GET",
       },
       {
-        url: "http://localhost:8900/platform/v1/secrets",
-        method: "PUT",
+        url: "http://localhost:8900/v1/namespaces/customer%20namespace/secrets",
+        method: "POST",
       },
       {
-        url: "http://localhost:8900/platform/v1/secrets/secret%2F1",
+        url: "http://localhost:8900/v1/namespaces/customer%20namespace/secrets/secret%2F1",
         method: "DELETE",
       },
     ]);
     expect(requested.every(({ url }) => !url.includes("/keys/introspect"))).toBe(true);
+    client.close();
+  });
+
+  it("rotates an existing secret through the explicit Secret Service namespace", async () => {
+    const requested: Array<{ url: string; method: string | undefined }> = [];
+    mockFetch((url, init) => {
+      requested.push({ url, method: init?.method });
+      const headers = init?.headers as Record<string, string>;
+      if (requested.length === 1) {
+        expect(headers).toHaveProperty("Idempotency-Key");
+        return new Response(null, { status: 409 });
+      }
+      if (requested.length === 2) {
+        return new Response(JSON.stringify({ id: "secret/1" }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        });
+      }
+      expect(headers).toHaveProperty("Idempotency-Key");
+      return new Response(
+        JSON.stringify({
+          id: "secret/1",
+          name: "TOKEN",
+          created_at_ms: 1_787_184_000_000,
+        }),
+        { status: 201, headers: { "Content-Type": "application/json" } },
+      );
+    });
+
+    const client = new CloudClient({
+      apiUrl: "http://localhost:8900",
+      namespace: "customer",
+    });
+    const secret = await client.upsertSecrets(
+      { name: "TOKEN", value: "rotated" },
+      { organizationId: "org", projectId: "project" },
+    );
+
+    expect(secret).toMatchObject({ id: "secret/1", name: "TOKEN" });
+    expect(requested).toEqual([
+      {
+        url: "http://localhost:8900/v1/namespaces/customer/secrets",
+        method: "POST",
+      },
+      {
+        url: "http://localhost:8900/v1/namespaces/customer/secret-names/TOKEN",
+        method: "GET",
+      },
+      {
+        url: "http://localhost:8900/v1/namespaces/customer/secrets/secret%2F1/versions",
+        method: "POST",
+      },
+    ]);
     client.close();
   });
 

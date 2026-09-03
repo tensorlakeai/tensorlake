@@ -821,7 +821,7 @@ def build_sandbox_application_image(
             builder_disk_mb=builder_disk_mb,
             is_public=is_public,
             docker_compat=False,
-            cas=True,
+            cas=False,
             allow_pat=_allow_pat,
             emit=emit,
         )
