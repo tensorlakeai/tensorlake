@@ -162,6 +162,9 @@ named = client.create(name="stable-name")
 sandbox = client.connect("stable-name")
 ```
 
+Pool root disks default to the registered image's size. Pass `disk_mb` to grow
+a filesystem-only image; a pool disk cannot be smaller than its image.
+
 Set the pool network policy when you create the pool, replace it later with a
 pool update, or pass `CLEAR_NETWORK_POLICY` (Python) / `null` (TypeScript) to
 remove it. On a change the service recycles the pool's unclaimed warm

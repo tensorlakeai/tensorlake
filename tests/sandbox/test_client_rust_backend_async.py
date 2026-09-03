@@ -1415,17 +1415,23 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         await client.update_pool(
             pool_id="pool-1",
             image="alpine",
+            disk_mb=25 * 1024,
             network=NetworkConfig(
                 allow_internet_access=False, allow_out=[], deny_out=[]
             ),
         )
         request = json.loads(captured["request_json"])
         self.assertEqual(captured["pool_id"], "pool-1")
+        self.assertEqual(request["resources"]["disk_mb"], 25 * 1024)
+        self.assertNotIn("ephemeral_disk_mb", request["resources"])
         self.assertEqual(request["network"]["allow_internet_access"], False)
 
         # Omitted keeps the current policy; the sentinel clears it.
         await client.update_pool(pool_id="pool-1", image="alpine")
-        self.assertNotIn("network", json.loads(captured["request_json"]))
+        request = json.loads(captured["request_json"])
+        self.assertNotIn("network", request)
+        self.assertNotIn("disk_mb", request["resources"])
+        self.assertNotIn("ephemeral_disk_mb", request["resources"])
 
         await client.update_pool(
             pool_id="pool-1", image="alpine", network=CLEAR_NETWORK_POLICY
@@ -1477,8 +1483,10 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             deny_out=["192.0.2.0/24"],
         )
 
-        await client.create_pool(image="alpine", network=policy)
+        await client.create_pool(image="alpine", disk_mb=25 * 1024, network=policy)
         request = json.loads(captured["request_json"])
+        self.assertEqual(request["resources"]["disk_mb"], 25 * 1024)
+        self.assertNotIn("ephemeral_disk_mb", request["resources"])
         self.assertEqual(
             request["network"],
             {
@@ -1490,6 +1498,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
 
         pool = await client.get_pool("pool-1")
         self.assertEqual(pool.network_policy, policy)
+        self.assertEqual(pool.resources.disk_mb, 1024)
 
     async def test_snapshot_threads_snapshot_type_to_rust_backend(self):
         fake = _FakeAsyncRustClient()

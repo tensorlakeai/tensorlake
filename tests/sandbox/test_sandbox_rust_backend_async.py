@@ -181,7 +181,7 @@ def _sandbox_info(status=SandboxStatus.RUNNING, **overrides) -> SandboxInfo:
         "namespace": "default",
         "status": status,
         "resources": ContainerResourcesInfo(
-            cpus=1.0, memory_mb=512, ephemeral_disk_mb=1024
+            cpus=1.0, memory_mb=512, disk_mb=1024
         ),
     }
     fields.update(overrides)

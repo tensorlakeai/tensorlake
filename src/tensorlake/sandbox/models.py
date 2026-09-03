@@ -5,7 +5,14 @@ from enum import Enum
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse, urlunparse
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_serializer
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    model_serializer,
+)
 
 _SANDBOX_MANAGEMENT_PORT = 9501
 
@@ -160,7 +167,9 @@ class ContainerResourcesInfo(BaseModel):
 
     cpus: float
     memory_mb: int
-    ephemeral_disk_mb: int
+    disk_mb: int = Field(
+        validation_alias=AliasChoices("disk_mb", "ephemeral_disk_mb")
+    )
 
 
 class GpuModel(str, Enum):
@@ -423,7 +432,7 @@ class SandboxPoolRequest(BaseModel):
     """Request payload for creating or updating a sandbox pool."""
 
     image: str
-    resources: ContainerResourcesInfo
+    resources: CreateSandboxResources
     timeout_secs: int = 0
     entrypoint: list[str] | None = None
     max_containers: int | None = None
