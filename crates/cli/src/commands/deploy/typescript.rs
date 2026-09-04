@@ -40,8 +40,7 @@ const MAX_CODE_SIZE: u64 = 5 * 1024 * 1024;
 const DEFAULT_NODE_IMAGE: &str = "node:24-trixie";
 const FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH: &str =
     ".tensorlake/typescript-function-runner-runtime.tgz";
-const FUNCTION_RUNNER_LINUX_X64_BINDING: &str =
-    "package/dist/native/linux-x64/tensorlake-node.node";
+const FUNCTION_RUNNER_LINUX_X64_PACKAGE: &str = "@tensorlake/native-linux-x64-gnu";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const UNAUTHENTICATED_REQUESTS: &str = "unauthenticated_requests";
 const DISCOVERY_SCRIPT: &str = r#"
@@ -639,15 +638,6 @@ fn load_function_runner_capsule(
             "Tensorlake TypeScript function runner capsule is empty",
         ));
     }
-    if !manifest
-        .files
-        .contains_key(FUNCTION_RUNNER_LINUX_X64_BINDING)
-    {
-        return Err(CliError::usage(format!(
-            "The Tensorlake TypeScript function runner capsule does not contain the Linux x64 native agent core required by sandbox images ({FUNCTION_RUNNER_LINUX_X64_BINDING}). Reinstall the published package or build the linux-x64 native target before running build:runtime."
-        )));
-    }
-
     let package_directory = capsule_root.join("package");
     let actual_files = collect_capsule_files(&package_directory)?;
     let expected_files = manifest.files.keys().cloned().collect::<BTreeSet<_>>();
@@ -682,6 +672,42 @@ fn load_function_runner_capsule(
         return Err(CliError::usage(format!(
             "Tensorlake TypeScript function runner capsule package metadata at {} is invalid",
             package_directory.display()
+        )));
+    }
+    if package_json
+        .get("optionalDependencies")
+        .and_then(|dependencies| dependencies.get(FUNCTION_RUNNER_LINUX_X64_PACKAGE))
+        .and_then(Value::as_str)
+        != Some(sdk_version)
+    {
+        return Err(CliError::usage(format!(
+            "The Tensorlake TypeScript function runner capsule does not declare {FUNCTION_RUNNER_LINUX_X64_PACKAGE}@{sdk_version}, which is required by Linux x64 sandbox images. Reinstall the published package or rebuild the function runner capsule."
+        )));
+    }
+
+    let shrinkwrap_path = package_directory.join("npm-shrinkwrap.json");
+    let shrinkwrap: Value =
+        serde_json::from_slice(&std::fs::read(&shrinkwrap_path).map_err(CliError::Io)?)?;
+    let shrinkwrap_packages = shrinkwrap.get("packages").and_then(Value::as_object);
+    let locked_root_native_version = shrinkwrap_packages
+        .and_then(|packages| packages.get(""))
+        .and_then(|root| root.get("optionalDependencies"))
+        .and_then(|dependencies| dependencies.get(FUNCTION_RUNNER_LINUX_X64_PACKAGE))
+        .and_then(Value::as_str);
+    let locked_native_path = format!("node_modules/{FUNCTION_RUNNER_LINUX_X64_PACKAGE}");
+    let locked_native = shrinkwrap_packages.and_then(|packages| packages.get(&locked_native_path));
+    if locked_root_native_version != Some(sdk_version)
+        || locked_native
+            .and_then(|package| package.get("version"))
+            .and_then(Value::as_str)
+            != Some(sdk_version)
+        || locked_native
+            .and_then(|package| package.get("optional"))
+            .and_then(Value::as_bool)
+            != Some(true)
+    {
+        return Err(CliError::usage(format!(
+            "The Tensorlake TypeScript function runner capsule lockfile does not pin optional dependency {FUNCTION_RUNNER_LINUX_X64_PACKAGE}@{sdk_version}"
         )));
     }
 
@@ -1250,10 +1276,10 @@ fn required_string<'a>(value: &'a Value, key: &str, label: &str) -> Result<&'a s
 #[cfg(test)]
 mod tests {
     use super::{
-        FUNCTION_RUNNER_LINUX_X64_BINDING, SerializedImageOperation, application_dockerfile,
-        application_with_resolved_images, bundle_application, canonical_entrypoint,
-        discover_deployment_with_timeout, ensure_public_endpoint_id, load_function_runner_capsule,
-        registered_image_component, render_image_operation,
+        SerializedImageOperation, application_dockerfile, application_with_resolved_images,
+        bundle_application, canonical_entrypoint, discover_deployment_with_timeout,
+        ensure_public_endpoint_id, load_function_runner_capsule, registered_image_component,
+        render_image_operation,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1317,7 +1343,7 @@ mod tests {
         assert!(
             paths.contains(&"package/bin/tensorlake-typescript-function-runner.js".to_string())
         );
-        assert!(paths.contains(&FUNCTION_RUNNER_LINUX_X64_BINDING.to_string()));
+        assert!(!paths.iter().any(|path| path.ends_with(".node")));
     }
 
     #[test]
