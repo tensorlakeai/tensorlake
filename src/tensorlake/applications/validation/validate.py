@@ -530,6 +530,18 @@ def _validate_function_configuration(
             )
         )
 
+    if (
+        not _is_non_negative_integer(config.max_concurrency)
+        or config.max_concurrency == 0
+        or config.max_concurrency > 4_294_967_295
+    ):
+        messages.append(
+            _configuration_error(
+                "Function max_concurrency must be an integer between 1 and 4294967295.",
+                function_details,
+            )
+        )
+
     if not isinstance(config.secrets, list) or any(
         not isinstance(secret, str) or not secret for secret in config.secrets
     ):

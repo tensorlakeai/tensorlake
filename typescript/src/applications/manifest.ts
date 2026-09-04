@@ -133,7 +133,7 @@ function functionManifest(
         ? []
         : [`region==${definition.options.region ?? application.options.region}`],
     },
-    max_concurrency: 1,
+    max_concurrency: definition.options.maxConcurrency,
   };
   if (definition.options.warmContainers != null) result.warm_containers = definition.options.warmContainers;
   if (definition.options.minContainers != null) result.min_containers = definition.options.minContainers;

@@ -25,6 +25,7 @@ class TestFunctionConfigurationValidation(unittest.TestCase):
             gpu="H100:0",
             retries=Retries(max_retries=-1),
             region="invalid-region",  # type: ignore[arg-type]
+            max_concurrency=0,
             warm_containers=2,
             min_containers=3,
             max_containers=1,
@@ -55,6 +56,7 @@ class TestFunctionConfigurationValidation(unittest.TestCase):
                 "Function memory must be a finite number greater than zero.",
                 "Function ephemeral_disk must be a finite number greater than zero.",
                 "Function timeout must be an integer between 1 and 86400 seconds.",
+                "Function max_concurrency must be an integer between 1 and 4294967295.",
                 "Function secrets must be a list of non-empty strings.",
                 "Function gpu must be a GPU model or list of GPU models, optionally followed by a positive integer count.",
                 "Function region must be 'us-east-1', 'eu-west-1', or None.",
