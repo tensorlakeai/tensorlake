@@ -88,12 +88,24 @@ const functionRunnerManifest = JSON.parse(await readFile(
   new URL("../runtime/typescript-function-runner/manifest.json", import.meta.url),
   "utf8",
 ));
-if (!Object.keys(functionRunnerManifest.files).some(
+if (Object.keys(functionRunnerManifest.files).some(
   (file) => file.endsWith("/tensorlake-node.node"),
 )) {
-  throw new Error("Function runner capsule does not contain a native Rust agent core");
+  throw new Error("Function runner capsule embeds a native Rust agent core");
+}
+const functionRunnerPackage = JSON.parse(await readFile(
+  new URL("../runtime/typescript-function-runner/package/package.json", import.meta.url),
+  "utf8",
+));
+if (
+  Object.keys(functionRunnerPackage.optionalDependencies ?? {}).length === 0
+  || Object.keys(functionRunnerPackage.optionalDependencies).some(
+    (dependency) => !dependency.startsWith("@tensorlake/native-"),
+  )
+) {
+  throw new Error("Function runner capsule does not declare native platform packages");
 }
 
 process.stdout.write(
-  "Verified ESM and CommonJS package entrypoints, legacy executor capsule, and function runner capsule\n",
+  "Verified ESM and CommonJS package entrypoints, legacy executor capsule, and platform-aware function runner capsule\n",
 );

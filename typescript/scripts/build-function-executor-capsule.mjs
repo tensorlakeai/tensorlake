@@ -55,7 +55,11 @@ writeJson(path.join(capsulePackage, "package.json"), capsulePackageJson);
 // by devDependencies have `dev: true`; shared and production packages do not.
 const lockedProductionPackages = Object.fromEntries(
   Object.entries(packageLock.packages)
-    .filter(([packagePath, metadata]) => packagePath !== "" && metadata.dev !== true)
+    .filter(([packagePath, metadata]) =>
+      packagePath !== ""
+      && !packagePath.startsWith("node_modules/@tensorlake/native-")
+      && metadata.dev !== true
+    )
     .sort(([left], [right]) => left.localeCompare(right)),
 );
 writeJson(path.join(capsulePackage, "npm-shrinkwrap.json"), {

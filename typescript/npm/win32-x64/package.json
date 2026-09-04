@@ -1,0 +1,28 @@
+{
+  "name": "@tensorlake/native-win32-x64",
+  "version": "0.5.125",
+  "description": "Tensorlake native Node.js binding for Windows x64",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tensorlakeai/tensorlake",
+    "directory": "typescript/npm/win32-x64"
+  },
+  "license": "Apache-2.0",
+  "preferUnplugged": true,
+  "main": "tensorlake-node.node",
+  "files": [
+    "tensorlake-node.node"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "os": [
+    "win32"
+  ],
+  "cpu": [
+    "x64"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
