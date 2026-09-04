@@ -14,7 +14,7 @@ permissions:
 jobs:
   artifact-storage-source:
     name: Pin private artifact_storage source
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tensorlake, tensorlake-small]
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
     steps:
@@ -56,7 +56,7 @@ jobs:
     # `tl fs setup` installs offline. tlfs-app is continue-on-error: when it produced nothing,
     # the darwin binary falls back to downloading the release asset at setup time.
     needs: [artifact-storage-source, tlfs-app]
-    runs-on: ${{ matrix.os }}
+    runs-on: ${{ matrix.runner }}
     strategy:
       fail-fast: false
       matrix:
@@ -64,6 +64,7 @@ jobs:
           # Customer Unix binaries ship the full CLI feature set (`tl fs mount` + fast clone).
           # Linux binaries are musl-linked so they do not depend on a host glibc floor.
           - os: ubuntu-latest
+            runner: [self-hosted, tensorlake, tensorlake-xlarge]
             target: x86_64-unknown-linux-musl
             rust_target_base: x86_64-unknown-linux-musl
             target_id: linux-x86_64
@@ -72,6 +73,7 @@ jobs:
             build_tool: cargo-zigbuild
             features: mount,git-clone
           - os: ubuntu-24.04-arm
+            runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-musl
             rust_target_base: aarch64-unknown-linux-musl
             target_id: linux-aarch64
@@ -80,6 +82,7 @@ jobs:
             build_tool: cargo-zigbuild
             features: mount,git-clone
           - os: macos-14
+            runner: macos-14
             target: aarch64-apple-darwin
             rust_target_base: aarch64-apple-darwin
             target_id: darwin-aarch64
@@ -88,6 +91,7 @@ jobs:
             features: mount,git-clone
           # Windows has no `tl fs mount` backend today; it still ships fast clone.
           - os: windows-latest
+            runner: windows-latest
             target: x86_64-pc-windows-msvc
             rust_target_base: x86_64-pc-windows-msvc
             target_id: windows-x86_64
@@ -106,7 +110,14 @@ jobs:
         if: matrix.build_tool == 'cargo-zigbuild'
         uses: mlugg/setup-zig@v2
 
-      - name: Cache Rust build artifacts
+      - name: Cache Rust build artifacts (Tensorlake)
+        if: matrix.target_id == 'linux-x86_64'
+        uses: ./.github/actions/setup-tensorlake-rust-cache
+        with:
+          cache-namespace: cli-release-linux-x86_64
+
+      - name: Cache Rust build artifacts (hosted runners)
+        if: matrix.target_id != 'linux-x86_64'
         uses: Swatinem/rust-cache@v2
         with:
           prefix-key: v1-rust-no-bin
@@ -302,7 +313,7 @@ jobs:
   release:
     name: Create GitHub Release
     needs: [build, tlfs-app]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tensorlake, tensorlake-small]
     steps:
       - uses: actions/checkout@v4
 

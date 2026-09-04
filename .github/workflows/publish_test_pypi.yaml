@@ -16,6 +16,8 @@ permissions:
 jobs:
   prepare:
     name: Generate dev version
+    # Fork pull requests execute this job, so keep it away from the shared
+    # repository cache volume mounted on Tensorlake runners.
     runs-on: ubuntu-latest
     outputs:
       version: ${{ steps.version.outputs.version }}
@@ -35,24 +37,28 @@ jobs:
     needs: [prepare]
     name: Build wheels on ${{ matrix.platform.os }} (${{ matrix.platform.target }})
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ${{ matrix.platform.os }}
+    runs-on: ${{ matrix.platform.runner }}
     strategy:
       fail-fast: false
       matrix:
         platform:
-          - os: namespace-profile-rust-builder-amd64
+          - os: tensorlake-xlarge
+            runner: [self-hosted, tensorlake, tensorlake-xlarge]
             target: x86_64
             manylinux: auto
           # Native arm64 runner + native PyPA image: the manylinux2014-cross image's
           # GCC 4.8 miscompiles ring's aarch64 crypto (TLS BadSignature at runtime).
           - os: ubuntu-24.04-arm
+            runner: ubuntu-24.04-arm
             target: aarch64
             manylinux: '2014'
             manylinux_container: quay.io/pypa/manylinux2014_aarch64:latest
           - os: macos-14
+            runner: macos-14
             target: aarch64
             rust_target: aarch64-apple-darwin
           - os: windows-latest
+            runner: windows-latest
             target: x86_64-pc-windows-msvc
             rust_target: x86_64-pc-windows-msvc
     steps:
@@ -116,7 +122,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     # Only wheels are publishable: an sdist would have to contain the private Function Agent core.
     needs: [build-wheels]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tensorlake, tensorlake-small]
     environment:
       name: test-pypi
       url: https://test.pypi.org/p/tensorlake
@@ -140,7 +146,7 @@ jobs:
   wait-for-propagation:
     name: Wait for TestPyPI propagation
     needs: [publish]
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tensorlake, tensorlake-small]
     steps:
       - name: Sleep 60s for TestPyPI index propagation
         run: sleep 60
