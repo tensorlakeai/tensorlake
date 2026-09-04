@@ -117,6 +117,23 @@ describe("TypeScript applications", () => {
     await expect(runLocal(app, 41).then((request) => request.output())).resolves.toBe(42);
   });
 
+  it("emits default and configured function concurrency", () => {
+    clearRegistryForTest();
+    const defaultConcurrency = registerFunction(
+      "default_concurrency",
+      async () => null,
+    );
+    const configuredConcurrency = registerApplication(
+      "configured_concurrency",
+      async () => null,
+      { maxConcurrency: 5 },
+    );
+
+    const manifest = createApplicationManifest(configuredConcurrency.definition);
+    expect(manifest.functions[defaultConcurrency.definition.name].max_concurrency).toBe(1);
+    expect(manifest.functions[configuredConcurrency.definition.name].max_concurrency).toBe(5);
+  });
+
   it("snapshots mutable registration options before execution and manifest generation", async () => {
     clearRegistryForTest();
     const functionRetries = { maxRetries: 0 };
@@ -231,6 +248,11 @@ describe("TypeScript applications", () => {
       async () => null,
       { secrets: "TOKEN" as unknown as string[] },
     )).toThrow(SDKUsageError);
+    expect(() => registerFunction(
+      "invalid_concurrency",
+      async () => null,
+      { maxConcurrency: 0 },
+    )).toThrow("maxConcurrency must be an integer between 1 and 4294967295");
     expect(() =>
       retries(null as unknown as { maxRetries: number })
     ).toThrow(SDKUsageError);

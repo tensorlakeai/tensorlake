@@ -44,6 +44,7 @@ export interface FunctionOptions<
   secrets?: string[];
   retries?: Retries;
   region?: Region;
+  maxConcurrency?: number;
   warmContainers?: number;
   minContainers?: number;
   maxContainers?: number;
@@ -81,6 +82,7 @@ export interface NormalizedFunctionOptions {
   secrets: string[];
   retries?: Retries;
   region?: Region;
+  maxConcurrency: number;
   warmContainers?: number;
   minContainers?: number;
   maxContainers?: number;
@@ -1219,6 +1221,7 @@ function normalizeOptions(options: FunctionOptions<readonly Parameter<unknown>[]
     secrets: [...(options.secrets ?? [])],
     retries: normalizedRetries,
     region: options.region,
+    maxConcurrency: options.maxConcurrency ?? 1,
     warmContainers: options.warmContainers,
     minContainers: options.minContainers,
     maxContainers: options.maxContainers,
@@ -1228,6 +1231,9 @@ function normalizeOptions(options: FunctionOptions<readonly Parameter<unknown>[]
   if (!Number.isFinite(result.ephemeralDisk) || result.ephemeralDisk <= 0) throw new SDKUsageError("ephemeralDisk must be greater than zero");
   if (!Number.isInteger(result.timeout) || result.timeout <= 0 || result.timeout > 86_400) {
     throw new SDKUsageError("timeout must be an integer between 1 and 86400 seconds");
+  }
+  if (!Number.isInteger(result.maxConcurrency) || result.maxConcurrency < 1 || result.maxConcurrency > 4_294_967_295) {
+    throw new SDKUsageError("maxConcurrency must be an integer between 1 and 4294967295");
   }
   for (const [label, value] of [
     ["warmContainers", result.warmContainers],

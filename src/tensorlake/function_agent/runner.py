@@ -122,7 +122,7 @@ _RESERVED_ENVIRONMENT_TARGETS = {
 }
 
 
-def _apply_resolved_environment(assignment: dict[str, Any]) -> None:
+def _consume_resolved_environment(assignment: dict[str, Any], *, install: bool) -> None:
     raw_environment = assignment.pop("resolved_environment", [])
     if not isinstance(raw_environment, list):
         raise ValueError("Resolved environment must be a list")
@@ -151,8 +151,9 @@ def _apply_resolved_environment(assignment: dict[str, Any]) -> None:
             raise ValueError("Resolved environment entry is invalid")
         targets.add(target)
         resolved.append((target, value))
-    for target, value in resolved:
-        os.environ[target] = value
+    if install:
+        for target, value in resolved:
+            os.environ[target] = value
     for item in raw_environment:
         item["value"] = ""
     raw_environment.clear()
@@ -1033,6 +1034,7 @@ class PythonFunctionRunner:
         self._lock = threading.Lock()
         self._attempts: dict[str, Attempt] = {}
         self._initialized = False
+        self._process_environment_initialized = False
         self._protocol_initialized = False
         self._code_sha256: str | None = None
         self._function_name: str | None = None
@@ -1074,7 +1076,10 @@ class PythonFunctionRunner:
     def _assignment(self, assignment: dict[str, Any]) -> None:
         attempt_id = assignment["attempt_id"]
         try:
-            _apply_resolved_environment(assignment)
+            install_environment = not self._process_environment_initialized
+            _consume_resolved_environment(assignment, install=install_environment)
+            if install_environment:
+                self._process_environment_initialized = True
             if not self._initialized:
                 self._initialize(assignment)
             if not self._protocol_initialized:
