@@ -163,11 +163,65 @@ jobs:
           name: native-${{ matrix.target_id }}
           path: typescript/dist/native/${{ matrix.target_id }}
 
+  # Each platform package must be bootstrapped once on npm and configured to
+  # trust this workflow before OIDC publishing can manage later releases.
+  publish-native-binaries:
+    name: Publish native package (${{ matrix.target_id }})
+    needs:
+      - build-native-binaries
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/${{ matrix.package_name }}
+    permissions:
+      contents: read
+      id-token: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target_id: linux-x64
+            package_name: "@tensorlake/native-linux-x64-gnu"
+          - target_id: linux-arm64
+            package_name: "@tensorlake/native-linux-arm64-gnu"
+          - target_id: linux-x64-musl
+            package_name: "@tensorlake/native-linux-x64-musl"
+          - target_id: linux-arm64-musl
+            package_name: "@tensorlake/native-linux-arm64-musl"
+          - target_id: darwin-arm64
+            package_name: "@tensorlake/native-darwin-arm64"
+          - target_id: win32-x64
+            package_name: "@tensorlake/native-win32-x64"
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Download native artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: native-${{ matrix.target_id }}
+          path: typescript/npm/${{ matrix.target_id }}
+
+      - name: Verify native package contents
+        run: |
+          test -f "npm/${{ matrix.target_id }}/tensorlake-node.node"
+          test "$(node -p "require('./npm/${{ matrix.target_id }}/package.json').name")" = "${{ matrix.package_name }}"
+          npm pack "./npm/${{ matrix.target_id }}" --dry-run --ignore-scripts
+
+      - name: Publish native package to npm
+        run: npm publish "./npm/${{ matrix.target_id }}" --access public --ignore-scripts
+
   publish:
     name: Publish to npm
     needs:
       - build-sdk-and-test
-      - build-native-binaries
+      - publish-native-binaries
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -188,52 +242,20 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Lock published native package checksums
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+
       - name: Download SDK artifact
         uses: actions/download-artifact@v4
         with:
           name: sdk-dist
           path: typescript
 
-      - name: Download Linux native artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: native-linux-x64
-          path: typescript/dist/native/linux-x64
-
-      - name: Download Linux arm64 native artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: native-linux-arm64
-          path: typescript/dist/native/linux-arm64
-
-      - name: Download Linux musl native artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: native-linux-x64-musl
-          path: typescript/dist/native/linux-x64-musl
-
-      - name: Download Linux arm64 musl native artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: native-linux-arm64-musl
-          path: typescript/dist/native/linux-arm64-musl
-
-      - name: Download macOS arm64 native artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: native-darwin-arm64
-          path: typescript/dist/native/darwin-arm64
-
-      - name: Download Windows x64 native artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: native-win32-x64
-          path: typescript/dist/native/win32-x64
-
       - name: Verify package contents
         run: |
           npm run build:runtime
           test -f runtime/typescript-function-runner/manifest.json
+          test -z "$(find dist runtime -type f -name '*.node' -print -quit)"
           npm pack --dry-run --ignore-scripts
 
       - name: Publish to npm

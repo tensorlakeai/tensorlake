@@ -206,6 +206,14 @@ jobs:
       - name: Build and verify Function Service runner capsule
         run: npm run build:runtime
 
+      - name: Verify the SDK package excludes local native builds
+        run: |
+          package_contents="$(npm pack --dry-run --ignore-scripts --json)"
+          if [[ "$package_contents" == *tensorlake-node.node* ]]; then
+            echo "The main tensorlake package unexpectedly contains a native binding."
+            exit 1
+          fi
+
   integration-tests:
     name: Integration tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository

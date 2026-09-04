@@ -4,6 +4,15 @@ const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
+const NATIVE_PACKAGES = {
+  "darwin-arm64": "@tensorlake/native-darwin-arm64",
+  "linux-arm64": "@tensorlake/native-linux-arm64-gnu",
+  "linux-arm64-musl": "@tensorlake/native-linux-arm64-musl",
+  "linux-x64": "@tensorlake/native-linux-x64-gnu",
+  "linux-x64-musl": "@tensorlake/native-linux-x64-musl",
+  "win32-x64": "@tensorlake/native-win32-x64",
+};
+
 function packageRoot() {
   return path.resolve(__dirname, "..");
 }
@@ -61,15 +70,34 @@ function nativeBindingPath(options = {}) {
   );
 }
 
+function nativePackageName(platform = process.platform, arch = process.arch, options = {}) {
+  return NATIVE_PACKAGES[nativeTargetId(platform, arch, options)];
+}
+
 function loadNative() {
   const targetId = nativeTargetId();
   const bindingPath = nativeBindingPath();
-  if (!fs.existsSync(bindingPath)) {
+  if (fs.existsSync(bindingPath)) {
+    return require(bindingPath);
+  }
+
+  const packageName = nativePackageName();
+  if (!packageName) {
     throw new Error(
-      `Missing native binding for ${targetId}. Run 'npm run build' in tensorlake before packaging or install a package published with support for your platform.`,
+      `Tensorlake does not provide a native binding for ${targetId}.`,
     );
   }
-  return require(bindingPath);
+
+  let packageEntry;
+  try {
+    packageEntry = require.resolve(packageName);
+  } catch (cause) {
+    throw new Error(
+      `Missing native binding package ${packageName} for ${targetId}. Reinstall tensorlake without omitting optional dependencies, and install dependencies on the machine where they will run.`,
+      { cause },
+    );
+  }
+  return require(packageEntry);
 }
 
 function exitWithSpawnResult(result) {
@@ -127,5 +155,6 @@ module.exports = {
   loadNative,
   nativeTargetId,
   nativeBindingPath,
+  nativePackageName,
   runPythonModule,
 };

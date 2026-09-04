@@ -20,6 +20,15 @@ interface NativeBindingPathOptions extends TargetOptions {
   arch?: string;
 }
 
+const NATIVE_PACKAGES: Readonly<Record<string, string>> = {
+  "darwin-arm64": "@tensorlake/native-darwin-arm64",
+  "linux-arm64": "@tensorlake/native-linux-arm64-gnu",
+  "linux-arm64-musl": "@tensorlake/native-linux-arm64-musl",
+  "linux-x64": "@tensorlake/native-linux-x64-gnu",
+  "linux-x64-musl": "@tensorlake/native-linux-x64-musl",
+  "win32-x64": "@tensorlake/native-win32-x64",
+};
+
 function packageRoot(): string {
   const parent = fileURLToPath(new URL("../", import.meta.url));
   if (existsSync(path.join(parent, "package.json"))) return parent;
@@ -64,13 +73,38 @@ export function nativeBindingPath(options: NativeBindingPathOptions = {}): strin
   );
 }
 
+export function nativePackageName(
+  platform: NodeJS.Platform = process.platform,
+  arch: string = process.arch,
+  options: TargetOptions = {},
+): string | undefined {
+  return NATIVE_PACKAGES[nativeTargetId(platform, arch, options)];
+}
+
 export function loadNative<T>(): T {
   const target = nativeTargetId();
   const bindingPath = nativeBindingPath();
-  if (!existsSync(bindingPath)) {
+  const require = createRequire(import.meta.url);
+
+  // Local source builds stage the addon here. Published packages intentionally
+  // omit this directory and resolve the platform-specific optional dependency.
+  if (existsSync(bindingPath)) return require(bindingPath) as T;
+
+  const packageName = nativePackageName();
+  if (!packageName) {
     throw new Error(
-      `Missing native binding for ${target}. Run 'npm run build' in tensorlake before packaging or install a package published with support for your platform.`,
+      `Tensorlake does not provide a native binding for ${target}.`,
     );
   }
-  return createRequire(import.meta.url)(bindingPath) as T;
+
+  let packageEntry: string;
+  try {
+    packageEntry = require.resolve(packageName);
+  } catch (cause) {
+    throw new Error(
+      `Missing native binding package ${packageName} for ${target}. Reinstall tensorlake without omitting optional dependencies, and install dependencies on the machine where they will run.`,
+      { cause },
+    );
+  }
+  return require(packageEntry) as T;
 }

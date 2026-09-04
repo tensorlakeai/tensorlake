@@ -25,12 +25,6 @@ mkdirSync(path.join(capsulePackage, "dist", "function-agent"), { recursive: true
 copyRequired("bin/tensorlake-typescript-function-runner.js");
 copyRequired("dist/function-agent/main.js");
 copyRequired("dist/function-agent/main.js.map");
-cpSync(path.join(root, "dist", "native"), path.join(capsulePackage, "dist", "native"), { recursive: true });
-const nativeBindings = collectFiles(path.join(capsulePackage, "dist", "native"))
-  .filter((relativePath) => relativePath.endsWith("/tensorlake-node.node"));
-if (nativeBindings.length === 0) {
-  throw new Error("Function runner capsule does not contain a native Rust agent core");
-}
 chmodSync(path.join(capsulePackage, "bin", "tensorlake-typescript-function-runner.js"), 0o755);
 
 const dependencies = {};
@@ -52,6 +46,7 @@ const capsulePackageJson = {
   bin: { "tensorlake-typescript-function-runner": "./bin/tensorlake-typescript-function-runner.js" },
   engines: { node: ">=24.0.0" },
   dependencies,
+  optionalDependencies: packageJson.optionalDependencies,
   license: packageJson.license,
 };
 writeJson(path.join(capsulePackage, "package.json"), capsulePackageJson);

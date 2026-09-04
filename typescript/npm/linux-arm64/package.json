@@ -1,0 +1,31 @@
+{
+  "name": "@tensorlake/native-linux-arm64-gnu",
+  "version": "0.5.125",
+  "description": "Tensorlake native Node.js binding for Linux arm64 (glibc)",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tensorlakeai/tensorlake",
+    "directory": "typescript/npm/linux-arm64"
+  },
+  "license": "Apache-2.0",
+  "preferUnplugged": true,
+  "main": "tensorlake-node.node",
+  "files": [
+    "tensorlake-node.node"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "arm64"
+  ],
+  "libc": [
+    "glibc"
+  ],
+  "publishConfig": {
+    "access": "public"
+  }
+}
