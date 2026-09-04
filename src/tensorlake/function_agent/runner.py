@@ -1045,6 +1045,8 @@ class PythonFunctionRunner:
         while True:
             try:
                 message = json.loads(await core.next_input())
+                if message.get("type") == "shutdown":
+                    return
                 await asyncio.to_thread(self._handle_message, message)
             except asyncio.CancelledError:
                 raise

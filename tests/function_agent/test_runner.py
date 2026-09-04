@@ -78,6 +78,14 @@ class PythonFunctionRunnerTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(await core.outputs.get(), {"type": "initialized"})
 
+    async def test_runner_stops_cleanly_on_shutdown(self) -> None:
+        core = FakeNativeCore()
+        protocol = ProtocolWriter(core, asyncio.get_running_loop())  # type: ignore[arg-type]
+        runner = PythonFunctionRunner(protocol)
+        core.push({"type": "shutdown"})
+
+        await asyncio.wait_for(runner.serve(core), timeout=2)  # type: ignore[arg-type]
+
     async def test_resolved_environment_is_set_before_application_import(self) -> None:
         function_name = "embedded_agent_import_secret_test"
         module_name = "embedded_agent_import_secret_test_module"
