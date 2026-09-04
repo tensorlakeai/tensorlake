@@ -10,7 +10,7 @@ permissions:
 jobs:
   test_sandbox_local:
     name: Sandbox integration tests (local)
-    runs-on: ubuntu-latest-xlarge
+    runs-on: [self-hosted, tensorlake, tensorlake-xlarge]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -31,10 +31,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-tensorlake-rust-cache
         with:
-          prefix-key: v1-rust-no-bin
-          cache-bin: false
+          cache-namespace: sandbox-local
 
       - name: Install Poetry
         uses: snok/install-poetry@v1

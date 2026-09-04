@@ -21,7 +21,7 @@ jobs:
   integration-test:
     name: Integration test against TestPyPI
     environment: prod
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tensorlake, tensorlake-large]
     steps:
       - name: Write test application
         run: |

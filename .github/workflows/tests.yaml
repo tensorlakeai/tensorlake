@@ -18,6 +18,8 @@ permissions:
 jobs:
   public_source_checks:
     name: Public Python source checks
+    # Fork pull requests execute this job, so keep it away from the shared
+    # repository cache volume mounted on Tensorlake runners.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -61,7 +63,7 @@ jobs:
     # The customer CLI and native function runners need private source from artifact_storage and
     # compute-engine-internal. Fork pull requests cannot read either repository-scoped App secret.
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest-xlarge
+    runs-on: [self-hosted, tensorlake, tensorlake-xlarge]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -88,10 +90,9 @@ jobs:
           cache-dependency-path: typescript/package-lock.json
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-tensorlake-rust-cache
         with:
-          prefix-key: v1-rust-full-feature
-          cache-bin: false
+          cache-namespace: tests-rust-full-feature
 
       - name: Build TypeScript SDK and Function Service runner capsule
         working-directory: typescript
@@ -204,7 +205,7 @@ jobs:
   run_tests:
     name: Lint and test
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest-xlarge
+    runs-on: [self-hosted, tensorlake, tensorlake-xlarge]
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4
@@ -225,10 +226,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-tensorlake-rust-cache
         with:
-          prefix-key: v1-rust-no-bin
-          cache-bin: false
+          cache-namespace: tests-lint-and-test
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
@@ -257,7 +257,7 @@ jobs:
   test_sandbox:
     name: Sandbox integration tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tensorlake, tensorlake-large]
     timeout-minutes: 30
     environment: prod
     steps:
@@ -279,10 +279,9 @@ jobs:
         uses: dtolnay/rust-toolchain@stable
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-tensorlake-rust-cache
         with:
-          prefix-key: v1-rust-no-bin
-          cache-bin: false
+          cache-namespace: tests-sandbox-integration
 
       - name: Install Poetry
         uses: snok/install-poetry@v1
