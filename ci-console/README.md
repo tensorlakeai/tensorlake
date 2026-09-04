@@ -11,7 +11,22 @@ Install the Tensorlake GitHub App once, use the label, and push. A signed `workf
 
 There is no repository picker, workflow migration bot, agent installation, or Tensorlake secret to add to the repository.
 
-## Try it locally
+## Runner labels
+
+| Label | CPU | Memory | Image |
+|---|---:|---:|---|
+| `tensorlake` | 2 vCPU | 8 GB | Ubuntu 24.04 |
+| `tensorlake-2vcpu-ubuntu-2404` | 2 vCPU | 8 GB | Ubuntu 24.04 |
+| `tensorlake-4vcpu-ubuntu-2404` | 4 vCPU | 16 GB | Ubuntu 24.04 |
+| `tensorlake-8vcpu-ubuntu-2404` | 8 vCPU | 32 GB | Ubuntu 24.04 |
+
+Unknown labels are ignored instead of provisioning unbounded compute.
+
+## Internal development
+
+> The sections below are for Tensorlake developers and service operators. CI users should never run the control plane or configure its infrastructure.
+
+Run the local demo with:
 
 ```bash
 cd /workspace/tensorlake/ci-console
@@ -26,18 +41,7 @@ Run the test suite with:
 python3 -m unittest discover -s tests -v
 ```
 
-## Runner labels
-
-| Label | CPU | Memory | Image |
-|---|---:|---:|---|
-| `tensorlake` | 2 vCPU | 8 GB | Ubuntu 24.04 |
-| `tensorlake-2vcpu-ubuntu-2404` | 2 vCPU | 8 GB | Ubuntu 24.04 |
-| `tensorlake-4vcpu-ubuntu-2404` | 4 vCPU | 16 GB | Ubuntu 24.04 |
-| `tensorlake-8vcpu-ubuntu-2404` | 8 vCPU | 32 GB | Ubuntu 24.04 |
-
-Unknown labels are ignored instead of provisioning unbounded compute.
-
-## Run in live mode
+## Service operator setup
 
 ### 1. Publish the runner image
 
