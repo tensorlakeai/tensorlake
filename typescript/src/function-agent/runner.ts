@@ -143,7 +143,7 @@ function serializeArgument(value: unknown): Message {
   };
 }
 
-function applyResolvedEnvironment(assignment: Assignment): void {
+function consumeResolvedEnvironment(assignment: Assignment, install: boolean): void {
   const rawEnvironment = assignment.resolved_environment ?? [];
   const targets = new Set<string>();
   for (const item of rawEnvironment) {
@@ -161,7 +161,9 @@ function applyResolvedEnvironment(assignment: Assignment): void {
     }
     targets.add(item.target);
   }
-  for (const item of rawEnvironment) process.env[item.target] = item.value;
+  if (install) {
+    for (const item of rawEnvironment) process.env[item.target] = item.value;
+  }
   for (const item of rawEnvironment) item.value = "";
   assignment.resolved_environment = [];
 }
@@ -176,6 +178,7 @@ export class FunctionAgentRunner {
   private readonly attempts = new Map<string, AttemptRuntime>();
   private readonly applications = new Map<string, Promise<LoadedApplication>>();
   private initializationSent = false;
+  private processEnvironmentInitialized = false;
 
   constructor(private readonly core: NativeFunctionAgentCore) {}
 
@@ -206,7 +209,9 @@ export class FunctionAgentRunner {
 
   private async startAssignment(assignment: Assignment): Promise<void> {
     try {
-      applyResolvedEnvironment(assignment);
+      const installEnvironment = !this.processEnvironmentInitialized;
+      consumeResolvedEnvironment(assignment, installEnvironment);
+      if (installEnvironment) this.processEnvironmentInitialized = true;
       const application = await this.loadApplication(assignment);
       if (!this.initializationSent) {
         await this.submit({ type: "initialized" });

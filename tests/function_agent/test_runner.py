@@ -100,8 +100,8 @@ from tensorlake.applications import function
 IMPORTED_VALUE = os.environ.get("{target}")
 
 @function()
-def {function_name}() -> str:
-    return IMPORTED_VALUE
+def {function_name}() -> tuple[str | None, str | None]:
+    return IMPORTED_VALUE, os.environ.get("{target}")
 """,
             function_name,
             module_name,
@@ -111,35 +111,31 @@ def {function_name}() -> str:
         runner = PythonFunctionRunner(protocol)
         serve = asyncio.create_task(runner.serve(core))  # type: ignore[arg-type]
         self.addAsyncCleanup(self._stop, serve)
-        core.push(
-            {
-                "type": "assignment",
-                "assignment": {
-                    "attempt_id": "attempt-secret",
-                    "fence_token": 3,
-                    "function_run_id": "run-secret",
-                    "request_id": "request-secret",
-                    "namespace": "default",
-                    "application": "secret-test",
-                    "application_version": "v1",
-                    "function": function_name,
-                    "timeout_ms": 5_000,
-                    "initialization_timeout_ms": 5_000,
-                    "inputs": [
-                        {
-                            "data_base64": "",
-                            "metadata_base64": "",
-                            "content_type": "application/octet-stream",
-                        }
-                    ],
-                    "request_headers": [],
-                    "call_metadata_base64": "",
-                    "application_code_base64": base64.b64encode(code).decode("ascii"),
-                    "application_code_sha256": hashlib.sha256(code).hexdigest(),
-                    "resolved_environment": [{"target": target, "value": canary}],
-                },
-            }
-        )
+        assignment = {
+            "attempt_id": "attempt-secret",
+            "fence_token": 3,
+            "function_run_id": "run-secret",
+            "request_id": "request-secret",
+            "namespace": "default",
+            "application": "secret-test",
+            "application_version": "v1",
+            "function": function_name,
+            "timeout_ms": 5_000,
+            "initialization_timeout_ms": 5_000,
+            "inputs": [
+                {
+                    "data_base64": "",
+                    "metadata_base64": "",
+                    "content_type": "application/octet-stream",
+                }
+            ],
+            "request_headers": [],
+            "call_metadata_base64": "",
+            "application_code_base64": base64.b64encode(code).decode("ascii"),
+            "application_code_sha256": hashlib.sha256(code).hexdigest(),
+            "resolved_environment": [{"target": target, "value": canary}],
+        }
+        core.push({"type": "assignment", "assignment": assignment})
 
         initialized = await self._output(core)
         result = await self._output(core)
@@ -149,9 +145,29 @@ def {function_name}() -> str:
             pickle.loads(
                 base64.b64decode(result["result"]["output_base64"], validate=True)
             ),
-            canary,
+            (canary, canary),
         )
         self.assertNotIn(canary, json.dumps([initialized, result]))
+
+        os.environ[target] = "customer-mutated-value"
+        core.push(
+            {
+                "type": "assignment",
+                "assignment": {
+                    **assignment,
+                    "attempt_id": "attempt-secret-2",
+                    "function_run_id": "run-secret-2",
+                },
+            }
+        )
+        second = await self._output(core)
+        self.assertEqual(second["type"], "success")
+        self.assertEqual(
+            pickle.loads(
+                base64.b64decode(second["result"]["output_base64"], validate=True)
+            ),
+            (canary, "customer-mutated-value"),
+        )
 
     async def test_application_state_round_trip_and_value_result(self) -> None:
         function_name = "embedded_agent_stateful_test"

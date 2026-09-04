@@ -16,6 +16,7 @@ class FakeCore implements NativeFunctionAgentCore {
       output: Record<string, unknown>,
       core: FakeCore,
     ) => void,
+    private readonly autoShutdown = true,
   ) {
     this.inputs = inputs.map((input) => JSON.stringify(input));
   }
@@ -32,7 +33,7 @@ class FakeCore implements NativeFunctionAgentCore {
     const output = JSON.parse(outputJson) as Record<string, unknown>;
     this.outputs.push(output);
     this.onOutput?.(output, this);
-    if (output.type === "success") this.push({ type: "shutdown" });
+    if (output.type === "success" && this.autoShutdown) this.push({ type: "shutdown" });
   }
 
   push(input: Record<string, unknown>): void {
@@ -63,7 +64,7 @@ describe("embedded TypeScript function agent", () => {
 const importedValue = process.env.${target};
 const definition = {
   name: "import_secret",
-  handler: async () => importedValue,
+  handler: async () => [importedValue, process.env.${target}],
   parameters: [],
   returns: { jsonSchema: {} },
   options: { timeout: 300 },
@@ -83,27 +84,46 @@ export function __tensorlakeGetFunction(name) {
         })),
         "runtime.mjs": new TextEncoder().encode(module),
       });
-      const core = new FakeCore([{
-        type: "assignment",
-        assignment: {
-          attempt_id: "attempt-secret",
-          fence_token: 2,
-          function_run_id: "run-secret",
-          request_id: "request-secret",
-          namespace: "ns",
-          application: "app",
-          application_version: "v1",
-          function: "import_secret",
-          timeout_ms: 10_000,
-          initialization_timeout_ms: 10_000,
-          inputs: [],
-          request_headers: [],
-          call_metadata_base64: "",
-          application_code_base64: Buffer.from(archive).toString("base64"),
-          application_code_sha256: createHash("sha256").update(archive).digest("hex"),
-          resolved_environment: [{ target, value: canary }],
+      const assignment = {
+        attempt_id: "attempt-secret",
+        fence_token: 2,
+        function_run_id: "run-secret",
+        request_id: "request-secret",
+        namespace: "ns",
+        application: "app",
+        application_version: "v1",
+        function: "import_secret",
+        timeout_ms: 10_000,
+        initialization_timeout_ms: 10_000,
+        inputs: [],
+        request_headers: [],
+        call_metadata_base64: "",
+        application_code_base64: Buffer.from(archive).toString("base64"),
+        application_code_sha256: createHash("sha256").update(archive).digest("hex"),
+        resolved_environment: [{ target, value: canary }],
+      };
+      let successes = 0;
+      const core = new FakeCore(
+        [{ type: "assignment", assignment }],
+        (output, activeCore) => {
+          if (output.type !== "success") return;
+          successes += 1;
+          if (successes === 1) {
+            process.env[target] = "customer-mutated-value";
+            activeCore.push({
+              type: "assignment",
+              assignment: {
+                ...assignment,
+                attempt_id: "attempt-secret-2",
+                function_run_id: "run-secret-2",
+              },
+            });
+          } else {
+            activeCore.push({ type: "shutdown" });
+          }
         },
-      }]);
+        false,
+      );
 
       await expect(new FunctionAgentRunner(core).run()).resolves.toBeUndefined();
       expect(core.outputs[0]).toEqual({ type: "initialized" });
@@ -111,7 +131,12 @@ export function __tensorlakeGetFunction(name) {
       expect(success).toMatchObject({ type: "success", attempt_id: "attempt-secret" });
       const result = success?.result as { output_base64: string };
       expect(JSON.parse(Buffer.from(result.output_base64, "base64").toString("utf8")))
-        .toBe(canary);
+        .toEqual([canary, canary]);
+      const secondSuccess = core.outputs[2];
+      expect(secondSuccess).toMatchObject({ type: "success", attempt_id: "attempt-secret-2" });
+      const secondResult = secondSuccess?.result as { output_base64: string };
+      expect(JSON.parse(Buffer.from(secondResult.output_base64, "base64").toString("utf8")))
+        .toEqual([canary, "customer-mutated-value"]);
       expect(JSON.stringify(core.outputs)).not.toContain(canary);
     } finally {
       if (previous == null) delete process.env[target];
