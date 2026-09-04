@@ -5,8 +5,9 @@
 //! catalog here, client-side, and submitted already resolved with the build
 //! request. The Image Service validates each pin against the caller's
 //! project and its reconciler drives the builder sandbox, mounting one
-//! read-only parent volume per pin beside the writable target volume and
-//! snapshotting the target through the CAS filesystem daemon. The client
+//! read-only parent volume per pin beside the writable target and disposable
+//! scratch volumes, and snapshotting the target through the CAS filesystem
+//! daemon. The client
 //! creates the build, uploads and seals the context, and polls it to
 //! completion. While an active attempt exposes its ephemeral builder sandbox,
 //! the client may also follow `tl-image-builder` output through the existing
@@ -63,7 +64,13 @@ const INJECTED_DOCKERFILE_PATH: &str = ".tensorlake/Dockerfile";
 /// The Image Service caps pinned parents so they always fit the sandbox
 /// volume budget beside the target volume. Enforced client-side too for a
 /// clearer error than a rejected build request.
-const MAX_PINNED_PARENTS: usize = 3;
+const MAX_PINNED_PARENTS: usize = 2;
+
+/// Default final filesystem capacity for CAS image builds. This is the
+/// Server's current minimum sandbox/rootfs disk size; callers can override it
+/// with the existing `disk_mb` / `--disk_mb` option.
+const DEFAULT_CAS_IMAGE_DISK_MB: u64 = 10 * 1024;
+const BYTES_PER_MIB: u64 = 1024 * 1024;
 
 const BUILD_POLL_INTERVAL: Duration = Duration::from_secs(3);
 const BUILD_POLL_TIMEOUT: Duration = Duration::from_secs(30 * 60);
@@ -89,6 +96,7 @@ where
     F: FnMut(SandboxImageBuildEvent),
 {
     warn_ignored_options(&options, &mut emit);
+    let disk_mb = cas_target_disk_mb(options.disk_mb)?;
     let is_public = options.is_public;
     let builder_resources = builder_resource_overrides(&options)?;
     // Forward the local `docker login` state for the guest's registry pulls,
@@ -125,6 +133,7 @@ where
                     "name": plan.registered_name,
                 }),
                 is_public,
+                disk_mb,
                 builder_resources,
                 registry_credentials_json,
             ),
@@ -150,6 +159,7 @@ where
                 "name": plan.registered_name,
             }),
             is_public,
+            disk_mb,
             builder_resources,
             registry_credentials_json,
         ),
@@ -229,12 +239,14 @@ fn with_registry_credentials(mut body: Value, registry_credentials_json: Option<
 fn build_request(
     mut body: Value,
     is_public: bool,
+    disk_mb: u64,
     builder_resources: Option<Value>,
     registry_credentials_json: Option<String>,
 ) -> Value {
     let object = body
         .as_object_mut()
         .expect("Image Service build request body must be an object");
+    object.insert("disk_mb".to_string(), Value::Number(disk_mb.into()));
     if is_public {
         object.insert(
             "image_scope".to_string(),
@@ -245,6 +257,19 @@ fn build_request(
         object.insert("builder_resources".to_string(), builder_resources);
     }
     with_registry_credentials(body, registry_credentials_json)
+}
+
+fn cas_target_disk_mb(requested_disk_mb: Option<u64>) -> Result<u64> {
+    let disk_mb = requested_disk_mb.unwrap_or(DEFAULT_CAS_IMAGE_DISK_MB);
+    if disk_mb == 0 {
+        return Err(SandboxImageBuildError::usage(
+            "--disk_mb must be greater than zero for CAS image builds",
+        ));
+    }
+    disk_mb.checked_mul(BYTES_PER_MIB).ok_or_else(|| {
+        SandboxImageBuildError::usage("--disk_mb is too large to convert to bytes")
+    })?;
+    Ok(disk_mb)
 }
 
 /// Preserve partial resource overrides so Image Service remains authoritative
@@ -264,17 +289,14 @@ fn builder_resource_overrides(options: &CommonBuildOptions) -> Result<Option<Val
     Ok((!resources.is_empty()).then_some(Value::Object(resources)))
 }
 
-/// Disk sizing and compatibility mode belong to the legacy platform-api
-/// rootfs builder. Image Service accepts CPU and memory overrides, while
-/// public visibility is supported through global image scope.
+/// Builder-rootfs sizing and compatibility mode belong to the legacy
+/// platform-api rootfs builder. `disk_mb` is supported by Image Service and
+/// sizes the final published target; `builder_disk_mb` remains legacy-only.
 fn warn_ignored_options(
     options: &CommonBuildOptions,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) {
     let mut ignored = Vec::new();
-    if options.disk_mb.is_some() {
-        ignored.push("disk_mb");
-    }
     if options.builder_disk_mb.is_some() {
         ignored.push("builder_disk_mb");
     }
@@ -1081,6 +1103,7 @@ mod tests {
             let body = build_request(
                 serde_json::json!({ "kind": kind }),
                 true,
+                30_720,
                 Some(serde_json::json!({"cpus": 2.5, "memory_mb": 6144})),
                 Some(r#"{"auths":{}}"#.to_string()),
             );
@@ -1090,11 +1113,31 @@ mod tests {
                 serde_json::json!({"cpus": 2.5, "memory_mb": 6144})
             );
             assert_eq!(body["registry_credentials_json"], r#"{"auths":{}}"#);
+            assert_eq!(body["disk_mb"], 30_720);
 
-            let private_body =
-                build_request(serde_json::json!({ "kind": kind }), false, None, None);
-            assert_eq!(private_body, serde_json::json!({ "kind": kind }));
+            let private_body = build_request(
+                serde_json::json!({ "kind": kind }),
+                false,
+                DEFAULT_CAS_IMAGE_DISK_MB,
+                None,
+                None,
+            );
+            assert_eq!(
+                private_body,
+                serde_json::json!({
+                    "kind": kind,
+                    "disk_mb": DEFAULT_CAS_IMAGE_DISK_MB,
+                })
+            );
         }
+    }
+
+    #[test]
+    fn cas_target_disk_defaults_and_validates() {
+        assert_eq!(cas_target_disk_mb(None).unwrap(), DEFAULT_CAS_IMAGE_DISK_MB);
+        assert_eq!(cas_target_disk_mb(Some(30_720)).unwrap(), 30_720);
+        assert!(cas_target_disk_mb(Some(0)).is_err());
+        assert!(cas_target_disk_mb(Some(u64::MAX)).is_err());
     }
 
     #[test]
@@ -1142,6 +1185,7 @@ mod tests {
         let mut options = common_options();
         options.cpus = Some(2.5);
         options.memory_mb = Some(6_144);
+        options.disk_mb = Some(30_720);
         let mut events = Vec::new();
         warn_ignored_options(&options, &mut |event| events.push(event));
         assert!(events.is_empty());
