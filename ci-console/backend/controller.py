@@ -57,9 +57,12 @@ class RunnerController:
     def verify_webhook(self, body: bytes, signature: str) -> bool:
         if self.github is None:
             return True
-        expected = "sha256=" + hmac.new(
-            self.github.config.webhook_secret.encode(), body, hashlib.sha256
-        ).hexdigest()
+        expected = (
+            "sha256="
+            + hmac.new(
+                self.github.config.webhook_secret.encode(), body, hashlib.sha256
+            ).hexdigest()
+        )
         return hmac.compare_digest(expected, signature)
 
     def handle_webhook(

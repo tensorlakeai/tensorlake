@@ -16,7 +16,6 @@ from typing import Any
 from backend.controller import RunnerController
 from backend.github_app import GitHubError
 
-
 ROOT = Path(__file__).resolve().parent
 
 
