@@ -562,6 +562,7 @@ impl NativeSandboxClient {
         prefetch: Option<bool>,
         snapshot_id: Option<String>,
         owner: Option<String>,
+        source_path: Option<String>,
     ) -> napi::Result<TracedJson> {
         let read_only = read_only.unwrap_or(false);
         let prefetch = prefetch.unwrap_or(false);
@@ -569,11 +570,12 @@ impl NativeSandboxClient {
             let sandbox_id = sandbox_id.clone();
             let file_system_id = file_system_id.clone();
             let mount_path = mount_path.clone();
+            let source_path = source_path.clone().unwrap_or_else(|| "/".to_string());
             let snapshot_id = snapshot_id.clone();
             let owner = owner.clone();
             async move {
                 let traced = c
-                    .attach_file_system(
+                    .attach_file_system_view(
                         &sandbox_id,
                         &file_system_id,
                         &mount_path,
@@ -581,6 +583,7 @@ impl NativeSandboxClient {
                         prefetch,
                         snapshot_id.as_deref(),
                         owner.as_deref(),
+                        &source_path,
                     )
                     .await?;
                 let trace_id = traced.trace_id.clone();

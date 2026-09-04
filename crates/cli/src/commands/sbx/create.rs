@@ -3,6 +3,7 @@ use crate::commands::sbx::{
     DEFAULT_SANDBOX_WAIT_TIMEOUT, apply_proxy_access_settings, build_network_config,
     sandbox_endpoint, wait_for_sandbox_status,
 };
+use crate::commands::sbx::fs::is_canonical_source_path;
 use crate::error::{CliError, Result};
 use serde::Deserialize;
 use tensorlake::sandboxes::resolve_sandbox_proxy_target;
@@ -122,7 +123,7 @@ pub struct CreateArgs<'a> {
 }
 
 const FILESYSTEM_FLAG_USAGE: &str = "--filesystem must be <name>[@<snapshot_id>]:<mount_path>[:<opts>] where <opts> \
-     is a comma-separated list of `ro` and/or `prefetch`, and a `@<snapshot_id>` pin requires \
+     is a comma-separated list of `ro`, `prefetch`, and/or `source=<absolute_path>`, and a `@<snapshot_id>` pin requires \
      `ro`";
 
 /// Parse `--filesystem <name>[@<snapshot>]:<path>[:<opts>]` flags into the
@@ -168,6 +169,7 @@ fn parse_file_system_mounts(raw: &[String]) -> Result<Vec<serde_json::Value>> {
                 "mount_path": mount_path,
             });
             let mut read_only = false;
+            let mut source_path = None;
             if let Some(opts) = opts {
                 for opt in opts.split(',') {
                     match opt {
@@ -176,10 +178,24 @@ fn parse_file_system_mounts(raw: &[String]) -> Result<Vec<serde_json::Value>> {
                             mount["read_only"] = serde_json::Value::Bool(true);
                         }
                         "prefetch" => mount["prefetch"] = serde_json::Value::Bool(true),
+                        _ if opt.starts_with("source=") => {
+                            let source = &opt["source=".len()..];
+                            if source_path.is_some() || !is_canonical_source_path(source) {
+                                return Err(CliError::usage(format!(
+                                    "invalid or duplicate --filesystem source path in {entry:?}: \
+                                     source must be a canonical absolute path"
+                                )));
+                            }
+                            source_path = Some(source);
+                            if source != "/" {
+                                mount["source_path"] =
+                                    serde_json::Value::String(source.to_string());
+                            }
+                        }
                         _ => {
                             return Err(CliError::usage(format!(
                                 "unknown --filesystem option {opt:?} in {entry:?}: \
-                                 valid options are `ro` and `prefetch`"
+                                 valid options are `ro`, `prefetch`, and `source=<absolute_path>`"
                             )));
                         }
                     }
@@ -561,6 +577,45 @@ mod tests {
                 "read_only": true,
                 "prefetch": true,
             })
+        );
+    }
+
+    #[test]
+    fn parse_file_system_mounts_parses_source_path() {
+        let mounts = parse_file_system_mounts(&[
+            "skills:/mnt/models:source=/shared/models,ro".to_string(),
+        ])
+        .unwrap();
+        assert_eq!(
+            mounts[0],
+            serde_json::json!({
+                "file_system_id": "skills",
+                "source_path": "/shared/models",
+                "mount_path": "/mnt/models",
+                "read_only": true,
+            })
+        );
+    }
+
+    #[test]
+    fn parse_file_system_mounts_rejects_relative_or_duplicate_source_path() {
+        assert!(
+            parse_file_system_mounts(&[
+                "skills:/mnt/models:source=shared/models".to_string()
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_file_system_mounts(&[
+                "skills:/mnt/models:source=/shared/../secrets".to_string()
+            ])
+            .is_err()
+        );
+        assert!(
+            parse_file_system_mounts(&[
+                "skills:/mnt/models:source=/one,source=/two".to_string()
+            ])
+            .is_err()
         );
     }
 

@@ -616,10 +616,37 @@ impl SandboxesClient {
         snapshot_id: Option<&str>,
         owner: Option<&str>,
     ) -> Result<Traced<SandboxInfo>, SdkError> {
+        self.attach_file_system_view(
+            sandbox_id,
+            file_system_id,
+            mount_path,
+            read_only,
+            prefetch,
+            snapshot_id,
+            owner,
+            "/",
+        )
+        .await
+    }
+
+    /// Attach a file-system subtree, exposing `source_path` as the mount root.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn attach_file_system_view(
+        &self,
+        sandbox_id: &str,
+        file_system_id: &str,
+        mount_path: &str,
+        read_only: bool,
+        prefetch: bool,
+        snapshot_id: Option<&str>,
+        owner: Option<&str>,
+        source_path: &str,
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/file_systems"));
         let body = FileSystemMount {
             file_system_id: file_system_id.to_string(),
             mount_path: mount_path.to_string(),
+            source_path: source_path.to_string(),
             read_only,
             prefetch,
             snapshot_id: snapshot_id.map(str::to_string),
@@ -1406,6 +1433,7 @@ mod process_ref_tests {
         let pinned_writable = FileSystemMount {
             file_system_id: "skills".to_string(),
             mount_path: "/mnt/skills".to_string(),
+            source_path: "/".to_string(),
             read_only: false,
             prefetch: false,
             snapshot_id: Some("0abc123def".to_string()),
@@ -1437,6 +1465,7 @@ mod process_ref_tests {
         let mount = |owner: Option<&str>| FileSystemMount {
             file_system_id: "skills".to_string(),
             mount_path: "/mnt/skills".to_string(),
+            source_path: "/".to_string(),
             read_only: false,
             prefetch: false,
             snapshot_id: None,

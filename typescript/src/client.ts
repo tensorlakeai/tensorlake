@@ -85,6 +85,9 @@ function fileSystemMountToWire(fs: FileSystemMount): Record<string, unknown> {
   return {
     file_system_id: fs.fileSystemId,
     mount_path: fs.mountPath,
+    ...(fs.sourcePath != null && fs.sourcePath !== "/"
+      ? { source_path: fs.sourcePath }
+      : {}),
     ...(fs.readOnly === true ? { read_only: true } : {}),
     ...(fs.prefetch === true ? { prefetch: true } : {}),
     ...(fs.snapshotId != null ? { snapshot_id: fs.snapshotId } : {}),
@@ -585,6 +588,7 @@ export class SandboxClient {
           options?.prefetch === true,
           options?.snapshotId ?? null,
           options?.owner ?? null,
+          options?.sourcePath ?? null,
         ),
       "sandboxId",
       { sandboxId, notFoundKind: "sandbox" },
