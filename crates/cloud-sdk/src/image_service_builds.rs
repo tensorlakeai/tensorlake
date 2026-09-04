@@ -61,10 +61,9 @@ const CAS_IMAGE_REF_PREFIX: &str = "cas-v1:";
 /// context, or inline Dockerfile text).
 const INJECTED_DOCKERFILE_PATH: &str = ".tensorlake/Dockerfile";
 
-/// The Image Service caps pinned parents so they always fit the sandbox
-/// volume budget beside the target volume. Enforced client-side too for a
-/// clearer error than a rejected build request.
-const MAX_PINNED_PARENTS: usize = 2;
+/// The Image Service accepts three pinned parents beside its target and
+/// scratch volumes, matching Server's five-volume sandbox limit.
+const MAX_PINNED_PARENTS: usize = 3;
 
 /// Default final filesystem capacity for CAS image builds. This is the
 /// Server's current minimum sandbox/rootfs disk size; callers can override it
