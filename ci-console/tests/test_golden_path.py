@@ -7,154 +7,161 @@ import unittest
 import urllib.error
 import urllib.request
 
-from backend.controller import GoldenPathController
-from backend.github_app import GitHubAppClient, GitHubError
-from backend.runners import TensorlakeRunnerProvider
+from backend.controller import RunnerController
+from backend.runners import resolve_profile, runner_labels
 from server import create_server
 
 
-class MigrationTests(unittest.TestCase):
-    def test_migrates_supported_scalar_linux_labels(self) -> None:
-        source = (
-            "jobs:\n"
-            "  test:\n"
-            "    runs-on: ubuntu-latest\n"
-            "  lint:\n"
-            "    runs-on: 'ubuntu-22.04' # pinned\n"
-        )
-        migrated, changed = GitHubAppClient.migrate_workflow(source)
-        self.assertEqual(changed, 2)
-        self.assertIn("runs-on: tensorlake-2vcpu-ubuntu-2404", migrated)
-        self.assertIn("runs-on: 'tensorlake-2vcpu-ubuntu-2204' # pinned", migrated)
+def workflow_job_payload(
+    *,
+    job_id: int = 123,
+    action: str = "queued",
+    labels: list[str] | None = None,
+) -> dict:
+    return {
+        "action": action,
+        "installation": {"id": 456},
+        "organization": {"login": "acme"},
+        "repository": {"full_name": "acme/api"},
+        "workflow_job": {
+            "id": job_id,
+            "run_id": 789,
+            "name": "test",
+            "labels": labels or ["tensorlake"],
+            "conclusion": "success" if action == "completed" else None,
+        },
+    }
 
-    def test_does_not_rewrite_expressions_or_self_hosted_labels(self) -> None:
-        source = (
-            "jobs:\n"
-            "  matrix:\n"
-            "    runs-on: ${{ matrix.os }}\n"
-            "  private:\n"
-            "    runs-on: [self-hosted, linux]\n"
+
+class RunnerProfileTests(unittest.TestCase):
+    def test_default_label_selects_safe_profile(self) -> None:
+        profile = resolve_profile(["tensorlake"])
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.cpus, 2.0)
+        self.assertEqual(profile.memory_mb, 8192)
+
+    def test_size_label_controls_resources(self) -> None:
+        profile = resolve_profile(["self-hosted", "tensorlake-8vcpu-ubuntu-2404"])
+        self.assertIsNotNone(profile)
+        self.assertEqual(profile.cpus, 8.0)
+        self.assertEqual(profile.memory_mb, 32768)
+
+    def test_unknown_tensorlake_label_does_not_provision(self) -> None:
+        self.assertIsNone(resolve_profile(["tensorlake-1000vcpu"]))
+
+    def test_jit_runner_matches_all_requested_labels(self) -> None:
+        profile = resolve_profile(["tensorlake"])
+        labels = runner_labels(["self-hosted", "tensorlake", "docker"], profile)
+        self.assertEqual(
+            labels,
+            ["self-hosted", "linux", "x64", "tensorlake", "docker"],
         )
-        migrated, changed = GitHubAppClient.migrate_workflow(source)
-        self.assertEqual(changed, 0)
-        self.assertEqual(migrated, source)
 
 
 class ControllerTests(unittest.TestCase):
-    def test_requires_ordered_golden_path(self) -> None:
-        controller = GoldenPathController(demo_delay=0.01)
-        with self.assertRaises(GitHubError):
-            controller.repositories()
-        controller.connect()
-        with self.assertRaises(ValueError):
-            controller.create_pull_request()
+    def test_unrelated_jobs_are_ignored(self) -> None:
+        controller = RunnerController(mode="demo", demo_delay=0.001)
+        result = controller.handle_webhook(
+            "workflow_job",
+            "delivery-1",
+            workflow_job_payload(labels=["ubuntu-latest"]),
+        )
+        self.assertEqual(result["action"], "ignored")
+        self.assertEqual(controller.state.list_runs(), [])
 
-    def test_demo_golden_path_completes(self) -> None:
-        controller = GoldenPathController(demo_delay=0.01)
-        connection = controller.connect()
-        self.assertTrue(connection["connected"])
-        repos = controller.repositories()
-        plan = controller.plan([repos[0]["full_name"], repos[1]["full_name"]])
-        self.assertEqual(plan["workflow_count"], 2)
-        self.assertEqual(plan["replacement_count"], 2)
-        pull_request = controller.create_pull_request()
-        self.assertEqual(pull_request["status"], "open")
-        run = controller.start_smoke_run()
-        deadline = time.time() + 2
-        while time.time() < deadline:
-            run = controller.state.get_run(run["id"])
-            if run and run["status"] == "completed":
+    def test_label_is_the_complete_onboarding_contract(self) -> None:
+        controller = RunnerController(mode="demo", demo_delay=0.001)
+        result = controller.handle_webhook(
+            "workflow_job", "delivery-1", workflow_job_payload()
+        )
+        self.assertEqual(result["action"], "provisioning")
+        for _ in range(100):
+            run = controller.state.get_run(result["run_id"])
+            if run["status"] == "completed":
                 break
-            time.sleep(0.01)
-        self.assertIsNotNone(run)
+            time.sleep(0.002)
         self.assertEqual(run["conclusion"], "success")
-        self.assertGreaterEqual(len(run["logs"]), 7)
-        self.assertTrue(run["sandbox"]["ephemeral"])
-        self.assertTrue(run["ssh_command"].startswith("tl sbx ssh "))
+        self.assertEqual(run["label"], "tensorlake")
+        self.assertEqual(run["sandbox"]["cpus"], 2.0)
 
-    def test_waiting_run_is_claimed_by_matching_github_job(self) -> None:
-        controller = GoldenPathController(demo_delay=0.01)
-        waiting = controller.state.create_run("acme/api-gateway", "Smoke")
-        claimed = controller.state.claim_waiting_run(
-            "acme/api-gateway", 9876, 1234
-        )
-        self.assertEqual(claimed["id"], waiting["id"])
-        self.assertEqual(claimed["github_job_id"], 9876)
-        self.assertEqual(claimed["github_run_id"], 1234)
-
-    def test_runner_label_controls_sandbox_resources(self) -> None:
-        self.assertEqual(
-            TensorlakeRunnerProvider._resources(
-                ["self-hosted", "tensorlake-8vcpu-ubuntu-2404"]
-            ),
-            (8.0, 32768),
-        )
-        self.assertEqual(TensorlakeRunnerProvider._resources(["self-hosted"]), (2.0, 8192))
+    def test_duplicate_delivery_does_not_start_another_runner(self) -> None:
+        controller = RunnerController(mode="demo", demo_delay=0.001)
+        payload = workflow_job_payload()
+        first = controller.handle_webhook("workflow_job", "same-id", payload)
+        second = controller.handle_webhook("workflow_job", "same-id", payload)
+        self.assertEqual(first["action"], "provisioning")
+        self.assertEqual(second["action"], "duplicate")
+        self.assertEqual(len(controller.state.list_runs()), 1)
 
 
 class ServerTests(unittest.TestCase):
-    @classmethod
-    def setUpClass(cls) -> None:
-        cls.server = create_server(port=0, demo_delay=0.01)
-        cls.port = cls.server.server_address[1]
-        cls.thread = threading.Thread(target=cls.server.serve_forever, daemon=True)
-        cls.thread.start()
+    def setUp(self) -> None:
+        self.server = create_server(port=0, mode="demo", demo_delay=0.001)
+        self.thread = threading.Thread(target=self.server.serve_forever, daemon=True)
+        self.thread.start()
+        self.base_url = f"http://127.0.0.1:{self.server.server_port}"
 
-    @classmethod
-    def tearDownClass(cls) -> None:
-        cls.server.shutdown()
-        cls.server.server_close()
+    def tearDown(self) -> None:
+        self.server.shutdown()
+        self.server.server_close()
+        self.thread.join(timeout=2)
 
-    def request(self, method: str, path: str, payload=None):
-        data = json.dumps(payload).encode() if payload is not None else None
+    def request(
+        self,
+        path: str,
+        *,
+        method: str = "GET",
+        body: dict | None = None,
+    ) -> tuple[int, dict, dict]:
+        data = json.dumps(body).encode() if body is not None else None
         request = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}{path}",
+            self.base_url + path,
             data=data,
             method=method,
             headers={"Content-Type": "application/json"},
         )
-        with urllib.request.urlopen(request, timeout=3) as response:
-            return response.status, json.load(response)
+        with urllib.request.urlopen(request) as response:
+            return response.status, json.load(response), dict(response.headers)
 
-    def test_http_golden_path(self) -> None:
-        status, health = self.request("GET", "/api/health")
+    def test_config_leads_with_one_runner_label(self) -> None:
+        status, config, _ = self.request("/api/config")
         self.assertEqual(status, 200)
-        self.assertEqual(health["mode"], "demo")
-        self.request("POST", "/api/github/connect", {})
-        _, repositories = self.request("GET", "/api/repositories")
-        selected = [repositories["repositories"][0]["full_name"]]
-        status, plan = self.request(
-            "POST", "/api/migration/plan", {"repositories": selected}
+        self.assertEqual(config["default_label"], "tensorlake")
+        self.assertEqual(config["install_url"], "/?installed=demo&account=acme")
+
+    def test_http_demo_dispatches_labeled_job(self) -> None:
+        status, result, _ = self.request(
+            "/api/demo/jobs",
+            method="POST",
+            body={"label": "tensorlake"},
         )
-        self.assertEqual(status, 200)
-        self.assertIn("tensorlake-2vcpu", plan["changes"][0]["diff"])
-        status, pull_request = self.request(
-            "POST", "/api/migration/pull-request", {}
-        )
-        self.assertEqual(status, 201)
-        self.assertEqual(pull_request["primary"]["number"], 42)
-        status, run = self.request("POST", "/api/runs/smoke", {})
         self.assertEqual(status, 202)
-        time.sleep(0.15)
-        _, finished = self.request("GET", f"/api/runs/{run['id']}")
-        self.assertEqual(finished["conclusion"], "success")
-        _, reset = self.request("POST", "/api/session/reset", {})
-        self.assertFalse(reset["connected"])
-        self.assertIsNone(reset["latest_run"])
+        for _ in range(100):
+            _, run, _ = self.request(f"/api/runs/{result['run_id']}")
+            if run["status"] == "completed":
+                break
+            time.sleep(0.002)
+        self.assertEqual(run["conclusion"], "success")
 
-    def test_does_not_serve_backend_source(self) -> None:
+    def test_old_migration_api_is_gone(self) -> None:
         with self.assertRaises(urllib.error.HTTPError) as raised:
-            self.request("GET", "/backend/github_app.py")
+            self.request("/api/repositories")
         self.assertEqual(raised.exception.code, 404)
 
-    def test_static_head_request_and_security_headers(self) -> None:
-        request = urllib.request.Request(
-            f"http://127.0.0.1:{self.port}/", method="HEAD"
-        )
-        with urllib.request.urlopen(request, timeout=3) as response:
+    def test_static_files_have_security_headers(self) -> None:
+        request = urllib.request.Request(self.base_url + "/", method="HEAD")
+        with urllib.request.urlopen(request) as response:
             self.assertEqual(response.status, 200)
             self.assertEqual(response.headers["X-Frame-Options"], "DENY")
-            self.assertIn("default-src 'self'", response.headers["Content-Security-Policy"])
+            self.assertIn(
+                "frame-ancestors 'none'",
+                response.headers["Content-Security-Policy"],
+            )
+
+    def test_backend_source_is_not_public(self) -> None:
+        with self.assertRaises(urllib.error.HTTPError) as raised:
+            urllib.request.urlopen(self.base_url + "/backend/github_app.py")
+        self.assertEqual(raised.exception.code, 404)
 
 
 if __name__ == "__main__":

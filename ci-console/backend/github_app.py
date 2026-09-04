@@ -3,15 +3,12 @@ from __future__ import annotations
 import base64
 import json
 import os
-import re
 import subprocess
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
-import uuid
 from dataclasses import dataclass
-from difflib import unified_diff
 from pathlib import Path
 from typing import Any
 
@@ -26,7 +23,7 @@ class GitHubConfig:
     app_slug: str
     private_key_path: str
     webhook_secret: str
-    callback_url: str
+    api_version: str = "2022-11-28"
 
     @classmethod
     def from_env(cls) -> "GitHubConfig":
@@ -35,12 +32,13 @@ class GitHubConfig:
             "app_slug": os.getenv("GITHUB_APP_SLUG", ""),
             "private_key_path": os.getenv("GITHUB_APP_PRIVATE_KEY_PATH", ""),
             "webhook_secret": os.getenv("GITHUB_WEBHOOK_SECRET", ""),
-            "callback_url": os.getenv(
-                "GITHUB_APP_CALLBACK_URL",
-                "http://127.0.0.1:4173/api/github/callback",
-            ),
+            "api_version": os.getenv("GITHUB_API_VERSION", "2022-11-28"),
         }
-        missing = [key for key, value in values.items() if not value]
+        missing = [
+            key
+            for key in ("app_id", "app_slug", "private_key_path", "webhook_secret")
+            if not values[key]
+        ]
         if missing:
             raise GitHubError(
                 "Live mode is missing GitHub configuration: " + ", ".join(missing)
@@ -61,13 +59,12 @@ class GitHubAppClient:
         self.config = config
         self._token_cache: dict[int, tuple[str, float]] = {}
 
-    def installation_url(self, state: str) -> str:
-        query = urllib.parse.urlencode({"state": state})
-        return f"https://github.com/apps/{self.config.app_slug}/installations/new?{query}"
+    def installation_url(self) -> str:
+        return f"https://github.com/apps/{self.config.app_slug}/installations/new"
 
     def _app_jwt(self) -> str:
         now = int(time.time())
-        header = _b64url(json.dumps({"alg": "RS256", "typ": "JWT"}).encode())
+        header = _b64url(b'{"alg":"RS256","typ":"JWT"}')
         payload = _b64url(
             json.dumps(
                 {"iat": now - 30, "exp": now + 540, "iss": self.config.app_id},
@@ -98,7 +95,7 @@ class GitHubAppClient:
         path: str,
         *,
         token: str | None = None,
-        payload: dict[str, Any] | list[Any] | None = None,
+        payload: dict[str, Any] | None = None,
     ) -> Any:
         body = json.dumps(payload).encode() if payload is not None else None
         request = urllib.request.Request(
@@ -109,8 +106,8 @@ class GitHubAppClient:
                 "Accept": "application/vnd.github+json",
                 "Authorization": f"Bearer {token or self._app_jwt()}",
                 "Content-Type": "application/json",
-                "User-Agent": "tensorlake-ci/0.1",
-                "X-GitHub-Api-Version": "2022-11-28",
+                "User-Agent": "tensorlake-ci/0.2",
+                "X-GitHub-Api-Version": self.config.api_version,
             },
         )
         try:
@@ -139,265 +136,31 @@ class GitHubAppClient:
     def installation(self, installation_id: int) -> dict[str, Any]:
         result = self._request("GET", f"/app/installations/{installation_id}")
         account = result["account"]
+        if account.get("type") != "Organization":
+            raise GitHubError(
+                "Tensorlake CI must be installed on a GitHub organization"
+            )
         return {
             "login": account["login"],
             "name": account.get("name") or account["login"],
             "avatar_url": account.get("avatar_url"),
-            "avatar": account["login"][0].upper(),
         }
-
-    def repositories(self, installation_id: int) -> list[dict[str, Any]]:
-        token = self.installation_token(installation_id)
-        result = self._request(
-            "GET", "/installation/repositories?per_page=100", token=token
-        )
-        repositories = []
-        for repo in result.get("repositories", []):
-            repositories.append(
-                {
-                    "id": repo["id"],
-                    "name": repo["name"],
-                    "full_name": repo["full_name"],
-                    "private": repo["private"],
-                    "language": repo.get("language") or "Repository",
-                    "updated_at": repo.get("updated_at"),
-                    "default_branch": repo["default_branch"],
-                    "workflow_count": None,
-                }
-            )
-        return repositories
-
-    def _repo_request(
-        self,
-        installation_id: int,
-        method: str,
-        full_name: str,
-        suffix: str,
-        payload: dict[str, Any] | None = None,
-    ) -> Any:
-        owner, repo = full_name.split("/", 1)
-        return self._request(
-            method,
-            f"/repos/{owner}/{repo}{suffix}",
-            token=self.installation_token(installation_id),
-            payload=payload,
-        )
-
-    def workflow_files(
-        self, installation_id: int, full_name: str, ref: str
-    ) -> list[dict[str, str]]:
-        try:
-            entries = self._repo_request(
-                installation_id,
-                "GET",
-                full_name,
-                f"/contents/.github/workflows?ref={urllib.parse.quote(ref)}",
-            )
-        except GitHubError as exc:
-            if "(404)" in str(exc):
-                return []
-            raise
-        files = []
-        for entry in entries:
-            if entry.get("type") != "file" or not entry["name"].endswith(
-                (".yml", ".yaml")
-            ):
-                continue
-            content = self._repo_request(
-                installation_id,
-                "GET",
-                full_name,
-                f"/contents/{entry['path']}?ref={urllib.parse.quote(ref)}",
-            )
-            decoded = base64.b64decode(content["content"]).decode(
-                "utf-8", errors="replace"
-            )
-            files.append(
-                {
-                    "path": entry["path"],
-                    "sha": content["sha"],
-                    "content": decoded,
-                }
-            )
-        return files
-
-    @staticmethod
-    def migrate_workflow(source: str) -> tuple[str, int]:
-        mappings = {
-            "ubuntu-latest": "tensorlake-2vcpu-ubuntu-2404",
-            "ubuntu-24.04": "tensorlake-2vcpu-ubuntu-2404",
-            "ubuntu-22.04": "tensorlake-2vcpu-ubuntu-2204",
-        }
-        changed = 0
-        pattern = re.compile(
-            r"^(?P<indent>\s*runs-on:\s*)(?P<quote>['\"]?)(?P<label>ubuntu-(?:latest|24\.04|22\.04))(?P=quote)(?P<tail>\s*(?:#.*)?)$",
-            re.MULTILINE,
-        )
-
-        def replace(match: re.Match[str]) -> str:
-            nonlocal changed
-            changed += 1
-            return (
-                f"{match.group('indent')}{match.group('quote')}"
-                f"{mappings[match.group('label')]}{match.group('quote')}"
-                f"{match.group('tail')}"
-            )
-
-        return pattern.sub(replace, source), changed
-
-    def plan_migration(
-        self, installation_id: int, repositories: list[dict[str, Any]]
-    ) -> dict[str, Any]:
-        changes: list[dict[str, Any]] = []
-        unsupported: list[dict[str, str]] = []
-        for repository in repositories:
-            full_name = repository["full_name"]
-            branch = repository["default_branch"]
-            workflows = self.workflow_files(installation_id, full_name, branch)
-            for workflow in workflows:
-                migrated, count = self.migrate_workflow(workflow["content"])
-                if count == 0:
-                    if "runs-on:" in workflow["content"]:
-                        unsupported.append(
-                            {
-                                "repository": full_name,
-                                "path": workflow["path"],
-                                "reason": "No supported GitHub-hosted Linux labels found",
-                            }
-                        )
-                    continue
-                diff = "\n".join(
-                    unified_diff(
-                        workflow["content"].splitlines(),
-                        migrated.splitlines(),
-                        fromfile=f"a/{workflow['path']}",
-                        tofile=f"b/{workflow['path']}",
-                        lineterm="",
-                    )
-                )
-                changes.append(
-                    {
-                        "repository": full_name,
-                        "default_branch": branch,
-                        "path": workflow["path"],
-                        "sha": workflow["sha"],
-                        "original": workflow["content"],
-                        "migrated": migrated,
-                        "replacements": count,
-                        "diff": diff,
-                    }
-                )
-        return {
-            "repositories": [repo["full_name"] for repo in repositories],
-            "changes": changes,
-            "unsupported": unsupported,
-            "workflow_count": len(changes),
-            "replacement_count": sum(item["replacements"] for item in changes),
-        }
-
-    def create_migration_pr(
-        self,
-        installation_id: int,
-        plan: dict[str, Any],
-    ) -> list[dict[str, Any]]:
-        grouped: dict[str, list[dict[str, Any]]] = {}
-        for change in plan["changes"]:
-            grouped.setdefault(change["repository"], []).append(change)
-        pull_requests = []
-        for full_name, changes in grouped.items():
-            default_branch = changes[0]["default_branch"]
-            branch = f"tensorlake-ci/migrate-{uuid.uuid4().hex[:8]}"
-            base_ref = self._repo_request(
-                installation_id,
-                "GET",
-                full_name,
-                f"/git/ref/heads/{urllib.parse.quote(default_branch)}",
-            )
-            self._repo_request(
-                installation_id,
-                "POST",
-                full_name,
-                "/git/refs",
-                {"ref": f"refs/heads/{branch}", "sha": base_ref["object"]["sha"]},
-            )
-            for change in changes:
-                self._repo_request(
-                    installation_id,
-                    "PUT",
-                    full_name,
-                    f"/contents/{change['path']}",
-                    {
-                        "message": f"ci: run {Path(change['path']).name} on Tensorlake",
-                        "content": base64.b64encode(change["migrated"].encode()).decode(),
-                        "sha": change["sha"],
-                        "branch": branch,
-                    },
-                )
-            smoke_path = ".github/workflows/tensorlake-ci-smoke.yml"
-            smoke_source = (
-                "name: Tensorlake CI smoke test\n"
-                "on:\n"
-                "  pull_request:\n"
-                "    paths:\n"
-                "      - '.github/workflows/tensorlake-ci-smoke.yml'\n"
-                "jobs:\n"
-                "  smoke:\n"
-                "    runs-on: tensorlake-2vcpu-ubuntu-2404\n"
-                "    steps:\n"
-                "      - uses: actions/checkout@v4\n"
-                "      - name: Verify Tensorlake runner\n"
-                "        run: |\n"
-                "          echo 'Tensorlake runner is online'\n"
-                "          uname -a\n"
-            )
-            self._repo_request(
-                installation_id,
-                "PUT",
-                full_name,
-                f"/contents/{smoke_path}",
-                {
-                    "message": "ci: add Tensorlake runner smoke test",
-                    "content": base64.b64encode(smoke_source.encode()).decode(),
-                    "branch": branch,
-                },
-            )
-            pr = self._repo_request(
-                installation_id,
-                "POST",
-                full_name,
-                "/pulls",
-                {
-                    "title": "Run CI on Tensorlake serverless runners",
-                    "head": branch,
-                    "base": default_branch,
-                    "body": (
-                        "This PR migrates supported GitHub-hosted Linux jobs to ephemeral "
-                        "Tensorlake runners and adds a one-time smoke workflow.\n\n"
-                        "Generated by Tensorlake CI. No application code was changed."
-                    ),
-                },
-            )
-            pull_requests.append(
-                {
-                    "repository": full_name,
-                    "number": pr["number"],
-                    "url": pr["html_url"],
-                    "branch": branch,
-                }
-            )
-        return pull_requests
 
     def generate_jit_config(
         self,
+        *,
         installation_id: int,
         organization: str,
         name: str,
         labels: list[str],
-        runner_group_id: int = 1,
+        runner_group_id: int,
     ) -> str:
         result = self._request(
             "POST",
-            f"/orgs/{urllib.parse.quote(organization)}/actions/runners/generate-jitconfig",
+            (
+                f"/orgs/{urllib.parse.quote(organization)}"
+                "/actions/runners/generate-jitconfig"
+            ),
             token=self.installation_token(installation_id),
             payload={
                 "name": name,

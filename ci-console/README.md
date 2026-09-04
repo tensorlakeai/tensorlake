@@ -1,55 +1,58 @@
 # Tensorlake CI
 
-An end-to-end golden-path implementation for running GitHub Actions jobs on ephemeral Tensorlake sandboxes.
+Serverless GitHub Actions runners with one repository-side change:
 
-The product guides a user through:
+```diff
+-    runs-on: ubuntu-latest
++    runs-on: tensorlake
+```
 
-1. Installing the Tensorlake GitHub App.
-2. Selecting repositories and discovering workflow files.
-3. Reviewing the exact `runs-on` migration diff.
-4. Opening migration pull requests.
-5. Watching GitHub queue a smoke job and Tensorlake provision a JIT runner.
-6. Streaming runner logs, inspecting the sandbox, and copying its SSH command.
+Install the Tensorlake GitHub App once, use the label, and push. A signed `workflow_job` webhook provisions a fresh Tensorlake sandbox, registers a one-job GitHub JIT runner, and terminates the sandbox after the job.
 
-The frontend and backend have no third-party runtime dependencies. Demo and live mode use the same HTTP contract.
+There is no repository picker, workflow migration bot, agent installation, or Tensorlake secret to add to the repository.
 
-## Run the complete demo
+## Try it locally
 
 ```bash
 cd /workspace/tensorlake/ci-console
 python3 server.py
 ```
 
-Open [http://127.0.0.1:4173](http://127.0.0.1:4173) and complete all four steps. The server returns deterministic repositories, creates a demo migration PR, and emits the same runner states and logs that the live provider uses.
+Open `http://127.0.0.1:4173`. Demo mode shows the same label-first onboarding and can dispatch a simulated webhook-to-sandbox run without credentials.
 
-Do not use `python3 -m http.server`; the onboarding UI now depends on the control-plane API served by `server.py`.
-
-## Tests
+Run the test suite with:
 
 ```bash
 python3 -m unittest discover -s tests -v
 ```
 
-The suite covers workflow rewriting, safe handling of unsupported runner expressions, onboarding-order enforcement, waiting-job correlation, the runner lifecycle, and the complete HTTP flow.
+## Runner labels
 
-## Live mode
+| Label | CPU | Memory | Image |
+|---|---:|---:|---|
+| `tensorlake` | 2 vCPU | 8 GB | Ubuntu 24.04 |
+| `tensorlake-2vcpu-ubuntu-2404` | 2 vCPU | 8 GB | Ubuntu 24.04 |
+| `tensorlake-4vcpu-ubuntu-2404` | 4 vCPU | 16 GB | Ubuntu 24.04 |
+| `tensorlake-8vcpu-ubuntu-2404` | 8 vCPU | 32 GB | Ubuntu 24.04 |
 
-Live mode requires a GitHub App, a Tensorlake API key, and a registered Tensorlake runner image.
+Unknown labels are ignored instead of provisioning unbounded compute.
 
-### 1. Build the runner image
+## Run in live mode
 
-Authenticate the `tl` CLI, then build and register the included image:
+### 1. Publish the runner image
+
+Authenticate the `tl` CLI, then build the included image:
 
 ```bash
 tl sbx image create ./runner-image/Dockerfile \
   --registered-name tensorlake-ci-runner-ubuntu-2404
 ```
 
-The image contains GitHub Actions Runner `2.337.0` under `/opt/actions-runner`. Update `RUNNER_VERSION` deliberately as new runner releases are validated.
+The image contains GitHub Actions Runner `2.337.0` under `/opt/actions-runner`.
 
-### 2. Configure a GitHub App
+### 2. Configure the GitHub App
 
-Set its setup callback URL to:
+Set the App's setup URL to:
 
 ```text
 https://YOUR_CI_HOST/api/github/callback
@@ -61,37 +64,45 @@ Set its webhook URL to:
 https://YOUR_CI_HOST/api/github/webhook
 ```
 
-Subscribe to `workflow_job`, `installation`, and `installation_repositories` events. The golden path currently needs these permissions:
+Subscribe to the `workflow_job` event. Installation events are delivered automatically.
 
-- Repository metadata: read
-- Actions: read and write
-- Contents: read and write
-- Workflows: read and write
-- Pull requests: read and write
-- Organization self-hosted runners: read and write
+The App needs only:
 
-The UI shows the workflow diff before any write. Migration changes are delivered through a pull request and remain subject to the repository's normal reviews and branch protections.
+- Repository metadata: read (required for every GitHub App)
+- Actions: read (to receive `workflow_job` events)
+- Organization self-hosted runners: write (to create one-job JIT configurations)
 
-### 3. Set environment variables
+It does not need Contents, Workflows, or Pull Request write access. Tensorlake CI never edits a repository.
 
-Copy `.env.example` into your secret manager or runtime environment. Do not commit the GitHub private key, webhook secret, or Tensorlake API key.
+### 3. Start the webhook service
 
 ```bash
 export TENSORLAKE_CI_MODE=live
-export TENSORLAKE_API_KEY=tl_your_api_key
-export TENSORLAKE_CI_RUNNER_IMAGE=tensorlake-ci-runner-ubuntu-2404
-export GITHUB_APP_ID=123456
-export GITHUB_APP_SLUG=your-tensorlake-ci-app
-export GITHUB_APP_PRIVATE_KEY_PATH=/absolute/path/to/github-app.private-key.pem
-export GITHUB_APP_CALLBACK_URL=https://YOUR_CI_HOST/api/github/callback
-export GITHUB_WEBHOOK_SECRET=replace-with-a-random-secret
-export GITHUB_RUNNER_GROUP_ID=1
+export TENSORLAKE_API_KEY="tl_your_api_key"
+export TENSORLAKE_CI_RUNNER_IMAGE="tensorlake-ci-runner-ubuntu-2404"
+export GITHUB_APP_ID="123456"
+export GITHUB_APP_SLUG="your-tensorlake-ci-app"
+export GITHUB_APP_PRIVATE_KEY_PATH="/run/secrets/github-app.pem"
+export GITHUB_WEBHOOK_SECRET="replace-with-a-random-secret"
+export GITHUB_RUNNER_GROUP_ID="1"
 
 python3 server.py --host 0.0.0.0 --port 4173 --mode live
 ```
 
-In live mode, GitHub App JWTs are signed locally with OpenSSL. Installation tokens are short-lived and cached only in memory. Incoming webhook bodies are verified with `X-Hub-Signature-256` before they can provision compute.
+The browser's install button points directly to the GitHub App installation page. The setup callback verifies the installation and immediately tells the user to add `runs-on: tensorlake`.
+
+## HTTP surface
+
+| Method | Path | Purpose |
+|---|---|---|
+| `GET` | `/api/health` | Service health and mode |
+| `GET` | `/api/config` | Install URL and supported labels |
+| `GET` | `/api/github/callback` | Verify an App installation and return to setup |
+| `POST` | `/api/github/webhook` | Accept signed `workflow_job` events |
+| `GET` | `/api/runs` | Inspect recent local runs |
+| `GET` | `/api/runs/:id` | Inspect a run and its sandbox logs |
+| `POST` | `/api/demo/jobs` | Dispatch a simulated job in demo mode |
 
 ## Production boundary
 
-This directory implements and validates the complete single-workspace golden path. Before exposing it as a multi-tenant service, replace the in-memory state with durable storage, add user/session authentication and workspace authorization, move provisioning work to a durable queue, and add webhook delivery persistence. See [Architecture](./docs/ARCHITECTURE.md) for the exact boundary.
+The reference service keeps webhook delivery IDs and run state in memory. A hosted service still needs durable idempotency, a retryable provisioning queue, tenant-aware quotas, a cleanup reconciler, authentication for the run-inspection API, and production telemetry. See [Architecture](./docs/ARCHITECTURE.md).

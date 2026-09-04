@@ -1,72 +1,65 @@
-# Golden-path architecture
+# Label-driven runner architecture
+
+## User contract
+
+The user installs the GitHub App once and changes one workflow field:
+
+```yaml
+runs-on: tensorlake
+```
+
+Tensorlake CI never scans or edits repositories. Optional labels select larger resource profiles.
 
 ## Live sequence
 
 ```text
-Browser                  Tensorlake CI              GitHub                 Tensorlake
-  | POST /github/connect      |                        |                         |
-  |-------------------------->| create CSRF state      |                         |
-  |<--------------------------| installation URL       |                         |
-  |------------------------------ install app -------->|                         |
-  |<-------- callback with installation_id ------------|                         |
-  | GET /repositories        | installation token      |                         |
-  |-------------------------->|----------------------->|                         |
-  |<--------------------------| repository metadata    |                         |
-  | POST /migration/plan     | read workflow YAML      |                         |
-  |-------------------------->|----------------------->|                         |
-  |<--------------------------| exact unified diff     |                         |
-  | POST /pull-request       | branch + commits + PR   |                         |
-  |-------------------------->|----------------------->|                         |
-  |                           |<-- workflow_job queued-|                         |
-  |                           | verify HMAC signature  |                         |
-  |                           | request JIT config --->|                         |
-  |                           | create sandbox --------------------------------->|
-  |                           | start run.sh --jitconfig ------------------------>|
-  | GET /runs/:id (poll)     |<---------------- process output + sandbox state --|
-  |<--------------------------| live steps, logs, SSH command                    |
-  |                           |<-- workflow_job complete -------------------------|
-  |                           | terminate sandbox ------------------------------->|
+User                 GitHub                 Tensorlake CI              Tensorlake
+ | install App          |                         |                         |
+ |--------------------->|--- installation ------>|                         |
+ | change runs-on       |                         |                         |
+ | push workflow ------>|                         |                         |
+ |                      |-- workflow_job queued ->| verify HMAC             |
+ |                      |                         | match tensorlake label  |
+ |                      |<-- request JIT config --|                         |
+ |                      |--- one-job config ----->|                         |
+ |                      |                         |--- create sandbox ------>|
+ |                      |                         |--- start runner -------->|
+ |                      |<======= runner claims queued job =================|
+ |<========================= normal Actions status and logs =================|
+ |                      |                         |--- terminate sandbox --->|
 ```
+
+The webhook payload supplies the GitHub App installation ID. The service exchanges its App JWT for an installation token, generates an organization-scoped JIT configuration, and passes that configuration directly to the runner process.
+
+## GitHub permissions
+
+- Metadata: read
+- Actions: read
+- Organization self-hosted runners: write
+
+Contents, Workflows, and Pull Requests permissions are intentionally absent. The control plane never receives a repository token; GitHub's runner application obtains the one-job credentials it needs through the encoded JIT configuration.
+
+## Label profiles
+
+Runner profiles are an explicit allowlist in `backend/runners.py`. A label controls CPU and memory but cannot request arbitrary resources. The default `tensorlake` label maps to 2 vCPU and 8 GB on Ubuntu 24.04.
 
 ## Components
 
-- `server.py` serves the application and the control-plane HTTP API.
-- `backend/controller.py` enforces the golden-path state transitions and selects demo or live providers.
-- `backend/github_app.py` signs GitHub App JWTs, obtains installation tokens, discovers workflows, produces diffs, creates branches/commits/PRs, and generates JIT runner configuration.
-- `backend/runners.py` provisions either deterministic demo jobs or real GitHub JIT runners inside Tensorlake sandboxes.
-- `backend/state.py` owns synchronized single-workspace state and correlates a UI-created waiting run with the subsequent GitHub `workflow_job` delivery.
+- `server.py` serves the install page and webhook endpoint.
+- `backend/controller.py` verifies delivery intent, deduplicates webhook deliveries, and dispatches only supported labels.
+- `backend/github_app.py` signs App JWTs, obtains installation tokens, verifies setup callbacks, and generates JIT configurations.
+- `backend/runners.py` maps labels to resource profiles and owns sandbox lifecycle.
+- `backend/state.py` holds the preview's in-memory webhook and run state.
 
-## API contract
+## Production boundary
 
-| Method | Path | Purpose |
-|---|---|---|
-| `GET` | `/api/health` | Liveness and provider mode |
-| `GET` | `/api/session` | Restore the current onboarding state |
-| `POST` | `/api/github/connect` | Connect demo GitHub or obtain the live App installation URL |
-| `GET` | `/api/github/callback` | Validate installation state and bind the installation |
-| `POST` | `/api/github/webhook` | Verify and accept GitHub webhook deliveries |
-| `GET` | `/api/repositories` | List repositories available to the installation |
-| `POST` | `/api/migration/plan` | Detect workflow files and return an exact runner-label diff |
-| `POST` | `/api/migration/pull-request` | Create migration branches, commits, smoke workflows, and PRs |
-| `POST` | `/api/runs/smoke` | Create the waiting run shown in onboarding |
-| `GET` | `/api/runs/:id` | Poll steps, logs, conclusion, sandbox, and SSH information |
-| `POST` | `/api/runs/:id/retain` | Keep a sandbox for debugging after failure |
+Before operating the service for multiple organizations, add:
 
-## Safety model
-
-Core CI provisioning needs organization self-hosted-runner administration and `workflow_job` events. It never sends a repository token into the sandbox; the GitHub Actions runner receives a one-job JIT configuration generated for the installation. The sandbox is ephemeral and is terminated after the runner exits unless the user explicitly retains a failed run.
-
-Migration is a separate, user-invoked capability. It needs workflow/content write permission only to create a branch and pull request. It does not merge the PR or bypass branch protections.
-
-## Required production hardening
-
-The local server intentionally keeps state in memory to remain dependency-free and reviewable. A hosted service must add:
-
-- Durable installations, repositories, migration plans, runs, and webhook delivery IDs.
-- Authenticated browser sessions tied to GitHub identity and organization membership.
-- Encrypted secret storage or workload identity for GitHub App and Tensorlake credentials.
-- A durable provisioning queue with retries, idempotency keys, dead-letter handling, and capacity controls.
-- A cleanup reconciler that terminates orphaned sandboxes after process or service failure.
-- Server-sent events or WebSockets in place of onboarding polling.
-- Audit logs, rate limits, organization policies, regional placement, and billing metering.
-- A release pipeline for validating and publishing runner images before changing the pinned runner version.
+- Durable webhook delivery IDs and run records.
+- A retryable provisioning queue with idempotency, backoff, and dead-letter handling.
+- Tenant-aware concurrency and spend limits.
+- A cleanup reconciler for orphaned sandboxes and runners.
+- Authentication and authorization on run/log inspection endpoints.
+- Encrypted secrets or workload identity for GitHub App and Tensorlake credentials.
+- Structured logs, traces, metrics, alerts, and audit events.
+- A release pipeline for runner images and GitHub Actions Runner upgrades.

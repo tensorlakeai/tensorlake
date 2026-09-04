@@ -1,339 +1,130 @@
 <!doctype html>
 <html lang="en">
   <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta
       name="description"
-      content="Tensorlake CI — secure, serverless GitHub Actions runners powered by isolated sandboxes."
+      content="Run GitHub Actions on fresh Tensorlake sandboxes by changing one runner label."
     />
-    <title>Tensorlake CI</title>
-    <link rel="stylesheet" href="./styles.css" />
+    <title>Tensorlake CI — serverless GitHub Actions runners</title>
+    <link rel="stylesheet" href="/styles.css" />
+    <script src="/app.js" defer></script>
   </head>
   <body>
-    <div class="app-shell">
-      <aside class="sidebar">
+    <header class="nav shell">
+      <a class="brand" href="/" aria-label="Tensorlake CI home">
+        <span class="mark" aria-hidden="true">T</span>
+        <span>Tensorlake</span>
+        <span class="product">CI</span>
+      </a>
+      <span class="status"><span class="status-dot"></span>Runner service online</span>
+    </header>
+
+    <main>
+      <section class="hero shell">
+        <div class="eyebrow">GitHub-native serverless runners</div>
+        <h1>Change one line.<br />Your CI runs on Tensorlake.</h1>
+        <p class="lede">
+          Install the GitHub App once. Then use a Tensorlake runner label in any
+          workflow. Every job starts in a fresh sandbox and disappears when it is done.
+        </p>
+
+        <div id="installed-banner" class="installed" hidden>
+          <span class="check" aria-hidden="true">✓</span>
+          <span><strong>GitHub connected.</strong> Add the label below and push.</span>
+        </div>
+
+        <div class="actions">
+          <a id="install-link" class="button primary" href="#">Install GitHub App</a>
+          <button id="copy-button" class="button secondary" type="button">
+            Copy runner label
+          </button>
+        </div>
+        <p class="trust">No repository secrets. No agents to deploy. No runner fleet to manage.</p>
+      </section>
+
+      <section class="switcher shell" aria-labelledby="switch-heading">
+        <div class="section-heading">
+          <span>01</span>
+          <div>
+            <h2 id="switch-heading">Replace your runner label</h2>
+            <p>That is the entire repository-side setup.</p>
+          </div>
+        </div>
+
+        <div class="code-card" aria-label="GitHub Actions workflow change">
+          <div class="code-topbar">
+            <span>.github/workflows/ci.yml</span>
+            <span class="yaml">YAML</span>
+          </div>
+          <pre><code><span class="muted">jobs:</span>
+  <span class="muted">test:</span>
+<span class="removed">-   runs-on: ubuntu-latest</span>
+<span class="added">+   runs-on: <strong id="runner-label">tensorlake</strong></span>
+    <span class="muted">steps:</span>
+      <span class="muted">- uses: actions/checkout@v4</span>
+      <span class="muted">- run: npm test</span></code></pre>
+          <button id="code-copy" class="code-copy" type="button">Copy</button>
+        </div>
+      </section>
+
+      <section class="how shell" aria-labelledby="how-heading">
+        <div class="section-heading">
+          <span>02</span>
+          <div>
+            <h2 id="how-heading">Push. Tensorlake handles the rest.</h2>
+            <p>The runner appears only when GitHub queues the job.</p>
+          </div>
+        </div>
+
+        <div class="flow">
+          <article>
+            <div class="flow-icon">GH</div>
+            <h3>GitHub queues the job</h3>
+            <p>The App receives a signed <code>workflow_job</code> event for the label.</p>
+          </article>
+          <div class="arrow" aria-hidden="true">→</div>
+          <article>
+            <div class="flow-icon accent">TL</div>
+            <h3>A sandbox starts</h3>
+            <p>A one-job JIT runner boots with the requested CPU and memory profile.</p>
+          </article>
+          <div class="arrow" aria-hidden="true">→</div>
+          <article>
+            <div class="flow-icon">✓</div>
+            <h3>The sandbox disappears</h3>
+            <p>Logs stay in GitHub. The isolated runner terminates after the job.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="profiles shell" aria-labelledby="profiles-heading">
         <div>
-          <a class="brand" href="#" aria-label="Tensorlake CI home">
-            <svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true">
-              <path d="M16 2.5 29.5 16 16 29.5 2.5 16 16 2.5Z" fill="currentColor"/>
-              <path d="m16 8.3 7.7 7.7-7.7 7.7L8.3 16 16 8.3Z" fill="#fff"/>
-              <path d="m16 12.8 3.2 3.2-3.2 3.2-3.2-3.2 3.2-3.2Z" fill="currentColor"/>
-            </svg>
-            <span>tensorlake</span>
-            <span class="brand-product">CI</span>
-          </a>
-
-          <button class="workspace-switcher" type="button" id="workspace-switcher">
-            <span class="workspace-avatar">AS</span>
-            <span class="workspace-copy">
-              <strong>Acme Systems</strong>
-              <small>Free workspace</small>
-            </span>
-            <svg viewBox="0 0 20 20" aria-hidden="true"><path d="m6 8 4 4 4-4"/></svg>
-          </button>
-
-          <nav class="primary-nav" aria-label="Primary navigation">
-            <a class="nav-item active" href="#overview" data-view="overview">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="2"/><rect x="14" y="3" width="7" height="7" rx="2"/><rect x="3" y="14" width="7" height="7" rx="2"/><rect x="14" y="14" width="7" height="7" rx="2"/></svg>
-              Overview
-            </a>
-            <a class="nav-item" href="#jobs" data-view="jobs">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4V8Z"/></svg>
-              Jobs
-              <span class="nav-count">3</span>
-            </a>
-            <a class="nav-item" href="#runners" data-view="runners">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m8 10 3 2-3 2m5 0h3"/></svg>
-              Runners
-            </a>
-            <a class="nav-item" href="#repositories" data-view="repositories">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19.5A2.5 2.5 0 0 1 6.5 17H20V4H6.5A2.5 2.5 0 0 0 4 6.5v13Z"/><path d="M8 7h8M8 11h5"/></svg>
-              Repositories
-            </a>
-            <a class="nav-item" href="#insights" data-view="insights">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 19V9m5 10V5m6 14v-7m5 7V3"/></svg>
-              Insights
-            </a>
-          </nav>
-
-          <p class="nav-label">Manage</p>
-          <nav class="secondary-nav" aria-label="Workspace settings">
-            <a class="nav-item" href="#secrets" data-view="secrets">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="8" cy="15" r="4"/><path d="m11 12 8-8m-3 3 3 3"/></svg>
-              Secrets
-            </a>
-            <a class="nav-item" href="#settings" data-view="settings">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1a1.7 1.7 0 0 0 1.9.3A1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/></svg>
-              Settings
-            </a>
-          </nav>
+          <span class="kicker">Runner profiles</span>
+          <h2 id="profiles-heading">Start simple. Size up in one word.</h2>
         </div>
-
-        <div class="sidebar-bottom">
-          <div class="usage-card">
-            <div class="usage-heading"><span>Build minutes</span><strong>18%</strong></div>
-            <div class="usage-bar"><span></span></div>
-            <p>892 of 5,000 free minutes left</p>
-            <button type="button" class="text-button" data-toast="Billing portal opened">Manage plan <span>↗</span></button>
-          </div>
-          <button class="user-menu" type="button" id="user-menu">
-            <span class="user-avatar">AR</span>
-            <span><strong>Alex Rivera</strong><small>alex@acme.dev</small></span>
-            <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="10" cy="4" r="1"/><circle cx="10" cy="10" r="1"/><circle cx="10" cy="16" r="1"/></svg>
-          </button>
+        <div id="profile-list" class="profile-list">
+          <div><code>tensorlake</code><span>2 vCPU · 8 GB</span></div>
         </div>
-      </aside>
+      </section>
 
-      <div class="mobile-header">
-        <a class="brand" href="#"><svg class="brand-mark" viewBox="0 0 32 32" aria-hidden="true"><path d="M16 2.5 29.5 16 16 29.5 2.5 16 16 2.5Z" fill="currentColor"/><path d="m16 8.3 7.7 7.7-7.7 7.7L8.3 16 16 8.3Z" fill="#fff"/><path d="m16 12.8 3.2 3.2-3.2 3.2-3.2-3.2 3.2-3.2Z" fill="currentColor"/></svg><span>tensorlake</span><span class="brand-product">CI</span></a>
-        <button class="icon-button" id="mobile-menu" aria-label="Open navigation"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
-      </div>
+      <section id="demo-panel" class="demo shell">
+        <div>
+          <span class="kicker">Local demo</span>
+          <h2>See the webhook-to-sandbox path</h2>
+          <p>Dispatch a simulated labeled GitHub job against this local service.</p>
+        </div>
+        <div class="demo-action">
+          <button id="demo-button" class="button secondary" type="button">Run demo job</button>
+          <span id="demo-status" aria-live="polite"></span>
+        </div>
+      </section>
+    </main>
 
-      <main class="main-content">
-        <header class="topbar">
-          <div class="breadcrumbs"><span>Acme Systems</span><svg viewBox="0 0 20 20"><path d="m8 6 4 4-4 4"/></svg><strong id="breadcrumb-current">Overview</strong></div>
-          <div class="topbar-actions">
-            <button class="command-search" type="button" data-toast="Search is ready">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg>
-              <span>Search</span><kbd>⌘ K</kbd>
-            </button>
-            <button class="icon-button" type="button" aria-label="Help" data-toast="Help center opened"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M9.8 9a2.4 2.4 0 1 1 3 2.3c-.8.3-.8.9-.8 1.7M12 17h.01"/></svg></button>
-            <button class="icon-button notification-button" type="button" aria-label="Notifications" data-toast="You're all caught up"><svg viewBox="0 0 24 24"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 7-3 9h18c0-2-3-2-3-9M10 21h4"/></svg><span></span></button>
-          </div>
-        </header>
-
-        <section id="onboarding-view" class="view onboarding-view">
-          <div class="page-heading onboarding-heading">
-            <div>
-              <div class="eyebrow"><span class="pulse-dot"></span> Serverless runners for GitHub Actions</div>
-              <h1>Ship faster. We’ll handle the runners.</h1>
-              <p>Connect GitHub and get secure, ephemeral sandboxes for every job—in under a minute.</p>
-            </div>
-            <div class="time-pill">
-              <svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg>
-              Takes about 60 seconds
-            </div>
-          </div>
-
-          <div class="onboarding-grid">
-            <section class="setup-panel">
-              <div class="step-progress four-steps" aria-label="Onboarding progress">
-                <div class="step-progress-line"><span id="progress-fill"></span></div>
-                <div class="progress-step active" data-progress="1"><span>1</span><p>Connect GitHub</p></div>
-                <div class="progress-step" data-progress="2"><span>2</span><p>Choose repos</p></div>
-                <div class="progress-step" data-progress="3"><span>3</span><p>Review changes</p></div>
-                <div class="progress-step" data-progress="4"><span>4</span><p>Verify runner</p></div>
-              </div>
-
-              <div class="setup-error" id="setup-error" hidden><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6v5M10 14h.01"/></svg><span></span></div>
-
-              <div class="setup-content active" data-step="1">
-                <div class="setup-icon github-icon">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" stroke="none" d="M12 .7a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2.24c-3.22.7-3.9-1.37-3.9-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.16.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.74-1.55-2.57-.3-5.27-1.29-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.16 1.18A10.97 10.97 0 0 1 12 6.11c.98 0 1.94.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.07.79 2.16v3.25c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg>
-                </div>
-                <span class="step-kicker">STEP 1 OF 4</span>
-                <h2>Connect your GitHub account</h2>
-                <p class="setup-description">Install the Tensorlake GitHub App to run workflows on our serverless infrastructure. Your code is isolated, encrypted, and deleted after every job.</p>
-                <button class="primary-button github-connect" id="connect-github" type="button">
-                  <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" stroke="none" d="M12 .7a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2.24c-3.22.7-3.9-1.37-3.9-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.16.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.74-1.55-2.57-.3-5.27-1.29-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.16 1.18A10.97 10.97 0 0 1 12 6.11c.98 0 1.94.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.07.79 2.16v3.25c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg>
-                  Connect with GitHub
-                  <svg class="button-arrow" viewBox="0 0 20 20" aria-hidden="true"><path d="M4 10h12m-4-4 4 4-4 4"/></svg>
-                </button>
-                <div class="permission-row">
-                  <span><svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7"/></svg> Read workflow status</span>
-                  <span><svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7"/></svg> Manage self-hosted runners</span>
-                </div>
-                <a href="#security" class="security-link" data-toast="Security overview opened"><svg viewBox="0 0 20 20"><rect x="4" y="8" width="12" height="9" rx="2"/><path d="M7 8V6a3 3 0 0 1 6 0v2"/></svg> See exactly what we access</a>
-              </div>
-
-              <div class="setup-content" data-step="2">
-                <div class="connected-account">
-                  <span class="connected-avatar">A</span>
-                  <div><strong>Acme Systems</strong><p>github.com/acme</p></div>
-                  <span class="connected-badge"><i></i> Connected</span>
-                </div>
-                <span class="step-kicker">STEP 2 OF 4</span>
-                <h2>Choose your repositories</h2>
-                <p class="setup-description compact">Select where Tensorlake runners can pick up jobs. You can change this anytime.</p>
-                <label class="search-field">
-                  <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="m16 16 4 4"/></svg>
-                  <input id="repo-search" type="search" placeholder="Search repositories..." autocomplete="off" />
-                </label>
-                <div class="repo-list" id="repo-list" aria-live="polite">
-                  <label class="repo-row" data-name="api-gateway" data-full-name="acme/api-gateway">
-                    <input type="checkbox" checked value="acme/api-gateway" />
-                    <span class="custom-checkbox"><svg viewBox="0 0 16 16"><path d="m3 8 3 3 7-7"/></svg></span>
-                    <span class="repo-symbol">A</span>
-                    <span><strong>api-gateway</strong><small>TypeScript · Updated 4 min ago</small></span>
-                    <em>Private</em>
-                  </label>
-                  <label class="repo-row" data-name="web-app" data-full-name="acme/web-app">
-                    <input type="checkbox" checked value="acme/web-app" />
-                    <span class="custom-checkbox"><svg viewBox="0 0 16 16"><path d="m3 8 3 3 7-7"/></svg></span>
-                    <span class="repo-symbol coral">W</span>
-                    <span><strong>web-app</strong><small>TypeScript · Updated yesterday</small></span>
-                    <em>Private</em>
-                  </label>
-                  <label class="repo-row" data-name="payments-service" data-full-name="acme/payments-service">
-                    <input type="checkbox" value="acme/payments-service" />
-                    <span class="custom-checkbox"><svg viewBox="0 0 16 16"><path d="m3 8 3 3 7-7"/></svg></span>
-                    <span class="repo-symbol violet">P</span>
-                    <span><strong>payments-service</strong><small>Go · Updated 3 days ago</small></span>
-                    <em>Private</em>
-                  </label>
-                </div>
-                <div class="setup-actions">
-                  <button class="secondary-button back-button" type="button" data-back="1">Back</button>
-                  <button class="primary-button" id="choose-repos" type="button">Review <span id="workflow-count">3</span> workflows <svg class="button-arrow" viewBox="0 0 20 20"><path d="M4 10h12m-4-4 4 4-4 4"/></svg></button>
-                </div>
-              </div>
-
-              <div class="setup-content" data-step="3">
-                <div class="review-heading-icon">
-                  <svg viewBox="0 0 24 24"><path d="M8 5H5a2 2 0 0 0-2 2v12a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2v-3M16 3h5v5M10 14 21 3"/></svg>
-                </div>
-                <span class="step-kicker">STEP 3 OF 4</span>
-                <h2>Review the migration</h2>
-                <p class="setup-description compact">Tensorlake will open a pull request that changes only your workflow runner labels. Your application code stays untouched.</p>
-                <div class="migration-summary">
-                  <div><span><svg viewBox="0 0 20 20"><path d="M5 4h10v12H5zM8 8h4M8 11h4"/></svg></span><p><small>Pull request</small><strong>Run CI on Tensorlake runners</strong></p></div>
-                  <div><span><svg viewBox="0 0 20 20"><path d="M6 3v12m0-8a3 3 0 1 0 0 6m8-6a3 3 0 1 1 0 6v4"/></svg></span><p><small>Branch</small><strong>tensorlake-ci/migrate-runners</strong></p></div>
-                </div>
-                <div class="diff-card">
-                  <div class="diff-header"><span id="diff-path">.github/workflows/ci.yml</span><em id="diff-file-count">1 of 2 files</em></div>
-                  <pre id="migration-diff"><span class="diff-context">  jobs:</span>
-<span class="diff-context">    test:</span>
-<span class="diff-remove">-     runs-on: ubuntu-latest</span>
-<span class="diff-add">+     runs-on: tensorlake-2vcpu-ubuntu-2404</span></pre>
-                </div>
-                <div class="review-note"><svg viewBox="0 0 20 20"><path d="M10 2 3.5 5v4.4c0 4 2.8 7 6.5 8.6 3.7-1.6 6.5-4.6 6.5-8.6V5L10 2Z"/><path d="m7 10 2 2 4-4"/></svg><span><strong>Safe by default</strong><small>The PR remains subject to your existing reviews and branch protections.</small></span></div>
-                <div class="setup-actions">
-                  <button class="secondary-button back-button" type="button" data-back="2">Back</button>
-                  <button class="primary-button launch-button" id="open-migration-pr" type="button"><span class="launch-button-label">Open migration PR</span><svg class="button-arrow" viewBox="0 0 20 20"><path d="M4 10h12m-4-4 4 4-4 4"/></svg></button>
-                </div>
-              </div>
-
-              <div class="setup-content run-setup-content" data-step="4">
-                <div class="run-heading">
-                  <div class="run-heading-icon"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/></svg></div>
-                  <div><span class="step-kicker">STEP 4 OF 4</span><h2>Watching your first run</h2><p>The migration PR is open. GitHub is handing its smoke job to Tensorlake now.</p></div>
-                  <a id="migration-pr-link" href="#" target="_blank" rel="noreferrer">View PR <span>↗</span></a>
-                </div>
-                <div class="run-progress-card">
-                  <div class="run-status-row"><span class="run-status active" id="run-status"><i></i> Provisioning</span><span id="run-elapsed">Just now</span></div>
-                  <div class="run-timeline" id="run-timeline">
-                    <div data-run-step="queued" class="active"><span>1</span><p>Queued by GitHub</p></div>
-                    <div data-run-step="sandbox"><span>2</span><p>Provision sandbox</p></div>
-                    <div data-run-step="runner"><span>3</span><p>Register runner</p></div>
-                    <div data-run-step="workflow"><span>4</span><p>Execute workflow</p></div>
-                  </div>
-                  <div class="live-terminal">
-                    <div class="terminal-header"><span><i></i><i></i><i></i></span><strong>Live output</strong><em>runner</em></div>
-                    <pre id="live-run-logs" aria-live="polite">Waiting for GitHub to queue the smoke workflow...</pre>
-                  </div>
-                  <div class="live-sandbox" id="live-sandbox" hidden>
-                    <span class="cube-icon"><i></i></span>
-                    <span><small>Ephemeral sandbox</small><strong id="live-sandbox-name">Creating...</strong></span>
-                    <span><small>Machine</small><strong id="live-sandbox-machine">2 vCPU · 8 GB</strong></span>
-                    <button class="secondary-button small" id="copy-ssh" type="button"><svg viewBox="0 0 20 20"><path d="M4 5h12v10H4zM7 9l2 2-2 2m4 0h2"/></svg> Copy SSH</button>
-                  </div>
-                </div>
-                <div class="setup-actions run-actions">
-                  <label class="retain-toggle"><input type="checkbox" id="retain-on-failure" /><span></span> Keep sandbox for debugging if this fails</label>
-                  <button class="primary-button" id="finish-onboarding" type="button" disabled>Go to dashboard <svg class="button-arrow" viewBox="0 0 20 20"><path d="M4 10h12m-4-4 4 4-4 4"/></svg></button>
-                </div>
-                <p class="fine-print">Runner sandboxes are deleted automatically after each successful job.</p>
-              </div>
-            </section>
-
-            <aside class="sandbox-preview">
-              <div class="preview-header"><span class="live-label"><i></i> LIVE PREVIEW</span><span class="serverless-badge">SERVERLESS</span></div>
-              <div class="preview-copy">
-                <h3>One clean sandbox.<br />For every job.</h3>
-                <p>Purpose-built microVMs spin up on demand, execute your workflow, then disappear without a trace.</p>
-              </div>
-              <div class="runner-visual">
-                <div class="visual-grid"></div>
-                <div class="job-source">
-                  <svg viewBox="0 0 24 24"><path d="M12 .7a11.5 11.5 0 0 0-3.64 22.41c.58.1.79-.25.79-.56v-2.24c-3.22.7-3.9-1.37-3.9-1.37-.53-1.34-1.29-1.7-1.29-1.7-1.05-.72.08-.71.08-.71 1.16.08 1.78 1.2 1.78 1.2 1.04 1.77 2.72 1.26 3.38.96.1-.75.4-1.26.74-1.55-2.57-.3-5.27-1.29-5.27-5.69 0-1.26.45-2.28 1.19-3.09-.12-.29-.52-1.46.11-3.05 0 0 .97-.31 3.16 1.18A10.97 10.97 0 0 1 12 6.11c.98 0 1.94.13 2.86.39 2.2-1.49 3.16-1.18 3.16-1.18.63 1.59.23 2.76.12 3.05.74.81 1.18 1.83 1.18 3.09 0 4.42-2.71 5.39-5.29 5.68.42.36.79 1.07.79 2.16v3.25c0 .31.21.67.8.56A11.5 11.5 0 0 0 12 .7Z"/></svg>
-                  <span>push</span>
-                </div>
-                <div class="flow-line line-one"><span></span></div>
-                <div class="sandbox-card sandbox-main">
-                  <div class="sandbox-top"><span class="cube-icon"><i></i></span><span><strong>runner-h7k2</strong><small>ubuntu-24.04</small></span><em>running</em></div>
-                  <div class="terminal-lines"><span></span><span></span><span></span></div>
-                  <div class="sandbox-meta"><span><i></i> Isolated</span><span>4 vCPU</span><span>8 GB</span></div>
-                </div>
-                <div class="flow-line line-two"><span></span></div>
-                <div class="completion-node"><svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7"/></svg></div>
-                <div class="ghost-sandbox ghost-one"></div><div class="ghost-sandbox ghost-two"></div>
-              </div>
-              <div class="preview-stats">
-                <div><strong>&lt; 1s</strong><span>Cold start</span></div>
-                <div><strong>0</strong><span>Idle cost</span></div>
-                <div><strong>∞</strong><span>Concurrency</span></div>
-              </div>
-            </aside>
-          </div>
-
-          <div class="trust-row">
-            <span><svg viewBox="0 0 20 20"><path d="M10 2 3.5 5v4.4c0 4 2.8 7 6.5 8.6 3.7-1.6 6.5-4.6 6.5-8.6V5L10 2Z"/><path d="m7 10 2 2 4-4"/></svg> Ephemeral by design</span>
-            <span><svg viewBox="0 0 20 20"><rect x="3" y="5" width="14" height="10" rx="2"/><path d="M7 9h6M7 12h3"/></svg> Works with GitHub Actions</span>
-            <span><svg viewBox="0 0 20 20"><circle cx="10" cy="10" r="7"/><path d="M10 6v4l3 2"/></svg> Scale to zero automatically</span>
-            <a href="#docs" data-toast="Documentation opened">How Tensorlake CI works <span>→</span></a>
-          </div>
-        </section>
-
-        <section id="dashboard-view" class="view dashboard-view" hidden>
-          <div class="page-heading dashboard-heading">
-            <div><div class="eyebrow"><span class="pulse-dot"></span> All systems operational</div><h1>Your CI, at a glance</h1><p>Serverless runners are online and ready for your next push.</p></div>
-            <button class="primary-button new-run-button" id="run-test-job" type="button"><svg viewBox="0 0 20 20"><path d="m7 5 8 5-8 5V5Z"/></svg> <span>Run test job</span></button>
-          </div>
-
-          <div class="metric-grid">
-            <article class="metric-card"><span class="metric-icon green"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="m10 8 6 4-6 4V8Z"/></svg></span><span><small>Jobs today</small><strong id="jobs-today">148</strong><em class="positive">↑ 12%</em></span><div class="sparkline"><i></i><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div></article>
-            <article class="metric-card"><span class="metric-icon blue"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/></svg></span><span><small>Active runners</small><strong id="active-runners">3</strong><em>of 12 jobs</em></span><div class="status-cluster"><i></i><i></i><i></i><i class="off"></i><i class="off"></i></div></article>
-            <article class="metric-card"><span class="metric-icon amber"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/></svg></span><span><small>Median startup</small><strong>742<sup>ms</sup></strong><em class="positive">↓ 48ms</em></span></article>
-            <article class="metric-card"><span class="metric-icon violet"><svg viewBox="0 0 24 24"><path d="m4 14 6-6 4 4 6-7"/><path d="M15 5h5v5"/></svg></span><span><small>Success rate</small><strong>98.6<sup>%</sup></strong><em class="positive">↑ 0.4%</em></span></article>
-          </div>
-
-          <div class="dashboard-grid">
-            <section class="jobs-card surface-card">
-              <div class="card-header"><div><h2>Recent jobs</h2><p>Across all connected repositories</p></div><button class="secondary-button small" type="button" data-view-button="jobs">View all jobs</button></div>
-              <div class="job-table" id="job-table" role="table">
-                <div class="job-row table-head" role="row"><span>Workflow</span><span>Repository</span><span>Status</span><span>Duration</span><span></span></div>
-                <div class="job-row" role="row"><span class="job-name"><i class="status-spinner"></i><span><strong>Build & test</strong><small>#1842 · feat/usage-alerts</small></span></span><span class="repo-name"><i>A</i> api-gateway</span><span><em class="job-status running">Running</em></span><span>1m 24s</span><button class="row-menu" aria-label="Job actions">•••</button></div>
-                <div class="job-row" role="row"><span class="job-name"><i class="status-check"><svg viewBox="0 0 16 16"><path d="m3 8 3 3 7-7"/></svg></i><span><strong>Preview deploy</strong><small>#917 · fix/nav-overflow</small></span></span><span class="repo-name"><i class="coral">W</i> web-app</span><span><em class="job-status passed">Passed</em></span><span>2m 08s</span><button class="row-menu" aria-label="Job actions">•••</button></div>
-                <div class="job-row" role="row"><span class="job-name"><i class="status-check"><svg viewBox="0 0 16 16"><path d="m3 8 3 3 7-7"/></svg></i><span><strong>Unit tests</strong><small>#1841 · main</small></span></span><span class="repo-name"><i>A</i> api-gateway</span><span><em class="job-status passed">Passed</em></span><span>48s</span><button class="row-menu" aria-label="Job actions">•••</button></div>
-                <div class="job-row" role="row"><span class="job-name"><i class="status-failed">×</i><span><strong>Lint & typecheck</strong><small>#916 · dependabot/npm</small></span></span><span class="repo-name"><i class="coral">W</i> web-app</span><span><em class="job-status failed">Failed</em></span><span>34s</span><button class="row-menu" aria-label="Job actions">•••</button></div>
-              </div>
-            </section>
-
-            <aside class="runner-card surface-card">
-              <div class="card-header"><div><h2>Runner fleet</h2><p>Right-sized in real time</p></div><span class="live-label"><i></i> LIVE</span></div>
-              <div class="fleet-visual">
-                <div class="fleet-ring ring-a"></div><div class="fleet-ring ring-b"></div>
-                <div class="fleet-core"><strong id="fleet-active">3</strong><span>active</span></div>
-                <span class="fleet-dot dot-a"></span><span class="fleet-dot dot-b"></span><span class="fleet-dot dot-c"></span>
-              </div>
-              <div class="fleet-legend"><span><i class="active"></i> Active <strong>3</strong></span><span><i class="warm"></i> Starting <strong>1</strong></span><span><i></i> Idle <strong>0</strong></span></div>
-              <div class="scale-note"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18"/></svg><span><strong>Automatic scaling is on</strong><small>Capacity follows your workflow queue</small></span></div>
-            </aside>
-          </div>
-        </section>
-
-        <section id="placeholder-view" class="view placeholder-view" hidden>
-          <div class="page-heading"><div><div class="eyebrow"><span class="pulse-dot"></span> Tensorlake CI</div><h1 id="placeholder-title">Jobs</h1><p id="placeholder-description">Manage your CI workspace.</p></div></div>
-          <div class="placeholder-card surface-card"><span class="metric-icon green"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="3"/><path d="m8 10 3 2-3 2m5 0h3"/></svg></span><h2 id="placeholder-card-title">Everything is ready</h2><p>Use Overview to see live activity, runner health, and recent workflow jobs.</p><button class="primary-button" type="button" data-view-button="overview">Back to overview</button></div>
-        </section>
-      </main>
-    </div>
-
-    <div class="popover" id="workspace-popover" hidden><button><span class="workspace-avatar">AS</span><span><strong>Acme Systems</strong><small>Current workspace</small></span><svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7"/></svg></button><div></div><button data-toast="Workspace creation started"><span class="add-workspace">+</span><span><strong>Create workspace</strong><small>Start a new team</small></span></button></div>
-    <div class="popover user-popover" id="user-popover" hidden><button data-toast="Profile opened">Profile settings</button><button id="replay-onboarding">Replay onboarding</button><button data-toast="Signed out of demo">Sign out</button></div>
-    <div class="toast" id="toast" role="status" aria-live="polite"><svg viewBox="0 0 20 20"><path d="m5 10 3 3 7-7"/></svg><span>Done</span></div>
-
-    <script src="./app.js"></script>
+    <footer class="shell">
+      <span>Tensorlake CI</span>
+      <span>Ephemeral by default.</span>
+    </footer>
   </body>
 </html>

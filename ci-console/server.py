@@ -13,7 +13,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any
 
-from backend.controller import GoldenPathController
+from backend.controller import RunnerController
 from backend.github_app import GitHubError
 
 
@@ -21,8 +21,8 @@ ROOT = Path(__file__).resolve().parent
 
 
 class TensorlakeCIHandler(BaseHTTPRequestHandler):
-    controller: GoldenPathController
-    server_version = "TensorlakeCI/0.1"
+    controller: RunnerController
+    server_version = "TensorlakeCI/0.2"
     protocol_version = "HTTP/1.1"
 
     def log_message(self, format: str, *args: Any) -> None:
@@ -34,9 +34,9 @@ class TensorlakeCIHandler(BaseHTTPRequestHandler):
         self.send_header("Referrer-Policy", "strict-origin-when-cross-origin")
         self.send_header(
             "Content-Security-Policy",
-            "default-src 'self'; style-src 'self' 'unsafe-inline'; "
-            "img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; "
-            "base-uri 'none'; object-src 'none'",
+            "default-src 'self'; style-src 'self'; img-src 'self' data:; "
+            "connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; "
+            "object-src 'none'",
         )
         super().end_headers()
 
@@ -70,23 +70,32 @@ class TensorlakeCIHandler(BaseHTTPRequestHandler):
         try:
             if path == "/api/health":
                 self._json(HTTPStatus.OK, {"ok": True, "mode": self.controller.mode})
-            elif path == "/api/session":
-                self._json(HTTPStatus.OK, self.controller.state.snapshot())
-            elif path == "/api/repositories":
-                self._json(HTTPStatus.OK, {"repositories": self.controller.repositories()})
+            elif path == "/api/config":
+                self._json(HTTPStatus.OK, self.controller.configuration())
+            elif path == "/api/runs":
+                self._json(HTTPStatus.OK, {"runs": self.controller.state.list_runs()})
             elif path == "/api/github/callback":
                 query = urllib.parse.parse_qs(parsed.query)
                 installation_id = int(query.get("installation_id", ["0"])[0])
-                oauth_state = query.get("state", [""])[0]
-                self.controller.complete_installation(installation_id, oauth_state)
+                if installation_id <= 0:
+                    raise ValueError("GitHub callback is missing installation_id")
+                account = self.controller.complete_installation(installation_id)
+                destination = "/?" + urllib.parse.urlencode(
+                    {"installed": "1", "account": account["login"]}
+                )
                 self.send_response(HTTPStatus.SEE_OTHER)
-                self.send_header("Location", "/#overview")
+                self.send_header("Location", destination)
+                self.send_header("Content-Length", "0")
                 self.end_headers()
             elif path.startswith("/api/runs/"):
                 run_id = path.removeprefix("/api/runs/").split("/", 1)[0]
                 run = self.controller.state.get_run(run_id)
-                if not run:
-                    self._error(HTTPStatus.NOT_FOUND, "run_not_found", "Run was not found")
+                if run is None:
+                    self._error(
+                        HTTPStatus.NOT_FOUND,
+                        "run_not_found",
+                        "Run was not found",
+                    )
                 else:
                     self._json(HTTPStatus.OK, run)
             elif path.startswith("/api/"):
@@ -108,29 +117,10 @@ class TensorlakeCIHandler(BaseHTTPRequestHandler):
         self._static(parsed.path, send_body=False)
 
     def do_POST(self) -> None:
-        parsed = urllib.parse.urlparse(self.path)
-        path = parsed.path
+        path = urllib.parse.urlparse(self.path).path
         try:
             raw, body = self._body()
-            if path == "/api/github/connect":
-                self._json(HTTPStatus.OK, self.controller.connect())
-            elif path == "/api/migration/plan":
-                repositories = body.get("repositories")
-                if not isinstance(repositories, list) or not all(
-                    isinstance(item, str) for item in repositories
-                ):
-                    raise ValueError("repositories must be a list of full repository names")
-                self._json(HTTPStatus.OK, self.controller.plan(repositories))
-            elif path == "/api/migration/pull-request":
-                self._json(HTTPStatus.CREATED, self.controller.create_pull_request())
-            elif path == "/api/runs/smoke":
-                self._json(HTTPStatus.ACCEPTED, self.controller.start_smoke_run())
-            elif path == "/api/session/reset":
-                self._json(HTTPStatus.OK, self.controller.reset())
-            elif path.startswith("/api/runs/") and path.endswith("/retain"):
-                run_id = path.removeprefix("/api/runs/").removesuffix("/retain")
-                self._json(HTTPStatus.OK, self.controller.retain_run(run_id))
-            elif path == "/api/github/webhook":
+            if path == "/api/github/webhook":
                 signature = self.headers.get("X-Hub-Signature-256", "")
                 if not self.controller.verify_webhook(raw, signature):
                     self._error(
@@ -139,16 +129,22 @@ class TensorlakeCIHandler(BaseHTTPRequestHandler):
                         "Webhook signature verification failed",
                     )
                     return
-                event = self.headers.get("X-GitHub-Event", "")
-                delivery = self.headers.get("X-GitHub-Delivery", "")
+                result = self.controller.handle_webhook(
+                    self.headers.get("X-GitHub-Event", ""),
+                    self.headers.get("X-GitHub-Delivery", ""),
+                    body,
+                )
+                self._json(HTTPStatus.ACCEPTED, result)
+            elif path == "/api/demo/jobs":
+                label = body.get("label", "tensorlake")
+                if not isinstance(label, str):
+                    raise ValueError("label must be a string")
                 self._json(
                     HTTPStatus.ACCEPTED,
-                    self.controller.handle_webhook(event, delivery, body),
+                    self.controller.dispatch_demo_job(label),
                 )
             else:
                 self._error(HTTPStatus.NOT_FOUND, "not_found", "API endpoint not found")
-        except KeyError as exc:
-            self._error(HTTPStatus.NOT_FOUND, "not_found", f"Resource {exc.args[0]} was not found")
         except (ValueError, GitHubError) as exc:
             self._error(HTTPStatus.BAD_REQUEST, "request_failed", str(exc))
         except Exception as exc:
@@ -162,10 +158,10 @@ class TensorlakeCIHandler(BaseHTTPRequestHandler):
             self._error(HTTPStatus.NOT_FOUND, "not_found", "File not found")
             return
         target = (ROOT / relative).resolve()
-        if ROOT not in target.parents and target != ROOT:
-            self._error(HTTPStatus.FORBIDDEN, "forbidden", "Path is outside the app root")
+        if ROOT not in target.parents:
+            self._error(HTTPStatus.FORBIDDEN, "forbidden", "Invalid path")
             return
-        if not target.is_file() or target.name.startswith("."):
+        if not target.is_file():
             self._error(HTTPStatus.NOT_FOUND, "not_found", "File not found")
             return
         content = target.read_bytes()
@@ -183,9 +179,9 @@ def create_server(
     host: str = "127.0.0.1",
     port: int = 4173,
     mode: str = "demo",
-    demo_delay: float = 0.35,
+    demo_delay: float = 0.2,
 ) -> ThreadingHTTPServer:
-    controller = GoldenPathController(mode=mode, demo_delay=demo_delay)
+    controller = RunnerController(mode=mode, demo_delay=demo_delay)
     handler = type(
         "ConfiguredTensorlakeCIHandler",
         (TensorlakeCIHandler,),
@@ -195,11 +191,15 @@ def create_server(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the Tensorlake CI console")
+    parser = argparse.ArgumentParser(
+        description="Run the Tensorlake CI webhook service"
+    )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=4173)
     parser.add_argument(
-        "--mode", choices=("demo", "live"), default=os.getenv("TENSORLAKE_CI_MODE", "demo")
+        "--mode",
+        choices=("demo", "live"),
+        default=os.getenv("TENSORLAKE_CI_MODE", "demo"),
     )
     args = parser.parse_args()
     server = create_server(args.host, args.port, args.mode)
