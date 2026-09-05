@@ -1,6 +1,6 @@
 {
   "name": "tensorlake-native-linux-arm64-gnu",
-  "version": "0.5.126",
+  "version": "0.5.127",
   "description": "Tensorlake native Node.js binding for Linux arm64 (glibc)",
   "repository": {
     "type": "git",
