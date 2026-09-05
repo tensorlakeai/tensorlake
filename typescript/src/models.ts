@@ -131,6 +131,8 @@ export interface NetworkConfig {
 export interface FileSystemMount {
   fileSystemId: string;
   mountPath: string;
+  /** Absolute path inside the file system exposed as the mount root. */
+  sourcePath?: string;
   /** Mount the file system read-only. */
   readOnly?: boolean;
   /** Eagerly download the file system's contents. */
@@ -143,6 +145,8 @@ export interface FileSystemMount {
 
 /** Optional mount modes for attaching a file system to a running sandbox. */
 export interface AttachFileSystemOptions {
+  /** Absolute path inside the file system exposed as the mount root. */
+  sourcePath?: string;
   /** Mount the file system read-only. */
   readOnly?: boolean;
   /** Eagerly download the file system's contents. */

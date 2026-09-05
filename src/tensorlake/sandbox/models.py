@@ -261,8 +261,9 @@ class FileSystemMount(BaseModel):
     """A file system mounted into a sandbox at a guest path.
 
     ``file_system_id`` is the Artifact Storage file-system name created with
-    ``tl fs create <name>`` and ``mount_path`` is an absolute, unique guest
-    path (e.g. ``/mnt/skills``).
+    ``tl fs create <name>``. ``source_path`` selects the absolute directory
+    inside that file system which is exposed as the mount root; it defaults
+    to ``/``. ``mount_path`` is the absolute, unique guest path.
 
     ``read_only`` mounts the file system read-only; ``prefetch`` eagerly
     downloads its contents. Both serialize onto the wire only when ``True``:
@@ -287,6 +288,7 @@ class FileSystemMount(BaseModel):
 
     file_system_id: str
     mount_path: str
+    source_path: str = "/"
     read_only: bool = False
     prefetch: bool = False
     snapshot_id: str | None = None
@@ -296,6 +298,8 @@ class FileSystemMount(BaseModel):
     def _omit_unset_mount_modes(self, handler):
         data = handler(self)
         if isinstance(data, dict):
+            if self.source_path == "/":
+                data.pop("source_path", None)
             if not self.read_only:
                 data.pop("read_only", None)
             if not self.prefetch:

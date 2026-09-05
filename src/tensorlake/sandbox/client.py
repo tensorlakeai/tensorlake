@@ -1039,6 +1039,7 @@ class SandboxClient:
         file_system_id: str,
         mount_path: str,
         *,
+        source_path: str = "/",
         read_only: bool = False,
         prefetch: bool = False,
         snapshot_id: str | None = None,
@@ -1055,6 +1056,7 @@ class SandboxClient:
             file_system_id: The registered file system's name (created with
                 ``tl fs create <name>``).
             mount_path: Absolute, unique guest mount path (e.g. ``/mnt/skills``).
+            source_path: Absolute path within the file system to expose.
             read_only: Mount the file system read-only.
             prefetch: Eagerly download the file system's contents.
             snapshot_id: Pin the mount to a specific filesystem snapshot.
@@ -1079,6 +1081,7 @@ class SandboxClient:
             FileSystemMount(
                 file_system_id=file_system_id,
                 mount_path=mount_path,
+                source_path=source_path,
                 read_only=read_only,
                 prefetch=prefetch,
                 snapshot_id=snapshot_id,
@@ -1092,6 +1095,7 @@ class SandboxClient:
                 sandbox_id=sandbox_id,
                 file_system_id=file_system_id,
                 mount_path=mount_path,
+                source_path=source_path,
                 read_only=read_only,
                 prefetch=prefetch,
                 snapshot_id=snapshot_id,
