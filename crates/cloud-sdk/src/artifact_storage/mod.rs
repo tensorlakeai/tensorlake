@@ -60,15 +60,13 @@ enum NativeReadResolution {
 
 impl ArtifactStorageClient {
     pub fn new(api_client: Client, git_base_url: impl Into<String>) -> Result<Self, SdkError> {
-        Ok(Self {
-            api_client: Some(api_client),
-            git_client: reqwest::Client::builder()
+        Ok(Self::with_http_client(
+            Some(api_client),
+            git_base_url,
+            crate::http_transport::https_builder()
                 .user_agent(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")))
                 .build()?,
-            git_base_url: trim_base_url(git_base_url.into()),
-            git_credentials: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
-            authorized_project_id: Arc::new(tokio::sync::OnceCell::new()),
-        })
+        ))
     }
 
     /// Build an Artifact Storage client whose data-plane HTTP connections use
@@ -86,19 +84,34 @@ impl ArtifactStorageClient {
         git_base_url: impl Into<String>,
         socket_path: &Path,
     ) -> Result<Self, SdkError> {
-        // This constructor may run without ClientBuilder having installed a provider.
-        crate::client::ensure_rustls_provider();
-        Ok(Self {
-            api_client: api_client.into(),
-            git_client: reqwest::Client::builder()
+        Ok(Self::with_http_client(
+            api_client.into(),
+            git_base_url,
+            crate::http_transport::unix_socket_builder(socket_path)
                 .user_agent(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")))
-                .unix_socket(socket_path)
-                .tls_certs_only(Vec::<reqwest::tls::Certificate>::new())
                 .build()?,
+        ))
+    }
+
+    /// Reuse a transport whose trust, routing and connection pool are already configured.
+    /// With no Platform API client, credentials must be supplied by the caller or host proxy.
+    pub fn with_http_client(
+        api_client: Option<Client>,
+        git_base_url: impl Into<String>,
+        git_client: reqwest::Client,
+    ) -> Self {
+        Self {
+            api_client,
+            git_client,
             git_base_url: trim_base_url(git_base_url.into()),
             git_credentials: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
             authorized_project_id: Arc::new(tokio::sync::OnceCell::new()),
-        })
+        }
+    }
+
+    /// Share this exact transport with private filesystem and kernel-facing clients.
+    pub fn http_client(&self) -> &reqwest::Client {
+        &self.git_client
     }
 
     pub fn git_base_url(&self) -> &str {
@@ -2690,13 +2703,11 @@ mod tests {
         )
         .unwrap();
         // Construct the socket client first, so no Platform API builder can
-        // initialize its crypto provider for it. Then prove the child lacks
-        // roots and that ordinary HTTPS still requires them.
-        let error = ClientBuilder::new("https://api.tensorlake.ai")
+        // initialize its crypto provider for it. Ordinary HTTPS must also
+        // construct successfully using bundled roots in this certless child.
+        ClientBuilder::new("https://api.tensorlake.ai")
             .build()
-            .err()
-            .expect("ordinary HTTPS client must require native roots");
-        assert!(format!("{error:?}").contains("No CA certificates were loaded"));
+            .expect("HTTPS uses bundled roots even in certless guests");
         assert!(matches!(
             client.mint_token_for_repo("project", Some("filesystem")).await,
             Err(crate::error::SdkError::Authentication(message))
@@ -2712,20 +2723,20 @@ mod tests {
                 request.extend_from_slice(&chunk[..read]);
             }
             let request = String::from_utf8(request).unwrap().to_lowercase();
-            assert!(request.starts_with("get /project/project/repos/filesystem/fs/head "));
+            assert!(request.starts_with("get /project/project/repos/filesystem/refs "));
             assert!(request.contains("authorization: basic "));
-            let body = r#"{"snapshot_id":"snapshot-1","generation":1}"#;
+            let body = r#"{"repo":"filesystem","refs":[]}"#;
             stream.write_all(format!(
                 "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                 body.len(),
             ).as_bytes()).await.unwrap();
         };
         let request = async {
-            let head = client
-                .native_head_with_credential("project", "filesystem", "t", "capability")
+            let refs = client
+                .list_refs_with_credential("project", "filesystem", "t", "capability")
                 .await
                 .unwrap();
-            assert_eq!(head.snapshot_id.as_deref(), Some("snapshot-1"));
+            assert!(refs.refs.is_empty());
         };
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             tokio::join!(server, request);
@@ -3849,9 +3860,14 @@ mod tests {
         // client in an isolated test run must install it itself (AlreadyInstalled is fine).
         let _ = rustls::crypto::ring::default_provider().install_default();
         let started = std::time::Instant::now();
-        let response = super::send_idempotent(reqwest::Client::new().get(&base))
-            .await
-            .unwrap();
+        let response = super::send_idempotent(
+            crate::http_transport::https_builder()
+                .build()
+                .unwrap()
+                .get(&base),
+        )
+        .await
+        .unwrap();
         assert_eq!(response.status(), reqwest::StatusCode::OK);
         assert!(
             started.elapsed() >= std::time::Duration::from_millis(1900),

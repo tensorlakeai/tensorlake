@@ -160,10 +160,10 @@ mod transport_failure_tests {
     /// Build the error a refused TCP connect produces, routed through
     /// `reqwest_middleware` exactly as every client in this crate does.
     async fn middleware_connect_error() -> SdkError {
-        crate::client::ensure_rustls_provider();
-        let client =
-            reqwest_middleware::ClientBuilder::new(reqwest::Client::builder().build().unwrap())
-                .build();
+        let client = reqwest_middleware::ClientBuilder::new(
+            crate::http_transport::https_builder().build().unwrap(),
+        )
+        .build();
         // Port 1 on loopback refuses immediately; no network access needed.
         SdkError::from(client.get("http://127.0.0.1:1/x").send().await.unwrap_err())
     }
@@ -199,7 +199,6 @@ mod transport_failure_tests {
     /// non-idempotent operations.
     #[tokio::test]
     async fn middleware_timeout_is_classified_as_timeout() {
-        crate::client::ensure_rustls_provider();
         // A listener that accepts the connection and then never answers.
         let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("listener");
         let address = listener.local_addr().expect("address");
@@ -211,7 +210,7 @@ mod transport_failure_tests {
         });
 
         let client = reqwest_middleware::ClientBuilder::new(
-            reqwest::Client::builder()
+            crate::http_transport::https_builder()
                 .timeout(std::time::Duration::from_millis(200))
                 .build()
                 .unwrap(),

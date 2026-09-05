@@ -11,7 +11,7 @@ use std::{
     ops::{Deref, DerefMut},
     pin::Pin,
     result::Result,
-    sync::{Arc, Once},
+    sync::Arc,
     time::Duration,
 };
 
@@ -545,17 +545,8 @@ fn str_to_header_value(value: &str) -> Result<HeaderValue, SdkError> {
         .map_err(|e: InvalidHeaderValue| SdkError::InvalidHeaderValue(e.to_string()))
 }
 
-pub(crate) fn ensure_rustls_provider() {
-    static INSTALL_PROVIDER: Once = Once::new();
-    INSTALL_PROVIDER.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
-}
-
 fn new_base_client(headers: &HeaderMap, user_agent: &str) -> Result<reqwest::Client, SdkError> {
-    ensure_rustls_provider();
-
-    let builder = reqwest::Client::builder()
+    let builder = crate::http_transport::https_builder()
         .user_agent(user_agent)
         .default_headers(headers.clone());
     let client = builder.build()?;
@@ -564,7 +555,7 @@ fn new_base_client(headers: &HeaderMap, user_agent: &str) -> Result<reqwest::Cli
 
 #[cfg(test)]
 mod tests {
-    use super::{ClientBuilder, ensure_rustls_provider};
+    use super::ClientBuilder;
     use reqwest::Method;
     use std::{
         io::{Read, Write},
@@ -681,7 +672,7 @@ mod tests {
 
     #[test]
     fn installs_rustls_provider() {
-        ensure_rustls_provider();
+        let _ = crate::http_transport::https_builder();
         assert!(
             rustls::crypto::CryptoProvider::get_default().is_some(),
             "rustls crypto provider should be installed"

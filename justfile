@@ -249,6 +249,10 @@ test-crate crate:
 test-artifact-storage:
     cargo test --locked -p tensorlake --lib artifact_storage::
 
+# Guard every SDK/CLI HTTP constructor, including feature-gated fast-clone paths in full CI.
+lint-http-transports:
+    cargo clippy --locked -p tensorlake -p tensorlake-cli --all-targets -- -D warnings
+
 
 # Run clippy lints on all crates
 clippy:

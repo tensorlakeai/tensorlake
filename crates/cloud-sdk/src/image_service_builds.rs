@@ -579,7 +579,8 @@ async fn upload_and_seal_context(
     )));
     let file = tokio::fs::File::open(tar_file.path()).await?;
     let stream = tokio_util::io::ReaderStream::new(file);
-    let response = reqwest::Client::new()
+    let response = crate::http_transport::https_builder()
+        .build()?
         .request(method, url)
         .header(CONTENT_LENGTH, tar_bytes)
         .body(reqwest::Body::wrap_stream(stream))

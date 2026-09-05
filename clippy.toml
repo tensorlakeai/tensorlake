@@ -1,0 +1,8 @@
+disallowed-methods = [
+    { path = "reqwest::get", reason = "Use http_transport; this helper constructs a bare client" },
+    { path = "reqwest::Client::builder", reason = "Use http_transport to select bundled HTTPS roots or plaintext socket transport" },
+    { path = "reqwest::Client::new", reason = "Use http_transport; native CA discovery is forbidden in shipped clients" },
+    { path = "reqwest::Client::default", reason = "Use http_transport; native CA discovery is forbidden in shipped clients" },
+    { path = "reqwest::ClientBuilder::new", reason = "Use http_transport to select an explicit trust policy" },
+    { path = "reqwest::ClientBuilder::default", reason = "Use http_transport to select an explicit trust policy" },
+]
