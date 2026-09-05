@@ -22,6 +22,7 @@ use tokio::sync::OnceCell;
 
 use napi::bindgen_prelude::{Buffer, Either, Promise};
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
+use napi::{Env, JsObject};
 use napi_derive::napi;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -794,13 +795,13 @@ impl Default for NativeStreamControl {
 }
 
 async fn cancellable_stream(
-    control: Option<&NativeStreamControl>,
+    control: Option<tokio::sync::watch::Sender<bool>>,
     operation: impl Future<Output = napi::Result<String>>,
 ) -> napi::Result<String> {
     match control {
         None => operation.await,
         Some(control) => {
-            let mut cancelled = control.cancelled.subscribe();
+            let mut cancelled = control.subscribe();
             tokio::select! {
                 biased;
                 _ = cancelled.wait_for(|value| *value) => Ok(String::new()),
@@ -816,6 +817,7 @@ async fn cancellable_stream(
 /// [`NativeSandboxClient::connect_proxy`] (shared pool) over the direct
 /// constructor.
 #[napi]
+#[derive(Clone)]
 pub struct NativeSandboxProxyClient {
     client: DeferredHttpClient,
     target: SandboxProxyTarget,
@@ -824,6 +826,25 @@ pub struct NativeSandboxProxyClient {
 }
 
 impl NativeSandboxProxyClient {
+    fn spawn_stream<F, Fut>(
+        &self,
+        env: Env,
+        control: Option<&NativeStreamControl>,
+        operation: F,
+    ) -> napi::Result<JsObject>
+    where
+        F: FnOnce(Self) -> Fut + Send + 'static,
+        Fut: Future<Output = napi::Result<String>> + Send + 'static,
+    {
+        // napi-rs does not retain Option<&T> arguments for async methods.
+        // Clone all borrowed native state synchronously on the JS thread,
+        // before spawning or parsing payloads. Keep an owned sender for the
+        // whole stream so collecting the JS control cannot close the channel.
+        let client = self.clone();
+        let control = control.map(|control| control.cancelled.clone());
+        env.spawn_future(async move { cancellable_stream(control, operation(client)).await })
+    }
+
     async fn client(&self) -> napi::Result<SandboxProxyClient> {
         let client = self
             .client
@@ -1030,15 +1051,17 @@ impl NativeSandboxProxyClient {
 
     // -- Streaming output (events delivered live via `emit`) --
 
-    #[napi]
-    pub async fn follow_stdout(
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn follow_stdout(
         &self,
+        env: Env,
         process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
         control: Option<&NativeStreamControl>,
-    ) -> napi::Result<String> {
-        cancellable_stream(control, async {
-            self.client()
+    ) -> napi::Result<JsObject> {
+        self.spawn_stream(env, control, |client| async move {
+            client
+                .client()
                 .await?
                 .follow_stdout_streaming_async(process, move |event| {
                     emit_event(emit.clone(), event)
@@ -1046,18 +1069,19 @@ impl NativeSandboxProxyClient {
                 .await
                 .map_err(into_napi_error)
         })
-        .await
     }
 
-    #[napi]
-    pub async fn follow_stderr(
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn follow_stderr(
         &self,
+        env: Env,
         process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
         control: Option<&NativeStreamControl>,
-    ) -> napi::Result<String> {
-        cancellable_stream(control, async {
-            self.client()
+    ) -> napi::Result<JsObject> {
+        self.spawn_stream(env, control, |client| async move {
+            client
+                .client()
                 .await?
                 .follow_stderr_streaming_async(process, move |event| {
                     emit_event(emit.clone(), event)
@@ -1065,18 +1089,19 @@ impl NativeSandboxProxyClient {
                 .await
                 .map_err(into_napi_error)
         })
-        .await
     }
 
-    #[napi]
-    pub async fn follow_output(
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn follow_output(
         &self,
+        env: Env,
         process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
         control: Option<&NativeStreamControl>,
-    ) -> napi::Result<String> {
-        cancellable_stream(control, async {
-            self.client()
+    ) -> napi::Result<JsObject> {
+        self.spawn_stream(env, control, |client| async move {
+            client
+                .client()
                 .await?
                 .follow_output_streaming_async(process, move |event| {
                     emit_event(emit.clone(), event)
@@ -1084,27 +1109,27 @@ impl NativeSandboxProxyClient {
                 .await
                 .map_err(into_napi_error)
         })
-        .await
     }
 
     /// Start a process and stream lifecycle events live via `emit`. Resolves
     /// with the trace id once the process exits.
-    #[napi]
-    pub async fn run_process_streaming(
+    #[napi(ts_return_type = "Promise<string>")]
+    pub fn run_process_streaming(
         &self,
+        env: Env,
         payload_json: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
         control: Option<&NativeStreamControl>,
-    ) -> napi::Result<String> {
-        let payload: Value = parse_json_payload(&payload_json)?;
-        cancellable_stream(control, async {
-            self.client()
+    ) -> napi::Result<JsObject> {
+        self.spawn_stream(env, control, |client| async move {
+            let payload: Value = parse_json_payload(&payload_json)?;
+            client
+                .client()
                 .await?
                 .run_process_streaming_async(&payload, move |event| emit_event(emit.clone(), event))
                 .await
                 .map_err(into_napi_error)
         })
-        .await
     }
 
     /// Start a process and buffer all lifecycle events, returning them once the

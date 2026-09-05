@@ -12,6 +12,7 @@ import { setEnvironmentData } from "node:worker_threads";
 // Run in a disposable process: certificate settings and native module state
 // must be fresh, and the parent must be able to detect a blocked event loop.
 if (!process.argv.includes("--child")) {
+  await import("./test-native-stream-lifetime.mjs");
   if (process.platform !== "linux") {
     console.log("Slow certificate I/O regression requires Linux FIFOs.");
   } else {
