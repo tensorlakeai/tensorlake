@@ -32,7 +32,7 @@ type GitCredentialCache = HashMap<(String, Option<String>), GitCredential>;
 
 #[derive(Clone)]
 pub struct ArtifactStorageClient {
-    api_client: Client,
+    api_client: Option<Client>,
     git_client: reqwest::Client,
     git_base_url: String,
     git_credentials: Arc<tokio::sync::Mutex<GitCredentialCache>>,
@@ -61,7 +61,7 @@ enum NativeReadResolution {
 impl ArtifactStorageClient {
     pub fn new(api_client: Client, git_base_url: impl Into<String>) -> Result<Self, SdkError> {
         Ok(Self {
-            api_client,
+            api_client: Some(api_client),
             git_client: reqwest::Client::builder()
                 .user_agent(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")))
                 .build()?,
@@ -74,17 +74,26 @@ impl ArtifactStorageClient {
     /// Build an Artifact Storage client whose data-plane HTTP connections use
     /// a local Unix socket. Sandbox TLFS uses this for its root-owned relay to
     /// the authenticated dataplane-host system-storage proxy.
+    ///
+    /// Pass `None` for `api_client` when the host proxy owns credentials. This
+    /// avoids constructing an unused HTTPS client in guests without a CA store;
+    /// token minting then fails locally. Passing a [`Client`] retains ordinary
+    /// Platform API authentication. The socket transport uses an empty TLS
+    /// trust set: it needs no native roots and cannot authenticate HTTPS peers.
     #[cfg(unix)]
     pub fn new_with_unix_socket(
-        api_client: Client,
+        api_client: impl Into<Option<Client>>,
         git_base_url: impl Into<String>,
         socket_path: &Path,
     ) -> Result<Self, SdkError> {
+        // This constructor may run without ClientBuilder having installed a provider.
+        crate::client::ensure_rustls_provider();
         Ok(Self {
-            api_client,
+            api_client: api_client.into(),
             git_client: reqwest::Client::builder()
                 .user_agent(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")))
                 .unix_socket(socket_path)
+                .tls_certs_only(Vec::<reqwest::tls::Certificate>::new())
                 .build()?,
             git_base_url: trim_base_url(git_base_url.into()),
             git_credentials: Arc::new(tokio::sync::Mutex::new(HashMap::new())),
@@ -116,15 +125,19 @@ impl ArtifactStorageClient {
     ) -> Result<Traced<GitCredential>, SdkError> {
         // Ingress authenticates the bearer token and forwards the authorized project id to Artifact
         // Storage. Callers should build the SDK with `ClientBuilder::scope(...)` when using PATs.
+        let api_client = self.api_client.as_ref().ok_or_else(|| {
+            SdkError::Authentication(
+                "token minting requires a Platform API client; the system-storage proxy owns credentials"
+                    .to_string(),
+            )
+        })?;
         let _ = project_id;
         let path = "/artifact-storage/v1/token";
         let body = MintGitTokenRequest {
             repo: repo.map(str::to_string),
         };
-        let req = self
-            .api_client
-            .build_post_json_request(Method::POST, path, &body)?;
-        self.api_client.execute_json(req).await
+        let req = api_client.build_post_json_request(Method::POST, path, &body)?;
+        api_client.execute_json(req).await
     }
 
     /// Resolve the project selected by ingress from the ordinary Artifact Storage credential.
@@ -2635,6 +2648,92 @@ mod tests {
         NativeDirectFileWrite, NativeDirectMutation, NativeDirectPathTransfer,
         REPO_KIND_FILESYSTEM,
     };
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    async fn unix_socket_without_platform_client_works_without_system_ca_certificates() {
+        const CHILD: &str = "TENSORLAKE_TEST_CERTLESS_SOCKET_CHILD";
+        const SUCCESS: &str = "certless socket request succeeded; minting refused";
+        if std::env::var_os(CHILD).is_none() {
+            let temp = tempfile::tempdir().unwrap();
+            let output = tokio::time::timeout(
+                std::time::Duration::from_secs(20),
+                tokio::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "artifact_storage::tests::unix_socket_without_platform_client_works_without_system_ca_certificates",
+                        "--nocapture",
+                    ])
+                    .env(CHILD, "1")
+                    .env("SSL_CERT_FILE", temp.path().join("missing-certs"))
+                    .env("SSL_CERT_DIR", temp.path().join("missing-certs"))
+                    .kill_on_drop(true)
+                    .output(),
+            )
+            .await
+            .expect("certless subprocess timed out")
+            .unwrap();
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(stdout.contains(SUCCESS), "child test did not run: {stdout}");
+            return;
+        }
+
+        let temp = tempfile::tempdir().unwrap();
+        let socket = temp.path().join("proxy.sock");
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+        let client = ArtifactStorageClient::new_with_unix_socket(
+            None,
+            "http://tensorlake-system-storage",
+            &socket,
+        )
+        .unwrap();
+        // Construct the socket client first, so no Platform API builder can
+        // initialize its crypto provider for it. Then prove the child lacks
+        // roots and that ordinary HTTPS still requires them.
+        let error = ClientBuilder::new("https://api.tensorlake.ai")
+            .build()
+            .err()
+            .expect("ordinary HTTPS client must require native roots");
+        assert!(format!("{error:?}").contains("No CA certificates were loaded"));
+        assert!(matches!(
+            client.mint_token_for_repo("project", Some("filesystem")).await,
+            Err(crate::error::SdkError::Authentication(message))
+                if message.contains("system-storage proxy owns credentials")
+        ));
+        let server = async {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                let mut chunk = [0; 1024];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0 && request.len() < 16384);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8(request).unwrap().to_lowercase();
+            assert!(request.starts_with("get /project/project/repos/filesystem/fs/head "));
+            assert!(request.contains("authorization: basic "));
+            let body = r#"{"snapshot_id":"snapshot-1","generation":1}"#;
+            stream.write_all(format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len(),
+            ).as_bytes()).await.unwrap();
+        };
+        let request = async {
+            let head = client
+                .native_head_with_credential("project", "filesystem", "t", "capability")
+                .await
+                .unwrap();
+            assert_eq!(head.snapshot_id.as_deref(), Some("snapshot-1"));
+        };
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            tokio::join!(server, request);
+        })
+        .await
+        .expect("socket request timed out");
+        println!("{SUCCESS}");
+    }
 
     #[test]
     fn project_id_comes_from_normal_artifact_credential() {

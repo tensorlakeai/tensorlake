@@ -245,6 +245,10 @@ test-rust:
 test-crate crate:
     just with-function-agent-core cargo test -p {{crate}}
 
+# Artifact Storage transport unit tests; no credentials or live services required.
+test-artifact-storage:
+    cargo test --locked -p tensorlake --lib artifact_storage::
+
 
 # Run clippy lints on all crates
 clippy:
