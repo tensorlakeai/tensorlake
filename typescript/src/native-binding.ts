@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { detectLinuxLibc } from "../lib/libc.cjs";
+import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,9 +32,9 @@ const NATIVE_PACKAGES: Readonly<Record<string, string>> = {
 
 function packageRoot(): string {
   const parent = fileURLToPath(new URL("../", import.meta.url));
-  if (existsSync(path.join(parent, "package.json"))) return parent;
+  if (fs.existsSync(path.join(parent, "package.json"))) return parent;
   const grandparent = fileURLToPath(new URL("../../", import.meta.url));
-  if (existsSync(path.join(grandparent, "package.json"))) return grandparent;
+  if (fs.existsSync(path.join(grandparent, "package.json"))) return grandparent;
   return parent;
 }
 
@@ -46,25 +47,7 @@ function linuxLibcFamily(options: TargetOptions): "gnu" | "musl" {
   }
   if (cachedLinuxLibc != null) return cachedLinuxLibc;
 
-  // libc cannot change during the process lifetime. Generating a diagnostic
-  // report can block on network lookups, so omit those and only probe once.
-  // Keep this in sync with lib/runtime.cjs, used by the runtime launchers.
-  cachedLinuxLibc = "gnu";
-  // Available since Node 22, but missing from the current Node type definitions.
-  const report = process.report as NodeJS.ProcessReport & { excludeNetwork: boolean };
-  if (!report?.getReport) return cachedLinuxLibc;
-  const excludeNetwork = report.excludeNetwork;
-  try {
-    report.excludeNetwork = true;
-    const data = report.getReport() as RuntimeReport | undefined;
-    if (data) {
-      cachedLinuxLibc = data.header?.glibcVersionRuntime ? "gnu" : "musl";
-    }
-  } catch {
-    // Preserve the GNU fallback when diagnostic reports are unavailable.
-  } finally {
-    report.excludeNetwork = excludeNetwork;
-  }
+  cachedLinuxLibc = detectLinuxLibc(fs);
   return cachedLinuxLibc;
 }
 
@@ -108,7 +91,7 @@ export function loadNative<T>(): T {
 
   // Local source builds stage the addon here. Published packages intentionally
   // omit this directory and resolve the platform-specific optional dependency.
-  if (existsSync(bindingPath)) return require(bindingPath) as T;
+  if (fs.existsSync(bindingPath)) return require(bindingPath) as T;
 
   const packageName = nativePackageName();
   if (!packageName) {

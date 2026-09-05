@@ -1,4 +1,5 @@
 import { createRequire } from "node:module";
+import { existsSync } from "node:fs";
 import { access, readFile } from "node:fs/promises";
 const require = createRequire(import.meta.url);
 
@@ -109,3 +110,12 @@ if (
 process.stdout.write(
   "Verified ESM and CommonJS package entrypoints, legacy executor capsule, and platform-aware function runner capsule\n",
 );
+
+// Trusted native-build CI stages an addon for this host before validating the
+// package. Pure-JS packaging jobs intentionally omit local native artifacts.
+if (process.platform === "linux") {
+  const { nativeBindingPath } = require("../lib/runtime.cjs");
+  if (existsSync(nativeBindingPath())) {
+    await import("./test-native-sandbox.mjs");
+  }
+}

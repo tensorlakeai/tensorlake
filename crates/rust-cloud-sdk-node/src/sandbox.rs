@@ -2,9 +2,9 @@
 //!
 //! Mirrors the surface `crates/rust-cloud-sdk-py` exposes to Python so both
 //! language SDKs delegate to the same Rust implementation (and therefore share
-//! its `reqwest` connection pool and HTTP/2 connection coalescing). Every
-//! method is `async` here — Node has no use for the sync variants the Python
-//! binding also exposes.
+//! its `reqwest` connection pool and HTTP/2 connection coalescing). HTTP
+//! operations are async. Synchronous constructors only retain configuration;
+//! transport and certificate initialization happens on a blocking worker.
 //!
 //! Conventions (kept identical to the Python binding):
 //! - JSON in / JSON out: request bodies and structured responses cross the
@@ -16,7 +16,9 @@
 //!   (`SandboxNotFoundError`, `PoolInUseError`, ...).
 
 use std::future::Future;
+use std::sync::Arc;
 use std::time::Duration;
+use tokio::sync::OnceCell;
 
 use napi::bindgen_prelude::Buffer;
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
@@ -30,7 +32,8 @@ use tensorlake::sandboxes::models::{
     UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
-    SandboxProxyClient, SandboxesClient, resolve_sandbox_proxy_target, select_sandbox_proxy_url,
+    SandboxProxyClient, SandboxProxyTarget, SandboxesClient, resolve_sandbox_proxy_target,
+    select_sandbox_proxy_url,
 };
 use tensorlake::{ClientBuilder, error::SdkError};
 
@@ -247,6 +250,47 @@ fn parse_snapshot_type(snapshot_type: Option<String>) -> napi::Result<Option<Sna
     }
 }
 
+// ---- Deferred HTTP transport ----------------------------------------------
+
+/// Constructors only retain configuration. The first async operation builds
+/// the transport on Tokio's blocking pool; concurrent first users share one
+/// initialization, and an initialization error can be retried on a later call.
+#[derive(Clone)]
+struct DeferredHttpClient(Arc<DeferredHttpClientInner>);
+
+struct DeferredHttpClientInner {
+    builder: ClientBuilder,
+    client: OnceCell<tensorlake::Client>,
+}
+
+impl DeferredHttpClient {
+    fn new(builder: ClientBuilder) -> Self {
+        Self(Arc::new(DeferredHttpClientInner {
+            builder,
+            client: OnceCell::new(),
+        }))
+    }
+
+    async fn get(&self) -> napi::Result<tensorlake::Client> {
+        let client = self
+            .0
+            .client
+            .get_or_try_init(|| async {
+                let builder = self.0.builder.clone();
+                tokio::task::spawn_blocking(move || builder.build())
+                    .await
+                    .map_err(|error| {
+                        napi::Error::from_reason(format!(
+                            "HTTP client initialization failed: {error}"
+                        ))
+                    })?
+                    .map_err(into_napi_error)
+            })
+            .await?;
+        Ok(client.clone())
+    }
+}
+
 // ---- Sandbox lifecycle client ---------------------------------------------
 
 /// Sandbox lifecycle, pool, and snapshot client. Owns the `reqwest`
@@ -254,8 +298,22 @@ fn parse_snapshot_type(snapshot_type: Option<String>) -> napi::Result<Option<Sna
 /// HTTP/2 connections are coalesced across every sandbox in a session.
 #[napi]
 pub struct NativeSandboxClient {
-    client: SandboxesClient,
+    client: DeferredHttpClient,
     api_url: String,
+    namespace: String,
+}
+
+impl NativeSandboxClient {
+    async fn client(&self) -> napi::Result<SandboxesClient> {
+        let client = self.client.get().await?;
+        let log_client = client.with_base_url(&self.api_url);
+        Ok(SandboxesClient::new(
+            client,
+            self.namespace.clone(),
+            is_localhost_api_url(&self.api_url),
+        )
+        .with_log_client(log_client))
+    }
 }
 
 #[napi]
@@ -273,40 +331,26 @@ impl NativeSandboxClient {
     ) -> napi::Result<Self> {
         let lifecycle_url = resolve_sandbox_lifecycle_url(&api_url);
         let mut lifecycle_builder = ClientBuilder::new(&lifecycle_url);
-        let mut api_builder = ClientBuilder::new(&api_url);
         if let Some(token) = api_key.as_deref() {
             lifecycle_builder = lifecycle_builder.bearer_token(token);
-            api_builder = api_builder.bearer_token(token);
         }
         if let (Some(org_id), Some(project_id)) =
             (organization_id.as_deref(), project_id.as_deref())
         {
             lifecycle_builder = lifecycle_builder.scope(org_id, project_id);
-            api_builder = api_builder.scope(org_id, project_id);
         }
         if let Some(ua) = user_agent.as_deref() {
             lifecycle_builder = lifecycle_builder.user_agent(ua);
-            api_builder = api_builder.user_agent(ua);
         }
         if let Some(seconds) = request_timeout_sec {
             let timeout = duration_from_seconds("request_timeout_sec", seconds)?;
             lifecycle_builder = lifecycle_builder.timeout(timeout);
-            api_builder = api_builder.timeout(timeout);
         }
 
-        let client = lifecycle_builder.build().map_err(into_napi_error)?;
-        let log_client = api_builder.build().map_err(into_napi_error)?;
-        let use_namespaced_endpoints = is_localhost_api_url(&api_url);
-        let sandboxes_client = SandboxesClient::new(
-            client,
-            namespace.unwrap_or_else(|| "default".to_string()),
-            use_namespaced_endpoints,
-        )
-        .with_log_client(log_client);
-
         Ok(Self {
-            client: sandboxes_client,
+            client: DeferredHttpClient::new(lifecycle_builder),
             api_url,
+            namespace: namespace.unwrap_or_else(|| "default".to_string()),
         })
     }
 
@@ -329,8 +373,8 @@ impl NativeSandboxClient {
     }
 
     /// Create a proxy client for `sandbox_id` that shares this client's
-    /// connection pool. Only the first sandbox in a session pays the TCP+TLS
-    /// handshake; subsequent ones reuse the coalesced HTTP/2 connection.
+    /// connection pool and deferred initialization. Requests reuse pooled
+    /// connections when the transport can serve the target from that pool.
     #[napi]
     pub fn connect_proxy(
         &self,
@@ -341,33 +385,21 @@ impl NativeSandboxClient {
     ) -> napi::Result<NativeSandboxProxyClient> {
         let target =
             resolve_sandbox_proxy_target(&proxy_url, &sandbox_id).map_err(into_napi_error)?;
-        let shared_client = if let Some(seconds) = request_timeout_sec {
-            self.client
-                .http_client()
-                .with_base_url_and_timeout(
-                    &target.base_url,
-                    Some(duration_from_seconds("request_timeout_sec", seconds)?),
-                )
-                .map_err(into_napi_error)?
-        } else {
-            self.client
-                .http_client()
-                .with_base_url_without_timeout(&target.base_url)
-                .map_err(into_napi_error)?
-        };
-        let proxy = SandboxProxyClient::new(shared_client, target.host_override)
-            .with_sandbox_id(target.sandbox_id_header)
-            .with_routing_hint(routing_hint);
+        let timeout = request_timeout_sec
+            .map(|seconds| duration_from_seconds("request_timeout_sec", seconds))
+            .transpose()?;
         Ok(NativeSandboxProxyClient {
-            client: proxy,
-            base_url: target.base_url,
+            client: self.client.clone(),
+            target,
+            routing_hint,
+            timeout,
         })
     }
 
     #[napi]
     pub async fn create_sandbox(&self, request_json: String) -> napi::Result<TracedJson> {
         let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
-        let client = self.client.clone();
+        let client = self.client().await?;
         // Create is not retried: it is not idempotent.
         let traced = client.create(&request).await.map_err(into_napi_error)?;
         let json =
@@ -384,7 +416,7 @@ impl NativeSandboxClient {
         pool_id: String,
         request_json: Option<String>,
     ) -> napi::Result<TracedJson> {
-        let client = self.client.clone();
+        let client = self.client().await?;
         let request = request_json
             .as_deref()
             .map(parse_json_payload::<ClaimSandboxRequest>)
@@ -404,7 +436,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn copy_sandbox(&self, sandbox_id: String, times: u32) -> napi::Result<TracedJson> {
-        let client = self.client.clone();
+        let client = self.client().await?;
         let traced = client
             .copy(&sandbox_id, times as usize)
             .await
@@ -419,7 +451,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn get_sandbox(&self, sandbox_id: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             async move {
                 let traced = c.get(&sandbox_id).await?;
@@ -433,7 +465,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn list_sandboxes(&self) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
+        with_retry(self.client().await?, 5, move |c| async move {
             let traced = c.list().await?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&serde_json::json!({ "sandboxes": *traced }))?;
@@ -450,7 +482,7 @@ impl NativeSandboxClient {
         direction: Option<String>,
     ) -> napi::Result<TracedJson> {
         let params = parse_archived_sandboxes_params(limit, cursor, direction)?;
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let params = params.clone();
             async move {
                 let traced = c.list_archived(&params).await?;
@@ -464,7 +496,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn get_archived_sandbox(&self, sandbox_id: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             async move {
                 let traced = c.get_archived(&sandbox_id).await?;
@@ -479,7 +511,7 @@ impl NativeSandboxClient {
     #[napi]
     pub async fn get_sandbox_logs(&self, request_json: String) -> napi::Result<TracedJson> {
         let request: GetSandboxLogsRequest = parse_json_payload(&request_json)?;
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let request = request.clone();
             async move {
                 let traced = c.get_logs(&request).await?;
@@ -493,7 +525,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn list_sandbox_log_processes(&self, sandbox_id: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             async move {
                 let traced = c.list_log_processes(&sandbox_id).await?;
@@ -512,7 +544,7 @@ impl NativeSandboxClient {
         request_json: String,
     ) -> napi::Result<TracedJson> {
         let request: UpdateSandboxRequest = parse_json_payload(&request_json)?;
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             let request = request.clone();
             async move {
@@ -527,7 +559,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn delete_sandbox(&self, sandbox_id: String) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             async move { c.delete(&sandbox_id).await.map(|t| t.trace_id) }
         })
@@ -536,7 +568,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn suspend_sandbox(&self, sandbox_id: String) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             async move { c.suspend(&sandbox_id).await.map(|t| t.trace_id) }
         })
@@ -545,7 +577,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn resume_sandbox(&self, sandbox_id: String) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
         })
@@ -553,6 +585,7 @@ impl NativeSandboxClient {
     }
 
     #[napi]
+    #[allow(clippy::too_many_arguments)]
     pub async fn attach_file_system(
         &self,
         sandbox_id: String,
@@ -565,7 +598,7 @@ impl NativeSandboxClient {
     ) -> napi::Result<TracedJson> {
         let read_only = read_only.unwrap_or(false);
         let prefetch = prefetch.unwrap_or(false);
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             let file_system_id = file_system_id.clone();
             let mount_path = mount_path.clone();
@@ -597,7 +630,7 @@ impl NativeSandboxClient {
         sandbox_id: String,
         mount_path: String,
     ) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             let mount_path = mount_path.clone();
             async move {
@@ -617,7 +650,7 @@ impl NativeSandboxClient {
         snapshot_type: Option<String>,
     ) -> napi::Result<TracedJson> {
         let parsed_type = parse_snapshot_type(snapshot_type)?;
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
             async move {
                 let traced = c.snapshot(&sandbox_id, parsed_type).await?;
@@ -631,7 +664,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn get_snapshot(&self, snapshot_id: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let snapshot_id = snapshot_id.clone();
             async move {
                 let traced = c.get_snapshot(&snapshot_id).await?;
@@ -645,7 +678,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn list_snapshots(&self) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
+        with_retry(self.client().await?, 5, move |c| async move {
             let traced = c.list_snapshots().await?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&serde_json::json!({ "snapshots": *traced }))?;
@@ -656,7 +689,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn delete_snapshot(&self, snapshot_id: String) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let snapshot_id = snapshot_id.clone();
             async move { c.delete_snapshot(&snapshot_id).await.map(|t| t.trace_id) }
         })
@@ -666,7 +699,7 @@ impl NativeSandboxClient {
     #[napi]
     pub async fn create_pool(&self, request_json: String) -> napi::Result<TracedJson> {
         let request: CreateSandboxPoolRequest = parse_json_payload(&request_json)?;
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let request = request.clone();
             async move {
                 let traced = c.create_pool_with_network(&request).await?;
@@ -680,7 +713,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn get_pool(&self, pool_id: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let pool_id = pool_id.clone();
             async move {
                 let traced = c.get_pool(&pool_id).await?;
@@ -694,7 +727,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn list_pools(&self) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
+        with_retry(self.client().await?, 5, move |c| async move {
             let traced = c.list_pools().await?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&serde_json::json!({ "pools": *traced }))?;
@@ -710,7 +743,7 @@ impl NativeSandboxClient {
         request_json: String,
     ) -> napi::Result<TracedJson> {
         let request: UpdateSandboxPoolRequest = parse_json_payload(&request_json)?;
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let pool_id = pool_id.clone();
             let request = request.clone();
             async move {
@@ -725,7 +758,7 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn delete_pool(&self, pool_id: String) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let pool_id = pool_id.clone();
             async move { c.delete_pool(&pool_id).await.map(|t| t.trace_id) }
         })
@@ -740,8 +773,26 @@ impl NativeSandboxClient {
 /// constructor.
 #[napi]
 pub struct NativeSandboxProxyClient {
-    client: SandboxProxyClient,
-    base_url: String,
+    client: DeferredHttpClient,
+    target: SandboxProxyTarget,
+    routing_hint: Option<String>,
+    timeout: Option<Duration>,
+}
+
+impl NativeSandboxProxyClient {
+    async fn client(&self) -> napi::Result<SandboxProxyClient> {
+        let client = self
+            .client
+            .get()
+            .await?
+            .with_base_url_and_timeout(&self.target.base_url, self.timeout)
+            .map_err(into_napi_error)?;
+        Ok(
+            SandboxProxyClient::new(client, self.target.host_override.clone())
+                .with_sandbox_id(self.target.sandbox_id_header.clone())
+                .with_routing_hint(self.routing_hint.clone()),
+        )
+    }
 }
 
 #[napi]
@@ -773,24 +824,20 @@ impl NativeSandboxProxyClient {
         if let Some(ua) = user_agent.as_deref() {
             builder = builder.user_agent(ua);
         }
-        if let Some(seconds) = request_timeout_sec {
-            builder = builder.timeout(duration_from_seconds("request_timeout_sec", seconds)?);
-        }
-
-        let client = builder.build().map_err(into_napi_error)?;
-        let proxy = SandboxProxyClient::new(client, target.host_override)
-            .with_sandbox_id(target.sandbox_id_header)
-            .with_routing_hint(routing_hint);
-
+        let timeout = request_timeout_sec
+            .map(|seconds| duration_from_seconds("request_timeout_sec", seconds))
+            .transpose()?;
         Ok(Self {
-            client: proxy,
-            base_url: target.base_url,
+            client: DeferredHttpClient::new(builder),
+            target,
+            routing_hint,
+            timeout,
         })
     }
 
     #[napi]
     pub fn base_url(&self) -> String {
-        self.base_url.clone()
+        self.target.base_url.clone()
     }
 
     // -- Process management --
@@ -798,7 +845,7 @@ impl NativeSandboxProxyClient {
     #[napi]
     pub async fn start_process(&self, payload_json: String) -> napi::Result<TracedJson> {
         let payload: Value = parse_json_payload(&payload_json)?;
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let payload = payload.clone();
             async move {
                 let traced = c.start_process(&payload).await?;
@@ -812,7 +859,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn list_processes(&self) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
+        with_retry(self.client().await?, 5, move |c| async move {
             let traced = c.list_processes().await?;
             let trace_id = traced.trace_id.clone();
             let processes = traced.into_inner();
@@ -826,7 +873,7 @@ impl NativeSandboxProxyClient {
     // attempt because `with_retry` may invoke the closure more than once.
     #[napi]
     pub async fn get_process(&self, process: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let process = process.clone();
             async move {
                 let traced = c.get_process(process).await?;
@@ -840,7 +887,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn kill_process(&self, process: String) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let process = process.clone();
             async move { c.kill_process(process).await.map(|t| t.trace_id) }
         })
@@ -849,7 +896,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn restart_process(&self, process: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let process = process.clone();
             async move {
                 let traced = c.restart_process(process).await?;
@@ -863,7 +910,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn send_signal(&self, process: String, signal: i32) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let process = process.clone();
             async move {
                 let traced = c.send_signal(process, signal as i64).await?;
@@ -878,7 +925,7 @@ impl NativeSandboxProxyClient {
     #[napi]
     pub async fn write_stdin(&self, process: String, data: Buffer) -> napi::Result<String> {
         let bytes = data.to_vec();
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let process = process.clone();
             let bytes = bytes.clone();
             async move { c.write_stdin(process, bytes).await.map(|t| t.trace_id) }
@@ -888,7 +935,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn close_stdin(&self, process: String) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let process = process.clone();
             async move { c.close_stdin(process).await.map(|t| t.trace_id) }
         })
@@ -897,7 +944,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn get_stdout(&self, process: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let process = process.clone();
             async move {
                 let traced = c.get_stdout(process).await?;
@@ -911,7 +958,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn get_stderr(&self, process: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let process = process.clone();
             async move {
                 let traced = c.get_stderr(process).await?;
@@ -925,7 +972,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn get_output(&self, process: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let process = process.clone();
             async move {
                 let traced = c.get_output(process).await?;
@@ -945,7 +992,8 @@ impl NativeSandboxProxyClient {
         process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> napi::Result<String> {
-        self.client
+        self.client()
+            .await?
             .clone()
             .follow_stdout_streaming(process, move |event| emit_event(&emit, event))
             .await
@@ -958,7 +1006,8 @@ impl NativeSandboxProxyClient {
         process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> napi::Result<String> {
-        self.client
+        self.client()
+            .await?
             .clone()
             .follow_stderr_streaming(process, move |event| emit_event(&emit, event))
             .await
@@ -971,7 +1020,8 @@ impl NativeSandboxProxyClient {
         process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> napi::Result<String> {
-        self.client
+        self.client()
+            .await?
             .clone()
             .follow_output_streaming(process, move |event| emit_event(&emit, event))
             .await
@@ -987,7 +1037,8 @@ impl NativeSandboxProxyClient {
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> napi::Result<String> {
         let payload: Value = parse_json_payload(&payload_json)?;
-        self.client
+        self.client()
+            .await?
             .clone()
             .run_process_streaming(&payload, move |event| emit_event(&emit, event))
             .await
@@ -1001,8 +1052,8 @@ impl NativeSandboxProxyClient {
         let payload: Value = parse_json_payload(&payload_json)?;
         // Not retried: running a process is not idempotent.
         let traced = self
-            .client
-            .clone()
+            .client()
+            .await?
             .run_process(&payload)
             .await
             .map_err(into_napi_error)?;
@@ -1020,7 +1071,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn read_file(&self, path: String) -> napi::Result<TracedBytes> {
-        let (trace_id, data): (String, Vec<u8>) = with_retry(self.client.clone(), 5, move |c| {
+        let (trace_id, data): (String, Vec<u8>) = with_retry(self.client().await?, 5, move |c| {
             let path = path.clone();
             async move {
                 let traced = c.read_file(&path).await?;
@@ -1039,7 +1090,7 @@ impl NativeSandboxProxyClient {
     #[napi]
     pub async fn write_file(&self, path: String, content: Buffer) -> napi::Result<String> {
         let bytes = content.to_vec();
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let path = path.clone();
             let bytes = bytes.clone();
             async move { c.write_file(&path, bytes).await.map(|t| t.trace_id) }
@@ -1049,7 +1100,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn upload_file(&self, path: String, local_path: String) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let path = path.clone();
             let local_path = local_path.clone();
             async move { c.upload_file(&path, local_path).await.map(|t| t.trace_id) }
@@ -1059,7 +1110,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn delete_file(&self, path: String) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let path = path.clone();
             async move { c.delete_file(&path).await.map(|t| t.trace_id) }
         })
@@ -1068,7 +1119,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn list_directory(&self, path: String) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let path = path.clone();
             async move {
                 let traced = c.list_directory(&path).await?;
@@ -1085,7 +1136,7 @@ impl NativeSandboxProxyClient {
     #[napi]
     pub async fn create_pty_session(&self, payload_json: String) -> napi::Result<TracedJson> {
         let payload: Value = parse_json_payload(&payload_json)?;
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let payload = payload.clone();
             async move {
                 let traced = c.create_pty_session(&payload).await?;
@@ -1099,7 +1150,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn delete_pty_session(&self, session_id: String) -> napi::Result<String> {
-        with_retry(self.client.clone(), 5, move |c| {
+        with_retry(self.client().await?, 5, move |c| {
             let session_id = session_id.clone();
             async move { c.delete_pty_session(&session_id).await.map(|t| t.trace_id) }
         })
@@ -1108,7 +1159,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn health(&self) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
+        with_retry(self.client().await?, 5, move |c| async move {
             let traced = c.health().await?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced)?;
@@ -1119,7 +1170,7 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn info(&self) -> napi::Result<TracedJson> {
-        with_retry(self.client.clone(), 5, move |c| async move {
+        with_retry(self.client().await?, 5, move |c| async move {
             let traced = c.info().await?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced)?;

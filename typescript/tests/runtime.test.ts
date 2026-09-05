@@ -52,14 +52,11 @@ describe("runtime native binding selection", () => {
 
 const require = createRequire(import.meta.url);
 const runtimePath = require.resolve("../lib/runtime.cjs");
-const processReport = process.report as NodeJS.ProcessReport & { excludeNetwork: boolean };
 
 describe.each(["SDK", "CommonJS launcher"])("%s libc detection", (loader) => {
   let runtime: typeof import("../src/native-binding.js");
-  let originalExcludeNetwork: boolean;
 
   beforeEach(async () => {
-    originalExcludeNetwork = processReport.excludeNetwork;
     vi.resetModules();
     delete require.cache[runtimePath];
     runtime = loader === "SDK"
@@ -69,80 +66,44 @@ describe.each(["SDK", "CommonJS launcher"])("%s libc detection", (loader) => {
 
   afterEach(() => {
     vi.restoreAllMocks();
-    processReport.excludeNetwork = originalExcludeNetwork;
+    vi.unstubAllEnvs();
     delete require.cache[runtimePath];
   });
 
-  it.runIf(process.platform === "linux").each([
-    { header: { glibcVersionRuntime: "2.35" }, suffix: "" },
-    { header: {}, suffix: "-musl" },
-  ])("probes only once across target, path and package lookup ($suffix)", ({ header, suffix }) => {
-    processReport.excludeNetwork = false;
-    const reportOptions: boolean[] = [];
-    const getReport = vi.spyOn(process.report, "getReport").mockImplementation(() => {
-      reportOptions.push(processReport.excludeNetwork);
-      return { header } as ReturnType<typeof process.report.getReport>;
-    });
-
-    for (let i = 0; i < 3; i++) {
-      expect(runtime.nativeTargetId("linux", "x64")).toBe(`linux-x64${suffix}`);
+  it.runIf(process.platform === "linux").each(["gnu", "musl"] as const)(
+    "detects and caches %s without diagnostic reports",
+    (libc) => {
+      vi.stubEnv("TENSORLAKE_NODE_LIBC", libc);
+      const getReport = vi.spyOn(process.report, "getReport").mockImplementation(() => {
+        throw new Error("SDK must not generate diagnostic reports");
+      });
+      const target = libc === "musl" ? "linux-x64-musl" : "linux-x64";
+      expect(runtime.nativeTargetId("linux", "x64")).toBe(target);
+      vi.stubEnv("TENSORLAKE_NODE_LIBC", "invalid-after-detection");
       expect(runtime.nativeBindingPath({ platform: "linux", arch: "x64" })).toContain(
-        path.join("native", `linux-x64${suffix}`, "tensorlake-node.node"),
+        path.join("native", target, "tensorlake-node.node"),
       );
       expect(runtime.nativePackageName("linux", "x64")).toBe(
-        suffix ? "@tensorlake/native-linux-x64-musl" : "@tensorlake/native-linux-x64-gnu",
+        libc === "musl" ? "@tensorlake/native-linux-x64-musl" : "@tensorlake/native-linux-x64-gnu",
       );
-    }
-    expect(getReport).toHaveBeenCalledTimes(1);
-    expect(reportOptions).toEqual([true]);
-  });
-
-  it.runIf(process.platform === "linux").each([false, true])(
-    "restores excludeNetwork=%s after detection succeeds or throws",
-    async (excludeNetwork) => {
-      processReport.excludeNetwork = excludeNetwork;
-      const reportOptions: boolean[] = [];
-      const getReport = vi.spyOn(process.report, "getReport").mockImplementation(() => {
-        reportOptions.push(processReport.excludeNetwork);
-        return { header: { glibcVersionRuntime: "2.35" } } as ReturnType<typeof process.report.getReport>;
-      });
-      expect(runtime.nativeTargetId("linux", "x64")).toBe("linux-x64");
-      expect(processReport.excludeNetwork).toBe(excludeNetwork);
-
-      vi.resetModules();
-      delete require.cache[runtimePath];
-      runtime = loader === "SDK"
-        ? await import("../src/native-binding.js")
-        : require(runtimePath);
-      getReport.mockImplementation(() => {
-        reportOptions.push(processReport.excludeNetwork);
-        throw new Error("report unavailable");
-      });
-      expect(runtime.nativeTargetId("linux", "x64")).toBe("linux-x64");
-      expect(processReport.excludeNetwork).toBe(excludeNetwork);
-      expect(runtime.nativeTargetId("linux", "x64")).toBe("linux-x64");
-      expect(getReport).toHaveBeenCalledTimes(2);
-      expect(reportOptions).toEqual([true, true]);
+      expect(runtime.nativeTargetId("linux", "x64", { libc: "musl" })).toBe("linux-x64-musl");
+      expect(runtime.nativeTargetId("linux", "x64", { report: { header: {} } })).toBe("linux-x64-musl");
+      expect(runtime.nativeTargetId("linux", "x64")).toBe(target);
+      expect(getReport).not.toHaveBeenCalled();
     },
   );
 
-  it("does not probe for explicit inputs or non-Linux targets", () => {
-    const getReport = vi.spyOn(process.report, "getReport");
+  it("does not detect the host libc for explicit inputs or non-Linux targets", () => {
+    vi.stubEnv("TENSORLAKE_NODE_LIBC", "invalid");
     expect(runtime.nativeTargetId("linux", "x64", { libc: "gnu" })).toBe("linux-x64");
     expect(runtime.nativeTargetId("linux", "x64", { report: { header: {} } })).toBe("linux-x64-musl");
     expect(runtime.nativeTargetId("darwin", "arm64")).toBe("darwin-arm64");
-    expect(getReport).not.toHaveBeenCalled();
   });
 
-  it.runIf(process.platform === "linux")("keeps explicit inputs independent of cached detection", () => {
-    const getReport = vi.spyOn(process.report, "getReport").mockReturnValue(
-      { header: { glibcVersionRuntime: "2.35" } } as ReturnType<typeof process.report.getReport>,
-    );
-    expect(runtime.nativeTargetId("linux", "x64", { report: { header: {} } })).toBe("linux-x64-musl");
+  it.runIf(process.platform === "linux")("does not cache failed detection", () => {
+    vi.stubEnv("TENSORLAKE_NODE_LIBC", "invalid");
+    expect(() => runtime.nativeTargetId()).toThrow("TENSORLAKE_NODE_LIBC");
+    vi.stubEnv("TENSORLAKE_NODE_LIBC", "gnu");
     expect(runtime.nativeTargetId("linux", "x64")).toBe("linux-x64");
-    expect(runtime.nativeTargetId("linux", "x64", { libc: "musl" })).toBe("linux-x64-musl");
-    expect(runtime.nativeTargetId("linux", "x64", { report: { header: {} } })).toBe("linux-x64-musl");
-    expect(runtime.nativeTargetId("linux", "x64")).toBe("linux-x64");
-    expect(getReport).toHaveBeenCalledTimes(1);
   });
 });

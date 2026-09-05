@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+const { detectLinuxLibc } = require("./libc.cjs");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
@@ -32,24 +33,7 @@ function linuxLibcFamily(options = {}) {
   }
   if (cachedLinuxLibc != null) return cachedLinuxLibc;
 
-  // libc cannot change during the process lifetime. Generating a diagnostic
-  // report can block on network lookups, so omit those and only probe once.
-  // Keep this in sync with src/native-binding.ts, used by the SDK bundles.
-  cachedLinuxLibc = "gnu";
-  const report = process.report;
-  if (!report?.getReport) return cachedLinuxLibc;
-  const excludeNetwork = report.excludeNetwork;
-  try {
-    report.excludeNetwork = true;
-    const data = report.getReport();
-    if (data) {
-      cachedLinuxLibc = data.header?.glibcVersionRuntime ? "gnu" : "musl";
-    }
-  } catch {
-    // Preserve the GNU fallback when diagnostic reports are unavailable.
-  } finally {
-    report.excludeNetwork = excludeNetwork;
-  }
+  cachedLinuxLibc = detectLinuxLibc(fs);
   return cachedLinuxLibc;
 }
 

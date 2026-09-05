@@ -91,6 +91,7 @@ pub struct Client {
 /// Builder for creating a [`Client`] with a fluent API.
 ///
 /// The base URL is required, while bearer token, middlewares, and scope are optional.
+#[derive(Clone)]
 pub struct ClientBuilder {
     base_url: String,
     bearer_token: Option<String>,
@@ -193,7 +194,7 @@ impl ClientBuilder {
             .user_agent
             .as_deref()
             .unwrap_or(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")));
-        let base_client = new_base_client(&default_headers, ua, self.timeout)?;
+        let base_client = new_base_client(&default_headers, ua)?;
         let mut builder = ReqwestClientBuilder::new(base_client.clone());
 
         for middleware in &self.middlewares {
@@ -254,16 +255,9 @@ impl Client {
         new_url: &str,
         timeout: Option<Duration>,
     ) -> Result<Self, SdkError> {
-        let base_client = new_base_client(&self.default_headers, &self.user_agent, timeout)?;
-        let client = ReqwestClientBuilder::new(base_client.clone()).build();
-        Ok(Self {
-            base_url: new_url.to_string(),
-            base_client,
-            client,
-            default_headers: self.default_headers.clone(),
-            user_agent: self.user_agent.clone(),
-            timeout,
-        })
+        let mut client = self.with_base_url(new_url);
+        client.timeout = timeout;
+        Ok(client)
     }
 
     fn prepare_request(&self, request: &mut Request) {
@@ -284,6 +278,12 @@ impl Client {
     }
 
     fn insert_request_timeout_header(&self, request: &mut Request) {
+        // Timeouts belong to requests, so clients with different deadlines can
+        // share the same transport and TLS configuration. Preserve an explicit
+        // per-request timeout when the caller supplied one.
+        if request.timeout().is_none() {
+            *request.timeout_mut() = self.timeout;
+        }
         let Some(timeout) = self.timeout else {
             return;
         };
@@ -370,7 +370,11 @@ impl Client {
         method: reqwest::Method,
         path: &str,
     ) -> reqwest_middleware::RequestBuilder {
-        self.client.request(method, self.base_url.clone() + path)
+        let request = self.client.request(method, self.base_url.clone() + path);
+        match self.timeout {
+            Some(timeout) => request.timeout(timeout),
+            None => request,
+        }
     }
 
     pub async fn build_event_source_request<T>(
@@ -387,6 +391,7 @@ impl Client {
             .header(ACCEPT, "text/event-stream")
             .header("traceparent", traceparent);
         if let Some(timeout) = self.timeout {
+            request_builder = request_builder.timeout(timeout);
             let millis = timeout.as_millis();
             if millis > 0 {
                 request_builder =
@@ -547,19 +552,12 @@ fn ensure_rustls_provider() {
     });
 }
 
-fn new_base_client(
-    headers: &HeaderMap,
-    user_agent: &str,
-    timeout: Option<Duration>,
-) -> Result<reqwest::Client, SdkError> {
+fn new_base_client(headers: &HeaderMap, user_agent: &str) -> Result<reqwest::Client, SdkError> {
     ensure_rustls_provider();
 
-    let mut builder = reqwest::Client::builder()
+    let builder = reqwest::Client::builder()
         .user_agent(user_agent)
         .default_headers(headers.clone());
-    if let Some(timeout) = timeout {
-        builder = builder.timeout(timeout);
-    }
     let client = builder.build()?;
     Ok(client)
 }
@@ -573,7 +571,113 @@ mod tests {
         net::TcpListener,
         sync::mpsc,
         thread,
+        time::Duration,
     };
+
+    #[tokio::test]
+    async fn clients_with_different_timeouts_reuse_the_connection_pool() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        // One accepted socket must serve all three clients. If a client
+        // rebuilds the pool, its request times out instead of using this socket.
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            for _ in 0..3 {
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                }
+                stream
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n")
+                    .await
+                    .unwrap();
+            }
+        });
+        let client = ClientBuilder::new(&url)
+            .timeout(Duration::from_secs(1))
+            .build()
+            .unwrap();
+        let unbounded = client.with_base_url_without_timeout(&url).unwrap();
+        let longer = client
+            .with_base_url_and_timeout(&url, Some(Duration::from_secs(2)))
+            .unwrap();
+        for current in [&client, &unbounded, &longer] {
+            let request = current.request(Method::GET, "/").build().unwrap();
+            tokio::time::timeout(Duration::from_secs(3), current.execute_raw(request))
+                .await
+                .unwrap()
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap();
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn proxy_can_remove_lifecycle_timeout_without_rebuilding_transport() {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = tokio::spawn(async move {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                tokio::spawn(async move {
+                    let mut request = Vec::new();
+                    while !request.ends_with(b"\r\n\r\n") {
+                        request.push(stream.read_u8().await.unwrap());
+                    }
+                    tokio::time::sleep(Duration::from_millis(150)).await;
+                    let _ = stream
+                        .write_all(
+                            b"HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+                        )
+                        .await;
+                });
+            }
+        });
+        let client = ClientBuilder::new(&url)
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        let request = client.request(Method::GET, "/").build().unwrap();
+        assert!(
+            matches!(client.execute_raw(request).await.unwrap_err(), crate::error::SdkError::Middleware(error) if error.is_timeout())
+        );
+
+        let proxy = client.with_base_url_without_timeout(&url).unwrap();
+        let request = proxy.request(Method::GET, "/").build().unwrap();
+        assert!(request.timeout().is_none());
+        tokio::time::timeout(Duration::from_secs(3), proxy.execute_raw(request))
+            .await
+            .unwrap()
+            .unwrap();
+
+        let request = proxy
+            .request(Method::GET, "/")
+            .timeout(Duration::from_millis(20))
+            .build()
+            .unwrap();
+        assert!(
+            matches!(proxy.execute_raw(request).await.unwrap_err(), crate::error::SdkError::Middleware(error) if error.is_timeout())
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn request_deadlines_are_preserved_when_preparing_external_requests() {
+        let client = ClientBuilder::new("http://localhost")
+            .timeout(Duration::from_secs(2))
+            .build()
+            .unwrap();
+        let mut request = reqwest::Request::new(Method::GET, "http://localhost/".parse().unwrap());
+        client.prepare_request(&mut request);
+        assert_eq!(request.timeout(), Some(&Duration::from_secs(2)));
+        *request.timeout_mut() = Some(Duration::from_millis(100));
+        client.prepare_request(&mut request);
+        assert_eq!(request.timeout(), Some(&Duration::from_millis(100)));
+    }
 
     #[test]
     fn installs_rustls_provider() {

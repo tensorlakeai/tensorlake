@@ -2,6 +2,17 @@
 
 The TypeScript SDK supports Tensorlake sandboxes on Node.js 22 or newer. Deploying and running durable TypeScript applications requires Node.js 24 or newer. Application handlers are async-only and values crossing a function boundary must be JSON values or a direct `File`. Application entrypoints can also receive an exact raw request body with `HttpBody`.
 
+Sandbox handles retain connection configuration without loading TLS certificates.
+Their first HTTP operation initializes the native transport on a background thread;
+concurrent operations share that initialization and proxies reuse its connection pool.
+Initialization failures reject the operation and can be retried by a later operation.
+Creating a new client picks up changes to the system's trusted certificates.
+
+On Linux, native binding selection reads the Node executable's ELF interpreter
+without generating diagnostic reports. For a nonstandard or statically linked Node
+executable, set `TENSORLAKE_NODE_LIBC=gnu` or `TENSORLAKE_NODE_LIBC=musl` before using
+the SDK.
+
 ```ts
 import { registerApplication, registerFunction } from "tensorlake/applications";
 
