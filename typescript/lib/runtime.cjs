@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+const { detectLinuxLibc } = require("./libc.cjs");
 const fs = require("node:fs");
 const path = require("node:path");
 const { spawnSync } = require("node:child_process");
@@ -21,25 +22,19 @@ function baseTargetId(platform = process.platform, arch = process.arch) {
   return `${platform}-${arch}`;
 }
 
+let cachedLinuxLibc;
+
 function linuxLibcFamily(options = {}) {
   if (options.libc === "gnu" || options.libc === "musl") {
     return options.libc;
   }
-
-  try {
-    const report =
-      options.report ?? (process.report?.getReport ? process.report.getReport() : undefined);
-    if (!report) {
-      return "gnu";
-    }
-    if (report?.header?.glibcVersionRuntime) {
-      return "gnu";
-    }
-  } catch {
-    return "gnu";
+  if (options.report != null) {
+    return options.report.header?.glibcVersionRuntime ? "gnu" : "musl";
   }
+  if (cachedLinuxLibc != null) return cachedLinuxLibc;
 
-  return "musl";
+  cachedLinuxLibc = detectLinuxLibc(fs);
+  return cachedLinuxLibc;
 }
 
 function packageTargetId(platform = process.platform, arch = process.arch, options = {}) {

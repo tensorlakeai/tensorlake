@@ -1005,8 +1005,24 @@ impl SandboxProxyClient {
     pub async fn follow_stdout_streaming(
         &self,
         process: impl Into<ProcessRef>,
-        on_event: impl FnMut(OutputEvent),
+        mut on_event: impl FnMut(OutputEvent),
     ) -> Result<String, SdkError> {
+        self.follow_stdout_streaming_async(process, |event| {
+            on_event(event);
+            std::future::ready(Ok(()))
+        })
+        .await
+    }
+
+    /// Await consumer capacity before reading the next event.
+    pub async fn follow_stdout_streaming_async<F>(
+        &self,
+        process: impl Into<ProcessRef>,
+        on_event: impl FnMut(OutputEvent) -> F,
+    ) -> Result<String, SdkError>
+    where
+        F: std::future::Future<Output = Result<(), SdkError>>,
+    {
         let seg = process.into().to_path_segment();
         self.follow_stream_cb(&format!("/api/v1/processes/{seg}/stdout/follow"), on_event)
             .await
@@ -1015,8 +1031,24 @@ impl SandboxProxyClient {
     pub async fn follow_stderr_streaming(
         &self,
         process: impl Into<ProcessRef>,
-        on_event: impl FnMut(OutputEvent),
+        mut on_event: impl FnMut(OutputEvent),
     ) -> Result<String, SdkError> {
+        self.follow_stderr_streaming_async(process, |event| {
+            on_event(event);
+            std::future::ready(Ok(()))
+        })
+        .await
+    }
+
+    /// Await consumer capacity before reading the next event.
+    pub async fn follow_stderr_streaming_async<F>(
+        &self,
+        process: impl Into<ProcessRef>,
+        on_event: impl FnMut(OutputEvent) -> F,
+    ) -> Result<String, SdkError>
+    where
+        F: std::future::Future<Output = Result<(), SdkError>>,
+    {
         let seg = process.into().to_path_segment();
         self.follow_stream_cb(&format!("/api/v1/processes/{seg}/stderr/follow"), on_event)
             .await
@@ -1025,8 +1057,24 @@ impl SandboxProxyClient {
     pub async fn follow_output_streaming(
         &self,
         process: impl Into<ProcessRef>,
-        on_event: impl FnMut(OutputEvent),
+        mut on_event: impl FnMut(OutputEvent),
     ) -> Result<String, SdkError> {
+        self.follow_output_streaming_async(process, |event| {
+            on_event(event);
+            std::future::ready(Ok(()))
+        })
+        .await
+    }
+
+    /// Await consumer capacity before reading the next event.
+    pub async fn follow_output_streaming_async<F>(
+        &self,
+        process: impl Into<ProcessRef>,
+        on_event: impl FnMut(OutputEvent) -> F,
+    ) -> Result<String, SdkError>
+    where
+        F: std::future::Future<Output = Result<(), SdkError>>,
+    {
         let seg = process.into().to_path_segment();
         self.follow_stream_cb(&format!("/api/v1/processes/{seg}/output/follow"), on_event)
             .await
@@ -1051,6 +1099,22 @@ impl SandboxProxyClient {
         payload: &Value,
         mut on_event: impl FnMut(RunProcessEvent),
     ) -> Result<String, SdkError> {
+        self.run_process_streaming_async(payload, |event| {
+            on_event(event);
+            std::future::ready(Ok(()))
+        })
+        .await
+    }
+
+    /// Await consumer capacity before reading the next lifecycle event.
+    pub async fn run_process_streaming_async<F>(
+        &self,
+        payload: &Value,
+        mut on_event: impl FnMut(RunProcessEvent) -> F,
+    ) -> Result<String, SdkError>
+    where
+        F: std::future::Future<Output = Result<(), SdkError>>,
+    {
         let path = "/api/v1/processes/run";
         let req = self
             .request(Method::POST, path)
@@ -1095,16 +1159,19 @@ impl SandboxProxyClient {
             });
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
-            on_event(event?);
+            on_event(event?).await?;
         }
         Ok(trace_id)
     }
 
-    async fn follow_stream_cb(
+    async fn follow_stream_cb<F>(
         &self,
         path: &str,
-        mut on_event: impl FnMut(OutputEvent),
-    ) -> Result<String, SdkError> {
+        mut on_event: impl FnMut(OutputEvent) -> F,
+    ) -> Result<String, SdkError>
+    where
+        F: std::future::Future<Output = Result<(), SdkError>>,
+    {
         let req = self
             .request(Method::GET, path)
             .header(ACCEPT, "text/event-stream")
@@ -1137,7 +1204,7 @@ impl SandboxProxyClient {
             });
         futures::pin_mut!(stream);
         while let Some(event) = stream.next().await {
-            on_event(event?);
+            on_event(event?).await?;
         }
         Ok(trace_id)
     }

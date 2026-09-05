@@ -1,4 +1,5 @@
-import { existsSync } from "node:fs";
+import { detectLinuxLibc } from "../lib/libc.cjs";
+import * as fs from "node:fs";
 import { createRequire } from "node:module";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -31,21 +32,23 @@ const NATIVE_PACKAGES: Readonly<Record<string, string>> = {
 
 function packageRoot(): string {
   const parent = fileURLToPath(new URL("../", import.meta.url));
-  if (existsSync(path.join(parent, "package.json"))) return parent;
+  if (fs.existsSync(path.join(parent, "package.json"))) return parent;
   const grandparent = fileURLToPath(new URL("../../", import.meta.url));
-  if (existsSync(path.join(grandparent, "package.json"))) return grandparent;
+  if (fs.existsSync(path.join(grandparent, "package.json"))) return grandparent;
   return parent;
 }
 
+let cachedLinuxLibc: "gnu" | "musl" | undefined;
+
 function linuxLibcFamily(options: TargetOptions): "gnu" | "musl" {
   if (options.libc != null) return options.libc;
-  try {
-    const report = options.report ?? process.report?.getReport() as RuntimeReport | undefined;
-    if (report?.header?.glibcVersionRuntime) return "gnu";
-  } catch {
-    return "gnu";
+  if (options.report != null) {
+    return options.report.header?.glibcVersionRuntime ? "gnu" : "musl";
   }
-  return "musl";
+  if (cachedLinuxLibc != null) return cachedLinuxLibc;
+
+  cachedLinuxLibc = detectLinuxLibc(fs);
+  return cachedLinuxLibc;
 }
 
 export function nativeTargetId(
@@ -88,7 +91,7 @@ export function loadNative<T>(): T {
 
   // Local source builds stage the addon here. Published packages intentionally
   // omit this directory and resolve the platform-specific optional dependency.
-  if (existsSync(bindingPath)) return require(bindingPath) as T;
+  if (fs.existsSync(bindingPath)) return require(bindingPath) as T;
 
   const packageName = nativePackageName();
   if (!packageName) {

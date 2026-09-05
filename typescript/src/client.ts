@@ -1,6 +1,7 @@
 import * as defaults from "./defaults.js";
 import { SandboxError } from "./errors.js";
 import type { Traced } from "./http.js";
+import { releaseNativeHandle } from "./native-worker-client.js";
 import {
   callNative,
   loadNativeSandboxBinding,
@@ -196,7 +197,7 @@ export class SandboxClient {
   }
 
   close(): void {
-    // The native client releases its connection pool on GC; nothing to do.
+    releaseNativeHandle(this.native);
   }
 
   private withRequestTimeout(
@@ -908,7 +909,7 @@ export class SandboxClient {
     const requestedName =
       options?.poolId != null ? null : (options?.name ?? null);
 
-    const finishConnect = (
+    const finishConnect = async (
       sandboxId: string,
       routingHint: string | undefined,
       name: string | null | undefined,
@@ -917,7 +918,7 @@ export class SandboxClient {
     ) => {
       const explicitProxyUrl =
         options?.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
-      const selectedProxyUrl = this.native.selectSandboxProxyUrl(
+      const selectedProxyUrl = await this.native.selectSandboxProxyUrl(
         sandboxId,
         sandboxUrl ?? null,
         ingressEndpoint ?? null,

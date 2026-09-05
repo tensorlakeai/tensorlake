@@ -26,6 +26,8 @@ mkdirSync(path.join(capsulePackage, "dist", "function-executor"), { recursive: t
 copyRequired("bin/function-executor.js");
 copyRequired("dist/function-executor/main.js");
 copyRequired("dist/function-executor/main.js.map");
+copyRequired("dist/native-worker.cjs");
+copyRequired("dist/native-worker.cjs.map");
 cpSync(sharedProtoRoot, path.join(capsulePackage, "proto"), { recursive: true });
 chmodSync(path.join(capsulePackage, "bin", "function-executor.js"), 0o755);
 

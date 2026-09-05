@@ -14,6 +14,7 @@
     "tensorlake-typescript-function-runner": "./bin/tensorlake-typescript-function-runner.js"
   },
   "exports": {
+    "./internal/native-worker": "./dist/native-worker.cjs",
     ".": {
       "import": {
         "types": "./dist/index.d.ts",
@@ -53,6 +54,7 @@
     "test:function-executor": "vitest run tests/function-executor.test.ts tests/function-executor-protocol.test.ts",
     "test:function-agent": "vitest run tests/function-agent.test.ts",
     "test:integration": "vitest run tests/integration.test.ts",
+    "test:native-sandbox": "node ./scripts/test-native-sandbox.mjs",
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
     "prepack": "npm run build"

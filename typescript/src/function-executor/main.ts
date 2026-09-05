@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { configureNativeWorker } from "../native-worker-client.js";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import * as grpc from "@grpc/grpc-js";
@@ -72,6 +73,7 @@ function functionExecutorProtoRoot(): string {
 }
 
 export async function main(argv = process.argv.slice(2)): Promise<void> {
+  configureNativeWorker(() => new URL("../native-worker.cjs", import.meta.url));
   const nodeMajor = Number(process.versions.node.split(".")[0]);
   if (nodeMajor < 24) throw new Error(`Tensorlake TypeScript functions require Node 24 or newer; got ${process.versions.node}`);
   const args = parseArguments(argv);
