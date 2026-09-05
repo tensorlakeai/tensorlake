@@ -9,13 +9,20 @@ import {
 } from "./native-sandbox.js";
 import { fromSnakeKeys } from "./models.js";
 import { buildContextFromEnv } from "./sandbox-image.js";
+import {
+  GitCli,
+  type RepositoryMount,
+  type RepositoryMountOptions,
+  type RepositoryMountStatus,
+  type RepositoryUnmountOptions,
+} from "./repository-mount.js";
 
 export interface RepositoryClientOptions {
   apiUrl?: string;
   apiKey?: string;
-  /** @deprecated Scope is selected by ingress for SDK API keys. */
+  /** @deprecated Scope is selected by ingress for SDK API keys; used only by local `tl` mounts. */
   organizationId?: string;
-  /** @deprecated Scope is selected by ingress for SDK API keys. */
+  /** @deprecated Scope is selected by ingress for SDK API keys; used only by local `tl` mounts. */
   projectId?: string;
   requestTimeout?: number;
   timeoutMs?: number;
@@ -196,6 +203,7 @@ export interface Operation {
 export class RepositoryClient {
   private readonly native: NativeRepositoryClient;
   private readonly requestTimeoutMs: number;
+  private readonly cli: GitCli;
 
   constructor(options?: RepositoryClientOptions) {
     this.requestTimeoutMs = resolveRequestTimeoutMs(options);
@@ -217,10 +225,21 @@ export class RepositoryClient {
       null,
       this.requestTimeoutMs / 1000,
     );
+    const context = buildContextFromEnv();
+    const envOverrides: Record<string, string> = {
+      TENSORLAKE_API_KEY: apiKey,
+      TENSORLAKE_API_URL: options?.apiUrl ?? defaults.API_URL,
+    };
+    const organizationId = options?.organizationId ?? context.organizationId;
+    const projectId = options?.projectId ?? context.projectId;
+    if (organizationId) envOverrides.TENSORLAKE_ORGANIZATION_ID = organizationId;
+    if (projectId) envOverrides.TENSORLAKE_PROJECT_ID = projectId;
+    this.cli = new GitCli(envOverrides);
   }
 
   static forCloud(options?: RepositoryClientOptions): RepositoryClient {
     return new RepositoryClient({
+      ...options,
       apiUrl: options?.apiUrl ?? "https://api.tensorlake.ai",
       apiKey: options?.apiKey,
       requestTimeout: options?.requestTimeout,
@@ -241,11 +260,36 @@ export class RepositoryClient {
     return new RepositoryClient({
       apiUrl: context.apiUrl,
       apiKey: context.apiKey,
+      organizationId: context.organizationId,
+      projectId: context.projectId,
     });
   }
 
   close(): void {
     releaseNativeHandle(this.native);
+  }
+
+  /**
+   * Mount `repo[:branch|tag|full-commit][//subtree]` to a local directory.
+   * Requires the separately installed `tl` CLI with mount support. Mounts
+   * live on the machine running Node.js and must be explicitly unmounted.
+   */
+  async mount(
+    target: string,
+    localPath: string,
+    options?: RepositoryMountOptions,
+  ): Promise<RepositoryMount> {
+    return this.cli.mount(target, localPath, options);
+  }
+
+  /** Detach a local repository mount, optionally deleting its private workspace. */
+  async unmount(localPath: string, options?: RepositoryUnmountOptions): Promise<void> {
+    await this.cli.unmount(localPath, options);
+  }
+
+  /** Inspect a local mount; defaults to the mount containing the current directory. */
+  async mountStatus(localPath?: string): Promise<RepositoryMountStatus> {
+    return this.cli.status(localPath);
   }
 
   async url(repo: string): Promise<string> {

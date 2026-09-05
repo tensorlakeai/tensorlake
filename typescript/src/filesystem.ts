@@ -23,15 +23,10 @@
  * await mount.unmount();
  */
 
-import { execFile } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { accessSync, constants } from "node:fs";
-import { homedir } from "node:os";
-import { join } from "node:path";
-import { promisify } from "node:util";
+import { MountCli } from "./mount-cli.js";
 import * as defaults from "./defaults.js";
 import {
-  CliNotFoundError,
   FileNotFoundInFilesystemError,
   FilesystemAPIError,
   FilesystemError,
@@ -56,8 +51,6 @@ import {
   type NativeRepositoryClient,
 } from "./native-sandbox.js";
 import { buildContextFromEnv } from "./sandbox-image.js";
-
-const execFileAsync = promisify(execFile);
 
 const FILESYSTEM_REPO_KIND = "filesystem";
 
@@ -124,70 +117,9 @@ async function callNative<T>(
  * mounts by invoking `tl fs mount/unmount/snapshot/status`. Everything else
  * goes through the Rust core and does not need the CLI.
  */
-class FsCli {
-  private binary: string | null = null;
-  private readonly envOverrides: Record<string, string>;
-
+class FsCli extends MountCli {
   constructor(envOverrides: Record<string, string>) {
-    this.envOverrides = envOverrides;
-  }
-
-  private async findCli(): Promise<string> {
-    const candidates: string[] = [];
-    if (process.env.TENSORLAKE_CLI) {
-      candidates.push(process.env.TENSORLAKE_CLI);
-    }
-    candidates.push("tl");
-    const installed = join(homedir(), ".tensorlake", "bin", "tl");
-    try {
-      // Existence, not executability: a present-but-broken install should be
-      // probed and blamed as "upgrade required" (parity with Python), not
-      // reported as missing.
-      accessSync(installed, constants.F_OK);
-      candidates.push(installed);
-    } catch {
-      // not installed at the default path
-    }
-    // A candidate that exists but fails the probe means "upgrade tl"; a
-    // candidate that does not exist must not be blamed as outdated. The
-    // Python SDK mirrors these exact semantics.
-    let unsupported: string | null = null;
-    for (const candidate of candidates) {
-      try {
-        await execFileAsync(candidate, ["fs", "--help"], { timeout: 15_000 });
-        return candidate;
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-          unsupported = candidate;
-        }
-      }
-    }
-    throw new CliNotFoundError(
-      unsupported
-        ? `\`tl\` at ${unsupported} does not support \`tl fs\` (upgrade required)`
-        : "`tl` was not found on PATH",
-    );
-  }
-
-  private async run(args: string[], timeoutMs = 300_000): Promise<string> {
-    if (this.binary === null) {
-      this.binary = await this.findCli();
-    }
-    try {
-      const { stdout } = await execFileAsync(this.binary, ["fs", ...args], {
-        timeout: timeoutMs,
-        env: { ...process.env, ...this.envOverrides },
-        maxBuffer: 16 * 1024 * 1024,
-      });
-      return stdout;
-    } catch (error) {
-      const failure = error as { stderr?: string; stdout?: string; killed?: boolean };
-      if (failure.killed) {
-        throw new MountError(`\`tl fs ${args[0]}\` timed out after ${timeoutMs}ms`);
-      }
-      const detail = (failure.stderr || failure.stdout || String(error)).trim();
-      throw new MountError(`\`tl fs ${args.join(" ")}\` failed: ${detail}`);
-    }
+    super("fs", envOverrides);
   }
 
   // Flags always precede a `--` end-of-options separator so caller-supplied
