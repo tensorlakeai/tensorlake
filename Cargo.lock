@@ -1736,7 +1736,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
- "webpki-roots 1.0.7",
+ "webpki-root-certs",
  "zstd 0.13.3",
 ]
 
@@ -5514,7 +5514,7 @@ dependencies = [
  "urlencoding",
  "utoipa",
  "uuid",
- "webpki-roots 1.0.7",
+ "webpki-root-certs",
  "xattr",
  "zip",
  "zstd 0.13.3",

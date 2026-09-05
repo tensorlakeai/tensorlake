@@ -45,4 +45,4 @@ tracing = "0.1"
 zstd = "0.13"
 reqwest = { version = "0.13", default-features = false, features = ["json", "rustls", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "std"] }
-webpki-roots = "1"
+webpki-root-certs = "1"

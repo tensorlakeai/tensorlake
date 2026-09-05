@@ -1,6 +1,6 @@
 //! HTTP trust policy for shipped SDKs and CLIs.
 //!
-//! HTTPS uses Mozilla roots bundled with `webpki-roots`, independently of the
+//! HTTPS uses Mozilla roots bundled with `webpki-root-certs`, independently of the
 //! host/guest CA store. Root changes ship with dependency updates. System-storage
 //! sockets use plaintext HTTP and an empty trust set, so HTTPS fails closed.
 //! Configure request policy on these builders; never construct a bare client.
@@ -18,14 +18,14 @@ fn ensure_rustls_provider() {
 #[allow(clippy::disallowed_methods)] // The only place that selects HTTPS trust.
 pub fn https_builder() -> reqwest::ClientBuilder {
     ensure_rustls_provider();
-    // reqwest 0.13's tls_certs_only takes full certificates, not webpki trust anchors.
-    let roots = rustls::RootCertStore {
-        roots: webpki_roots::TLS_SERVER_ROOTS.to_vec(),
-    };
-    let tls = rustls::ClientConfig::builder()
-        .with_root_certificates(roots)
-        .with_no_client_auth();
-    reqwest::Client::builder().tls_backend_preconfigured(tls)
+    // Use full certificates (the sibling of webpki-roots' compact trust anchors), so
+    // reqwest still owns TLS/ALPN setup and respects http1_only/http2 configuration.
+    reqwest::Client::builder().tls_certs_only(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().map(
+        |cert| {
+            reqwest::tls::Certificate::from_der(cert.as_ref())
+                .expect("bundled Mozilla root is a valid X.509 certificate")
+        },
+    ))
 }
 
 /// Plaintext transport through the authenticated host's Unix socket.
