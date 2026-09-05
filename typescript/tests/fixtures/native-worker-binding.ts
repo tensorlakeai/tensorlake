@@ -6,7 +6,7 @@ Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 300);
 let clients = 0;
 let events = 0;
 let cancelled = 0;
-class NativeStreamControl {
+class StreamControl {
   stopped = false;
   private resolve!: () => void;
   done = new Promise<void>((resolve) => {
@@ -58,10 +58,17 @@ class NativeSandboxProxyClient {
       );
     return { traceId: "trace", json: JSON.stringify({ pid: 7 }) };
   }
-  async followStdout(
+  followStdout(id: string, emit: (event: string) => Promise<void>) {
+    const control = new StreamControl();
+    return {
+      result: this.streamStdout(id, emit, control),
+      cancel: () => control.cancel(),
+    };
+  }
+  private async streamStdout(
     id: string,
     emit: (event: string) => Promise<void>,
-    control: NativeStreamControl,
+    control: StreamControl,
   ) {
     if (id === "quiet") {
       await control.done;
@@ -102,7 +109,6 @@ export function loadNative() {
     NativeSandboxClient,
     NativeSandboxProxyClient,
     NativeRepositoryClient,
-    NativeStreamControl,
     validateManagedName: (name: string) => {
       if (!name) throw Error("empty name");
     },

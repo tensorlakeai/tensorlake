@@ -10,10 +10,12 @@ const port = parentPort!;
 // native object construction happen in this isolate.
 const binding = loadNative<Record<string, any>>();
 const handles = new Map<number, { value?: any; error?: unknown }>();
-const streams = new Map<
-  number,
-  { control: { cancel(): void }; handleId?: number; ack?: () => void }
->();
+interface StreamState {
+  cancel?: () => void;
+  handleId?: number;
+  ack?: () => void;
+}
+const streams = new Map<number, StreamState>();
 
 function getHandle(id: number): any {
   const entry = handles.get(id);
@@ -61,7 +63,7 @@ port.on("message", (message: WorkerRequest) => {
     handles.delete(message.handleId);
     for (const stream of streams.values()) {
       if (stream.handleId === message.handleId) {
-        stream.control.cancel();
+        stream.cancel?.();
         stream.ack?.();
       }
     }
@@ -69,7 +71,7 @@ port.on("message", (message: WorkerRequest) => {
   }
   if (message.type === "cancel" || message.type === "ack") {
     const stream = streams.get(message.id);
-    if (message.type === "cancel") stream?.control.cancel();
+    if (message.type === "cancel") stream?.cancel?.();
     stream?.ack?.();
     if (stream) stream.ack = undefined;
     return;
@@ -84,23 +86,22 @@ async function invoke(
     const target =
       message.handleId === undefined ? binding : getHandle(message.handleId);
     const args = nativeArgs(message.args);
+    let stream: StreamState | undefined;
     if (message.stream) {
-      const stream = {
-        control: new binding.NativeStreamControl(),
-        handleId: message.handleId,
-        ack: undefined as (() => void) | undefined,
-      };
+      stream = { handleId: message.handleId };
+      const state = stream;
       streams.set(message.id, stream);
       args.push(
         (value: string) =>
           new Promise<void>((resolve) => {
-            stream.ack = resolve;
+            state.ack = resolve;
             send({ type: "event", id: message.id, value });
           }),
-        stream.control,
       );
     }
-    const value = await target[message.method](...args);
+    const call = target[message.method](...args);
+    if (stream) stream.cancel = call.cancel;
+    const value = await (stream ? call.result : call);
     send({ type: "result", id: message.id, value });
   } catch (cause) {
     const error = cause instanceof Error ? cause : new Error(String(cause));

@@ -6,8 +6,8 @@ import { createRequire } from "node:module";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 
-// Exercise the raw addon: the worker's streams map otherwise hides native
-// lifetime bugs by keeping JS wrappers reachable until each call settles.
+// Exercise the raw addon without the worker's streams map keeping the
+// cancellation function or native client reachable until each call settles.
 // A dangling native reference can abort Node, so isolate GC in a child.
 if (!process.argv.includes("--stream-lifetime-child")) {
   const child = spawn(process.execPath, [
@@ -45,10 +45,10 @@ if (!process.argv.includes("--stream-lifetime-child")) {
     assert.ok(collected, "GC did not collect the test marker");
   }
 
-  function start(method, argument, control) {
-    // Neither the native client nor the control is retained by the caller.
+  function start(method, argument) {
+    // The native client is not retained by the caller.
     const client = new binding.NativeSandboxProxyClient(url, "sandbox");
-    return client[method](argument, () => {}, control);
+    return client[method](argument, () => {});
   }
 
   async function checkStream(method, mode) {
@@ -56,12 +56,17 @@ if (!process.argv.includes("--stream-lifetime-child")) {
     // Slow Rust parsing extends the interval before the native future first
     // uses cancellation. Previously, GC during this interval crashed Node.
     const argument = method === "runProcessStreaming"
-      ? JSON.stringify({ command: "echo", args: mode === "temporary" ? ["x".repeat(32 * 1024 * 1024)] : [] })
+      ? JSON.stringify({ command: "echo", args: mode === "complete" ? ["x".repeat(32 * 1024 * 1024)] : [] })
       : "quiet";
-    const control = mode === "cancel" ? new binding.NativeStreamControl() : undefined;
-    const call = start(method, argument, mode === "temporary" ? new binding.NativeStreamControl() : control);
+    // In the completion case, retain only the Promise so GC can collect the
+    // cancellation function while Rust is parsing or waiting for output.
+    let call = start(method, argument);
+    const cancel = mode === "cancel" ? call.cancel : undefined;
+    const promise = call.result;
+    call = undefined;
+    assert.ok(promise instanceof Promise);
     let settled = false;
-    const result = call.then(
+    const result = promise.then(
       (value) => ({ value }),
       (error) => ({ error }),
     ).finally(() => { settled = true; });
@@ -73,7 +78,7 @@ if (!process.argv.includes("--stream-lifetime-child")) {
     assert.equal(response.destroyed, false, `${method}: GC closed the HTTP response`);
     if (mode === "cancel") {
       const closed = once(response, "close");
-      control.cancel();
+      cancel();
       await closed;
     } else {
       response.end();
@@ -81,21 +86,23 @@ if (!process.argv.includes("--stream-lifetime-child")) {
     const outcome = await result;
     if (outcome.error) throw outcome.error;
     assert.equal(typeof outcome.value, "string");
+    // Cancellation remains harmless after the stream has finished.
+    cancel?.();
   }
 
   try {
     for (const method of methods) {
-      for (const mode of ["temporary", "cancel", "omitted"]) {
+      for (const mode of ["complete", "cancel"]) {
         await checkStream(method, mode);
       }
     }
     // Invalid payloads still reject asynchronously after native state has
     // been copied; callers receive a Promise rather than a synchronous throw.
-    const invalid = start("runProcessStreaming", "{", new binding.NativeStreamControl());
+    const invalid = start("runProcessStreaming", "{").result;
     assert.ok(invalid instanceof Promise);
     await assert.rejects(invalid, /invalid JSON payload/);
     await collect();
-    console.log("Native stream lifetime regression passed: all four methods survive GC, cancel explicitly, and work without a control.");
+    console.log("Native stream lifetime regression passed: all four methods own their state, survive GC, and cancel explicitly.");
   } finally {
     server.closeAllConnections();
     server.close();

@@ -62,7 +62,7 @@ describe("native worker boundary", () => {
     await writeFile(addon, "staged addon");
     await buildNativeWorker(output);
     expect(await readFile(addon, "utf8")).toBe("staged addon");
-    expect(await readFile(path.join(output, "native-worker.cjs"), "utf8")).toContain("NativeStreamControl");
+    expect(await readFile(path.join(output, "native-worker.cjs"), "utf8")).toContain("worker_threads");
   });
   it("keeps constructors lazy and the event loop live during cold loading; shares clients across concurrent proxies", async () => {
     const { binding, client, proxy, resolve } = setup();
