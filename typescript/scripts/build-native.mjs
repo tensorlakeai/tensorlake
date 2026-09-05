@@ -2,6 +2,7 @@ import { chmodSync, copyFileSync, existsSync, mkdirSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { buildNativeWorker } from "./build-native-worker.mjs";
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -124,3 +125,5 @@ copyFileSync(source, destination);
 if (targetPlatform !== "win32") {
   chmodSync(destination, 0o644);
 }
+
+await buildNativeWorker();

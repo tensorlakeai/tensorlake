@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
@@ -15,6 +15,7 @@ import {
   type NativeSandboxProxyClient,
 } from "../src/native-sandbox.js";
 import { RemoteAPIError } from "../src/errors.js";
+import { buildNativeWorker } from "../scripts/build-native-worker.mjs";
 
 let directory: string;
 let workerPath: string;
@@ -54,6 +55,15 @@ const setup = () => {
 };
 
 describe("native worker boundary", () => {
+  it("builds the worker for native-only checkouts without removing staged addons", async () => {
+    const output = path.join(directory, "native-only");
+    const addon = path.join(output, "native", "linux-x64", "tensorlake-node.node");
+    await mkdir(path.dirname(addon), { recursive: true });
+    await writeFile(addon, "staged addon");
+    await buildNativeWorker(output);
+    expect(await readFile(addon, "utf8")).toBe("staged addon");
+    expect(await readFile(path.join(output, "native-worker.cjs"), "utf8")).toContain("NativeStreamControl");
+  });
   it("keeps constructors lazy and the event loop live during cold loading; shares clients across concurrent proxies", async () => {
     const { binding, client, proxy, resolve } = setup();
     const second = client.connectProxy("http://localhost", "second");
