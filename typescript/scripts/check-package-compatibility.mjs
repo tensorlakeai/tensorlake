@@ -108,7 +108,7 @@ const functionRunnerPackage = JSON.parse(await readFile(
 if (
   Object.keys(functionRunnerPackage.optionalDependencies ?? {}).length === 0
   || Object.keys(functionRunnerPackage.optionalDependencies).some(
-    (dependency) => !dependency.startsWith("@tensorlake/native-"),
+    (dependency) => !dependency.startsWith("tensorlake-native-"),
   )
 ) {
   throw new Error("Function runner capsule does not declare native platform packages");

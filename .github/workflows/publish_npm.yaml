@@ -181,17 +181,17 @@ jobs:
       matrix:
         include:
           - target_id: linux-x64
-            package_name: "@tensorlake/native-linux-x64-gnu"
+            package_name: "tensorlake-native-linux-x64-gnu"
           - target_id: linux-arm64
-            package_name: "@tensorlake/native-linux-arm64-gnu"
+            package_name: "tensorlake-native-linux-arm64-gnu"
           - target_id: linux-x64-musl
-            package_name: "@tensorlake/native-linux-x64-musl"
+            package_name: "tensorlake-native-linux-x64-musl"
           - target_id: linux-arm64-musl
-            package_name: "@tensorlake/native-linux-arm64-musl"
+            package_name: "tensorlake-native-linux-arm64-musl"
           - target_id: darwin-arm64
-            package_name: "@tensorlake/native-darwin-arm64"
+            package_name: "tensorlake-native-darwin-arm64"
           - target_id: win32-x64
-            package_name: "@tensorlake/native-win32-x64"
+            package_name: "tensorlake-native-win32-x64"
     steps:
       - uses: actions/checkout@v4
 

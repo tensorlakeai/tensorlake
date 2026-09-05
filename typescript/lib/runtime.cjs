@@ -6,12 +6,12 @@ const path = require("node:path");
 const { spawnSync } = require("node:child_process");
 
 const NATIVE_PACKAGES = {
-  "darwin-arm64": "@tensorlake/native-darwin-arm64",
-  "linux-arm64": "@tensorlake/native-linux-arm64-gnu",
-  "linux-arm64-musl": "@tensorlake/native-linux-arm64-musl",
-  "linux-x64": "@tensorlake/native-linux-x64-gnu",
-  "linux-x64-musl": "@tensorlake/native-linux-x64-musl",
-  "win32-x64": "@tensorlake/native-win32-x64",
+  "darwin-arm64": "tensorlake-native-darwin-arm64",
+  "linux-arm64": "tensorlake-native-linux-arm64-gnu",
+  "linux-arm64-musl": "tensorlake-native-linux-arm64-musl",
+  "linux-x64": "tensorlake-native-linux-x64-gnu",
+  "linux-x64-musl": "tensorlake-native-linux-x64-musl",
+  "win32-x64": "tensorlake-native-win32-x64",
 };
 
 function packageRoot() {

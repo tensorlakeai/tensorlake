@@ -59,7 +59,7 @@ const lockedProductionPackages = Object.fromEntries(
   Object.entries(packageLock.packages)
     .filter(([packagePath, metadata]) =>
       packagePath !== ""
-      && !packagePath.startsWith("node_modules/@tensorlake/native-")
+      && !packagePath.startsWith("node_modules/tensorlake-native-")
       && metadata.dev !== true
     )
     .sort(([left], [right]) => left.localeCompare(right)),

@@ -20,7 +20,7 @@ DEFAULT_FILES = (
     "typescript/npm/win32-x64/package.json",
 )
 
-NATIVE_PACKAGE_PREFIX = "@tensorlake/native-"
+NATIVE_PACKAGE_PREFIX = "tensorlake-native-"
 
 
 def bump_typescript_package_lock(path: Path, version: str) -> None:
