@@ -6,6 +6,49 @@ WAL checkpoints on the server. An explicit snapshot materializes the current che
 commit on the private workspace line; only `promote` (or an explicit snapshot from a `--publish`
 mount) changes a branch.
 
+## TypeScript SDK
+
+`RepositoryClient.mount()` mounts a repository on the machine running Node.js and returns a
+`RepositoryMount` handle. It requires the separately installed `tl` CLI with Git mount support
+(FUSE on Linux or FSKit on macOS). The SDK uses the client's API key, API URL, and any configured
+CLI organization/project scope. It looks for `TENSORLAKE_CLI`, `tl` on `PATH`, then
+`~/.tensorlake/bin/tl`.
+
+```ts
+import { RepositoryClient } from "tensorlake";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
+
+const client = new RepositoryClient({ apiKey: "your-api-key" });
+const mount = await client.mount("monorepo:main//services/auth", "./code");
+try {
+  await writeFile(join(mount.path, "notes.txt"), "Updated by the agent\n");
+  await mount.snapshot("Save agent changes");
+  console.log(await mount.status());
+  // Explicitly land the workspace onto a branch.
+  await mount.promote("main", { merge: true });
+} finally {
+  await mount.unmount();
+}
+```
+
+The target accepts branches, tags, full commits, and subtrees as described below. Mount options
+are `{ readOnly: true }`, `{ publish: true }`, or `{ workspace: "WORKSPACE_ID" }`; these three
+modes are mutually exclusive. Writable private workspaces are the default. `publish` requires a
+branch and publishes explicit snapshots onto that branch.
+
+The handle also exposes `sync(target?)`, `rebase(target, { failOnConflict?: boolean })`, and
+`prefetch()`. `status()` returns `path`, `repository`, `reference`, `workspaceId`, `state`, and
+`localChanges`, plus the CLI's complete JSON payload in `raw`. Workspace IDs are nullable until
+the first autosaved write creates a private workspace. The CLI enforces the workspace and
+conflict rules described below.
+
+`unmount()` retains the private workspace for resuming later. Pass `{ deleteWorkspace: true }`
+to delete it after detaching, or `{ discard: true }` to drop unpublished local state. For a mount
+created outside this process, use `client.mountStatus(path)` or `client.unmount(path, options)`.
+Closing the client does not unmount its directories. CLI discovery failures raise
+`CliNotFoundError`; command failures and malformed status responses raise `MountError`.
+
 ## Sources and subtrees
 
 The target grammar is:

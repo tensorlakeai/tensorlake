@@ -215,9 +215,9 @@ export class ReadOnlyMountNotSupportedError extends MountError {
 }
 
 export class CliNotFoundError extends MountError {
-  constructor(detail: string) {
+  constructor(detail: string, command: "fs" | "git mount" = "fs") {
     super(
-      "Mount operations require the Tensorlake CLI (`tl`) with `tl fs` " +
+      `Mount operations require the Tensorlake CLI (\`tl\`) with \`tl ${command}\` ` +
         `support: ${detail}. Install or upgrade it with: ` +
         "curl -fsSL https://tensorlake.ai/install.sh | sh",
     );

@@ -7,6 +7,12 @@ export { TcpTunnel } from "./tunnel.js";
 export { CloudClient } from "./cloud-client.js";
 export { APIClient } from "./api-client.js";
 export { RepositoryClient } from "./repositories.js";
+export { RepositoryMount } from "./repository-mount.js";
+export type {
+  RepositoryMountOptions,
+  RepositoryMountStatus,
+  RepositoryUnmountOptions,
+} from "./repository-mount.js";
 export {
   createSandboxImage,
   importSandboxImage,
