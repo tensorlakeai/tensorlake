@@ -30,6 +30,7 @@ png = { workspace = true }
 postcard = { workspace = true }
 reqwest = { workspace = true }
 rustls = { workspace = true }
+webpki-root-certs = { workspace = true }
 eventsource-stream = { workspace = true }
 reqwest-middleware = { workspace = true }
 rayon = { workspace = true }

@@ -1,16 +1,6 @@
-use std::sync::Once;
-
-/// Build a reqwest client builder after ensuring rustls has a crypto provider.
+/// Use the SDK's bundled-root HTTPS policy for every CLI request.
 pub(crate) fn client_builder() -> reqwest::ClientBuilder {
-    ensure_rustls_provider();
-    reqwest::Client::builder()
-}
-
-fn ensure_rustls_provider() {
-    static INSTALL_PROVIDER: Once = Once::new();
-    INSTALL_PROVIDER.call_once(|| {
-        let _ = rustls::crypto::ring::default_provider().install_default();
-    });
+    tensorlake::http_transport::https_builder()
 }
 
 #[cfg(test)]

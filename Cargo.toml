@@ -56,6 +56,7 @@ serde_path_to_error = "0.1.20"
 # never happen.
 reqwest = { version = "0.13.2", default-features = false, features = ["http2", "json", "multipart", "rustls-no-provider", "stream"] }
 rustls = { version = "0.23", default-features = false, features = ["ring"] }
+webpki-root-certs = "1"
 eventsource-stream = "0.2"
 reqwest-middleware = { version = "0.5.1", features = ["json", "multipart", "query"] }
 url = "2.5.8"

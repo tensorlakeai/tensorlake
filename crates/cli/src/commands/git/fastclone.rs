@@ -178,7 +178,7 @@ pub async fn fast_clone(opts: FastCloneOptions) -> Result<FastCloneStats> {
         clean_base.set_path(&path);
     }
     let ctx = HttpCtx {
-        client: reqwest::Client::builder().build()?,
+        client: crate::http::client_builder().build()?,
         origin: clean_base.clone(),
         auth: opts.credential.clone(),
         progress: opts.progress,
@@ -1232,7 +1232,7 @@ mod tests {
     fn test_ctx() -> HttpCtx {
         let _ = rustls::crypto::ring::default_provider().install_default();
         HttpCtx {
-            client: reqwest::Client::new(),
+            client: crate::http::client_builder().build().unwrap(),
             origin: Url::parse("http://127.0.0.1/").unwrap(),
             auth: None,
             progress: None,

@@ -245,6 +245,19 @@ test-rust:
 test-crate crate:
     just with-function-agent-core cargo test -p {{crate}}
 
+# Artifact Storage transport unit tests; no credentials or live services required.
+test-artifact-storage:
+    cargo test --locked -p tensorlake --lib artifact_storage::
+
+# Guard every SDK/CLI HTTP constructor, including feature-gated fast-clone paths in full CI.
+# This focused gate does not enable unrelated style lints; the existing `clippy` recipe does.
+lint-http-transports:
+    cargo clippy --locked -p tensorlake -p tensorlake-cli --all-targets -- -A clippy::all -D clippy::disallowed_methods -D warnings
+
+# Requires private sources to have been injected by the CI vendoring action.
+lint-http-transports-full:
+    cargo clippy -p tensorlake -p tensorlake-cli --features tensorlake-cli/mount,tensorlake-cli/git-clone --all-targets -- -A clippy::all -D clippy::disallowed_methods -D warnings
+
 
 # Run clippy lints on all crates
 clippy:

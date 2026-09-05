@@ -71,6 +71,7 @@ pub mod artifact_storage;
 pub mod cron;
 pub mod document_ai;
 pub mod error;
+pub mod http_transport;
 mod image_service_builds;
 pub mod images;
 pub mod sandbox_images;

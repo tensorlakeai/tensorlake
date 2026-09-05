@@ -5,7 +5,6 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { rootCertificates } from "node:tls";
 import { fileURLToPath } from "node:url";
 import { setEnvironmentData } from "node:worker_threads";
 
@@ -14,7 +13,7 @@ import { setEnvironmentData } from "node:worker_threads";
 if (!process.argv.includes("--child")) {
   await import("./test-native-stream-lifetime.mjs");
   if (process.platform !== "linux") {
-    console.log("Slow certificate I/O regression requires Linux FIFOs.");
+    console.log("Forbidden certificate I/O regression requires Linux FIFOs.");
   } else {
     const child = spawn(process.execPath, [
       "--require", fileURLToPath(new URL("../tests/fixtures/delayed-native-load.cjs", import.meta.url)),
@@ -36,32 +35,23 @@ if (!process.argv.includes("--child")) {
   process.env.SSL_CERT_FILE = fifo;
   process.env.SSL_CERT_DIR = emptyDirectory;
 
-  // A separate process supplies a real CA after a 750 ms read stall. It keeps
-  // serving subsequent opens so regressions report extra initialization too.
-  const writer = spawn(process.execPath, ["--input-type=module", "-e", `
-    import { openSync, writeSync, closeSync } from 'node:fs';
-    import { rootCertificates } from 'node:tls';
-    import { setTimeout } from 'node:timers/promises';
-    let reads = 0;
-    for (;;) {
-      const fd = openSync(process.argv[1], 'w');
-      if (reads++ === 0) await setTimeout(750);
-      writeSync(fd, rootCertificates[0] + '\\n');
-      closeSync(fd);
-      process.stdout.write('read\\n');
-      await setTimeout(25);
-    }
-  `, fifo], { stdio: ["ignore", "pipe", "inherit"] });
-  let certificateReads = 0;
-  writer.stdout.setEncoding("utf8");
-  writer.stdout.on("data", (chunk) => { certificateReads += chunk.split("\n").length - 1; });
+  // No writer ever opens this FIFO. Any regression to platform CA discovery
+  // blocks initialization and is killed by the parent's 20s deadline. Shipped
+  // clients must use bundled roots, independent of guest certificate files.
 
   let connections = 0;
   let streamsClosed = 0;
   let fileContents = Buffer.from([0, 255, 128, 7]);
   const authorizations = [];
+  let failNextRequest = false;
   const server = createServer((request, response) => {
     authorizations.push(request.headers.authorization);
+    if (failNextRequest) {
+      failNextRequest = false;
+      response.writeHead(400, { "Content-Type": "application/json" });
+      response.end(JSON.stringify({ message: "injected request failure" }));
+      return;
+    }
     if (request.url.endsWith("/follow")) {
       response.setHeader("Content-Type", "text/event-stream");
       response.flushHeaders();
@@ -92,14 +82,25 @@ if (!process.argv.includes("--child")) {
   let reports = 0;
   const originalGetReport = process.report.getReport;
   const originalDlopen = process.dlopen;
-  const nativeLoads = new Int32Array(new SharedArrayBuffer(4));
+  // Shared fixture state: addon load count, blocked flag, main-thread release.
+  const nativeLoads = new Int32Array(new SharedArrayBuffer(3 * Int32Array.BYTES_PER_ELEMENT));
+  let blockedTicks = 0;
   setEnvironmentData("tensorlake-test-native-loads", nativeLoads.buffer);
   process.dlopen = () => { throw new Error("Sandbox SDK must not load native code on the main thread"); };
   process.report.getReport = () => {
     reports++;
     throw new Error("SDK must not generate diagnostic reports");
   };
-  const timer = setInterval(() => { ticks++; }, 10);
+  const timer = setInterval(() => {
+    ticks++;
+    if (Atomics.load(nativeLoads, 1) === 1 && Atomics.load(nativeLoads, 2) === 0) {
+      if (++blockedTicks === 3) {
+        console.log("Main event loop advanced while addon loading was blocked; releasing worker");
+        Atomics.store(nativeLoads, 2, 1);
+        Atomics.notify(nativeLoads, 2);
+      }
+    }
+  }, 10);
 
   try {
     const { Sandbox, SandboxClient } = await import("../dist/index.js");
@@ -110,18 +111,17 @@ if (!process.argv.includes("--child")) {
     const standalone = new Sandbox({ sandboxId: "direct-constructor", proxyUrl: url });
     const setupMs = performance.now() - setupStart;
     assert.ok(setupMs < 500, `Handle construction blocked for ${setupMs.toFixed(1)} ms`);
-    assert.equal(certificateReads, 0, "Constructors must not load certificates");
+    assert.equal(Atomics.load(nativeLoads, 0), 0, "Constructors must not load the native addon");
     assert.equal(reports, 0, "Platform detection generated a diagnostic report");
 
     ticks = 0;
     await Promise.all([client.list(), handles[0].listProcesses(), handles[1].listProcesses()]);
-    assert.ok(ticks >= 100, `Event loop stalled during slow addon/CA loading (${ticks} timer ticks)`);
-    assert.equal(certificateReads, 1, "Concurrent first requests must share initialization");
+    assert.equal(blockedTicks, 3, "Main event loop must advance while addon loading is blocked");
+    assert.equal(Atomics.load(nativeLoads, 0), 1, "Concurrent first requests must share addon loading");
     const initialConnections = connections;
     for (const handle of handles) await handle.listProcesses();
     await client.listLogProcesses("sandbox-0");
     assert.equal(connections, initialConnections, "Proxy handles rebuilt the connection pool");
-    assert.equal(certificateReads, 1, "Proxy handles reloaded certificates");
     assert.ok(authorizations.every((value) => value === "Bearer client-one"));
 
     // A distinct client must keep its own credentials even after another
@@ -163,23 +163,27 @@ if (!process.argv.includes("--child")) {
     for (let i = 0; i < 100 && streamsClosed === firstClosed + 1; i++) await new Promise((resolve) => setTimeout(resolve, 10));
     assert.equal(streamsClosed, firstClosed + 2, "Abort did not cancel a quiet native HTTP stream");
 
-    // Failed initialization must reject the operation and remain retryable.
+    // Empty/invalid platform CA files must not affect new clients either.
+    // A failed request must still leave the initialized client usable.
     const certFile = path.join(directory, "retry.pem");
     writeFileSync(certFile, "");
     process.env.SSL_CERT_FILE = certFile;
     const retry = new SandboxClient({ apiUrl: url }, true);
-    await assert.rejects(retry.list());
-    writeFileSync(certFile, rootCertificates[0] + "\n");
     await retry.list();
+    failNextRequest = true;
+    await assert.rejects(retry.list());
+    assert.equal(failNextRequest, false, "Injected failure did not reach the server");
+    await retry.list();
+    writeFileSync(certFile, "not a CA certificate\n");
+    const invalidRoots = new SandboxClient({ apiUrl: url }, true);
+    await invalidRoots.list();
     for (const handle of [...handles, direct, standalone, cjsSandbox]) handle.close();
-    client.close(); other.close(); retry.close();
-    console.log(`Native sandbox regression passed: ${setupMs.toFixed(1)} ms setup, ${ticks} timer ticks, worker-only addon loading, shared transport, stream cancellation and retry verified.`);
+    client.close(); other.close(); retry.close(); invalidRoots.close();
+    console.log(`Native sandbox regression passed: ${setupMs.toFixed(1)} ms setup, ${ticks} timer ticks, worker-only addon loading, no platform CA discovery, shared transport, stream cancellation and request retry verified.`);
   } finally {
     clearInterval(timer);
     process.report.getReport = originalGetReport;
     process.dlopen = originalDlopen;
-    writer.kill("SIGKILL");
-    await once(writer, "exit");
     server.closeAllConnections();
     server.close();
     rmSync(directory, { recursive: true, force: true });

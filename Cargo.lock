@@ -1729,12 +1729,14 @@ dependencies = [
  "bytes",
  "futures",
  "reqwest",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.11.0",
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "webpki-root-certs",
  "zstd 0.13.3",
 ]
 
@@ -5512,6 +5514,7 @@ dependencies = [
  "urlencoding",
  "utoipa",
  "uuid",
+ "webpki-root-certs",
  "xattr",
  "zip",
  "zstd 0.13.3",
