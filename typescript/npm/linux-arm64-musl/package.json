@@ -1,6 +1,6 @@
 {
   "name": "@tensorlake/native-linux-arm64-musl",
-  "version": "0.5.125",
+  "version": "0.5.126",
   "description": "Tensorlake native Node.js binding for Linux arm64 (musl)",
   "repository": {
     "type": "git",
