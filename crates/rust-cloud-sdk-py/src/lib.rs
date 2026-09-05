@@ -6,7 +6,6 @@
 
 mod function_agent;
 
-use std::error::Error as StdError;
 use std::future::Future;
 use std::io::Write;
 use std::path::PathBuf;
@@ -42,7 +41,10 @@ use tensorlake::sandboxes::{
     SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
     resolve_sandbox_proxy_target, select_sandbox_proxy_url,
 };
-use tensorlake::{Client, ClientBuilder, error::SdkError};
+use tensorlake::{
+    Client, ClientBuilder,
+    error::{SdkError, TransportFailure},
+};
 use tokio::runtime::Runtime;
 
 create_exception!(_cloud_sdk, CloudApiClientError, PyException);
@@ -65,9 +67,11 @@ fn shared_runtime() -> &'static Runtime {
 /// never transmitted). Gates the 409/404-on-retry forgiveness in the
 /// filesystem create/delete bindings.
 fn request_may_have_executed(err: &SdkError) -> bool {
+    if err.transport_failure() == Some(TransportFailure::Timeout) {
+        return true;
+    }
     match err {
         SdkError::ServerError { status, .. } => status.is_server_error(),
-        SdkError::Http(e) => e.is_timeout(),
         _ => false,
     }
 }
@@ -2378,6 +2382,20 @@ impl CloudSandboxProxyClient {
             operation,
         )
     }
+
+    /// Retry variant for operations that must not run twice.
+    fn run_with_connect_replay<T, F, Fut>(&self, operation: F) -> PyResult<T>
+    where
+        F: FnMut(SandboxProxyClient) -> Fut,
+        Fut: Future<Output = Result<T, SdkError>>,
+    {
+        run_with_connect_replay_blocking(
+            self.client.clone(),
+            "rust sandbox proxy request",
+            into_sandbox_py_error,
+            operation,
+        )
+    }
 }
 
 #[pyclass]
@@ -2693,7 +2711,11 @@ impl CloudSandboxProxyClient {
 
     fn run_process_json(&self, payload_json: String) -> PyResult<(String, Vec<String>)> {
         let payload: Value = parse_json_payload(&payload_json)?;
-        self.run_with_retry(5, move |client| {
+        // Running a process is not idempotent: the general retry would replay
+        // it after a timeout, when the sandbox may already be executing the
+        // command. Only connect failures — which never reached the sandbox —
+        // are replayed.
+        self.run_with_connect_replay(move |client| {
             let payload = payload.clone();
             async move {
                 let traced = client.run_process(&payload).await?;
@@ -3118,7 +3140,9 @@ impl CloudSandboxProxyClient {
         let payload: Value = parse_json_payload(&payload_json)?;
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| {
+            // See `run_process_json`: replay only failures that never reached
+            // the sandbox, so a timeout cannot start the command twice.
+            let traced = replay_on_connect_failure(client, move |c| {
                 let payload = payload.clone();
                 async move { c.run_process(&payload).await }
             })
@@ -3413,6 +3437,53 @@ fn run_with_retry_blocking<C, T, F, Fut>(
     max_retries: usize,
     label: &str,
     into_err: fn(SdkError) -> PyErr,
+    operation: F,
+) -> PyResult<T>
+where
+    C: Clone,
+    F: FnMut(C) -> Fut,
+    Fut: Future<Output = Result<T, SdkError>>,
+{
+    run_bounded_blocking(
+        client,
+        max_retries,
+        is_retryable,
+        label,
+        into_err,
+        operation,
+    )
+}
+
+/// Blocking counterpart of [`replay_on_connect_failure`]: replays only the
+/// failures that provably never reached the server, so it is safe to wrap a
+/// non-idempotent operation.
+fn run_with_connect_replay_blocking<C, T, F, Fut>(
+    client: C,
+    label: &str,
+    into_err: fn(SdkError) -> PyErr,
+    operation: F,
+) -> PyResult<T>
+where
+    C: Clone,
+    F: FnMut(C) -> Fut,
+    Fut: Future<Output = Result<T, SdkError>>,
+{
+    run_bounded_blocking(
+        client,
+        MAX_CONNECT_REPLAYS,
+        is_safe_to_replay,
+        label,
+        into_err,
+        operation,
+    )
+}
+
+fn run_bounded_blocking<C, T, F, Fut>(
+    client: C,
+    max_retries: usize,
+    should_retry: fn(&SdkError) -> bool,
+    label: &str,
+    into_err: fn(SdkError) -> PyErr,
     mut operation: F,
 ) -> PyResult<T>
 where
@@ -3425,7 +3496,7 @@ where
         match shared_runtime().block_on(operation(client.clone())) {
             Ok(value) => return Ok(value),
             Err(err) => {
-                if !is_retryable(&err) || retries >= max_retries {
+                if !should_retry(&err) || retries >= max_retries {
                     return Err(into_err(err));
                 }
 
@@ -3551,20 +3622,70 @@ fn duration_from_seconds(name: &str, seconds: f64) -> PyResult<Duration> {
     Ok(Duration::from_secs_f64(seconds))
 }
 
+/// Whether the SDK may re-send a request after this failure.
+///
+/// Deliberately excludes timeouts. A timeout means the request was already on
+/// the wire, so the server may have executed it; most operations reached
+/// through this predicate — starting a process, creating a snapshot or pool,
+/// deleting a sandbox — cannot absorb a second execution. Only failures that
+/// provably never reached the server are replayed here; per-operation timeout
+/// retries need an idempotency review first.
 fn is_retryable(error: &SdkError) -> bool {
+    if is_safe_to_replay(error) {
+        return true;
+    }
     match error {
         SdkError::ServerError { status, .. } => {
             *status == reqwest::StatusCode::BAD_GATEWAY
                 || *status == reqwest::StatusCode::SERVICE_UNAVAILABLE
                 || *status == reqwest::StatusCode::GATEWAY_TIMEOUT
         }
-        SdkError::Http(http_error) => http_error.is_connect() || http_error.is_timeout(),
-        SdkError::Middleware(middleware_error) => {
-            let source = middleware_error.to_string().to_lowercase();
-            source.contains("timeout") || source.contains("connect")
-        }
         SdkError::EventSourceError(_) => true,
         _ => false,
+    }
+}
+
+/// Whether replaying the request is safe even when the operation is not
+/// idempotent.
+///
+/// Only a connect failure qualifies: DNS, TCP, and TLS all fail before a single
+/// request byte reaches the server, so the operation provably did not run. A
+/// timeout gives no such guarantee — the server may have received the request
+/// and be executing it still.
+fn is_safe_to_replay(error: &SdkError) -> bool {
+    matches!(error.transport_failure(), Some(TransportFailure::Connect))
+}
+
+/// Number of times a request that never reached the server is replayed.
+///
+/// Small on purpose: a connect failure resolves in milliseconds, so the useful
+/// case is a single transient DNS or TCP hiccup, not a sustained outage the
+/// caller should hear about promptly.
+const MAX_CONNECT_REPLAYS: usize = 2;
+
+/// Run `op`, replaying it only when the previous attempt failed before the
+/// request reached the server.
+///
+/// Unlike [`retry_async_op`], this is safe for non-idempotent operations such
+/// as starting a process.
+async fn replay_on_connect_failure<C, T, F, Fut>(client: C, op: F) -> Result<T, SdkError>
+where
+    C: Clone,
+    F: Fn(C) -> Fut,
+    Fut: Future<Output = Result<T, SdkError>>,
+{
+    let mut replays = 0usize;
+    loop {
+        match op(client.clone()).await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                if !is_safe_to_replay(&err) || replays >= MAX_CONNECT_REPLAYS {
+                    return Err(err);
+                }
+                replays += 1;
+                tokio::time::sleep(Duration::from_secs_f64(calculate_sleep_time(replays))).await;
+            }
+        }
     }
 }
 
@@ -3579,44 +3700,15 @@ fn into_py_error(error: SdkError) -> PyErr {
         SdkError::ServerError { status, message } => {
             CloudApiClientError::new_err(("remote_api", Some(status.as_u16()), message))
         }
-        SdkError::Http(http_error) => {
-            let message = format_error_chain(&http_error);
-            if http_error.is_timeout() || http_error.is_connect() {
+        other => {
+            let message = other.detail();
+            if other.transport_failure().is_some() {
                 CloudApiClientError::new_err(("connection", Option::<u16>::None, message))
             } else {
                 CloudApiClientError::new_err(("internal", Option::<u16>::None, message))
             }
         }
-        SdkError::Middleware(middleware_error) => {
-            let message = format_error_chain(&middleware_error);
-            let lower = message.to_lowercase();
-            if lower.contains("connect")
-                || lower.contains("connection refused")
-                || lower.contains("dns")
-                || lower.contains("timed out")
-                || lower.contains("timeout")
-            {
-                CloudApiClientError::new_err(("connection", Option::<u16>::None, message))
-            } else {
-                CloudApiClientError::new_err(("internal", Option::<u16>::None, message))
-            }
-        }
-        other => CloudApiClientError::new_err(("internal", Option::<u16>::None, other.to_string())),
     }
-}
-
-fn format_error_chain(error: &dyn StdError) -> String {
-    let mut message = error.to_string();
-    let mut source = error.source();
-    while let Some(cause) = source {
-        let cause_message = cause.to_string();
-        if !cause_message.is_empty() {
-            message.push_str(": ");
-            message.push_str(&cause_message);
-        }
-        source = cause.source();
-    }
-    message
 }
 
 fn into_sandbox_py_error(error: SdkError) -> PyErr {
@@ -3630,38 +3722,19 @@ fn into_sandbox_py_error(error: SdkError) -> PyErr {
         SdkError::ServerError { status, message } => {
             CloudSandboxClientError::new_err(("remote_api", Some(status.as_u16()), message))
         }
-        SdkError::Http(http_error) => {
-            if http_error.is_timeout() {
-                CloudSandboxClientError::new_err((
-                    "connection",
-                    Some(504u16),
-                    http_error.to_string(),
-                ))
-            } else if http_error.is_connect() {
-                CloudSandboxClientError::new_err((
-                    "connection",
-                    Some(503u16),
-                    http_error.to_string(),
-                ))
-            } else {
-                CloudSandboxClientError::new_err((
-                    "internal",
-                    Option::<u16>::None,
-                    http_error.to_string(),
-                ))
-            }
-        }
-        SdkError::Middleware(middleware_error) => {
-            let message = middleware_error.to_string();
-            let lower = message.to_lowercase();
-            if lower.contains("timeout") || lower.contains("connect") {
-                CloudSandboxClientError::new_err(("connection", Option::<u16>::None, message))
-            } else {
-                CloudSandboxClientError::new_err(("internal", Option::<u16>::None, message))
-            }
-        }
         other => {
-            CloudSandboxClientError::new_err(("internal", Option::<u16>::None, other.to_string()))
+            let message = other.detail();
+            match other.transport_failure() {
+                Some(TransportFailure::Timeout) => {
+                    CloudSandboxClientError::new_err(("connection", Some(504u16), message))
+                }
+                Some(TransportFailure::Connect) => {
+                    CloudSandboxClientError::new_err(("connection", Some(503u16), message))
+                }
+                None => {
+                    CloudSandboxClientError::new_err(("internal", Option::<u16>::None, message))
+                }
+            }
         }
     }
 }
@@ -3677,41 +3750,20 @@ fn into_document_ai_py_error(error: SdkError) -> PyErr {
         SdkError::ServerError { status, message } => {
             CloudDocumentAIClientError::new_err(("remote_api", Some(status.as_u16()), message))
         }
-        SdkError::Http(http_error) => {
-            if http_error.is_timeout() {
-                CloudDocumentAIClientError::new_err((
-                    "connection",
-                    Some(504u16),
-                    http_error.to_string(),
-                ))
-            } else if http_error.is_connect() {
-                CloudDocumentAIClientError::new_err((
-                    "connection",
-                    Some(503u16),
-                    http_error.to_string(),
-                ))
-            } else {
-                CloudDocumentAIClientError::new_err((
-                    "internal",
-                    Option::<u16>::None,
-                    http_error.to_string(),
-                ))
+        other => {
+            let message = other.detail();
+            match other.transport_failure() {
+                Some(TransportFailure::Timeout) => {
+                    CloudDocumentAIClientError::new_err(("connection", Some(504u16), message))
+                }
+                Some(TransportFailure::Connect) => {
+                    CloudDocumentAIClientError::new_err(("connection", Some(503u16), message))
+                }
+                None => {
+                    CloudDocumentAIClientError::new_err(("internal", Option::<u16>::None, message))
+                }
             }
         }
-        SdkError::Middleware(middleware_error) => {
-            let message = middleware_error.to_string();
-            let lower = message.to_lowercase();
-            if lower.contains("timeout") || lower.contains("connect") {
-                CloudDocumentAIClientError::new_err(("connection", Option::<u16>::None, message))
-            } else {
-                CloudDocumentAIClientError::new_err(("internal", Option::<u16>::None, message))
-            }
-        }
-        other => CloudDocumentAIClientError::new_err((
-            "internal",
-            Option::<u16>::None,
-            other.to_string(),
-        )),
     }
 }
 
