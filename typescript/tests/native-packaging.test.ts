@@ -21,13 +21,13 @@ interface NativeTarget {
 const targets: readonly NativeTarget[] = [
   {
     id: "darwin-arm64",
-    name: "@tensorlake/native-darwin-arm64",
+    name: "tensorlake-native-darwin-arm64",
     platform: "darwin",
     arch: "arm64",
   },
   {
     id: "linux-arm64",
-    name: "@tensorlake/native-linux-arm64-gnu",
+    name: "tensorlake-native-linux-arm64-gnu",
     platform: "linux",
     arch: "arm64",
     libc: "glibc",
@@ -35,7 +35,7 @@ const targets: readonly NativeTarget[] = [
   },
   {
     id: "linux-arm64-musl",
-    name: "@tensorlake/native-linux-arm64-musl",
+    name: "tensorlake-native-linux-arm64-musl",
     platform: "linux",
     arch: "arm64",
     libc: "musl",
@@ -43,7 +43,7 @@ const targets: readonly NativeTarget[] = [
   },
   {
     id: "linux-x64",
-    name: "@tensorlake/native-linux-x64-gnu",
+    name: "tensorlake-native-linux-x64-gnu",
     platform: "linux",
     arch: "x64",
     libc: "glibc",
@@ -51,7 +51,7 @@ const targets: readonly NativeTarget[] = [
   },
   {
     id: "linux-x64-musl",
-    name: "@tensorlake/native-linux-x64-musl",
+    name: "tensorlake-native-linux-x64-musl",
     platform: "linux",
     arch: "x64",
     libc: "musl",
@@ -59,7 +59,7 @@ const targets: readonly NativeTarget[] = [
   },
   {
     id: "win32-x64",
-    name: "@tensorlake/native-win32-x64",
+    name: "tensorlake-native-win32-x64",
     platform: "win32",
     arch: "x64",
   },
@@ -110,6 +110,7 @@ describe("native package metadata", () => {
     for (const { name } of targets) {
       expect(packageLock.packages[`node_modules/${name}`]).toMatchObject({
         version: rootPackage.version,
+        resolved: `https://registry.npmjs.org/${name}/-/${name}-${rootPackage.version}.tgz`,
         optional: true,
       });
     }

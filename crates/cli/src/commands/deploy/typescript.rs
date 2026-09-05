@@ -40,7 +40,7 @@ const MAX_CODE_SIZE: u64 = 5 * 1024 * 1024;
 const DEFAULT_NODE_IMAGE: &str = "node:24-trixie";
 const FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH: &str =
     ".tensorlake/typescript-function-runner-runtime.tgz";
-const FUNCTION_RUNNER_LINUX_X64_PACKAGE: &str = "@tensorlake/native-linux-x64-gnu";
+const FUNCTION_RUNNER_LINUX_X64_PACKAGE: &str = "tensorlake-native-linux-x64-gnu";
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const UNAUTHENTICATED_REQUESTS: &str = "unauthenticated_requests";
 const DISCOVERY_SCRIPT: &str = r#"

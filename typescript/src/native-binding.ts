@@ -22,12 +22,12 @@ interface NativeBindingPathOptions extends TargetOptions {
 }
 
 const NATIVE_PACKAGES: Readonly<Record<string, string>> = {
-  "darwin-arm64": "@tensorlake/native-darwin-arm64",
-  "linux-arm64": "@tensorlake/native-linux-arm64-gnu",
-  "linux-arm64-musl": "@tensorlake/native-linux-arm64-musl",
-  "linux-x64": "@tensorlake/native-linux-x64-gnu",
-  "linux-x64-musl": "@tensorlake/native-linux-x64-musl",
-  "win32-x64": "@tensorlake/native-win32-x64",
+  "darwin-arm64": "tensorlake-native-darwin-arm64",
+  "linux-arm64": "tensorlake-native-linux-arm64-gnu",
+  "linux-arm64-musl": "tensorlake-native-linux-arm64-musl",
+  "linux-x64": "tensorlake-native-linux-x64-gnu",
+  "linux-x64-musl": "tensorlake-native-linux-x64-musl",
+  "win32-x64": "tensorlake-native-win32-x64",
 };
 
 function packageRoot(): string {

@@ -1,5 +1,5 @@
 {
-  "name": "@tensorlake/native-darwin-arm64",
+  "name": "tensorlake-native-darwin-arm64",
   "version": "0.5.126",
   "description": "Tensorlake native Node.js binding for macOS arm64",
   "repository": {
