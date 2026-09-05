@@ -20,8 +20,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::OnceCell;
 
-use napi::bindgen_prelude::Buffer;
-use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction, ThreadsafeFunctionCallMode};
+use napi::bindgen_prelude::{Buffer, Either, Promise};
+use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
 use napi_derive::napi;
 use serde::de::DeserializeOwned;
 use serde_json::Value;
@@ -766,6 +766,50 @@ impl NativeSandboxClient {
     }
 }
 
+/// Cancellation belongs to a single stream, never to the shared transport.
+#[napi]
+pub struct NativeStreamControl {
+    cancelled: tokio::sync::watch::Sender<bool>,
+}
+
+#[napi]
+impl NativeStreamControl {
+    #[napi(constructor)]
+    pub fn new() -> Self {
+        Self {
+            cancelled: tokio::sync::watch::channel(false).0,
+        }
+    }
+
+    #[napi]
+    pub fn cancel(&self) {
+        self.cancelled.send_replace(true);
+    }
+}
+
+impl Default for NativeStreamControl {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+async fn cancellable_stream(
+    control: Option<&NativeStreamControl>,
+    operation: impl Future<Output = napi::Result<String>>,
+) -> napi::Result<String> {
+    match control {
+        None => operation.await,
+        Some(control) => {
+            let mut cancelled = control.cancelled.subscribe();
+            tokio::select! {
+                biased;
+                _ = cancelled.wait_for(|value| *value) => Ok(String::new()),
+                result = operation => result,
+            }
+        }
+    }
+}
+
 // ---- Sandbox proxy client -------------------------------------------------
 
 /// Process / file / PTY client for a single running sandbox. Prefer
@@ -991,13 +1035,18 @@ impl NativeSandboxProxyClient {
         &self,
         process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
+        control: Option<&NativeStreamControl>,
     ) -> napi::Result<String> {
-        self.client()
-            .await?
-            .clone()
-            .follow_stdout_streaming(process, move |event| emit_event(&emit, event))
-            .await
-            .map_err(into_napi_error)
+        cancellable_stream(control, async {
+            self.client()
+                .await?
+                .follow_stdout_streaming_async(process, move |event| {
+                    emit_event(emit.clone(), event)
+                })
+                .await
+                .map_err(into_napi_error)
+        })
+        .await
     }
 
     #[napi]
@@ -1005,13 +1054,18 @@ impl NativeSandboxProxyClient {
         &self,
         process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
+        control: Option<&NativeStreamControl>,
     ) -> napi::Result<String> {
-        self.client()
-            .await?
-            .clone()
-            .follow_stderr_streaming(process, move |event| emit_event(&emit, event))
-            .await
-            .map_err(into_napi_error)
+        cancellable_stream(control, async {
+            self.client()
+                .await?
+                .follow_stderr_streaming_async(process, move |event| {
+                    emit_event(emit.clone(), event)
+                })
+                .await
+                .map_err(into_napi_error)
+        })
+        .await
     }
 
     #[napi]
@@ -1019,13 +1073,18 @@ impl NativeSandboxProxyClient {
         &self,
         process: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
+        control: Option<&NativeStreamControl>,
     ) -> napi::Result<String> {
-        self.client()
-            .await?
-            .clone()
-            .follow_output_streaming(process, move |event| emit_event(&emit, event))
-            .await
-            .map_err(into_napi_error)
+        cancellable_stream(control, async {
+            self.client()
+                .await?
+                .follow_output_streaming_async(process, move |event| {
+                    emit_event(emit.clone(), event)
+                })
+                .await
+                .map_err(into_napi_error)
+        })
+        .await
     }
 
     /// Start a process and stream lifecycle events live via `emit`. Resolves
@@ -1035,14 +1094,17 @@ impl NativeSandboxProxyClient {
         &self,
         payload_json: String,
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
+        control: Option<&NativeStreamControl>,
     ) -> napi::Result<String> {
         let payload: Value = parse_json_payload(&payload_json)?;
-        self.client()
-            .await?
-            .clone()
-            .run_process_streaming(&payload, move |event| emit_event(&emit, event))
-            .await
-            .map_err(into_napi_error)
+        cancellable_stream(control, async {
+            self.client()
+                .await?
+                .run_process_streaming_async(&payload, move |event| emit_event(emit.clone(), event))
+                .await
+                .map_err(into_napi_error)
+        })
+        .await
     }
 
     /// Start a process and buffer all lifecycle events, returning them once the
@@ -1188,14 +1250,21 @@ pub fn validate_managed_name(name: String) -> napi::Result<()> {
     tensorlake::sandboxes::validate_managed_name(&name).map_err(into_napi_error)
 }
 
-/// Serialize one streaming event and push it across the napi threadsafe
-/// boundary. Serialization failures (which should not occur for the SDK's own
-/// event types) drop the event rather than aborting the stream.
-fn emit_event<E: serde::Serialize>(
-    emit: &ThreadsafeFunction<String, ErrorStrategy::Fatal>,
+/// Await the JS consumer's acknowledgement. Rust stops polling the response
+/// while the worker/main-thread bridge has an outstanding event.
+async fn emit_event<E: serde::Serialize>(
+    emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     event: E,
-) {
-    if let Ok(serialized) = serde_json::to_string(&event) {
-        emit.call(serialized, ThreadsafeFunctionCallMode::Blocking);
+) -> Result<(), SdkError> {
+    let serialized = serde_json::to_string(&event)?;
+    let ack: Either<(), Promise<()>> = emit
+        .call_async(serialized)
+        .await
+        .map_err(|error| SdkError::ClientError(error.to_string()))?;
+    match ack {
+        Either::A(()) => Ok(()),
+        Either::B(promise) => promise
+            .await
+            .map_err(|error| SdkError::ClientError(error.to_string())),
     }
 }

@@ -1,4 +1,5 @@
 import * as defaults from "./defaults.js";
+import { releaseNativeHandle } from "./native-worker-client.js";
 import { SandboxError } from "./errors.js";
 import type { Traced } from "./http.js";
 import {
@@ -244,7 +245,7 @@ export class RepositoryClient {
   }
 
   close(): void {
-    // The native client releases its connection pool on GC; nothing to do.
+    releaseNativeHandle(this.native);
   }
 
   async url(repo: string): Promise<string> {

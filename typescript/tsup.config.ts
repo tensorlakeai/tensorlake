@@ -7,6 +7,7 @@ const { version } = require("./package.json");
 export default defineConfig({
   entry: [
     "src/index.ts",
+    "src/native-worker.ts",
     "src/sandbox-image.ts",
     "src/applications/index.ts",
     "src/function-executor/main.ts",

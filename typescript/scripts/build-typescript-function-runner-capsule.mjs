@@ -31,6 +31,8 @@ mkdirSync(path.join(capsulePackage, "dist", "function-agent"), {
 copyRequired("bin/tensorlake-typescript-function-runner.js");
 copyRequired("dist/function-agent/main.js");
 copyRequired("dist/function-agent/main.js.map");
+copyRequired("dist/native-worker.cjs");
+copyRequired("dist/native-worker.cjs.map");
 chmodSync(
   path.join(capsulePackage, "bin", "tensorlake-typescript-function-runner.js"),
   0o755,

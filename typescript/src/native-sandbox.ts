@@ -6,7 +6,8 @@ import {
   SandboxError,
   SandboxNotFoundError,
 } from "./errors.js";
-import { loadNative } from "./native-binding.js";
+import { workerBinding } from "./native-worker-client.js";
+import { cancelNativeCall, type NativeCall } from "./native-worker-protocol.js";
 
 /**
  * Bridge to the Rust core's sandbox lifecycle + proxy clients (`napi-rs`).
@@ -32,7 +33,7 @@ export interface TracedJson {
 
 export interface TracedBytes {
   traceId: string;
-  data: Buffer;
+  data: Uint8Array;
   contentId?: string;
   fullSize?: number;
 }
@@ -43,7 +44,7 @@ export interface TracedEvents {
 }
 
 /** Per-event callback used by the streaming proxy methods. */
-export type NativeEmit = (eventJson: string) => void;
+export type NativeEmit = (eventJson: string) => void | Promise<void>;
 
 export interface NativeSandboxProxyClient {
   baseUrl(): string;
@@ -134,7 +135,7 @@ export interface NativeSandboxClient {
     sandboxUrl?: string | null,
     ingressEndpoint?: string | null,
     explicitProxyUrl?: string | null,
-  ): string;
+  ): string | Promise<string>;
 }
 
 export interface NativeRepositoryClient {
@@ -259,35 +260,14 @@ export interface NativeSandboxBinding {
   NativeSandboxProxyClient: NativeSandboxProxyClientCtor;
   NativeRepositoryClient?: NativeRepositoryClientCtor;
   /** Validate a managed-process name; throws on failure. Single source-of-truth rule in Rust. */
-  validateManagedName: (name: string) => void;
+  validateManagedName: (name: string) => void | Promise<void>;
 }
 
 // ---- Binding loader -------------------------------------------------------
 
 let cachedBinding: NativeSandboxBinding | undefined;
-let cachedBindingError: Error | undefined;
-
 export function loadNativeSandboxBinding(): NativeSandboxBinding {
-  if (cachedBinding) return cachedBinding;
-  if (cachedBindingError) throw cachedBindingError;
-  try {
-    const binding = loadNative<NativeSandboxBinding>();
-    if (
-      binding == null ||
-      typeof binding.NativeSandboxClient !== "function" ||
-      typeof binding.NativeSandboxProxyClient !== "function"
-    ) {
-      throw new SandboxError(
-        "native binding does not export the sandbox clients; rebuild with 'npm run build:native'",
-      );
-    }
-    cachedBinding = binding;
-    return cachedBinding;
-  } catch (error) {
-    cachedBindingError =
-      error instanceof Error ? error : new Error(String(error));
-    throw cachedBindingError;
-  }
+  return cachedBinding ??= workerBinding();
 }
 
 /** Test seam: replace (or clear) the native binding. */
@@ -295,7 +275,6 @@ export function __setNativeSandboxBindingForTest(
   binding: NativeSandboxBinding | undefined,
 ): void {
   cachedBinding = binding;
-  cachedBindingError = undefined;
 }
 
 // ---- Error translation ----------------------------------------------------
@@ -401,64 +380,49 @@ export async function callNative<T>(
 /**
  * Adapt the native per-event callback API into an async generator, preserving
  * the live-streaming semantics of `followStdout`/`followStderr`/`followOutput`.
- * The native `start` call resolves once the upstream stream closes; events are
- * buffered in a queue and drained in order.
+ * The native `start` call resolves once the upstream stream closes. Each emit
+ * resolves only after consumption, propagating backpressure through the worker
+ * to Rust. Cancellation drops the upstream response, including quiet streams.
  */
 export async function* nativeEventStream(
   start: (emit: NativeEmit) => Promise<string>,
   context?: NativeErrorContext,
   signal?: AbortSignal,
 ): AsyncGenerator<Record<string, unknown>> {
-  const queue: string[] = [];
-  let wake: (() => void) | null = null;
+  if (signal?.aborted) return;
+  const queue: Array<{ value: string; consumed: () => void }> = [];
+  let wake: (() => void) | undefined;
   let finished = false;
-  let failure: unknown = null;
-
-  const notify = () => {
-    if (wake) {
-      const w = wake;
-      wake = null;
-      w();
-    }
+  let stopped = false;
+  let failure: unknown;
+  const notify = () => { const resolve = wake; wake = undefined; resolve?.(); };
+  const emit: NativeEmit = (value) => {
+    if (stopped) return Promise.resolve();
+    return new Promise<void>((consumed) => { queue.push({ value, consumed }); notify(); });
   };
-
-  const emit: NativeEmit = (eventJson) => {
-    queue.push(eventJson);
-    notify();
-  };
-
-  const onAbort = () => notify();
+  let call: NativeCall<string> | undefined;
+  const onAbort = () => { stopped = true; call?.[cancelNativeCall]?.(); notify(); };
   signal?.addEventListener("abort", onAbort, { once: true });
-
-  const startPromise = start(emit)
-    .catch((error) => {
-      failure = error;
-    })
-    .finally(() => {
-      finished = true;
-      notify();
-    });
-
   try {
-    while (true) {
-      if (queue.length > 0) {
-        yield JSON.parse(queue.shift()!) as Record<string, unknown>;
-        continue;
+    call = start(emit);
+    void call.catch((error: unknown) => { failure = error; }).finally(() => { finished = true; notify(); });
+    while (!stopped) {
+      const event = queue.shift();
+      if (event) {
+        try { yield JSON.parse(event.value) as Record<string, unknown>; }
+        finally { event.consumed(); }
+      } else if (finished) {
+        break;
+      } else {
+        await new Promise<void>((resolve) => { wake = resolve; });
       }
-      if (signal?.aborted) break;
-      if (finished) break;
-      await new Promise<void>((resolve) => {
-        wake = resolve;
-      });
     }
-    if (failure != null) {
-      throw translateNativeError(failure, context);
-    }
+    if (!stopped && failure !== undefined) throw translateNativeError(failure, context);
   } finally {
+    stopped = true;
     signal?.removeEventListener("abort", onAbort);
-    // Ensure the native call settles so it never surfaces as an unhandled
-    // rejection when the consumer breaks early.
-    void startPromise.catch(() => {});
+    call?.[cancelNativeCall]?.();
+    for (const event of queue) event.consumed();
   }
 }
 

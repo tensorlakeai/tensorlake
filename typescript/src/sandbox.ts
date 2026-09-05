@@ -1,3 +1,4 @@
+import { releaseNativeHandle } from "./native-worker-client.js";
 import type { SandboxClient } from "./client.js";
 import {
   type ConnectDesktopOptions,
@@ -75,6 +76,7 @@ class SandboxProxyConnection {
   private readonly optionRoutingHint?: string;
   private readonly explicitProxyUrl?: string;
   private resolveGeneration = 0;
+  private closed = false;
 
   constructor(
     private readonly sandbox: Sandbox,
@@ -98,6 +100,7 @@ class SandboxProxyConnection {
   }
 
   async ensureResolved(): Promise<void> {
+    if (this.closed) throw new SandboxError("Sandbox connection is closed");
     if (this.nativeProxy != null) {
       return;
     }
@@ -115,16 +118,12 @@ class SandboxProxyConnection {
     });
 
     const generation = this.resolveGeneration;
-    this.resolvePromise = this.resolveProxyInfo(identifier)
-      .then((info) => {
+    const resolving = this.resolveProxyInfo(identifier)
+      .then(async (info) => {
         if (generation !== this.resolveGeneration) {
           return;
         }
-        this.sandbox.traceId = info.traceId;
-        this.sandbox._setLifecycleIdentifier(info.sandboxId);
-        this.sandbox._setName(info.name ?? null);
-        this.routingHint = info.routingHint ?? this.optionRoutingHint;
-        const proxyUrl = this.options.nativeClient?.selectSandboxProxyUrl(
+        const proxyUrl = await this.options.nativeClient?.selectSandboxProxyUrl(
           info.sandboxId,
           info.sandboxUrl ?? null,
           info.ingressEndpoint ?? null,
@@ -136,6 +135,11 @@ class SandboxProxyConnection {
             "server response did not include sandbox_url; refusing to derive a proxy URL",
           );
         }
+        if (generation !== this.resolveGeneration) return;
+        this.sandbox.traceId = info.traceId;
+        this.sandbox._setLifecycleIdentifier(info.sandboxId);
+        this.sandbox._setName(info.name ?? null);
+        this.routingHint = info.routingHint ?? this.optionRoutingHint;
         this.nativeProxy = this.configureProxy(
           proxyUrl,
           info.sandboxId,
@@ -150,19 +154,21 @@ class SandboxProxyConnection {
         });
       })
       .finally(() => {
-        this.resolvePromise = null;
+        if (this.resolvePromise === resolving) this.resolvePromise = null;
       });
-
-    return this.resolvePromise;
+    this.resolvePromise = resolving;
+    return resolving;
   }
 
   hasExplicitProxyUrl(): boolean {
     return this.explicitProxyUrl != null;
   }
 
-  refreshFromInfo(info: Traced<SandboxInfo>): void {
+  async refreshFromInfo(info: Traced<SandboxInfo>): Promise<void> {
+    if (this.closed) throw new SandboxError("Sandbox connection is closed");
+    const generation = ++this.resolveGeneration;
     const routingHint = info.routingHint ?? this.optionRoutingHint;
-    const proxyUrl = this.options.nativeClient?.selectSandboxProxyUrl(
+    const proxyUrl = await this.options.nativeClient?.selectSandboxProxyUrl(
       info.sandboxId,
       info.sandboxUrl ?? null,
       info.ingressEndpoint ?? null,
@@ -174,14 +180,15 @@ class SandboxProxyConnection {
         "server response did not include sandbox_url; refusing to derive a proxy URL",
       );
     }
+    if (generation !== this.resolveGeneration) return;
     const state = this.buildProxyState(
       proxyUrl,
       info.sandboxId,
       routingHint,
     );
-    this.resolveGeneration += 1;
     this.resolvePromise = null;
     this.routingHint = routingHint;
+    releaseNativeHandle(this.nativeProxy);
     this.nativeProxy = state.nativeProxy;
     this.baseUrl = state.baseUrl;
     this.wsHeaders = state.wsHeaders;
@@ -193,6 +200,7 @@ class SandboxProxyConnection {
   /** Await proxy resolution and return the Rust-backed proxy client. */
   async client(): Promise<NativeSandboxProxyClient> {
     await this.ensureResolved();
+    if (this.closed) throw new SandboxError("Sandbox connection is closed");
     if (this.nativeProxy == null) {
       throw new SandboxError(
         "server response did not include sandbox_url; refusing to derive a proxy URL",
@@ -202,8 +210,9 @@ class SandboxProxyConnection {
   }
 
   close(): void {
-    // The underlying reqwest client is released when the native handle is
-    // garbage-collected; there is nothing to close eagerly.
+    this.closed = true;
+    this.resolveGeneration += 1;
+    releaseNativeHandle(this.nativeProxy);
   }
 
   private configureProxy(
@@ -994,7 +1003,7 @@ export class Sandbox {
         info.status === SandboxStatus.RUNNING &&
         (info.sandboxUrl != null || this.proxy.hasExplicitProxyUrl())
       ) {
-        this.proxy.refreshFromInfo(info);
+        await this.proxy.refreshFromInfo(info);
         return;
       }
       if (info.status === SandboxStatus.TERMINATED) {
@@ -1186,7 +1195,7 @@ export class Sandbox {
     if (options?.name != null) {
       // Validate the managed name client-side (throws) via the single source-of-truth rule
       // in the Rust core. The daemon re-validates as the authority.
-      loadNativeSandboxBinding().validateManagedName(options.name);
+      await loadNativeSandboxBinding().validateManagedName(options.name);
       payload.name = options.name;
     }
     if (options?.restart != null) payload.restart = toSnakeKeys(options.restart);

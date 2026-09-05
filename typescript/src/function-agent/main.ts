@@ -1,4 +1,5 @@
 import { loadNative } from "../native-binding.js";
+import { configureNativeWorker } from "../native-worker-client.js";
 import type { NativeFunctionAgentBinding, NativeFunctionAgentOptions } from "./protocol.js";
 import { FunctionAgentRunner } from "./runner.js";
 
@@ -33,6 +34,7 @@ function parseArgs(args: readonly string[]): NativeFunctionAgentOptions {
 }
 
 export async function main(args: readonly string[] = process.argv.slice(2)): Promise<void> {
+  configureNativeWorker(() => new URL("../native-worker.cjs", import.meta.url));
   const binding = loadNative<NativeFunctionAgentBinding>();
   const core = new binding.FunctionAgentCore(parseArgs(args));
   return new FunctionAgentRunner(core).run();

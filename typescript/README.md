@@ -2,11 +2,27 @@
 
 The TypeScript SDK supports Tensorlake sandboxes on Node.js 22 or newer. Deploying and running durable TypeScript applications requires Node.js 24 or newer. Application handlers are async-only and values crossing a function boundary must be JSON values or a direct `File`. Application entrypoints can also receive an exact raw request body with `HttpBody`.
 
-Sandbox handles retain connection configuration without loading TLS certificates.
-Their first HTTP operation initializes the native transport on a background thread;
-concurrent operations share that initialization and proxies reuse its connection pool.
-Initialization failures reject the operation and can be retried by a later operation.
-Creating a new client picks up changes to the system's trusted certificates.
+Sandbox, repository and filesystem handles retain configuration on the calling thread.
+The first native operation starts a persistent Node worker that loads the addon and
+owns the native clients. Concurrent calls use the same worker; sandbox proxies share
+their lifecycle client's connection pool. Addon loading and TLS initialization keep
+the application's event loop responsive, including on the first call. Initialization
+failures reject the operation. A later operation can retry transport initialization;
+creating a new client picks up changes to the system's trusted certificates.
+
+Streaming consumers acknowledge each event before Rust reads the next one. Breaking
+iteration, aborting its signal, or closing the sandbox connection cancels the native
+HTTP stream. Closing one handle leaves sibling handles usable. Garbage collection
+also releases native handles, and an idle worker does not keep Node running. If a
+worker fails, outstanding calls reject without automatic replay; subsequent calls
+can start a fresh worker. Byte arguments are copied across the worker boundary;
+caller-owned buffers are never detached. File-path upload APIs avoid that copy.
+
+Both ESM and CommonJS packages include the worker entrypoint. Applications using a
+bundler should keep `tensorlake` external so its worker and optional native packages
+remain available at runtime. Tensorlake's function runtime capsules carry the worker
+for deployed application bundles. Image-building and Function Agent runtime bindings
+have their own native entrypoints and are outside this sandbox worker boundary.
 
 On Linux, native binding selection reads the Node executable's ELF interpreter
 without generating diagnostic reports. For a nonstandard or statically linked Node

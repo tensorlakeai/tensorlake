@@ -14,6 +14,7 @@
     "tensorlake-typescript-function-runner": "./bin/tensorlake-typescript-function-runner.js"
   },
   "exports": {
+    "./internal/native-worker": "./dist/native-worker.cjs",
     ".": {
       "import": {
         "types": "./dist/index.d.ts",

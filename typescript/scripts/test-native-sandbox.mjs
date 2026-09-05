@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { rootCertificates } from "node:tls";
 import { fileURLToPath } from "node:url";
+import { setEnvironmentData } from "node:worker_threads";
 
 // Run in a disposable process: certificate settings and native module state
 // must be fresh, and the parent must be able to detect a blocked event loop.
@@ -14,7 +15,10 @@ if (!process.argv.includes("--child")) {
   if (process.platform !== "linux") {
     console.log("Slow certificate I/O regression requires Linux FIFOs.");
   } else {
-    const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "--child"], {
+    const child = spawn(process.execPath, [
+      "--require", fileURLToPath(new URL("../tests/fixtures/delayed-native-load.cjs", import.meta.url)),
+      fileURLToPath(import.meta.url), "--child",
+    ], {
       stdio: "inherit",
       timeout: 20_000,
       killSignal: "SIGKILL",
@@ -52,9 +56,30 @@ if (!process.argv.includes("--child")) {
   writer.stdout.on("data", (chunk) => { certificateReads += chunk.split("\n").length - 1; });
 
   let connections = 0;
+  let streamsClosed = 0;
+  let fileContents = Buffer.from([0, 255, 128, 7]);
   const authorizations = [];
   const server = createServer((request, response) => {
     authorizations.push(request.headers.authorization);
+    if (request.url.endsWith("/follow")) {
+      response.setHeader("Content-Type", "text/event-stream");
+      response.flushHeaders();
+      if (!request.url.includes("/quiet/")) {
+        for (let i = 0; i < 20; i++) response.write(`data: ${JSON.stringify({ line: String(i), timestamp: i })}\n\n`);
+      }
+      response.on("close", () => { streamsClosed++; });
+      return;
+    }
+    if (request.url.startsWith("/api/v1/files?")) {
+      if (request.method === "PUT") {
+        const chunks = [];
+        request.on("data", (chunk) => chunks.push(chunk));
+        request.on("end", () => { fileContents = Buffer.concat(chunks); response.end(); });
+      } else {
+        response.end(fileContents);
+      }
+      return;
+    }
     response.setHeader("Content-Type", "application/json");
     response.end(JSON.stringify({ sandboxes: [], processes: [] }));
   });
@@ -65,6 +90,10 @@ if (!process.argv.includes("--child")) {
   let ticks = 0;
   let reports = 0;
   const originalGetReport = process.report.getReport;
+  const originalDlopen = process.dlopen;
+  const nativeLoads = new Int32Array(new SharedArrayBuffer(4));
+  setEnvironmentData("tensorlake-test-native-loads", nativeLoads.buffer);
+  process.dlopen = () => { throw new Error("Sandbox SDK must not load native code on the main thread"); };
   process.report.getReport = () => {
     reports++;
     throw new Error("SDK must not generate diagnostic reports");
@@ -85,7 +114,7 @@ if (!process.argv.includes("--child")) {
 
     ticks = 0;
     await Promise.all([client.list(), handles[0].listProcesses(), handles[1].listProcesses()]);
-    assert.ok(ticks >= 20, `Event loop stalled during slow CA loading (${ticks} timer ticks)`);
+    assert.ok(ticks >= 100, `Event loop stalled during slow addon/CA loading (${ticks} timer ticks)`);
     assert.equal(certificateReads, 1, "Concurrent first requests must share initialization");
     const initialConnections = connections;
     for (const handle of handles) await handle.listProcesses();
@@ -103,6 +132,35 @@ if (!process.argv.includes("--child")) {
     assert.equal(authorizations.at(-1), "Bearer client-one");
     await direct.listProcesses();
     await standalone.listProcesses();
+    assert.deepEqual(Array.from(await standalone.readFile("/bytes")), [0, 255, 128, 7]);
+    const bytes = new Uint8Array([7, 128, 255, 0]);
+    await standalone.writeFile("/bytes", bytes);
+    assert.equal(bytes.byteLength, 4, "Upload detached the caller's buffer");
+    assert.deepEqual(Array.from(await standalone.readFile("/bytes")), [7, 128, 255, 0]);
+
+    // Load the CJS facade too. It must share the existing worker and preserve
+    // native routing helpers without loading an addon on the main thread.
+    const { createRequire } = await import("node:module");
+    const commonJS = createRequire(import.meta.url)("../dist/index.cjs");
+    const cjsSandbox = new commonJS.Sandbox({ sandboxId: "commonjs", proxyUrl: url });
+    await cjsSandbox.listProcesses();
+    assert.equal(Atomics.load(nativeLoads, 0), 1, "ESM and CommonJS must share one worker and addon load");
+
+    const firstClosed = streamsClosed;
+    const stream = standalone.followStdout(7)[Symbol.asyncIterator]();
+    assert.equal((await stream.next()).value.line, "0");
+    await stream.return();
+    for (let i = 0; i < 100 && streamsClosed === firstClosed; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(streamsClosed, firstClosed + 1, "Early return did not cancel native HTTP stream");
+
+    const controller = new AbortController();
+    const quiet = standalone.followStdout("quiet", { signal: controller.signal })[Symbol.asyncIterator]();
+    const next = quiet.next();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    controller.abort();
+    assert.equal((await next).done, true);
+    for (let i = 0; i < 100 && streamsClosed === firstClosed + 1; i++) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.equal(streamsClosed, firstClosed + 2, "Abort did not cancel a quiet native HTTP stream");
 
     // Failed initialization must reject the operation and remain retryable.
     const certFile = path.join(directory, "retry.pem");
@@ -112,10 +170,13 @@ if (!process.argv.includes("--child")) {
     await assert.rejects(retry.list());
     writeFileSync(certFile, rootCertificates[0] + "\n");
     await retry.list();
-    console.log(`Native sandbox regression passed: ${setupMs.toFixed(1)} ms setup, ${ticks} timer ticks, shared transport and retry verified.`);
+    for (const handle of [...handles, direct, standalone, cjsSandbox]) handle.close();
+    client.close(); other.close(); retry.close();
+    console.log(`Native sandbox regression passed: ${setupMs.toFixed(1)} ms setup, ${ticks} timer ticks, worker-only addon loading, shared transport, stream cancellation and retry verified.`);
   } finally {
     clearInterval(timer);
     process.report.getReport = originalGetReport;
+    process.dlopen = originalDlopen;
     writer.kill("SIGKILL");
     await once(writer, "exit");
     server.closeAllConnections();
