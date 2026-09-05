@@ -11,7 +11,10 @@ use tensorlake::artifact_storage::models::REPO_KIND_FILESYSTEM;
 use tensorlake::artifact_storage::models::{
     NativeDirectFilePathWrite, NativeDirectFileWrite, NativeDirectPathTransfer,
 };
-use tensorlake::{ClientBuilder, error::SdkError};
+use tensorlake::{
+    ClientBuilder,
+    error::{SdkError, TransportFailure},
+};
 
 use crate::sandbox::{
     TracedBytes, TracedJson, duration_from_seconds, into_napi_error, usage_error, with_retry,
@@ -45,9 +48,11 @@ pub struct FilesystemFilePathWrite {
 /// never transmitted). Gates the 409/404-on-retry forgiveness in the
 /// filesystem create/delete bindings.
 fn request_may_have_executed(err: &SdkError) -> bool {
+    if err.transport_failure() == Some(TransportFailure::Timeout) {
+        return true;
+    }
     match err {
         SdkError::ServerError { status, .. } => status.is_server_error(),
-        SdkError::Http(e) => e.is_timeout(),
         _ => false,
     }
 }

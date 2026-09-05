@@ -545,7 +545,7 @@ fn str_to_header_value(value: &str) -> Result<HeaderValue, SdkError> {
         .map_err(|e: InvalidHeaderValue| SdkError::InvalidHeaderValue(e.to_string()))
 }
 
-fn ensure_rustls_provider() {
+pub(crate) fn ensure_rustls_provider() {
     static INSTALL_PROVIDER: Once = Once::new();
     INSTALL_PROVIDER.call_once(|| {
         let _ = rustls::crypto::ring::default_provider().install_default();

@@ -36,7 +36,10 @@ use tensorlake::sandboxes::{
     SandboxProxyClient, SandboxProxyTarget, SandboxesClient, resolve_sandbox_proxy_target,
     select_sandbox_proxy_url,
 };
-use tensorlake::{ClientBuilder, error::SdkError};
+use tensorlake::{
+    ClientBuilder,
+    error::{SdkError, TransportFailure},
+};
 
 // ---- Return value objects -------------------------------------------------
 
@@ -77,6 +80,13 @@ fn make_napi_error(category: &str, status: Option<u16>, message: String) -> napi
 
 /// Map an [`SdkError`] to a structured napi error. Mirrors the Python binding's
 /// `into_sandbox_py_error` so both SDKs classify failures identically.
+///
+/// Transport failures are classified with [`SdkError::transport_failure`], not
+/// by inspecting the message. Every request in this binding goes through
+/// `reqwest_middleware`, so a connect failure arrives as
+/// `SdkError::Middleware` rendering as `error sending request for url (...)` —
+/// a string that contains neither "connect" nor "timeout". Classifying it by
+/// substring reported real DNS and TCP failures as opaque internal errors.
 pub(crate) fn into_napi_error(error: SdkError) -> napi::Error {
     match error {
         SdkError::Authentication(message) => make_napi_error("sdk_usage", Some(401), message),
@@ -84,25 +94,18 @@ pub(crate) fn into_napi_error(error: SdkError) -> napi::Error {
         SdkError::ServerError { status, message } => {
             make_napi_error("remote_api", Some(status.as_u16()), message)
         }
-        SdkError::Http(http_error) => {
-            if http_error.is_timeout() {
-                make_napi_error("connection", Some(504), http_error.to_string())
-            } else if http_error.is_connect() {
-                make_napi_error("connection", Some(503), http_error.to_string())
-            } else {
-                make_napi_error("internal", None, http_error.to_string())
+        other => match other.transport_failure() {
+            // `detail()` appends the source chain, which is where reqwest keeps
+            // the part that names the failure (`tcp connect error`, `dns
+            // error`). Without it the caller sees only the generic wrapper.
+            Some(TransportFailure::Timeout) => {
+                make_napi_error("connection", Some(504), other.detail())
             }
-        }
-        SdkError::Middleware(middleware_error) => {
-            let message = middleware_error.to_string();
-            let lower = message.to_lowercase();
-            if lower.contains("timeout") || lower.contains("connect") {
-                make_napi_error("connection", None, message)
-            } else {
-                make_napi_error("internal", None, message)
+            Some(TransportFailure::Connect) => {
+                make_napi_error("connection", Some(503), other.detail())
             }
-        }
-        other => make_napi_error("internal", None, other.to_string()),
+            None => make_napi_error("internal", None, other.detail()),
+        },
     }
 }
 
@@ -112,21 +115,38 @@ pub(crate) fn usage_error(message: String) -> napi::Error {
 
 // ---- Retry helpers (ported from the Python binding) -----------------------
 
+/// Whether the SDK may re-send a request after this failure.
+///
+/// Deliberately excludes timeouts. A timeout means the request was already on
+/// the wire, so the server may have executed it; most operations reached
+/// through this predicate — starting a process, creating a snapshot or pool,
+/// deleting a sandbox — cannot absorb a second execution. Only failures that
+/// provably never reached the server are replayed here; per-operation timeout
+/// retries need an idempotency review first.
 fn is_retryable(error: &SdkError) -> bool {
+    if is_safe_to_replay(error) {
+        return true;
+    }
     match error {
         SdkError::ServerError { status, .. } => {
             *status == reqwest::StatusCode::BAD_GATEWAY
                 || *status == reqwest::StatusCode::SERVICE_UNAVAILABLE
                 || *status == reqwest::StatusCode::GATEWAY_TIMEOUT
         }
-        SdkError::Http(http_error) => http_error.is_connect() || http_error.is_timeout(),
-        SdkError::Middleware(middleware_error) => {
-            let source = middleware_error.to_string().to_lowercase();
-            source.contains("timeout") || source.contains("connect")
-        }
         SdkError::EventSourceError(_) => true,
         _ => false,
     }
+}
+
+/// Whether replaying the request is safe even when the operation is not
+/// idempotent.
+///
+/// Only a connect failure qualifies: DNS, TCP, and TLS all fail before a single
+/// request byte reaches the server, so the operation provably did not run. A
+/// timeout gives no such guarantee — the server may have received the request
+/// and be executing it still.
+fn is_safe_to_replay(error: &SdkError) -> bool {
+    matches!(error.transport_failure(), Some(TransportFailure::Connect))
 }
 
 fn calculate_sleep_time(retries: usize) -> f64 {
@@ -153,6 +173,42 @@ where
                 }
                 retries += 1;
                 let sleep_time = calculate_sleep_time(retries);
+                tokio::time::sleep(Duration::from_secs_f64(sleep_time)).await;
+            }
+        }
+    }
+}
+
+/// Number of times a request that never reached the server is replayed.
+///
+/// Small on purpose: a connect failure resolves in milliseconds, so the useful
+/// case is a single transient DNS or TCP hiccup, not a sustained outage the
+/// caller should hear about promptly.
+const MAX_CONNECT_REPLAYS: usize = 2;
+
+/// Run `op`, replaying it only when the previous attempt failed before the
+/// request reached the server.
+///
+/// Unlike [`retry_async_op`], this is safe for non-idempotent operations such
+/// as starting a process: [`is_safe_to_replay`] admits connect failures only,
+/// and a connect failure means no request byte was ever transmitted, so the
+/// operation cannot have run.
+async fn replay_on_connect_failure<C, T, F, Fut>(client: C, op: F) -> Result<T, SdkError>
+where
+    C: Clone,
+    F: Fn(C) -> Fut,
+    Fut: Future<Output = Result<T, SdkError>>,
+{
+    let mut replays = 0usize;
+    loop {
+        match op(client.clone()).await {
+            Ok(value) => return Ok(value),
+            Err(err) => {
+                if !is_safe_to_replay(&err) || replays >= MAX_CONNECT_REPLAYS {
+                    return Err(err);
+                }
+                replays += 1;
+                let sleep_time = calculate_sleep_time(replays);
                 tokio::time::sleep(Duration::from_secs_f64(sleep_time)).await;
             }
         }
@@ -1112,13 +1168,15 @@ impl NativeSandboxProxyClient {
     #[napi]
     pub async fn run_process(&self, payload_json: String) -> napi::Result<TracedEvents> {
         let payload: Value = parse_json_payload(&payload_json)?;
-        // Not retried: running a process is not idempotent.
-        let traced = self
-            .client()
-            .await?
-            .run_process(&payload)
-            .await
-            .map_err(into_napi_error)?;
+        // Running a process is not idempotent, so this is not wrapped in the
+        // general retry. Connect failures are still replayed: the request never
+        // reached the sandbox, so no process was started.
+        let traced = replay_on_connect_failure(self.client().await?, |client| {
+            let payload = payload.clone();
+            async move { client.run_process(&payload).await }
+        })
+        .await
+        .map_err(into_napi_error)?;
         let trace_id = traced.trace_id.clone();
         let events = traced
             .into_inner()
