@@ -37,15 +37,35 @@ function packageRoot(): string {
   return parent;
 }
 
+let cachedLinuxLibc: "gnu" | "musl" | undefined;
+
 function linuxLibcFamily(options: TargetOptions): "gnu" | "musl" {
   if (options.libc != null) return options.libc;
-  try {
-    const report = options.report ?? process.report?.getReport() as RuntimeReport | undefined;
-    if (report?.header?.glibcVersionRuntime) return "gnu";
-  } catch {
-    return "gnu";
+  if (options.report != null) {
+    return options.report.header?.glibcVersionRuntime ? "gnu" : "musl";
   }
-  return "musl";
+  if (cachedLinuxLibc != null) return cachedLinuxLibc;
+
+  // libc cannot change during the process lifetime. Generating a diagnostic
+  // report can block on network lookups, so omit those and only probe once.
+  // Keep this in sync with lib/runtime.cjs, used by the runtime launchers.
+  cachedLinuxLibc = "gnu";
+  // Available since Node 22, but missing from the current Node type definitions.
+  const report = process.report as NodeJS.ProcessReport & { excludeNetwork: boolean };
+  if (!report?.getReport) return cachedLinuxLibc;
+  const excludeNetwork = report.excludeNetwork;
+  try {
+    report.excludeNetwork = true;
+    const data = report.getReport() as RuntimeReport | undefined;
+    if (data) {
+      cachedLinuxLibc = data.header?.glibcVersionRuntime ? "gnu" : "musl";
+    }
+  } catch {
+    // Preserve the GNU fallback when diagnostic reports are unavailable.
+  } finally {
+    report.excludeNetwork = excludeNetwork;
+  }
+  return cachedLinuxLibc;
 }
 
 export function nativeTargetId(
