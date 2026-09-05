@@ -253,6 +253,10 @@ test-artifact-storage:
 lint-http-transports:
     cargo clippy --locked -p tensorlake -p tensorlake-cli --all-targets -- -D warnings
 
+# Requires private sources to have been injected by the CI vendoring action.
+lint-http-transports-full:
+    cargo clippy -p tensorlake -p tensorlake-cli --features tensorlake-cli/mount,tensorlake-cli/git-clone --all-targets -- -D warnings
+
 
 # Run clippy lints on all crates
 clippy:
