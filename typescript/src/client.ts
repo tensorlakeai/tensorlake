@@ -556,6 +556,12 @@ export class SandboxClient {
     while (Date.now() < deadline) {
       const info = await this.get(sandboxId);
       if (info.status === SandboxStatus.RUNNING) return;
+      if (
+        typeof info.errorDetails === "string" &&
+        info.errorDetails.startsWith("Resident resume failed: ")
+      ) {
+        throw new SandboxError(info.errorDetails);
+      }
       if (info.status === SandboxStatus.TERMINATED) {
         throw new SandboxError(
           `Sandbox ${sandboxId} terminated while waiting for resume`,

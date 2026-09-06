@@ -1097,6 +1097,39 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(fake.suspend_wait_ms, 0)
         self.assertEqual(fake.resume_calls, [])
 
+    def test_resume_polling_reports_late_failure_without_waiting_for_timeout(self):
+        for status in ("pending", "suspended"):
+
+            class FailedResumeClient(_FakeRustClient):
+                get_calls = 0
+
+                def get_sandbox_json(self, sandbox_id):
+                    self.get_calls += 1
+                    return (
+                        "trace",
+                        json.dumps(
+                            {
+                                "id": "sbx-1",
+                                "namespace": "default",
+                                "status": status,
+                                "resources": {
+                                    "cpus": 1,
+                                    "memory_mb": 512,
+                                    "ephemeral_disk_mb": 1024,
+                                },
+                                "error_details": "Resident resume failed: checkpoint owner unavailable",
+                            }
+                        ),
+                    )
+
+            fake = FailedResumeClient()
+            client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+            client._rust_client = fake
+            with self.assertRaisesRegex(SandboxError, "checkpoint owner unavailable"):
+                client.resume("sbx-1", timeout=0.2, poll_interval=0.01)
+            self.assertEqual(fake.get_calls, 1)
+            self.assertEqual(fake.resume_calls, ["sbx-1"])
+
     def test_resume_calls_rust_backend(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
         fake = _FakeRustClient()

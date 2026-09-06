@@ -814,6 +814,24 @@ describe("SandboxClient", () => {
     });
   });
 
+  it.each(["pending", "suspended"])(
+    "reports late resume failure in %s after an asynchronous response",
+    async (status) => {
+      const stub = installNativeStub({ client: {
+        getSandbox: vi.fn(async () => ({ traceId: "t", json: JSON.stringify({
+          id: "sbx-1", namespace: "default", status,
+          resources: { cpus: 1, memory_mb: 512, ephemeral_disk_mb: 1024 },
+          error_details: "Resident resume failed: checkpoint owner unavailable",
+        }) })),
+      } });
+      const client = SandboxClient.forLocalhost();
+      await expect(client.resume("sbx-1", { timeout: 0.2, pollInterval: 0.01 })).rejects.toThrow("checkpoint owner unavailable");
+      expect(stub.client.getSandbox).toHaveBeenCalledTimes(1);
+      expect(stub.client.resumeSandbox).toHaveBeenCalledTimes(1);
+      client.close();
+    },
+  );
+
   it.each(["suspend", "resume"] as const)(
     "%s counts the server completion wait against the caller timeout",
     async (action) => {

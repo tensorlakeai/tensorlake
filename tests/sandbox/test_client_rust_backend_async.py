@@ -1055,6 +1055,41 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(fake.suspend_wait_ms, 0)
         self.assertEqual(fake.resume_calls, [])
 
+    async def test_resume_polling_reports_late_failure_without_waiting_for_timeout(
+        self,
+    ):
+        for status in ("pending", "suspended"):
+
+            class FailedResumeClient(_FakeAsyncRustClient):
+                get_calls = 0
+
+                async def get_sandbox_json_async(self, *, sandbox_id):
+                    self.get_calls += 1
+                    return (
+                        "trace",
+                        json.dumps(
+                            {
+                                "id": "sbx-1",
+                                "namespace": "default",
+                                "status": status,
+                                "resources": {
+                                    "cpus": 1,
+                                    "memory_mb": 512,
+                                    "ephemeral_disk_mb": 1024,
+                                },
+                                "error_details": "Resident resume failed: checkpoint owner unavailable",
+                            }
+                        ),
+                    )
+
+            fake = FailedResumeClient()
+            client = _make_client(fake)
+            client._rust_client = fake
+            with self.assertRaisesRegex(SandboxError, "checkpoint owner unavailable"):
+                await client.resume("sbx-1", timeout=0.2, poll_interval=0.01)
+            self.assertEqual(fake.get_calls, 1)
+            self.assertEqual(fake.resume_calls, ["sbx-1"])
+
     async def test_resume_calls_rust_backend(self):
         fake = _FakeAsyncRustClient()
         client = _make_client(fake)

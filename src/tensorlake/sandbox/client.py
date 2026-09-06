@@ -1032,6 +1032,10 @@ class SandboxClient:
             info = self.get(sandbox_id).value
             if info.status == SandboxStatus.RUNNING:
                 return Traced(trace_id, None)
+            if isinstance(info.error_details, str) and info.error_details.startswith(
+                "Resident resume failed: "
+            ):
+                raise SandboxError(info.error_details)
             if info.status == SandboxStatus.TERMINATED:
                 raise SandboxError(
                     f"Sandbox {sandbox_id!r} terminated while waiting for resume"
