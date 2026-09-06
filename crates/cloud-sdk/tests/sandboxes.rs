@@ -215,7 +215,7 @@ async fn pool_network_policy_is_sent_and_preserved_on_update() {
                 "pool_id":"pool-1",
                 "namespace":"default",
                 "image":"alpine",
-                "resources":{"cpus":1.0,"memory_mb":1024,"ephemeral_disk_mb":1024},
+                "resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":1024},
                 "network_policy":{
                     "allow_internet_access":false,
                     "allow_out":["10.0.0.0/8"],
@@ -233,7 +233,7 @@ async fn pool_network_policy_is_sent_and_preserved_on_update() {
                 "pool_id":"pool-1",
                 "namespace":"default",
                 "image":"alpine",
-                "resources":{"cpus":1.0,"memory_mb":2048,"ephemeral_disk_mb":1024},
+                "resources":{"cpus":1.0,"memory_mb":2048,"disk_mb":1024},
                 "network_policy":{
                     "allow_internet_access":false,
                     "allow_out":["10.0.0.0/8"],
@@ -327,7 +327,7 @@ async fn update_pool_with_network_replaces_policy_without_get() {
                 "pool_id":"pool-1",
                 "namespace":"default",
                 "image":"alpine",
-                "resources":{"cpus":1.0,"memory_mb":1024,"ephemeral_disk_mb":1024},
+                "resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":1024},
                 "network_policy":{
                     "allow_internet_access":true,
                     "allow_out":[],
@@ -404,7 +404,7 @@ async fn update_pool_clear_sends_explicit_null_network() {
                 "pool_id":"pool-1",
                 "namespace":"default",
                 "image":"alpine",
-                "resources":{"cpus":1.0,"memory_mb":1024,"ephemeral_disk_mb":1024}
+                "resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":1024}
             }"#,
         )
         .await;
@@ -537,7 +537,7 @@ const SANDBOX_INFO_JSON: &str = r#"{
     "sandbox_id":"sb-1",
     "namespace":"default",
     "status":"running",
-    "resources":{"cpus":1.0,"memory_mb":1024,"ephemeral_disk_mb":1024}
+    "resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":1024}
 }"#;
 
 #[tokio::test]

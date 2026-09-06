@@ -107,35 +107,11 @@ impl GetSandboxLogsRequest {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Serialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ContainerResourcesInfo {
     pub cpus: f64,
     pub memory_mb: i64,
     pub disk_mb: i64,
-}
-
-impl<'de> Deserialize<'de> for ContainerResourcesInfo {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        struct Wire {
-            cpus: f64,
-            memory_mb: i64,
-            #[serde(default)]
-            disk_mb: Option<i64>,
-            #[serde(default)]
-            ephemeral_disk_mb: Option<i64>,
-        }
-
-        let wire = Wire::deserialize(deserializer)?;
-        Ok(Self {
-            cpus: wire.cpus,
-            memory_mb: wire.memory_mb,
-            disk_mb: wire.disk_mb.or(wire.ephemeral_disk_mb).unwrap_or_default(),
-        })
-    }
 }
 
 /// GPU models supported by the sandbox scheduler.
@@ -1120,7 +1096,7 @@ mod tests {
     }
 
     #[test]
-    fn container_resources_info_prefers_canonical_disk_and_reads_legacy_responses() {
+    fn container_resources_info_requires_canonical_disk() {
         let canonical: ContainerResourcesInfo = serde_json::from_value(serde_json::json!({
             "cpus": 1.0,
             "memory_mb": 1024,
@@ -1130,16 +1106,15 @@ mod tests {
         .unwrap();
         assert_eq!(canonical.disk_mb, 20480);
 
-        let legacy: ContainerResourcesInfo = serde_json::from_value(serde_json::json!({
+        let legacy = serde_json::from_value::<ContainerResourcesInfo>(serde_json::json!({
             "cpus": 1.0,
             "memory_mb": 1024,
             "ephemeral_disk_mb": 10240
-        }))
-        .unwrap();
-        assert_eq!(legacy.disk_mb, 10240);
+        }));
+        assert!(legacy.is_err(), "disk_mb is required in server responses");
         assert_eq!(
-            serde_json::to_value(legacy).unwrap(),
-            serde_json::json!({"cpus": 1.0, "memory_mb": 1024, "disk_mb": 10240})
+            serde_json::to_value(canonical).unwrap(),
+            serde_json::json!({"cpus": 1.0, "memory_mb": 1024, "disk_mb": 20480})
         );
     }
 
@@ -1440,7 +1415,7 @@ mod tests {
             "id":"sbx-1",
             "namespace":"default",
             "status":"running",
-            "resources":{"cpus":1.0,"memory_mb":512,"ephemeral_disk_mb":1024},
+            "resources":{"cpus":1.0,"memory_mb":512,"disk_mb":1024},
             "routing_hint":"hint-1",
             "sandbox_url":"https://sbx-1.sandbox.tensorlake.ai"
         }"#;

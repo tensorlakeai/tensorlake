@@ -134,7 +134,7 @@ class _FakeAsyncRustClient:
       "resources": {
         "cpus": 1.0,
         "memory_mb": 512,
-        "ephemeral_disk_mb": 1024
+        "disk_mb": 1024
       }
     }
   ]
@@ -154,7 +154,7 @@ class _FakeAsyncRustClient:
   "resources": {
     "cpus": 1.0,
     "memory_mb": 512,
-    "ephemeral_disk_mb": 1024
+    "disk_mb": 1024
   },
   "allow_unauthenticated_access": false,
   "exposed_ports": [8080],
@@ -175,7 +175,7 @@ class _FakeAsyncRustClient:
             "resources": {
                 "cpus": 1.0,
                 "memory_mb": 512,
-                "ephemeral_disk_mb": 1024,
+                "disk_mb": 1024,
             },
             "name": payload.get("name"),
             "allow_unauthenticated_access": payload.get(
@@ -256,7 +256,7 @@ def _sandbox_info_json(
         "resources": {
             "cpus": 1.0,
             "memory_mb": 512,
-            "ephemeral_disk_mb": 1024,
+            "disk_mb": 1024,
         },
         "allow_unauthenticated_access": False,
         "exposed_ports": [],
@@ -301,7 +301,7 @@ class _StatusSequenceRustClient(_FakeAsyncRustClient):
                     "resources": {
                         "cpus": 1.0,
                         "memory_mb": 512,
-                        "ephemeral_disk_mb": 1024,
+                        "disk_mb": 1024,
                     },
                     "routing_hint": "hint-2",
                     "sandbox_url": f"https://{returned_sandbox_id}.sandbox.tensorlake.ai",
@@ -687,7 +687,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 512,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                         }
                     ),
@@ -732,7 +732,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 512,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                         }
                     ),
@@ -803,7 +803,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
   "resources": {
     "cpus": 1.0,
     "memory_mb": 512,
-    "ephemeral_disk_mb": 1024
+    "disk_mb": 1024
   },
   "error_details": {
     "message": "failed to pull image tensorlake/missing-image"
@@ -1403,7 +1403,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 1024,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                         }
                     ),
@@ -1465,7 +1465,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 1024,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                             "network_policy": {
                                 "allow_internet_access": False,

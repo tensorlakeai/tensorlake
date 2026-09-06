@@ -5,14 +5,7 @@ from enum import Enum
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse, urlunparse
 
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    BeforeValidator,
-    ConfigDict,
-    Field,
-    model_serializer,
-)
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_serializer
 
 _SANDBOX_MANAGEMENT_PORT = 9501
 
@@ -167,9 +160,7 @@ class ContainerResourcesInfo(BaseModel):
 
     cpus: float
     memory_mb: int
-    disk_mb: int = Field(
-        validation_alias=AliasChoices("disk_mb", "ephemeral_disk_mb")
-    )
+    disk_mb: int
 
 
 class GpuModel(str, Enum):
