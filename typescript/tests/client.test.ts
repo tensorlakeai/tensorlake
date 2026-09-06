@@ -1,10 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { SandboxClient } from "../src/client.js";
-import {
-  type GpuModel,
-  SandboxStatus,
-  SnapshotStatus,
-} from "../src/models.js";
+import { type GpuModel, SandboxStatus, SnapshotStatus } from "../src/models.js";
 import { clearNativeStub, installNativeStub } from "./native-stub.js";
 
 /** Build the native error a non-2xx HTTP response now surfaces from Rust. */
@@ -41,7 +37,10 @@ describe("SandboxClient", () => {
         expect(JSON.parse(body)).toEqual({ snapshot_id: "snap-memory" });
         return {
           traceId: "t",
-          json: JSON.stringify({ sandbox_id: "sbx-restored", status: "running" }),
+          json: JSON.stringify({
+            sandbox_id: "sbx-restored",
+            status: "running",
+          }),
         };
       });
       installNativeStub({ client: { createSandbox } });
@@ -56,7 +55,10 @@ describe("SandboxClient", () => {
         expect(JSON.parse(body).resources).toEqual({ cpus: 2 });
         return {
           traceId: "t",
-          json: JSON.stringify({ sandbox_id: "sbx-restored", status: "running" }),
+          json: JSON.stringify({
+            sandbox_id: "sbx-restored",
+            status: "running",
+          }),
         };
       });
       installNativeStub({ client: { createSandbox } });
@@ -152,7 +154,10 @@ describe("SandboxClient", () => {
             expect(body.resources.gpus).toEqual([{ count: 2, model }]);
             return {
               traceId: "t",
-              json: JSON.stringify({ sandbox_id: "sbx-gpu", status: "pending" }),
+              json: JSON.stringify({
+                sandbox_id: "sbx-gpu",
+                status: "pending",
+              }),
             };
           }),
         },
@@ -172,7 +177,10 @@ describe("SandboxClient", () => {
             expect(body.resources.gpus).toEqual([{ count: 2, model: "H100" }]);
             return {
               traceId: "t",
-              json: JSON.stringify({ sandbox_id: "sbx-gpu", status: "pending" }),
+              json: JSON.stringify({
+                sandbox_id: "sbx-gpu",
+                status: "pending",
+              }),
             };
           }),
         },
@@ -744,7 +752,7 @@ describe("SandboxClient", () => {
       await expect(
         client.suspend("sbx-1", { wait: false }),
       ).resolves.toBeUndefined();
-      expect(stub.client.suspendSandbox).toHaveBeenCalledWith("sbx-1");
+      expect(stub.client.suspendSandbox).toHaveBeenCalledWith("sbx-1", 0);
       client.close();
     });
 
@@ -765,7 +773,7 @@ describe("SandboxClient", () => {
 
       const client = SandboxClient.forLocalhost();
       await expect(client.suspend("sbx-1")).resolves.toBeUndefined();
-      expect(stub.client.suspendSandbox).toHaveBeenCalledWith("sbx-1");
+      expect(stub.client.suspendSandbox).toHaveBeenCalledWith("sbx-1", 10_000);
       expect(stub.client.getSandbox).toHaveBeenCalled();
       client.close();
     });
@@ -779,7 +787,7 @@ describe("SandboxClient", () => {
       await expect(
         client.resume("sbx-1", { wait: false }),
       ).resolves.toBeUndefined();
-      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1");
+      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1", 0);
       client.close();
     });
 
@@ -800,11 +808,35 @@ describe("SandboxClient", () => {
 
       const client = SandboxClient.forLocalhost();
       await expect(client.resume("sbx-1")).resolves.toBeUndefined();
-      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1");
+      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1", 10_000);
       expect(stub.client.getSandbox).toHaveBeenCalled();
       client.close();
     });
   });
+
+  it.each(["suspend", "resume"] as const)(
+    "%s counts the server completion wait against the caller timeout",
+    async (action) => {
+      let now = 0;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      const nativeMethod =
+        action === "suspend" ? "suspendSandbox" : "resumeSandbox";
+      const stub = installNativeStub({
+        client: {
+          [nativeMethod]: vi.fn(async () => {
+            now = 2000;
+          }),
+        },
+      });
+      const client = SandboxClient.forLocalhost();
+      await expect(client[action]("sbx-1", { timeout: 1 })).rejects.toThrow(
+        `did not ${action} within 1s`,
+      );
+      expect(stub.client[nativeMethod]).toHaveBeenCalledWith("sbx-1", 1000);
+      expect(stub.client.getSandbox).not.toHaveBeenCalled();
+      client.close();
+    },
+  );
 
   describe("claim", () => {
     it("claims from pool", async () => {

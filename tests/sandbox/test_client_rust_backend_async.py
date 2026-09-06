@@ -70,12 +70,14 @@ class _FakeAsyncRustClient:
             "server response did not include sandbox_url; refusing to derive a proxy URL"
         )
 
-    async def suspend_sandbox_async(self, *, sandbox_id):
+    async def suspend_sandbox_async(self, *, sandbox_id, wait_ms=0):
         self.suspend_calls.append(sandbox_id)
+        self.suspend_wait_ms = wait_ms
         return "trace-suspend"
 
-    async def resume_sandbox_async(self, *, sandbox_id):
+    async def resume_sandbox_async(self, *, sandbox_id, wait_ms=0):
         self.resume_calls.append(sandbox_id)
+        self.resume_wait_ms = wait_ms
         return "trace-resume"
 
     async def create_snapshot_async(self, *, sandbox_id, snapshot_type=None):
@@ -1018,6 +1020,31 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(SandboxError, "reserved for sandbox management"):
             await client.expose_ports("sbx-1", [9501])
 
+    async def test_lifecycle_server_wait_counts_against_timeout(self):
+        for action in ("suspend", "resume"):
+            with self.subTest(action=action):
+                fake = _FakeAsyncRustClient()
+                client = _make_client(fake)
+
+                class Clock:
+                    def __init__(self):
+                        self.values = iter((0, 2))
+
+                    def time(self):
+                        return next(self.values)
+
+                with (
+                    patch(
+                        "tensorlake.sandbox.async_client.asyncio.get_running_loop",
+                        return_value=Clock(),
+                    ),
+                    patch.object(client, "get") as get,
+                ):
+                    with self.assertRaisesRegex(SandboxError, "within 1s"):
+                        await getattr(client, action)("sbx-1", timeout=1)
+                    get.assert_not_called()
+                self.assertEqual(getattr(fake, f"{action}_wait_ms"), 1000)
+
     async def test_suspend_calls_rust_backend(self):
         fake = _FakeAsyncRustClient()
         client = _make_client(fake)
@@ -1025,6 +1052,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         await client.suspend("my-env", wait=False)
 
         self.assertEqual(fake.suspend_calls, ["my-env"])
+        self.assertEqual(fake.suspend_wait_ms, 0)
         self.assertEqual(fake.resume_calls, [])
 
     async def test_resume_calls_rust_backend(self):
@@ -1034,6 +1062,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         await client.resume("my-env", wait=False)
 
         self.assertEqual(fake.resume_calls, ["my-env"])
+        self.assertEqual(fake.resume_wait_ms, 0)
         self.assertEqual(fake.suspend_calls, [])
 
     async def test_handle_resume_wait_rebinds_proxy_from_fresh_info(self):
@@ -1211,6 +1240,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
 
         await client.suspend("sbx-1", wait=True, timeout=2.0, poll_interval=0.01)
 
+        self.assertEqual(fake.suspend_wait_ms, 2000)
         self.assertEqual(fake.suspend_calls, ["sbx-1"])
         self.assertGreaterEqual(fake.get_calls, 2)
 
@@ -1220,6 +1250,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
 
         await client.resume("sbx-1", wait=True, timeout=2.0, poll_interval=0.01)
 
+        self.assertEqual(fake.resume_wait_ms, 2000)
         self.assertEqual(fake.resume_calls, ["sbx-1"])
         self.assertGreaterEqual(fake.get_calls, 2)
 
@@ -1231,7 +1262,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             def close(self):
                 return None
 
-            async def suspend_sandbox_async(self, *, sandbox_id):
+            async def suspend_sandbox_async(self, *, sandbox_id, wait_ms=0):
                 raise FakeRustError(
                     ("remote_api", 404, f"sandbox {sandbox_id} not found")
                 )
@@ -1256,7 +1287,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             def close(self):
                 return None
 
-            async def resume_sandbox_async(self, *, sandbox_id):
+            async def resume_sandbox_async(self, *, sandbox_id, wait_ms=0):
                 raise FakeRustError(
                     ("remote_api", 404, f"sandbox {sandbox_id} not found")
                 )

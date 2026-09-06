@@ -29,6 +29,14 @@ without generating diagnostic reports. For a nonstandard or statically linked No
 executable, set `TENSORLAKE_NODE_LIBC=gnu` or `TENSORLAKE_NODE_LIBC=musl` before using
 the SDK.
 
+Blocking sandbox suspend and resume requests ask the server to wait for up to
+10 seconds of the requested timeout using sandbox state notifications. If the
+server returns before completion, including older servers, the SDK continues
+its normal bounded status polling. `wait: false` requests no server wait and
+retains its immediate-return behavior. Server completion removes the polling
+interval from the usual lifecycle path; it does not change when the server
+considers a sandbox suspended or running.
+
 ```ts
 import { registerApplication, registerFunction } from "tensorlake/applications";
 

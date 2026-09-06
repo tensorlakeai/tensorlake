@@ -624,19 +624,35 @@ impl NativeSandboxClient {
     }
 
     #[napi]
-    pub async fn suspend_sandbox(&self, sandbox_id: String) -> napi::Result<String> {
+    pub async fn suspend_sandbox(
+        &self,
+        sandbox_id: String,
+        wait_ms: Option<u32>,
+    ) -> napi::Result<String> {
         with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
-            async move { c.suspend(&sandbox_id).await.map(|t| t.trace_id) }
+            async move {
+                c.suspend_with_wait(&sandbox_id, wait_ms.unwrap_or(0))
+                    .await
+                    .map(|t| t.trace_id)
+            }
         })
         .await
     }
 
     #[napi]
-    pub async fn resume_sandbox(&self, sandbox_id: String) -> napi::Result<String> {
+    pub async fn resume_sandbox(
+        &self,
+        sandbox_id: String,
+        wait_ms: Option<u32>,
+    ) -> napi::Result<String> {
         with_retry(self.client().await?, 5, move |c| {
             let sandbox_id = sandbox_id.clone();
-            async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
+            async move {
+                c.resume_with_wait(&sandbox_id, wait_ms.unwrap_or(0))
+                    .await
+                    .map(|t| t.trace_id)
+            }
         })
         .await
     }
