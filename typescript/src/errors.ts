@@ -103,13 +103,71 @@ export class PoolInUseError extends SandboxError {
   }
 }
 
+export function formatErrorDetails(errorDetails: unknown): string | undefined {
+  if (errorDetails == null) return undefined;
+  if (typeof errorDetails === "string") {
+    const detail = errorDetails.trim();
+    return detail || undefined;
+  }
+  if (Array.isArray(errorDetails)) {
+    const parts = errorDetails
+      .map((item) => formatErrorDetails(item))
+      .filter((item): item is string => Boolean(item));
+    return parts.length > 0 ? parts.join("; ") : JSON.stringify(errorDetails);
+  }
+  if (typeof errorDetails === "object") {
+    for (const key of ["message", "detail", "error", "reason"]) {
+      const value = (errorDetails as Record<string, unknown>)[key];
+      if (typeof value === "string" && value.trim()) {
+        return value.trim();
+      }
+    }
+    return JSON.stringify(errorDetails);
+  }
+  return String(errorDetails);
+}
+
 /** Raised when the remote API returns an error. */
 export class RemoteAPIError extends SandboxError {
   readonly statusCode: number;
+  /** Original response body, retained for compatibility and diagnostics. */
   readonly responseMessage: string;
+  readonly sandboxId?: string;
+  /** Server reason, including unknown future reasons. */
+  readonly reason?: string;
+  readonly errorDetails?: unknown;
 
   constructor(statusCode: number, message: string) {
-    super(`API error (status ${statusCode}): ${message}`);
+    let failure: Record<string, unknown> | undefined;
+    try {
+      const payload: unknown = JSON.parse(message);
+      if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+        const record = payload as Record<string, unknown>;
+        if (
+          typeof record.sandbox_id === "string" &&
+          record.sandbox_id.trim() &&
+          (record.status === "failed" || record.status === "terminated")
+        )
+          failure = record;
+      }
+    } catch {
+      // Non-JSON errors keep their existing message.
+    }
+    const sandboxId = failure?.sandbox_id as string | undefined;
+    const rawReason = failure?.reason ?? failure?.termination_reason;
+    const reason = typeof rawReason === "string" ? rawReason : undefined;
+    const errorDetails = failure?.error_details;
+    let displayMessage = message;
+    if (failure) {
+      displayMessage = `Sandbox ${sandboxId} ${failure.status}`;
+      if (reason) displayMessage += ` (${reason})`;
+      const detail = formatErrorDetails(errorDetails);
+      if (detail) displayMessage += `: ${detail}`;
+    }
+    super(`API error (status ${statusCode}): ${displayMessage}`);
+    this.sandboxId = sandboxId;
+    this.reason = reason;
+    this.errorDetails = errorDetails;
     this.name = "RemoteAPIError";
     this.statusCode = statusCode;
     this.responseMessage = message;

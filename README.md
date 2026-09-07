@@ -168,6 +168,11 @@ remove it. On a change the service recycles the pool's unclaimed warm
 containers onto the new policy, while containers already claimed by sandboxes
 keep the policy they booted with.
 
+Sandbox startup errors include the server's reason and actionable diagnostic.
+The Python and TypeScript `RemoteAPIError` exposes structured failure fields;
+the CLI shows the same details in create/copy errors and `tl sbx describe`.
+See [sandbox failure diagnostics](docs/sandbox-errors.md) for error handling examples.
+
 ---
 
 ## Cloud Volumes

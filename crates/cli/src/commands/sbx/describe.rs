@@ -1,6 +1,7 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
-    DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, format_created_at, native_ssh, sandbox_endpoint,
+    DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, error_details_message, format_created_at, native_ssh,
+    sandbox_endpoint,
 };
 use crate::error::{CliError, Result};
 
@@ -229,6 +230,9 @@ fn print_sandbox_details(item: &serde_json::Value) {
             .and_then(|v| v.as_str())
             .unwrap_or("");
         println!("Reason:          {}", reason);
+        if let Some(details) = item.get("error_details").and_then(error_details_message) {
+            println!("Error details:   {}", details);
+        }
 
         let outcome = item.get("outcome").and_then(|v| v.as_str()).unwrap_or("");
         println!("Outcome:         {}", outcome);
@@ -236,6 +240,11 @@ fn print_sandbox_details(item: &serde_json::Value) {
 }
 
 fn print_ssh_config_details(item: &serde_json::Value) -> Result<()> {
+    // Terminated sandboxes have no routable guest. Their diagnosis must remain
+    // inspectable even when the server has already removed sandbox_url.
+    if item.get("status").and_then(|value| value.as_str()) == Some("terminated") {
+        return Ok(());
+    }
     let id = item
         .get("sandbox_id")
         .or_else(|| item.get("id"))

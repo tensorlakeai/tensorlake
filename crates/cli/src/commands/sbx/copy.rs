@@ -1,7 +1,7 @@
 use serde::Deserialize;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_sandbox_path, sandbox_endpoint};
+use crate::commands::sbx::{format_failure_detail, parse_sandbox_path, sandbox_endpoint};
 use crate::error::{CliError, Result};
 
 const REQUEST_TIMEOUT_HEADER: &str = "X-Tensorlake-Request-Timeout-Ms";
@@ -21,6 +21,8 @@ struct CopiedSandbox {
     reason: Option<String>,
     #[serde(default)]
     termination_reason: Option<String>,
+    #[serde(default)]
+    error_details: Option<serde_json::Value>,
 }
 
 pub async fn run(
@@ -138,10 +140,12 @@ fn summarize_sandboxes(sandboxes: &[&CopiedSandbox]) -> String {
             let reason = sandbox
                 .reason
                 .as_deref()
-                .or(sandbox.termination_reason.as_deref())
-                .map(|reason| format!(": {reason}"))
+                .or(sandbox.termination_reason.as_deref());
+            let detail = format_failure_detail(reason, sandbox.error_details.as_ref())
+                .or_else(|| reason.map(str::to_string))
+                .map(|detail| format!(": {detail}"))
                 .unwrap_or_default();
-            format!("{} ({}){}", sandbox.sandbox_id, sandbox.status, reason)
+            format!("{} ({}){}", sandbox.sandbox_id, sandbox.status, detail)
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -168,12 +172,14 @@ mod tests {
                 status: "running".to_string(),
                 reason: None,
                 termination_reason: None,
+                error_details: None,
             },
             CopiedSandbox {
                 sandbox_id: "sbx-2".to_string(),
                 status: "running".to_string(),
                 reason: None,
                 termination_reason: None,
+                error_details: None,
             },
         ];
 

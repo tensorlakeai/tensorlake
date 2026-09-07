@@ -1,7 +1,7 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
     DEFAULT_SANDBOX_WAIT_TIMEOUT, apply_proxy_access_settings, build_network_config,
-    sandbox_endpoint, wait_for_sandbox_status,
+    sandbox_endpoint, sandbox_failure_detail, wait_for_sandbox_status,
 };
 use crate::error::{CliError, Result};
 use serde::Deserialize;
@@ -70,6 +70,15 @@ pub async fn create_with_request(
 }
 
 fn format_create_error(status: reqwest::StatusCode, body: &str) -> String {
+    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(body)
+        && payload.get("status").and_then(|value| value.as_str()) == Some("failed")
+        && let Some(sandbox_id) = payload.get("sandbox_id").and_then(|value| value.as_str())
+    {
+        let detail = sandbox_failure_detail(&payload)
+            .map(|detail| format!(": {detail}"))
+            .unwrap_or_default();
+        return format!("failed to create sandbox {sandbox_id} (HTTP {status}){detail}");
+    }
     #[derive(Deserialize)]
     struct ServerError<'a> {
         #[serde(default)]

@@ -320,7 +320,8 @@ fn is_localhost(url: &str) -> bool {
 fn sandbox_termination_detail(info: &serde_json::Value) -> Option<String> {
     let reason = info
         .get("termination_reason")
-        .and_then(|value| value.as_str())?;
+        .and_then(|value| value.as_str())
+        .or_else(|| info.get("reason").and_then(|value| value.as_str()))?;
     match reason {
         "ImageNotFound" => Some(
             info.get("image")
@@ -363,10 +364,25 @@ fn error_details_message(value: &serde_json::Value) -> Option<String> {
     }
 }
 
+fn format_failure_detail(
+    reason: Option<&str>,
+    error_details: Option<&serde_json::Value>,
+) -> Option<String> {
+    let detail = error_details.and_then(error_details_message)?;
+    Some(match reason.filter(|reason| !reason.is_empty()) {
+        Some(reason) => format!("{reason}: {detail}"),
+        None => detail,
+    })
+}
+
 fn sandbox_failure_detail(info: &serde_json::Value) -> Option<String> {
-    info.get("error_details")
-        .and_then(error_details_message)
-        .or_else(|| sandbox_termination_detail(info))
+    format_failure_detail(
+        info.get("termination_reason")
+            .and_then(|value| value.as_str())
+            .or_else(|| info.get("reason").and_then(|value| value.as_str())),
+        info.get("error_details"),
+    )
+    .or_else(|| sandbox_termination_detail(info))
 }
 
 fn format_sandbox_wait_termination_message(
@@ -671,7 +687,7 @@ mod tests {
 
         assert_eq!(
             message,
-            "Sandbox failed to reach 'running': failed to pull image tensorlake/missing-image"
+            "Sandbox failed to reach 'running': StartupFailedInternalError: failed to pull image tensorlake/missing-image"
         );
     }
 }

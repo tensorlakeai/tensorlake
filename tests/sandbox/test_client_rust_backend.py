@@ -17,7 +17,7 @@ from tensorlake.sandbox import (
     _defaults,
 )
 from tensorlake.sandbox.client import SandboxClient
-from tensorlake.sandbox.exceptions import SandboxError
+from tensorlake.sandbox.exceptions import RemoteAPIError, SandboxError
 
 
 class _FakeRustProxyClient:
@@ -266,6 +266,63 @@ def _sandbox_info_json(
 class TestSandboxClientRustBackend(unittest.TestCase):
     def setUp(self):
         _RecordingCreateRustClient.instances = []
+
+    def test_create_configuration_failure_preserves_diagnostic_fields(self):
+        class FakeRustError(Exception):
+            pass
+
+        diagnosis = "Cannot mount /tools: overlaps the registered mount /tools. Remove the conflicting registration."
+        body = json.dumps(
+            {
+                "sandbox_id": "sbx-config",
+                "status": "failed",
+                "reason": "ConfigurationError",
+                "error_details": diagnosis,
+            }
+        )
+
+        class FailedClient(_FakeRustClient):
+            def create_sandbox(self, request_json):
+                raise FakeRustError(("remote_api", 422, body))
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = FailedClient()
+        with patch(
+            "tensorlake.sandbox.client.RustCloudSandboxClientError", FakeRustError
+        ):
+            with self.assertRaises(RemoteAPIError) as caught:
+                client.create()
+        error = caught.exception
+        self.assertEqual(error.status_code, 422)
+        self.assertEqual(error.sandbox_id, "sbx-config")
+        self.assertEqual(error.reason, "ConfigurationError")
+        self.assertEqual(error.error_details, diagnosis)
+        self.assertEqual(error.message, body)
+        self.assertIn(
+            f"Sandbox sbx-config failed (ConfigurationError): {diagnosis}", str(error)
+        )
+
+    def test_create_and_connect_reports_immediate_failure_without_polling(self):
+        class FailedClient(_FakeRustClient):
+            def create_sandbox(self, request_json):
+                return "trace-failed", json.dumps(
+                    {
+                        "sandbox_id": "sbx-config",
+                        "status": "failed",
+                        "reason": "ConfigurationError",
+                        "error_details": "Cannot shrink rootfs from 20 GiB to 10 GiB",
+                    }
+                )
+
+            def get_sandbox_json(self, sandbox_id):
+                raise AssertionError("An explicit failure must not be polled")
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = FailedClient()
+        with self.assertRaisesRegex(
+            SandboxError, "ConfigurationError.*Cannot shrink rootfs"
+        ):
+            client.create_and_connect()
 
     def test_constructor_passes_default_request_timeout_to_rust_backend(self):
         class _RecordingRustClient:
@@ -1545,6 +1602,48 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(len(fake.create_snapshot_calls), 1)
         _, snapshot_type = fake.create_snapshot_calls[0]
         self.assertIsNone(snapshot_type)
+
+
+class TestSandboxFailureCompatibility(unittest.TestCase):
+    def test_unrelated_and_malformed_errors_keep_the_original_message(self):
+        for body in (
+            "upstream unavailable",
+            "{broken",
+            "null",
+            "[]",
+            '{"message":"invalid input"}',
+            '{"sandbox_id":42,"status":"failed","reason":"ConfigurationError"}',
+            '{"sandbox_id":"sbx","status":"running"}',
+        ):
+            with self.subTest(body=body):
+                error = RemoteAPIError(422, body)
+                self.assertEqual(str(error), f"API error (status 422): {body}")
+                self.assertIsNone(error.sandbox_id)
+                self.assertIsNone(error.reason)
+                self.assertIsNone(error.error_details)
+
+    def test_legacy_details_and_unknown_reasons_are_preserved(self):
+        for reason in ("InternalError", "FileSystemNotFound", "FutureReason"):
+            for details in (None, "", {"message": "diagnosis"}, ["one", "two"]):
+                with self.subTest(reason=reason, details=details):
+                    error = RemoteAPIError(
+                        422,
+                        json.dumps(
+                            {
+                                "sandbox_id": "sbx",
+                                "status": "failed",
+                                "termination_reason": reason,
+                                "error_details": details,
+                            }
+                        ),
+                    )
+                    self.assertEqual(error.reason, reason)
+                    self.assertEqual(error.error_details, details)
+                    self.assertIn(reason, str(error))
+                    if isinstance(details, dict):
+                        self.assertIn(": diagnosis", str(error))
+                    if isinstance(details, list):
+                        self.assertIn(": one; two", str(error))
 
 
 if __name__ == "__main__":

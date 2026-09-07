@@ -20,6 +20,7 @@ from .exceptions import (
     SandboxError,
     SandboxNotFoundError,
     SandboxNotRoutableError,
+    _format_error_details,
 )
 from .models import (
     CLEAR_NETWORK_POLICY,
@@ -206,32 +207,6 @@ def _normalize_user_ports(ports: list[int]) -> list[int]:
     return sorted(normalized)
 
 
-def _format_error_details(error_details: object | None) -> str | None:
-    if error_details is None:
-        return None
-    if isinstance(error_details, str):
-        detail = error_details.strip()
-        return detail or None
-    if isinstance(error_details, dict):
-        for key in ("message", "detail", "error", "reason"):
-            value = error_details.get(key)
-            if isinstance(value, str) and value.strip():
-                return value.strip()
-        if error_details:
-            return json.dumps(error_details, sort_keys=True)
-        return None
-    if isinstance(error_details, list):
-        parts = [
-            formatted
-            for item in error_details
-            if (formatted := _format_error_details(item)) is not None
-        ]
-        if parts:
-            return "; ".join(parts)
-        return json.dumps(error_details)
-    return str(error_details)
-
-
 def _startup_failure_message(
     sandbox_id: str,
     status: SandboxStatus | str,
@@ -245,11 +220,11 @@ def _startup_failure_message(
         if status_value == SandboxStatus.TERMINATED.value
         else f"Sandbox {sandbox_id} became {status_value} during startup"
     )
+    if termination_reason:
+        prefix += f" ({termination_reason})"
     detail = _format_error_details(error_details)
     if detail:
         return f"{prefix}: {detail}"
-    if termination_reason:
-        return f"{prefix}: termination reason: {termination_reason}"
     return prefix
 
 
@@ -1711,13 +1686,17 @@ class SandboxClient:
                 name=result.name or requested_name,
             )
             return sandbox
-        if result.status in (SandboxStatus.SUSPENDED, SandboxStatus.TERMINATED):
+        if result.status in (
+            SandboxStatus.SUSPENDED,
+            SandboxStatus.TERMINATED,
+            SandboxStatus.FAILED,
+        ):
             raise SandboxError(
                 _startup_failure_message(
                     result.sandbox_id,
                     result.status,
                     error_details=result.error_details,
-                    termination_reason=result.termination_reason,
+                    termination_reason=result.termination_reason or result.reason,
                 )
             )
         if result.status == SandboxStatus.TIMEOUT:
