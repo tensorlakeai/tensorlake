@@ -1067,7 +1067,12 @@ describe("SandboxClient", () => {
             source_sandbox_id: "sbx-1",
             sandboxes: [
               { sandbox_id: "copy-1", status: "running" },
-              { sandbox_id: "copy-2", status: "failed", reason: "no capacity" },
+              {
+                sandbox_id: "copy-2",
+                status: "failed",
+                reason: "ConfigurationError",
+                error_details: "Cannot mount /tools: conflicting registration",
+              },
             ],
           }),
         };
@@ -1087,7 +1092,10 @@ describe("SandboxClient", () => {
       expect(response.sandboxes[0].status).toBe("running");
       expect(response.sandboxes[1].sandboxId).toBe("copy-2");
       expect(response.sandboxes[1].status).toBe("failed");
-      expect(response.sandboxes[1].reason).toBe("no capacity");
+      expect(response.sandboxes[1].reason).toBe("ConfigurationError");
+      expect(response.sandboxes[1].errorDetails).toBe(
+        "Cannot mount /tools: conflicting registration",
+      );
       expect(response.traceId).toBeDefined();
       client.close();
     });
@@ -1822,6 +1830,15 @@ describe("SandboxClient", () => {
 });
 
 describe("sandbox API error compatibility", () => {
+  it("preserves the body when a failure uses unrecognized diagnostic fields", () => {
+    const body =
+      '{"sandbox_id":"sbx","status":"failed","message":"legacy diagnosis"}';
+    const error = new RemoteAPIError(422, body);
+    expect(error.message).toBe(`API error (status 422): ${body}`);
+    expect(error.sandboxId).toBe("sbx");
+    expect(error.reason).toBeUndefined();
+  });
+
   it.each([
     "upstream unavailable",
     "{broken",

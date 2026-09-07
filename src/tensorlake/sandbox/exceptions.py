@@ -154,6 +154,8 @@ class RemoteAPIError(SandboxError):
             detail = _format_error_details(self._error_details)
             if detail:
                 display_message += f": {detail}"
+            if not self._reason and not detail:
+                display_message = message
         super().__init__(f"API error (status {status_code}): {display_message}")
 
     @property

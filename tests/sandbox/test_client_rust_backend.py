@@ -109,7 +109,8 @@ class _FakeRustClient:
                         {
                             "sandbox_id": "copy-2",
                             "status": "failed",
-                            "reason": "no capacity",
+                            "reason": "ConfigurationError",
+                            "error_details": "Cannot mount /tools: conflicting registration",
                         },
                     ],
                 }
@@ -997,7 +998,11 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(response.sandboxes[0].sandbox_id, "copy-1")
         self.assertEqual(response.sandboxes[0].status, "running")
         self.assertEqual(response.sandboxes[1].status, "failed")
-        self.assertEqual(response.sandboxes[1].reason, "no capacity")
+        self.assertEqual(response.sandboxes[1].reason, "ConfigurationError")
+        self.assertEqual(
+            response.sandboxes[1].error_details,
+            "Cannot mount /tools: conflicting registration",
+        )
 
     def test_copy_rejects_invalid_times(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
@@ -1605,6 +1610,13 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
 
 class TestSandboxFailureCompatibility(unittest.TestCase):
+    def test_unrecognized_failure_fields_keep_the_original_body(self):
+        body = '{"sandbox_id":"sbx","status":"failed","message":"legacy diagnosis"}'
+        error = RemoteAPIError(422, body)
+        self.assertEqual(str(error), f"API error (status 422): {body}")
+        self.assertEqual(error.sandbox_id, "sbx")
+        self.assertIsNone(error.reason)
+
     def test_unrelated_and_malformed_errors_keep_the_original_message(self):
         for body in (
             "upstream unavailable",

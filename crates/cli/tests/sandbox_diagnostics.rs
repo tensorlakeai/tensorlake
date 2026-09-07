@@ -62,16 +62,26 @@ async fn create_and_copy_print_the_reason_and_diagnostic() {
         "sandbox_id": "sbx-config", "status": "failed",
         "reason": "ConfigurationError", "error_details": DIAGNOSIS,
     });
-    for (args, body) in [
-        (vec!["create"], failure.clone()),
+    for (args, status, body) in [
+        (vec!["create"], 422, failure.clone()),
         (
             vec!["copy", "sbx-source"],
+            422,
             json!({
-                "source_sandbox_id": "sbx-source", "sandboxes": [failure],
+                "source_sandbox_id": "sbx-source", "sandboxes": [failure.clone()],
+            }),
+        ),
+        (
+            vec!["copy", "sbx-source"],
+            207,
+            json!({
+                "source_sandbox_id": "sbx-source", "sandboxes": [
+                    {"sandbox_id": "sbx-running", "status": "running"}, failure,
+                ],
             }),
         ),
     ] {
-        let output = run_cli(&args, vec![(422, body)]).await;
+        let output = run_cli(&args, vec![(status, body)]).await;
         let stderr = String::from_utf8_lossy(&output.stderr);
         assert!(!output.status.success(), "{stderr}");
         assert!(stderr.contains("sbx-config"), "{stderr}");
@@ -79,6 +89,23 @@ async fn create_and_copy_print_the_reason_and_diagnostic() {
         assert!(stderr.contains(DIAGNOSIS), "{stderr}");
         assert!(!stderr.contains("error_details"), "{stderr}");
     }
+}
+
+#[tokio::test]
+async fn legacy_create_errors_keep_their_diagnosis() {
+    let output = run_cli(
+        &["create"],
+        vec![(
+            422,
+            json!({
+                "sandbox_id": "sbx-legacy", "status": "failed", "message": "legacy diagnosis",
+            }),
+        )],
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(stderr.contains("legacy diagnosis"), "{stderr}");
 }
 
 #[tokio::test]

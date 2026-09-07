@@ -163,6 +163,7 @@ export class RemoteAPIError extends SandboxError {
       if (reason) displayMessage += ` (${reason})`;
       const detail = formatErrorDetails(errorDetails);
       if (detail) displayMessage += `: ${detail}`;
+      if (!reason && !detail) displayMessage = message;
     }
     super(`API error (status ${statusCode}): ${displayMessage}`);
     this.sandboxId = sandboxId;

@@ -73,11 +73,9 @@ fn format_create_error(status: reqwest::StatusCode, body: &str) -> String {
     if let Ok(payload) = serde_json::from_str::<serde_json::Value>(body)
         && payload.get("status").and_then(|value| value.as_str()) == Some("failed")
         && let Some(sandbox_id) = payload.get("sandbox_id").and_then(|value| value.as_str())
+        && let Some(detail) = sandbox_failure_detail(&payload)
     {
-        let detail = sandbox_failure_detail(&payload)
-            .map(|detail| format!(": {detail}"))
-            .unwrap_or_default();
-        return format!("failed to create sandbox {sandbox_id} (HTTP {status}){detail}");
+        return format!("failed to create sandbox {sandbox_id} (HTTP {status}): {detail}");
     }
     #[derive(Deserialize)]
     struct ServerError<'a> {
