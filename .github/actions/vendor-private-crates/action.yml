@@ -102,8 +102,10 @@ runs:
           fi
           # Keep the placeholder's tensorlake-adapted Cargo.toml; replace only the source tree.
           rm -f "$placeholder"/*.rs
-          cp "$real"/*.rs "$placeholder"/
-          count=$(ls "$placeholder"/*.rs | wc -l | tr -d ' ')
+          # Modules may live in subdirectories (for example graph_reachability).
+          # Copy the source tree, not just top-level Rust files.
+          cp -R "$real"/. "$placeholder"/
+          count=$(find "$placeholder" -type f -name '*.rs' | wc -l | tr -d ' ')
           echo "Vendored ${count} ${crate} source file(s)."
         done
         echo "The CLI can now build with --features mount,git-clone."

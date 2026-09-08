@@ -35,7 +35,7 @@ serde = { version = "1", features = ["derive"] }
 thiserror = "2"
 bytes = "1"
 sha1 = "0.11"
-sha2 = "0.10"
+sha2 = "0.11"
 # zlib-rs matches artifact_storage's flate2 backend choice, which the real codec is tested
 # against; the default miniz_oxide backend has produced a divergent test result.
 flate2 = { version = "1.1.9", features = ["zlib-rs"] }
