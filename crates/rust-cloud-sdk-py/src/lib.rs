@@ -44,6 +44,7 @@ use tensorlake::sandboxes::{
 use tensorlake::{
     Client, ClientBuilder,
     error::{SdkError, TransportFailure},
+    retry::{RetryDecision, RetryPolicy, RetryState, retry},
 };
 use tokio::runtime::Runtime;
 
@@ -1514,15 +1515,17 @@ impl CloudSandboxClient {
 
     fn create_sandbox(&self, request_json: String) -> PyResult<(String, String)> {
         let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
-        let client = self.client.clone();
-        shared_runtime()
-            .block_on(async move {
+        // Creating a sandbox is not idempotent, so only failures that provably
+        // never reached the server are replayed.
+        self.run_with_connect_replay(move |client| {
+            let request = request.clone();
+            async move {
                 let traced = client.create(&request).await?;
                 let trace_id = traced.trace_id.clone();
                 let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
                 Ok((trace_id, json))
-            })
-            .map_err(into_sandbox_py_error)
+            }
+        })
     }
 
     #[pyo3(signature = (pool_id, request_json=None))]
@@ -1858,10 +1861,13 @@ impl CloudSandboxClient {
         let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = client
-                .create(&request)
-                .await
-                .map_err(into_sandbox_py_error)?;
+            // See `create_sandbox`: replay only what never reached the server.
+            let traced = replay_if_never_delivered(client, move |c| {
+                let request = request.clone();
+                async move { c.create(&request).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
@@ -3142,7 +3148,7 @@ impl CloudSandboxProxyClient {
         future_into_py(py, async move {
             // See `run_process_json`: replay only failures that never reached
             // the sandbox, so a timeout cannot start the command twice.
-            let traced = replay_on_connect_failure(client, move |c| {
+            let traced = replay_if_never_delivered(client, move |c| {
                 let payload = payload.clone();
                 async move { c.run_process(&payload).await }
             })
@@ -3446,8 +3452,7 @@ where
 {
     run_bounded_blocking(
         client,
-        max_retries,
-        is_retryable,
+        RetryPolicy::idempotent(max_retries),
         label,
         into_err,
         operation,
@@ -3470,8 +3475,7 @@ where
 {
     run_bounded_blocking(
         client,
-        MAX_CONNECT_REPLAYS,
-        is_safe_to_replay,
+        RetryPolicy::non_idempotent(),
         label,
         into_err,
         operation,
@@ -3480,8 +3484,7 @@ where
 
 fn run_bounded_blocking<C, T, F, Fut>(
     client: C,
-    max_retries: usize,
-    should_retry: fn(&SdkError) -> bool,
+    policy: RetryPolicy,
     label: &str,
     into_err: fn(SdkError) -> PyErr,
     mut operation: F,
@@ -3491,22 +3494,22 @@ where
     F: FnMut(C) -> Fut,
     Fut: Future<Output = Result<T, SdkError>>,
 {
-    let mut retries = 0usize;
+    let started = std::time::Instant::now();
+    let mut state = RetryState::new(policy);
     loop {
         match shared_runtime().block_on(operation(client.clone())) {
             Ok(value) => return Ok(value),
-            Err(err) => {
-                if !should_retry(&err) || retries >= max_retries {
-                    return Err(into_err(err));
+            Err(err) => match state.decide(&err, started.elapsed()) {
+                RetryDecision::Stop => return Err(into_err(err)),
+                RetryDecision::Retry(wait) => {
+                    eprintln!(
+                        "Retrying {label} after {:.2} seconds. Retry count: {}. Retryable exception: {err}",
+                        wait.as_secs_f64(),
+                        state.retries()
+                    );
+                    std::thread::sleep(wait);
                 }
-
-                retries += 1;
-                let sleep_time = calculate_sleep_time(retries);
-                eprintln!(
-                    "Retrying {label} after {sleep_time:.2} seconds. Retry count: {retries}. Retryable exception: {err}"
-                );
-                std::thread::sleep(Duration::from_secs_f64(sleep_time));
-            }
+            },
         }
     }
 }
@@ -3559,6 +3562,21 @@ impl CloudSandboxClient {
             operation,
         )
     }
+
+    /// Retry variant for operations that must not run twice: replays only
+    /// failures that provably never reached the server.
+    fn run_with_connect_replay<T, F, Fut>(&self, operation: F) -> PyResult<T>
+    where
+        F: FnMut(SandboxesClient) -> Fut,
+        Fut: Future<Output = Result<T, SdkError>>,
+    {
+        run_with_connect_replay_blocking(
+            self.client.clone(),
+            "rust sandbox API request",
+            into_sandbox_py_error,
+            operation,
+        )
+    }
 }
 
 impl CloudDocumentAIClient {
@@ -3583,32 +3601,11 @@ where
     F: Fn(C) -> Fut,
     Fut: Future<Output = Result<T, SdkError>>,
 {
-    let mut retries = 0usize;
-    loop {
-        match op(client.clone()).await {
-            Ok(value) => return Ok(value),
-            Err(err) => {
-                if !is_retryable(&err) || retries >= max_retries {
-                    return Err(err);
-                }
-                retries += 1;
-                let sleep_time = calculate_sleep_time(retries);
-                tokio::time::sleep(Duration::from_secs_f64(sleep_time)).await;
-            }
-        }
-    }
+    retry(client, RetryPolicy::idempotent(max_retries), op).await
 }
 
 fn sandbox_serde_err(err: serde_json::Error) -> PyErr {
     into_sandbox_py_error(SdkError::from(err))
-}
-
-fn calculate_sleep_time(retries: usize) -> f64 {
-    let initial_delay_seconds: f64 = 0.1;
-    let max_delay_seconds: f64 = 15.0;
-    let jitter_multiplier: f64 = 0.75;
-    let base_delay = initial_delay_seconds * 2f64.powi(retries as i32);
-    base_delay.min(max_delay_seconds) * jitter_multiplier
 }
 
 fn duration_from_seconds(name: &str, seconds: f64) -> PyResult<Duration> {
@@ -3630,63 +3627,17 @@ fn duration_from_seconds(name: &str, seconds: f64) -> PyResult<Duration> {
 /// deleting a sandbox — cannot absorb a second execution. Only failures that
 /// provably never reached the server are replayed here; per-operation timeout
 /// retries need an idempotency review first.
-fn is_retryable(error: &SdkError) -> bool {
-    if is_safe_to_replay(error) {
-        return true;
-    }
-    match error {
-        SdkError::ServerError { status, .. } => {
-            *status == reqwest::StatusCode::BAD_GATEWAY
-                || *status == reqwest::StatusCode::SERVICE_UNAVAILABLE
-                || *status == reqwest::StatusCode::GATEWAY_TIMEOUT
-        }
-        SdkError::EventSourceError(_) => true,
-        _ => false,
-    }
-}
-
-/// Whether replaying the request is safe even when the operation is not
-/// idempotent.
-///
-/// Only a connect failure qualifies: DNS, TCP, and TLS all fail before a single
-/// request byte reaches the server, so the operation provably did not run. A
-/// timeout gives no such guarantee — the server may have received the request
-/// and be executing it still.
-fn is_safe_to_replay(error: &SdkError) -> bool {
-    matches!(error.transport_failure(), Some(TransportFailure::Connect))
-}
-
-/// Number of times a request that never reached the server is replayed.
-///
-/// Small on purpose: a connect failure resolves in milliseconds, so the useful
-/// case is a single transient DNS or TCP hiccup, not a sustained outage the
-/// caller should hear about promptly.
-const MAX_CONNECT_REPLAYS: usize = 2;
-
-/// Run `op`, replaying it only when the previous attempt failed before the
-/// request reached the server.
-///
-/// Unlike [`retry_async_op`], this is safe for non-idempotent operations such
-/// as starting a process.
-async fn replay_on_connect_failure<C, T, F, Fut>(client: C, op: F) -> Result<T, SdkError>
+/// Replay `op` only while its failures provably never reached the server —
+/// a connect failure, or the Sandbox Proxy reporting it could not complete the
+/// lookup — for up to [`tensorlake::retry::UNDELIVERED_REPLAY_BUDGET`]. Safe
+/// for operations that must not run twice.
+async fn replay_if_never_delivered<C, T, F, Fut>(client: C, op: F) -> Result<T, SdkError>
 where
     C: Clone,
     F: Fn(C) -> Fut,
     Fut: Future<Output = Result<T, SdkError>>,
 {
-    let mut replays = 0usize;
-    loop {
-        match op(client.clone()).await {
-            Ok(value) => return Ok(value),
-            Err(err) => {
-                if !is_safe_to_replay(&err) || replays >= MAX_CONNECT_REPLAYS {
-                    return Err(err);
-                }
-                replays += 1;
-                tokio::time::sleep(Duration::from_secs_f64(calculate_sleep_time(replays))).await;
-            }
-        }
-    }
+    retry(client, RetryPolicy::non_idempotent(), op).await
 }
 
 fn into_py_error(error: SdkError) -> PyErr {

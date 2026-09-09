@@ -77,6 +77,20 @@ pub enum SdkError {
     EventSourceError(String),
 }
 
+/// Error codes the Sandbox Proxy returns when it could not complete a request
+/// *before* forwarding it to the sandbox: the Indexify lookup did not answer
+/// (`SANDBOX_UPSTREAM_ERROR`), the sandbox has no route yet
+/// (`SANDBOX_NOT_READY`), or the dataplane could not be reached
+/// (`SANDBOX_UNREACHABLE`). In every case the request never reached the
+/// sandbox, so replaying it cannot duplicate a side effect — and every case is
+/// what an Indexify server rollout looks like from the client. The proxy's
+/// error body is `{"error": "...", "code": "..."}`.
+pub const SANDBOX_PROXY_UNDELIVERED_CODES: &[&str] = &[
+    "SANDBOX_UPSTREAM_ERROR",
+    "SANDBOX_NOT_READY",
+    "SANDBOX_UNREACHABLE",
+];
+
 /// Why a request failed below the HTTP status layer.
 ///
 /// The distinction is load-bearing for retries: a [`TransportFailure::Connect`]
@@ -126,6 +140,47 @@ impl SdkError {
         } else {
             None
         }
+    }
+
+    /// The `code` from a JSON error body of the form
+    /// `{"error": "...", "code": "..."}`, when the server sent one.
+    ///
+    /// [`SdkError::ServerError`] keeps the raw body as its message, so the code
+    /// is recovered by parsing it here rather than carried as a field.
+    pub fn upstream_error_code(&self) -> Option<String> {
+        let Self::ServerError { message, .. } = self else {
+            return None;
+        };
+        #[derive(serde::Deserialize)]
+        struct Body {
+            code: Option<String>,
+        }
+        serde_json::from_str::<Body>(message)
+            .ok()
+            .and_then(|body| body.code)
+    }
+
+    /// Whether the request provably never reached the server that would have
+    /// executed it, making a replay safe even for a non-idempotent operation.
+    ///
+    /// True for a connect failure (see [`SdkError::transport_failure`]) and for
+    /// a 502/503 from the Sandbox Proxy carrying one of
+    /// [`SANDBOX_PROXY_UNDELIVERED_CODES`]. A timeout, or a 5xx without such a
+    /// code, gives no such guarantee.
+    pub fn never_reached_server(&self) -> bool {
+        if matches!(self.transport_failure(), Some(TransportFailure::Connect)) {
+            return true;
+        }
+        let Self::ServerError { status, .. } = self else {
+            return false;
+        };
+        if *status != reqwest::StatusCode::SERVICE_UNAVAILABLE
+            && *status != reqwest::StatusCode::BAD_GATEWAY
+        {
+            return false;
+        }
+        self.upstream_error_code()
+            .is_some_and(|code| SANDBOX_PROXY_UNDELIVERED_CODES.contains(&code.as_str()))
     }
 
     /// The error's `Display` output followed by every `source()` in its chain.
@@ -235,6 +290,68 @@ mod transport_failure_tests {
         assert!(
             detail.contains("tcp connect error"),
             "detail() must expose the source chain; got {detail:?}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod undelivered_tests {
+    use super::SdkError;
+
+    fn server_error(status: u16, body: &str) -> SdkError {
+        SdkError::ServerError {
+            status: reqwest::StatusCode::from_u16(status).unwrap(),
+            message: body.to_string(),
+        }
+    }
+
+    #[test]
+    fn upstream_error_code_reads_the_proxy_body() {
+        let error = server_error(
+            503,
+            r#"{"error":"Sandbox routing is temporarily unavailable","code":"SANDBOX_UPSTREAM_ERROR"}"#,
+        );
+        assert_eq!(
+            error.upstream_error_code().as_deref(),
+            Some("SANDBOX_UPSTREAM_ERROR")
+        );
+        assert_eq!(server_error(503, "plain text").upstream_error_code(), None);
+        assert_eq!(
+            server_error(503, r#"{"error":"no code"}"#).upstream_error_code(),
+            None
+        );
+    }
+
+    #[test]
+    fn only_pre_forward_proxy_failures_count_as_undelivered() {
+        let undelivered = [
+            (503, "SANDBOX_UPSTREAM_ERROR"),
+            (503, "SANDBOX_NOT_READY"),
+            (502, "SANDBOX_UNREACHABLE"),
+        ];
+        for (status, code) in undelivered {
+            let body = format!(r#"{{"error":"x","code":"{code}"}}"#);
+            assert!(
+                server_error(status, &body).never_reached_server(),
+                "{status} {code} must be replayable"
+            );
+        }
+
+        // Same codes on a status the proxy does not use for them: not trusted.
+        assert!(
+            !server_error(500, r#"{"error":"x","code":"SANDBOX_UPSTREAM_ERROR"}"#)
+                .never_reached_server()
+        );
+        // A 503 from something else — the sandbox daemon, an ingress — may have
+        // executed the request.
+        assert!(!server_error(503, r#"{"error":"daemon overloaded"}"#).never_reached_server());
+        assert!(
+            !server_error(503, r#"{"error":"x","code":"SANDBOX_NOT_FOUND"}"#)
+                .never_reached_server()
+        );
+        assert!(
+            !server_error(404, r#"{"error":"x","code":"SANDBOX_NOT_FOUND"}"#)
+                .never_reached_server()
         );
     }
 }

@@ -39,6 +39,7 @@ use tensorlake::sandboxes::{
 use tensorlake::{
     ClientBuilder,
     error::{SdkError, TransportFailure},
+    retry::{RetryPolicy, retry},
 };
 
 // ---- Return value objects -------------------------------------------------
@@ -123,96 +124,28 @@ pub(crate) fn usage_error(message: String) -> napi::Error {
 /// deleting a sandbox — cannot absorb a second execution. Only failures that
 /// provably never reached the server are replayed here; per-operation timeout
 /// retries need an idempotency review first.
-fn is_retryable(error: &SdkError) -> bool {
-    if is_safe_to_replay(error) {
-        return true;
-    }
-    match error {
-        SdkError::ServerError { status, .. } => {
-            *status == reqwest::StatusCode::BAD_GATEWAY
-                || *status == reqwest::StatusCode::SERVICE_UNAVAILABLE
-                || *status == reqwest::StatusCode::GATEWAY_TIMEOUT
-        }
-        SdkError::EventSourceError(_) => true,
-        _ => false,
-    }
-}
-
-/// Whether replaying the request is safe even when the operation is not
-/// idempotent.
-///
-/// Only a connect failure qualifies: DNS, TCP, and TLS all fail before a single
-/// request byte reaches the server, so the operation provably did not run. A
-/// timeout gives no such guarantee — the server may have received the request
-/// and be executing it still.
-fn is_safe_to_replay(error: &SdkError) -> bool {
-    matches!(error.transport_failure(), Some(TransportFailure::Connect))
-}
-
-fn calculate_sleep_time(retries: usize) -> f64 {
-    let initial_delay_seconds: f64 = 0.1;
-    let max_delay_seconds: f64 = 15.0;
-    let jitter_multiplier: f64 = 0.75;
-    let base_delay = initial_delay_seconds * 2f64.powi(retries as i32);
-    base_delay.min(max_delay_seconds) * jitter_multiplier
-}
-
+/// Retry `op` as an idempotent operation: transient failures up to
+/// `max_retries` times, and anything that never reached the server for the
+/// full [`tensorlake::retry::UNDELIVERED_REPLAY_BUDGET`].
 async fn retry_async_op<C, T, F, Fut>(client: C, max_retries: usize, op: F) -> Result<T, SdkError>
 where
     C: Clone,
     F: Fn(C) -> Fut,
     Fut: Future<Output = Result<T, SdkError>>,
 {
-    let mut retries = 0usize;
-    loop {
-        match op(client.clone()).await {
-            Ok(value) => return Ok(value),
-            Err(err) => {
-                if !is_retryable(&err) || retries >= max_retries {
-                    return Err(err);
-                }
-                retries += 1;
-                let sleep_time = calculate_sleep_time(retries);
-                tokio::time::sleep(Duration::from_secs_f64(sleep_time)).await;
-            }
-        }
-    }
+    retry(client, RetryPolicy::idempotent(max_retries), op).await
 }
 
-/// Number of times a request that never reached the server is replayed.
-///
-/// Small on purpose: a connect failure resolves in milliseconds, so the useful
-/// case is a single transient DNS or TCP hiccup, not a sustained outage the
-/// caller should hear about promptly.
-const MAX_CONNECT_REPLAYS: usize = 2;
-
-/// Run `op`, replaying it only when the previous attempt failed before the
-/// request reached the server.
-///
-/// Unlike [`retry_async_op`], this is safe for non-idempotent operations such
-/// as starting a process: [`is_safe_to_replay`] admits connect failures only,
-/// and a connect failure means no request byte was ever transmitted, so the
-/// operation cannot have run.
-async fn replay_on_connect_failure<C, T, F, Fut>(client: C, op: F) -> Result<T, SdkError>
+/// Replay `op` only while its failures provably never reached the server — a
+/// connect failure, or the Sandbox Proxy reporting it could not complete the
+/// lookup. Safe for operations that must not run twice.
+async fn replay_if_never_delivered<C, T, F, Fut>(client: C, op: F) -> Result<T, SdkError>
 where
     C: Clone,
     F: Fn(C) -> Fut,
     Fut: Future<Output = Result<T, SdkError>>,
 {
-    let mut replays = 0usize;
-    loop {
-        match op(client.clone()).await {
-            Ok(value) => return Ok(value),
-            Err(err) => {
-                if !is_safe_to_replay(&err) || replays >= MAX_CONNECT_REPLAYS {
-                    return Err(err);
-                }
-                replays += 1;
-                let sleep_time = calculate_sleep_time(replays);
-                tokio::time::sleep(Duration::from_secs_f64(sleep_time)).await;
-            }
-        }
-    }
+    retry(client, RetryPolicy::non_idempotent(), op).await
 }
 
 /// Run `op` with bounded retries, mapping any terminal error to a napi error.
@@ -456,9 +389,14 @@ impl NativeSandboxClient {
     #[napi]
     pub async fn create_sandbox(&self, request_json: String) -> napi::Result<TracedJson> {
         let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
-        let client = self.client().await?;
-        // Create is not retried: it is not idempotent.
-        let traced = client.create(&request).await.map_err(into_napi_error)?;
+        // Creating a sandbox is not idempotent, so only failures that provably
+        // never reached the server are replayed.
+        let traced = replay_if_never_delivered(self.client().await?, |client| {
+            let request = request.clone();
+            async move { client.create(&request).await }
+        })
+        .await
+        .map_err(into_napi_error)?;
         let json =
             serde_json::to_string(&*traced).map_err(|e| into_napi_error(SdkError::from(e)))?;
         Ok(TracedJson {
@@ -1171,7 +1109,7 @@ impl NativeSandboxProxyClient {
         // Running a process is not idempotent, so this is not wrapped in the
         // general retry. Connect failures are still replayed: the request never
         // reached the sandbox, so no process was started.
-        let traced = replay_on_connect_failure(self.client().await?, |client| {
+        let traced = replay_if_never_delivered(self.client().await?, |client| {
             let payload = payload.clone();
             async move { client.run_process(&payload).await }
         })
