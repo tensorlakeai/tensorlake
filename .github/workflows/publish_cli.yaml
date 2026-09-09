@@ -18,6 +18,21 @@ jobs:
     outputs:
       sha: ${{ steps.resolve.outputs.sha }}
     steps:
+      - uses: actions/checkout@v4
+
+      - name: Read reviewed private source revision
+        id: source-ref
+        shell: bash
+        run: |
+          set -euo pipefail
+          sha=$(cat crates/ARTIFACT_STORAGE_REVISION)
+          sha="${sha%$'\r'}"
+          if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "::error file=crates/ARTIFACT_STORAGE_REVISION::expected a full artifact_storage commit SHA"
+            exit 1
+          fi
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
       - name: Mint artifact_storage access token
         id: app-token
         uses: actions/create-github-app-token@v1
@@ -31,6 +46,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           repository: tensorlakeai/artifact_storage
+          ref: ${{ steps.source-ref.outputs.sha }}
           token: ${{ steps.app-token.outputs.token }}
           path: .artifact-storage-source
           sparse-checkout: AGENTS.md

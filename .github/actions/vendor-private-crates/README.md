@@ -15,16 +15,18 @@ for the duration of the job.
 4. Copies the real sources over the placeholders, keeping the placeholders' workspace-adapted
    manifests.
 5. When `include-macos-fskit: "true"`, separately stages the private FSKit `Sources` and
-   `Resources` needed by the macOS Rust source-contract tests. Linux and Windows callers leave the
+   `Resources` for consumers that need them. Linux and Windows callers leave the
    input disabled and do not fetch or compile Swift sources. The FSKit `build.sh` remains confined
    to the dedicated TLFS.app release job.
 
 The calling job must run `actions/checkout` for this repo first, then call this action before the
 build step, and add `--features git-clone` (plus `mount` on mount-capable targets; or
 `mount,git-clone` for official standalone CLI builds) to that build.
-Release workflows pass the `source-ref` input as one previously resolved 40-character
-`artifact_storage` commit SHA. Ordinary test workflows may omit it and resolve `main` once per
-action invocation; core and FSKit companion sources still use the same resolved commit.
+CI and releases use the reviewed 40-character `artifact_storage` commit SHA in
+`crates/ARTIFACT_STORAGE_REVISION`. Update that file to a merged AS commit when consuming private
+source changes. Release workflows resolve the pin once and pass it to every binary and TLFS.app
+job. Ordinary test workflows omit `source-ref` to use the same pin; stacked changes may pass a
+different full commit SHA explicitly. Moving branch names are rejected.
 
 ## One-time setup
 
@@ -47,10 +49,13 @@ default (no-mount) lanes still run for them, so external contributors' PRs build
 
 ## Consumers
 
-- `.github/workflows/tests.yaml` — full-feature Rust workspace tests.
-- `.github/workflows/publish_cli.yaml` — release `tensorlake` binaries (Linux + macOS).
+- `.github/workflows/tests.yaml` — full-feature Rust workspace tests, macOS private client tests, and
+  the Windows CLI build with `git-clone` enabled.
+- `.github/workflows/publish_cli.yaml` — release `tensorlake` binaries (Linux, macOS, Windows).
 
 Local equivalent (no App needed, uses a sibling artifact_storage checkout): `just build-cli-full`.
+Check out the recorded AS revision in that sibling to reproduce CI; the local recipe deliberately
+uses the sibling's current source tree to support development of uncommitted private changes.
 On macOS, `build-cli-full` and `test-cli-full` stage the matching private FSKit `Sources` and
 `Resources` for the command and restore the public one-line TLFS directory afterward, including on
 failure.

@@ -13,6 +13,8 @@ are swapped in EPHEMERALLY only for builds that enable the features needing them
 
 Staging copies the complete src tree, including nested Rust modules and embedded assets.
 CI compares the staged tree with the private checkout before compiling.
+CI and CLI releases pin all three crates and the FSKit companion sources to the merged AS commit
+in crates/ARTIFACT_STORAGE_REVISION. Update that pin in a reviewed companion PR to consume AS fixes.
 
 The swapped source compiles against the PLACEHOLDER manifests, so each placeholder Cargo.toml's
 dependency list must mirror the corresponding artifact_storage crate. If upstream dependencies
