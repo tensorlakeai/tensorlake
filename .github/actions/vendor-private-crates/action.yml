@@ -20,7 +20,7 @@ inputs:
     required: true
   include-macos-fskit:
     description: >
-      Also stage the private macOS FSKit Sources and Resources needed by macOS client tests.
+      Also stage private macOS FSKit Sources and Resources for consumers that need them.
       Leave disabled on Linux and Windows so those builds have no Swift source dependency.
     required: false
     default: "false"

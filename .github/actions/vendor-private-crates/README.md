@@ -15,7 +15,7 @@ for the duration of the job.
 4. Copies the real sources over the placeholders, keeping the placeholders' workspace-adapted
    manifests.
 5. When `include-macos-fskit: "true"`, separately stages the private FSKit `Sources` and
-   `Resources` needed by the macOS Rust source-contract tests. Linux and Windows callers leave the
+   `Resources` for consumers that need them. Linux and Windows callers leave the
    input disabled and do not fetch or compile Swift sources. The FSKit `build.sh` remains confined
    to the dedicated TLFS.app release job.
 
@@ -49,7 +49,7 @@ default (no-mount) lanes still run for them, so external contributors' PRs build
 
 ## Consumers
 
-- `.github/workflows/tests.yaml` — full-feature Rust workspace tests, macOS source contracts, and
+- `.github/workflows/tests.yaml` — full-feature Rust workspace tests, macOS private client tests, and
   the Windows CLI build with `git-clone` enabled.
 - `.github/workflows/publish_cli.yaml` — release `tensorlake` binaries (Linux, macOS, Windows).
 
