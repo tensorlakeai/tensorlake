@@ -1065,6 +1065,10 @@ enum GpuModelArg {
     A6000,
     #[value(name = "A10")]
     A10,
+    #[value(name = "RTX-PRO-6000-BLACKWELL-SERVER")]
+    RtxPro6000BlackwellServer,
+    #[value(name = "L40")]
+    L40,
 }
 
 impl GpuModelArg {
@@ -1076,6 +1080,8 @@ impl GpuModelArg {
             Self::T4 => "T4",
             Self::A6000 => "A6000",
             Self::A10 => "A10",
+            Self::RtxPro6000BlackwellServer => "RTX-PRO-6000-BLACKWELL-SERVER",
+            Self::L40 => "L40",
         }
     }
 }
@@ -4387,7 +4393,16 @@ mod tests {
 
     #[test]
     fn sbx_create_parses_gpu_request_with_explicit_model() {
-        for model in ["A100-40GB", "A100-80GB", "H100", "T4", "A6000", "A10"] {
+        for model in [
+            "A100-40GB",
+            "A100-80GB",
+            "H100",
+            "T4",
+            "A6000",
+            "A10",
+            "RTX-PRO-6000-BLACKWELL-SERVER",
+            "L40",
+        ] {
             let cli = Cli::try_parse_from([
                 "tl",
                 "sbx",

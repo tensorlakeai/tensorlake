@@ -53,6 +53,8 @@ const GPU_MODELS = new Set<string>([
   "H100",
   "T4",
   "A6000",
+  "RTX-PRO-6000-BLACKWELL-SERVER",
+  "L40",
   "A10",
 ]);
 

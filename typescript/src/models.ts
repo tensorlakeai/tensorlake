@@ -80,6 +80,8 @@ export type GpuModel =
   | "H100"
   | "T4"
   | "A6000"
+  | "RTX-PRO-6000-BLACKWELL-SERVER"
+  | "L40"
   | "A10";
 
 /** A homogeneous GPU allocation for a sandbox. */

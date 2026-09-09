@@ -172,6 +172,8 @@ class GpuModel(str, Enum):
     T4 = "T4"
     A6000 = "A6000"
     A10 = "A10"
+    RTX_PRO_6000_BLACKWELL_SERVER = "RTX-PRO-6000-BLACKWELL-SERVER"
+    L40 = "L40"
 
 
 class GpuRequest(BaseModel):
