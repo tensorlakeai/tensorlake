@@ -134,6 +134,7 @@ Two execution modes:
 
 ## Key Conventions
 
+- **Typed API responses**: Deserialize response and error bodies into explicit structs/enums (`serde::Deserialize` in Rust) and access named fields. Do not parse a body into `serde_json::Value` and extract known fields with `.get()` / `.as_str()`. Reuse wire models or add a focused response struct; represent supported legacy shapes with types, defaults, and aliases. Reserve dynamic JSON for individual fields whose contract permits arbitrary JSON, such as `error_details`. Preserve raw-body fallback for unrecognized or non-JSON error responses.
 - **Python 3.10+**, managed with **Poetry 2.0.0**
 - **Formatting**: Black + isort (profile "black"). Pre-commit hooks enforce this.
 - **Tests**: Standard `unittest` framework with `parameterized` for parameterized tests. Parameterized tests are main used to run the same test code in local and remote modes and ensure the same results. Claude must not create new Python environments to run test. Instead it should use currrent Poetry environment by i.e. using `poetry run python tests/path_to/test_file.py`.

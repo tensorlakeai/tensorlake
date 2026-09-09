@@ -49,6 +49,7 @@ async fn run_cli(args: &[&str], responses: Vec<(u16, Value)>) -> std::process::O
             .current_dir(temp.path())
             .env_remove("TENSORLAKE_GIT_TOKEN")
             .env("NO_COLOR", "1")
+            .env("TZ", "UTC")
             .kill_on_drop(true)
             .output().await.unwrap();
         server.await.unwrap();
@@ -131,4 +132,114 @@ async fn describe_prints_live_and_archived_diagnostics() {
             "{stdout}"
         );
     }
+}
+
+#[tokio::test]
+async fn create_wait_reports_a_typed_termination_with_legacy_details() {
+    let output = run_cli(
+        &["create"],
+        vec![
+            (
+                200,
+                json!({"sandbox_id": "sbx-config", "status": "pending"}),
+            ),
+            (
+                200,
+                json!({
+                    "sandbox_id": "sbx-config", "status": "terminated",
+                    "termination_reason": "ConfigurationError",
+                    "error_details": [{"message": DIAGNOSIS}, "Rebuild the snapshot."],
+                    "future_field": {"ignored": true},
+                }),
+            ),
+        ],
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "{stderr}");
+    assert!(
+        stderr.contains(&format!("Sandbox failed to reach 'running': ConfigurationError: {DIAGNOSIS}; Rebuild the snapshot.")),
+        "{stderr}"
+    );
+}
+
+#[tokio::test]
+async fn describe_preserves_legacy_fields_and_timestamp_formats() {
+    for created_at in [
+        json!("2020-01-02T12:00:00Z"),
+        json!(1577966400),
+        json!(1577966400000_u64),
+        json!(1577966400000000_u64),
+    ] {
+        let output = run_cli(
+            &["describe", "sbx-legacy"],
+            vec![(200, json!({
+                "id": "sbx-legacy", "status": "terminated", "image": "example-image",
+                "namespace": "example-namespace", "name": "example-name",
+                "resources": {"cpus": 0.5, "memory_mb": 1024, "ephemeral_disk_mb": 2048},
+                "allow_unauthenticated_proxy_access": true,
+                "network": {"allow_internet_access": false, "allow_out": ["allowed.example"], "deny_out": ["denied.example"]},
+                "created_at": created_at, "terminated_at": null,
+                "timeout_secs": 120, "sandboxUrl": "https://sbx-legacy.example.com",
+                "entrypoint": ["/bin/sh", "-l"], "exposedPorts": [8080, 9090],
+                "termination_reason": "FutureReason",
+                "error_details": {"message": DIAGNOSIS, "phase": "mount"},
+                "outcome": "failure", "future_field": {"ignored": true},
+            }))],
+        ).await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        for line in [
+            "ID:              sbx-legacy",
+            "Name:            example-name",
+            "Namespace:       example-namespace",
+            "Image:           example-image",
+            "CPUs:            0.5",
+            "Memory:          1024 MB",
+            "Disk:            2048 MB",
+            "Proxy auth:      unauthenticated",
+            "Internet:        blocked",
+            "Created:         2020-01-02",
+            "Timeout:         120s",
+            "URL:             https://sbx-legacy.example.com",
+            "Entrypoint:      /bin/sh -l",
+            "Ports:           8080, 9090",
+            "Allow out:       allowed.example",
+            "Deny out:        denied.example",
+            "Reason:          FutureReason",
+            "Outcome:         failure",
+        ] {
+            assert!(stdout.contains(line), "Missing {line:?}: {stdout}");
+        }
+        assert!(
+            stdout.contains(&format!("Error details:   {DIAGNOSIS}")),
+            "{stdout}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn describe_running_sandbox_still_prints_ssh_config() {
+    let output = run_cli(
+        &["describe", "sbx-running"],
+        vec![(
+            200,
+            json!({
+                "sandbox_id": "sbx-running", "status": "running",
+                "sandbox_url": "https://sbx-running.example.com",
+            }),
+        )],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(output.status.success(), "{stdout}\n{stderr}");
+    assert!(stdout.contains("SSH Config:"), "{stdout}");
+    assert!(
+        stdout.contains("HostName sbx-running.example.com"),
+        "{stdout}"
+    );
+    assert!(stdout.contains("User sbx-running"), "{stdout}");
+    assert!(!stdout.contains("Error details:"), "{stdout}");
 }

@@ -1,7 +1,7 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
-    DEFAULT_SANDBOX_WAIT_TIMEOUT, apply_proxy_access_settings, build_network_config,
-    sandbox_endpoint, sandbox_failure_detail, wait_for_sandbox_status,
+    DEFAULT_SANDBOX_WAIT_TIMEOUT, SandboxFailureDetails, apply_proxy_access_settings,
+    build_network_config, sandbox_endpoint, sandbox_failure_detail, wait_for_sandbox_status,
 };
 use crate::error::{CliError, Result};
 use serde::Deserialize;
@@ -70,29 +70,34 @@ pub async fn create_with_request(
 }
 
 fn format_create_error(status: reqwest::StatusCode, body: &str) -> String {
-    if let Ok(payload) = serde_json::from_str::<serde_json::Value>(body)
-        && payload.get("status").and_then(|value| value.as_str()) == Some("failed")
-        && let Some(sandbox_id) = payload.get("sandbox_id").and_then(|value| value.as_str())
-        && let Some(detail) = sandbox_failure_detail(&payload)
+    #[derive(Deserialize)]
+    struct SandboxCreateFailure {
+        sandbox_id: String,
+        status: String,
+        #[serde(flatten)]
+        failure: SandboxFailureDetails,
+    }
+
+    if let Ok(payload) = serde_json::from_str::<SandboxCreateFailure>(body)
+        && payload.status == "failed"
+        && let Some(detail) = sandbox_failure_detail(&payload.failure)
     {
+        let sandbox_id = payload.sandbox_id;
         return format!("failed to create sandbox {sandbox_id} (HTTP {status}): {detail}");
     }
     #[derive(Deserialize)]
-    struct ServerError<'a> {
-        #[serde(default)]
-        code: Option<&'a str>,
-        message: &'a str,
+    struct ServerError {
+        code: Option<String>,
+        message: String,
     }
 
-    if let Ok(error) = serde_json::from_str::<ServerError<'_>>(body)
-        && error.code == Some("GPU_REQUIRES_CAS_SNAPSHOT")
-    {
-        return format!(
-            "{}\n\nTo see compatible images, run `tl sbx image ls --cas`.",
-            error.message
-        );
-    }
-    if let Ok(error) = serde_json::from_str::<ServerError<'_>>(body) {
+    if let Ok(error) = serde_json::from_str::<ServerError>(body) {
+        if error.code.as_deref() == Some("GPU_REQUIRES_CAS_SNAPSHOT") {
+            return format!(
+                "{}\n\nTo see compatible images, run `tl sbx image ls --cas`.",
+                error.message
+            );
+        }
         return format!(
             "failed to create sandbox (HTTP {status}): {}",
             error.message
@@ -491,6 +496,33 @@ mod tests {
             ),
             "failed to create sandbox (HTTP 400 Bad Request): bad request"
         );
+    }
+
+    #[test]
+    fn server_error_decodes_escaped_messages() {
+        assert_eq!(
+            format_create_error(
+                reqwest::StatusCode::BAD_REQUEST,
+                r#"{"message":"Mount \"/tools\" is invalid.\nChoose another path."}"#,
+            ),
+            "failed to create sandbox (HTTP 400 Bad Request): Mount \"/tools\" is invalid.\nChoose another path."
+        );
+    }
+
+    #[test]
+    fn unrecognized_create_errors_keep_the_raw_body() {
+        for body in [
+            "upstream unavailable",
+            r#"{"diagnostic":"unrecognized response"}"#,
+            r#"{"sandbox_id":"sbx-1","status":"failed"}"#,
+            // A malformed known field must not be silently treated as a typed failure.
+            r#"{"sandbox_id":123,"status":"failed","reason":"ConfigurationError"}"#,
+        ] {
+            assert_eq!(
+                format_create_error(reqwest::StatusCode::BAD_GATEWAY, body),
+                format!("failed to create sandbox (HTTP 502 Bad Gateway): {body}")
+            );
+        }
     }
 
     #[test]
