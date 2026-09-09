@@ -44,7 +44,7 @@ use tensorlake::sandboxes::{
 use tensorlake::{
     Client, ClientBuilder,
     error::{SdkError, TransportFailure},
-    retry::{RetryDecision, RetryPolicy, RetryState, retry},
+    retry::{RetryDecision, RetryPolicy, RetryState, UNDELIVERED_REPLAY_BUDGET, retry},
 };
 use tokio::runtime::Runtime;
 
@@ -3524,6 +3524,11 @@ where
                                 state.retries()
                             );
                             std::thread::sleep(wait);
+                            if started.elapsed() >= UNDELIVERED_REPLAY_BUDGET
+                                && err.never_reached_server()
+                            {
+                                return Err(into_err(err));
+                            }
                         }
                     },
                 }

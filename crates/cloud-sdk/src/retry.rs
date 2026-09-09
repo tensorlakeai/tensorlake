@@ -26,6 +26,8 @@ use crate::error::SdkError;
 /// Sized to outlast an Indexify server rollout: the pod is replaced in
 /// 7–30 s and the Sandbox Proxy reports lookups as unavailable for a few
 /// seconds after that. Replays stop as soon as one attempt succeeds.
+/// No undelivered replay starts at or after this deadline, including when a
+/// retry sleep wakes late. An attempt already in flight is allowed to finish.
 pub const UNDELIVERED_REPLAY_BUDGET: Duration = Duration::from_secs(30);
 
 /// Cap on the doubling wait between transient retries of an idempotent
@@ -140,8 +142,8 @@ impl RetryState {
             }
             self.undelivered_replays += 1;
             let wait = undelivered_backoff(self.undelivered_replays);
-            // Never wait past the budget: a replay that could not start in
-            // time should fail now, with the error the caller can act on.
+            // Cap the wait at the budget. Callers must recheck after sleeping,
+            // since a clipped wait reaches the deadline and any wait can wake late.
             return RetryDecision::Retry(wait.min(UNDELIVERED_REPLAY_BUDGET - elapsed));
         }
         if self.policy.idempotent
@@ -174,7 +176,14 @@ where
             Ok(value) => return Ok(value),
             Err(error) => match state.decide(&error, started.elapsed()) {
                 RetryDecision::Stop => return Err(error),
-                RetryDecision::Retry(wait) => tokio::time::sleep(wait).await,
+                RetryDecision::Retry(wait) => {
+                    tokio::time::sleep(wait).await;
+                    if started.elapsed() >= UNDELIVERED_REPLAY_BUDGET
+                        && error.never_reached_server()
+                    {
+                        return Err(error);
+                    }
+                }
             },
         }
     }
@@ -314,15 +323,63 @@ mod tests {
     async fn retry_gives_up_once_the_budget_is_spent() {
         let attempts = Arc::new(AtomicUsize::new(0));
         let counter = Arc::clone(&attempts);
+        let started = tokio::time::Instant::now();
         let result: Result<(), SdkError> = retry((), RetryPolicy::non_idempotent(), move |()| {
+            assert!(
+                started.elapsed() < UNDELIVERED_REPLAY_BUDGET,
+                "a replay must not start after the budget is spent"
+            );
             counter.fetch_add(1, Ordering::SeqCst);
             async move { Err(proxy_unavailable()) }
         })
         .await;
 
         assert!(result.is_err());
+        assert_eq!(started.elapsed(), UNDELIVERED_REPLAY_BUDGET);
         // 0.15+0.3+0.6+1.2+2.4 = 4.65 s, then 3.75 s steps: ~7 more before 30 s.
         let made = attempts.load(Ordering::SeqCst);
         assert!((10..=14).contains(&made), "attempts before budget: {made}");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn retry_returns_the_last_error_if_the_timer_wakes_after_the_deadline() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let task = tokio::spawn(retry((), RetryPolicy::non_idempotent(), move |()| {
+            counter.fetch_add(1, Ordering::SeqCst);
+            async move { Err::<(), _>(proxy_unavailable()) }
+        }));
+
+        // Let the first failure schedule its 150 ms wait, then simulate a
+        // stalled executor that cannot poll that timer until the budget is gone.
+        tokio::task::yield_now().await;
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        tokio::time::advance(UNDELIVERED_REPLAY_BUDGET + Duration::from_secs(1)).await;
+
+        let error = task.await.unwrap().unwrap_err();
+        assert_eq!(error.to_string(), proxy_unavailable().to_string());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn transient_retries_can_continue_after_the_undelivered_budget() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let counter = Arc::clone(&attempts);
+        let started = tokio::time::Instant::now();
+        let result = retry((), RetryPolicy::idempotent(10), move |()| {
+            let attempt = counter.fetch_add(1, Ordering::SeqCst);
+            async move {
+                if attempt < 10 {
+                    Err(server_error(503, "service unavailable"))
+                } else {
+                    Ok(())
+                }
+            }
+        })
+        .await;
+
+        assert!(result.is_ok());
+        assert_eq!(attempts.load(Ordering::SeqCst), 11);
+        assert_eq!(started.elapsed(), Duration::from_millis(52_800));
     }
 }
