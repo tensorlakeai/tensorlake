@@ -77,18 +77,28 @@ pub enum SdkError {
     EventSourceError(String),
 }
 
-/// Error codes the Sandbox Proxy returns when it could not complete a request
-/// *before* forwarding it to the sandbox: the Indexify lookup did not answer
-/// (`SANDBOX_UPSTREAM_ERROR`), the sandbox has no route yet
-/// (`SANDBOX_NOT_READY`), or the dataplane could not be reached
-/// (`SANDBOX_UNREACHABLE`). In every case the request never reached the
-/// sandbox, so replaying it cannot duplicate a side effect — and every case is
-/// what an Indexify server rollout looks like from the client. The proxy's
-/// error body is `{"error": "...", "code": "..."}`.
+/// Error codes the Sandbox Proxy returns when it gave up on a request *before*
+/// any dataplane executed it, so replaying the request cannot duplicate a side
+/// effect:
+///
+/// - `SANDBOX_UPSTREAM_ERROR` — the Indexify lookup did not answer.
+/// - `SANDBOX_NOT_READY` — the sandbox has no route yet.
+/// - `SANDBOX_UNREACHABLE` — the dataplane could not be connected to, or a
+///   dataplane answered that it does not host the sandbox (its own
+///   `SANDBOX_NOT_FOUND` / `SANDBOX_NOT_RUNNING`, sent instead of executing
+///   the request) and the route could not be refreshed in time.
+/// - `AUTH_SERVICE_UNAVAILABLE` — the Platform auth check failed; nothing was
+///   forwarded.
+///
+/// These are what an Indexify server rollout looks like from the client. The
+/// proxy's error body is `{"error": "...", "code": "..."}`. Proxies older than
+/// compute-engine-internal #2083 report the lookup gap as a plain
+/// `SANDBOX_NOT_FOUND` 404, which is not replayed.
 pub const SANDBOX_PROXY_UNDELIVERED_CODES: &[&str] = &[
     "SANDBOX_UPSTREAM_ERROR",
     "SANDBOX_NOT_READY",
     "SANDBOX_UNREACHABLE",
+    "AUTH_SERVICE_UNAVAILABLE",
 ];
 
 /// Why a request failed below the HTTP status layer.
@@ -164,9 +174,13 @@ impl SdkError {
     /// executed it, making a replay safe even for a non-idempotent operation.
     ///
     /// True for a connect failure (see [`SdkError::transport_failure`]) and for
-    /// a 502/503 from the Sandbox Proxy carrying one of
-    /// [`SANDBOX_PROXY_UNDELIVERED_CODES`]. A timeout, or a 5xx without such a
-    /// code, gives no such guarantee.
+    /// a 5xx from the Sandbox Proxy carrying one of
+    /// [`SANDBOX_PROXY_UNDELIVERED_CODES`]. Any 5xx qualifies, not only the
+    /// 502/503 current proxies emit: older proxies relay the Indexify lookup's
+    /// own 500/504 verbatim under `SANDBOX_UPSTREAM_ERROR`, and those requests
+    /// were not forwarded either. A 4xx with one of these codes is a definitive
+    /// answer the proxy passed through (a 403, a 409) and is not replayed. A
+    /// timeout, or a 5xx without such a code, gives no guarantee at all.
     pub fn never_reached_server(&self) -> bool {
         if matches!(self.transport_failure(), Some(TransportFailure::Connect)) {
             return true;
@@ -174,9 +188,7 @@ impl SdkError {
         let Self::ServerError { status, .. } = self else {
             return false;
         };
-        if *status != reqwest::StatusCode::SERVICE_UNAVAILABLE
-            && *status != reqwest::StatusCode::BAD_GATEWAY
-        {
+        if !status.is_server_error() {
             return false;
         }
         self.upstream_error_code()
@@ -326,8 +338,12 @@ mod undelivered_tests {
     fn only_pre_forward_proxy_failures_count_as_undelivered() {
         let undelivered = [
             (503, "SANDBOX_UPSTREAM_ERROR"),
+            // Pre-#2083 proxies relay the lookup's own 5xx under this code.
+            (500, "SANDBOX_UPSTREAM_ERROR"),
+            (504, "SANDBOX_UPSTREAM_ERROR"),
             (503, "SANDBOX_NOT_READY"),
             (502, "SANDBOX_UNREACHABLE"),
+            (503, "AUTH_SERVICE_UNAVAILABLE"),
         ];
         for (status, code) in undelivered {
             let body = format!(r#"{{"error":"x","code":"{code}"}}"#);
@@ -337,11 +353,15 @@ mod undelivered_tests {
             );
         }
 
-        // Same codes on a status the proxy does not use for them: not trusted.
-        assert!(
-            !server_error(500, r#"{"error":"x","code":"SANDBOX_UPSTREAM_ERROR"}"#)
-                .never_reached_server()
-        );
+        // A 4xx under the same code is a definitive answer the proxy passed
+        // through from the lookup (forbidden, conflict): not replayed.
+        for status in [403, 409] {
+            assert!(
+                !server_error(status, r#"{"error":"x","code":"SANDBOX_UPSTREAM_ERROR"}"#)
+                    .never_reached_server(),
+                "{status} must not be replayed"
+            );
+        }
         // A 503 from something else — the sandbox daemon, an ingress — may have
         // executed the request.
         assert!(!server_error(503, r#"{"error":"daemon overloaded"}"#).never_reached_server());

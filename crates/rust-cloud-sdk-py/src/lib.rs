@@ -2377,7 +2377,8 @@ impl CloudSandboxClient {
 impl CloudSandboxProxyClient {
     fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
-        F: FnMut(SandboxProxyClient) -> Fut,
+        F: FnMut(SandboxProxyClient) -> Fut + Send,
+        T: Send,
         Fut: Future<Output = Result<T, SdkError>>,
     {
         run_with_retry_blocking(
@@ -2392,7 +2393,8 @@ impl CloudSandboxProxyClient {
     /// Retry variant for operations that must not run twice.
     fn run_with_connect_replay<T, F, Fut>(&self, operation: F) -> PyResult<T>
     where
-        F: FnMut(SandboxProxyClient) -> Fut,
+        F: FnMut(SandboxProxyClient) -> Fut + Send,
+        T: Send,
         Fut: Future<Output = Result<T, SdkError>>,
     {
         run_with_connect_replay_blocking(
@@ -2719,8 +2721,9 @@ impl CloudSandboxProxyClient {
         let payload: Value = parse_json_payload(&payload_json)?;
         // Running a process is not idempotent: the general retry would replay
         // it after a timeout, when the sandbox may already be executing the
-        // command. Only connect failures — which never reached the sandbox —
-        // are replayed.
+        // command. Only failures that never reached the sandbox — a connect
+        // failure, or the Sandbox Proxy giving up before forwarding — are
+        // replayed.
         self.run_with_connect_replay(move |client| {
             let payload = payload.clone();
             async move {
@@ -3446,8 +3449,9 @@ fn run_with_retry_blocking<C, T, F, Fut>(
     operation: F,
 ) -> PyResult<T>
 where
-    C: Clone,
-    F: FnMut(C) -> Fut,
+    C: Clone + Send,
+    F: FnMut(C) -> Fut + Send,
+    T: Send,
     Fut: Future<Output = Result<T, SdkError>>,
 {
     run_bounded_blocking(
@@ -3459,7 +3463,7 @@ where
     )
 }
 
-/// Blocking counterpart of [`replay_on_connect_failure`]: replays only the
+/// Blocking counterpart of [`replay_if_never_delivered`]: replays only the
 /// failures that provably never reached the server, so it is safe to wrap a
 /// non-idempotent operation.
 fn run_with_connect_replay_blocking<C, T, F, Fut>(
@@ -3469,8 +3473,9 @@ fn run_with_connect_replay_blocking<C, T, F, Fut>(
     operation: F,
 ) -> PyResult<T>
 where
-    C: Clone,
-    F: FnMut(C) -> Fut,
+    C: Clone + Send,
+    F: FnMut(C) -> Fut + Send,
+    T: Send,
     Fut: Future<Output = Result<T, SdkError>>,
 {
     run_bounded_blocking(
@@ -3482,6 +3487,14 @@ where
     )
 }
 
+/// Drive `operation` to completion on the shared runtime, retrying under
+/// `policy`, with the GIL released for the whole loop.
+///
+/// The sync bindings reach this from `&self` methods that hold the GIL. An
+/// undelivered request can be replayed for up to
+/// [`tensorlake::retry::UNDELIVERED_REPLAY_BUDGET`], and holding the GIL
+/// across those sleeps would freeze every other Python thread for the length
+/// of a control-plane rollout.
 fn run_bounded_blocking<C, T, F, Fut>(
     client: C,
     policy: RetryPolicy,
@@ -3490,28 +3503,33 @@ fn run_bounded_blocking<C, T, F, Fut>(
     mut operation: F,
 ) -> PyResult<T>
 where
-    C: Clone,
-    F: FnMut(C) -> Fut,
+    C: Clone + Send,
+    T: Send,
+    F: FnMut(C) -> Fut + Send,
     Fut: Future<Output = Result<T, SdkError>>,
 {
-    let started = std::time::Instant::now();
-    let mut state = RetryState::new(policy);
-    loop {
-        match shared_runtime().block_on(operation(client.clone())) {
-            Ok(value) => return Ok(value),
-            Err(err) => match state.decide(&err, started.elapsed()) {
-                RetryDecision::Stop => return Err(into_err(err)),
-                RetryDecision::Retry(wait) => {
-                    eprintln!(
-                        "Retrying {label} after {:.2} seconds. Retry count: {}. Retryable exception: {err}",
-                        wait.as_secs_f64(),
-                        state.retries()
-                    );
-                    std::thread::sleep(wait);
+    Python::attach(|py| {
+        py.detach(move || {
+            let started = std::time::Instant::now();
+            let mut state = RetryState::new(policy);
+            loop {
+                match shared_runtime().block_on(operation(client.clone())) {
+                    Ok(value) => return Ok(value),
+                    Err(err) => match state.decide(&err, started.elapsed()) {
+                        RetryDecision::Stop => return Err(into_err(err)),
+                        RetryDecision::Retry(wait) => {
+                            eprintln!(
+                                "Retrying {label} after {:.2} seconds. Retry count: {}. Retryable exception: {err}",
+                                wait.as_secs_f64(),
+                                state.retries()
+                            );
+                            std::thread::sleep(wait);
+                        }
+                    },
                 }
-            },
-        }
-    }
+            }
+        })
+    })
 }
 
 impl CloudApiClient {
@@ -3521,7 +3539,8 @@ impl CloudApiClient {
 
     fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
-        F: FnMut(Client) -> Fut,
+        F: FnMut(Client) -> Fut + Send,
+        T: Send,
         Fut: Future<Output = Result<T, SdkError>>,
     {
         run_with_retry_blocking(
@@ -3535,7 +3554,8 @@ impl CloudApiClient {
 
     fn run_artifact_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
-        F: FnMut(ArtifactStorageClient) -> Fut,
+        F: FnMut(ArtifactStorageClient) -> Fut + Send,
+        T: Send,
         Fut: Future<Output = Result<T, SdkError>>,
     {
         run_with_retry_blocking(
@@ -3551,7 +3571,8 @@ impl CloudApiClient {
 impl CloudSandboxClient {
     fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
-        F: FnMut(SandboxesClient) -> Fut,
+        F: FnMut(SandboxesClient) -> Fut + Send,
+        T: Send,
         Fut: Future<Output = Result<T, SdkError>>,
     {
         run_with_retry_blocking(
@@ -3567,7 +3588,8 @@ impl CloudSandboxClient {
     /// failures that provably never reached the server.
     fn run_with_connect_replay<T, F, Fut>(&self, operation: F) -> PyResult<T>
     where
-        F: FnMut(SandboxesClient) -> Fut,
+        F: FnMut(SandboxesClient) -> Fut + Send,
+        T: Send,
         Fut: Future<Output = Result<T, SdkError>>,
     {
         run_with_connect_replay_blocking(
@@ -3582,7 +3604,8 @@ impl CloudSandboxClient {
 impl CloudDocumentAIClient {
     fn run_with_retry<T, F, Fut>(&self, max_retries: usize, operation: F) -> PyResult<T>
     where
-        F: FnMut(DocumentAiClient) -> Fut,
+        F: FnMut(DocumentAiClient) -> Fut + Send,
+        T: Send,
         Fut: Future<Output = Result<T, SdkError>>,
     {
         run_with_retry_blocking(
@@ -3619,14 +3642,6 @@ fn duration_from_seconds(name: &str, seconds: f64) -> PyResult<Duration> {
     Ok(Duration::from_secs_f64(seconds))
 }
 
-/// Whether the SDK may re-send a request after this failure.
-///
-/// Deliberately excludes timeouts. A timeout means the request was already on
-/// the wire, so the server may have executed it; most operations reached
-/// through this predicate — starting a process, creating a snapshot or pool,
-/// deleting a sandbox — cannot absorb a second execution. Only failures that
-/// provably never reached the server are replayed here; per-operation timeout
-/// retries need an idempotency review first.
 /// Replay `op` only while its failures provably never reached the server —
 /// a connect failure, or the Sandbox Proxy reporting it could not complete the
 /// lookup — for up to [`tensorlake::retry::UNDELIVERED_REPLAY_BUDGET`]. Safe

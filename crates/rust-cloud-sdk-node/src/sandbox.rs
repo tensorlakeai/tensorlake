@@ -114,16 +114,8 @@ pub(crate) fn usage_error(message: String) -> napi::Error {
     make_napi_error("sdk_usage", None, message)
 }
 
-// ---- Retry helpers (ported from the Python binding) -----------------------
+// ---- Retry helpers (policy shared with the Python binding via tensorlake::retry)
 
-/// Whether the SDK may re-send a request after this failure.
-///
-/// Deliberately excludes timeouts. A timeout means the request was already on
-/// the wire, so the server may have executed it; most operations reached
-/// through this predicate — starting a process, creating a snapshot or pool,
-/// deleting a sandbox — cannot absorb a second execution. Only failures that
-/// provably never reached the server are replayed here; per-operation timeout
-/// retries need an idempotency review first.
 /// Retry `op` as an idempotent operation: transient failures up to
 /// `max_retries` times, and anything that never reached the server for the
 /// full [`tensorlake::retry::UNDELIVERED_REPLAY_BUDGET`].
@@ -1107,8 +1099,9 @@ impl NativeSandboxProxyClient {
     pub async fn run_process(&self, payload_json: String) -> napi::Result<TracedEvents> {
         let payload: Value = parse_json_payload(&payload_json)?;
         // Running a process is not idempotent, so this is not wrapped in the
-        // general retry. Connect failures are still replayed: the request never
-        // reached the sandbox, so no process was started.
+        // general retry. Failures that never reached the sandbox — a connect
+        // failure, or the Sandbox Proxy giving up before forwarding — are still
+        // replayed: no process was started.
         let traced = replay_if_never_delivered(self.client().await?, |client| {
             let payload = payload.clone();
             async move { client.run_process(&payload).await }

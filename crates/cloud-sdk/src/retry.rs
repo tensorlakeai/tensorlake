@@ -28,14 +28,34 @@ use crate::error::SdkError;
 /// seconds after that. Replays stop as soon as one attempt succeeds.
 pub const UNDELIVERED_REPLAY_BUDGET: Duration = Duration::from_secs(30);
 
-/// Longest single wait between attempts.
-pub const MAX_BACKOFF: Duration = Duration::from_secs(5);
+/// Cap on the doubling wait between transient retries of an idempotent
+/// operation. This is the schedule the bindings have always used; a caller
+/// asking for ten retries gets ~53 s of patience, as before.
+pub const MAX_TRANSIENT_BACKOFF: Duration = Duration::from_secs(15);
 
-/// Wait before the `attempt`-th retry (1-based): `0.1 s × 2^attempt × 0.75`,
-/// capped at [`MAX_BACKOFF`] — 0.15, 0.3, 0.6, 1.2, 2.4, 3.75, 3.75 …
-pub fn backoff(attempt: usize) -> Duration {
+/// Cap on the wait between replays of an undelivered request. Lower than the
+/// transient cap so the replays keep probing a recovering control plane every
+/// few seconds instead of sleeping through most of the budget.
+pub const MAX_UNDELIVERED_BACKOFF: Duration = Duration::from_secs(5);
+
+/// The exponential schedule shared by both caps: `min(0.1 s × 2^attempt, cap)
+/// × 0.75`, `attempt` 1-based. The 0.75 is applied after the cap, so the
+/// longest wait is three quarters of `cap`.
+fn backoff(attempt: usize, cap: Duration) -> Duration {
     let base = Duration::from_millis(100).saturating_mul(1u32 << attempt.min(31));
-    base.min(MAX_BACKOFF).mul_f64(0.75)
+    base.min(cap).mul_f64(0.75)
+}
+
+/// Wait before the `attempt`-th transient retry: 0.15, 0.3, 0.6, 1.2, 2.4,
+/// 4.8, 9.6, 11.25, 11.25 …
+pub fn transient_backoff(attempt: usize) -> Duration {
+    backoff(attempt, MAX_TRANSIENT_BACKOFF)
+}
+
+/// Wait before the `attempt`-th undelivered replay: 0.15, 0.3, 0.6, 1.2, 2.4,
+/// 3.75, 3.75 …
+pub fn undelivered_backoff(attempt: usize) -> Duration {
+    backoff(attempt, MAX_UNDELIVERED_BACKOFF)
 }
 
 /// Whether the failure is worth retrying for an operation that can safely run
@@ -119,7 +139,7 @@ impl RetryState {
                 return RetryDecision::Stop;
             }
             self.undelivered_replays += 1;
-            let wait = backoff(self.undelivered_replays);
+            let wait = undelivered_backoff(self.undelivered_replays);
             // Never wait past the budget: a replay that could not start in
             // time should fail now, with the error the caller can act on.
             return RetryDecision::Retry(wait.min(UNDELIVERED_REPLAY_BUDGET - elapsed));
@@ -129,7 +149,7 @@ impl RetryState {
             && self.transient_retries < self.policy.max_transient_retries
         {
             self.transient_retries += 1;
-            return RetryDecision::Retry(backoff(self.transient_retries));
+            return RetryDecision::Retry(transient_backoff(self.transient_retries));
         }
         RetryDecision::Stop
     }
@@ -184,12 +204,25 @@ mod tests {
     }
 
     #[test]
-    fn backoff_grows_then_caps() {
-        assert_eq!(backoff(1), Duration::from_millis(150));
-        assert_eq!(backoff(2), Duration::from_millis(300));
-        assert_eq!(backoff(5), Duration::from_millis(2_400));
-        assert_eq!(backoff(6), Duration::from_millis(3_750));
-        assert_eq!(backoff(40), Duration::from_millis(3_750));
+    fn undelivered_backoff_grows_then_caps_low() {
+        assert_eq!(undelivered_backoff(1), Duration::from_millis(150));
+        assert_eq!(undelivered_backoff(2), Duration::from_millis(300));
+        assert_eq!(undelivered_backoff(5), Duration::from_millis(2_400));
+        assert_eq!(undelivered_backoff(6), Duration::from_millis(3_750));
+        assert_eq!(undelivered_backoff(40), Duration::from_millis(3_750));
+    }
+
+    #[test]
+    fn transient_backoff_keeps_the_original_schedule() {
+        // The schedule the bindings shipped with before this module existed:
+        // 0.1 s × 2^n, capped at 15 s, × 0.75.
+        assert_eq!(transient_backoff(1), Duration::from_millis(150));
+        assert_eq!(transient_backoff(6), Duration::from_millis(4_800));
+        assert_eq!(transient_backoff(7), Duration::from_millis(9_600));
+        assert_eq!(transient_backoff(8), Duration::from_millis(11_250));
+        assert_eq!(transient_backoff(40), Duration::from_millis(11_250));
+        let ten_retries: Duration = (1..=10).map(transient_backoff).sum();
+        assert_eq!(ten_retries, Duration::from_millis(52_800));
     }
 
     #[test]
