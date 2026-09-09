@@ -26,10 +26,10 @@ inputs:
     default: "false"
   source-ref:
     description: >
-      artifact_storage Git ref to vendor. Release workflows must pass one resolved commit SHA so
-      every job consumes the same private source revision.
+      Optional full artifact_storage commit SHA. Defaults to crates/ARTIFACT_STORAGE_REVISION
+      so CI and releases consume the same reviewed private source revision.
     required: false
-    default: main
+    default: ""
 
 outputs:
   source-sha:
@@ -39,6 +39,25 @@ outputs:
 runs:
   using: composite
   steps:
+    - name: Read pinned artifact_storage revision
+      id: source-ref
+      shell: bash
+      env:
+        SOURCE_REF: ${{ inputs.source-ref }}
+      run: |
+        set -euo pipefail
+        sha="$SOURCE_REF"
+        if [ -z "$sha" ]; then
+          sha=$(cat crates/ARTIFACT_STORAGE_REVISION)
+          # Git may check this text file out with CRLF on Windows.
+          sha="${sha%$'\r'}"
+        fi
+        if [[ ! "$sha" =~ ^[0-9a-f]{40}$ ]]; then
+          echo "::error::artifact_storage source must be a full commit SHA"
+          exit 1
+        fi
+        echo "sha=$sha" >> "$GITHUB_OUTPUT"
+
     - name: Mint artifact_storage access token
       id: app-token
       uses: actions/create-github-app-token@v1
@@ -52,7 +71,7 @@ runs:
       uses: actions/checkout@v4
       with:
         repository: tensorlakeai/artifact_storage
-        ref: ${{ inputs.source-ref }}
+        ref: ${{ steps.source-ref.outputs.sha }}
         token: ${{ steps.app-token.outputs.token }}
         path: .mount-core
         sparse-checkout: |
