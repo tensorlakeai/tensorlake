@@ -16,7 +16,7 @@ from tensorlake.sandbox import (
     _defaults,
 )
 from tensorlake.sandbox.async_client import AsyncSandboxClient
-from tensorlake.sandbox.exceptions import SandboxError
+from tensorlake.sandbox.exceptions import RemoteAPIError, SandboxError
 
 
 class _FakeAsyncRustProxyClient:
@@ -113,7 +113,8 @@ class _FakeAsyncRustClient:
                         {
                             "sandbox_id": "copy-2",
                             "status": "failed",
-                            "reason": "no capacity",
+                            "reason": "ConfigurationError",
+                            "error_details": "Cannot mount /tools: conflicting registration",
                         },
                     ],
                 }
@@ -312,6 +313,63 @@ class _StatusSequenceRustClient(_FakeAsyncRustClient):
 class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         _RecordingCreateRustClient.instances = []
+
+    async def test_create_configuration_failure_preserves_diagnostic_fields(self):
+        class FakeRustError(Exception):
+            pass
+
+        diagnosis = "Cannot mount /tools: overlaps the registered mount /tools. Remove the conflicting registration."
+        body = json.dumps(
+            {
+                "sandbox_id": "sbx-config",
+                "status": "failed",
+                "reason": "ConfigurationError",
+                "error_details": diagnosis,
+            }
+        )
+
+        class FailedClient(_FakeAsyncRustClient):
+            async def create_sandbox_async(self, request_json):
+                raise FakeRustError(("remote_api", 422, body))
+
+        client = AsyncSandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = FailedClient()
+        with patch(
+            "tensorlake.sandbox.client.RustCloudSandboxClientError", FakeRustError
+        ):
+            with self.assertRaises(RemoteAPIError) as caught:
+                await client.create()
+        error = caught.exception
+        self.assertEqual(error.status_code, 422)
+        self.assertEqual(error.sandbox_id, "sbx-config")
+        self.assertEqual(error.reason, "ConfigurationError")
+        self.assertEqual(error.error_details, diagnosis)
+        self.assertEqual(error.message, body)
+        self.assertIn(
+            f"Sandbox sbx-config failed (ConfigurationError): {diagnosis}", str(error)
+        )
+
+    async def test_create_and_connect_reports_immediate_failure_without_polling(self):
+        class FailedClient(_FakeAsyncRustClient):
+            async def create_sandbox_async(self, request_json):
+                return "trace-failed", json.dumps(
+                    {
+                        "sandbox_id": "sbx-config",
+                        "status": "failed",
+                        "reason": "ConfigurationError",
+                        "error_details": "Cannot shrink rootfs from 20 GiB to 10 GiB",
+                    }
+                )
+
+            async def get_sandbox_json_async(self, sandbox_id):
+                raise AssertionError("An explicit failure must not be polled")
+
+        client = AsyncSandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = FailedClient()
+        with self.assertRaisesRegex(
+            SandboxError, "ConfigurationError.*Cannot shrink rootfs"
+        ):
+            await client.create_and_connect()
 
     async def test_constructor_passes_default_request_timeout_to_rust_backend(self):
         class _RecordingRustClient:
@@ -899,7 +957,11 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.sandboxes[0].sandbox_id, "copy-1")
         self.assertEqual(response.sandboxes[0].status, "running")
         self.assertEqual(response.sandboxes[1].status, "failed")
-        self.assertEqual(response.sandboxes[1].reason, "no capacity")
+        self.assertEqual(response.sandboxes[1].reason, "ConfigurationError")
+        self.assertEqual(
+            response.sandboxes[1].error_details,
+            "Cannot mount /tools: conflicting registration",
+        )
 
     async def test_copy_rejects_invalid_times(self):
         client = _make_client()

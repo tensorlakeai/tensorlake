@@ -1,7 +1,9 @@
 use serde::Deserialize;
 
 use crate::auth::context::CliContext;
-use crate::commands::sbx::{parse_sandbox_path, sandbox_endpoint};
+use crate::commands::sbx::{
+    SandboxFailureDetails, format_failure_detail, parse_sandbox_path, sandbox_endpoint,
+};
 use crate::error::{CliError, Result};
 
 const REQUEST_TIMEOUT_HEADER: &str = "X-Tensorlake-Request-Timeout-Ms";
@@ -17,10 +19,8 @@ struct CopiedSandbox {
     #[serde(alias = "id")]
     sandbox_id: String,
     status: String,
-    #[serde(default)]
-    reason: Option<String>,
-    #[serde(default)]
-    termination_reason: Option<String>,
+    #[serde(flatten)]
+    failure: SandboxFailureDetails,
 }
 
 pub async fn run(
@@ -136,12 +136,15 @@ fn summarize_sandboxes(sandboxes: &[&CopiedSandbox]) -> String {
         .iter()
         .map(|sandbox| {
             let reason = sandbox
+                .failure
                 .reason
                 .as_deref()
-                .or(sandbox.termination_reason.as_deref())
-                .map(|reason| format!(": {reason}"))
+                .or(sandbox.failure.termination_reason.as_deref());
+            let detail = format_failure_detail(reason, sandbox.failure.error_details.as_ref())
+                .or_else(|| reason.map(str::to_string))
+                .map(|detail| format!(": {detail}"))
                 .unwrap_or_default();
-            format!("{} ({}){}", sandbox.sandbox_id, sandbox.status, reason)
+            format!("{} ({}){}", sandbox.sandbox_id, sandbox.status, detail)
         })
         .collect::<Vec<_>>()
         .join(", ")
@@ -166,14 +169,12 @@ mod tests {
             CopiedSandbox {
                 sandbox_id: "sbx-1".to_string(),
                 status: "running".to_string(),
-                reason: None,
-                termination_reason: None,
+                failure: SandboxFailureDetails::default(),
             },
             CopiedSandbox {
                 sandbox_id: "sbx-2".to_string(),
                 status: "running".to_string(),
-                reason: None,
-                termination_reason: None,
+                failure: SandboxFailureDetails::default(),
             },
         ];
 

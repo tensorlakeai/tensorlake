@@ -8,6 +8,8 @@ export enum SandboxStatus {
   SUSPENDED = "suspended",
   TERMINATED = "terminated",
   TIMEOUT = "timeout",
+  /** Terminal status used by blocking create/claim responses. */
+  FAILED = "failed",
 }
 
 export enum SnapshotStatus {

@@ -85,6 +85,8 @@ class SandboxStatus(str, Enum):
     SUSPENDED = "suspended"
     TERMINATED = "terminated"
     TIMEOUT = "timeout"
+    # Terminal status used by blocking create/claim responses.
+    FAILED = "failed"
 
 
 class SnapshotStatus(str, Enum):

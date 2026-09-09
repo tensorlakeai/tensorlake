@@ -1,5 +1,5 @@
 import * as defaults from "./defaults.js";
-import { SandboxError } from "./errors.js";
+import { SandboxError, formatErrorDetails } from "./errors.js";
 import type { Traced } from "./http.js";
 import { releaseNativeHandle } from "./native-worker-client.js";
 import {
@@ -960,12 +960,13 @@ export class SandboxClient {
     }
     if (
       result.status === SandboxStatus.SUSPENDED ||
-      result.status === SandboxStatus.TERMINATED
+      result.status === SandboxStatus.TERMINATED ||
+      result.status === SandboxStatus.FAILED
     ) {
       throw new SandboxError(
         formatStartupFailureMessage(result.sandboxId, result.status, {
           errorDetails: result.errorDetails,
-          terminationReason: result.terminationReason,
+          terminationReason: result.terminationReason ?? result.reason,
         }),
       );
     }
@@ -1081,42 +1082,18 @@ function formatStartupFailureMessage(
     terminationReason?: string;
   },
 ): string {
-  const prefix =
+  let prefix =
     status === SandboxStatus.TERMINATED
       ? `Sandbox ${sandboxId} terminated during startup`
       : `Sandbox ${sandboxId} became ${status} during startup`;
+  if (options.terminationReason) {
+    prefix += ` (${options.terminationReason})`;
+  }
   const detail = formatErrorDetails(options.errorDetails);
   if (detail) {
     return `${prefix}: ${detail}`;
   }
-  if (options.terminationReason) {
-    return `${prefix}: termination reason: ${options.terminationReason}`;
-  }
   return prefix;
-}
-
-function formatErrorDetails(errorDetails: unknown): string | undefined {
-  if (errorDetails == null) return undefined;
-  if (typeof errorDetails === "string") {
-    const detail = errorDetails.trim();
-    return detail || undefined;
-  }
-  if (Array.isArray(errorDetails)) {
-    const parts = errorDetails
-      .map((item) => formatErrorDetails(item))
-      .filter((item): item is string => Boolean(item));
-    return parts.length > 0 ? parts.join("; ") : JSON.stringify(errorDetails);
-  }
-  if (typeof errorDetails === "object") {
-    for (const key of ["message", "detail", "error", "reason"]) {
-      const value = (errorDetails as Record<string, unknown>)[key];
-      if (typeof value === "string" && value.trim()) {
-        return value.trim();
-      }
-    }
-    return JSON.stringify(errorDetails);
-  }
-  return String(errorDetails);
 }
 
 const RESERVED_SANDBOX_MANAGEMENT_PORT = 9501;

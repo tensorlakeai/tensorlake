@@ -25,11 +25,47 @@ pub mod update;
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 use chrono::{DateTime, Local, TimeZone, Utc};
+use serde::Deserialize;
 use tensorlake::sandboxes::{
     models::NetworkConfig, resolve_default_sandbox_proxy_url,
     resolve_sandbox_proxy_target as resolve_core_proxy_target, select_sandbox_proxy_url,
 };
 use tokio::time::{Duration, Instant};
+
+#[derive(Debug, Default, Deserialize)]
+struct SandboxFailureDetails {
+    reason: Option<String>,
+    termination_reason: Option<String>,
+    image: Option<String>,
+    // The API permits arbitrary JSON here, including legacy objects and lists.
+    error_details: Option<serde_json::Value>,
+}
+
+#[derive(Deserialize)]
+struct SandboxStatusResponse {
+    status: String,
+    #[serde(flatten)]
+    failure: SandboxFailureDetails,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum SandboxTimestamp {
+    Rfc3339(String),
+    Numeric(f64),
+}
+
+impl SandboxTimestamp {
+    fn format(&self) -> String {
+        let timestamp = match self {
+            Self::Rfc3339(timestamp) => DateTime::parse_from_rfc3339(timestamp)
+                .ok()
+                .map(|dt| dt.with_timezone(&Utc)),
+            Self::Numeric(timestamp) => parse_numeric_timestamp(*timestamp),
+        };
+        format_timestamp(timestamp)
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedSandboxProxyTarget {
@@ -159,12 +195,8 @@ pub async fn wait_for_sandbox_status(
             .map_err(CliError::Http)?;
 
         if info_resp.status().is_success() {
-            let info: serde_json::Value = info_resp.json().await.map_err(CliError::Http)?;
-            let current_status = info
-                .get("status")
-                .and_then(|value| value.as_str())
-                .unwrap_or("")
-                .to_string();
+            let info: SandboxStatusResponse = info_resp.json().await.map_err(CliError::Http)?;
+            let current_status = info.status;
 
             if current_status == target_status {
                 if let Some(ref s) = spinner {
@@ -177,8 +209,11 @@ pub async fn wait_for_sandbox_status(
                 if let Some(ref s) = spinner {
                     s.finish_and_clear();
                 }
-                let message =
-                    format_sandbox_wait_termination_message("Sandbox", target_status, &info);
+                let message = format_sandbox_wait_termination_message(
+                    "Sandbox",
+                    target_status,
+                    &info.failure,
+                );
                 return Err(CliError::Other(anyhow::anyhow!(message)));
             }
         }
@@ -317,14 +352,15 @@ fn is_localhost(url: &str) -> bool {
     false
 }
 
-fn sandbox_termination_detail(info: &serde_json::Value) -> Option<String> {
+fn sandbox_termination_detail(info: &SandboxFailureDetails) -> Option<String> {
     let reason = info
-        .get("termination_reason")
-        .and_then(|value| value.as_str())?;
+        .termination_reason
+        .as_deref()
+        .or(info.reason.as_deref())?;
     match reason {
         "ImageNotFound" => Some(
-            info.get("image")
-                .and_then(|value| value.as_str())
+            info.image
+                .as_deref()
                 .filter(|image| !image.is_empty())
                 .map(|image| format!("image not found: {image}"))
                 .unwrap_or_else(|| "image not found".to_string()),
@@ -363,16 +399,31 @@ fn error_details_message(value: &serde_json::Value) -> Option<String> {
     }
 }
 
-fn sandbox_failure_detail(info: &serde_json::Value) -> Option<String> {
-    info.get("error_details")
-        .and_then(error_details_message)
-        .or_else(|| sandbox_termination_detail(info))
+fn format_failure_detail(
+    reason: Option<&str>,
+    error_details: Option<&serde_json::Value>,
+) -> Option<String> {
+    let detail = error_details.and_then(error_details_message)?;
+    Some(match reason.filter(|reason| !reason.is_empty()) {
+        Some(reason) => format!("{reason}: {detail}"),
+        None => detail,
+    })
+}
+
+fn sandbox_failure_detail(info: &SandboxFailureDetails) -> Option<String> {
+    format_failure_detail(
+        info.termination_reason
+            .as_deref()
+            .or(info.reason.as_deref()),
+        info.error_details.as_ref(),
+    )
+    .or_else(|| sandbox_termination_detail(info))
 }
 
 fn format_sandbox_wait_termination_message(
     subject: &str,
     target_status: &str,
-    info: &serde_json::Value,
+    info: &SandboxFailureDetails,
 ) -> String {
     if let Some(detail) = sandbox_failure_detail(info) {
         format!("{subject} failed to reach '{target_status}': {detail}")
@@ -502,7 +553,11 @@ mod network_config_tests {
 }
 
 pub fn format_created_at(value: Option<&serde_json::Value>) -> String {
-    let Some(timestamp) = created_at_sort_key(value) else {
+    format_timestamp(created_at_sort_key(value))
+}
+
+fn format_timestamp(timestamp: Option<DateTime<Utc>>) -> String {
+    let Some(timestamp) = timestamp else {
         return "-".to_string();
     };
 
@@ -564,8 +619,8 @@ fn parse_numeric_timestamp(timestamp: f64) -> Option<DateTime<Utc>> {
 #[cfg(test)]
 mod tests {
     use super::{
-        error_details_message, format_created_at, format_sandbox_wait_termination_message,
-        sandbox_termination_detail,
+        SandboxFailureDetails, error_details_message, format_created_at,
+        format_sandbox_wait_termination_message, sandbox_termination_detail,
     };
     use chrono::{Duration, Utc};
 
@@ -589,10 +644,11 @@ mod tests {
 
     #[test]
     fn sandbox_termination_detail_formats_image_not_found() {
-        let info = serde_json::json!({
-            "termination_reason": "ImageNotFound",
-            "image": "foo",
-        });
+        let info = SandboxFailureDetails {
+            termination_reason: Some("ImageNotFound".to_string()),
+            image: Some("foo".to_string()),
+            ..Default::default()
+        };
 
         let detail = sandbox_termination_detail(&info);
 
@@ -601,10 +657,11 @@ mod tests {
 
     #[test]
     fn sandbox_wait_termination_message_includes_image_not_found_detail() {
-        let info = serde_json::json!({
-            "termination_reason": "ImageNotFound",
-            "image": "foo",
-        });
+        let info = SandboxFailureDetails {
+            termination_reason: Some("ImageNotFound".to_string()),
+            image: Some("foo".to_string()),
+            ..Default::default()
+        };
 
         let message = format_sandbox_wait_termination_message("Sandbox", "running", &info);
 
@@ -616,9 +673,7 @@ mod tests {
 
     #[test]
     fn sandbox_wait_termination_message_falls_back_without_reason() {
-        let info = serde_json::json!({
-            "status": "terminated",
-        });
+        let info = SandboxFailureDetails::default();
 
         let message = format_sandbox_wait_termination_message("Sandbox", "running", &info);
 
@@ -630,9 +685,10 @@ mod tests {
 
     #[test]
     fn sandbox_wait_termination_message_includes_generic_reason() {
-        let info = serde_json::json!({
-            "termination_reason": "StartupFailedInternalError",
-        });
+        let info = SandboxFailureDetails {
+            termination_reason: Some("StartupFailedInternalError".to_string()),
+            ..Default::default()
+        };
 
         let message = format_sandbox_wait_termination_message("Sandbox", "running", &info);
 
@@ -659,19 +715,19 @@ mod tests {
 
     #[test]
     fn sandbox_wait_termination_message_prefers_error_details() {
-        let info = serde_json::json!({
-            "status": "terminated",
-            "termination_reason": "StartupFailedInternalError",
-            "error_details": {
+        let info = SandboxFailureDetails {
+            termination_reason: Some("StartupFailedInternalError".to_string()),
+            error_details: Some(serde_json::json!({
                 "message": "failed to pull image tensorlake/missing-image",
-            },
-        });
+            })),
+            ..Default::default()
+        };
 
         let message = format_sandbox_wait_termination_message("Sandbox", "running", &info);
 
         assert_eq!(
             message,
-            "Sandbox failed to reach 'running': failed to pull image tensorlake/missing-image"
+            "Sandbox failed to reach 'running': StartupFailedInternalError: failed to pull image tensorlake/missing-image"
         );
     }
 }

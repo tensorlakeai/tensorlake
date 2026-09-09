@@ -92,9 +92,10 @@ build-cli-full *ARGS:
     trap restore EXIT
     # Swap in the real sources, keeping the placeholders' tensorlake-adapted Cargo.tomls.
     for crate in gsvc-mount gsvc-codec gsvc-fs-client; do
-        rm -f "crates/$crate/src"/*.rs
+        rm -rf "crates/$crate/src"
+        mkdir -p "crates/$crate/src"
         echo "swapping crates/$crate/src with $artifact_storage/crates/$crate/src"
-        cp "$artifact_storage/crates/$crate/src"/*.rs "crates/$crate/src"/
+        cp -R "$artifact_storage/crates/$crate/src"/. "crates/$crate/src"/
     done
     # macOS-only tests compile a source-level wire/coherence contract against the private FSKit
     # bridge. Sources and resources are staged with the Rust crates and removed by the trap. The
@@ -130,8 +131,9 @@ build-tlfs-mount-daemon *ARGS:
     }
     trap restore EXIT
     for crate in gsvc-mount gsvc-fs-client; do
-        rm -f "crates/$crate/src"/*.rs
-        cp "$artifact_storage/crates/$crate/src"/*.rs "crates/$crate/src"/
+        rm -rf "crates/$crate/src"
+        mkdir -p "crates/$crate/src"
+        cp -R "$artifact_storage/crates/$crate/src"/. "crates/$crate/src"/
     done
     cargo build --manifest-path crates/gsvc-fs-client/Cargo.toml \
         --bin tlfs-mount-daemon {{ARGS}}
@@ -210,8 +212,9 @@ test-cli-full *ARGS:
     }
     trap restore EXIT
     for crate in gsvc-mount gsvc-codec gsvc-fs-client; do
-        rm -f "crates/$crate/src"/*.rs
-        cp "$artifact_storage/crates/$crate/src"/*.rs "crates/$crate/src"/
+        rm -rf "crates/$crate/src"
+        mkdir -p "crates/$crate/src"
+        cp -R "$artifact_storage/crates/$crate/src"/. "crates/$crate/src"/
     done
     if [ "$stage_macos_tlfs" = true ]; then
         rm -rf "platform/macos/tlfs/Sources" "platform/macos/tlfs/Resources"

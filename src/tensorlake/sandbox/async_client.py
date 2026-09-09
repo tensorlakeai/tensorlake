@@ -1059,13 +1059,17 @@ class AsyncSandboxClient:
                 name=result.name or requested_name,
             )
             return sandbox
-        if result.status in (SandboxStatus.SUSPENDED, SandboxStatus.TERMINATED):
+        if result.status in (
+            SandboxStatus.SUSPENDED,
+            SandboxStatus.TERMINATED,
+            SandboxStatus.FAILED,
+        ):
             raise SandboxError(
                 _startup_failure_message(
                     result.sandbox_id,
                     result.status,
                     error_details=result.error_details,
-                    termination_reason=result.termination_reason,
+                    termination_reason=result.termination_reason or result.reason,
                 )
             )
         if result.status == SandboxStatus.TIMEOUT:

@@ -11,6 +11,9 @@ are swapped in EPHEMERALLY only for builds that enable the features needing them
               (ARTIFACT_STORAGE_APP_ID / _PRIVATE_KEY), sparse-checks-out the required sources,
               and swaps them over the placeholders for the job only
 
+Staging copies the complete src tree, including nested Rust modules and embedded assets.
+CI compares the staged tree with the private checkout before compiling.
+
 The swapped source compiles against the PLACEHOLDER manifests, so each placeholder Cargo.toml's
 dependency list must mirror the corresponding artifact_storage crate. If upstream dependencies
 change, update the placeholder manifest in the same companion change. Native filesystem SDK and

@@ -1,10 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { RemoteAPIError } from "../src/errors.js";
 import { SandboxClient } from "../src/client.js";
-import {
-  type GpuModel,
-  SandboxStatus,
-  SnapshotStatus,
-} from "../src/models.js";
+import { type GpuModel, SandboxStatus, SnapshotStatus } from "../src/models.js";
 import { clearNativeStub, installNativeStub } from "./native-stub.js";
 
 /** Build the native error a non-2xx HTTP response now surfaces from Rust. */
@@ -36,12 +33,73 @@ describe("SandboxClient", () => {
   });
 
   describe("create", () => {
+    it("surfaces structured configuration diagnostics from the native HTTP error", async () => {
+      const diagnosis =
+        "Cannot mount /tools: overlaps the registered mount /tools. Remove the conflicting registration.";
+      const body = JSON.stringify({
+        sandbox_id: "sbx-config",
+        status: "failed",
+        reason: "ConfigurationError",
+        error_details: diagnosis,
+      });
+      const createSandbox = vi.fn(async () => {
+        throw nativeError(422, body);
+      });
+      installNativeStub({ client: { createSandbox } });
+      const client = SandboxClient.forLocalhost();
+      try {
+        const error = await client.create().catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(RemoteAPIError);
+        expect(error).toMatchObject({
+          statusCode: 422,
+          sandboxId: "sbx-config",
+          reason: "ConfigurationError",
+          errorDetails: diagnosis,
+          responseMessage: body,
+          message: `API error (status 422): Sandbox sbx-config failed (ConfigurationError): ${diagnosis}`,
+        });
+        expect(createSandbox).toHaveBeenCalledOnce();
+      } finally {
+        client.close();
+      }
+    });
+
+    it("reports an immediate failed response without polling", async () => {
+      const getSandbox = vi.fn();
+      installNativeStub({
+        client: {
+          createSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              sandbox_id: "sbx-config",
+              status: "failed",
+              reason: "ConfigurationError",
+              error_details: "Cannot shrink rootfs from 20 GiB to 10 GiB",
+            }),
+          })),
+          getSandbox,
+        },
+      });
+      const client = SandboxClient.forLocalhost();
+      try {
+        await expect(client.createAndConnect()).rejects.toThrow(
+          "ConfigurationError): Cannot shrink rootfs",
+        );
+        expect(getSandbox).not.toHaveBeenCalled();
+      } finally {
+        client.close();
+      }
+    });
+
     it("inherits snapshot resources when no overrides are provided", async () => {
       const createSandbox = vi.fn(async (body: string) => {
         expect(JSON.parse(body)).toEqual({ snapshot_id: "snap-memory" });
         return {
           traceId: "t",
-          json: JSON.stringify({ sandbox_id: "sbx-restored", status: "running" }),
+          json: JSON.stringify({
+            sandbox_id: "sbx-restored",
+            status: "running",
+          }),
         };
       });
       installNativeStub({ client: { createSandbox } });
@@ -56,7 +114,10 @@ describe("SandboxClient", () => {
         expect(JSON.parse(body).resources).toEqual({ cpus: 2 });
         return {
           traceId: "t",
-          json: JSON.stringify({ sandbox_id: "sbx-restored", status: "running" }),
+          json: JSON.stringify({
+            sandbox_id: "sbx-restored",
+            status: "running",
+          }),
         };
       });
       installNativeStub({ client: { createSandbox } });
@@ -152,7 +213,10 @@ describe("SandboxClient", () => {
             expect(body.resources.gpus).toEqual([{ count: 2, model }]);
             return {
               traceId: "t",
-              json: JSON.stringify({ sandbox_id: "sbx-gpu", status: "pending" }),
+              json: JSON.stringify({
+                sandbox_id: "sbx-gpu",
+                status: "pending",
+              }),
             };
           }),
         },
@@ -172,7 +236,10 @@ describe("SandboxClient", () => {
             expect(body.resources.gpus).toEqual([{ count: 2, model: "H100" }]);
             return {
               traceId: "t",
-              json: JSON.stringify({ sandbox_id: "sbx-gpu", status: "pending" }),
+              json: JSON.stringify({
+                sandbox_id: "sbx-gpu",
+                status: "pending",
+              }),
             };
           }),
         },
@@ -1000,7 +1067,12 @@ describe("SandboxClient", () => {
             source_sandbox_id: "sbx-1",
             sandboxes: [
               { sandbox_id: "copy-1", status: "running" },
-              { sandbox_id: "copy-2", status: "failed", reason: "no capacity" },
+              {
+                sandbox_id: "copy-2",
+                status: "failed",
+                reason: "ConfigurationError",
+                error_details: "Cannot mount /tools: conflicting registration",
+              },
             ],
           }),
         };
@@ -1020,7 +1092,10 @@ describe("SandboxClient", () => {
       expect(response.sandboxes[0].status).toBe("running");
       expect(response.sandboxes[1].sandboxId).toBe("copy-2");
       expect(response.sandboxes[1].status).toBe("failed");
-      expect(response.sandboxes[1].reason).toBe("no capacity");
+      expect(response.sandboxes[1].reason).toBe("ConfigurationError");
+      expect(response.sandboxes[1].errorDetails).toBe(
+        "Cannot mount /tools: conflicting registration",
+      );
       expect(response.traceId).toBeDefined();
       client.close();
     });
@@ -1752,4 +1827,60 @@ describe("SandboxClient", () => {
       client.close();
     });
   });
+});
+
+describe("sandbox API error compatibility", () => {
+  it("preserves the body when a failure uses unrecognized diagnostic fields", () => {
+    const body =
+      '{"sandbox_id":"sbx","status":"failed","message":"legacy diagnosis"}';
+    const error = new RemoteAPIError(422, body);
+    expect(error.message).toBe(`API error (status 422): ${body}`);
+    expect(error.sandboxId).toBe("sbx");
+    expect(error.reason).toBeUndefined();
+  });
+
+  it.each([
+    "upstream unavailable",
+    "{broken",
+    "null",
+    "[]",
+    '{"message":"invalid input"}',
+    '{"sandbox_id":42,"status":"failed","reason":"ConfigurationError"}',
+    '{"sandbox_id":"sbx","status":"running"}',
+  ])("preserves unrelated or malformed error %s", (body) => {
+    const error = new RemoteAPIError(422, body);
+    expect(error.message).toBe(`API error (status 422): ${body}`);
+    expect(error.responseMessage).toBe(body);
+    expect(error.sandboxId).toBeUndefined();
+    expect(error.reason).toBeUndefined();
+    expect(error.errorDetails).toBeUndefined();
+  });
+
+  it.each(["InternalError", "FileSystemNotFound", "FutureReason"])(
+    "preserves legacy details and reason %s",
+    (reason) => {
+      for (const details of [
+        null,
+        "",
+        { message: "diagnosis" },
+        ["one", "two"],
+      ]) {
+        const error = new RemoteAPIError(
+          422,
+          JSON.stringify({
+            sandbox_id: "sbx",
+            status: "failed",
+            termination_reason: reason,
+            error_details: details,
+          }),
+        );
+        expect(error.reason).toBe(reason);
+        expect(error.errorDetails).toEqual(details);
+        expect(error.message).toContain(reason);
+        if (Array.isArray(details))
+          expect(error.message).toContain(": one; two");
+        else if (details) expect(error.message).toContain(": diagnosis");
+      }
+    },
+  );
 });

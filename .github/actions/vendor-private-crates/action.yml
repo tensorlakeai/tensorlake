@@ -101,10 +101,11 @@ runs:
             exit 1
           fi
           # Keep the placeholder's tensorlake-adapted Cargo.toml; replace only the source tree.
-          rm -f "$placeholder"/*.rs
-          cp "$real"/*.rs "$placeholder"/
-          count=$(ls "$placeholder"/*.rs | wc -l | tr -d ' ')
-          echo "Vendored ${count} ${crate} source file(s)."
+          rm -rf "$placeholder"
+          mkdir -p "$placeholder"
+          cp -R "$real"/. "$placeholder"/
+          diff -qr "$real" "$placeholder"
+          echo "Vendored the complete ${crate} source tree."
         done
         echo "The CLI can now build with --features mount,git-clone."
 
