@@ -74,6 +74,7 @@ pub mod error;
 pub mod http_transport;
 mod image_service_builds;
 pub mod images;
+pub mod retry;
 pub mod sandbox_images;
 pub mod sandbox_templates;
 pub mod sandboxes;
