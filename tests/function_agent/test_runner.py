@@ -57,10 +57,11 @@ class LoopBoundNativeCore:
         return submit()
 
 
-class GatedNativeCore:
+class GatedNativeCore(FakeNativeCore):
     """Explicit native completion gates, without implementing a second WAL."""
 
     def __init__(self) -> None:
+        super().__init__()
         self.entered: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
         self.pending: dict[str, asyncio.Future[None]] = {}
 
@@ -162,6 +163,27 @@ class ProtocolWriterConcurrencyTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(first.done())
         self.core.pending["first"].set_result(None)
         await asyncio.wait_for(first, timeout=2)
+        self.assertEqual(len(self.writer._attempt_locks), 0)
+
+    async def test_shutdown_input_progresses_while_writes_await_native_outcomes(
+        self,
+    ) -> None:
+        runner = PythonFunctionRunner(self.writer)
+        first = self.submit("first", "a")
+        await self.entered("first")
+        second = self.submit("second", "b")
+        await self.entered("second")
+        self.core.push({"type": "shutdown"})
+        await asyncio.wait_for(runner.serve(self.core), timeout=2)  # type: ignore[arg-type]
+        self.assertFalse(first.done())
+        self.assertFalse(second.done())
+        # The input loop does not fabricate write acknowledgments on shutdown;
+        # actual native outcomes still release the blocked writer threads.
+        for pending in self.core.pending.values():
+            pending.set_exception(RuntimeError("native agent stopped"))
+        for write in (first, second):
+            with self.assertRaisesRegex(RuntimeError, "native agent stopped"):
+                await asyncio.wait_for(write, timeout=2)
         self.assertEqual(len(self.writer._attempt_locks), 0)
 
     async def test_same_attempt_waits_through_native_error_and_reclaims_lock(
