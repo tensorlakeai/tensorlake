@@ -283,6 +283,18 @@ clean-rust:
 
 # ─── Python ──────────────────────────────────────────────────────────────────
 
+# Focused embedded Python runner tests; requires an already built native extension.
+test-function-agent-python:
+    PYTHONPATH=src poetry run python -m unittest tests.function_agent.test_runner
+
+# Controlled delayed-native comparison, not native WAL or service throughput.
+bench-function-agent-python:
+    PYTHONPATH=src poetry run python -m tests.function_agent.benchmark_protocol_writer
+
+check-function-agent-python:
+    poetry run black --check src/tensorlake/function_agent tests/function_agent
+    poetry run isort --check --profile black src/tensorlake/function_agent tests/function_agent
+
 # Format Python code (Black + isort)
 fmt-python:
     poetry run black src/tensorlake --extend-exclude vendor
