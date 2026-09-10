@@ -8,6 +8,7 @@ import io
 import json
 import os
 import pickle
+import threading
 import unittest
 import zipfile
 from typing import Any, Coroutine
@@ -21,6 +22,7 @@ from tensorlake.applications.user_data_serializer import (
     serializer_by_name,
 )
 from tensorlake.function_agent.runner import ProtocolWriter, PythonFunctionRunner
+from tests.function_agent.benchmark_protocol_writer import SerialProtocolWriter, measure
 
 
 class FakeNativeCore:
@@ -55,7 +57,241 @@ class LoopBoundNativeCore:
         return submit()
 
 
+class GatedNativeCore:
+    """Explicit native completion gates, without implementing a second WAL."""
+
+    def __init__(self) -> None:
+        self.entered: asyncio.Queue[dict[str, Any]] = asyncio.Queue()
+        self.pending: dict[str, asyncio.Future[None]] = {}
+
+    def submit_output(self, output_json: str) -> Coroutine[Any, Any, None]:
+        loop = asyncio.get_running_loop()
+        message = json.loads(output_json)
+
+        async def submit() -> None:
+            completion = loop.create_future()
+            self.pending[message["test_id"]] = completion
+            self.entered.put_nowait(message)
+            await completion
+
+        return submit()
+
+    def release_all(self) -> None:
+        for completion in self.pending.values():
+            if not completion.done():
+                completion.set_result(None)
+
+
+class ProtocolWriterConcurrencyTest(unittest.IsolatedAsyncioTestCase):
+    async def test_benchmark_timeout_drains_actual_workers_without_blocking_loop(
+        self,
+    ) -> None:
+        for writer_type in (SerialProtocolWriter, ProtocolWriter):
+            measured = asyncio.create_task(
+                measure(
+                    writer_type,
+                    0,
+                    native_delay_seconds=60,
+                    ack_timeout_seconds=0.02,
+                )
+            )
+            done, _ = await asyncio.wait({measured}, timeout=3)
+            if not done:
+                measured.cancel()
+                self.fail("benchmark timeout failed to finish cleanup within 3s")
+            with self.assertRaises(asyncio.TimeoutError):
+                measured.result()
+
+    async def asyncSetUp(self) -> None:
+        self.core = GatedNativeCore()
+        self.writer = ProtocolWriter(self.core, asyncio.get_running_loop())  # type: ignore[arg-type]
+        self.writes: list[asyncio.Task[None]] = []
+        self.workers_finished: list[threading.Event] = []
+
+    async def asyncTearDown(self) -> None:
+        # Bounded teardown also releases any next same-attempt writer admitted
+        # by completing its predecessor; no worker is left waiting on the loop.
+        async def drain() -> None:
+            while any(not write.done() for write in self.writes) or any(
+                not finished.is_set() for finished in self.workers_finished
+            ):
+                self.core.release_all()
+                await asyncio.sleep(0.001)
+            self.core.release_all()
+            await asyncio.gather(*self.writes, return_exceptions=True)
+
+        await asyncio.wait_for(drain(), timeout=2)
+
+    def submit(
+        self,
+        test_id: str,
+        attempt_id: str | None = None,
+        started: threading.Event | None = None,
+    ) -> asyncio.Task[None]:
+        message: dict[str, Any] = {"type": "initialized", "test_id": test_id}
+        if attempt_id is not None:
+            message.update(type="failure", attempt_id=attempt_id)
+        finished = threading.Event()
+        self.workers_finished.append(finished)
+
+        def write() -> None:
+            try:
+                if started is not None:
+                    started.set()
+                self.writer.write(message)
+            finally:
+                finished.set()
+
+        task = asyncio.create_task(asyncio.to_thread(write))
+        self.writes.append(task)
+        return task
+
+    async def entered(self, test_id: str) -> None:
+        message = await asyncio.wait_for(self.core.entered.get(), timeout=2)
+        self.assertEqual(message["test_id"], test_id)
+
+    async def test_independent_attempt_does_not_wait_for_native_ack(self) -> None:
+        first = self.submit("first", "a")
+        await self.entered("first")
+        second = self.submit("second", "b")
+        await self.entered("second")
+        self.assertFalse(first.done())
+        self.assertFalse(second.done())
+        self.core.pending["second"].set_result(None)
+        await asyncio.wait_for(second, timeout=2)
+        self.assertFalse(first.done())
+        self.core.pending["first"].set_result(None)
+        await asyncio.wait_for(first, timeout=2)
+        self.assertEqual(len(self.writer._attempt_locks), 0)
+
+    async def test_same_attempt_waits_through_native_error_and_reclaims_lock(
+        self,
+    ) -> None:
+        first = self.submit("first", "a")
+        await self.entered("first")
+        second = self.submit("second", "a")
+        independent = self.submit("independent", "b")
+        await self.entered("independent")
+        self.assertNotIn("second", self.core.pending)
+        error = RuntimeError("native durable write failed")
+        self.core.pending["first"].set_exception(error)
+        with self.assertRaises(RuntimeError) as raised:
+            await asyncio.wait_for(first, timeout=2)
+        self.assertIs(raised.exception, error)
+        await self.entered("second")
+        self.core.release_all()
+        await asyncio.wait_for(asyncio.gather(second, independent), timeout=2)
+        # Keep the native exception alive: its traceback must not pin the key.
+        self.assertEqual(len(self.writer._attempt_locks), 0)
+
+    async def test_cancelled_waiter_does_not_release_same_attempt_order(self) -> None:
+        first = self.submit("first", "a")
+        await self.entered("first")
+        first.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await first
+        second = self.submit("second", "a")
+        independent = self.submit("independent", "b")
+        await self.entered("independent")
+        self.assertNotIn("second", self.core.pending)
+        self.assertFalse(self.core.pending["first"].cancelled())
+        self.core.pending["first"].set_result(None)
+        await self.entered("second")
+        self.core.release_all()
+        await asyncio.wait_for(asyncio.gather(second, independent), timeout=2)
+        self.assertEqual(len(self.writer._attempt_locks), 0)
+
+    async def test_lifecycle_lock_is_separate_and_serialized(self) -> None:
+        first = self.submit("initialized-1")
+        await self.entered("initialized-1")
+        second = self.submit("initialized-2")
+        attempt = self.submit("attempt", "initialized")
+        await self.entered("attempt")
+        self.assertNotIn("initialized-2", self.core.pending)
+        self.core.pending["initialized-1"].set_result(None)
+        await self.entered("initialized-2")
+        self.core.release_all()
+        await asyncio.wait_for(asyncio.gather(first, second, attempt), timeout=2)
+
+    async def test_cancelled_queued_writer_stays_ordered_until_its_native_ack(
+        self,
+    ) -> None:
+        first = self.submit("first", "a")
+        await self.entered("first")
+        started = threading.Event()
+        queued = self.submit("queued", "a", started=started)
+        self.assertTrue(await asyncio.to_thread(started.wait, 2))
+        queued.cancel()
+        with self.assertRaises(asyncio.CancelledError):
+            await queued
+        self.assertNotIn("queued", self.core.pending)
+        self.core.pending["first"].set_result(None)
+        await self.entered("queued")
+        third = self.submit("third", "a")
+        independent = self.submit("independent", "b")
+        await self.entered("independent")
+        self.assertNotIn("third", self.core.pending)
+        self.assertEqual(len(self.writer._attempt_locks), 2)
+        self.core.pending["queued"].set_result(None)
+        await self.entered("third")
+        self.core.release_all()
+        await asyncio.wait_for(asyncio.gather(first, third, independent), timeout=2)
+        self.assertEqual(len(self.writer._attempt_locks), 0)
+
+    async def test_sequential_attempt_history_does_not_retain_ordering_keys(
+        self,
+    ) -> None:
+        for index in range(128):
+            key = str(index)
+            write = self.submit(key, key)
+            await self.entered(key)
+            self.assertEqual(len(self.writer._attempt_locks), 1)
+            self.core.pending[key].set_result(None)
+            await asyncio.wait_for(write, timeout=2)
+            self.assertEqual(len(self.writer._attempt_locks), 0)
+
+    async def test_invalid_identity_is_forwarded_to_native_validation(self) -> None:
+        for invalid in ([], {}, 42, None):
+            write = asyncio.create_task(
+                asyncio.to_thread(
+                    self.writer.write,
+                    {"type": "failure", "attempt_id": invalid, "test_id": "invalid"},
+                )
+            )
+            self.writes.append(write)
+            await self.entered("invalid")
+            self.core.pending["invalid"].set_exception(ValueError("invalid identity"))
+            with self.assertRaisesRegex(ValueError, "invalid identity"):
+                await asyncio.wait_for(write, timeout=2)
+        self.assertEqual(len(self.writer._attempt_locks), 0)
+
+
 class PythonFunctionRunnerTest(unittest.IsolatedAsyncioTestCase):
+    async def test_writer_propagates_real_native_errors_without_retaining_attempt(
+        self,
+    ) -> None:
+        core = FunctionAgentCore(
+            "http://127.0.0.1:9",
+            "test-token",
+            registration_attempts=1,
+            registration_retry_ms=1,
+            request_timeout_ms=50,
+        )
+        protocol = ProtocolWriter(core, asyncio.get_running_loop())
+        # These are rejected by the actual PyO3/core JSON boundary, not a fake
+        # extension. Both errors must cross the synchronous bridge unchanged.
+        for message_type in ("failure", "success"):
+            with self.assertRaisesRegex(RuntimeError, "missing field"):
+                await asyncio.wait_for(
+                    asyncio.to_thread(
+                        protocol.write,
+                        {"type": message_type, "attempt_id": "same-attempt"},
+                    ),
+                    timeout=2,
+                )
+            self.assertEqual(len(protocol._attempt_locks), 0)
+        await asyncio.sleep(0.1)
+
     async def test_native_core_can_start_inside_the_python_event_loop(self) -> None:
         core = FunctionAgentCore(
             "http://127.0.0.1:9",
