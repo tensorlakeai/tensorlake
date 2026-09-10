@@ -133,8 +133,8 @@ pub enum GpuModel {
     A6000,
     #[serde(rename = "A10")]
     A10,
-    #[serde(rename = "RTX-PRO-6000-BLACKWELL-SERVER")]
-    RtxPro6000BlackwellServer,
+    #[serde(rename = "RTX-PRO-6000")]
+    RtxPro6000,
     #[serde(rename = "L40")]
     L40,
 }
@@ -147,7 +147,7 @@ impl GpuModel {
         Self::T4,
         Self::A6000,
         Self::A10,
-        Self::RtxPro6000BlackwellServer,
+        Self::RtxPro6000,
         Self::L40,
     ];
 
@@ -159,7 +159,7 @@ impl GpuModel {
             Self::T4 => "T4",
             Self::A6000 => "A6000",
             Self::A10 => "A10",
-            Self::RtxPro6000BlackwellServer => "RTX-PRO-6000-BLACKWELL-SERVER",
+            Self::RtxPro6000 => "RTX-PRO-6000",
             Self::L40 => "L40",
         }
     }
@@ -1433,7 +1433,7 @@ mod tests {
             "T4",
             "A6000",
             "A10",
-            "RTX-PRO-6000-BLACKWELL-SERVER",
+            "RTX-PRO-6000",
             "L40",
         ];
         for (model, wire_value) in GpuModel::ALL.into_iter().zip(wire_values) {

@@ -1065,8 +1065,8 @@ enum GpuModelArg {
     A6000,
     #[value(name = "A10")]
     A10,
-    #[value(name = "RTX-PRO-6000-BLACKWELL-SERVER")]
-    RtxPro6000BlackwellServer,
+    #[value(name = "RTX-PRO-6000")]
+    RtxPro6000,
     #[value(name = "L40")]
     L40,
 }
@@ -1080,7 +1080,7 @@ impl GpuModelArg {
             Self::T4 => "T4",
             Self::A6000 => "A6000",
             Self::A10 => "A10",
-            Self::RtxPro6000BlackwellServer => "RTX-PRO-6000-BLACKWELL-SERVER",
+            Self::RtxPro6000 => "RTX-PRO-6000",
             Self::L40 => "L40",
         }
     }
@@ -4400,7 +4400,7 @@ mod tests {
             "T4",
             "A6000",
             "A10",
-            "RTX-PRO-6000-BLACKWELL-SERVER",
+            "RTX-PRO-6000",
             "L40",
         ] {
             let cli = Cli::try_parse_from([

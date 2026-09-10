@@ -172,7 +172,7 @@ class GpuModel(str, Enum):
     T4 = "T4"
     A6000 = "A6000"
     A10 = "A10"
-    RTX_PRO_6000_BLACKWELL_SERVER = "RTX-PRO-6000-BLACKWELL-SERVER"
+    RTX_PRO_6000 = "RTX-PRO-6000"
     L40 = "L40"
 
 
