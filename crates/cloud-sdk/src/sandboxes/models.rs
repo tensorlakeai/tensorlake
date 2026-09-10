@@ -132,16 +132,22 @@ pub enum GpuModel {
     A6000,
     #[serde(rename = "A10")]
     A10,
+    #[serde(rename = "RTX-PRO-6000")]
+    RtxPro6000,
+    #[serde(rename = "L40")]
+    L40,
 }
 
 impl GpuModel {
-    pub const ALL: [Self; 6] = [
+    pub const ALL: [Self; 8] = [
         Self::A10040Gb,
         Self::A10080Gb,
         Self::H100,
         Self::T4,
         Self::A6000,
         Self::A10,
+        Self::RtxPro6000,
+        Self::L40,
     ];
 
     pub const fn as_str(self) -> &'static str {
@@ -152,6 +158,8 @@ impl GpuModel {
             Self::T4 => "T4",
             Self::A6000 => "A6000",
             Self::A10 => "A10",
+            Self::RtxPro6000 => "RTX-PRO-6000",
+            Self::L40 => "L40",
         }
     }
 }
@@ -1443,7 +1451,16 @@ mod tests {
 
     #[test]
     fn gpu_models_use_server_wire_values() {
-        let wire_values = ["A100-40GB", "A100-80GB", "H100", "T4", "A6000", "A10"];
+        let wire_values = [
+            "A100-40GB",
+            "A100-80GB",
+            "H100",
+            "T4",
+            "A6000",
+            "A10",
+            "RTX-PRO-6000",
+            "L40",
+        ];
         for (model, wire_value) in GpuModel::ALL.into_iter().zip(wire_values) {
             assert_eq!(model.to_string(), wire_value);
             assert_eq!(wire_value.parse::<GpuModel>().unwrap(), model);

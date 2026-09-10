@@ -204,6 +204,8 @@ describe("SandboxClient", () => {
       "H100",
       "T4",
       "A6000",
+      "RTX-PRO-6000",
+      "L40",
       "A10",
     ] satisfies GpuModel[])("creates a %s GPU sandbox", async (model) => {
       const stub = installNativeStub({

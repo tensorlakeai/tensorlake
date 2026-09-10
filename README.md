@@ -372,3 +372,12 @@ Sign up at [cloud.tensorlake.ai](https://cloud.tensorlake.ai/), run `pip install
 * [Sandbox Documentation](https://docs.tensorlake.ai/sandboxes/introduction)
 * [Orchestrate Documentation](https://docs.tensorlake.ai/applications/quickstart)
 * [`tl git mount` repository and subtree workflow](docs/git-mount.md)
+
+### GPU model names
+
+Sandbox GPU requests also accept `RTX-PRO-6000` and `L40`
+in the Python, TypeScript, and Rust SDKs and the CLI `--gpu` option.
+Python exposes `GpuModel.RTX_PRO_6000` and `GpuModel.L40`.
+`RTX-PRO-6000` selects the 96 GB Blackwell Server Edition, not the workstation
+editions. These names request exact models; L40 does not select L40S. The server and
+dataplane must support the requested model and have matching capacity.
