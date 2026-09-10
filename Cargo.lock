@@ -687,6 +687,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "crc32c"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "3a47af21622d091a8f0fb295b88bc886ac74efcc613efc19f5d0b21de5c89e47"
+dependencies = [
+ "rustc_version",
+]
+
+[[package]]
 name = "crc32fast"
 version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -5581,7 +5590,9 @@ dependencies = [
  "anyhow",
  "base64",
  "chrono",
+ "crc32c",
  "hex",
+ "libc",
  "p256",
  "reqwest",
  "rustls",
