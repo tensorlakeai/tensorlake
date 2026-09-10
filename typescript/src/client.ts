@@ -82,7 +82,12 @@ function requireReadOnlySnapshotPin(
  * explicit `false` (or an unknown pin field).
  */
 function fileSystemMountToWire(fs: FileSystemMount): Record<string, unknown> {
-  requireReadOnlySnapshotPin(fs.fileSystemId, fs.mountPath, fs.readOnly, fs.snapshotId);
+  requireReadOnlySnapshotPin(
+    fs.fileSystemId,
+    fs.mountPath,
+    fs.readOnly,
+    fs.snapshotId,
+  );
   return {
     file_system_id: fs.fileSystemId,
     mount_path: fs.mountPath,
@@ -498,14 +503,18 @@ export class SandboxClient {
     sandboxId: string,
     options?: SuspendResumeOptions,
   ): Promise<void> {
-    await callNative(() => this.native.suspendSandbox(sandboxId), {
+    const timeout = options?.timeout ?? 300;
+    const deadline = Date.now() + timeout * 1000;
+    const waitMs =
+      options?.wait === false
+        ? 0
+        : Math.max(0, Math.min(10_000, Math.floor(timeout * 1000)));
+    await callNative(() => this.native.suspendSandbox(sandboxId, waitMs), {
       sandboxId,
       notFoundKind: "sandbox",
     });
     if (options?.wait === false) return;
-    const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
-    const deadline = Date.now() + timeout * 1000;
     while (Date.now() < deadline) {
       const info = await this.get(sandboxId);
       if (info.status === SandboxStatus.SUSPENDED) return;
@@ -532,17 +541,27 @@ export class SandboxClient {
     sandboxId: string,
     options?: SuspendResumeOptions,
   ): Promise<void> {
-    await callNative(() => this.native.resumeSandbox(sandboxId), {
+    const timeout = options?.timeout ?? 300;
+    const deadline = Date.now() + timeout * 1000;
+    const waitMs =
+      options?.wait === false
+        ? 0
+        : Math.max(0, Math.min(10_000, Math.floor(timeout * 1000)));
+    await callNative(() => this.native.resumeSandbox(sandboxId, waitMs), {
       sandboxId,
       notFoundKind: "sandbox",
     });
     if (options?.wait === false) return;
-    const timeout = options?.timeout ?? 300;
     const pollInterval = options?.pollInterval ?? 1;
-    const deadline = Date.now() + timeout * 1000;
     while (Date.now() < deadline) {
       const info = await this.get(sandboxId);
       if (info.status === SandboxStatus.RUNNING) return;
+      if (
+        typeof info.errorDetails === "string" &&
+        info.errorDetails.startsWith("Resident resume failed: ")
+      ) {
+        throw new SandboxError(info.errorDetails);
+      }
       if (info.status === SandboxStatus.TERMINATED) {
         throw new SandboxError(
           `Sandbox ${sandboxId} terminated while waiting for resume`,

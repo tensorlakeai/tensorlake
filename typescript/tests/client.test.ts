@@ -811,7 +811,7 @@ describe("SandboxClient", () => {
       await expect(
         client.suspend("sbx-1", { wait: false }),
       ).resolves.toBeUndefined();
-      expect(stub.client.suspendSandbox).toHaveBeenCalledWith("sbx-1");
+      expect(stub.client.suspendSandbox).toHaveBeenCalledWith("sbx-1", 0);
       client.close();
     });
 
@@ -832,7 +832,7 @@ describe("SandboxClient", () => {
 
       const client = SandboxClient.forLocalhost();
       await expect(client.suspend("sbx-1")).resolves.toBeUndefined();
-      expect(stub.client.suspendSandbox).toHaveBeenCalledWith("sbx-1");
+      expect(stub.client.suspendSandbox).toHaveBeenCalledWith("sbx-1", 10_000);
       expect(stub.client.getSandbox).toHaveBeenCalled();
       client.close();
     });
@@ -846,7 +846,7 @@ describe("SandboxClient", () => {
       await expect(
         client.resume("sbx-1", { wait: false }),
       ).resolves.toBeUndefined();
-      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1");
+      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1", 0);
       client.close();
     });
 
@@ -867,11 +867,53 @@ describe("SandboxClient", () => {
 
       const client = SandboxClient.forLocalhost();
       await expect(client.resume("sbx-1")).resolves.toBeUndefined();
-      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1");
+      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1", 10_000);
       expect(stub.client.getSandbox).toHaveBeenCalled();
       client.close();
     });
   });
+
+  it.each(["pending", "suspended"])(
+    "reports late resume failure in %s after an asynchronous response",
+    async (status) => {
+      const stub = installNativeStub({ client: {
+        getSandbox: vi.fn(async () => ({ traceId: "t", json: JSON.stringify({
+          id: "sbx-1", namespace: "default", status,
+          resources: { cpus: 1, memory_mb: 512, ephemeral_disk_mb: 1024 },
+          error_details: "Resident resume failed: checkpoint owner unavailable",
+        }) })),
+      } });
+      const client = SandboxClient.forLocalhost();
+      await expect(client.resume("sbx-1", { timeout: 0.2, pollInterval: 0.01 })).rejects.toThrow("checkpoint owner unavailable");
+      expect(stub.client.getSandbox).toHaveBeenCalledTimes(1);
+      expect(stub.client.resumeSandbox).toHaveBeenCalledTimes(1);
+      client.close();
+    },
+  );
+
+  it.each(["suspend", "resume"] as const)(
+    "%s counts the server completion wait against the caller timeout",
+    async (action) => {
+      let now = 0;
+      vi.spyOn(Date, "now").mockImplementation(() => now);
+      const nativeMethod =
+        action === "suspend" ? "suspendSandbox" : "resumeSandbox";
+      const stub = installNativeStub({
+        client: {
+          [nativeMethod]: vi.fn(async () => {
+            now = 2000;
+          }),
+        },
+      });
+      const client = SandboxClient.forLocalhost();
+      await expect(client[action]("sbx-1", { timeout: 1 })).rejects.toThrow(
+        `did not ${action} within 1s`,
+      );
+      expect(stub.client[nativeMethod]).toHaveBeenCalledWith("sbx-1", 1000);
+      expect(stub.client.getSandbox).not.toHaveBeenCalled();
+      client.close();
+    },
+  );
 
   describe("claim", () => {
     it("claims from pool", async () => {

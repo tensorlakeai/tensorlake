@@ -643,9 +643,11 @@ class AsyncSandboxClient:
         timeout: float = 300,
         poll_interval: float = 1.0,
     ) -> Traced[None]:
+        deadline = asyncio.get_running_loop().time() + timeout
         try:
             trace_id = await self._rust_client.suspend_sandbox_async(
-                sandbox_id=sandbox_id
+                sandbox_id=sandbox_id,
+                wait_ms=min(10_000, max(0, int(timeout * 1000))) if wait else 0,
             )
         except Exception as e:
             if _rust_status_code(e) == 404:
@@ -653,7 +655,6 @@ class AsyncSandboxClient:
             _raise_as_sandbox_error(e)
         if not wait:
             return Traced(trace_id, None)
-        deadline = asyncio.get_running_loop().time() + timeout
         while asyncio.get_running_loop().time() < deadline:
             info = (await self.get(sandbox_id)).value
             if info.status == SandboxStatus.SUSPENDED:
@@ -672,9 +673,11 @@ class AsyncSandboxClient:
         timeout: float = 300,
         poll_interval: float = 1.0,
     ) -> Traced[None]:
+        deadline = asyncio.get_running_loop().time() + timeout
         try:
             trace_id = await self._rust_client.resume_sandbox_async(
-                sandbox_id=sandbox_id
+                sandbox_id=sandbox_id,
+                wait_ms=min(10_000, max(0, int(timeout * 1000))) if wait else 0,
             )
         except Exception as e:
             if _rust_status_code(e) == 404:
@@ -682,11 +685,14 @@ class AsyncSandboxClient:
             _raise_as_sandbox_error(e)
         if not wait:
             return Traced(trace_id, None)
-        deadline = asyncio.get_running_loop().time() + timeout
         while asyncio.get_running_loop().time() < deadline:
             info = (await self.get(sandbox_id)).value
             if info.status == SandboxStatus.RUNNING:
                 return Traced(trace_id, None)
+            if isinstance(info.error_details, str) and info.error_details.startswith(
+                "Resident resume failed: "
+            ):
+                raise SandboxError(info.error_details)
             if info.status == SandboxStatus.TERMINATED:
                 raise SandboxError(
                     f"Sandbox {sandbox_id!r} terminated while waiting for resume"

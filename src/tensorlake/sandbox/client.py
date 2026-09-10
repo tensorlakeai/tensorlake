@@ -932,7 +932,8 @@ class SandboxClient:
 
         Args:
             sandbox_id: ID or name of the sandbox to suspend
-            wait: If True (default), poll until Suspended; False returns immediately.
+            wait: If True (default), wait for Suspended using server notifications
+                with polling fallback; False returns immediately.
             timeout: Max seconds to wait when wait=True (default 300)
             poll_interval: Seconds between polls when wait=True (default 1.0)
 
@@ -942,16 +943,19 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
+        deadline = time.monotonic() + timeout
         try:
-            trace_id = self._rust_client.suspend_sandbox(sandbox_id=sandbox_id)
+            trace_id = self._rust_client.suspend_sandbox(
+                sandbox_id=sandbox_id,
+                wait_ms=min(10_000, max(0, int(timeout * 1000))) if wait else 0,
+            )
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
         if not wait:
             return Traced(trace_id, None)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             info = self.get(sandbox_id).value
             if info.status == SandboxStatus.SUSPENDED:
                 return Traced(trace_id, None)
@@ -976,7 +980,8 @@ class SandboxClient:
 
         Args:
             sandbox_id: ID or name of the sandbox to resume
-            wait: If True (default), poll until Running; False returns immediately.
+            wait: If True (default), wait for Running using server notifications
+                with polling fallback; False returns immediately.
             timeout: Max seconds to wait when wait=True (default 300)
             poll_interval: Seconds between polls when wait=True (default 1.0)
 
@@ -986,19 +991,26 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
+        deadline = time.monotonic() + timeout
         try:
-            trace_id = self._rust_client.resume_sandbox(sandbox_id=sandbox_id)
+            trace_id = self._rust_client.resume_sandbox(
+                sandbox_id=sandbox_id,
+                wait_ms=min(10_000, max(0, int(timeout * 1000))) if wait else 0,
+            )
         except Exception as e:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
         if not wait:
             return Traced(trace_id, None)
-        deadline = time.time() + timeout
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             info = self.get(sandbox_id).value
             if info.status == SandboxStatus.RUNNING:
                 return Traced(trace_id, None)
+            if isinstance(info.error_details, str) and info.error_details.startswith(
+                "Resident resume failed: "
+            ):
+                raise SandboxError(info.error_details)
             if info.status == SandboxStatus.TERMINATED:
                 raise SandboxError(
                     f"Sandbox {sandbox_id!r} terminated while waiting for resume"

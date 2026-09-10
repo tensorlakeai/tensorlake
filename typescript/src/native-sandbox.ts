@@ -96,8 +96,8 @@ export interface NativeSandboxClient {
   listSandboxLogProcesses(sandboxId: string): Promise<TracedJson>;
   updateSandbox(sandboxId: string, requestJson: string): Promise<TracedJson>;
   deleteSandbox(sandboxId: string): Promise<string>;
-  suspendSandbox(sandboxId: string): Promise<string>;
-  resumeSandbox(sandboxId: string): Promise<string>;
+  suspendSandbox(sandboxId: string, waitMs?: number): Promise<string>;
+  resumeSandbox(sandboxId: string, waitMs?: number): Promise<string>;
   attachFileSystem(
     sandboxId: string,
     fileSystemId: string,
@@ -107,10 +107,7 @@ export interface NativeSandboxClient {
     snapshotId?: string | null,
     owner?: string | null,
   ): Promise<TracedJson>;
-  detachFileSystem(
-    sandboxId: string,
-    mountPath: string,
-  ): Promise<TracedJson>;
+  detachFileSystem(sandboxId: string, mountPath: string): Promise<TracedJson>;
   createSnapshot(
     sandboxId: string,
     snapshotType?: string | null,
@@ -267,7 +264,7 @@ export interface NativeSandboxBinding {
 
 let cachedBinding: NativeSandboxBinding | undefined;
 export function loadNativeSandboxBinding(): NativeSandboxBinding {
-  return cachedBinding ??= workerBinding();
+  return (cachedBinding ??= workerBinding());
 }
 
 /** Test seam: replace (or clear) the native binding. */
@@ -395,29 +392,53 @@ export async function* nativeEventStream(
   let finished = false;
   let stopped = false;
   let failure: unknown;
-  const notify = () => { const resolve = wake; wake = undefined; resolve?.(); };
+  const notify = () => {
+    const resolve = wake;
+    wake = undefined;
+    resolve?.();
+  };
   const emit: NativeEmit = (value) => {
     if (stopped) return Promise.resolve();
-    return new Promise<void>((consumed) => { queue.push({ value, consumed }); notify(); });
+    return new Promise<void>((consumed) => {
+      queue.push({ value, consumed });
+      notify();
+    });
   };
   let call: NativeCall<string> | undefined;
-  const onAbort = () => { stopped = true; call?.[cancelNativeCall]?.(); notify(); };
+  const onAbort = () => {
+    stopped = true;
+    call?.[cancelNativeCall]?.();
+    notify();
+  };
   signal?.addEventListener("abort", onAbort, { once: true });
   try {
     call = start(emit);
-    void call.catch((error: unknown) => { failure = error; }).finally(() => { finished = true; notify(); });
+    void call
+      .catch((error: unknown) => {
+        failure = error;
+      })
+      .finally(() => {
+        finished = true;
+        notify();
+      });
     while (!stopped) {
       const event = queue.shift();
       if (event) {
-        try { yield JSON.parse(event.value) as Record<string, unknown>; }
-        finally { event.consumed(); }
+        try {
+          yield JSON.parse(event.value) as Record<string, unknown>;
+        } finally {
+          event.consumed();
+        }
       } else if (finished) {
         break;
       } else {
-        await new Promise<void>((resolve) => { wake = resolve; });
+        await new Promise<void>((resolve) => {
+          wake = resolve;
+        });
       }
     }
-    if (!stopped && failure !== undefined) throw translateNativeError(failure, context);
+    if (!stopped && failure !== undefined)
+      throw translateNativeError(failure, context);
   } finally {
     stopped = true;
     signal?.removeEventListener("abort", onAbort);
@@ -456,5 +477,9 @@ export function assembleCommandResult(events: string[]): {
     }
   }
 
-  return { exitCode, stdout: stdoutLines.join("\n"), stderr: stderrLines.join("\n") };
+  return {
+    exitCode,
+    stdout: stdoutLines.join("\n"),
+    stderr: stderrLines.join("\n"),
+  };
 }

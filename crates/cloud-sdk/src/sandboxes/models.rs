@@ -211,7 +211,10 @@ impl From<GpuRequest> for GPUResources {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxResources {
-    #[serde(default = "unspecified_cpus", skip_serializing_if = "is_unspecified_f64")]
+    #[serde(
+        default = "unspecified_cpus",
+        skip_serializing_if = "is_unspecified_f64"
+    )]
     pub cpus: f64,
     #[serde(
         default = "unspecified_memory_mb",
@@ -1125,12 +1128,11 @@ mod tests {
             serde_json::json!({"snapshot_id": "snap-memory"})
         );
 
-        let cpu_override: CreateSandboxRequest =
-            serde_json::from_value(serde_json::json!({
-                "snapshot_id": "snap-memory",
-                "resources": {"cpus": 2.0}
-            }))
-            .unwrap();
+        let cpu_override: CreateSandboxRequest = serde_json::from_value(serde_json::json!({
+            "snapshot_id": "snap-memory",
+            "resources": {"cpus": 2.0}
+        }))
+        .unwrap();
         assert_eq!(cpu_override.resources.cpus, 2.0);
         assert_eq!(cpu_override.resources.memory_mb, unspecified_memory_mb());
 

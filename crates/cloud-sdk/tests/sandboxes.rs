@@ -13,6 +13,55 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
 #[tokio::test]
+async fn lifecycle_completion_wait_is_explicit_bounded_and_accepts_legacy_202() {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let mut requests = Vec::new();
+            for status in ["202 Accepted", "202 Accepted", "200 OK", "202 Accepted"] {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                requests.push(read_http_request(&mut socket).await);
+                socket
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-length: 0\r\nconnection: close\r\n\r\n"
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            requests
+        });
+        let client = ClientBuilder::new(&format!("http://{address}"))
+            .build()
+            .unwrap();
+        let sandboxes = SandboxesClient::new(client, "default", false);
+        sandboxes.suspend("sbx-1").await.unwrap();
+        sandboxes.resume("sbx-1").await.unwrap();
+        sandboxes.suspend_with_wait("sbx-1", 10_000).await.unwrap();
+        sandboxes.resume_with_wait("sbx-1", u32::MAX).await.unwrap();
+        let requests = server.await.unwrap();
+        for (request, path) in requests.iter().zip([
+            "/sandboxes/sbx-1/suspend",
+            "/sandboxes/sbx-1/resume",
+            "/sandboxes/sbx-1/suspend?wait_ms=10000",
+            "/sandboxes/sbx-1/resume?wait_ms=30000",
+        ]) {
+            let request = String::from_utf8_lossy(request);
+            assert!(
+                request.starts_with(&format!("POST {path} HTTP/1.1\r\n")),
+                "{request}"
+            );
+            assert!(request.contains("\r\ncontent-length: 0\r\n"));
+        }
+    })
+    .await
+    .expect("lifecycle HTTP exchange exceeded five seconds");
+}
+
+#[tokio::test]
 async fn sandbox_proxy_raw_and_empty_posts_send_content_length_and_routing_headers() {
     let listener = TcpListener::bind("127.0.0.1:0")
         .await
