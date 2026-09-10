@@ -70,7 +70,7 @@ export enum ContainerState {
 export interface ContainerResourcesInfo {
   cpus: number;
   memoryMb: number;
-  ephemeralDiskMb: number;
+  diskMb: number;
 }
 
 /** GPU models supported by the sandbox scheduler. */
@@ -388,7 +388,8 @@ export interface CreatePoolOptions {
   image: string;
   cpus?: number;
   memoryMb?: number;
-  ephemeralDiskMb?: number;
+  /** Root disk size in megabytes. Omit to use the registered image's size. */
+  diskMb?: number;
   timeoutSecs?: number;
   entrypoint?: string[];
   maxContainers?: number;
@@ -408,7 +409,8 @@ export interface UpdatePoolOptions {
   image: string;
   cpus?: number;
   memoryMb?: number;
-  ephemeralDiskMb?: number;
+  /** Root disk size in megabytes. Omit to use the registered image's size. */
+  diskMb?: number;
   timeoutSecs?: number;
   entrypoint?: string[];
   maxContainers?: number;

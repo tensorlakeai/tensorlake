@@ -138,7 +138,7 @@ describe("Sandbox", () => {
         id: "sbx-1",
         namespace: "default",
         status: "running",
-        resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+        resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
         sandbox_url: "https://old.sandbox.tensorlake.ai",
         routing_hint: "old-hint",
         ...overrides,
@@ -883,7 +883,7 @@ describe("Sandbox", () => {
         id: "sbx-1",
         namespace: "default",
         status: "running",
-        resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+        resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
         ...overrides,
       });
     }
@@ -1087,7 +1087,7 @@ describe("Sandbox", () => {
         id: "sbx-abc",
         namespace: "default",
         status: "running",
-        resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+        resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
         ...overrides,
       });
     }

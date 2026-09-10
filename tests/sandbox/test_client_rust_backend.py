@@ -130,7 +130,7 @@ class _FakeRustClient:
       "resources": {
         "cpus": 1.0,
         "memory_mb": 512,
-        "ephemeral_disk_mb": 1024
+        "disk_mb": 1024
       }
     }
   ]
@@ -150,7 +150,7 @@ class _FakeRustClient:
   "resources": {
     "cpus": 1.0,
     "memory_mb": 512,
-    "ephemeral_disk_mb": 1024
+    "disk_mb": 1024
   },
   "allow_unauthenticated_access": false,
   "exposed_ports": [8080],
@@ -171,7 +171,7 @@ class _FakeRustClient:
             "resources": {
                 "cpus": 1.0,
                 "memory_mb": 512,
-                "ephemeral_disk_mb": 1024,
+                "disk_mb": 1024,
             },
             "name": payload.get("name"),
             "allow_unauthenticated_access": payload.get(
@@ -252,7 +252,7 @@ def _sandbox_info_json(
         "resources": {
             "cpus": 1.0,
             "memory_mb": 512,
-            "ephemeral_disk_mb": 1024,
+            "disk_mb": 1024,
         },
         "allow_unauthenticated_access": False,
         "exposed_ports": [],
@@ -633,7 +633,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 512,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                         }
                     ),
@@ -679,7 +679,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 512,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                         }
                     ),
@@ -829,7 +829,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
   "resources": {
     "cpus": 1.0,
     "memory_mb": 512,
-    "ephemeral_disk_mb": 1024
+    "disk_mb": 1024
   },
   "error_details": {
     "message": "failed to pull image tensorlake/missing-image"
@@ -941,7 +941,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 512,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                             "routing_hint": "hint-2",
                             "sandbox_url": "https://sbx-canonical.sandbox.tensorlake.ai",
@@ -1429,6 +1429,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 1024,
+                                "disk_mb": 20 * 1024,
                                 "ephemeral_disk_mb": 1024,
                             },
                             "network_policy": {
@@ -1448,8 +1449,10 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             deny_out=["192.0.2.0/24"],
         )
 
-        client.create_pool(image="alpine", network=policy)
+        client.create_pool(image="alpine", disk_mb=25 * 1024, network=policy)
         request = json.loads(captured["request_json"])
+        self.assertEqual(request["resources"]["disk_mb"], 25 * 1024)
+        self.assertNotIn("ephemeral_disk_mb", request["resources"])
         self.assertEqual(
             request["network"],
             {
@@ -1461,6 +1464,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
         pool = client.get_pool("pool-1")
         self.assertEqual(pool.network_policy, policy)
+        self.assertEqual(pool.resources.disk_mb, 20 * 1024)
 
     def test_clear_sentinel_is_rejected_on_pool_create(self):
         # Clearing is only meaningful against an existing pool; creating one
@@ -1490,7 +1494,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 1024,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                         }
                     ),
@@ -1502,6 +1506,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         client.update_pool(
             pool_id="pool-1",
             image="alpine",
+            disk_mb=25 * 1024,
             network=NetworkConfig(
                 allow_internet_access=False,
                 allow_out=[],
@@ -1510,6 +1515,8 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         )
         request = json.loads(captured["request_json"])
         self.assertEqual(captured["pool_id"], "pool-1")
+        self.assertEqual(request["resources"]["disk_mb"], 25 * 1024)
+        self.assertNotIn("ephemeral_disk_mb", request["resources"])
         self.assertEqual(
             request["network"],
             {
@@ -1524,6 +1531,8 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         client.update_pool(pool_id="pool-1", image="alpine")
         request = json.loads(captured["request_json"])
         self.assertNotIn("network", request)
+        self.assertNotIn("disk_mb", request["resources"])
+        self.assertNotIn("ephemeral_disk_mb", request["resources"])
 
         # CLEAR_NETWORK_POLICY must reach the wire as an explicit null so the
         # service removes the policy instead of keeping it.

@@ -111,8 +111,7 @@ impl GetSandboxLogsRequest {
 pub struct ContainerResourcesInfo {
     pub cpus: f64,
     pub memory_mb: i64,
-    #[serde(default)]
-    pub ephemeral_disk_mb: i64,
+    pub disk_mb: i64,
 }
 
 /// GPU models supported by the sandbox scheduler.
@@ -211,7 +210,10 @@ impl From<GpuRequest> for GPUResources {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct CreateSandboxResources {
-    #[serde(default = "unspecified_cpus", skip_serializing_if = "is_unspecified_f64")]
+    #[serde(
+        default = "unspecified_cpus",
+        skip_serializing_if = "is_unspecified_f64"
+    )]
     pub cpus: f64,
     #[serde(
         default = "unspecified_memory_mb",
@@ -382,7 +384,7 @@ pub struct UpdateSandboxRequest {
 pub struct SandboxPoolRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
-    pub resources: ContainerResourcesInfo,
+    pub resources: CreateSandboxResources,
     #[serde(default)]
     pub timeout_secs: i64,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -414,7 +416,7 @@ impl Serialize for CreateSandboxPoolRequest {
         struct Wire<'a> {
             #[serde(skip_serializing_if = "Option::is_none")]
             image: Option<&'a str>,
-            resources: &'a ContainerResourcesInfo,
+            resources: &'a CreateSandboxResources,
             timeout_secs: i64,
             #[serde(skip_serializing_if = "Option::is_none")]
             entrypoint: Option<&'a Vec<String>>,
@@ -447,7 +449,7 @@ impl<'de> Deserialize<'de> for CreateSandboxPoolRequest {
         #[derive(Deserialize)]
         struct Wire {
             image: Option<String>,
-            resources: ContainerResourcesInfo,
+            resources: CreateSandboxResources,
             #[serde(default)]
             timeout_secs: i64,
             entrypoint: Option<Vec<String>>,
@@ -537,7 +539,7 @@ impl Serialize for UpdateSandboxPoolRequest {
         struct Wire<'a> {
             #[serde(skip_serializing_if = "Option::is_none")]
             image: Option<&'a str>,
-            resources: &'a ContainerResourcesInfo,
+            resources: &'a CreateSandboxResources,
             timeout_secs: i64,
             #[serde(skip_serializing_if = "Option::is_none")]
             entrypoint: Option<&'a Vec<String>>,
@@ -574,7 +576,7 @@ impl<'de> Deserialize<'de> for UpdateSandboxPoolRequest {
         #[derive(Deserialize)]
         struct Wire {
             image: Option<String>,
-            resources: ContainerResourcesInfo,
+            resources: CreateSandboxResources,
             #[serde(default)]
             timeout_secs: i64,
             entrypoint: Option<Vec<String>>,
@@ -1070,7 +1072,7 @@ mod tests {
             "resources": {
                 "cpus": 1.0,
                 "memory_mb": 1024,
-                "ephemeral_disk_mb": 1024
+                "disk_mb": 20480
             },
             "timeout_secs": 0,
             "network": {
@@ -1082,6 +1084,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(request.pool.image.as_deref(), Some("alpine"));
+        assert_eq!(request.pool.resources.disk_mb, Some(20480));
         assert_eq!(
             request.network,
             Some(NetworkConfig {
@@ -1089,6 +1092,29 @@ mod tests {
                 allow_out: vec![],
                 deny_out: vec![],
             })
+        );
+    }
+
+    #[test]
+    fn container_resources_info_requires_canonical_disk() {
+        let canonical: ContainerResourcesInfo = serde_json::from_value(serde_json::json!({
+            "cpus": 1.0,
+            "memory_mb": 1024,
+            "disk_mb": 20480,
+            "ephemeral_disk_mb": 1024
+        }))
+        .unwrap();
+        assert_eq!(canonical.disk_mb, 20480);
+
+        let legacy = serde_json::from_value::<ContainerResourcesInfo>(serde_json::json!({
+            "cpus": 1.0,
+            "memory_mb": 1024,
+            "ephemeral_disk_mb": 10240
+        }));
+        assert!(legacy.is_err(), "disk_mb is required in server responses");
+        assert_eq!(
+            serde_json::to_value(canonical).unwrap(),
+            serde_json::json!({"cpus": 1.0, "memory_mb": 1024, "disk_mb": 20480})
         );
     }
 
@@ -1125,12 +1151,11 @@ mod tests {
             serde_json::json!({"snapshot_id": "snap-memory"})
         );
 
-        let cpu_override: CreateSandboxRequest =
-            serde_json::from_value(serde_json::json!({
-                "snapshot_id": "snap-memory",
-                "resources": {"cpus": 2.0}
-            }))
-            .unwrap();
+        let cpu_override: CreateSandboxRequest = serde_json::from_value(serde_json::json!({
+            "snapshot_id": "snap-memory",
+            "resources": {"cpus": 2.0}
+        }))
+        .unwrap();
         assert_eq!(cpu_override.resources.cpus, 2.0);
         assert_eq!(cpu_override.resources.memory_mb, unspecified_memory_mb());
 
@@ -1390,7 +1415,7 @@ mod tests {
             "id":"sbx-1",
             "namespace":"default",
             "status":"running",
-            "resources":{"cpus":1.0,"memory_mb":512,"ephemeral_disk_mb":1024},
+            "resources":{"cpus":1.0,"memory_mb":512,"disk_mb":1024},
             "routing_hint":"hint-1",
             "sandbox_url":"https://sbx-1.sandbox.tensorlake.ai"
         }"#;

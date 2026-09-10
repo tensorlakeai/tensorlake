@@ -375,7 +375,7 @@ describe("SandboxClient", () => {
               id: "sbx-1",
               namespace: "default",
               status: "running",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
               created_at: 1700000000,
             }),
           })),
@@ -386,6 +386,7 @@ describe("SandboxClient", () => {
       const info = await client.get("sbx-1");
       expect(info.sandboxId).toBe("sbx-1");
       expect(info.status).toBe(SandboxStatus.RUNNING);
+      expect(info.resources.diskMb).toBe(1024);
       expect(info.createdAt).toBeInstanceOf(Date);
       expect(stub.client.getSandbox).toHaveBeenCalledWith("sbx-1");
       client.close();
@@ -400,7 +401,7 @@ describe("SandboxClient", () => {
               id: "sbx-named",
               namespace: "default",
               status: "running",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
               name: "my-sandbox",
             }),
           })),
@@ -422,7 +423,7 @@ describe("SandboxClient", () => {
               id: "sbx-ports",
               namespace: "default",
               status: "running",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
               allow_unauthenticated_access: true,
               exposed_ports: [8080, 3000],
               ingress_endpoint: "https://sandbox.us-east-1.aws.tensorlake.ai",
@@ -452,7 +453,7 @@ describe("SandboxClient", () => {
               id: "sbx-1",
               namespace: "default",
               status: "running",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
             }),
           })),
         },
@@ -480,7 +481,7 @@ describe("SandboxClient", () => {
                   resources: {
                     cpus: 1,
                     memory_mb: 1024,
-                    ephemeral_disk_mb: 1024,
+                    disk_mb: 1024,
                   },
                 },
               ],
@@ -531,7 +532,7 @@ describe("SandboxClient", () => {
                 resources: {
                   cpus: 1,
                   memory_mb: 1024,
-                  ephemeral_disk_mb: 1024,
+                  disk_mb: 1024,
                 },
                 name: "my-new-name",
               }),
@@ -565,7 +566,7 @@ describe("SandboxClient", () => {
                 resources: {
                   cpus: 1,
                   memory_mb: 1024,
-                  ephemeral_disk_mb: 1024,
+                  disk_mb: 1024,
                 },
                 allow_unauthenticated_access: true,
                 exposed_ports: [8080, 8081],
@@ -589,7 +590,7 @@ describe("SandboxClient", () => {
       id: "sbx-1",
       namespace: "default",
       status: "running",
-      resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+      resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
     });
 
     it("replaces the network policy with a snake-cased object", async () => {
@@ -673,7 +674,7 @@ describe("SandboxClient", () => {
               id: "sbx-1",
               namespace: "default",
               status: "running",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
               allow_unauthenticated_access: false,
               exposed_ports: [8080],
               ingress_endpoint: "https://sandbox.us-east-1.aws.tensorlake.ai",
@@ -703,7 +704,7 @@ describe("SandboxClient", () => {
               id: "sbx-1",
               namespace: "default",
               status: "running",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
               allow_unauthenticated_access: false,
               exposed_ports: [8080],
             }),
@@ -721,7 +722,7 @@ describe("SandboxClient", () => {
                 resources: {
                   cpus: 1,
                   memory_mb: 1024,
-                  ephemeral_disk_mb: 1024,
+                  disk_mb: 1024,
                 },
                 allow_unauthenticated_access: true,
                 exposed_ports: [8080, 8081],
@@ -748,7 +749,7 @@ describe("SandboxClient", () => {
               id: "sbx-1",
               namespace: "default",
               status: "running",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
               allow_unauthenticated_access: true,
               exposed_ports: [8080],
             }),
@@ -766,7 +767,7 @@ describe("SandboxClient", () => {
                 resources: {
                   cpus: 1,
                   memory_mb: 1024,
-                  ephemeral_disk_mb: 1024,
+                  disk_mb: 1024,
                 },
                 allow_unauthenticated_access: false,
                 exposed_ports: [],
@@ -824,7 +825,7 @@ describe("SandboxClient", () => {
               id: "sbx-1",
               status: "suspended",
               namespace: "default",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
             }),
           })),
         },
@@ -859,7 +860,7 @@ describe("SandboxClient", () => {
               id: "sbx-1",
               status: "running",
               namespace: "default",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
             }),
           })),
         },
@@ -1341,7 +1342,7 @@ describe("SandboxClient", () => {
               id: "sbx-1",
               namespace: "default",
               status: "terminated",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
               error_details: {
                 message: "failed to pull image tensorlake/missing-image",
               },
@@ -1538,6 +1539,8 @@ describe("SandboxClient", () => {
             const body = JSON.parse(json);
             expect(body.image).toBe("node:20");
             expect(body.max_containers).toBe(5);
+            expect(body.resources.disk_mb).toBe(25 * 1024);
+            expect(body.resources.ephemeral_disk_mb).toBeUndefined();
             expect(body.network).toEqual({
               allow_internet_access: false,
               allow_out: ["10.0.0.0/8"],
@@ -1555,6 +1558,7 @@ describe("SandboxClient", () => {
       const result = await client.createPool({
         image: "node:20",
         maxContainers: 5,
+        diskMb: 25 * 1024,
         network: {
           allowInternetAccess: false,
           allowOut: ["10.0.0.0/8"],
@@ -1574,7 +1578,7 @@ describe("SandboxClient", () => {
               id: "pool-1",
               namespace: "default",
               image: "node:20",
-              resources: { cpus: 1, memory_mb: 1024, ephemeral_disk_mb: 1024 },
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
               timeout_secs: 0,
               network_policy: {
                 allow_internet_access: false,
@@ -1590,6 +1594,7 @@ describe("SandboxClient", () => {
       const info = await client.getPool("pool-1");
       expect(info.poolId).toBe("pool-1");
       expect(info.image).toBe("node:20");
+      expect(info.resources.diskMb).toBe(1024);
       expect(info.networkPolicy).toEqual({
         allowInternetAccess: false,
         allowOut: ["10.0.0.0/8"],
@@ -1636,6 +1641,7 @@ describe("SandboxClient", () => {
       const client = SandboxClient.forLocalhost();
       const info = await client.updatePool("pool-1", {
         image: "node:20",
+        diskMb: 25 * 1024,
         network: {
           allowInternetAccess: false,
           allowOut: ["10.0.0.0/8"],
@@ -1648,6 +1654,8 @@ describe("SandboxClient", () => {
         string,
       ];
       const body = JSON.parse(bodyJson) as Record<string, unknown>;
+      expect(body.resources).toMatchObject({ disk_mb: 25 * 1024 });
+      expect(body.resources).not.toHaveProperty("ephemeral_disk_mb");
       expect(body.network).toEqual({
         allow_internet_access: false,
         allow_out: ["10.0.0.0/8"],
@@ -1695,6 +1703,8 @@ describe("SandboxClient", () => {
       ];
       const body = JSON.parse(bodyJson) as Record<string, unknown>;
       expect(body).not.toHaveProperty("network");
+      expect(body.resources).not.toHaveProperty("disk_mb");
+      expect(body.resources).not.toHaveProperty("ephemeral_disk_mb");
       client.close();
     });
   });

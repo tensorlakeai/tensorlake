@@ -33,7 +33,7 @@ def _sandbox_info_json(file_systems: list[dict]) -> str:
             "id": "sbx-1",
             "namespace": "default",
             "status": "running",
-            "resources": {"cpus": 1.0, "memory_mb": 512, "ephemeral_disk_mb": 1024},
+            "resources": {"cpus": 1.0, "memory_mb": 512, "disk_mb": 1024},
             "file_systems": file_systems,
         }
     )

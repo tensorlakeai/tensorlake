@@ -134,7 +134,7 @@ class _FakeAsyncRustClient:
       "resources": {
         "cpus": 1.0,
         "memory_mb": 512,
-        "ephemeral_disk_mb": 1024
+        "disk_mb": 1024
       }
     }
   ]
@@ -154,7 +154,7 @@ class _FakeAsyncRustClient:
   "resources": {
     "cpus": 1.0,
     "memory_mb": 512,
-    "ephemeral_disk_mb": 1024
+    "disk_mb": 1024
   },
   "allow_unauthenticated_access": false,
   "exposed_ports": [8080],
@@ -175,7 +175,7 @@ class _FakeAsyncRustClient:
             "resources": {
                 "cpus": 1.0,
                 "memory_mb": 512,
-                "ephemeral_disk_mb": 1024,
+                "disk_mb": 1024,
             },
             "name": payload.get("name"),
             "allow_unauthenticated_access": payload.get(
@@ -256,7 +256,7 @@ def _sandbox_info_json(
         "resources": {
             "cpus": 1.0,
             "memory_mb": 512,
-            "ephemeral_disk_mb": 1024,
+            "disk_mb": 1024,
         },
         "allow_unauthenticated_access": False,
         "exposed_ports": [],
@@ -301,7 +301,7 @@ class _StatusSequenceRustClient(_FakeAsyncRustClient):
                     "resources": {
                         "cpus": 1.0,
                         "memory_mb": 512,
-                        "ephemeral_disk_mb": 1024,
+                        "disk_mb": 1024,
                     },
                     "routing_hint": "hint-2",
                     "sandbox_url": f"https://{returned_sandbox_id}.sandbox.tensorlake.ai",
@@ -687,7 +687,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 512,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                         }
                     ),
@@ -732,7 +732,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 512,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                         }
                     ),
@@ -803,7 +803,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
   "resources": {
     "cpus": 1.0,
     "memory_mb": 512,
-    "ephemeral_disk_mb": 1024
+    "disk_mb": 1024
   },
   "error_details": {
     "message": "failed to pull image tensorlake/missing-image"
@@ -1403,7 +1403,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 1024,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                         }
                     ),
@@ -1415,17 +1415,23 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         await client.update_pool(
             pool_id="pool-1",
             image="alpine",
+            disk_mb=25 * 1024,
             network=NetworkConfig(
                 allow_internet_access=False, allow_out=[], deny_out=[]
             ),
         )
         request = json.loads(captured["request_json"])
         self.assertEqual(captured["pool_id"], "pool-1")
+        self.assertEqual(request["resources"]["disk_mb"], 25 * 1024)
+        self.assertNotIn("ephemeral_disk_mb", request["resources"])
         self.assertEqual(request["network"]["allow_internet_access"], False)
 
         # Omitted keeps the current policy; the sentinel clears it.
         await client.update_pool(pool_id="pool-1", image="alpine")
-        self.assertNotIn("network", json.loads(captured["request_json"]))
+        request = json.loads(captured["request_json"])
+        self.assertNotIn("network", request)
+        self.assertNotIn("disk_mb", request["resources"])
+        self.assertNotIn("ephemeral_disk_mb", request["resources"])
 
         await client.update_pool(
             pool_id="pool-1", image="alpine", network=CLEAR_NETWORK_POLICY
@@ -1459,7 +1465,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                             "resources": {
                                 "cpus": 1.0,
                                 "memory_mb": 1024,
-                                "ephemeral_disk_mb": 1024,
+                                "disk_mb": 1024,
                             },
                             "network_policy": {
                                 "allow_internet_access": False,
@@ -1477,8 +1483,10 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             deny_out=["192.0.2.0/24"],
         )
 
-        await client.create_pool(image="alpine", network=policy)
+        await client.create_pool(image="alpine", disk_mb=25 * 1024, network=policy)
         request = json.loads(captured["request_json"])
+        self.assertEqual(request["resources"]["disk_mb"], 25 * 1024)
+        self.assertNotIn("ephemeral_disk_mb", request["resources"])
         self.assertEqual(
             request["network"],
             {
@@ -1490,6 +1498,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
 
         pool = await client.get_pool("pool-1")
         self.assertEqual(pool.network_policy, policy)
+        self.assertEqual(pool.resources.disk_mb, 1024)
 
     async def test_snapshot_threads_snapshot_type_to_rust_backend(self):
         fake = _FakeAsyncRustClient()

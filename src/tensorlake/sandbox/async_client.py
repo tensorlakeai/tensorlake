@@ -47,7 +47,6 @@ from .models import (
     ArchivedSandboxInfo,
     ClaimSandboxRequest,
     ClearNetworkPolicy,
-    ContainerResourcesInfo,
     CopySandboxResponse,
     CreateSandboxPoolResponse,
     CreateSandboxRequest,
@@ -779,7 +778,7 @@ class AsyncSandboxClient:
         image: str | None = None,
         cpus: float = 1.0,
         memory_mb: int = 1024,
-        ephemeral_disk_mb: int = 1024,
+        disk_mb: int | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -789,7 +788,9 @@ class AsyncSandboxClient:
         """Create a sandbox pool.
 
         Set ``network`` to apply a network policy to each pool container. The
-        policy can be replaced later with ``update_pool``.
+        policy can be replaced later with ``update_pool``. Omit ``disk_mb`` to
+        use the registered image's root disk size, or set it to grow a
+        filesystem-only image.
         """
         if network is CLEAR_NETWORK_POLICY:
             raise ValueError(
@@ -799,8 +800,8 @@ class AsyncSandboxClient:
 
         request_model = SandboxPoolRequest(
             image=image,
-            resources=ContainerResourcesInfo(
-                cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
+            resources=CreateSandboxResources(
+                cpus=cpus, memory_mb=memory_mb, disk_mb=disk_mb
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -843,7 +844,7 @@ class AsyncSandboxClient:
         image: str,
         cpus: float = 1.0,
         memory_mb: int = 1024,
-        ephemeral_disk_mb: int = 1024,
+        disk_mb: int | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -856,12 +857,16 @@ class AsyncSandboxClient:
         replace the policy, or pass :data:`CLEAR_NETWORK_POLICY` to remove the
         policy entirely. On a change the service recycles the pool's unclaimed
         warm containers onto the new policy, while containers already claimed
-        by sandboxes keep the policy they booted with.
+        by sandboxes keep the policy they booted with. CPU, memory, disk, image,
+        and entrypoint changes likewise recycle unclaimed warm containers
+        asynchronously; stale containers are not used when suitable capacity is
+        unavailable. Omit ``disk_mb`` to use the registered image's root disk
+        size.
         """
         request_model = SandboxPoolRequest(
             image=image,
-            resources=ContainerResourcesInfo(
-                cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
+            resources=CreateSandboxResources(
+                cpus=cpus, memory_mb=memory_mb, disk_mb=disk_mb
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,

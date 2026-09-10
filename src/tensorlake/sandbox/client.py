@@ -27,7 +27,6 @@ from .models import (
     ArchivedSandboxInfo,
     ClaimSandboxRequest,
     ClearNetworkPolicy,
-    ContainerResourcesInfo,
     CopySandboxResponse,
     CreateSandboxPoolResponse,
     CreateSandboxRequest,
@@ -1265,7 +1264,7 @@ class SandboxClient:
         image: str | None = None,
         cpus: float = 1.0,
         memory_mb: int = 1024,
-        ephemeral_disk_mb: int = 1024,
+        disk_mb: int | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -1279,7 +1278,8 @@ class SandboxClient:
                 ``tensorlake/ubuntu-minimal`` or a registered Sandbox Image name.
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
-            ephemeral_disk_mb: Ephemeral disk space in megabytes
+            disk_mb: Root disk size in megabytes. When omitted, the registered
+                image's root disk size is used.
             timeout_secs: Timeout in seconds (default: 0 = no timeout)
             entrypoint: Custom entrypoint command (optional)
             max_containers: Maximum number of containers in pool
@@ -1301,8 +1301,8 @@ class SandboxClient:
 
         request_model = SandboxPoolRequest(
             image=image,
-            resources=ContainerResourcesInfo(
-                cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
+            resources=CreateSandboxResources(
+                cpus=cpus, memory_mb=memory_mb, disk_mb=disk_mb
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -1366,7 +1366,7 @@ class SandboxClient:
         image: str,
         cpus: float = 1.0,
         memory_mb: int = 1024,
-        ephemeral_disk_mb: int = 1024,
+        disk_mb: int | None = None,
         timeout_secs: int = 0,
         entrypoint: list[str] | None = None,
         max_containers: int | None = None,
@@ -1379,7 +1379,11 @@ class SandboxClient:
         replace the policy, or pass :data:`CLEAR_NETWORK_POLICY` to remove the
         policy entirely. On a change the service recycles the pool's unclaimed
         warm containers onto the new policy, while containers already claimed
-        by sandboxes keep the policy they booted with.
+        by sandboxes keep the policy they booted with. Changes to CPU, memory,
+        disk, image, or entrypoint likewise recycle unclaimed warm containers
+        asynchronously. If suitable capacity is unavailable, the pool remains
+        below its warm target until capacity appears; stale warm containers are
+        never used as a fallback.
 
         Args:
             pool_id: ID of the pool to update
@@ -1387,7 +1391,8 @@ class SandboxClient:
                 ``tensorlake/ubuntu-minimal`` or a registered Sandbox Image name.
             cpus: Number of CPUs to allocate
             memory_mb: Memory in megabytes
-            ephemeral_disk_mb: Ephemeral disk space in megabytes
+            disk_mb: Root disk size in megabytes. When omitted, the registered
+                image's root disk size is used.
             timeout_secs: Timeout in seconds (default: 0 = no timeout)
             entrypoint: Custom entrypoint command (optional)
             max_containers: Maximum number of containers in pool
@@ -1406,8 +1411,8 @@ class SandboxClient:
         """
         request_model = SandboxPoolRequest(
             image=image,
-            resources=ContainerResourcesInfo(
-                cpus=cpus, memory_mb=memory_mb, ephemeral_disk_mb=ephemeral_disk_mb
+            resources=CreateSandboxResources(
+                cpus=cpus, memory_mb=memory_mb, disk_mb=disk_mb
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,

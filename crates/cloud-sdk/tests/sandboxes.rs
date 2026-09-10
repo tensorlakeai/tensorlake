@@ -3,7 +3,7 @@ use tensorlake::{
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
         models::{
-            ClaimSandboxRequest, ContainerResourcesInfo, CreateSandboxPoolRequest, FileSystemMount,
+            ClaimSandboxRequest, CreateSandboxPoolRequest, CreateSandboxResources, FileSystemMount,
             NetworkConfig, NetworkPolicyUpdate, SandboxPoolRequest, UpdateSandboxPoolRequest,
             UpdateSandboxRequest,
         },
@@ -215,7 +215,7 @@ async fn pool_network_policy_is_sent_and_preserved_on_update() {
                 "pool_id":"pool-1",
                 "namespace":"default",
                 "image":"alpine",
-                "resources":{"cpus":1.0,"memory_mb":1024,"ephemeral_disk_mb":1024},
+                "resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":1024},
                 "network_policy":{
                     "allow_internet_access":false,
                     "allow_out":["10.0.0.0/8"],
@@ -233,7 +233,7 @@ async fn pool_network_policy_is_sent_and_preserved_on_update() {
                 "pool_id":"pool-1",
                 "namespace":"default",
                 "image":"alpine",
-                "resources":{"cpus":1.0,"memory_mb":2048,"ephemeral_disk_mb":1024},
+                "resources":{"cpus":1.0,"memory_mb":2048,"disk_mb":1024},
                 "network_policy":{
                     "allow_internet_access":false,
                     "allow_out":["10.0.0.0/8"],
@@ -260,10 +260,11 @@ async fn pool_network_policy_is_sent_and_preserved_on_update() {
         .create_pool_with_network(&CreateSandboxPoolRequest {
             pool: SandboxPoolRequest {
                 image: Some("alpine".to_string()),
-                resources: ContainerResourcesInfo {
+                resources: CreateSandboxResources {
                     cpus: 1.0,
                     memory_mb: 1024,
-                    ephemeral_disk_mb: 1024,
+                    disk_mb: None,
+                    gpu_configs: None,
                 },
                 timeout_secs: 0,
                 entrypoint: None,
@@ -280,10 +281,11 @@ async fn pool_network_policy_is_sent_and_preserved_on_update() {
             "pool-1",
             &SandboxPoolRequest {
                 image: Some("alpine".to_string()),
-                resources: ContainerResourcesInfo {
+                resources: CreateSandboxResources {
                     cpus: 1.0,
                     memory_mb: 2048,
-                    ephemeral_disk_mb: 1024,
+                    disk_mb: Some(2048),
+                    gpu_configs: None,
                 },
                 timeout_secs: 0,
                 entrypoint: None,
@@ -299,8 +301,12 @@ async fn pool_network_policy_is_sent_and_preserved_on_update() {
     let get_text = String::from_utf8_lossy(&get);
     let update_text = String::from_utf8_lossy(&update);
     assert!(create_text.contains(r#""network":{"allow_internet_access":false"#));
+    assert!(!create_text.contains("disk_mb"));
+    assert!(!create_text.contains("ephemeral_disk_mb"));
     assert!(get_text.starts_with("GET /sandbox-pools/pool-1 HTTP/1.1\r\n"));
     assert!(update_text.contains(r#""network":{"allow_internet_access":false"#));
+    assert!(update_text.contains(r#""disk_mb":2048"#));
+    assert!(!update_text.contains("ephemeral_disk_mb"));
 }
 
 #[tokio::test]
@@ -321,7 +327,7 @@ async fn update_pool_with_network_replaces_policy_without_get() {
                 "pool_id":"pool-1",
                 "namespace":"default",
                 "image":"alpine",
-                "resources":{"cpus":1.0,"memory_mb":1024,"ephemeral_disk_mb":1024},
+                "resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":1024},
                 "network_policy":{
                     "allow_internet_access":true,
                     "allow_out":[],
@@ -344,10 +350,11 @@ async fn update_pool_with_network_replaces_policy_without_get() {
             &UpdateSandboxPoolRequest {
                 pool: SandboxPoolRequest {
                     image: Some("alpine".to_string()),
-                    resources: ContainerResourcesInfo {
+                    resources: CreateSandboxResources {
                         cpus: 1.0,
                         memory_mb: 1024,
-                        ephemeral_disk_mb: 1024,
+                        disk_mb: None,
+                        gpu_configs: None,
                     },
                     timeout_secs: 0,
                     entrypoint: None,
@@ -397,7 +404,7 @@ async fn update_pool_clear_sends_explicit_null_network() {
                 "pool_id":"pool-1",
                 "namespace":"default",
                 "image":"alpine",
-                "resources":{"cpus":1.0,"memory_mb":1024,"ephemeral_disk_mb":1024}
+                "resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":1024}
             }"#,
         )
         .await;
@@ -415,10 +422,11 @@ async fn update_pool_clear_sends_explicit_null_network() {
             &UpdateSandboxPoolRequest {
                 pool: SandboxPoolRequest {
                     image: Some("alpine".to_string()),
-                    resources: ContainerResourcesInfo {
+                    resources: CreateSandboxResources {
                         cpus: 1.0,
                         memory_mb: 1024,
-                        ephemeral_disk_mb: 1024,
+                        disk_mb: None,
+                        gpu_configs: None,
                     },
                     timeout_secs: 0,
                     entrypoint: None,
@@ -445,10 +453,11 @@ fn network_policy_update_wire_shapes() {
     // Keep is omitted entirely, Clear is an explicit null, Set is an object.
     let pool = SandboxPoolRequest {
         image: Some("alpine".to_string()),
-        resources: ContainerResourcesInfo {
+        resources: CreateSandboxResources {
             cpus: 1.0,
             memory_mb: 1024,
-            ephemeral_disk_mb: 1024,
+            disk_mb: None,
+            gpu_configs: None,
         },
         timeout_secs: 0,
         entrypoint: None,
@@ -494,10 +503,11 @@ fn create_pool_wire_round_trips_with_arbitrary_precision() {
     let request = CreateSandboxPoolRequest {
         pool: SandboxPoolRequest {
             image: Some("alpine".to_string()),
-            resources: ContainerResourcesInfo {
+            resources: CreateSandboxResources {
                 cpus: 1.5,
                 memory_mb: 1024,
-                ephemeral_disk_mb: 2048,
+                disk_mb: Some(2048),
+                gpu_configs: None,
             },
             timeout_secs: 60,
             entrypoint: Some(vec!["sleep".to_string(), "60".to_string()]),
@@ -515,6 +525,8 @@ fn create_pool_wire_round_trips_with_arbitrary_precision() {
     let value: serde_json::Value =
         serde_json::from_str(&encoded).expect("decode create pool JSON value");
     assert_eq!(value["resources"]["cpus"], serde_json::json!(1.5));
+    assert_eq!(value["resources"]["disk_mb"], serde_json::json!(2048));
+    assert!(value["resources"].get("ephemeral_disk_mb").is_none());
     assert_eq!(
         serde_json::from_str::<CreateSandboxPoolRequest>(&encoded).expect("round-trip create pool"),
         request
@@ -525,7 +537,7 @@ const SANDBOX_INFO_JSON: &str = r#"{
     "sandbox_id":"sb-1",
     "namespace":"default",
     "status":"running",
-    "resources":{"cpus":1.0,"memory_mb":1024,"ephemeral_disk_mb":1024}
+    "resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":1024}
 }"#;
 
 #[tokio::test]

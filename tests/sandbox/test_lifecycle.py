@@ -445,7 +445,7 @@ class TestPoolLifecycle(BaseSandboxTest):
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
             network=NetworkConfig(allow_internet_access=False),
         )
@@ -482,7 +482,7 @@ class TestPoolLifecycle(BaseSandboxTest):
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=2048,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            disk_mb=_SANDBOX_DISK_MB,
             warm_containers=1,
         )
         self.assertEqual(updated.resources.memory_mb, 2048)
@@ -533,7 +533,7 @@ class TestPoolWithSandboxes(BaseSandboxTest):
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
             warm_containers=1,
         )
@@ -612,7 +612,7 @@ class TestWarmContainers(BaseSandboxTest):
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
             warm_containers=1,
         )
@@ -760,7 +760,7 @@ class TestMaxContainers(BaseSandboxTest):
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
             warm_containers=1,
             max_containers=2,
@@ -867,7 +867,7 @@ class TestPoolDeletion(BaseSandboxTest):
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
             warm_containers=2,
         )
@@ -934,7 +934,7 @@ class TestSandboxTimeout(BaseSandboxTest):
             image=_SANDBOX_IMAGE,
             cpus=_SANDBOX_CPUS,
             memory_mb=_SANDBOX_MEMORY_MB,
-            ephemeral_disk_mb=_SANDBOX_DISK_MB,
+            disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
             warm_containers=1,
             timeout_secs=30,

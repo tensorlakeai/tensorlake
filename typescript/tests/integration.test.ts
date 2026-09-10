@@ -542,7 +542,7 @@ describe(
         image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
-        ephemeralDiskMb: SANDBOX_DISK_MB,
+        diskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
         warmContainers: 1,
       });
@@ -738,7 +738,7 @@ describe(
         image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
-        ephemeralDiskMb: SANDBOX_DISK_MB,
+        diskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
         network: {
           allowInternetAccess: false,
@@ -778,7 +778,7 @@ describe(
         image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: 2048,
-        ephemeralDiskMb: SANDBOX_DISK_MB,
+        diskMb: SANDBOX_DISK_MB,
         warmContainers: 1,
       });
       expect(updated.resources.memoryMb).toBe(2048);
@@ -835,7 +835,7 @@ describe(
         image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
-        ephemeralDiskMb: SANDBOX_DISK_MB,
+        diskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
         warmContainers: 1,
       });
@@ -909,7 +909,7 @@ describe(
         image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
-        ephemeralDiskMb: SANDBOX_DISK_MB,
+        diskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
         warmContainers: 1,
       });
@@ -1020,7 +1020,7 @@ describe(
         image: sandboxImage,
         cpus: SANDBOX_CPUS,
         memoryMb: SANDBOX_MEMORY_MB,
-        ephemeralDiskMb: SANDBOX_DISK_MB,
+        diskMb: SANDBOX_DISK_MB,
         entrypoint: ["sleep", "300"],
         warmContainers: 1,
         timeoutSecs: 30,

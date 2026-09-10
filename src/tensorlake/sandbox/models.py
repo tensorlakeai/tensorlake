@@ -160,7 +160,7 @@ class ContainerResourcesInfo(BaseModel):
 
     cpus: float
     memory_mb: int
-    ephemeral_disk_mb: int
+    disk_mb: int
 
 
 class GpuModel(str, Enum):
@@ -423,7 +423,7 @@ class SandboxPoolRequest(BaseModel):
     """Request payload for creating or updating a sandbox pool."""
 
     image: str
-    resources: ContainerResourcesInfo
+    resources: CreateSandboxResources
     timeout_secs: int = 0
     entrypoint: list[str] | None = None
     max_containers: int | None = None

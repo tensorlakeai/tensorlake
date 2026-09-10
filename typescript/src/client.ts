@@ -754,7 +754,7 @@ export class SandboxClient {
       resources: {
         cpus: options.cpus ?? 1.0,
         memory_mb: options.memoryMb ?? 1024,
-        ephemeral_disk_mb: options.ephemeralDiskMb ?? 1024,
+        ...(options.diskMb != null ? { disk_mb: options.diskMb } : {}),
       },
       timeout_secs: options.timeoutSecs ?? 0,
     };
@@ -796,7 +796,10 @@ export class SandboxClient {
    * network policy, set it to replace the policy, or pass `null` to remove the
    * policy entirely. On a change the service recycles the pool's unclaimed
    * warm containers onto the new policy, while containers already claimed by
-   * sandboxes keep the policy they booted with.
+   * sandboxes keep the policy they booted with. CPU, memory, disk, image, and
+   * entrypoint changes likewise recycle unclaimed warm containers
+   * asynchronously. If suitable capacity is unavailable, stale warm
+   * containers are not used as a fallback.
    */
   async updatePool(
     poolId: string,
@@ -807,7 +810,7 @@ export class SandboxClient {
       resources: {
         cpus: options.cpus ?? 1.0,
         memory_mb: options.memoryMb ?? 1024,
-        ephemeral_disk_mb: options.ephemeralDiskMb ?? 1024,
+        ...(options.diskMb != null ? { disk_mb: options.diskMb } : {}),
       },
       timeout_secs: options.timeoutSecs ?? 0,
     };
