@@ -103,5 +103,8 @@ The staged native Function Agent core ran **98 passed, one ignored in 1.43 s**,
 including WAL replay/group commit, reserved-completion backpressure and canceled
 waiter tests. The ignored test is the separate native WAL benchmark. Existing
 Sandbox integration CI also passed. No manually launched cloud acceptance run or
-production deployment was performed. The Windows build job remains outside this
-Linux evidence record until its result is available.
+production deployment was performed. The entire
+[SDK Tests workflow](https://github.com/tensorlakeai/tensorlake/actions/runs/34426030186)
+passed all six jobs at the same executable revision, including the separate
+Windows wheel/import/native build smoke job. Those packaging checks do not change
+the Linux bridge benchmark's measurement scope.
