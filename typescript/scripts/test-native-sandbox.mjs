@@ -105,19 +105,16 @@ if (!process.argv.includes("--child")) {
   try {
     // Install the delayed-load fixture explicitly in a test worker entrypoint.
     // Production workers deliberately do not inherit application preloads.
-    const worker = path.join(directory, "worker.cjs");
-    writeFileSync(worker, [
-      `require(${JSON.stringify(fileURLToPath(new URL("../tests/fixtures/delayed-native-load.cjs", import.meta.url)))});`,
-      `require(${JSON.stringify(fileURLToPath(new URL("../dist/native-worker.cjs", import.meta.url)))});`,
-    ].join("\n"));
+    const worker = fileURLToPath(new URL("../tests/fixtures/native-sandbox-worker.mjs", import.meta.url));
     const configure = path.join(directory, "configure.mjs");
     const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
     await build({
-      stdin: { contents: `import {configureNativeWorker} from ${JSON.stringify(fileURLToPath(new URL("../src/native-worker-client.ts", import.meta.url)))}; configureNativeWorker(() => ${JSON.stringify(worker)});`, loader: "ts", resolveDir: fileURLToPath(new URL("../", import.meta.url)) },
+      entryPoints: [fileURLToPath(new URL("../src/native-worker-client.ts", import.meta.url))],
       outfile: configure, bundle: true, platform: "node", format: "esm",
       define: { __SDK_VERSION__: JSON.stringify(version) },
     });
-    await import(pathToFileURL(configure).href);
+    const { configureNativeWorker } = await import(pathToFileURL(configure).href);
+    configureNativeWorker(() => worker);
     const { Sandbox, SandboxClient } = await import("../dist/index.js");
     const setupStart = performance.now();
     const client = new SandboxClient({ apiUrl: url, apiKey: "client-one", timeoutMs: 1_000 }, true);
