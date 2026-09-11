@@ -136,6 +136,18 @@ impl RetryState {
     /// Decide what to do about `error`, given how long the whole operation has
     /// been running.
     pub fn decide(&mut self, error: &SdkError, elapsed: Duration) -> RetryDecision {
+        self.decide_with_transient(error, elapsed, is_transient(error))
+    }
+
+    /// Apply a caller's transient-error classification using the same retry
+    /// counters and undelivered budget. This still requires an idempotent
+    /// policy before retrying a possibly delivered operation.
+    pub fn decide_with_transient(
+        &mut self,
+        error: &SdkError,
+        elapsed: Duration,
+        transient: bool,
+    ) -> RetryDecision {
         if error.never_reached_server() {
             if elapsed >= UNDELIVERED_REPLAY_BUDGET {
                 return RetryDecision::Stop;
@@ -147,7 +159,7 @@ impl RetryState {
             return RetryDecision::Retry(wait.min(UNDELIVERED_REPLAY_BUDGET - elapsed));
         }
         if self.policy.idempotent
-            && is_transient(error)
+            && transient
             && self.transient_retries < self.policy.max_transient_retries
         {
             self.transient_retries += 1;
@@ -159,6 +171,11 @@ impl RetryState {
     /// Attempts made so far beyond the first.
     pub fn retries(&self) -> usize {
         self.transient_retries + self.undelivered_replays
+    }
+
+    /// Transient retries only, excluding the independent undelivered replays.
+    pub fn transient_retries(&self) -> usize {
+        self.transient_retries
     }
 }
 
@@ -290,12 +307,48 @@ mod tests {
         ));
         assert_eq!(state.decide(&error, Duration::ZERO), RetryDecision::Stop);
 
-        // 4xx is never transient.
+        // Ordinary client errors are not transient.
         let mut state = RetryState::new(RetryPolicy::idempotent(5));
         assert_eq!(
             state.decide(&server_error(404, "gone"), Duration::ZERO),
             RetryDecision::Stop
         );
+    }
+
+    #[test]
+    fn custom_transient_classification_requires_an_idempotent_policy() {
+        let error = server_error(429, "rate limited");
+        let mut reads = RetryState::new(RetryPolicy::idempotent(1));
+        assert!(matches!(
+            reads.decide_with_transient(&error, Duration::ZERO, true),
+            RetryDecision::Retry(_)
+        ));
+        assert_eq!(
+            reads.decide_with_transient(&error, Duration::ZERO, true),
+            RetryDecision::Stop
+        );
+        let mut mutations = RetryState::new(RetryPolicy::non_idempotent());
+        assert_eq!(
+            mutations.decide_with_transient(&error, Duration::ZERO, true),
+            RetryDecision::Stop
+        );
+        // Existing bindings retain their original classification.
+        let mut defaults = RetryState::new(RetryPolicy::idempotent(1));
+        assert_eq!(defaults.decide(&error, Duration::ZERO), RetryDecision::Stop);
+    }
+
+    #[test]
+    fn undelivered_replays_do_not_advance_the_transient_schedule() {
+        let mut state = RetryState::new(RetryPolicy::idempotent(2));
+        state.decide(&proxy_unavailable(), Duration::ZERO);
+        state.decide(&proxy_unavailable(), Duration::ZERO);
+        assert_eq!(state.transient_retries(), 0);
+        assert_eq!(
+            state.decide(&server_error(503, "busy"), Duration::ZERO),
+            RetryDecision::Retry(transient_backoff(1))
+        );
+        assert_eq!(state.transient_retries(), 1);
+        assert_eq!(state.retries(), 3);
     }
 
     #[tokio::test(start_paused = true)]

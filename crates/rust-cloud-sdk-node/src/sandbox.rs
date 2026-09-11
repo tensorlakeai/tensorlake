@@ -238,7 +238,7 @@ fn parse_snapshot_type(snapshot_type: Option<String>) -> napi::Result<Option<Sna
 /// the transport on Tokio's blocking pool; concurrent first users share one
 /// initialization, and an initialization error can be retried on a later call.
 #[derive(Clone)]
-struct DeferredHttpClient(Arc<DeferredHttpClientInner>);
+pub(crate) struct DeferredHttpClient(Arc<DeferredHttpClientInner>);
 
 struct DeferredHttpClientInner {
     builder: ClientBuilder,
@@ -246,14 +246,14 @@ struct DeferredHttpClientInner {
 }
 
 impl DeferredHttpClient {
-    fn new(builder: ClientBuilder) -> Self {
+    pub(crate) fn new(builder: ClientBuilder) -> Self {
         Self(Arc::new(DeferredHttpClientInner {
             builder,
             client: OnceCell::new(),
         }))
     }
 
-    async fn get(&self) -> napi::Result<tensorlake::Client> {
+    pub(crate) async fn get(&self) -> napi::Result<tensorlake::Client> {
         let client = self
             .0
             .client

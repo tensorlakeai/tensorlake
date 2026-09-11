@@ -1,6 +1,6 @@
 import * as defaults from "./defaults.js";
 import { SandboxError, formatErrorDetails } from "./errors.js";
-import type { Traced } from "./http.js";
+import type { Traced } from "./traced.js";
 import { releaseNativeHandle } from "./native-worker-client.js";
 import {
   callNative,

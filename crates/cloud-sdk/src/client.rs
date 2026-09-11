@@ -100,6 +100,7 @@ pub struct ClientBuilder {
     project_id: Option<String>,
     user_agent: Option<String>,
     timeout: Option<Duration>,
+    follow_redirects: bool,
 }
 
 impl ClientBuilder {
@@ -121,6 +122,7 @@ impl ClientBuilder {
             project_id: None,
             user_agent: None,
             timeout: None,
+            follow_redirects: true,
         }
     }
 
@@ -138,6 +140,13 @@ impl ClientBuilder {
     /// Set the total timeout for each HTTP request.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
+        self
+    }
+
+    /// Configure automatic redirects. Mutations that may be retried should
+    /// disable redirects so a later hop cannot hide delivery of the first one.
+    pub fn follow_redirects(mut self, enabled: bool) -> Self {
+        self.follow_redirects = enabled;
         self
     }
 
@@ -194,7 +203,15 @@ impl ClientBuilder {
             .user_agent
             .as_deref()
             .unwrap_or(concat!("tensorlake-rust-sdk/", env!("CARGO_PKG_VERSION")));
-        let base_client = new_base_client(&default_headers, ua)?;
+        let transport = crate::http_transport::https_builder()
+            .user_agent(ua)
+            .default_headers(default_headers.clone())
+            .redirect(if self.follow_redirects {
+                reqwest::redirect::Policy::default()
+            } else {
+                reqwest::redirect::Policy::none()
+            });
+        let base_client = transport.build()?;
         let mut builder = ReqwestClientBuilder::new(base_client.clone());
 
         for middleware in &self.middlewares {
@@ -311,6 +328,17 @@ impl Client {
         self.prepare_request(&mut request);
         let response = self.client.execute(request).await?;
         Ok(response)
+    }
+
+    /// Execute a traced request while leaving status handling to the binding.
+    /// Useful for APIs with expected non-success statuses (such as lookup 404s).
+    pub async fn execute_raw_traced(
+        &self,
+        mut request: Request,
+    ) -> Result<Traced<Response>, SdkError> {
+        let trace_id = self.prepare_traced_request(&mut request);
+        let response = self.client.execute(request).await?;
+        Ok(Traced::new(trace_id, response))
     }
 
     /// Execute an HTTP request, inject a W3C `traceparent` header, and return
@@ -545,14 +573,6 @@ fn str_to_header_value(value: &str) -> Result<HeaderValue, SdkError> {
         .map_err(|e: InvalidHeaderValue| SdkError::InvalidHeaderValue(e.to_string()))
 }
 
-fn new_base_client(headers: &HeaderMap, user_agent: &str) -> Result<reqwest::Client, SdkError> {
-    let builder = crate::http_transport::https_builder()
-        .user_agent(user_agent)
-        .default_headers(headers.clone());
-    let client = builder.build()?;
-    Ok(client)
-}
-
 #[cfg(test)]
 mod tests {
     use super::ClientBuilder;
@@ -602,6 +622,61 @@ mod tests {
                 .bytes()
                 .await
                 .unwrap();
+        }
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn storage_transports_preserve_encoded_bytes() {
+        use flate2::{Compression, write::GzEncoder};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+        let payload = b"bytes whose stored checksum must not change";
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::default());
+        encoder.write_all(payload).unwrap();
+        let encoded = encoder.finish().unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let wire = encoded.clone();
+        let server = tokio::spawn(async move {
+            for _ in 0..2 {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(socket.read_u8().await.unwrap());
+                }
+                socket.write_all(format!(
+                    "HTTP/1.1 200 OK\r\nConnection: close\r\nContent-Encoding: gzip\r\nContent-Length: {}\r\n\r\n",
+                    wire.len(),
+                ).as_bytes()).await.unwrap();
+                socket.write_all(&wire).await.unwrap();
+            }
+        });
+
+        // Both direct storage transport and the shared API client preserve bytes.
+        for direct in [true, false] {
+            let response = match direct {
+                true => crate::http_transport::https_builder()
+                    .timeout(Duration::from_secs(2))
+                    .build()
+                    .unwrap()
+                    .get(&url)
+                    .send()
+                    .await
+                    .unwrap(),
+                false => {
+                    let client = ClientBuilder::new(&url)
+                        .timeout(Duration::from_secs(2))
+                        .build()
+                        .unwrap();
+                    client
+                        .execute_raw(client.request(Method::GET, "/").build().unwrap())
+                        .await
+                        .unwrap()
+                }
+            };
+            let body = response.bytes().await.unwrap();
+            assert_eq!(body.as_ref(), encoded.as_slice());
         }
         server.await.unwrap();
     }

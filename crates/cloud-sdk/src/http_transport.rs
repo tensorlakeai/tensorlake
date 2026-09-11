@@ -20,12 +20,17 @@ pub fn https_builder() -> reqwest::ClientBuilder {
     ensure_rustls_provider();
     // Use full certificates (the sibling of webpki-roots' compact trust anchors), so
     // reqwest still owns TLS/ALPN setup and respects http1_only/http2 configuration.
-    reqwest::Client::builder().tls_certs_only(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().map(
-        |cert| {
+    reqwest::Client::builder()
+        // Keep wire bytes intact unless a client explicitly opts into decoding.
+        // Cargo feature unification must not change storage checksum semantics.
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
+        .tls_certs_only(webpki_root_certs::TLS_SERVER_ROOT_CERTS.iter().map(|cert| {
             reqwest::tls::Certificate::from_der(cert.as_ref())
                 .expect("bundled Mozilla root is a valid X.509 certificate")
-        },
-    ))
+        }))
 }
 
 /// Plaintext transport through the authenticated host's Unix socket.
@@ -35,6 +40,10 @@ pub fn https_builder() -> reqwest::ClientBuilder {
 pub fn unix_socket_builder(socket: &std::path::Path) -> reqwest::ClientBuilder {
     ensure_rustls_provider();
     reqwest::Client::builder()
+        .no_gzip()
+        .no_brotli()
+        .no_deflate()
+        .no_zstd()
         .tls_certs_only(Vec::<reqwest::tls::Certificate>::new())
         .unix_socket(socket)
 }

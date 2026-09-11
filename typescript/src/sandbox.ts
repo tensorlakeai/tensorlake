@@ -9,7 +9,7 @@ import {
   SandboxError,
   SandboxNotFoundError,
 } from "./errors.js";
-import { type Traced } from "./http.js";
+import { type Traced } from "./traced.js";
 import {
   assembleCommandResult,
   callNative,

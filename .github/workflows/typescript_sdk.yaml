@@ -7,6 +7,8 @@ on:
     paths:
       - "typescript/**"
       - "crates/rust-cloud-sdk-node/**"
+      - "crates/cloud-sdk/**"
+      - "Cargo.toml"
       - "crates/function-agent-core/**"
       - ".github/actions/vendor-function-agent-core/**"
       - ".github/scripts/stage_function_agent_core.sh"
@@ -26,6 +28,8 @@ on:
     paths:
       - "typescript/**"
       - "crates/rust-cloud-sdk-node/**"
+      - "crates/cloud-sdk/**"
+      - "Cargo.toml"
       - "crates/function-agent-core/**"
       - ".github/actions/vendor-function-agent-core/**"
       - ".github/scripts/stage_function_agent_core.sh"
@@ -205,6 +209,13 @@ jobs:
 
       - name: Build and verify Function Service runner capsule
         run: npm run build:runtime
+
+      - name: Verify native cloud transport and cancellation
+        run: npm run test:native-cloud
+
+      - name: Verify cloud decoding preserves Function Agent blob transfers
+        run: |
+          cargo test -p tensorlake-rust-cloud-sdk-node --lib cloud::tests::
 
       - name: Verify the SDK package excludes local native builds
         run: |

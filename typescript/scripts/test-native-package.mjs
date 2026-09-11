@@ -42,12 +42,16 @@ try {
     import { createServer } from 'node:http';
     import { once } from 'node:events';
     import { createRequire } from 'node:module';
+    const dispatcherKey = Symbol.for('undici.globalDispatcher.1');
+    const applicationDispatcher = {};
+    globalThis[dispatcherKey] = applicationDispatcher;
     process.dlopen = () => { throw new Error('Main-thread addon load'); };
-    const { SandboxClient } = await import('tensorlake');
-    const { Sandbox } = createRequire(import.meta.url)('tensorlake');
+    const { SandboxClient, CloudClient } = await import('tensorlake');
+    const { Sandbox, CloudClient: CommonJSCloudClient } = createRequire(import.meta.url)('tensorlake');
+    assert.equal(globalThis[dispatcherKey], applicationDispatcher, 'SDK replaced application dispatcher');
     const server = createServer((_req, res) => {
       res.setHeader('Content-Type', 'application/json');
-      res.end(JSON.stringify({ sandboxes: [], processes: [] }));
+      res.end(JSON.stringify({ sandboxes: [], processes: [], applications: [] }));
     });
     server.listen(0, '127.0.0.1');
     await once(server, 'listening');
@@ -57,12 +61,30 @@ try {
       const sandbox = new Sandbox({ sandboxId: 'packaged', proxyUrl: url });
       assert.deepEqual(Array.from(await client.list()), []);
       assert.deepEqual(Array.from(await sandbox.listProcesses()), []);
+      for (const Client of [CloudClient, CommonJSCloudClient]) {
+        const cloud = new Client({ apiUrl: url });
+        assert.deepEqual(await cloud.applications(), []);
+        cloud.close();
+      }
       sandbox.close(); client.close();
     } finally { server.closeAllConnections(); server.close(); }
   `);
-  const child = spawn(process.execPath, [driver], { cwd: directory, stdio: "inherit", timeout: 20_000, killSignal: "SIGKILL" });
-  const [code, signal] = await once(child, "exit");
-  assert.equal(code, 0, `Packed worker test failed (${signal ?? code})`);
+  for (const flag of ["--require", "--import"]) {
+    const preload = path.join(directory, flag === "--require" ? "preload.cjs" : "preload.mjs");
+    await writeFile(preload, flag === "--require"
+      ? `require('node:fs').appendFileSync(process.env.TENSORLAKE_TEST_PRELOAD_LOG, String(require('node:worker_threads').threadId) + '\\n');`
+      : `import {appendFileSync} from 'node:fs'; import {threadId} from 'node:worker_threads'; appendFileSync(process.env.TENSORLAKE_TEST_PRELOAD_LOG, String(threadId) + '\\n');`);
+    for (const source of ["cli", "env"]) {
+      const log = path.join(directory, `${flag}-${source}.log`);
+      const child = spawn(process.execPath, [...(source === "cli" ? [flag, preload] : []), driver], {
+        cwd: directory, stdio: "inherit", timeout: 20_000, killSignal: "SIGKILL",
+        env: { ...process.env, TENSORLAKE_TEST_PRELOAD_LOG: log, NODE_OPTIONS: source === "env" ? `${flag}=${JSON.stringify(preload)}` : "" },
+      });
+      const [code, signal] = await once(child, "exit");
+      assert.equal(code, 0, `Packed worker test failed (${flag}, ${source}, ${signal ?? code})`);
+      assert.equal(await readFile(log, "utf8"), "0\n", "Customer preload ran inside the SDK worker");
+    }
+  }
   // Capsules must carry exactly the worker tested in the SDK package.
   const worker = await readFile(path.join(sdk, "dist/native-worker.cjs"));
   for (const capsule of ["function-executor", "typescript-function-runner"]) {
