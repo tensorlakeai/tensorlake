@@ -309,10 +309,17 @@ fn default_allow_internet_access() -> bool {
 /// attaches. Unset means the image default (the baked `tl-user` account when
 /// the image has one, otherwise root). The field serializes only when set,
 /// for the same compatibility reason as the pin.
-#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct FileSystemMount {
     pub file_system_id: String,
     pub mount_path: String,
+    /// Absolute directory within the file system exposed as this mount's
+    /// root. `/` preserves the historical whole-file-system behavior.
+    #[serde(
+        default = "default_file_system_source_path",
+        skip_serializing_if = "is_root_source_path"
+    )]
+    pub source_path: String,
     /// Mount the file system read-only inside the guest.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub read_only: bool,
@@ -326,6 +333,28 @@ pub struct FileSystemMount {
     /// Present the mounted files as owned by this guest user spec.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub owner: Option<String>,
+}
+
+impl Default for FileSystemMount {
+    fn default() -> Self {
+        Self {
+            file_system_id: String::new(),
+            mount_path: String::new(),
+            source_path: default_file_system_source_path(),
+            read_only: false,
+            prefetch: false,
+            snapshot_id: None,
+            owner: None,
+        }
+    }
+}
+
+fn default_file_system_source_path() -> String {
+    "/".to_string()
+}
+
+fn is_root_source_path(path: &str) -> bool {
+    path == "/"
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1131,6 +1160,7 @@ mod tests {
         let mount = FileSystemMount {
             file_system_id: "skills".to_string(),
             mount_path: "/mnt/skills".to_string(),
+            source_path: "/".to_string(),
             read_only: false,
             prefetch: false,
             snapshot_id: None,
@@ -1180,6 +1210,7 @@ mod tests {
         let mount = FileSystemMount {
             file_system_id: "skills".to_string(),
             mount_path: "/mnt/skills".to_string(),
+            source_path: "/shared/skills".to_string(),
             read_only: true,
             prefetch: true,
             snapshot_id: None,
@@ -1190,6 +1221,7 @@ mod tests {
             serde_json::json!({
                 "file_system_id": "skills",
                 "mount_path": "/mnt/skills",
+                "source_path": "/shared/skills",
                 "read_only": true,
                 "prefetch": true
             })
@@ -1201,6 +1233,7 @@ mod tests {
         let pinned = FileSystemMount {
             file_system_id: "skills".to_string(),
             mount_path: "/mnt/skills".to_string(),
+            source_path: "/".to_string(),
             read_only: true,
             prefetch: false,
             snapshot_id: Some("0abc123def".to_string()),
