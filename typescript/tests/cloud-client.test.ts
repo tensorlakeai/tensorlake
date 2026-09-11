@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import * as undici from "undici";
+import { clearCloudStub, installCloudStub as mockFetch } from "./cloud-stub.js";
 import { CloudClient } from "../src/cloud-client.js";
 import { RemoteRequest, remoteOptions, runRemote } from "../src/applications/remote.js";
 import { FunctionError, RequestError } from "../src/applications/errors.js";
@@ -7,30 +7,19 @@ import { File } from "../src/applications/file.js";
 import { registerApplication } from "../src/applications/function.js";
 import { RequestExecutionError, RequestFailedError } from "../src/errors.js";
 
-vi.mock("undici", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("undici")>();
-  return { ...actual, fetch: vi.fn() };
-});
-
 describe("CloudClient", () => {
 
   afterEach(() => {
-    vi.mocked(undici.fetch).mockReset();
+    clearCloudStub();
     vi.restoreAllMocks();
   });
-
-  function mockFetch(
-    handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
-  ) {
-    vi.mocked(undici.fetch).mockImplementation(handler as typeof undici.fetch);
-  }
 
   it("runs single-part requests as raw bodies when the part name is 0", async () => {
     mockFetch((_url, init) => {
       const headers = init?.headers as Record<string, string>;
       expect(headers["Accept"]).toBe("application/json");
       expect(headers["Content-Type"]).toBe("application/json");
-      expect(init?.body).toBe('{"city":"San Francisco"}');
+      expect(new TextDecoder().decode(init?.body as ArrayBuffer)).toBe('{"city":"San Francisco"}');
       return new Response(JSON.stringify({ request_id: "req-1" }), {
         status: 200,
       });
@@ -142,6 +131,8 @@ describe("CloudClient", () => {
   });
 
   it("rejects explicit remote options when a required application argument is missing", async () => {
+    const request = vi.fn();
+    mockFetch(request);
     const application = registerApplication(
       "remote_required_options",
       async (name: string) => `Hello, ${name}`,
@@ -151,7 +142,7 @@ describe("CloudClient", () => {
       application,
       remoteOptions({ apiUrl: "http://localhost:8911" }),
     )).rejects.toThrow("missing a required application argument");
-    expect(undici.fetch).not.toHaveBeenCalled();
+    expect(request).not.toHaveBeenCalled();
   });
 
   it("keeps CloudClientOptions-shaped application objects as application inputs", async () => {

@@ -6,7 +6,9 @@ export interface CloudClientOptions {
   organizationId?: string;
   projectId?: string;
   namespace?: string;
+  /** Maximum transient retries for safe reads. Mutations only replay when Rust proves they were not delivered. */
   maxRetries?: number;
+  /** Initial transient retry delay in milliseconds; exponential backoff is capped at 15 seconds. */
   retryBackoffMs?: number;
 }
 

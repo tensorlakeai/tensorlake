@@ -3,7 +3,6 @@ import { Sandbox } from "../src/sandbox.js";
 import { SandboxStatus } from "../src/models.js";
 import {
   RemoteAPIError,
-  SandboxError,
   SandboxNotFoundError,
 } from "../src/errors.js";
 

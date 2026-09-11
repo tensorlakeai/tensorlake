@@ -1,5 +1,5 @@
 import { createRequire } from "node:module";
-import { SHARE_ENV, Worker } from "node:worker_threads";
+import { Worker } from "node:worker_threads";
 import type { NativeEmit, NativeSandboxBinding } from "./native-sandbox.js";
 import {
   cancelNativeCall,
@@ -120,7 +120,10 @@ export class NativeWorkerClient {
   private getWorker(): Worker {
     if (this.worker) return this.worker;
     const worker = new Worker(this.workerPath(), {
-      env: SHARE_ENV,
+      // The bundled worker needs no application loaders or telemetry preloads.
+      // NODE_OPTIONS is parsed independently of execArgv by Node.
+      execArgv: [],
+      env: { ...process.env, NODE_OPTIONS: "" },
       name: "tensorlake-native",
     });
     this.worker = worker;
@@ -206,6 +209,11 @@ export function createWorkerBinding(
   runtime: NativeWorkerClient,
 ): NativeSandboxBinding {
   return {
+    NativeCloudClient: class {
+      constructor(...args: unknown[]) {
+        return runtime.handle("NativeCloudClient", args);
+      }
+    },
     NativeSandboxClient: class {
       constructor(...args: unknown[]) {
         return runtime.handle("NativeSandboxClient", args);

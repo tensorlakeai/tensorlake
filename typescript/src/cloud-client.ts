@@ -1,9 +1,8 @@
 import { nanoid } from "nanoid";
 
 import * as defaults from "./defaults.js";
-import { HttpClient } from "./http.js";
+import { NativeCloudTransport } from "./native-cloud.js";
 import { fromSnakeKeys } from "./models.js";
-import { parseSSEStream } from "./sse.js";
 import type {
   ApplicationBuildContext,
   ApplicationBuildResponse,
@@ -26,7 +25,7 @@ import type {
 } from "./cloud-models.js";
 
 export class CloudClient {
-  private readonly http: HttpClient;
+  private readonly transport: NativeCloudTransport;
   private readonly organizationId?: string;
   private readonly projectId?: string;
   private readonly namespace: string;
@@ -35,13 +34,15 @@ export class CloudClient {
     this.organizationId = options?.organizationId;
     this.projectId = options?.projectId;
     this.namespace = options?.namespace ?? defaults.NAMESPACE;
-    this.http = new HttpClient({
+    this.transport = new NativeCloudTransport({
       baseUrl: options?.apiUrl ?? defaults.API_URL,
       apiKey: options?.apiKey ?? defaults.API_KEY,
       organizationId: this.organizationId,
       projectId: this.projectId,
       maxRetries: options?.maxRetries ?? defaults.MAX_RETRIES,
       retryBackoffMs: options?.retryBackoffMs ?? defaults.RETRY_BACKOFF_MS,
+      timeoutMs: defaults.DEFAULT_HTTP_TIMEOUT_MS,
+      userAgent: `tensorlake-typescript-sdk/${defaults.SDK_VERSION}`,
     });
   }
 
@@ -50,7 +51,7 @@ export class CloudClient {
   }
 
   close(): void {
-    this.http.close();
+    this.transport.close();
   }
 
   async upsertApplication(
@@ -89,20 +90,20 @@ export class CloudClient {
       String(upgradeRunningRequests),
     );
 
-    await this.http.requestResponse("POST", this.namespacePath("applications"), {
+    await this.transport.requestResponse("POST", this.namespacePath("applications"), {
       body: form,
     });
   }
 
   async deleteApplication(applicationName: string): Promise<void> {
-    await this.http.requestResponse(
+    await this.transport.requestResponse(
       "DELETE",
       this.namespacePath(`applications/${encodeURIComponent(applicationName)}`),
     );
   }
 
   async deleteSandboxImage(imageName: string): Promise<void> {
-    await this.http.requestResponse(
+    await this.transport.requestResponse(
       "DELETE",
       this.namespacePath(`sandbox-images/${encodeURIComponent(imageName)}`),
     );
@@ -125,10 +126,10 @@ export class CloudClient {
       options?.organizationId,
       options?.projectId,
     );
-    const response = await this.http.requestResponse(
+    const response = await this.transport.requestResponse(
       "GET",
       `${base}/by-name/${encodeURIComponent(imageName)}`,
-      { allowedErrorStatusCodes: new Set([404]) },
+      { statusOnlyCodes: new Set([404]) },
     );
     if (response.status === 404) {
       return null;
@@ -153,7 +154,7 @@ export class CloudClient {
     let path: string | null = `${base}?pageSize=100`;
     const templates: SandboxTemplate[] = [];
     while (path !== null) {
-      const page: SandboxTemplatesPage = await this.http.requestJson<SandboxTemplatesPage>(
+      const page: SandboxTemplatesPage = await this.transport.requestJson<SandboxTemplatesPage>(
         "GET",
         path,
       );
@@ -167,7 +168,7 @@ export class CloudClient {
   }
 
   async applications(): Promise<ApplicationSummary[]> {
-    const raw = await this.http.requestJson<{ applications: Record<string, unknown>[] }>(
+    const raw = await this.transport.requestJson<{ applications: Record<string, unknown>[] }>(
       "GET",
       this.namespacePath("applications"),
     );
@@ -177,7 +178,7 @@ export class CloudClient {
   }
 
   async applicationManifest(applicationName: string): Promise<ApplicationManifest> {
-    const raw = await this.http.requestJson<Record<string, unknown>>(
+    const raw = await this.transport.requestJson<Record<string, unknown>>(
       "GET",
       this.namespacePath(`applications/${encodeURIComponent(applicationName)}`),
     );
@@ -194,12 +195,12 @@ export class CloudClient {
 
     const response =
       inputs.length === 0
-        ? await this.http.requestResponse("POST", path, {
+        ? await this.transport.requestResponse("POST", path, {
             body: new Uint8Array(),
             headers: { Accept: "application/json" },
           })
         : inputs.length === 1 && inputs[0].name === "0"
-          ? await this.http.requestResponse("POST", path, {
+          ? await this.transport.requestResponse("POST", path, {
               body: toRequestBody(inputs[0].data),
               headers: {
                 Accept: "application/json",
@@ -220,14 +221,14 @@ export class CloudClient {
     applicationName: string,
     requestId: string,
   ): Promise<void> {
-    const stream = await this.http.requestStream(
+    const stream = this.transport.stream(
       "GET",
       this.namespacePath(
         `applications/${encodeURIComponent(applicationName)}/requests/${encodeURIComponent(requestId)}/progress`,
       ),
     );
 
-    for await (const event of parseSSEStream<Record<string, unknown>>(stream)) {
+    for await (const event of stream) {
       if (Object.prototype.hasOwnProperty.call(event, "RequestFinished")) {
         return;
       }
@@ -240,7 +241,7 @@ export class CloudClient {
     applicationName: string,
     requestId: string,
   ): Promise<RequestMetadata> {
-    const raw = await this.http.requestJson<Record<string, unknown>>(
+    const raw = await this.transport.requestJson<Record<string, unknown>>(
       "GET",
       this.namespacePath(
         `applications/${encodeURIComponent(applicationName)}/requests/${encodeURIComponent(requestId)}`,
@@ -253,7 +254,7 @@ export class CloudClient {
     applicationName: string,
     requestId: string,
   ): Promise<RequestOutput> {
-    const response = await this.http.requestResponse(
+    const response = await this.transport.requestResponse(
       "GET",
       this.namespacePath(
         `applications/${encodeURIComponent(applicationName)}/requests/${encodeURIComponent(requestId)}/output`,
@@ -277,7 +278,7 @@ export class CloudClient {
       options?.organizationId,
       options?.projectId,
     );
-    const raw = await this.http.requestJson<SecretMetadata[]>("GET", base);
+    const raw = await this.transport.requestJson<SecretMetadata[]>("GET", base);
     const pageSize = Math.max(0, options?.pageSize ?? 100);
     return Object.assign(
       {
@@ -296,7 +297,7 @@ export class CloudClient {
       options?.organizationId,
       options?.projectId,
     );
-    const raw = await this.http.requestJson<SecretMetadata>(
+    const raw = await this.transport.requestJson<SecretMetadata>(
       "GET",
       `${base}/${encodeURIComponent(secretId)}`,
     );
@@ -329,25 +330,25 @@ export class CloudClient {
       options?.organizationId,
       options?.projectId,
     );
-    await this.http.requestResponse(
+    await this.transport.requestResponse(
       "DELETE",
       `${base}/${encodeURIComponent(secretId)}`,
     );
   }
 
   private async upsertSecret(base: string, secret: NewSecret): Promise<Secret> {
-    let response = await this.http.requestResponse("POST", base, {
+    let response = await this.transport.requestResponse("POST", base, {
       json: secret,
       headers: { "Idempotency-Key": nanoid() },
-      allowedErrorStatusCodes: new Set([409]),
+      statusOnlyCodes: new Set([409]),
     });
     if (response.status === 409) {
       const prefix = base.slice(0, -"/secrets".length);
-      const existing = await this.http.requestJson<{ id: string }>(
+      const existing = await this.transport.requestJson<{ id: string }>(
         "GET",
         `${prefix}/secret-names/${encodeURIComponent(secret.name)}`,
       );
-      response = await this.http.requestResponse(
+      response = await this.transport.requestResponse(
         "POST",
         `${base}/${encodeURIComponent(existing.id)}/versions`,
         {
@@ -378,7 +379,7 @@ export class CloudClient {
       "context.tar.gz",
     );
 
-    const response = await this.http.requestResponse(
+    const response = await this.transport.requestResponse(
       "PUT",
       `${trimTrailingSlashes(buildServicePath)}/builds`,
       { body: form },
@@ -393,7 +394,7 @@ export class CloudClient {
     imageContexts: ApplicationBuildContext[],
   ): Promise<ApplicationBuildResponse> {
     const form = createApplicationBuildForm(request, imageContexts);
-    const response = await this.http.requestResponse(
+    const response = await this.transport.requestResponse(
       "POST",
       trimTrailingSlashes(buildServicePath),
       { body: form },
@@ -406,7 +407,7 @@ export class CloudClient {
     buildServicePath: string,
     applicationBuildId: string,
   ): Promise<ApplicationBuildResponse> {
-    const raw = await this.http.requestJson<Record<string, unknown>>(
+    const raw = await this.transport.requestJson<Record<string, unknown>>(
       "GET",
       `${trimTrailingSlashes(buildServicePath)}/${encodeURIComponent(applicationBuildId)}`,
     );
@@ -417,7 +418,7 @@ export class CloudClient {
     buildServicePath: string,
     applicationBuildId: string,
   ): Promise<ApplicationBuildResponse> {
-    const raw = await this.http.requestJson<Record<string, unknown>>(
+    const raw = await this.transport.requestJson<Record<string, unknown>>(
       "POST",
       `${trimTrailingSlashes(buildServicePath)}/${encodeURIComponent(applicationBuildId)}/cancel`,
     );
@@ -428,7 +429,7 @@ export class CloudClient {
     buildServicePath: string,
     buildId: string,
   ): Promise<BuildInfo> {
-    const raw = await this.http.requestJson<Record<string, unknown>>(
+    const raw = await this.transport.requestJson<Record<string, unknown>>(
       "GET",
       `${trimTrailingSlashes(buildServicePath)}/builds/${encodeURIComponent(buildId)}`,
     );
@@ -436,7 +437,7 @@ export class CloudClient {
   }
 
   async cancelBuild(buildServicePath: string, buildId: string): Promise<void> {
-    await this.http.requestResponse(
+    await this.transport.requestResponse(
       "POST",
       `${trimTrailingSlashes(buildServicePath)}/builds/${encodeURIComponent(buildId)}/cancel`,
     );
@@ -447,12 +448,12 @@ export class CloudClient {
     buildId: string,
     signal?: AbortSignal,
   ): AsyncIterable<BuildLogEntry> {
-    const stream = await this.http.requestStream(
+    const stream = this.transport.stream(
       "GET",
       `${trimTrailingSlashes(buildServicePath)}/builds/${encodeURIComponent(buildId)}/logs`,
-      { signal },
+      signal,
     );
-    for await (const event of parseSSEStream<Record<string, unknown>>(stream, signal)) {
+    for await (const event of stream) {
       yield fromSnakeKeys(event) as BuildLogEntry;
     }
   }
@@ -469,7 +470,7 @@ export class CloudClient {
         input.name,
       );
     }
-    return this.http.requestResponse("POST", path, {
+    return this.transport.requestResponse("POST", path, {
       body: form,
       headers: { Accept: "application/json" },
     });
@@ -482,10 +483,10 @@ export class CloudClient {
   private async existingApplicationPublicEndpointId(
     applicationName: string,
   ): Promise<string | undefined> {
-    const response = await this.http.requestResponse(
+    const response = await this.transport.requestResponse(
       "GET",
       this.namespacePath(`applications/${encodeURIComponent(applicationName)}`),
-      { allowedErrorStatusCodes: new Set([404]) },
+      { statusOnlyCodes: new Set([404]) },
     );
     if (response.status === 404) {
       return undefined;

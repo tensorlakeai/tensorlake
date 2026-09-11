@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import * as undici from "undici";
+import { clearCloudStub, installCloudStub as mockFetch } from "./cloud-stub.js";
 import { APIClient } from "../src/api-client.js";
 import {
   RequestExecutionError,
@@ -8,24 +8,13 @@ import {
 } from "../src/errors.js";
 import { clearNativeStub, installNativeStub } from "./native-stub.js";
 
-vi.mock("undici", async (importOriginal) => {
-  const actual = await importOriginal<typeof import("undici")>();
-  return { ...actual, fetch: vi.fn() };
-});
-
 describe("APIClient", () => {
 
   afterEach(() => {
     clearNativeStub();
-    vi.mocked(undici.fetch).mockReset();
+    clearCloudStub();
     vi.restoreAllMocks();
   });
-
-  function mockFetch(
-    handler: (url: string, init?: RequestInit) => Response | Promise<Response>,
-  ) {
-    vi.mocked(undici.fetch).mockImplementation(handler as typeof undici.fetch);
-  }
 
   it("throws RequestNotFinishedError when output is requested too early", async () => {
     mockFetch(() =>

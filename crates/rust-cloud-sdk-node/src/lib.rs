@@ -2,12 +2,12 @@
 //! TypeScript SDK.
 //!
 //! Mirrors the surface exposed by `crates/rust-cloud-sdk-py` to Python so
-//! both language SDKs delegate to the same Rust implementation. Today this
-//! exposes only the sandbox-image build entry point — additional functions
-//! can be added as further TS code paths are consolidated.
+//! both language SDKs delegate to the same Rust implementation for cloud,
+//! sandbox, repository, filesystem and sandbox-image operations.
 
 #![deny(clippy::all)]
 
+mod cloud;
 mod function_agent;
 mod repositories;
 mod sandbox;

@@ -1,5 +1,6 @@
 /** Internal protocol. Native objects never cross an isolate boundary. */
 export type NativeClientKind =
+  | "NativeCloudClient"
   | "NativeSandboxClient"
   | "NativeSandboxProxyClient"
   | "NativeRepositoryClient";

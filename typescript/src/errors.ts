@@ -17,9 +17,7 @@ export class SandboxError extends SandboxException {
 /**
  * Raised when the client cannot complete a request against the API server.
  *
- * The original transport error (typically undici's `TypeError: fetch failed`,
- * whose real reason — `ECONNREFUSED`, `UND_ERR_CONNECT_TIMEOUT`, `EMFILE`, … —
- * lives in `.cause`) is preserved on this error's {@link cause} for programmatic
+ * The original transport error is preserved on this error's {@link cause} for programmatic
  * inspection, and its full chain is folded into the message so it survives
  * wrappers that only forward `error.message`. No interpretation of the failure
  * (client vs server) is applied — the raw inner error is surfaced as-is so the
@@ -35,7 +33,7 @@ export class SandboxConnectionError extends SandboxError {
 
 /**
  * Flatten an error and its `cause` chain into a single readable line, appending
- * each level's `code` when it is not already present in the message. undici
+ * each level's `code` when it is not already present in the message. Transport
  * reports `fetch failed` at the top and the real reason one or more levels down
  * in `.cause`, so this surfaces the part that actually identifies the failure.
  *

@@ -1,12 +1,13 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { setEnvironmentData } from "node:worker_threads";
+import { build } from "esbuild";
 
 // Run in a disposable process: certificate settings and native module state
 // must be fresh, and the parent must be able to detect a blocked event loop.
@@ -16,7 +17,6 @@ if (!process.argv.includes("--child")) {
     console.log("Forbidden certificate I/O regression requires Linux FIFOs.");
   } else {
     const child = spawn(process.execPath, [
-      "--require", fileURLToPath(new URL("../tests/fixtures/delayed-native-load.cjs", import.meta.url)),
       fileURLToPath(import.meta.url), "--child",
     ], {
       stdio: "inherit",
@@ -103,6 +103,21 @@ if (!process.argv.includes("--child")) {
   }, 10);
 
   try {
+    // Install the delayed-load fixture explicitly in a test worker entrypoint.
+    // Production workers deliberately do not inherit application preloads.
+    const worker = path.join(directory, "worker.cjs");
+    writeFileSync(worker, [
+      `require(${JSON.stringify(fileURLToPath(new URL("../tests/fixtures/delayed-native-load.cjs", import.meta.url)))});`,
+      `require(${JSON.stringify(fileURLToPath(new URL("../dist/native-worker.cjs", import.meta.url)))});`,
+    ].join("\n"));
+    const configure = path.join(directory, "configure.mjs");
+    const { version } = JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    await build({
+      stdin: { contents: `import {configureNativeWorker} from ${JSON.stringify(fileURLToPath(new URL("../src/native-worker-client.ts", import.meta.url)))}; configureNativeWorker(() => ${JSON.stringify(worker)});`, loader: "ts", resolveDir: fileURLToPath(new URL("../", import.meta.url)) },
+      outfile: configure, bundle: true, platform: "node", format: "esm",
+      define: { __SDK_VERSION__: JSON.stringify(version) },
+    });
+    await import(pathToFileURL(configure).href);
     const { Sandbox, SandboxClient } = await import("../dist/index.js");
     const setupStart = performance.now();
     const client = new SandboxClient({ apiUrl: url, apiKey: "client-one", timeoutMs: 1_000 }, true);

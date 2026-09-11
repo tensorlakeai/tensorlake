@@ -1,7 +1,7 @@
 import * as defaults from "./defaults.js";
 import { releaseNativeHandle } from "./native-worker-client.js";
 import { SandboxError } from "./errors.js";
-import type { Traced } from "./http.js";
+import type { Traced } from "./traced.js";
 import {
   callNative,
   loadNativeSandboxBinding,

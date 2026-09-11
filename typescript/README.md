@@ -138,3 +138,30 @@ These tests use bounded fake-server event sequences to cover terminal-result car
 ## Live server verification
 
 The [server-verification example](examples/server-verification/README.md) uses the normal `tl deploy <PATH>` workflow to deploy eight reference applications and verify durable calls, retries and retry exhaustion, concurrent fan-out, server-orchestrated reduce, nested calls, request context, tail calls, files, and request errors against an already-running server.
+
+## Native transport and application preloads
+
+Cloud, sandbox, repository, and filesystem HTTP operations use the Rust SDK
+through an internal worker. Keep the platform-specific optional native package
+installed. Importing Tensorlake does not replace the application's HTTP dispatcher.
+
+The worker starts with an empty `execArgv` and a copied environment with
+`NODE_OPTIONS` cleared, so application `--require`, `--import`, and loader hooks
+do not run inside it. Other environment variables are copied when it starts.
+The application's own startup flags and environment remain intact. Native HTTPS
+uses the Rust SDK's bundled Mozilla certificate roots.
+
+`CloudClient.close()` cancels its active requests and streams and prevents further
+requests. Buffered cloud requests have a 300-second deadline covering retries and
+body reads. Progress and build-log streams have a connection deadline and can
+remain open until completion or cancellation. `maxRetries` and `retryBackoffMs`
+control transient retries for safe reads; mutations are replayed only when the
+Rust retry policy establishes that they were not delivered, within its 30-second
+replay budget. A lost response after delivery does not replay an application invocation.
+Mutation redirects are returned as errors instead of being followed, because a
+failure fetching the redirected result cannot prove that the mutation was not
+delivered. Safe reads still follow redirects and retry failed response transfers.
+Cloud requests advertise gzip support and decode gzip responses, including live SSE.
+
+After building the SDK and native addon, run `npm run test:native-cloud` to check
+the cloud transport against a local HTTP server.

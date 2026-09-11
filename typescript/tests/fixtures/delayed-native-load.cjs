@@ -1,6 +1,8 @@
+/* eslint-disable @typescript-eslint/no-require-imports */
+/* global require, process */
 const { isMainThread, getEnvironmentData } = require("node:worker_threads");
 
-// Inherited only by the SDK worker in the native regression. Hold addon loading
+// Loaded explicitly by the test worker entrypoint. Hold addon loading
 // until the main thread proves it can advance while this worker is blocked.
 // The timeout catches a blocked main thread without relying on elapsed tick counts.
 if (!isMainThread) {

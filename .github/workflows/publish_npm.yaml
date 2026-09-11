@@ -157,6 +157,10 @@ jobs:
             exit 1
           fi
 
+      - name: Verify native cloud transport on host targets
+        if: "!endsWith(matrix.target_id, '-musl')"
+        run: npm run test:native-cloud
+
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
         with:

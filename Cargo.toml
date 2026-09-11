@@ -39,6 +39,7 @@ tokio = { version = "1.49.0", features = ["macros", "rt-multi-thread", "time", "
 tokio-util = { version = "0.7.18", features = ["codec", "io"] }
 tokio-tungstenite = { version = "0.28.0", features = ["rustls-tls-webpki-roots"] }
 futures = "0.3.32"
+async-compression = { version = "0.4.41", default-features = false, features = ["tokio", "gzip"] }
 des = "0.8"
 png = "0.18"
 

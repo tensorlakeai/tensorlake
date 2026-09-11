@@ -11,4 +11,3 @@ export const SANDBOX_PROXY_URL =
 export const DEFAULT_HTTP_TIMEOUT_MS = 300_000;
 export const MAX_RETRIES = 3;
 export const RETRY_BACKOFF_MS = 500;
-export const RETRYABLE_STATUS_CODES = new Set([429, 502, 503, 504]);

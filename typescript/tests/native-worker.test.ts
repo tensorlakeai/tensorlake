@@ -1,4 +1,6 @@
 import { build } from "esbuild";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -19,6 +21,7 @@ import { buildNativeWorker } from "../scripts/build-native-worker.mjs";
 
 let directory: string;
 let workerPath: string;
+const execFileAsync = promisify(execFile);
 beforeAll(async () => {
   directory = await mkdtemp(path.join(tmpdir(), "tensorlake-worker-test-"));
   workerPath = path.join(directory, "worker.cjs");
@@ -55,6 +58,38 @@ const setup = () => {
 };
 
 describe("native worker boundary", () => {
+  it.each([
+    ["cjs", "--require", "cli"], ["cjs", "--require", "env"],
+    ["esm", "--import", "cli"], ["esm", "--import", "env"],
+    ["esm", "--require", "cli"], ["esm", "--require", "env"],
+    ["cjs", "--import", "cli"], ["cjs", "--import", "env"],
+  ])("isolates %s workers from %s preloads supplied by %s", async (format, flag, source) => {
+    const testDir = await mkdtemp(path.join(directory, "preload-"));
+    const log = path.join(testDir, "preloads.txt");
+    const preload = path.join(testDir, flag === "--require" ? "preload.cjs" : "preload.mjs");
+    await writeFile(preload, flag === "--require"
+      ? `require('node:fs').appendFileSync(process.env.TENSORLAKE_TEST_PRELOAD_LOG, String(require('node:worker_threads').threadId) + '\\n');`
+      : `import {appendFileSync} from 'node:fs'; import {threadId} from 'node:worker_threads'; appendFileSync(process.env.TENSORLAKE_TEST_PRELOAD_LOG, String(threadId) + '\\n');`);
+    const driver = path.join(testDir, format === "esm" ? "driver.mjs" : "driver.cjs");
+    await build({
+      stdin: { contents: `
+        import {NativeWorkerClient} from './native-worker-client.ts';
+        (async () => {
+          const before = process.env.NODE_OPTIONS;
+          const runtime = new NativeWorkerClient(() => ${JSON.stringify(workerPath)});
+          const client = runtime.handle('NativeSandboxProxyClient', ['http://localhost', 'test']);
+          await client.health();
+          if (process.env.NODE_OPTIONS !== before) throw Error('Parent environment changed');
+        })().catch(error => { console.error(error); process.exitCode = 1; });
+      `, resolveDir: path.resolve("src"), loader: "ts" },
+      outfile: driver, bundle: true, platform: "node", format: format as "cjs" | "esm",
+      define: { __SDK_VERSION__: '"test"' }, logLevel: "silent",
+    });
+    await execFileAsync(process.execPath, [
+      ...(source === "cli" ? [flag, preload] : []), driver,
+    ], { timeout: 5000, env: { ...process.env, TENSORLAKE_TEST_PRELOAD_LOG: log, NODE_OPTIONS: source === "env" ? `${flag}=${JSON.stringify(preload)}` : "" } });
+    expect(await readFile(log, "utf8")).toBe("0\n");
+  });
   it("builds the worker for native-only checkouts without removing staged addons", async () => {
     const output = path.join(directory, "native-only");
     const addon = path.join(output, "native", "linux-x64", "tensorlake-node.node");
