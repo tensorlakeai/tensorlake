@@ -214,7 +214,8 @@ jobs:
         run: npm run test:native-cloud
 
       - name: Verify cloud decoding preserves Function Agent blob transfers
-        run: cargo test -p tensorlake-rust-cloud-sdk-node --lib cloud::tests::
+        run: |
+          cargo test -p tensorlake-rust-cloud-sdk-node --lib cloud::tests::
 
       - name: Verify the SDK package excludes local native builds
         run: |
