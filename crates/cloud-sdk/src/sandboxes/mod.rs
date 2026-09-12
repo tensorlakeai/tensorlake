@@ -577,14 +577,44 @@ impl SandboxesClient {
     }
 
     pub async fn suspend(&self, sandbox_id: &str) -> Result<Traced<()>, SdkError> {
+        self.suspend_with_wait(sandbox_id, 0).await
+    }
+
+    /// Request a bounded server-side completion wait. A 202 response (including
+    /// from older servers) still requires the caller to wait for completion.
+    pub async fn suspend_with_wait(
+        &self,
+        sandbox_id: &str,
+        wait_ms: u32,
+    ) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/suspend"));
-        let req = self.client.build_empty_post_request(&uri)?;
+        let mut req = self.client.build_empty_post_request(&uri)?;
+        if wait_ms != 0 {
+            req.url_mut()
+                .query_pairs_mut()
+                .append_pair("wait_ms", &wait_ms.min(30_000).to_string());
+        }
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 
     pub async fn resume(&self, sandbox_id: &str) -> Result<Traced<()>, SdkError> {
+        self.resume_with_wait(sandbox_id, 0).await
+    }
+
+    /// Request a bounded server-side completion wait, retaining compatibility
+    /// with servers that return 202 immediately.
+    pub async fn resume_with_wait(
+        &self,
+        sandbox_id: &str,
+        wait_ms: u32,
+    ) -> Result<Traced<()>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}/resume"));
-        let req = self.client.build_empty_post_request(&uri)?;
+        let mut req = self.client.build_empty_post_request(&uri)?;
+        if wait_ms != 0 {
+            req.url_mut()
+                .query_pairs_mut()
+                .append_pair("wait_ms", &wait_ms.min(30_000).to_string());
+        }
         Ok(self.client.execute_traced(req).await?.map(|_| ()))
     }
 

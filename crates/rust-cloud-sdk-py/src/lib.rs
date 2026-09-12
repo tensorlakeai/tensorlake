@@ -1667,17 +1667,29 @@ impl CloudSandboxClient {
         })
     }
 
-    fn suspend_sandbox(&self, sandbox_id: String) -> PyResult<String> {
+    #[pyo3(signature = (sandbox_id, wait_ms=0))]
+    fn suspend_sandbox(&self, sandbox_id: String, wait_ms: u32) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
-            async move { client.suspend(&sandbox_id).await.map(|t| t.trace_id) }
+            async move {
+                client
+                    .suspend_with_wait(&sandbox_id, wait_ms)
+                    .await
+                    .map(|t| t.trace_id)
+            }
         })
     }
 
-    fn resume_sandbox(&self, sandbox_id: String) -> PyResult<String> {
+    #[pyo3(signature = (sandbox_id, wait_ms=0))]
+    fn resume_sandbox(&self, sandbox_id: String, wait_ms: u32) -> PyResult<String> {
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
-            async move { client.resume(&sandbox_id).await.map(|t| t.trace_id) }
+            async move {
+                client
+                    .resume_with_wait(&sandbox_id, wait_ms)
+                    .await
+                    .map(|t| t.trace_id)
+            }
         })
     }
 
@@ -2068,16 +2080,22 @@ impl CloudSandboxClient {
         })
     }
 
+    #[pyo3(signature = (sandbox_id, wait_ms=0))]
     fn suspend_sandbox_async<'py>(
         &self,
         py: Python<'py>,
         sandbox_id: String,
+        wait_ms: u32,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
             let trace_id = retry_async_op(client, 5, move |c| {
                 let sandbox_id = sandbox_id.clone();
-                async move { c.suspend(&sandbox_id).await.map(|t| t.trace_id) }
+                async move {
+                    c.suspend_with_wait(&sandbox_id, wait_ms)
+                        .await
+                        .map(|t| t.trace_id)
+                }
             })
             .await
             .map_err(into_sandbox_py_error)?;
@@ -2085,16 +2103,22 @@ impl CloudSandboxClient {
         })
     }
 
+    #[pyo3(signature = (sandbox_id, wait_ms=0))]
     fn resume_sandbox_async<'py>(
         &self,
         py: Python<'py>,
         sandbox_id: String,
+        wait_ms: u32,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
         future_into_py(py, async move {
             let trace_id = retry_async_op(client, 5, move |c| {
                 let sandbox_id = sandbox_id.clone();
-                async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
+                async move {
+                    c.resume_with_wait(&sandbox_id, wait_ms)
+                        .await
+                        .map(|t| t.trace_id)
+                }
             })
             .await
             .map_err(into_sandbox_py_error)?;
