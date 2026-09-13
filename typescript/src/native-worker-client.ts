@@ -54,6 +54,11 @@ export class NativeWorkerClient {
               closed = true;
               this.release(handle.id);
             };
+          if (method === "withRequestTimeout")
+            return (...timeoutArgs: unknown[]) => {
+              if (closed) throw new Error("Tensorlake native client is closed");
+              return this.handle("NativeSandboxClient", timeoutArgs, handle);
+            };
           if (method === "connectProxy")
             return (...proxyArgs: unknown[]) => {
               if (closed) throw new Error("Tensorlake native client is closed");

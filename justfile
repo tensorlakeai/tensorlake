@@ -298,11 +298,12 @@ check-python-fmt:
 
 # Python SDK unit tests, including connection readiness; no live services required.
 test-sandbox-connect-python:
-    PYTHONPATH=src poetry run python -m unittest tests.sandbox.test_connect_ready tests.sandbox.test_client_rust_backend tests.sandbox.test_client_rust_backend_async tests.sandbox.test_sandbox_rust_backend tests.sandbox.test_sandbox_rust_backend_async tests.sandbox.test_file_systems tests.sandbox.test_get_or_create tests.image.test_sandbox_builder tests.function_agent.test_runner
+    PYTHONPATH=src poetry run python -m unittest tests.sandbox.test_connect_ready tests.sandbox.test_connect_transport tests.sandbox.test_lifecycle_cleanup tests.sandbox.test_client_rust_backend tests.sandbox.test_client_rust_backend_async tests.sandbox.test_sandbox_rust_backend tests.sandbox.test_sandbox_rust_backend_async tests.sandbox.test_file_systems tests.sandbox.test_get_or_create tests.image.test_sandbox_builder tests.function_agent.test_runner
 
 # Sandbox connection readiness, compatibility with existing handles, and native deadlines.
 test-sandbox-connect: test-sandbox-connect-python
     npm test --prefix typescript
+    npm run test:native-sandbox --prefix typescript
     just with-function-agent-core cargo test -p tensorlake --lib retry::tests
 
 # ─── Maturin (Python SDK + Rust Cloud SDK packaging) ─────────────────────────

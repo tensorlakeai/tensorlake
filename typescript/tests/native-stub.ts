@@ -79,7 +79,7 @@ function makeProxy(): FakeFns {
 }
 
 function makeClient(proxy: FakeFns): FakeFns {
-  return {
+  const client: FakeFns = {
     createSandbox: vi.fn(tracedJson()),
     claimSandbox: vi.fn(tracedJson()),
     copySandbox: vi.fn(tracedJson()),
@@ -119,6 +119,8 @@ function makeClient(proxy: FakeFns): FakeFns {
         })(),
     ),
   };
+  client.withRequestTimeout = vi.fn(() => client as unknown as NativeSandboxClient);
+  return client;
 }
 
 function makeRepository(): FakeFns {

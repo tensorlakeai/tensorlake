@@ -13,6 +13,7 @@ import { build } from "esbuild";
 // must be fresh, and the parent must be able to detect a blocked event loop.
 if (!process.argv.includes("--child")) {
   await import("./test-native-stream-lifetime.mjs");
+  await import("./test-native-connect-ready.mjs");
   if (process.platform !== "linux") {
     console.log("Forbidden certificate I/O regression requires Linux FIFOs.");
   } else {
@@ -119,7 +120,7 @@ if (!process.argv.includes("--child")) {
     const setupStart = performance.now();
     const client = new SandboxClient({ apiUrl: url, apiKey: "client-one", timeoutMs: 1_000 }, true);
     const handles = Array.from({ length: 20 }, (_, i) => client.connect(`sandbox-${i}`, url));
-    const direct = await Sandbox.connect({ sandboxId: "static-connect", proxyUrl: url, apiUrl: url });
+    const direct = await Sandbox.connect({ sandboxId: "static-connect", proxyUrl: url, apiUrl: url, resume: false });
     const standalone = new Sandbox({ sandboxId: "direct-constructor", proxyUrl: url });
     const setupMs = performance.now() - setupStart;
     assert.ok(setupMs < 500, `Handle construction blocked for ${setupMs.toFixed(1)} ms`);

@@ -283,11 +283,16 @@ pub struct NativeSandboxClient {
     client: DeferredHttpClient,
     api_url: String,
     namespace: String,
+    timeout_override: Option<Duration>,
 }
 
 impl NativeSandboxClient {
     async fn client(&self) -> napi::Result<SandboxesClient> {
         let client = self.client.get().await?;
+        let client = match self.timeout_override {
+            Some(timeout) => client.with_timeout(Some(timeout)),
+            None => client,
+        };
         let log_client = client.with_base_url(&self.api_url);
         Ok(SandboxesClient::new(
             client,
@@ -333,6 +338,21 @@ impl NativeSandboxClient {
             client: DeferredHttpClient::new(lifecycle_builder),
             api_url,
             namespace: namespace.unwrap_or_else(|| "default".to_string()),
+            timeout_override: None,
+        })
+    }
+
+    /// Preserve deferred initialization and the transport when changing deadlines.
+    #[napi]
+    pub fn with_request_timeout(&self, request_timeout_sec: f64) -> napi::Result<Self> {
+        Ok(Self {
+            client: self.client.clone(),
+            api_url: self.api_url.clone(),
+            namespace: self.namespace.clone(),
+            timeout_override: Some(duration_from_seconds(
+                "request_timeout_sec",
+                request_timeout_sec,
+            )?),
         })
     }
 

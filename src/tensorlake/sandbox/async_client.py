@@ -11,6 +11,7 @@ import asyncio
 import json
 import os
 import warnings
+from copy import copy
 from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 
@@ -221,17 +222,10 @@ class AsyncSandboxClient:
     def _with_request_timeout(self, request_timeout: float) -> "AsyncSandboxClient":
         if request_timeout == self._request_timeout:
             return self
-        return AsyncSandboxClient(
-            api_url=self._api_url,
-            api_key=self._api_key,
-            organization_id=self._organization_id,
-            project_id=self._project_id,
-            namespace=self._namespace,
-            max_retries=self._max_retries,
-            retry_backoff_sec=self._retry_backoff_sec,
-            request_timeout=request_timeout,
-            _internal=True,
-        )
+        scoped = copy(self)
+        scoped._rust_client = self._rust_client.with_request_timeout(request_timeout)
+        scoped._request_timeout = request_timeout
+        return scoped
 
     # --- Sandbox lifecycle ---
 

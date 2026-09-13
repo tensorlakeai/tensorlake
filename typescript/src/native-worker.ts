@@ -52,7 +52,9 @@ port.on("message", (message: WorkerRequest) => {
       const value =
         message.parentId === undefined
           ? new ctor(...args)
-          : getHandle(message.parentId).connectProxy(...args);
+          : kind === "NativeSandboxClient"
+            ? getHandle(message.parentId).withRequestTimeout(...args)
+            : getHandle(message.parentId).connectProxy(...args);
       handles.set(id, { value });
     } catch (error) {
       handles.set(message.handle.id, { error });

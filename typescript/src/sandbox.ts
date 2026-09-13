@@ -691,11 +691,11 @@ export class Sandbox {
       return seconds;
     };
     const request = async <T>(operation: (scoped: SandboxClient) => Promise<T>): Promise<T> => {
-      const scoped = new SandboxClient({ ...options, requestTimeout: remaining() }, true);
+      const scoped = client.withRequestTimeout(remaining());
       try {
         return await operation(scoped);
       } finally {
-        scoped.close();
+        if (scoped !== client) scoped.close();
       }
     };
     const checkTerminal = (info: Traced<SandboxInfo>): void => {

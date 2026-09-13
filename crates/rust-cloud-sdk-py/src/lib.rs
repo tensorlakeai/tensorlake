@@ -1495,6 +1495,14 @@ impl CloudSandboxClient {
         // reqwest clients are closed when dropped; this is a no-op for API parity.
     }
 
+    fn with_request_timeout(&self, request_timeout_sec: f64) -> PyResult<Self> {
+        let timeout = duration_from_seconds("request_timeout_sec", request_timeout_sec)?;
+        Ok(Self {
+            client: self.client.with_timeout(Some(timeout)),
+            api_url: self.api_url.clone(),
+        })
+    }
+
     #[pyo3(signature = (sandbox_id, sandbox_url=None, ingress_endpoint=None, explicit_proxy_url=None))]
     fn select_sandbox_proxy_url(
         &self,

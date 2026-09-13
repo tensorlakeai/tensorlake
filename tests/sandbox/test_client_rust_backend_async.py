@@ -41,6 +41,9 @@ class _FakeAsyncRustClient:
     def close(self):
         return None
 
+    def with_request_timeout(self, request_timeout_sec):
+        return self
+
     def connect_proxy(
         self, *, proxy_url, sandbox_id, routing_hint=None, request_timeout_sec=None
     ):
@@ -204,6 +207,9 @@ class _RecordingCreateRustClient:
         self.create_calls = 0
         self.delete_calls: list[str] = []
         type(self).instances.append(self)
+
+    def with_request_timeout(self, request_timeout_sec):
+        return type(self)(**{**self.kwargs, "request_timeout_sec": request_timeout_sec})
 
     def close(self):
         return None

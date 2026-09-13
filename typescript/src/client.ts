@@ -136,7 +136,7 @@ export class SandboxClient {
   private readonly requestTimeoutMs: number;
 
   /** @internal Pass `true` to suppress the deprecation warning when used by `Sandbox.create()` / `Sandbox.connect()`. */
-  constructor(options?: SandboxClientOptions, _internal = false) {
+  constructor(options?: SandboxClientOptions, _internal = false, _native?: NativeSandboxClient) {
     if (!_internal) {
       console.warn(
         "[tensorlake] SandboxClient is deprecated; use Sandbox.create() / Sandbox.connect() instead.",
@@ -150,7 +150,7 @@ export class SandboxClient {
     this.requestTimeoutMs = resolveRequestTimeoutMs(options);
 
     const binding = loadNativeSandboxBinding();
-    this.native = new binding.NativeSandboxClient(
+    this.native = _native ?? new binding.NativeSandboxClient(
       this.apiUrl,
       this.apiKey ?? null,
       this.organizationId ?? null,
@@ -202,7 +202,8 @@ export class SandboxClient {
     releaseNativeHandle(this.native);
   }
 
-  private withRequestTimeout(
+  /** @internal Share transport while scoping the HTTP request deadline. */
+  withRequestTimeout(
     requestTimeout: number | undefined,
   ): SandboxClient {
     if (requestTimeout == null) {
@@ -222,6 +223,7 @@ export class SandboxClient {
         timeoutMs,
       },
       /* _internal */ true,
+      this.native.withRequestTimeout(requestTimeout),
     );
   }
 

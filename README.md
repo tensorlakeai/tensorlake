@@ -159,7 +159,9 @@ Pass `resume=False` in Python or `resume: false` in TypeScript to preserve passi
 attachment. Metadata `get` and `list` operations never wake a sandbox. The legacy
 `SandboxClient.connect` remains passive. `request_timeout` / `requestTimeout`
 bounds the readiness wait; an omitted timeout uses 300 seconds for connecting
-and preserves the existing default for subsequent command requests.
+and preserves the existing default for subsequent command requests. Readiness
+polls share the existing HTTP connection pool while each request uses the
+remaining deadline.
 
 Retained handles also auto-resume on commands through the sandbox proxy. The
 proxy handles suspending/pending transitions before forwarding a command; this
