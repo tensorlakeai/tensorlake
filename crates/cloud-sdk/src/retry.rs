@@ -206,6 +206,34 @@ where
     }
 }
 
+/// Bound an entire readiness operation, including its native retries, by the
+/// caller's remaining budget. This is used for get/resume/health, never exec.
+pub async fn with_timeout<T>(
+    budget: Option<Duration>,
+    operation: impl Future<Output = Result<T, SdkError>>,
+) -> Result<T, SdkError> {
+    let Some(budget) = budget else {
+        return operation.await;
+    };
+    tokio::pin!(operation);
+    let deadline = tokio::time::sleep(budget);
+    tokio::pin!(deadline);
+    let mut progress = tokio::time::interval_at(
+        tokio::time::Instant::now() + Duration::from_secs(5),
+        Duration::from_secs(5),
+    );
+    loop {
+        tokio::select! {
+            biased;
+            _ = &mut deadline => return Err(SdkError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut, "Sandbox readiness request deadline exceeded",
+            ))),
+            result = &mut operation => return result,
+            _ = progress.tick() => eprintln!("Waiting for sandbox readiness request"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -214,6 +242,29 @@ mod tests {
     };
 
     use super::*;
+
+    #[tokio::test]
+    async fn readiness_deadline_cancels_native_retries() {
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let observed = attempts.clone();
+        let started = tokio::time::Instant::now();
+        let result = with_timeout(
+            Some(Duration::from_millis(20)),
+            retry((), RetryPolicy::idempotent(5), move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+                async { Err::<(), _>(proxy_unavailable()) }
+            }),
+        )
+        .await;
+        let error = result.unwrap_err();
+        assert_eq!(
+            error.transport_failure(),
+            Some(crate::error::TransportFailure::Timeout)
+        );
+        assert!(!error.never_reached_server());
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        assert!(started.elapsed() < Duration::from_secs(1));
+    }
 
     fn server_error(status: u16, body: &str) -> SdkError {
         SdkError::ServerError {

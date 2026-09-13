@@ -42,6 +42,9 @@ class _FakeRustClient:
     def close(self):
         return None
 
+    def with_request_timeout(self, request_timeout_sec):
+        return self
+
     def suspend_sandbox(self, sandbox_id):
         self.suspend_calls.append(sandbox_id)
 
@@ -200,6 +203,9 @@ class _RecordingCreateRustClient:
         self.create_calls = 0
         self.delete_calls: list[str] = []
         type(self).instances.append(self)
+
+    def with_request_timeout(self, request_timeout_sec):
+        return type(self)(**{**self.kwargs, "request_timeout_sec": request_timeout_sec})
 
     def close(self):
         return None
@@ -508,6 +514,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         ):
             sandbox = Sandbox.connect(
                 "sbx-1",
+                resume=False,
                 api_url="http://localhost:8900",
                 api_key="k",
                 proxy_url="https://sandbox.tensorlake.ai",
@@ -542,6 +549,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         ):
             sandbox = Sandbox.connect(
                 "sbx-1",
+                resume=False,
                 api_url="http://localhost:8900",
                 api_key="k",
                 proxy_url="https://sandbox.tensorlake.ai",

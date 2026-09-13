@@ -234,6 +234,18 @@ impl ClientBuilder {
 type EventSourceStream<T> = Pin<Box<dyn Stream<Item = Result<T, SdkError>> + Send>>;
 
 impl Client {
+    /// Configured HTTP timeout, also used to bound sandbox readiness retries.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
+    /// Override request deadlines while preserving the transport and middleware.
+    pub fn with_timeout(&self, timeout: Option<Duration>) -> Self {
+        let mut client = self.clone();
+        client.timeout = timeout;
+        client
+    }
+
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }
@@ -590,11 +602,11 @@ mod tests {
         use tokio::io::{AsyncReadExt, AsyncWriteExt};
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let url = format!("http://{}", listener.local_addr().unwrap());
-        // One accepted socket must serve all three clients. If a client
+        // One accepted socket must serve all four clients. If a client
         // rebuilds the pool, its request times out instead of using this socket.
         let server = tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.unwrap();
-            for _ in 0..3 {
+            for _ in 0..4 {
                 let mut request = Vec::new();
                 while !request.ends_with(b"\r\n\r\n") {
                     request.push(stream.read_u8().await.unwrap());
@@ -613,7 +625,10 @@ mod tests {
         let longer = client
             .with_base_url_and_timeout(&url, Some(Duration::from_secs(2)))
             .unwrap();
-        for current in [&client, &unbounded, &longer] {
+        let scoped = client.with_timeout(Some(Duration::from_secs(3)));
+        assert_eq!(client.timeout(), Some(Duration::from_secs(1)));
+        assert_eq!(scoped.timeout(), Some(Duration::from_secs(3)));
+        for current in [&client, &unbounded, &longer, &scoped] {
             let request = current.request(Method::GET, "/").build().unwrap();
             tokio::time::timeout(Duration::from_secs(3), current.execute_raw(request))
                 .await
