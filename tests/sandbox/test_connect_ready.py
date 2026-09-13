@@ -1,10 +1,9 @@
 """Connection readiness must not execute or replay user work."""
 
 import json
+import unittest
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import unittest
 
 from tensorlake.sandbox import AsyncSandbox, Sandbox, SandboxError, SandboxStatus
 from tensorlake.sandbox._connect import retryable_health_error
