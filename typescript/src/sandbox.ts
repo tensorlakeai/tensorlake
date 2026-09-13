@@ -7,6 +7,7 @@ import {
 import {
   RemoteAPIError,
   SandboxError,
+  SandboxConnectionError,
   SandboxNotFoundError,
 } from "./errors.js";
 import { type Traced } from "./traced.js";
@@ -659,25 +660,105 @@ export class Sandbox {
   /**
    * Attach to an existing sandbox and return a connected handle.
    *
-   * The handle is lazy: when `proxyUrl` is omitted, the sandbox is resolved
-   * on the first request so the handle uses the correct cloud/region ingress
-   * endpoint. Connecting does not verify that the sandbox exists. Does
-   * **not** auto-resume a suspended sandbox — call `sandbox.resume()`
-   * explicitly.
+   * Resumes a suspended sandbox and waits until its daemon accepts requests.
+   * Uses the server-returned ingress and refreshes routing after resume.
+   * Pass `resume: false` to return a passive handle without waking it.
    */
   static async connect(
     options: ConnectOptions & Partial<SandboxClientOptions>,
   ): Promise<Sandbox> {
     const { SandboxClient } = await import("./client.js");
-    const client = new SandboxClient(options, /* _internal */ true);
-    const sandbox = client.connect(
-      options.sandboxId,
-      options.proxyUrl,
-      options.routingHint,
-      options.requestTimeout,
-    );
-    sandbox.lifecycleClient = client;
-    return sandbox;
+    const timeout = options.requestTimeout ?? (options.timeoutMs == null ? 300 : options.timeoutMs / 1000);
+    if (!Number.isFinite(timeout) || timeout <= 0) {
+      throw new SandboxError("requestTimeout must be a finite positive number");
+    }
+    const client = new SandboxClient(options, true);
+    const attach = (requestTimeout: number | undefined): Sandbox => {
+      const sandbox = client.connect(
+        options.sandboxId, options.proxyUrl, options.routingHint, requestTimeout,
+      );
+      sandbox.lifecycleClient = client;
+      return sandbox;
+    };
+    if (options.resume === false) return attach(options.requestTimeout);
+
+    const deadline = performance.now() + timeout * 1000;
+    const remaining = (): number => {
+      const seconds = (deadline - performance.now()) / 1000;
+      if (seconds <= 0) {
+        throw new SandboxError(`Sandbox ${options.sandboxId} did not become ready within ${timeout}s`);
+      }
+      return seconds;
+    };
+    const request = async <T>(operation: (scoped: SandboxClient) => Promise<T>): Promise<T> => {
+      const scoped = new SandboxClient({ ...options, requestTimeout: remaining() }, true);
+      try {
+        return await operation(scoped);
+      } finally {
+        scoped.close();
+      }
+    };
+    const checkTerminal = (info: Traced<SandboxInfo>): void => {
+      if (info.status === SandboxStatus.TERMINATED) {
+        throw new SandboxError(`Sandbox ${info.sandboxId} is terminated; restart it explicitly`);
+      }
+    };
+    let nextLog = 0;
+    let canonical = options.sandboxId;
+    try {
+      while (true) {
+        remaining();
+        if (performance.now() >= nextLog) {
+          logSdkTimingEvent("sandbox.connect", "waiting_for_ready", {
+            sandbox_id: options.sandboxId, remaining_s: remaining(),
+          });
+          nextLog = performance.now() + 5000;
+        }
+        let info = await request((scoped) => scoped.get(canonical));
+        canonical = info.sandboxId;
+        checkTerminal(info);
+        if (info.status === SandboxStatus.SUSPENDED) {
+          try {
+            await request((scoped) => scoped.resume(info.sandboxId, { wait: false }));
+          } catch (error) {
+            if (!(error instanceof RemoteAPIError) || ![400, 409].includes(error.statusCode)) throw error;
+            const current = await request((scoped) => scoped.get(info.sandboxId));
+            if (current.status !== SandboxStatus.PENDING && current.status !== SandboxStatus.RUNNING) throw error;
+          }
+          info = await request((scoped) => scoped.get(info.sandboxId));
+          checkTerminal(info);
+        }
+        if (info.status !== SandboxStatus.RUNNING) {
+          await sleep(Math.min(200, remaining() * 1000));
+          continue;
+        }
+        const probe = attach(Math.min(5, remaining()));
+        try {
+          if (info.sandboxUrl != null || probe.proxy.hasExplicitProxyUrl()) {
+            await probe.proxy.refreshFromInfo(info);
+            // Only the read-only health request is retried. A command may
+            // already have executed when its response fails in transit.
+            const health = await probe.health();
+            const fresh = await request((scoped) => scoped.get(probe.sandboxId));
+            checkTerminal(fresh);
+            if (health.healthy && fresh.status === SandboxStatus.RUNNING) {
+              remaining();
+              const sandbox = attach(options.requestTimeout);
+              await sandbox.proxy.refreshFromInfo(fresh);
+              return sandbox;
+            }
+          }
+        } catch (error) {
+          if (!retryableConnectHealthError(error)) throw error;
+        } finally {
+          probe.close();
+        }
+        await sleep(Math.min(200, remaining() * 1000));
+      }
+    } catch (error) {
+      client.close();
+      throw error;
+    }
   }
 
   /**
@@ -760,6 +841,7 @@ export class Sandbox {
         const sandbox = await Sandbox.connect({
           ...createOptions,
           sandboxId: name,
+          resume: false,
         });
         // connect returns a lazy handle without checking that the name
         // exists; this status fetch is the existence check that routes a
@@ -1601,5 +1683,18 @@ export class Sandbox {
       sandboxId: this.sandboxId,
     });
     return Object.assign(fromSnakeKeys(JSON.parse(json)) as DaemonInfo, { traceId });
+  }
+}
+
+// This policy applies only to a read-only readiness probe, never user work.
+function retryableConnectHealthError(error: unknown): boolean {
+  if (error instanceof SandboxConnectionError) return true;
+  if (!(error instanceof RemoteAPIError)) return false;
+  if ([502, 503, 504].includes(error.statusCode)) return true;
+  if (error.statusCode !== 400) return false;
+  try {
+    return JSON.parse(error.responseMessage)?.code === "SANDBOX_NOT_RUNNING";
+  } catch {
+    return false;
   }
 }

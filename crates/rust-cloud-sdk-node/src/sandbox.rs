@@ -438,16 +438,22 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn get_sandbox(&self, sandbox_id: String) -> napi::Result<TracedJson> {
-        with_retry(self.client().await?, 5, move |c| {
-            let sandbox_id = sandbox_id.clone();
-            async move {
-                let traced = c.get(&sandbox_id).await?;
-                let trace_id = traced.trace_id.clone();
-                let json = serde_json::to_string(&*traced)?;
-                Ok(TracedJson { trace_id, json })
-            }
-        })
+        let client = self.client().await?;
+        let budget = client.http_client().timeout();
+        tensorlake::retry::with_timeout(
+            budget,
+            retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move {
+                    let traced = c.get(&sandbox_id).await?;
+                    let trace_id = traced.trace_id.clone();
+                    let json = serde_json::to_string(&*traced)?;
+                    Ok(TracedJson { trace_id, json })
+                }
+            }),
+        )
         .await
+        .map_err(into_napi_error)
     }
 
     #[napi]
@@ -564,11 +570,17 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn resume_sandbox(&self, sandbox_id: String) -> napi::Result<String> {
-        with_retry(self.client().await?, 5, move |c| {
-            let sandbox_id = sandbox_id.clone();
-            async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
-        })
+        let client = self.client().await?;
+        let budget = client.http_client().timeout();
+        tensorlake::retry::with_timeout(
+            budget,
+            retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
+            }),
+        )
         .await
+        .map_err(into_napi_error)
     }
 
     #[napi]
@@ -1210,13 +1222,19 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn health(&self) -> napi::Result<TracedJson> {
-        with_retry(self.client().await?, 5, move |c| async move {
-            let traced = c.health().await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&*traced)?;
-            Ok(TracedJson { trace_id, json })
-        })
+        let client = self.client().await?;
+        let budget = client.http_client().timeout();
+        tensorlake::retry::with_timeout(
+            budget,
+            retry_async_op(client, 5, move |c| async move {
+                let traced = c.health().await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }),
+        )
         .await
+        .map_err(into_napi_error)
     }
 
     #[napi]

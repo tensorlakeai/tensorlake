@@ -1565,15 +1565,19 @@ impl CloudSandboxClient {
     }
 
     fn get_sandbox_json(&self, sandbox_id: String) -> PyResult<(String, String)> {
-        self.run_with_retry(5, move |client| {
-            let sandbox_id = sandbox_id.clone();
-            async move {
-                let traced = client.get(&sandbox_id).await?;
-                let trace_id = traced.trace_id.clone();
-                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
-                Ok((trace_id, json))
-            }
-        })
+        run_readiness_request(
+            self.client.clone(),
+            self.client.http_client().timeout(),
+            move |client| {
+                let sandbox_id = sandbox_id.clone();
+                async move {
+                    let traced = client.get(&sandbox_id).await?;
+                    let trace_id = traced.trace_id.clone();
+                    let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                    Ok((trace_id, json))
+                }
+            },
+        )
     }
 
     fn list_sandboxes_json(&self) -> PyResult<(String, String)> {
@@ -1675,10 +1679,14 @@ impl CloudSandboxClient {
     }
 
     fn resume_sandbox(&self, sandbox_id: String) -> PyResult<String> {
-        self.run_with_retry(5, move |client| {
-            let sandbox_id = sandbox_id.clone();
-            async move { client.resume(&sandbox_id).await.map(|t| t.trace_id) }
-        })
+        run_readiness_request(
+            self.client.clone(),
+            self.client.http_client().timeout(),
+            move |client| {
+                let sandbox_id = sandbox_id.clone();
+                async move { client.resume(&sandbox_id).await.map(|t| t.trace_id) }
+            },
+        )
     }
 
     #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false, snapshot_id=None, owner=None))]
@@ -1922,11 +1930,15 @@ impl CloudSandboxClient {
         sandbox_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
+        let budget = client.http_client().timeout();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| {
-                let sandbox_id = sandbox_id.clone();
-                async move { c.get(&sandbox_id).await }
-            })
+            let traced = tensorlake::retry::with_timeout(
+                budget,
+                retry_async_op(client, 5, move |c| {
+                    let sandbox_id = sandbox_id.clone();
+                    async move { c.get(&sandbox_id).await }
+                }),
+            )
             .await
             .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
@@ -2091,11 +2103,15 @@ impl CloudSandboxClient {
         sandbox_id: String,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
+        let budget = client.http_client().timeout();
         future_into_py(py, async move {
-            let trace_id = retry_async_op(client, 5, move |c| {
-                let sandbox_id = sandbox_id.clone();
-                async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
-            })
+            let trace_id = tensorlake::retry::with_timeout(
+                budget,
+                retry_async_op(client, 5, move |c| {
+                    let sandbox_id = sandbox_id.clone();
+                    async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
+                }),
+            )
             .await
             .map_err(into_sandbox_py_error)?;
             Ok(trace_id)
@@ -2740,12 +2756,16 @@ impl CloudSandboxProxyClient {
     }
 
     fn health_json(&self) -> PyResult<(String, String)> {
-        self.run_with_retry(5, move |client| async move {
-            let traced = client.health().await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
-            Ok((trace_id, json))
-        })
+        run_readiness_request(
+            self.client.clone(),
+            self.client.http_client().timeout(),
+            move |client| async move {
+                let traced = client.health().await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            },
+        )
     }
 
     fn info_json(&self) -> PyResult<(String, String)> {
@@ -3169,10 +3189,14 @@ impl CloudSandboxProxyClient {
 
     fn health_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
+        let budget = client.http_client().timeout();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| async move { c.health().await })
-                .await
-                .map_err(into_sandbox_py_error)?;
+            let traced = tensorlake::retry::with_timeout(
+                budget,
+                retry_async_op(client, 5, move |c| async move { c.health().await }),
+            )
+            .await
+            .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
@@ -3439,6 +3463,30 @@ impl CloudDocumentAIClient {
             }
         })
     }
+}
+
+// Keep synchronous connect readiness inside the same total deadline as async.
+fn run_readiness_request<C, T, F, Fut>(
+    client: C,
+    budget: Option<Duration>,
+    operation: F,
+) -> PyResult<T>
+where
+    C: Clone + Send,
+    F: Fn(C) -> Fut + Send,
+    T: Send,
+    Fut: Future<Output = Result<T, SdkError>>,
+{
+    Python::attach(|py| {
+        py.detach(move || {
+            shared_runtime()
+                .block_on(tensorlake::retry::with_timeout(
+                    budget,
+                    retry_async_op(client, 5, operation),
+                ))
+                .map_err(into_sandbox_py_error)
+        })
+    })
 }
 
 fn run_with_retry_blocking<C, T, F, Fut>(

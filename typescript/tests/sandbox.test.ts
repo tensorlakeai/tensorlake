@@ -50,7 +50,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-abc",
         proxyUrl: "http://localhost:9443",
         requestTimeout: 10,
@@ -85,7 +85,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({ sandboxId: "demo-name" });
+      const sbx = await Sandbox.connect({ resume: false, sandboxId: "demo-name" });
       // A handle opened by name knows only the name until the server
       // answers; `create`/`connect` handles have no bind outcome.
       expect(sbx.sandboxId).toBe("demo-name");
@@ -118,7 +118,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-abc",
         proxyUrl: "http://localhost:9443",
         apiUrl: "http://localhost:8900",
@@ -173,7 +173,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "stable-name",
         apiKey: "key",
         apiUrl: "https://api.tensorlake.ai",
@@ -216,7 +216,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "stable-name",
         apiKey: "key",
         apiUrl: "https://api.tensorlake.ai",
@@ -251,7 +251,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-1",
         proxyUrl: "https://caller-proxy.example.com",
         apiKey: "key",
@@ -317,7 +317,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "stable-name",
         apiKey: "key",
         apiUrl: "https://api.tensorlake.ai",
@@ -898,7 +898,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-1",
         apiUrl: "http://localhost:8900",
       });
@@ -911,7 +911,7 @@ describe("Sandbox", () => {
 
     it("connect() leaves name null until info() is called", async () => {
       installNativeStub();
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-1",
         apiUrl: "http://localhost:8900",
       });
@@ -933,7 +933,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-1",
         apiUrl: "http://localhost:8900",
       });
@@ -965,7 +965,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-1",
         apiUrl: "http://localhost:8900",
       });
@@ -1004,7 +1004,7 @@ describe("Sandbox", () => {
       });
       installNativeStub({ client: { updateSandbox, getSandbox } });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "my-original-name",
         apiUrl: "http://localhost:8900",
       });
@@ -1261,7 +1261,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
@@ -1310,7 +1310,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
@@ -1353,7 +1353,7 @@ describe("Sandbox", () => {
       );
       installNativeStub({ client: { attachFileSystem } });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
@@ -1401,7 +1401,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
@@ -1425,7 +1425,7 @@ describe("Sandbox", () => {
       const attachFileSystem = vi.fn();
       installNativeStub({ client: { attachFileSystem } });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
@@ -1454,7 +1454,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
@@ -1478,7 +1478,7 @@ describe("Sandbox", () => {
         },
       });
 
-      const sbx = await Sandbox.connect({
+      const sbx = await Sandbox.connect({ resume: false,
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });

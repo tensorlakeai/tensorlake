@@ -296,6 +296,12 @@ check-python-fmt:
     poetry run black --check src/tensorlake --extend-exclude vendor
     poetry run isort --check src/tensorlake --profile black --extend-skip vendor
 
+# Sandbox connection readiness, compatibility with existing handles, and native deadlines.
+test-sandbox-connect:
+    PYTHONPATH=src poetry run python -m pytest tests/sandbox/test_connect_ready.py tests/sandbox/test_get_or_create.py tests/sandbox/test_client_rust_backend.py tests/sandbox/test_client_rust_backend_async.py tests/sandbox/test_sandbox_rust_backend.py tests/sandbox/test_sandbox_rust_backend_async.py -q
+    npm test --prefix typescript
+    just with-function-agent-core cargo test -p tensorlake --lib retry::tests
+
 # ─── Maturin (Python SDK + Rust Cloud SDK packaging) ─────────────────────────
 
 # Development install (builds Rust Cloud SDK extension + installs Python package)

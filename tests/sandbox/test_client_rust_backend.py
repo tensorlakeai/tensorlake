@@ -508,6 +508,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         ):
             sandbox = Sandbox.connect(
                 "sbx-1",
+                resume=False,
                 api_url="http://localhost:8900",
                 api_key="k",
                 proxy_url="https://sandbox.tensorlake.ai",
@@ -542,6 +543,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         ):
             sandbox = Sandbox.connect(
                 "sbx-1",
+                resume=False,
                 api_url="http://localhost:8900",
                 api_key="k",
                 proxy_url="https://sandbox.tensorlake.ai",

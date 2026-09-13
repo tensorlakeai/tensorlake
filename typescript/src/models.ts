@@ -722,6 +722,8 @@ export interface CheckpointOptions extends SuspendResumeOptions {
 
 export interface ConnectOptions {
   sandboxId: string;
+  /** Resume and wait for daemon readiness (default true). False returns a passive handle. */
+  resume?: boolean;
   proxyUrl?: string;
   routingHint?: string;
 }

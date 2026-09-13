@@ -234,6 +234,11 @@ impl ClientBuilder {
 type EventSourceStream<T> = Pin<Box<dyn Stream<Item = Result<T, SdkError>> + Send>>;
 
 impl Client {
+    /// Configured HTTP timeout, also used to bound sandbox readiness retries.
+    pub fn timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
     }

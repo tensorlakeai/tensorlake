@@ -558,6 +558,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         ):
             sandbox = await AsyncSandbox.connect(
                 "sbx-1",
+                resume=False,
                 api_url="http://localhost:8900",
                 api_key="k",
                 proxy_url="https://sandbox.tensorlake.ai",
@@ -592,6 +593,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         ):
             sandbox = await AsyncSandbox.connect(
                 "sbx-1",
+                resume=False,
                 api_url="http://localhost:8900",
                 api_key="k",
                 proxy_url="https://sandbox.tensorlake.ai",
