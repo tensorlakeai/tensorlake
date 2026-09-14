@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import hashlib
+import os
+import tempfile
 from pathlib import Path
-from typing import Optional
+from typing import Callable, Optional
 
 
 class KVCache:
@@ -38,8 +40,9 @@ class KVCache:
     def set(self, key: str, value: str, encoding: str = "utf-8") -> None:
         path = self._key_path(key, ".txt")
         try:
-            self.ns_dir.mkdir(parents=True, exist_ok=True)
-            path.write_text(value, encoding=encoding)
+            self._write_atomically(
+                path, lambda temporary: temporary.write_text(value, encoding=encoding)
+            )
         except Exception:
             # Best-effort cache; ignore failures
             pass
@@ -56,11 +59,25 @@ class KVCache:
     def set_bytes(self, key: str, data: bytes) -> None:
         path = self._key_path(key, ".bin")
         try:
-            self.ns_dir.mkdir(parents=True, exist_ok=True)
-            path.write_bytes(data)
+            self._write_atomically(path, lambda temporary: temporary.write_bytes(data))
         except Exception:
             # Best-effort cache; ignore failures
             pass
+
+    def _write_atomically(self, path: Path, write: Callable[[Path], int]) -> None:
+        """Publish a complete value without exposing a partially written entry."""
+        self.ns_dir.mkdir(parents=True, exist_ok=True)
+        temporary_path: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                dir=self.ns_dir, prefix=".cache-", delete=False
+            ) as temporary:
+                temporary_path = Path(temporary.name)
+            write(temporary_path)
+            os.replace(temporary_path, path)
+        finally:
+            if temporary_path is not None:
+                temporary_path.unlink(missing_ok=True)
 
     def delete(self, key: str) -> None:
         for suffix in (".txt", ".bin"):
