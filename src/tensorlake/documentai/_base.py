@@ -265,14 +265,36 @@ def _deserialize_error_response(resp: _RustHTTPResponse) -> ErrorResponse:
     try:
         error_response = ErrorResponse.model_validate(resp.json())
         return error_response
-    except (ValidationError, ValueError) as e:
-        print(f"Failed to deserialize error response: {e}", file=sys.stderr)
+    except (ValidationError, ValueError):
+        # The body is not a well formed error response. The deserialization failure itself
+        # is an SDK detail that tells the user nothing about what went wrong, so it is not
+        # reported; what the service said is recovered instead, as far as that is possible.
         return ErrorResponse(
-            message=str(resp.text),
-            code=ErrorCode.INTERNAL_ERROR,
+            message=_error_message_from_body(resp),
+            code=ErrorCode.UNKNOWN,
             trace_id=resp.headers.get("x-trace-id") or resp.headers.get("X-Trace-ID"),
             details=None,
         )
+
+
+def _error_message_from_body(resp: _RustHTTPResponse) -> str:
+    """Returns the most human-readable error message the response body offers.
+
+    Falls back to the raw body, which is still more useful to the user than a report that
+    the SDK could not parse it.
+    """
+    try:
+        body = resp.json()
+    except Exception:
+        return str(resp.text)
+
+    if isinstance(body, dict):
+        for key in ("message", "error", "detail"):
+            value = body.get(key)
+            if isinstance(value, str) and value:
+                return value
+
+    return str(resp.text)
 
 
 # --- simple color helpers ---
