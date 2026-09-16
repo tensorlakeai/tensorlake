@@ -252,7 +252,8 @@ export interface SandboxInfo {
   resources: ContainerResourcesInfo;
   timeoutSecs?: number;
   entrypoint?: string[];
-  network?: NetworkConfig;
+  /** Egress network policy currently applied to the sandbox. */
+  networkPolicy?: NetworkConfig;
   poolId?: string;
   outcome?: string;
   terminationReason?: string;

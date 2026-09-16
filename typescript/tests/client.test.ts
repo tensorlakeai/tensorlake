@@ -416,6 +416,36 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("maps network_policy from response to networkPolicy", async () => {
+      installNativeStub({
+        client: {
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              id: "sbx-1",
+              namespace: "default",
+              status: "running",
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
+              network_policy: {
+                allow_internet_access: false,
+                allow_out: [],
+                deny_out: ["198.51.100.0/24"],
+              },
+            }),
+          })),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const info = await client.get("sbx-1");
+      expect(info.networkPolicy).toEqual({
+        allowInternetAccess: false,
+        allowOut: [],
+        denyOut: ["198.51.100.0/24"],
+      });
+      client.close();
+    });
+
     it("maps port access fields from response", async () => {
       installNativeStub({
         client: {
