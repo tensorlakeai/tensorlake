@@ -242,13 +242,14 @@ class _RecordingCreateRustClient:
         return "trace-delete"
 
 
-def _sandbox_info_json(
+def _sandbox_info_payload(
     sandbox_id: str,
     *,
     status: str = "running",
     sandbox_url: str | None = None,
     routing_hint: str | None = None,
-) -> str:
+    network_policy: dict | None = None,
+) -> dict:
     payload = {
         "id": sandbox_id,
         "namespace": "default",
@@ -265,7 +266,13 @@ def _sandbox_info_json(
         payload["sandbox_url"] = sandbox_url
     if routing_hint is not None:
         payload["routing_hint"] = routing_hint
-    return json.dumps(payload)
+    if network_policy is not None:
+        payload["network_policy"] = network_policy
+    return payload
+
+
+def _sandbox_info_json(sandbox_id: str, **kwargs) -> str:
+    return json.dumps(_sandbox_info_payload(sandbox_id, **kwargs))
 
 
 def _make_client(fake: object | None = None) -> AsyncSandboxClient:

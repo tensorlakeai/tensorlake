@@ -359,6 +359,11 @@ class TestSandboxImages(BaseSandboxTest):
 # ---------------------------------------------------------------------------
 
 
+_SANDBOX_NETWORK_POLICY = NetworkConfig(
+    allow_internet_access=False, deny_out=["198.51.100.0/24"]
+)
+
+
 class TestSandboxLifecycle(BaseSandboxTest):
     """Create a sandbox, verify it transitions to Running, delete it,
     verify it transitions to Terminated."""
@@ -381,6 +386,8 @@ class TestSandboxLifecycle(BaseSandboxTest):
             memory_mb=_SANDBOX_MEMORY_MB,
             disk_mb=_SANDBOX_DISK_MB,
             entrypoint=["sleep", "300"],
+            allow_internet_access=False,
+            deny_out=["198.51.100.0/24"],
         )
         self.assertIsNotNone(resp.sandbox_id)
         self.assertIn(resp.status, (SandboxStatus.PENDING, SandboxStatus.RUNNING))
@@ -391,12 +398,17 @@ class TestSandboxLifecycle(BaseSandboxTest):
         info = self.client.get(self.__class__.sandbox_id)
         self.assertEqual(info.sandbox_id, self.__class__.sandbox_id)
         self.assertIn(info.status, (SandboxStatus.PENDING, SandboxStatus.RUNNING))
+        # The server reports the policy as ``network_policy``; this is the
+        # sandbox-level counterpart of the pool round-trip below.
+        self.assertEqual(info.network_policy, _SANDBOX_NETWORK_POLICY)
 
     def test_3_list_sandboxes(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
         sandboxes = self.client.list()
         ids = [s.sandbox_id for s in sandboxes]
         self.assertIn(self.__class__.sandbox_id, ids)
+        listed = next(s for s in sandboxes if s.sandbox_id == self.__class__.sandbox_id)
+        self.assertEqual(listed.network_policy, _SANDBOX_NETWORK_POLICY)
 
     def test_4_sandbox_transitions_to_running(self):
         self.assertIsNotNone(self.__class__.sandbox_id, "Depends on test_1")
