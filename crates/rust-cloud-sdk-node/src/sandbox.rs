@@ -283,11 +283,16 @@ pub struct NativeSandboxClient {
     client: DeferredHttpClient,
     api_url: String,
     namespace: String,
+    timeout_override: Option<Duration>,
 }
 
 impl NativeSandboxClient {
     async fn client(&self) -> napi::Result<SandboxesClient> {
         let client = self.client.get().await?;
+        let client = match self.timeout_override {
+            Some(timeout) => client.with_timeout(Some(timeout)),
+            None => client,
+        };
         let log_client = client.with_base_url(&self.api_url);
         Ok(SandboxesClient::new(
             client,
@@ -333,6 +338,21 @@ impl NativeSandboxClient {
             client: DeferredHttpClient::new(lifecycle_builder),
             api_url,
             namespace: namespace.unwrap_or_else(|| "default".to_string()),
+            timeout_override: None,
+        })
+    }
+
+    /// Preserve deferred initialization and the transport when changing deadlines.
+    #[napi]
+    pub fn with_request_timeout(&self, request_timeout_sec: f64) -> napi::Result<Self> {
+        Ok(Self {
+            client: self.client.clone(),
+            api_url: self.api_url.clone(),
+            namespace: self.namespace.clone(),
+            timeout_override: Some(duration_from_seconds(
+                "request_timeout_sec",
+                request_timeout_sec,
+            )?),
         })
     }
 
@@ -438,16 +458,22 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn get_sandbox(&self, sandbox_id: String) -> napi::Result<TracedJson> {
-        with_retry(self.client().await?, 5, move |c| {
-            let sandbox_id = sandbox_id.clone();
-            async move {
-                let traced = c.get(&sandbox_id).await?;
-                let trace_id = traced.trace_id.clone();
-                let json = serde_json::to_string(&*traced)?;
-                Ok(TracedJson { trace_id, json })
-            }
-        })
+        let client = self.client().await?;
+        let budget = client.http_client().timeout();
+        tensorlake::retry::with_timeout(
+            budget,
+            retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move {
+                    let traced = c.get(&sandbox_id).await?;
+                    let trace_id = traced.trace_id.clone();
+                    let json = serde_json::to_string(&*traced)?;
+                    Ok(TracedJson { trace_id, json })
+                }
+            }),
+        )
         .await
+        .map_err(into_napi_error)
     }
 
     #[napi]
@@ -564,11 +590,17 @@ impl NativeSandboxClient {
 
     #[napi]
     pub async fn resume_sandbox(&self, sandbox_id: String) -> napi::Result<String> {
-        with_retry(self.client().await?, 5, move |c| {
-            let sandbox_id = sandbox_id.clone();
-            async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
-        })
+        let client = self.client().await?;
+        let budget = client.http_client().timeout();
+        tensorlake::retry::with_timeout(
+            budget,
+            retry_async_op(client, 5, move |c| {
+                let sandbox_id = sandbox_id.clone();
+                async move { c.resume(&sandbox_id).await.map(|t| t.trace_id) }
+            }),
+        )
         .await
+        .map_err(into_napi_error)
     }
 
     #[napi]
@@ -1210,13 +1242,19 @@ impl NativeSandboxProxyClient {
 
     #[napi]
     pub async fn health(&self) -> napi::Result<TracedJson> {
-        with_retry(self.client().await?, 5, move |c| async move {
-            let traced = c.health().await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&*traced)?;
-            Ok(TracedJson { trace_id, json })
-        })
+        let client = self.client().await?;
+        let budget = client.http_client().timeout();
+        tensorlake::retry::with_timeout(
+            budget,
+            retry_async_op(client, 5, move |c| async move {
+                let traced = c.health().await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }),
+        )
         .await
+        .map_err(into_napi_error)
     }
 
     #[napi]

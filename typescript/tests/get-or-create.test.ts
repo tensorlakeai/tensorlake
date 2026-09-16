@@ -36,7 +36,7 @@ describe("Sandbox.getOrCreate", () => {
     expect(result).toBe(existing);
     expect(result.bindOutcome).toBe("attached");
     expect(connect).toHaveBeenCalledTimes(1);
-    expect(connect).toHaveBeenCalledWith({ sandboxId: NAME });
+    expect(connect).toHaveBeenCalledWith({ sandboxId: NAME, resume: false });
     expect(create).not.toHaveBeenCalled();
     expect(existing.resume).not.toHaveBeenCalled();
   });
@@ -282,6 +282,7 @@ describe("Sandbox.getOrCreate", () => {
 
     expect(connect).toHaveBeenCalledWith({
       sandboxId: NAME,
+      resume: false,
       apiUrl: "https://api.example.test",
       requestTimeout: 17,
     });

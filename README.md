@@ -130,6 +130,43 @@ with client.create_and_connect(snapshot_id=snapshot.snapshot_id) as sandbox:
     print(result.stdout)
 ```
 
+### Reconnecting after suspension
+
+`Sandbox.connect(id_or_name)` resumes a suspended sandbox and waits until its
+command daemon accepts requests. `AsyncSandbox.connect` and TypeScript
+`Sandbox.connect` have the same behavior. There is no status check to write
+before running a command:
+
+```python
+from tensorlake.sandbox import Sandbox
+
+sandbox = Sandbox.connect("session-name", request_timeout=60)
+result = sandbox.run("echo", args=["ready"])
+```
+
+```typescript
+const sandbox = await Sandbox.connect({ sandboxId: "session-name", requestTimeout: 60 });
+const result = await sandbox.run("echo", { args: ["ready"] });
+```
+
+Connect waits through an in-flight suspend or startup, refreshes routing after
+resume, and checks daemon health. Concurrent callers attach to the same sandbox.
+Missing or terminated sandboxes fail explicitly; connect does not recreate them.
+Authorization and quota errors are preserved. Readiness retries only read-only
+health requests; it does not replay commands after ambiguous failures.
+
+Pass `resume=False` in Python or `resume: false` in TypeScript to preserve passive
+attachment. Metadata `get` and `list` operations never wake a sandbox. The legacy
+`SandboxClient.connect` remains passive. `request_timeout` / `requestTimeout`
+bounds the readiness wait; an omitted timeout uses 300 seconds for connecting
+and preserves the existing default for subsequent command requests. Readiness
+polls share the existing HTTP connection pool while each request uses the
+remaining deadline.
+
+Retained handles also auto-resume on commands through the sandbox proxy. The
+proxy handles suspending/pending transitions before forwarding a command; this
+requires the matching sandbox-proxy/dataplane readiness release.
+
 ### Sandbox Pools
 
 Pre-warm containers for fast startup:
