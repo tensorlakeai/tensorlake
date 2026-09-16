@@ -27,7 +27,9 @@ describe("Sandbox", () => {
 
   describe("constructor", () => {
     it("requires an explicit proxyUrl for direct construction", () => {
-      expect(() => new Sandbox({ sandboxId: "sbx-direct" })).toThrow(SandboxError);
+      expect(() => new Sandbox({ sandboxId: "sbx-direct" })).toThrow(
+        SandboxError,
+      );
       expect(() => new Sandbox({ sandboxId: "sbx-direct" })).toThrow(
         /proxyUrl is required/,
       );
@@ -225,7 +227,7 @@ describe("Sandbox", () => {
       await sbx.resume({ wait: false });
 
       expect(stub.client.connectProxy).toHaveBeenCalledOnce();
-      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1");
+      expect(stub.client.resumeSandbox).toHaveBeenCalledWith("sbx-1", 0);
       sbx.close();
     });
 
@@ -278,7 +280,8 @@ describe("Sandbox", () => {
     });
 
     it("keeps the connect-time env proxy override across resume rebind", async () => {
-      process.env.TENSORLAKE_SANDBOX_PROXY_URL = "https://initial-env.example.com";
+      process.env.TENSORLAKE_SANDBOX_PROXY_URL =
+        "https://initial-env.example.com";
       const responses = [
         sandboxInfo({
           sandbox_url: undefined,
@@ -324,7 +327,8 @@ describe("Sandbox", () => {
         requestTimeout: 7,
       });
       await sbx.health();
-      process.env.TENSORLAKE_SANDBOX_PROXY_URL = "https://later-env.example.com";
+      process.env.TENSORLAKE_SANDBOX_PROXY_URL =
+        "https://later-env.example.com";
 
       await sbx.resume({ timeout: 2, pollInterval: 0.01 });
 
@@ -417,7 +421,10 @@ describe("Sandbox", () => {
 
   describe("run", () => {
     /** A buffered run_process event list (each event a JSON string). */
-    function runEvents(events: unknown[]): { traceId: string; events: string[] } {
+    function runEvents(events: unknown[]): {
+      traceId: string;
+      events: string[];
+    } {
       return { traceId: "t", events: events.map((e) => JSON.stringify(e)) };
     }
 
@@ -437,7 +444,10 @@ describe("Sandbox", () => {
       });
 
       const sbx = makeSandbox();
-      const result = await sbx.run("echo", { args: ["hello"], user: "1000:1000" });
+      const result = await sbx.run("echo", {
+        args: ["hello"],
+        user: "1000:1000",
+      });
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("hello");
       expect(result.stderr).toBe("");
@@ -467,25 +477,31 @@ describe("Sandbox", () => {
       // stream_headers/stream_complete phases were SSE artifacts of the old
       // undici path).
       expect(errorSpy).toHaveBeenCalledWith(
-        expect.stringContaining("[tensorlake:sdk-timing] op=sandbox.run phase=start"),
+        expect.stringContaining(
+          "[tensorlake:sdk-timing] op=sandbox.run phase=start",
+        ),
       );
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining("command_length=4"),
       );
       // The command payload must not leak when payloads are disabled.
-      expect(errorSpy.mock.calls.some(([line]) => String(line).includes("command=echo"))).toBe(
-        false,
-      );
+      expect(
+        errorSpy.mock.calls.some(([line]) =>
+          String(line).includes("command=echo"),
+        ),
+      ).toBe(false);
       expect(errorSpy).toHaveBeenCalledWith(
         expect.stringContaining("phase=complete"),
       );
       // The read file path/contents must never leak into timings.
-      expect(errorSpy.mock.calls.some(([line]) => String(line).includes("secret.txt"))).toBe(
-        false,
-      );
-      expect(errorSpy.mock.calls.some(([line]) => String(line).includes("secret"))).toBe(
-        false,
-      );
+      expect(
+        errorSpy.mock.calls.some(([line]) =>
+          String(line).includes("secret.txt"),
+        ),
+      ).toBe(false);
+      expect(
+        errorSpy.mock.calls.some(([line]) => String(line).includes("secret")),
+      ).toBe(false);
       sbx.close();
     });
 
@@ -551,8 +567,22 @@ describe("Sandbox", () => {
             traceId: "t",
             json: JSON.stringify({
               processes: [
-                { pid: 1, status: "running", command: "bash", args: [], stdin_writable: false, started_at: 1700000000 },
-                { pid: 2, status: "exited", command: "ls", args: [], stdin_writable: false, started_at: 1700000001 },
+                {
+                  pid: 1,
+                  status: "running",
+                  command: "bash",
+                  args: [],
+                  stdin_writable: false,
+                  started_at: 1700000000,
+                },
+                {
+                  pid: 2,
+                  status: "exited",
+                  command: "ls",
+                  args: [],
+                  stdin_writable: false,
+                  started_at: 1700000001,
+                },
               ],
             }),
           })),
@@ -795,10 +825,7 @@ describe("Sandbox", () => {
       const stub = installNativeStub();
 
       const sbx = makeSandbox();
-      await sbx.writeFile(
-        "/tmp/out.txt",
-        new TextEncoder().encode("content"),
-      );
+      await sbx.writeFile("/tmp/out.txt", new TextEncoder().encode("content"));
       const [path, content] = stub.proxy.writeFile.mock.calls[0];
       expect(path).toBe("/tmp/out.txt");
       expect(Buffer.isBuffer(content)).toBe(true);
@@ -814,7 +841,12 @@ describe("Sandbox", () => {
             json: JSON.stringify({
               path: "/tmp",
               entries: [
-                { name: "file.txt", is_dir: false, size: 100, modified_at: 1700000000 },
+                {
+                  name: "file.txt",
+                  is_dir: false,
+                  size: 100,
+                  modified_at: 1700000000,
+                },
                 { name: "subdir", is_dir: true, size: null, modified_at: null },
               ],
             }),
@@ -999,7 +1031,11 @@ describe("Sandbox", () => {
         expect(id).toBe("sbx-1");
         return {
           traceId: "t",
-          json: sandboxInfoBody({ id: "sbx-1", name: "renamed-by-handle", status: "running" }),
+          json: sandboxInfoBody({
+            id: "sbx-1",
+            name: "renamed-by-handle",
+            status: "running",
+          }),
         };
       });
       installNativeStub({ client: { updateSandbox, getSandbox } });
@@ -1013,7 +1049,10 @@ describe("Sandbox", () => {
       expect(sbx.name).toBe("renamed-by-handle");
 
       expect(updateSandbox).toHaveBeenCalledOnce();
-      expect(updateSandbox).toHaveBeenCalledWith("my-original-name", expect.any(String));
+      expect(updateSandbox).toHaveBeenCalledWith(
+        "my-original-name",
+        expect.any(String),
+      );
       // After update resolves the canonical ID, subsequent calls use the UUID.
       expect(getSandbox).toHaveBeenCalledWith("sbx-1");
       sbx.close();
@@ -1031,12 +1070,18 @@ describe("Sandbox", () => {
         expect(id).toBe("sbx-1");
         return {
           traceId: "t",
-          json: JSON.stringify({ snapshot_id: "snap-1", status: "in_progress" }),
+          json: JSON.stringify({
+            snapshot_id: "snap-1",
+            status: "in_progress",
+          }),
         };
       });
       installNativeStub({ client: { updateSandbox, createSnapshot } });
 
-      const client = new SandboxClient({ apiUrl: "http://localhost:8900" }, true);
+      const client = new SandboxClient(
+        { apiUrl: "http://localhost:8900" },
+        true,
+      );
       const sbx = client.connect("my-original-name");
       sbx._setOwner(client);
 
@@ -1061,13 +1106,20 @@ describe("Sandbox", () => {
         json: JSON.stringify({
           snapshots: [
             { snapshot_id: "snap-1", sandbox_id: "sbx-1", status: "completed" },
-            { snapshot_id: "snap-2", sandbox_id: "other-sbx", status: "completed" },
+            {
+              snapshot_id: "snap-2",
+              sandbox_id: "other-sbx",
+              status: "completed",
+            },
           ],
         }),
       }));
       installNativeStub({ client: { updateSandbox, listSnapshots } });
 
-      const client = new SandboxClient({ apiUrl: "http://localhost:8900" }, true);
+      const client = new SandboxClient(
+        { apiUrl: "http://localhost:8900" },
+        true,
+      );
       const sbx = client.connect("my-original-name");
       sbx._setOwner(client);
 
@@ -1244,7 +1296,11 @@ describe("Sandbox", () => {
       const stub = installNativeStub({
         client: {
           attachFileSystem: vi.fn(
-            async (sandboxId: string, fileSystemId: string, mountPath: string) => {
+            async (
+              sandboxId: string,
+              fileSystemId: string,
+              mountPath: string,
+            ) => {
               expect(sandboxId).toBe("sbx-abc");
               expect(fileSystemId).toBe("file_system_abc");
               expect(mountPath).toBe("/mnt/skills");
@@ -1252,7 +1308,10 @@ describe("Sandbox", () => {
                 traceId: "t",
                 json: fsSandboxInfoBody({
                   file_systems: [
-                    { file_system_id: "file_system_abc", mount_path: "/mnt/skills" },
+                    {
+                      file_system_id: "file_system_abc",
+                      mount_path: "/mnt/skills",
+                    },
                   ],
                 }),
               };
@@ -1265,10 +1324,7 @@ describe("Sandbox", () => {
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
-      const info = await sbx.attachFileSystem(
-        "file_system_abc",
-        "/mnt/skills",
-      );
+      const info = await sbx.attachFileSystem("file_system_abc", "/mnt/skills");
       expect(info.fileSystems).toEqual([
         { fileSystemId: "file_system_abc", mountPath: "/mnt/skills" },
       ]);
@@ -1314,10 +1370,14 @@ describe("Sandbox", () => {
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
-      const info = await sbx.attachFileSystem("file_system_abc", "/mnt/skills", {
-        readOnly: true,
-        prefetch: true,
-      });
+      const info = await sbx.attachFileSystem(
+        "file_system_abc",
+        "/mnt/skills",
+        {
+          readOnly: true,
+          prefetch: true,
+        },
+      );
       expect(info.fileSystems).toEqual([
         {
           fileSystemId: "file_system_abc",
@@ -1345,7 +1405,10 @@ describe("Sandbox", () => {
             traceId: "t",
             json: fsSandboxInfoBody({
               file_systems: [
-                { file_system_id: "file_system_abc", mount_path: "/mnt/skills" },
+                {
+                  file_system_id: "file_system_abc",
+                  mount_path: "/mnt/skills",
+                },
               ],
             }),
           };
@@ -1405,10 +1468,14 @@ describe("Sandbox", () => {
         sandboxId: "sbx-abc",
         apiUrl: "http://localhost:8900",
       });
-      const info = await sbx.attachFileSystem("file_system_abc", "/mnt/skills", {
-        readOnly: true,
-        snapshotId: "0abc123def",
-      });
+      const info = await sbx.attachFileSystem(
+        "file_system_abc",
+        "/mnt/skills",
+        {
+          readOnly: true,
+          snapshotId: "0abc123def",
+        },
+      );
       expect(info.fileSystems).toEqual([
         {
           fileSystemId: "file_system_abc",
@@ -1471,7 +1538,10 @@ describe("Sandbox", () => {
             traceId: "t",
             json: fsSandboxInfoBody({
               file_systems: [
-                { file_system_id: "file_system_abc", mount_path: "/mnt/skills" },
+                {
+                  file_system_id: "file_system_abc",
+                  mount_path: "/mnt/skills",
+                },
               ],
             }),
           })),
@@ -1507,9 +1577,7 @@ describe("Sandbox", () => {
       installNativeStub();
       const sbx = makeSandbox("sbx-1");
       const url = sbx.ptyWsUrl("sess-1", "tok-1");
-      expect(url).toBe(
-        "ws://localhost:9443/api/v1/pty/sess-1/ws?token=tok-1",
-      );
+      expect(url).toBe("ws://localhost:9443/api/v1/pty/sess-1/ws?token=tok-1");
       sbx.close();
     });
   });

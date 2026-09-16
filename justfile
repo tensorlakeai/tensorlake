@@ -252,6 +252,13 @@ test-crate crate:
 test-artifact-storage:
     cargo test --locked -p tensorlake --lib artifact_storage::
 
+# Build the native bindings first (develop-release and the TypeScript native
+# build), then verify lifecycle wire requests and sync/async client behavior.
+test-sandbox-lifecycle python="python3":
+    cargo test --locked -p tensorlake --test sandboxes lifecycle_completion_wait
+    cd typescript && npm test -- tests/client.test.ts tests/sandbox.test.ts
+    "{{python}}" -m pytest tests/sandbox/test_client_rust_backend.py tests/sandbox/test_client_rust_backend_async.py
+
 # Guard every SDK/CLI HTTP constructor, including feature-gated fast-clone paths in full CI.
 # This focused gate does not enable unrelated style lints; the existing `clippy` recipe does.
 lint-http-transports:
