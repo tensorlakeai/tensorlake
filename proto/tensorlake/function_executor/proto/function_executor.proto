@@ -451,6 +451,8 @@ message AllocationExecutionEventFinishAllocation {
     optional SerializedObjectInsideBLOB request_error_output = 6;
     // BLOB with uploaded request error output, if any.
     optional BLOB uploaded_request_error_blob = 7;
+    // Logical clock of the allocation event that caused a replay failure.
+    optional uint64 allocation_event_clock = 8;
 }
 
 // A single execution event in the allocation execution log.
