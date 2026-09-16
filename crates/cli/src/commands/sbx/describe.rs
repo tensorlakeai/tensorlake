@@ -18,7 +18,6 @@ struct SandboxDescription {
     resources: Option<SandboxResources>,
     #[serde(alias = "allow_unauthenticated_proxy_access")]
     allow_unauthenticated_access: Option<bool>,
-    #[serde(alias = "network")]
     network_policy: Option<SandboxNetwork>,
     created_at: Option<SandboxTimestamp>,
     terminated_at: Option<SandboxTimestamp>,
@@ -284,19 +283,10 @@ mod tests {
     }
 
     #[test]
-    fn describe_reads_network_policy_and_legacy_network_keys() {
+    fn describe_reads_network_policy() {
         let current = parse(r#","network_policy":{"allow_internet_access":false}"#);
         assert_eq!(
             current
-                .network_policy
-                .as_ref()
-                .and_then(|n| n.allow_internet_access),
-            Some(false)
-        );
-
-        let legacy = parse(r#","network":{"allow_internet_access":false}"#);
-        assert_eq!(
-            legacy
                 .network_policy
                 .as_ref()
                 .and_then(|n| n.allow_internet_access),

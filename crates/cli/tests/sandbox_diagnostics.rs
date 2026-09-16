@@ -178,7 +178,7 @@ async fn describe_preserves_legacy_fields_and_timestamp_formats() {
                 "namespace": "example-namespace", "name": "example-name",
                 "resources": {"cpus": 0.5, "memory_mb": 1024, "ephemeral_disk_mb": 2048},
                 "allow_unauthenticated_proxy_access": true,
-                "network": {"allow_internet_access": false, "allow_out": ["allowed.example"], "deny_out": ["denied.example"]},
+                "network_policy": {"allow_internet_access": false, "allow_out": ["allowed.example"], "deny_out": ["denied.example"]},
                 "created_at": created_at, "terminated_at": null,
                 "timeout_secs": 120, "sandboxUrl": "https://sbx-legacy.example.com",
                 "entrypoint": ["/bin/sh", "-l"], "exposedPorts": [8080, 9090],

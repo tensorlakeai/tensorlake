@@ -648,9 +648,8 @@ pub struct SandboxInfo {
     pub timeout_secs: Option<i64>,
     #[serde(default)]
     pub entrypoint: Option<Vec<String>>,
-    /// Egress network policy reported by the server. The wire key is
-    /// `network_policy`; `network` is accepted for older servers.
-    #[serde(default, alias = "network")]
+    /// Egress network policy currently applied to the sandbox.
+    #[serde(default)]
     pub network_policy: Option<NetworkConfig>,
     #[serde(default)]
     pub pool_id: Option<String>,
@@ -1122,12 +1121,6 @@ mod tests {
         let mut current = base.clone();
         current["network_policy"] = serde_json::to_value(&policy).unwrap();
         let info: SandboxInfo = serde_json::from_value(current).unwrap();
-        assert_eq!(info.network_policy, Some(policy.clone()));
-
-        // Older servers spelled the key `network`.
-        let mut legacy = base.clone();
-        legacy["network"] = serde_json::to_value(&policy).unwrap();
-        let info: SandboxInfo = serde_json::from_value(legacy).unwrap();
         assert_eq!(info.network_policy, Some(policy.clone()));
 
         let info: SandboxInfo = serde_json::from_value(base).unwrap();

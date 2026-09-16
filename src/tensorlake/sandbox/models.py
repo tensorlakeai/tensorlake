@@ -6,14 +6,7 @@ from enum import Enum
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse, urlunparse
 
-from pydantic import (
-    AliasChoices,
-    BaseModel,
-    BeforeValidator,
-    ConfigDict,
-    Field,
-    model_serializer,
-)
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_serializer
 
 _SANDBOX_MANAGEMENT_PORT = 9501
 
@@ -495,13 +488,8 @@ class SandboxInfo(BaseModel):
     entrypoint: list[str] | None = None
     network_policy: NetworkConfig | None = Field(
         default=None,
-        validation_alias=AliasChoices("network_policy", "network"),
+        description="Egress network policy currently applied to the sandbox.",
     )
-    """Egress network policy currently applied to the sandbox.
-
-    The server reports it under ``network_policy``; ``network`` is accepted
-    for older servers.
-    """
     pool_id: str | None = None
     outcome: str | None = None
     termination_reason: str | None = None
@@ -528,6 +516,15 @@ class SandboxInfo(BaseModel):
             stacklevel=2,
         )
         return self.network_policy
+
+    @network.setter
+    def network(self, value: NetworkConfig | None) -> None:
+        warnings.warn(
+            "SandboxInfo.network is deprecated; use SandboxInfo.network_policy",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        self.network_policy = value
 
     def url_for_port(self, port: int = _SANDBOX_MANAGEMENT_PORT) -> str | None:
         """Return the public URL for the management API or an exposed user port."""
