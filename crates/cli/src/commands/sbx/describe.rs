@@ -293,6 +293,10 @@ mod tests {
             Some(false)
         );
 
+        // `network` is the request key and is not an alias for the response.
+        let request_key = parse(r#","network":{"allow_internet_access":false}"#);
+        assert!(request_key.network_policy.is_none());
+
         assert!(parse("").network_policy.is_none());
     }
 }

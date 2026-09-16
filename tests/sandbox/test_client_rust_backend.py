@@ -239,14 +239,14 @@ class _RecordingCreateRustClient:
         return "trace-delete"
 
 
-def _sandbox_info_json(
+def _sandbox_info_payload(
     sandbox_id: str,
     *,
     status: str = "running",
     sandbox_url: str | None = None,
     routing_hint: str | None = None,
     network_policy: dict | None = None,
-) -> str:
+) -> dict:
     payload = {
         "id": sandbox_id,
         "namespace": "default",
@@ -265,7 +265,11 @@ def _sandbox_info_json(
         payload["routing_hint"] = routing_hint
     if network_policy is not None:
         payload["network_policy"] = network_policy
-    return json.dumps(payload)
+    return payload
+
+
+def _sandbox_info_json(sandbox_id: str, **kwargs) -> str:
+    return json.dumps(_sandbox_info_payload(sandbox_id, **kwargs))
 
 
 class TestSandboxClientRustBackend(unittest.TestCase):
@@ -619,7 +623,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                 )
 
             def list_sandboxes_json(self):
-                sandbox = json.loads(_sandbox_info_json("sbx-1", network_policy=policy))
+                sandbox = _sandbox_info_payload("sbx-1", network_policy=policy)
                 return ("trace-list-sandboxes", json.dumps({"sandboxes": [sandbox]}))
 
         client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")
@@ -632,18 +636,16 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(info.network_policy, expected)
         with self.assertWarns(DeprecationWarning):
             self.assertEqual(info.network, expected)
-        # ``Traced`` only forwards attribute reads, so assign on the model.
-        model = info.value
-        with self.assertWarns(DeprecationWarning):
-            model.network = None
-        self.assertIsNone(model.network_policy)
 
         listed = list(client.list())
         self.assertEqual(listed[0].network_policy, expected)
 
-    def test_sandbox_info_network_policy_defaults_to_none(self):
-        info = SandboxInfo.model_validate_json(_sandbox_info_json("sbx-1"))
-        self.assertIsNone(info.network_policy)
+    def test_sandbox_info_ignores_request_side_network_key(self):
+        # ``network`` is the create/update request key. The server never
+        # reports the policy under it, so it must not populate the model.
+        payload = _sandbox_info_payload("sbx-1")
+        payload["network"] = {"allow_internet_access": False}
+        self.assertIsNone(SandboxInfo.model_validate(payload).network_policy)
 
     def test_connect_prefers_server_sandbox_url_when_proxy_url_omitted(self):
         client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")

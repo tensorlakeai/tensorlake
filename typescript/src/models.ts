@@ -254,11 +254,6 @@ export interface SandboxInfo {
   entrypoint?: string[];
   /** Egress network policy currently applied to the sandbox. */
   networkPolicy?: NetworkConfig;
-  /**
-   * @deprecated Never populated; the server reports the policy as
-   * `networkPolicy`. Kept only so existing reads keep compiling.
-   */
-  network?: NetworkConfig;
   poolId?: string;
   outcome?: string;
   terminationReason?: string;

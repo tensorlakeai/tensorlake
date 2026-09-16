@@ -1123,6 +1123,13 @@ mod tests {
         let info: SandboxInfo = serde_json::from_value(current).unwrap();
         assert_eq!(info.network_policy, Some(policy.clone()));
 
+        // `network` is the request key; the server never reports the policy
+        // under it, so it must not be read as an alias.
+        let mut request_key = base.clone();
+        request_key["network"] = serde_json::to_value(&policy).unwrap();
+        let info: SandboxInfo = serde_json::from_value(request_key).unwrap();
+        assert_eq!(info.network_policy, None);
+
         let info: SandboxInfo = serde_json::from_value(base).unwrap();
         assert_eq!(info.network_policy, None);
 

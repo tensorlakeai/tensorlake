@@ -517,15 +517,6 @@ class SandboxInfo(BaseModel):
         )
         return self.network_policy
 
-    @network.setter
-    def network(self, value: NetworkConfig | None) -> None:
-        warnings.warn(
-            "SandboxInfo.network is deprecated; use SandboxInfo.network_policy",
-            DeprecationWarning,
-            stacklevel=2,
-        )
-        self.network_policy = value
-
     def url_for_port(self, port: int = _SANDBOX_MANAGEMENT_PORT) -> str | None:
         """Return the public URL for the management API or an exposed user port."""
 
