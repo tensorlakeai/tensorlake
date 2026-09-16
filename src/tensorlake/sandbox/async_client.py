@@ -461,6 +461,7 @@ class AsyncSandboxClient:
         file_system_id: str,
         mount_path: str,
         *,
+        source_path: str = "/",
         read_only: bool = False,
         prefetch: bool = False,
         snapshot_id: str | None = None,
@@ -481,6 +482,7 @@ class AsyncSandboxClient:
             FileSystemMount(
                 file_system_id=file_system_id,
                 mount_path=mount_path,
+                source_path=source_path,
                 read_only=read_only,
                 prefetch=prefetch,
                 snapshot_id=snapshot_id,
@@ -494,6 +496,7 @@ class AsyncSandboxClient:
                 sandbox_id=sandbox_id,
                 file_system_id=file_system_id,
                 mount_path=mount_path,
+                source_path=source_path,
                 read_only=read_only,
                 prefetch=prefetch,
                 snapshot_id=snapshot_id,
