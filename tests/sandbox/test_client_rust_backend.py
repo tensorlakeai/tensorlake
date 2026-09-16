@@ -8,6 +8,7 @@ from tensorlake.sandbox import (
     GpuRequest,
     NetworkConfig,
     PoolInUseError,
+    SandboxInfo,
     SandboxNotFoundError,
     SandboxNotRoutableError,
     SandboxStatus,
@@ -598,6 +599,85 @@ class TestSandboxClientRustBackend(unittest.TestCase):
 
         with self.assertRaisesRegex(SandboxError, "Provide only one of"):
             client.connect("stable-name", sandbox_id="sbx-123")
+
+    def test_get_reads_network_policy_from_server_response(self):
+        policy = {
+            "allow_internet_access": False,
+            "allow_out": [],
+            "deny_out": ["198.51.100.0/24"],
+        }
+
+        class _NetworkRustClient(_FakeRustClient):
+            def get_sandbox_json(self, sandbox_id):
+                self.last_get_sandbox_id = sandbox_id
+                return (
+                    "trace-get-sandbox",
+                    json.dumps(
+                        {
+                            "id": sandbox_id,
+                            "namespace": "default",
+                            "status": "running",
+                            "resources": {
+                                "cpus": 1.0,
+                                "memory_mb": 512,
+                                "disk_mb": 1024,
+                            },
+                            # The server reports the policy under this key.
+                            "network_policy": policy,
+                        }
+                    ),
+                )
+
+            def list_sandboxes_json(self):
+                return (
+                    "trace-list-sandboxes",
+                    json.dumps(
+                        {
+                            "sandboxes": [
+                                {
+                                    "id": "sbx-1",
+                                    "namespace": "default",
+                                    "status": "running",
+                                    "resources": {
+                                        "cpus": 1.0,
+                                        "memory_mb": 512,
+                                        "disk_mb": 1024,
+                                    },
+                                    "network_policy": policy,
+                                }
+                            ]
+                        }
+                    ),
+                )
+
+        client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")
+        client._rust_client = _NetworkRustClient()
+
+        expected = NetworkConfig(
+            allow_internet_access=False, deny_out=["198.51.100.0/24"]
+        )
+        info = client.get("sbx-1")
+        self.assertEqual(info.network_policy, expected)
+        with self.assertWarns(DeprecationWarning):
+            self.assertEqual(info.network, expected)
+
+        listed = list(client.list())
+        self.assertEqual(listed[0].network_policy, expected)
+
+    def test_sandbox_info_accepts_legacy_network_key(self):
+        base = {
+            "id": "sbx-1",
+            "namespace": "default",
+            "status": "running",
+            "resources": {"cpus": 1.0, "memory_mb": 512, "disk_mb": 1024},
+        }
+        legacy = SandboxInfo.model_validate(
+            {**base, "network": {"allow_internet_access": False}}
+        )
+        self.assertEqual(
+            legacy.network_policy, NetworkConfig(allow_internet_access=False)
+        )
+        self.assertIsNone(SandboxInfo.model_validate(base).network_policy)
 
     def test_connect_prefers_server_sandbox_url_when_proxy_url_omitted(self):
         client = SandboxClient(api_url="https://api.tensorlake.ai", api_key="k")

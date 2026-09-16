@@ -648,8 +648,10 @@ pub struct SandboxInfo {
     pub timeout_secs: Option<i64>,
     #[serde(default)]
     pub entrypoint: Option<Vec<String>>,
-    #[serde(default)]
-    pub network: Option<NetworkConfig>,
+    /// Egress network policy reported by the server. The wire key is
+    /// `network_policy`; `network` is accepted for older servers.
+    #[serde(default, alias = "network")]
+    pub network_policy: Option<NetworkConfig>,
     #[serde(default)]
     pub pool_id: Option<String>,
     #[serde(default)]
@@ -1101,6 +1103,48 @@ mod tests {
                 deny_out: vec![],
             })
         );
+    }
+
+    #[test]
+    fn sandbox_info_reads_network_policy_wire_key() {
+        let policy = NetworkConfig {
+            allow_internet_access: false,
+            allow_out: vec![],
+            deny_out: vec!["198.51.100.0/24".to_string()],
+        };
+        let base = serde_json::json!({
+            "id": "sbx-1",
+            "namespace": "default",
+            "status": "running",
+            "resources": {"cpus": 1.0, "memory_mb": 1024, "disk_mb": 1024}
+        });
+
+        let mut current = base.clone();
+        current["network_policy"] = serde_json::to_value(&policy).unwrap();
+        let info: SandboxInfo = serde_json::from_value(current).unwrap();
+        assert_eq!(info.network_policy, Some(policy.clone()));
+
+        // Older servers spelled the key `network`.
+        let mut legacy = base.clone();
+        legacy["network"] = serde_json::to_value(&policy).unwrap();
+        let info: SandboxInfo = serde_json::from_value(legacy).unwrap();
+        assert_eq!(info.network_policy, Some(policy.clone()));
+
+        let info: SandboxInfo = serde_json::from_value(base).unwrap();
+        assert_eq!(info.network_policy, None);
+
+        // Re-serialization (what the Python/TS bindings hand to their
+        // models) uses the canonical key.
+        let out = serde_json::to_value(SandboxInfo {
+            network_policy: Some(policy.clone()),
+            ..info
+        })
+        .unwrap();
+        assert_eq!(
+            out["network_policy"],
+            serde_json::to_value(&policy).unwrap()
+        );
+        assert!(out.get("network").is_none());
     }
 
     #[test]
