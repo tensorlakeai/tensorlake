@@ -1,6 +1,6 @@
 {
   "name": "tensorlake-native-darwin-arm64",
-  "version": "0.5.133",
+  "version": "0.5.134",
   "description": "Tensorlake native Node.js binding for macOS arm64",
   "repository": {
     "type": "git",
