@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from tensorlake.sandbox import Pty, Sandbox
+from tensorlake.sandbox.pty import _prepare_sync_ws_connect
 
 
 class _FakeRustProxyClient:
@@ -172,6 +173,24 @@ class TestPty(unittest.TestCase):
                 sandbox.create_pty(command="/bin/bash")
 
             delete_mock.assert_called_once_with("sess-1", timeout=10.0)
+
+
+class TestPrepareSyncWsConnect(unittest.TestCase):
+    """Pure-function tests for the websocket-client Host-header workaround."""
+
+    def test_no_host_header_is_passthrough(self):
+        header, kwargs = _prepare_sync_ws_connect({"X-PTY-Token": "tok"})
+        self.assertEqual(header, ["X-PTY-Token: tok"])
+        self.assertEqual(kwargs, {})
+
+    def test_host_header_moves_to_host_option(self):
+        header, kwargs = _prepare_sync_ws_connect(
+            {"Host": "sandbox.example.com", "X-PTY-Token": "tok"}
+        )
+        # websocket-client writes its own Host line and appends ``header``
+        # verbatim, so Host must not appear in the list.
+        self.assertEqual(header, ["X-PTY-Token: tok"])
+        self.assertEqual(kwargs, {"host": "sandbox.example.com"})
 
 
 if __name__ == "__main__":
