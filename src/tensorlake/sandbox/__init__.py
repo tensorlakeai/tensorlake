@@ -78,6 +78,7 @@ from .models import (
 )
 from .pty import AsyncPty, Pty
 from .sandbox import Sandbox
+from .tunnel import AsyncTcpTunnel, TcpTunnel, TunnelAddress
 
 __all__ = [
     # Lifecycle management
@@ -89,6 +90,9 @@ __all__ = [
     "Pty",
     "AsyncPty",
     "Desktop",
+    "TcpTunnel",
+    "AsyncTcpTunnel",
+    "TunnelAddress",
     # Lifecycle models
     "SandboxStatus",
     "GetOrCreateOutcome",
