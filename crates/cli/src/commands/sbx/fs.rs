@@ -15,6 +15,21 @@ use crate::commands::sbx::sandbox_endpoint;
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
 
+pub(super) fn is_canonical_source_path(path: &str) -> bool {
+    if path.len() > 4096
+        || !path.starts_with('/')
+        || path.chars().any(|character| character.is_control())
+    {
+        return false;
+    }
+    path == "/"
+        || (!path.ends_with('/')
+            && path
+                .split('/')
+                .skip(1)
+                .all(|component| !matches!(component, "" | "." | "..")))
+}
+
 /// Parse a sandbox lifecycle response into typed [`SandboxInfo`], surfacing a
 /// useful error on non-2xx.
 async fn parse_sandbox_response(resp: Response, action: &str) -> Result<SandboxInfo> {
@@ -39,7 +54,7 @@ fn print_mounts_table(mounts: &[FileSystemMount]) {
         return;
     }
 
-    let mut table = new_table(&["File System ID", "Mount Path", "Options"]);
+    let mut table = new_table(&["File System ID", "Source Path", "Mount Path", "Options"]);
     for mount in mounts {
         let mut options = Vec::new();
         if mount.read_only {
@@ -57,6 +72,7 @@ fn print_mounts_table(mounts: &[FileSystemMount]) {
         };
         table.add_row(vec![
             Cell::new(source),
+            Cell::new(mount.source_path.as_str()),
             Cell::new(mount.mount_path.as_str()),
             Cell::new(options.join(",")),
         ]);
@@ -71,12 +87,18 @@ fn print_mounts_table(mounts: &[FileSystemMount]) {
 /// users fail fast offline.
 fn build_attach_body(
     file_system_id: &str,
+    source_path: &str,
     mount_path: &str,
     read_only: bool,
     prefetch: bool,
     snapshot_id: Option<&str>,
     owner: Option<&str>,
 ) -> Result<serde_json::Value> {
+    if !is_canonical_source_path(source_path) {
+        return Err(CliError::usage(
+            "--source-path must be a canonical absolute path".to_string(),
+        ));
+    }
     if snapshot_id.is_some() && !read_only {
         return Err(CliError::usage(
             "--snapshot requires --read-only: snapshot-pinned mounts are read-only".to_string(),
@@ -86,6 +108,9 @@ fn build_attach_body(
         "file_system_id": file_system_id,
         "mount_path": mount_path,
     });
+    if source_path != "/" {
+        body["source_path"] = serde_json::Value::String(source_path.to_string());
+    }
     if read_only {
         body["read_only"] = serde_json::Value::Bool(true);
     }
@@ -106,6 +131,7 @@ pub async fn attach(
     ctx: &CliContext,
     sandbox_id: &str,
     file_system_id: &str,
+    source_path: &str,
     mount_path: &str,
     read_only: bool,
     prefetch: bool,
@@ -117,6 +143,7 @@ pub async fn attach(
     let url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}/file_systems"));
     let body = build_attach_body(
         file_system_id,
+        source_path,
         mount_path,
         read_only,
         prefetch,
@@ -198,7 +225,8 @@ mod tests {
 
     #[test]
     fn attach_body_omits_unset_mount_modes() {
-        let body = build_attach_body("skills", "/mnt/skills", false, false, None, None).unwrap();
+        let body =
+            build_attach_body("skills", "/", "/mnt/skills", false, false, None, None).unwrap();
         assert_eq!(
             body,
             serde_json::json!({
@@ -212,6 +240,7 @@ mod tests {
     fn attach_body_includes_snapshot_pin_with_read_only() {
         let body = build_attach_body(
             "skills",
+            "/",
             "/mnt/skills",
             true,
             false,
@@ -231,9 +260,51 @@ mod tests {
     }
 
     #[test]
+    fn attach_body_includes_non_root_source_path() {
+        let body = build_attach_body(
+            "skills",
+            "/shared/models",
+            "/mnt/models",
+            true,
+            false,
+            None,
+            None,
+        )
+        .unwrap();
+        assert_eq!(
+            body,
+            serde_json::json!({
+                "file_system_id": "skills",
+                "source_path": "/shared/models",
+                "mount_path": "/mnt/models",
+                "read_only": true,
+            })
+        );
+    }
+
+    #[test]
+    fn attach_body_rejects_non_canonical_source_path() {
+        for source_path in ["", "relative", "//shared", "/shared/", "/shared/../secrets"] {
+            assert!(
+                build_attach_body(
+                    "skills",
+                    source_path,
+                    "/mnt/models",
+                    false,
+                    false,
+                    None,
+                    None,
+                )
+                .is_err()
+            );
+        }
+    }
+
+    #[test]
     fn attach_body_rejects_snapshot_pin_without_read_only() {
         let error = build_attach_body(
             "skills",
+            "/",
             "/mnt/skills",
             false,
             true,
@@ -252,7 +323,16 @@ mod tests {
     #[test]
     fn attach_body_includes_owner_only_when_set() {
         let body =
-            build_attach_body("skills", "/mnt/skills", false, false, None, Some("agent")).unwrap();
+            build_attach_body(
+                "skills",
+                "/",
+                "/mnt/skills",
+                false,
+                false,
+                None,
+                Some("agent"),
+            )
+            .unwrap();
         assert_eq!(
             body,
             serde_json::json!({
