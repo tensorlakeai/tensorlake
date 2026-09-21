@@ -311,7 +311,11 @@ impl ArtifactStorageClient {
             git_username,
             git_token,
         )?;
-        let response = request_builder.json(&request).send().await?;
+        // Creation is idempotent (a replay of an already-created name answers 409), so a
+        // congestion 503 + Retry-After or a transport failure is replayed like any other
+        // idempotent request instead of surfacing as a terminal error to one-off filesystem
+        // creators.
+        let response = send_idempotent(request_builder.json(&request)).await?;
         decode_empty(response, trace_id).await
     }
 
@@ -3876,6 +3880,89 @@ mod tests {
         );
         server.await.unwrap();
         assert_eq!(*hits.lock().unwrap(), 3);
+    }
+
+    /// Repository/filesystem creation goes through the idempotent sender: a congestion 503 with
+    /// `Retry-After` (the artifact-storage answer to an FDB transaction-window overrun) is
+    /// replayed instead of surfacing as a terminal error to a one-off filesystem creator.
+    #[tokio::test]
+    async fn create_repo_replays_congestion_rejections() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+        let seen = requests.clone();
+        let server = tokio::spawn(async move {
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut bytes = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0);
+                    bytes.extend_from_slice(&chunk[..read]);
+                    if let Some(offset) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break offset + 4;
+                    }
+                };
+                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                let content_len = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while bytes.len() < header_end + content_len {
+                    let mut chunk = [0u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert_ne!(read, 0);
+                    bytes.extend_from_slice(&chunk[..read]);
+                }
+                seen.lock().unwrap().push(format!(
+                    "{} {}",
+                    headers.lines().next().unwrap(),
+                    String::from_utf8_lossy(&bytes[header_end..])
+                ));
+                let response = if attempt == 0 {
+                    "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Type: text/plain\r\nContent-Length: 49\r\nConnection: close\r\n\r\ncreate repo: transaction timed out; retry shortly"
+                } else {
+                    "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                };
+                stream.write_all(response.as_bytes()).await.unwrap();
+            }
+        });
+        let _ = rustls::crypto::ring::default_provider().install_default();
+        let client = super::ArtifactStorageClient::with_http_client(
+            None,
+            &base,
+            crate::http_transport::https_builder().build().unwrap(),
+        );
+        client
+            .create_repo_with_credential(
+                "proj",
+                "one-off-fs",
+                None,
+                Some("filesystem"),
+                "git",
+                "tok",
+            )
+            .await
+            .expect("the replayed create succeeds");
+        server.await.unwrap();
+        let seen = requests.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            2,
+            "one rejected attempt plus one replay: {seen:?}"
+        );
+        for request in seen.iter() {
+            assert!(
+                request.starts_with("POST /project/proj/repos/one-off-fs "),
+                "every attempt is the same create: {request}"
+            );
+            assert!(request.contains("\"kind\":\"filesystem\""), "{request}");
+        }
     }
 
     #[tokio::test]
