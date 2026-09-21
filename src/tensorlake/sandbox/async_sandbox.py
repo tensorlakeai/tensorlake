@@ -69,6 +69,7 @@ from .sandbox import (
     _resolve_process_arg,
     _validate_managed_name_client_side,
 )
+from .tunnel import DEFAULT_LOCAL_HOST, DEFAULT_TUNNEL_CONNECT_TIMEOUT, AsyncTcpTunnel
 
 if TYPE_CHECKING:
     from .async_client import AsyncSandboxClient
@@ -1341,6 +1342,30 @@ class AsyncSandbox:
             except Exception:
                 pass
             raise
+
+    async def create_tunnel(
+        self,
+        remote_port: int,
+        *,
+        local_host: str = DEFAULT_LOCAL_HOST,
+        local_port: int | None = None,
+        connect_timeout: float = DEFAULT_TUNNEL_CONNECT_TIMEOUT,
+    ) -> AsyncTcpTunnel:
+        """Open a TCP tunnel to a port inside the sandbox and return the local listener.
+
+        Each connection to ``local_host:local_port`` is relayed to
+        ``remote_port`` inside the sandbox. ``local_port`` defaults to
+        ``remote_port``; pass ``0`` to bind an ephemeral port. Close the
+        returned :class:`~tensorlake.sandbox.AsyncTcpTunnel` when done.
+        """
+        return await AsyncTcpTunnel.listen(
+            base_url=self._base_url,
+            ws_headers=self._proxy_headers,
+            remote_port=remote_port,
+            local_host=local_host,
+            local_port=local_port,
+            connect_timeout=connect_timeout,
+        )
 
     # --- Health and info ---
 

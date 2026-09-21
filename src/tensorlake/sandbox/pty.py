@@ -59,6 +59,25 @@ def _prepare_async_ws_connect(
     return ws_url, list(headers.items()), connect_kwargs
 
 
+def _prepare_sync_ws_connect(
+    ws_headers: dict[str, str],
+) -> tuple[list[str], dict[str, Any]]:
+    """Split a custom Host header out of the header list for websocket-client.
+
+    ``websocket.create_connection`` always writes its own Host line and then
+    appends every entry of ``header`` verbatim, so passing ``Host`` there
+    yields two Host headers in the upgrade request. The library exposes a
+    ``host`` option that replaces its generated Host line, so route the
+    override through that option instead.
+    """
+    headers = dict(ws_headers)
+    host_override = headers.pop("Host", None)
+    connect_kwargs: dict[str, Any] = {}
+    if host_override is not None:
+        connect_kwargs["host"] = host_override
+    return [f"{key}: {value}" for key, value in headers.items()], connect_kwargs
+
+
 def _ensure_token_query_param(ws_url: str, token: str) -> tuple[str, str]:
     parsed = urlparse(ws_url)
     query = parse_qs(parsed.query, keep_blank_values=True)
@@ -170,14 +189,14 @@ class Pty:
             if self._ws is not None:
                 return self
 
+            header, connect_kwargs = _prepare_sync_ws_connect(self._ws_headers)
             try:
                 ws = websocket.create_connection(
                     self._ws_url,
-                    header=[
-                        f"{key}: {value}" for key, value in self._ws_headers.items()
-                    ],
+                    header=header,
                     timeout=self._connect_timeout,
                     enable_multithread=True,
+                    **connect_kwargs,
                 )
             except Exception as e:
                 raise SandboxConnectionError(

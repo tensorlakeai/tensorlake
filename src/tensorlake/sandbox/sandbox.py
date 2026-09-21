@@ -55,6 +55,7 @@ from .models import (
     SnapshotWaitCondition,
     StdinMode,
 )
+from .tunnel import DEFAULT_LOCAL_HOST, DEFAULT_TUNNEL_CONNECT_TIMEOUT, TcpTunnel
 
 # Avoid circular import: sandbox.py ↔ client.py.  With ``from __future__
 # import annotations`` the type string is never evaluated at runtime, but
@@ -2018,6 +2019,30 @@ class Sandbox:
             except Exception:
                 pass
             raise
+
+    def create_tunnel(
+        self,
+        remote_port: int,
+        *,
+        local_host: str = DEFAULT_LOCAL_HOST,
+        local_port: int | None = None,
+        connect_timeout: float = DEFAULT_TUNNEL_CONNECT_TIMEOUT,
+    ) -> TcpTunnel:
+        """Open a TCP tunnel to a port inside the sandbox and return the local listener.
+
+        Each connection to ``local_host:local_port`` is relayed to
+        ``remote_port`` inside the sandbox. ``local_port`` defaults to
+        ``remote_port``; pass ``0`` to bind an ephemeral port. Close the
+        returned :class:`~tensorlake.sandbox.TcpTunnel` when done.
+        """
+        return TcpTunnel.listen(
+            base_url=self._base_url,
+            ws_headers=self._proxy_headers,
+            remote_port=remote_port,
+            local_host=local_host,
+            local_port=local_port,
+            connect_timeout=connect_timeout,
+        )
 
     def connect_desktop(
         self,
