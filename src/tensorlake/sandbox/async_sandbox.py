@@ -324,6 +324,7 @@ class AsyncSandbox:
         cls,
         sandbox_id: str,
         *,
+        resume: bool = True,
         proxy_url: str | None = None,
         routing_hint: str | None = None,
         api_key: str | None = _defaults.API_KEY,
@@ -333,6 +334,13 @@ class AsyncSandbox:
         namespace: str | None = _defaults.NAMESPACE,
         request_timeout: float | None = None,
     ) -> "AsyncSandbox":
+        """Attach by ID or name, resuming and waiting for daemon health by default.
+
+        Pass ``resume=False`` for passive attachment. ``request_timeout`` bounds
+        readiness and does not change the sandbox's lifetime. Missing or
+        terminated sandboxes are not recreated.
+        """
+        from ._connect import connect_ready_async
         from .async_client import AsyncSandboxClient
 
         client = AsyncSandboxClient(
@@ -348,6 +356,19 @@ class AsyncSandbox:
             ),
             _internal=True,
         )
+        if resume:
+            return await connect_ready_async(
+                client,
+                sandbox_id,
+                (
+                    request_timeout
+                    if request_timeout is not None
+                    else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+                ),
+                proxy_url=proxy_url,
+                routing_hint=routing_hint,
+                request_timeout=request_timeout,
+            )
         return await client.connect(
             sandbox_id,
             proxy_url=proxy_url,
@@ -393,6 +414,7 @@ class AsyncSandbox:
         records what the call did in :attr:`bind_outcome`.
         """
         connect_kwargs: dict[str, Any] = {
+            "resume": False,
             "proxy_url": proxy_url,
             "api_key": api_key,
             "api_url": api_url,

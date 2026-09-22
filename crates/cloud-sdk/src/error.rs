@@ -142,6 +142,11 @@ impl SdkError {
     /// that identify it (`tcp connect error`, `dns error`) appear only in the
     /// [`std::error::Error::source`] chain.
     pub fn transport_failure(&self) -> Option<TransportFailure> {
+        if let Self::Io(error) = self
+            && error.kind() == std::io::ErrorKind::TimedOut
+        {
+            return Some(TransportFailure::Timeout);
+        }
         let error = self.as_reqwest()?;
         if error.is_timeout() {
             Some(TransportFailure::Timeout)

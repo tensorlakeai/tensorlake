@@ -1331,9 +1331,8 @@ describe("SandboxClient", () => {
         startupTimeout: 12,
       });
       expect(sandbox.sandboxId).toBe("sbx-1");
-      // The cloned native client used for the create request is built with the
-      // 15s timeout (7th ctor arg).
-      expect(stub.clientCtorArgs[6]).toBe(15);
+      // The create request overrides its deadline while sharing the transport.
+      expect(stub.client.withRequestTimeout).toHaveBeenCalledWith(15);
       client.close();
       sandbox.close();
     });

@@ -478,6 +478,7 @@ class Sandbox:
         cls,
         sandbox_id: str,
         *,
+        resume: bool = True,
         proxy_url: str | None = None,
         routing_hint: str | None = None,
         api_key: str | None = _defaults.API_KEY,
@@ -490,8 +491,9 @@ class Sandbox:
         """Attach to an existing sandbox and return a connected handle.
 
         When ``proxy_url`` is omitted, resolves the sandbox first so the handle
-        uses the correct cloud/region ingress endpoint. Does **not** auto-resume
-        a suspended sandbox — call ``sandbox.resume()`` explicitly.
+        uses the correct cloud/region ingress endpoint. By default, resumes a
+        suspended sandbox and waits for daemon readiness. Pass ``resume=False``
+        to attach a passive handle without waking the sandbox.
 
         Args:
             sandbox_id: ID or name of the sandbox to attach to.
@@ -506,6 +508,7 @@ class Sandbox:
         Returns:
             Connected Sandbox handle (does not auto-terminate on context exit).
         """
+        from ._connect import connect_ready
         from .client import SandboxClient
 
         client = SandboxClient(
@@ -521,6 +524,19 @@ class Sandbox:
             ),
             _internal=True,
         )
+        if resume:
+            return connect_ready(
+                client,
+                sandbox_id,
+                (
+                    request_timeout
+                    if request_timeout is not None
+                    else _defaults.DEFAULT_HTTP_TIMEOUT_SEC
+                ),
+                proxy_url=proxy_url,
+                routing_hint=routing_hint,
+                request_timeout=request_timeout,
+            )
         return client.connect(
             sandbox_id,
             proxy_url=proxy_url,
@@ -620,6 +636,7 @@ class Sandbox:
             RemoteAPIError: If the create step fails with a non-409 error.
         """
         connect_kwargs: dict[str, Any] = {
+            "resume": False,
             "proxy_url": proxy_url,
             "api_key": api_key,
             "api_url": api_url,

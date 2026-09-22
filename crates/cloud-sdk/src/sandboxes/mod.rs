@@ -362,6 +362,15 @@ impl SandboxesClient {
         self
     }
 
+    /// Share the lifecycle and log connection pools with a new request deadline.
+    pub fn with_timeout(&self, timeout: Option<std::time::Duration>) -> Self {
+        Self {
+            client: self.client.with_timeout(timeout),
+            log_client: self.log_client.with_timeout(timeout),
+            ..self.clone()
+        }
+    }
+
     pub fn http_client(&self) -> &Client {
         &self.client
     }

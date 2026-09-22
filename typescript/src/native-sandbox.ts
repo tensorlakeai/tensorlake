@@ -82,6 +82,7 @@ export interface NativeSandboxProxyClient {
 }
 
 export interface NativeSandboxClient {
+  withRequestTimeout(requestTimeout: number): NativeSandboxClient;
   createSandbox(requestJson: string): Promise<TracedJson>;
   claimSandbox(poolId: string, requestJson?: string): Promise<TracedJson>;
   copySandbox(sandboxId: string, times: number): Promise<TracedJson>;

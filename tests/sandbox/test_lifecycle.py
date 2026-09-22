@@ -71,6 +71,26 @@ def _poll_sandbox_status(
     )
 
 
+def _delete_pool_after_sandbox_cleanup(
+    client: SandboxClient, pool_id: str, timeout: float = 30.0
+) -> None:
+    """Allow accepted sandbox deletions to leave the pool's active index."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            client.delete_pool(pool_id)
+            return
+        except PoolInUseError:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            print(
+                f"Waiting for sandbox cleanup before deleting pool {pool_id}",
+                flush=True,
+            )
+            time.sleep(min(1.0, remaining))
+
+
 def _poll_pool_containers(
     client: SandboxClient,
     pool_id: str,
@@ -936,7 +956,7 @@ class TestSandboxTimeout(BaseSandboxTest):
                 pass
         if cls.pool_id:
             try:
-                cls.client.delete_pool(cls.pool_id)
+                _delete_pool_after_sandbox_cleanup(cls.client, cls.pool_id)
             except Exception:
                 pass
         super().tearDownClass()
@@ -1001,8 +1021,7 @@ class TestSandboxTimeout(BaseSandboxTest):
             self.client.delete(self.__class__.sandbox_id)
             self.__class__.sandbox_id = None
         if self.__class__.pool_id:
-            time.sleep(2)
-            self.client.delete_pool(self.__class__.pool_id)
+            _delete_pool_after_sandbox_cleanup(self.client, self.__class__.pool_id)
             self.__class__.pool_id = None
 
 
