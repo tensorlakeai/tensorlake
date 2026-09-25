@@ -265,6 +265,22 @@ jobs:
             tests.image.test_sandbox_builder \
             tests.function_agent.test_runner
 
+      - uses: taiki-e/install-action@just
+
+      - name: Compare bounded Python Function Agent bridge concurrency
+        run: |
+          set -euo pipefail
+          just check-function-agent-python
+          just bench-function-agent-python | tee function-agent-python-benchmark.log
+
+      - name: Retain Python bridge comparison evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: function-agent-python-bridge-${{ github.sha }}
+          path: function-agent-python-benchmark.log
+          if-no-files-found: warn
+
   test_sandbox:
     name: Sandbox integration tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
