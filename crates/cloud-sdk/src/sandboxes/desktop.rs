@@ -31,6 +31,20 @@ const PORT_PROBE_RETRY_INTERVAL: Duration = Duration::from_millis(250);
 
 const SECURITY_TYPE_NONE: u8 = 1;
 const SECURITY_TYPE_VNC_AUTH: u8 = 2;
+/// Upper bound on server-declared framebuffer dimensions. The VNC wire format
+/// carries `u16` dimensions, so an untrusted server can declare up to
+/// `65535 × 65535`; a single `vec![0; 65535 * 65535 * 4]` would request
+/// ~16 GiB and can take down the client (and pressure the whole host).
+/// 8192 comfortably covers any real desktop (7680×4320 with headroom) while
+/// capping the worst-case framebuffer at 256 MiB.
+const MAX_DESKTOP_DIMENSION: u16 = 8192;
+
+/// Upper bound on server-declared variable-length text payloads (desktop
+/// name, cut text, security failure reasons). These are `u32` on the wire and
+/// are read into memory before any sanity check; without a cap a hostile
+/// server can request a multi-gigabyte allocation from a 4-byte field.
+const MAX_SERVER_TEXT_BYTES: usize = 1024 * 1024;
+
 const ENCODING_RAW: i32 = 0;
 const ENCODING_DESKTOP_SIZE: i32 = -223;
 const BUTTON_LEFT_MASK: u8 = 1;
@@ -631,6 +645,17 @@ where
             let encoding = read_i32(&mut self.transport).await?;
             match encoding {
                 ENCODING_RAW => {
+                    // Check the rectangle against the framebuffer *before*
+                    // reading: the declared byte count is attacker-controlled
+                    // and a rectangle that does not fit must never be read.
+                    if x.checked_add(width).is_none_or(|value| value > self.width)
+                        || y.checked_add(height)
+                            .is_none_or(|value| value > self.height)
+                    {
+                        return Err(SdkError::ClientError(
+                            "desktop raw rectangle exceeds framebuffer bounds".to_string(),
+                        ));
+                    }
                     let bytes_per_pixel = self.pixel_format.bytes_per_pixel();
                     let length = usize::from(width)
                         .checked_mul(usize::from(height))
@@ -678,7 +703,8 @@ where
     async fn read_server_cut_text(&mut self) -> Result<(), SdkError> {
         let _ = self.transport.read_exact(3).await?;
         let len = read_u32(&mut self.transport).await?;
-        let _ = self.transport.read_exact(len as usize).await?;
+        let len = check_server_length(len, "server cut text")?;
+        let _ = self.transport.read_exact(len).await?;
         Ok(())
     }
 
@@ -896,7 +922,8 @@ impl ServerInit {
         let pixel_format_bytes = transport.read_exact(16).await?;
         let pixel_format = parse_pixel_format(&pixel_format_bytes)?;
         let name_len = read_u32(transport).await?;
-        let _name = transport.read_exact(name_len as usize).await?;
+        let name_len = check_server_length(name_len, "desktop name")?;
+        let _name = transport.read_exact(name_len).await?;
         Ok(Self {
             width,
             height,
@@ -914,7 +941,8 @@ async fn negotiate_security<T: DesktopTransport>(
         let security_type = read_u32(transport).await?;
         if security_type == 0 {
             let reason_len = read_u32(transport).await?;
-            let reason = String::from_utf8(transport.read_exact(reason_len as usize).await?)
+            let reason_len = check_server_length(reason_len, "security failure reason")?;
+            let reason = String::from_utf8(transport.read_exact(reason_len).await?)
                 .unwrap_or_else(|_| "unknown reason".to_string());
             return Err(SdkError::ClientError(format!(
                 "VNC security negotiation failed: {reason}"
@@ -925,7 +953,8 @@ async fn negotiate_security<T: DesktopTransport>(
         let security_type_count = read_u8(transport).await?;
         if security_type_count == 0 {
             let reason_len = read_u32(transport).await?;
-            let reason = String::from_utf8(transport.read_exact(reason_len as usize).await?)
+            let reason_len = check_server_length(reason_len, "security failure reason")?;
+            let reason = String::from_utf8(transport.read_exact(reason_len).await?)
                 .unwrap_or_else(|_| "unknown reason".to_string());
             return Err(SdkError::ClientError(format!(
                 "VNC security negotiation failed: {reason}"
@@ -1024,7 +1053,8 @@ async fn read_security_result<T: DesktopTransport>(
 
     let reason = if has_reason_string {
         let reason_len = read_u32(transport).await?;
-        String::from_utf8(transport.read_exact(reason_len as usize).await?)
+        let reason_len = check_server_length(reason_len, "security failure reason")?;
+        String::from_utf8(transport.read_exact(reason_len).await?)
             .unwrap_or_else(|_| "authentication failed".to_string())
     } else if status == 1 {
         "authentication failed".to_string()
@@ -1155,6 +1185,10 @@ fn scale_channel(value: u32, max: u16) -> Result<u8, SdkError> {
 }
 
 fn allocate_framebuffer(width: u16, height: u16) -> Result<Vec<u8>, SdkError> {
+    // Dimensions come straight off the wire from a server that may be
+    // running untrusted tenant code, so bound the magnitude (not just the
+    // arithmetic) before allocating.
+    validate_desktop_dimensions(width, height)?;
     let len = usize::from(width)
         .checked_mul(usize::from(height))
         .and_then(|size| size.checked_mul(4))
@@ -1162,6 +1196,35 @@ fn allocate_framebuffer(width: u16, height: u16) -> Result<Vec<u8>, SdkError> {
             SdkError::ClientError("desktop framebuffer size exceeds supported bounds".to_string())
         })?;
     Ok(vec![0; len])
+}
+
+/// Validate server-declared framebuffer dimensions at the wire boundary.
+fn validate_desktop_dimensions(width: u16, height: u16) -> Result<(), SdkError> {
+    if width == 0 || height == 0 {
+        return Err(SdkError::ClientError(
+            "desktop framebuffer dimensions must be non-zero".to_string(),
+        ));
+    }
+    if width > MAX_DESKTOP_DIMENSION || height > MAX_DESKTOP_DIMENSION {
+        return Err(SdkError::ClientError(format!(
+            "desktop framebuffer dimensions {width}x{height} exceed the supported maximum of \
+             {MAX_DESKTOP_DIMENSION}x{MAX_DESKTOP_DIMENSION}"
+        )));
+    }
+    Ok(())
+}
+
+/// Bound a server-declared variable length before using it as an allocation
+/// or read size.
+fn check_server_length(len: u32, what: &str) -> Result<usize, SdkError> {
+    let len = usize::try_from(len).unwrap_or(usize::MAX);
+    if len > MAX_SERVER_TEXT_BYTES {
+        return Err(SdkError::ClientError(format!(
+            "VNC server declared a {what} length of {len} bytes, exceeding the \
+             {MAX_SERVER_TEXT_BYTES}-byte limit; refusing to read"
+        )));
+    }
+    Ok(len)
 }
 
 fn build_tunnel_url(base_url: &str, remote_port: u16) -> Result<String, SdkError> {
@@ -1494,6 +1557,127 @@ mod tests {
         assert_eq!(info.width, 2);
         assert_eq!(info.height, 1);
         assert_eq!(&buffer[..8], &[255, 0, 0, 255, 0, 255, 0, 255]);
+    }
+
+    #[tokio::test]
+    async fn handshake_rejects_oversized_server_dimensions() {
+        // A hostile server declaring 65535x65535 must be rejected at the
+        // wire boundary instead of driving a ~16 GiB allocation.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RFB 003.008\n");
+        bytes.push(1);
+        bytes.push(SECURITY_TYPE_NONE);
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&server_init_bytes(u16::MAX, u16::MAX, true));
+
+        let error = match connect_session(bytes, None).await {
+            Err(error) => error,
+            Ok(_) => panic!("expected oversized dimensions to be rejected"),
+        };
+        assert!(error.to_string().contains("exceed the supported maximum"));
+    }
+
+    #[tokio::test]
+    async fn handshake_rejects_zero_server_dimensions() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RFB 003.008\n");
+        bytes.push(1);
+        bytes.push(SECURITY_TYPE_NONE);
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&server_init_bytes(0, 0, true));
+
+        let error = match connect_session(bytes, None).await {
+            Err(error) => error,
+            Ok(_) => panic!("expected zero dimensions to be rejected"),
+        };
+        assert!(error.to_string().contains("must be non-zero"));
+    }
+
+    #[tokio::test]
+    async fn handshake_rejects_oversized_desktop_name_length() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RFB 003.008\n");
+        bytes.push(1);
+        bytes.push(SECURITY_TYPE_NONE);
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        // Dimensions are valid; the name length is a hostile u32.
+        bytes.extend_from_slice(&(2u16).to_be_bytes());
+        bytes.extend_from_slice(&(1u16).to_be_bytes());
+        bytes.extend_from_slice(&PixelFormat::preferred().encode());
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes());
+
+        let error = match connect_session(bytes, None).await {
+            Err(error) => error,
+            Ok(_) => panic!("expected hostile name length to be rejected"),
+        };
+        assert!(error.to_string().contains("exceeding the"));
+        assert!(error.to_string().contains("desktop name"));
+    }
+
+    #[tokio::test]
+    async fn oversized_server_cut_text_is_rejected() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RFB 003.008\n");
+        bytes.push(1);
+        bytes.push(SECURITY_TYPE_NONE);
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&server_init_bytes(2, 1, true));
+        bytes.push(3); // ServerCutText
+        bytes.extend_from_slice(&[0, 0, 0]); // padding
+        bytes.extend_from_slice(&u32::MAX.to_be_bytes()); // hostile length
+
+        let mut session = connect_session(bytes, None).await.unwrap();
+        let error = match session.read_server_message().await {
+            Err(error) => error,
+            Ok(_) => panic!("expected hostile cut-text length to be rejected"),
+        };
+        assert!(error.to_string().contains("server cut text"));
+    }
+
+    #[tokio::test]
+    async fn raw_rectangle_outside_framebuffer_is_rejected_before_reading() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RFB 003.008\n");
+        bytes.push(1);
+        bytes.push(SECURITY_TYPE_NONE);
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&server_init_bytes(2, 1, true));
+        // Rectangle claims 65535x65535 at (0,0) inside a 2x1 framebuffer.
+        bytes.push(0); // FramebufferUpdate
+        bytes.push(0); // padding
+        bytes.extend_from_slice(&(1u16).to_be_bytes());
+        bytes.extend_from_slice(&(0u16).to_be_bytes());
+        bytes.extend_from_slice(&(0u16).to_be_bytes());
+        bytes.extend_from_slice(&u16::MAX.to_be_bytes());
+        bytes.extend_from_slice(&u16::MAX.to_be_bytes());
+        bytes.extend_from_slice(&ENCODING_RAW.to_be_bytes());
+        // No pixel payload is supplied: the client must fail on the bounds
+        // check without attempting to read the declared ~17 GB of pixels.
+
+        let mut session = connect_session(bytes, None).await.unwrap();
+        let error = match session.read_server_message().await {
+            Err(error) => error,
+            Ok(_) => panic!("expected out-of-bounds rectangle to be rejected"),
+        };
+        assert!(error.to_string().contains("exceeds framebuffer bounds"));
+    }
+
+    #[tokio::test]
+    async fn oversized_resize_is_rejected() {
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(b"RFB 003.008\n");
+        bytes.push(1);
+        bytes.push(SECURITY_TYPE_NONE);
+        bytes.extend_from_slice(&0u32.to_be_bytes());
+        bytes.extend_from_slice(&server_init_bytes(1, 1, true));
+        bytes.extend_from_slice(&desktop_size_update(u16::MAX, u16::MAX));
+
+        let mut session = connect_session(bytes, None).await.unwrap();
+        let error = match session.read_server_message().await {
+            Err(error) => error,
+            Ok(_) => panic!("expected oversized resize to be rejected"),
+        };
+        assert!(error.to_string().contains("exceed the supported maximum"));
     }
 
     #[tokio::test]
