@@ -30,7 +30,10 @@ pub async fn run(
         .unwrap_or_else(|| "default image".to_string());
     eprintln!("Creating sandbox with {}...", label);
 
+    // `wait: false` (ADR 0086): the server acknowledges the sandbox at once
+    // and readiness is polled below; a timeout leaves the sandbox queued.
     let mut create_body = serde_json::json!({
+        "wait": false,
         "resources": {
             "cpus": cpus,
             "memory_mb": memory,

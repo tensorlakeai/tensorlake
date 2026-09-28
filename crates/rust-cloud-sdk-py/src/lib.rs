@@ -38,8 +38,8 @@ use tensorlake::sandboxes::models::{
     UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
-    SandboxDesktopClient as RustSandboxDesktopClient, SandboxProxyClient, SandboxesClient,
-    resolve_sandbox_proxy_target, select_sandbox_proxy_url,
+    DEFAULT_WAIT_POLL_INTERVAL, SandboxDesktopClient as RustSandboxDesktopClient,
+    SandboxProxyClient, SandboxesClient, resolve_sandbox_proxy_target, select_sandbox_proxy_url,
 };
 use tensorlake::{
     Client, ClientBuilder,
@@ -1528,6 +1528,59 @@ impl CloudSandboxClient {
         })
     }
 
+    /// Wait-free create (ADR 0086): sends `wait: false` and returns the
+    /// acknowledgement as soon as the sandbox is durable. Like the blocking
+    /// create it is not idempotent, so only failures that provably never
+    /// reached the server are replayed.
+    fn create_sandbox_no_wait(&self, request_json: String) -> PyResult<(String, String)> {
+        let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
+        self.run_with_connect_replay(move |client| {
+            let request = request.clone();
+            async move {
+                let traced = client.create_no_wait(&request).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
+        })
+    }
+
+    /// Poll the sandbox every `poll_interval_sec` until it leaves `pending`
+    /// or `timeout_sec` elapses (ADR 0086), returning the last observed
+    /// `SandboxInfo`. A still-pending result means the budget ran out while
+    /// the sandbox kept its place in the queue; nothing here deletes it.
+    #[pyo3(signature = (sandbox_id, timeout_sec, poll_interval_sec=None))]
+    fn wait_for_sandbox(
+        &self,
+        sandbox_id: String,
+        timeout_sec: f64,
+        poll_interval_sec: Option<f64>,
+    ) -> PyResult<(String, String)> {
+        let timeout = duration_from_non_negative_seconds("timeout_sec", timeout_sec)?;
+        let poll_interval = poll_interval_sec
+            .map(|seconds| duration_from_seconds("poll_interval_sec", seconds))
+            .transpose()?
+            .unwrap_or(DEFAULT_WAIT_POLL_INTERVAL);
+        // The loop owns its retries; nothing is replayed around it.
+        run_bounded_blocking(
+            self.client.clone(),
+            RetryPolicy::non_idempotent(),
+            "rust sandbox wait",
+            into_sandbox_py_error,
+            move |client| {
+                let sandbox_id = sandbox_id.clone();
+                async move {
+                    let traced = client
+                        .wait_until_settled(&sandbox_id, timeout, poll_interval)
+                        .await?;
+                    let trace_id = traced.trace_id.clone();
+                    let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                    Ok((trace_id, json))
+                }
+            },
+        )
+    }
+
     #[pyo3(signature = (pool_id, request_json=None))]
     fn claim_sandbox(
         &self,
@@ -1868,6 +1921,53 @@ impl CloudSandboxClient {
             })
             .await
             .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    /// Awaitable counterpart of `create_sandbox_no_wait`.
+    fn create_sandbox_no_wait_async<'py>(
+        &self,
+        py: Python<'py>,
+        request_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = replay_if_never_delivered(client, move |c| {
+                let request = request.clone();
+                async move { c.create_no_wait(&request).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            let trace_id = traced.trace_id.clone();
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
+            Ok((trace_id, json))
+        })
+    }
+
+    /// Awaitable counterpart of `wait_for_sandbox`.
+    #[pyo3(signature = (sandbox_id, timeout_sec, poll_interval_sec=None))]
+    fn wait_for_sandbox_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+        timeout_sec: f64,
+        poll_interval_sec: Option<f64>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let timeout = duration_from_non_negative_seconds("timeout_sec", timeout_sec)?;
+        let poll_interval = poll_interval_sec
+            .map(|seconds| duration_from_seconds("poll_interval_sec", seconds))
+            .transpose()?
+            .unwrap_or(DEFAULT_WAIT_POLL_INTERVAL);
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = client
+                .wait_until_settled(&sandbox_id, timeout, poll_interval)
+                .await
+                .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
             let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
@@ -3666,6 +3766,19 @@ fn duration_from_seconds(name: &str, seconds: f64) -> PyResult<Duration> {
             "sdk_usage",
             Option::<u16>::None,
             format!("{name} must be a positive finite number"),
+        )));
+    }
+    Ok(Duration::from_secs_f64(seconds))
+}
+
+/// Like [`duration_from_seconds`] but accepts zero: a zero wait budget is a
+/// single non-blocking observation of the sandbox state.
+fn duration_from_non_negative_seconds(name: &str, seconds: f64) -> PyResult<Duration> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(CloudSandboxClientError::new_err((
+            "sdk_usage",
+            Option::<u16>::None,
+            format!("{name} must be a non-negative finite number"),
         )));
     }
     Ok(Duration::from_secs_f64(seconds))

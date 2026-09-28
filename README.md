@@ -62,8 +62,12 @@ tl login
 Create a sandbox, run a command, and clean up:
 
 ```bash
-# Create a sandbox
+# Create a sandbox (waits for it to run; a timeout leaves it queued, never cancels it)
 tl sbx create
+
+# Request a sandbox without waiting, then collect it later
+tl sbx create --no-wait
+tl sbx wait <sandbox-id> --timeout 1800
 
 # Run a command inside it
 tl sbx exec <sandbox-id> -- sh -lc "printf 'Hello from the sandbox!\n'"
@@ -113,6 +117,30 @@ with client.create_and_connect() as sandbox:
     print(proc.pid)
 
 # Sandbox is automatically terminated when the context manager exits
+```
+
+`create_and_connect()` (and `Sandbox.create()`) send the create with
+`wait=False`, so the server acknowledges the sandbox at once, and then poll it
+until it runs. **If the wait runs out, the sandbox is not deleted**: a
+`SandboxPending` is raised with its `sandbox_id`, and the sandbox keeps its
+place in the queue until capacity arrives. Collect it later with
+`Sandbox.connect(sandbox_id)`, or request sandboxes ahead of capacity with
+`Sandbox.create(..., wait=False)`, which returns a `PendingSandbox` handle, and
+call `pending.ready()` on each one when you need it. Pass
+`cancel_on_timeout=True` for the previous delete-then-raise behaviour, or
+`max_pending_secs` to let the server give up after a bound. See
+[wait-free create and readiness by polling](docs/sandbox-create-and-wait.md).
+
+```python
+from tensorlake.sandbox import Sandbox, SandboxPending
+
+pending = Sandbox.create(
+    name="job-17", image="tensorlake/ubuntu-minimal", max_pending_secs=45 * 60, wait=False
+)
+try:
+    sandbox = pending.ready(timeout=30)
+except SandboxPending as still:
+    print(still.pending_reason)  # still queued; call ready() again
 ```
 
 ### Snapshots

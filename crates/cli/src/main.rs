@@ -1178,9 +1178,17 @@ enum SbxCommands {
         #[arg(short, long, conflicts_with = "snapshot")]
         image: Option<String>,
 
-        /// Return immediately after creation instead of waiting for the sandbox to be running
+        /// Return immediately after creation instead of waiting for the sandbox to be running.
+        /// The sandbox is queued and starts when capacity is available; collect it with `tl sbx wait <id>`
         #[arg(short, long)]
         no_wait: bool,
+
+        /// Longest the sandbox may wait for capacity, in seconds, before the server fails it
+        /// with reason `no_capacity`. 0 fails at once when it cannot be placed. Unset waits
+        /// indefinitely. Metal hosts take up to 20 minutes to boot, so use 1800 or more for
+        /// capacity waits
+        #[arg(long = "max-pending-secs", value_name = "SECS")]
+        max_pending_secs: Option<u64>,
 
         /// Expose a port via the sandbox proxy (can be repeated)
         #[arg(short = 'x', long = "expose", value_parser = parse_user_port)]
@@ -1240,6 +1248,17 @@ enum SbxCommands {
         /// Return immediately after sending the resume request instead of waiting for the sandbox to be running
         #[arg(short, long)]
         no_wait: bool,
+    },
+
+    /// Wait for a sandbox to be running, polling every two seconds. Resumable: run it again
+    /// after a timeout to keep waiting. Never cancels the sandbox
+    Wait {
+        /// Sandbox ID or name
+        sandbox_id: String,
+
+        /// Max seconds to wait before giving up (the sandbox keeps its place in the queue)
+        #[arg(short, long, default_value_t = 120)]
+        timeout: u64,
     },
 
     /// Execute a command in a sandbox
@@ -2171,6 +2190,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         snapshot,
                         image,
                         no_wait,
+                        max_pending_secs,
                         ports,
                         allow_unauthenticated_access,
                         no_internet,
@@ -2209,6 +2229,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 network_allow: &network_allow,
                                 network_deny: &network_deny,
                                 file_systems: &file_systems,
+                                max_pending_secs,
                             },
                         )
                         .await
@@ -2244,6 +2265,17 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         sandbox_id,
                         no_wait,
                     } => commands::sbx::resume::run(ctx, &sandbox_id, !no_wait).await,
+                    SbxCommands::Wait {
+                        sandbox_id,
+                        timeout,
+                    } => {
+                        commands::sbx::wait::run(
+                            ctx,
+                            &sandbox_id,
+                            std::time::Duration::from_secs(timeout),
+                        )
+                        .await
+                    }
                     SbxCommands::Exec {
                         sandbox_id,
                         command,

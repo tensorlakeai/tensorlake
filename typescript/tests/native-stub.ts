@@ -79,8 +79,29 @@ function makeProxy(): FakeFns {
 }
 
 function makeClient(proxy: FakeFns): FakeFns {
-  return {
+  // The wait-free create and polling fakes are derived from `createSandbox`
+  // and `getSandbox` so a test that scripts those (the pre-ADR-0086 surface)
+  // keeps driving the SDK: the create payload is rendered as the `wait: false`
+  // acknowledgement (a legacy `timeout` answer means still pending), and the
+  // wait polls `getSandbox` a bounded number of times. The real loop (sleeps,
+  // transient retries, budgets) is tested in Rust.
+  const client: FakeFns = {
     createSandbox: vi.fn(tracedJson()),
+    createSandboxNoWait: vi.fn(async (requestJson: string) => {
+      const { traceId, json } = await client.createSandbox(requestJson);
+      const { status, ...rest } = JSON.parse(json) as Record<string, unknown>;
+      return { traceId, json: JSON.stringify({ ...rest, state: status ?? "pending" }) };
+    }),
+    waitForSandbox: vi.fn(async (sandboxId: string) => {
+      let last = "{}";
+      for (let i = 0; i < 5; i++) {
+        const { json } = await client.getSandbox(sandboxId);
+        last = json;
+        const info = JSON.parse(json) as { status?: string };
+        if ((info.status ?? "pending") !== "pending") break;
+      }
+      return { traceId: "t", json: last };
+    }),
     claimSandbox: vi.fn(tracedJson()),
     copySandbox: vi.fn(tracedJson()),
     getSandbox: vi.fn(tracedJson()),
@@ -119,6 +140,7 @@ function makeClient(proxy: FakeFns): FakeFns {
         })(),
     ),
   };
+  return client;
 }
 
 function makeRepository(): FakeFns {

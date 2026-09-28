@@ -11,7 +11,7 @@ import asyncio
 import json
 import os
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, Literal, overload
 from urllib.parse import urlparse
 
 import httpx
@@ -25,8 +25,10 @@ from .exceptions import (
     SandboxError,
     SandboxNotFoundError,
     SandboxNotRoutableError,
+    SandboxPending,
 )
 from .models import (
+    AsyncPendingSandbox,
     CheckpointType,
     ClearNetworkPolicy,
     CommandResult,
@@ -223,6 +225,8 @@ class AsyncSandbox:
         self._require_lifecycle_client("refresh proxy routing")
         identifier = self._lifecycle_identifier()
         loop = asyncio.get_running_loop()
+        started = loop.time()
+        last: SandboxInfo | None = None
         while True:
             remaining = deadline - loop.time()
             if remaining <= 0:
@@ -241,14 +245,92 @@ class AsyncSandbox:
                 return info
             if info.status == SandboxStatus.TERMINATED:
                 raise SandboxError(
-                    f"Sandbox {identifier!r} terminated while refreshing proxy routing"
+                    f"Sandbox {identifier!r} terminated while refreshing proxy routing",
+                    reason=info.termination_reason,
+                    sandbox_id=info.sandbox_id,
                 )
+            last = info
             await asyncio.sleep(min(poll_interval, max(0.0, deadline - loop.time())))
+        if last is not None and last.status == SandboxStatus.PENDING:
+            # Still queued for capacity: it keeps its place, the caller decides.
+            raise SandboxPending(
+                last.sandbox_id,
+                pending_reason=last.pending_reason,
+                timeout=max(0.0, deadline - started),
+            )
         raise SandboxError(
-            f"Sandbox {identifier!r} did not provide refreshed proxy routing within timeout"
+            f"Sandbox {identifier!r} did not provide refreshed proxy routing within timeout",
+            sandbox_id=identifier,
         )
 
     # --- Class-level factory methods ---
+
+    @overload
+    @classmethod
+    async def create(
+        cls,
+        image: str | None = None,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: GpuModel | str | None = None,
+        timeout_secs: int | None = None,
+        entrypoint: list[str] | None = None,
+        allow_internet_access: bool = True,
+        allow_out: list[str] | None = None,
+        deny_out: list[str] | None = None,
+        pool_id: str | None = None,
+        snapshot_id: str | None = None,
+        proxy_url: str | None = None,
+        request_timeout: float | None = None,
+        startup_timeout: float | None = None,
+        name: str | None = None,
+        file_systems: list[FileSystemMount] | None = None,
+        api_key: str | None = _defaults.API_KEY,
+        api_url: str = _defaults.API_URL,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+        gpu: GpuRequest | None = None,
+        max_pending_secs: int | None = None,
+        cancel_on_timeout: bool = False,
+        wait: Literal[True] = True,
+    ) -> "AsyncSandbox": ...
+
+    @overload
+    @classmethod
+    async def create(
+        cls,
+        image: str | None = None,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: GpuModel | str | None = None,
+        timeout_secs: int | None = None,
+        entrypoint: list[str] | None = None,
+        allow_internet_access: bool = True,
+        allow_out: list[str] | None = None,
+        deny_out: list[str] | None = None,
+        pool_id: str | None = None,
+        snapshot_id: str | None = None,
+        proxy_url: str | None = None,
+        request_timeout: float | None = None,
+        startup_timeout: float | None = None,
+        name: str | None = None,
+        file_systems: list[FileSystemMount] | None = None,
+        api_key: str | None = _defaults.API_KEY,
+        api_url: str = _defaults.API_URL,
+        organization_id: str | None = None,
+        project_id: str | None = None,
+        namespace: str | None = _defaults.NAMESPACE,
+        gpu: GpuRequest | None = None,
+        max_pending_secs: int | None = None,
+        cancel_on_timeout: bool = False,
+        *,
+        wait: Literal[False],
+    ) -> AsyncPendingSandbox: ...
 
     @classmethod
     async def create(
@@ -277,7 +359,20 @@ class AsyncSandbox:
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
-    ) -> "AsyncSandbox":
+        max_pending_secs: int | None = None,
+        cancel_on_timeout: bool = False,
+        wait: bool = True,
+    ) -> "AsyncSandbox | AsyncPendingSandbox":
+        """Create a new sandbox and return a connected, running handle.
+
+        Async mirror of :meth:`Sandbox.create`. With ``wait=False`` it
+        returns an :class:`AsyncPendingSandbox` at once (``await
+        pending.ready()`` waits for it). **When the wait runs out the
+        sandbox is not deleted**; ``SandboxPending`` is raised with its id
+        and it keeps its place in the queue. Pass ``cancel_on_timeout=True``
+        for the previous delete-then-raise behaviour, or
+        ``max_pending_secs`` for a server-side bound.
+        """
         from .async_client import AsyncSandboxClient
 
         effective_request_timeout = (
@@ -298,6 +393,33 @@ class AsyncSandbox:
             request_timeout=effective_request_timeout,
             _internal=True,
         )
+        if not wait:
+            if pool_id is not None:
+                raise SandboxError(
+                    "wait=False cannot be combined with pool_id: a pool claim is "
+                    "answered synchronously"
+                )
+            return await client._request_pending(
+                image=image,
+                cpus=cpus,
+                memory_mb=memory_mb,
+                disk_mb=disk_mb,
+                gpus=gpus,
+                gpu_model=gpu_model,
+                timeout_secs=timeout_secs,
+                entrypoint=entrypoint,
+                allow_internet_access=allow_internet_access,
+                allow_out=allow_out,
+                deny_out=deny_out,
+                snapshot_id=snapshot_id,
+                name=name,
+                file_systems=file_systems,
+                gpu=gpu,
+                max_pending_secs=max_pending_secs,
+                proxy_url=proxy_url,
+                request_timeout=effective_request_timeout,
+                owns_sandbox=True,
+            )
         return await client.create_and_connect(
             image=image,
             cpus=cpus,
@@ -317,6 +439,8 @@ class AsyncSandbox:
             name=name,
             file_systems=file_systems,
             gpu=gpu,
+            max_pending_secs=max_pending_secs,
+            cancel_on_timeout=cancel_on_timeout,
         )
 
     @classmethod
@@ -382,6 +506,7 @@ class AsyncSandbox:
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
+        max_pending_secs: int | None = None,
     ) -> "AsyncSandbox":
         """Return the one sandbox bound to ``name``. Create it on first use.
 
@@ -458,6 +583,7 @@ class AsyncSandbox:
                         project_id=project_id,
                         namespace=namespace,
                         gpu=gpu,
+                        max_pending_secs=max_pending_secs,
                     )
                 except RemoteAPIError as e:
                     if e.status_code != 409:

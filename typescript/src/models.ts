@@ -12,6 +12,32 @@ export enum SandboxStatus {
   FAILED = "failed",
 }
 
+/**
+ * Why a pending sandbox is waiting (`pendingReason`). The wire value is a
+ * snake_case string; unknown future reasons arrive as plain strings.
+ */
+export enum SandboxPendingReason {
+  SCHEDULING = "scheduling",
+  WAITING_FOR_CONTAINER = "waiting_for_container",
+  NO_EXECUTORS_AVAILABLE = "no_executors_available",
+  NO_RESOURCES_AVAILABLE = "no_resources_available",
+  POOL_AT_CAPACITY = "pool_at_capacity",
+  MAX_CAPACITY_REACHED = "max_capacity_reached",
+  NO_EXECUTOR_FOR_SNAPSHOT_LOCATION = "no_executor_for_snapshot_location",
+  /** The autoscaler reported that no fleet can ever place this shape. */
+  UNPLACEABLE = "unplaceable",
+}
+
+/** `terminationReason` when a `maxPendingSecs` bound expired, or the shape is unplaceable. */
+export const TERMINATION_REASON_NO_CAPACITY = "no_capacity";
+/** `terminationReason` when a pending sandbox was deleted before it ran. */
+export const TERMINATION_REASON_CANCELLED = "cancelled";
+
+/** Whether a sandbox status is one a readiness wait keeps polling through. */
+export function isSandboxPending(status: SandboxStatus | string): boolean {
+  return String(status) === SandboxStatus.PENDING;
+}
+
 export enum SnapshotStatus {
   IN_PROGRESS = "in_progress",
   LOCAL_READY = "local_ready",
@@ -189,6 +215,22 @@ export interface CreateSandboxOptions {
   name?: string;
   /** File systems to mount on fresh creation or warm-pool claim, each at its own absolute, unique guest mount path. */
   fileSystems?: FileSystemMount[];
+  /**
+   * `false` returns a `PendingSandbox` handle as soon as the sandbox is
+   * durable, without waiting for it to run: `pending.ready()` waits,
+   * `pending.status()` looks, and `Sandbox.connect(pending.sandboxId)`
+   * collects it from any other process. `true` / unset waits as before.
+   */
+  wait?: boolean;
+  /**
+   * Longest the sandbox may wait for capacity before the server fails it with
+   * reason `no_capacity`. `0` fails at once when it cannot be placed; unset
+   * (the default) waits indefinitely. Applies to capacity waits only, not to
+   * image pull or boot. A bound shorter than the fleet's boot time (up to 20
+   * minutes on metal hosts) expires the very demand that made the autoscaler
+   * launch a host; 30 minutes or more is recommended for capacity waits.
+   */
+  maxPendingSecs?: number;
 }
 
 export interface UpdateSandboxOptions {
@@ -206,6 +248,14 @@ export interface UpdateSandboxOptions {
   network?: NetworkConfig | null;
 }
 
+/**
+ * Response from a blocking create or a pool claim.
+ *
+ * The server waits for readiness for at most the request timeout and can
+ * already report `running`; a `pending` answer carries a `pendingReason`.
+ * Use `connect(sandboxId)` to wait for a pending sandbox, or
+ * `create({ wait: false })` for a `PendingSandbox` handle.
+ */
 export interface CreateSandboxResponse {
   sandboxId: string;
   status: SandboxStatus;
@@ -216,6 +266,40 @@ export interface CreateSandboxResponse {
   name?: string | null;
   terminationReason?: string;
   errorDetails?: unknown;
+  pendingReason?: string;
+}
+
+/**
+ * The acknowledgement of a `create({ wait: false })`: the wire record of a
+ * sandbox that is durable and starts whenever capacity allows. The
+ * `PendingSandbox` class in `pending-sandbox.ts` wraps it with `ready()` /
+ * `status()`. A server that predates `wait: false` answers the blocking
+ * create's shape instead, so `state` may already be `running`.
+ */
+export interface PendingSandboxRecord {
+  sandboxId: string;
+  name?: string;
+  state: SandboxStatus;
+  pendingReason?: string;
+  routingHint?: string;
+  ingressEndpoint?: string;
+  sandboxUrl?: string;
+  reason?: string;
+  terminationReason?: string;
+  errorDetails?: unknown;
+}
+
+export interface ReadyOptions {
+  /** Seconds to wait; defaults to the client requestTimeout. `0` observes the current state once. */
+  timeout?: number;
+  /** Seconds between `GET /sandboxes/{id}` polls. Default: 2. */
+  pollInterval?: number;
+  /**
+   * Delete the sandbox when `timeout` runs out while it is still pending,
+   * then throw `SandboxError` (the pre-ADR-0086 behaviour). Default false:
+   * throw `SandboxPending` and leave the sandbox queued.
+   */
+  cancelOnTimeout?: boolean;
 }
 
 export interface CopySandboxOptions {
@@ -258,6 +342,8 @@ export interface SandboxInfo {
   outcome?: string;
   terminationReason?: string;
   errorDetails?: unknown;
+  /** Why a pending sandbox is waiting, in snake_case. */
+  pendingReason?: string;
   createdAt?: Date;
   terminatedAt?: Date;
   name?: string;
@@ -679,6 +765,14 @@ export interface CreateAndConnectOptions extends CreateSandboxOptions {
   requestTimeout?: number;
   /** @deprecated Use requestTimeout. */
   startupTimeout?: number;
+  /**
+   * Delete the sandbox when `requestTimeout` runs out while it is still
+   * pending, then throw `SandboxError` (the pre-ADR-0086 behaviour). Default
+   * false: throw `SandboxPending` and leave the sandbox queued.
+   */
+  cancelOnTimeout?: boolean;
+  /** Seconds between readiness polls. Default: 2. */
+  pollInterval?: number;
 }
 
 /**
