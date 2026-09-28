@@ -1,6 +1,7 @@
 // Public API
 export { SandboxClient } from "./client.js";
 export { Sandbox } from "./sandbox.js";
+export { PendingSandbox } from "./pending-sandbox.js";
 export { Pty } from "./sandbox.js";
 export { Desktop } from "./desktop.js";
 export { TcpTunnel } from "./tunnel.js";
@@ -102,6 +103,7 @@ export type {
 export {
   SandboxException,
   SandboxError,
+  SandboxPending,
   SandboxConnectionError,
   SandboxNotFoundError,
   PoolNotFoundError,
@@ -115,11 +117,15 @@ export {
 // Models & enums
 export {
   SandboxStatus,
+  SandboxPendingReason,
   SnapshotStatus,
   ProcessStatus,
   StdinMode,
   OutputMode,
   ContainerState,
+  TERMINATION_REASON_NO_CAPACITY,
+  TERMINATION_REASON_CANCELLED,
+  isSandboxPending,
 } from "./models.js";
 
 export type {
@@ -169,6 +175,8 @@ export type {
   GpuRequest,
   GPUResources,
   CreateSandboxResponse,
+  PendingSandboxRecord,
+  ReadyOptions,
   SandboxInfo,
   SandboxPortAccess,
   ArchivedSandboxInfo,

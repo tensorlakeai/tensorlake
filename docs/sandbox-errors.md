@@ -49,12 +49,19 @@ errors. Reasons are strings so future server reasons remain readable. Older
 servers that omit diagnostics still produce a useful reason or their original
 error message. Diagnostic values may be strings or legacy JSON objects/arrays.
 
-When a create operation returns a pending sandbox, the readiness helper includes
-the eventual termination reason and diagnostic in its `SandboxError`. To inspect
+When a create operation returns a pending sandbox, the readiness wait
+(`PendingSandbox.ready` / `Sandbox.create`) includes the eventual termination reason
+and diagnostic in its `SandboxError`, and exposes the reason as
+`SandboxError.reason` (Python) / `SandboxError.reason` (TypeScript): `no_capacity`
+when a `max_pending_secs` bound expired, `cancelled` when a pending sandbox was
+deleted, or a startup reason. A wait whose budget runs out while the sandbox is
+still queued raises `SandboxPending` instead, and never deletes the sandbox; see
+[wait-free create and readiness by polling](sandbox-create-and-wait.md). To inspect
 a sandbox directly, use `client.get(...)`: the returned object has
-`termination_reason` and `error_details` in Python, or `terminationReason` and
-`errorDetails` in TypeScript. Copy operations can return partial failures; inspect
-each entry's `status`, `reason`, and diagnostic in the returned `sandboxes` list.
+`termination_reason`, `pending_reason` and `error_details` in Python, or
+`terminationReason`, `pendingReason` and `errorDetails` in TypeScript. Copy
+operations can return partial failures; inspect each entry's `status`, `reason`,
+and diagnostic in the returned `sandboxes` list.
 
 `tl sbx create` and `tl sbx copy` print the reason and diagnostic on failure.
 `tl sbx describe <id>` shows an **Error details** line for terminated sandboxes,

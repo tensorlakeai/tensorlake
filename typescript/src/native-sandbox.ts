@@ -83,6 +83,14 @@ export interface NativeSandboxProxyClient {
 
 export interface NativeSandboxClient {
   createSandbox(requestJson: string): Promise<TracedJson>;
+  /** Wait-free create (`wait: false`, ADR 0086). */
+  createSandboxNoWait(requestJson: string): Promise<TracedJson>;
+  /** Poll the sandbox until it leaves `pending` or the budget runs out; resolves with the last `SandboxInfo`. */
+  waitForSandbox(
+    sandboxId: string,
+    timeoutSec: number,
+    pollIntervalSec?: number | null,
+  ): Promise<TracedJson>;
   claimSandbox(poolId: string, requestJson?: string): Promise<TracedJson>;
   copySandbox(sandboxId: string, times: number): Promise<TracedJson>;
   getSandbox(sandboxId: string): Promise<TracedJson>;

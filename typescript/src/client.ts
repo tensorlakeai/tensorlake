@@ -1,5 +1,5 @@
 import * as defaults from "./defaults.js";
-import { SandboxError, formatErrorDetails } from "./errors.js";
+import { SandboxError, SandboxPending, formatErrorDetails } from "./errors.js";
 import type { Traced } from "./traced.js";
 import { releaseNativeHandle } from "./native-worker-client.js";
 import {
@@ -28,10 +28,13 @@ import {
   type SandboxClientOptions,
   type SandboxInfo,
   type SandboxLogsResponse,
+  type PendingSandboxRecord,
+  type ReadyOptions,
   type SandboxPortAccess,
   type SandboxPoolInfo,
   type SandboxProcessLogFiltersResponse,
   SandboxStatus,
+  isSandboxPending,
   type SnapshotAndWaitOptions,
   type SnapshotInfo,
   type SnapshotOptions,
@@ -43,9 +46,13 @@ import {
   fromSnakeKeys,
   toSnakeKeys,
 } from "./models.js";
+import { PendingSandbox, type PendingSandboxBinding } from "./pending-sandbox.js";
 import { Sandbox } from "./sandbox.js";
 import { nowMs, logSdkTimingEvent, logSdkTiming } from "./sdk-timings.js";
 import { explicitProxyUrlOverride } from "./url.js";
+
+/** Seconds between `GET /sandboxes/{id}` polls while waiting for a sandbox to run (ADR 0086). */
+export const DEFAULT_WAIT_POLL_INTERVAL_SEC = 2;
 
 const GPU_MODELS = new Set<string>([
   "A100-40GB",
@@ -251,10 +258,221 @@ export class SandboxClient {
 
   // --- Sandbox CRUD ---
 
-  /** Create a new sandbox. Returns immediately; the sandbox may still be starting. Use `createAndConnect()` for a blocking, ready-to-use handle. */
+  /**
+   * Create a new sandbox.
+   *
+   * With `wait` unset or `true` the server waits for readiness for at most
+   * the request timeout and answers the blocking create's record (`status`
+   * may already be `running`); this is the wire behaviour unchanged. With
+   * `wait: false` the server answers as soon as the sandbox is durable and
+   * this returns a {@link PendingSandbox} at once: `pending.ready()` waits
+   * for it, `pending.status()` looks at it, and `connect(sandboxId)`
+   * collects it from any other process. Give the sandbox a `name` when a
+   * retry of this call must not create a second one: a repeated name is an
+   * HTTP 409, and `Sandbox.getOrCreate` resolves it. Use
+   * `createAndConnect()` for a blocking, ready-to-use handle.
+   */
+  async create<O extends CreateSandboxOptions = CreateSandboxOptions>(
+    options?: O,
+  ): Promise<
+    O extends { wait: false } ? PendingSandbox : Traced<CreateSandboxResponse>
+  >;
   async create(
     options?: CreateSandboxOptions,
-  ): Promise<Traced<CreateSandboxResponse>> {
+  ): Promise<PendingSandbox | Traced<CreateSandboxResponse>> {
+    if (options?.wait === false) {
+      return this.requestPending(options, { ownsSandbox: false });
+    }
+    const body = SandboxClient.buildCreateRequestBody(options);
+    return this.tracedJson<CreateSandboxResponse>(
+      () => this.native.createSandbox(JSON.stringify(body)),
+      "sandboxId",
+    );
+  }
+
+  /**
+   * @internal Send the create with `wait: false` and return the pending
+   * handle, bound to this client so `ready()` / `status()` work.
+   */
+  async requestPending(
+    options: CreateSandboxOptions | undefined,
+    binding: {
+      proxyUrl?: string;
+      requestTimeout?: number;
+      ownsSandbox: boolean;
+    },
+  ): Promise<PendingSandbox> {
+    const body = SandboxClient.buildCreateRequestBody({
+      ...options,
+      wait: false,
+    });
+    const record = await this.tracedJson<PendingSandboxRecord>(() =>
+      this.native.createSandboxNoWait(JSON.stringify(body)),
+    );
+    return new PendingSandbox(record, {
+      client: this,
+      proxyUrl: binding.proxyUrl,
+      requestTimeout: binding.requestTimeout,
+      requestedName: options?.name ?? null,
+      ownsSandbox: binding.ownsSandbox,
+      traceId: record.traceId,
+    });
+  }
+
+  /** @internal Implementation of `PendingSandbox.ready`. */
+  async _ready(
+    sandboxId: string,
+    binding: PendingSandboxBinding,
+    options?: ReadyOptions,
+  ): Promise<Sandbox> {
+    const budget = options?.timeout ?? this.requestTimeoutMs / 1000;
+    const observed = await this.waitForSandbox(
+      sandboxId,
+      budget,
+      options?.pollInterval ?? DEFAULT_WAIT_POLL_INTERVAL_SEC,
+    );
+    return this.settleWait(observed, {
+      budget,
+      proxyUrl: binding.proxyUrl,
+      requestTimeout: binding.requestTimeout,
+      cancelOnTimeout: options?.cancelOnTimeout ?? false,
+      requestedName: binding.requestedName,
+      ownsSandbox: binding.ownsSandbox,
+      traceId: binding.traceId,
+    });
+  }
+
+  /**
+   * Poll `get` every `pollInterval` seconds until the sandbox leaves
+   * `pending` or `timeout` elapses, resolving with the last observation.
+   * Never rejects for a timeout and never deletes.
+   */
+  private async waitForSandbox(
+    sandboxId: string,
+    timeout: number,
+    pollInterval: number,
+  ): Promise<Traced<SandboxInfo>> {
+    if (!Number.isFinite(timeout) || timeout < 0) {
+      throw new SandboxError("timeout must be a non-negative number of seconds");
+    }
+    if (!Number.isFinite(pollInterval) || pollInterval <= 0) {
+      throw new SandboxError("pollInterval must be a positive number of seconds");
+    }
+    return this.tracedJson<SandboxInfo>(
+      () => this.native.waitForSandbox(sandboxId, timeout, pollInterval),
+      "sandboxId",
+      { sandboxId, notFoundKind: "sandbox" },
+    );
+  }
+
+  /** Turn the last observed sandbox state into a handle or an error. */
+  private async settleWait(
+    observed: Traced<SandboxInfo>,
+    options: {
+      budget: number;
+      proxyUrl?: string;
+      requestTimeout?: number;
+      cancelOnTimeout: boolean;
+      requestedName?: string | null;
+      ownsSandbox?: boolean;
+      traceId?: string;
+    },
+  ): Promise<Sandbox> {
+    const { status, sandboxId } = observed;
+    if (isSandboxPending(status)) {
+      if (options.cancelOnTimeout) {
+        try {
+          await this.delete(sandboxId);
+        } catch {
+          // ignore cleanup failures
+        }
+        throw new SandboxError(
+          `Sandbox ${sandboxId} did not start within ${options.budget}s`,
+          { reason: observed.pendingReason, sandboxId },
+        );
+      }
+      throw new SandboxPending(sandboxId, {
+        pendingReason: observed.pendingReason,
+        timeout: options.budget,
+      });
+    }
+    if (status === SandboxStatus.RUNNING) {
+      const explicitProxyUrl =
+        options.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
+      const selectedProxyUrl = await this.native.selectSandboxProxyUrl(
+        sandboxId,
+        observed.sandboxUrl ?? null,
+        observed.ingressEndpoint ?? null,
+        explicitProxyUrl ?? null,
+      );
+      const sandbox = this.connect(
+        sandboxId,
+        selectedProxyUrl,
+        observed.routingHint,
+        options.requestTimeout,
+        explicitProxyUrl,
+      );
+      if (options.ownsSandbox) sandbox._setOwner(this);
+      else sandbox._setLifecycleClient(this);
+      sandbox.traceId = options.traceId ?? observed.traceId;
+      sandbox._setLifecycleIdentifier(sandboxId);
+      sandbox._setName(observed.name ?? options.requestedName ?? null);
+      return sandbox;
+    }
+    if (status === SandboxStatus.TERMINATED || status === SandboxStatus.FAILED) {
+      throw startupFailure(sandboxId, status, {
+        errorDetails: observed.errorDetails,
+        terminationReason: observed.terminationReason,
+      });
+    }
+    throw new SandboxError(
+      `Sandbox ${sandboxId} is ${status}, not running; ` +
+        (status === SandboxStatus.SUSPENDED
+          ? "resume it to run it again"
+          : "wait for it to settle"),
+      { reason: String(status), sandboxId },
+    );
+  }
+
+  /**
+   * Routing for a lazy `connect` handle. A sandbox that is still pending is
+   * waited on here rather than failing: readiness is a property of the
+   * sandbox, not of the create call that requested it.
+   */
+  private async resolveRoutingInfo(
+    identifier: string,
+    requestTimeout?: number,
+  ): Promise<Traced<SandboxInfo>> {
+    const info = await this.get(identifier);
+    if (info.status !== SandboxStatus.PENDING) return info;
+    const budget = requestTimeout ?? this.requestTimeoutMs / 1000;
+    const observed = await this.waitForSandbox(
+      info.sandboxId,
+      budget,
+      DEFAULT_WAIT_POLL_INTERVAL_SEC,
+    );
+    if (isSandboxPending(observed.status)) {
+      throw new SandboxPending(observed.sandboxId, {
+        pendingReason: observed.pendingReason,
+        timeout: budget,
+      });
+    }
+    if (
+      observed.status === SandboxStatus.TERMINATED ||
+      observed.status === SandboxStatus.FAILED
+    ) {
+      throw startupFailure(observed.sandboxId, observed.status, {
+        errorDetails: observed.errorDetails,
+        terminationReason: observed.terminationReason,
+      });
+    }
+    return observed;
+  }
+
+  /** @internal Build the create wire body; shared by `create` and `createAndConnect`. */
+  static buildCreateRequestBody(
+    options?: CreateSandboxOptions,
+  ): Record<string, unknown> {
     const gpuResources = gpuRequest(
       options?.gpu,
       options?.gpus,
@@ -294,11 +512,18 @@ export class SandboxClient {
         deny_out: options?.denyOut ?? [],
       };
     }
-
-    return this.tracedJson<CreateSandboxResponse>(
-      () => this.native.createSandbox(JSON.stringify(body)),
-      "sandboxId",
-    );
+    if (options?.maxPendingSecs != null) {
+      if (
+        !Number.isInteger(options.maxPendingSecs) ||
+        options.maxPendingSecs < 0
+      ) {
+        throw new SandboxError("maxPendingSecs must be a non-negative integer");
+      }
+      body.max_pending_secs = options.maxPendingSecs;
+    }
+    // Sent only when false so older servers keep accepting the body.
+    if (options?.wait === false) body.wait = false;
+    return body;
   }
 
   /** Get current state and metadata for a sandbox by ID. */
@@ -867,7 +1092,7 @@ export class SandboxClient {
       projectId: this.projectId,
       routingHint,
       resolveProxyInfo: async (currentIdentifier) =>
-        this.get(currentIdentifier),
+        this.resolveRoutingInfo(currentIdentifier, requestTimeout),
       requestTimeout,
       nativeClient: this.native,
     });
@@ -876,8 +1101,19 @@ export class SandboxClient {
   /**
    * Create a sandbox, wait for it to reach `Running`, and return a connected handle.
    *
-   * Blocks until the sandbox is ready or `requestTimeout` elapses. The returned
-   * `Sandbox` auto-terminates when `terminate()` is called.
+   * This is `create({ wait: false })` followed by `PendingSandbox.ready()`
+   * polling every `pollInterval` seconds, with `requestTimeout` as the wait
+   * budget, in one call. The returned `Sandbox` auto-terminates when
+   * `terminate()` is called.
+   *
+   * **When the wait runs out the sandbox is not deleted.** A `SandboxPending`
+   * is thrown with the sandbox id, and the sandbox keeps its place in the
+   * queue and starts whenever capacity arrives; `connect` with that id to
+   * collect it, or `delete` it to give up. Pass
+   * `cancelOnTimeout: true` for the previous behaviour (delete, then throw
+   * `SandboxError`), or set `maxPendingSecs` to let the server fail it after
+   * a bound. A pool claim (`poolId`) answers from the server-side wait; a
+   * claim that is still starting is then waited on the same way.
    */
   async createAndConnect(options?: CreateAndConnectOptions): Promise<Sandbox> {
     const opStart = nowMs();
@@ -886,6 +1122,7 @@ export class SandboxClient {
       options?.startupTimeout ??
       this.requestTimeoutMs / 1000;
     const requestClient = this.withRequestTimeout(requestTimeout);
+    const deadline = Date.now() + secondsToMillis(requestTimeout);
     logSdkTimingEvent("sandbox.create", "start", {
       request_timeout_s: requestTimeout,
       image: options?.image,
@@ -894,141 +1131,151 @@ export class SandboxClient {
 
     // claim() never sends options.name to the server, so only create() should fall
     // back to it locally when the server response omits a name.
+    const requestedName =
+      options?.poolId != null ? null : (options?.name ?? null);
+    let sandboxId: string;
+    let traceId: string;
     const createStart = nowMs();
-    const result =
-      options?.poolId != null
-        ? await requestClient.claim(options.poolId, {
-            fileSystems: options.fileSystems,
-          })
-        : await requestClient.create(options);
-    logSdkTiming(
-      "sandbox.create",
-      options?.poolId != null ? "claim_response" : "create_response",
-      createStart,
-      {
+    if (options?.poolId != null) {
+      // Pool claims have no `wait: false`: the server answers from its own
+      // wait, so a claim is often already running.
+      const result = await requestClient.claim(options.poolId, {
+        fileSystems: options.fileSystems,
+      });
+      logSdkTiming("sandbox.create", "claim_response", createStart, {
         sandbox_id: result.sandboxId,
         status: result.status,
         server_trace_id: result.traceId,
-      },
-    );
-    const requestedName =
-      options?.poolId != null ? null : (options?.name ?? null);
-
-    const finishConnect = async (
-      sandboxId: string,
-      routingHint: string | undefined,
-      name: string | null | undefined,
-      ingressEndpoint: string | undefined,
-      sandboxUrl: string | undefined,
-    ) => {
-      const explicitProxyUrl =
-        options?.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
-      const selectedProxyUrl = await this.native.selectSandboxProxyUrl(
-        sandboxId,
-        sandboxUrl ?? null,
-        ingressEndpoint ?? null,
-        explicitProxyUrl ?? null,
-      );
-      const sandbox = requestClient.connect(
-        sandboxId,
-        selectedProxyUrl,
-        routingHint,
-        requestTimeout,
-        explicitProxyUrl,
-      );
-      sandbox._setOwner(requestClient);
-      sandbox.traceId = result.traceId;
-      sandbox._setLifecycleIdentifier(sandboxId);
-      sandbox._setName(name ?? requestedName);
-      logSdkTiming("sandbox.create", "complete", opStart, {
-        sandbox_id: sandboxId,
-        status: SandboxStatus.RUNNING,
-        server_trace_id: result.traceId,
-        routing_hint: routingHint,
-        ingress_endpoint: ingressEndpoint,
-        sandbox_url: sandboxUrl,
       });
-      return sandbox;
-    };
-
-    // Fast path: the blocking create/claim response already carries Running status
-    // and a short-lived routing hint. Use it immediately to skip an extra poll RTT
-    // and let the proxy route the first request without a placement lookup.
-    if (result.status === SandboxStatus.RUNNING) {
-      return finishConnect(
-        result.sandboxId,
-        result.routingHint,
-        result.name,
-        result.ingressEndpoint,
-        result.sandboxUrl,
-      );
-    }
-    if (
-      result.status === SandboxStatus.SUSPENDED ||
-      result.status === SandboxStatus.TERMINATED ||
-      result.status === SandboxStatus.FAILED
-    ) {
-      throw new SandboxError(
-        formatStartupFailureMessage(result.sandboxId, result.status, {
-          errorDetails: result.errorDetails,
-          terminationReason: result.terminationReason ?? result.reason,
-        }),
-      );
-    }
-    if (result.status === SandboxStatus.TIMEOUT) {
-      try {
-        await requestClient.delete(result.sandboxId);
-      } catch {
-        // ignore cleanup failures
-      }
-      throw new SandboxError(
-        `Sandbox ${result.sandboxId} did not start within ${requestTimeout}s`,
-      );
-    }
-
-    const deadline = Date.now() + secondsToMillis(requestTimeout);
-
-    while (Date.now() < deadline) {
-      const pollStart = nowMs();
-      const info = await requestClient.get(result.sandboxId);
-      logSdkTiming("sandbox.create", "poll_response", pollStart, {
-        sandbox_id: result.sandboxId,
-        status: info.status,
-        server_trace_id: info.traceId,
-      });
-      if (info.status === SandboxStatus.RUNNING) {
-        return finishConnect(
-          info.sandboxId,
-          info.routingHint,
-          info.name,
-          info.ingressEndpoint,
-          info.sandboxUrl,
+      if (result.status === SandboxStatus.RUNNING) {
+        const explicitProxyUrl =
+          options?.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
+        const selectedProxyUrl = await this.native.selectSandboxProxyUrl(
+          result.sandboxId,
+          result.sandboxUrl ?? null,
+          result.ingressEndpoint ?? null,
+          explicitProxyUrl ?? null,
         );
+        const sandbox = requestClient.connect(
+          result.sandboxId,
+          selectedProxyUrl,
+          result.routingHint,
+          requestTimeout,
+          explicitProxyUrl,
+        );
+        sandbox._setOwner(requestClient);
+        sandbox.traceId = result.traceId;
+        sandbox._setLifecycleIdentifier(result.sandboxId);
+        sandbox._setName(result.name ?? requestedName);
+        logSdkTiming("sandbox.create", "complete", opStart, {
+          sandbox_id: result.sandboxId,
+          status: SandboxStatus.RUNNING,
+          server_trace_id: result.traceId,
+        });
+        return sandbox;
       }
       if (
-        info.status === SandboxStatus.SUSPENDED ||
-        info.status === SandboxStatus.TERMINATED
+        result.status === SandboxStatus.SUSPENDED ||
+        result.status === SandboxStatus.TERMINATED ||
+        result.status === SandboxStatus.FAILED
       ) {
-        throw new SandboxError(
-          formatStartupFailureMessage(result.sandboxId, info.status, {
-            errorDetails: info.errorDetails,
-            terminationReason: info.terminationReason,
-          }),
-        );
+        throw startupFailure(result.sandboxId, result.status, {
+          errorDetails: result.errorDetails,
+          terminationReason: result.terminationReason ?? result.reason,
+        });
       }
-      await sleep(500);
+      sandboxId = result.sandboxId;
+      traceId = result.traceId;
+    } else {
+      const pending = await requestClient.requestPending(options, {
+        ownsSandbox: true,
+      });
+      logSdkTiming("sandbox.create", "create_response", createStart, {
+        sandbox_id: pending.sandboxId,
+        status: pending.state,
+        server_trace_id: pending.traceId,
+      });
+      sandboxId = pending.sandboxId;
+      traceId = pending.traceId;
+      // Fast path: a server without `wait: false` may already answer running,
+      // with a short-lived routing hint worth using directly.
+      if (pending.state === SandboxStatus.RUNNING) {
+        const explicitProxyUrl =
+          options?.proxyUrl ?? explicitProxyUrlOverride() ?? undefined;
+        const selectedProxyUrl = await this.native.selectSandboxProxyUrl(
+          sandboxId,
+          pending.sandboxUrl ?? null,
+          pending.ingressEndpoint ?? null,
+          explicitProxyUrl ?? null,
+        );
+        const sandbox = requestClient.connect(
+          sandboxId,
+          selectedProxyUrl,
+          pending.routingHint,
+          requestTimeout,
+          explicitProxyUrl,
+        );
+        sandbox._setOwner(requestClient);
+        sandbox.traceId = traceId;
+        sandbox._setLifecycleIdentifier(sandboxId);
+        sandbox._setName(pending.name ?? requestedName);
+        logSdkTiming("sandbox.create", "complete", opStart, {
+          sandbox_id: sandboxId,
+          status: SandboxStatus.RUNNING,
+          server_trace_id: traceId,
+        });
+        return sandbox;
+      }
+      if (
+        pending.state === SandboxStatus.TERMINATED ||
+        pending.state === SandboxStatus.FAILED
+      ) {
+        throw startupFailure(sandboxId, pending.state, {
+          errorDetails: pending.errorDetails,
+          terminationReason: pending.terminationReason ?? pending.reason,
+        });
+      }
     }
 
-    // Timed out — clean up
-    try {
-      await requestClient.delete(result.sandboxId);
-    } catch {
-      // ignore cleanup failures
-    }
-    throw new SandboxError(
-      `Sandbox ${result.sandboxId} did not start within ${requestTimeout}s`,
+    // A `timeout` claim or a pending create: the sandbox exists and keeps its
+    // place in the queue. Poll it with whatever budget is left (a zero budget
+    // observes its state once without sleeping).
+    const remaining = Math.max(0, (deadline - Date.now()) / 1000);
+    const observed = await requestClient.waitForSandbox(
+      sandboxId,
+      remaining,
+      options?.pollInterval ?? DEFAULT_WAIT_POLL_INTERVAL_SEC,
     );
+    const sandbox = await requestClient.settleWait(observed, {
+      budget: requestTimeout,
+      proxyUrl: options?.proxyUrl,
+      requestTimeout,
+      cancelOnTimeout: options?.cancelOnTimeout ?? false,
+      requestedName,
+      ownsSandbox: true,
+      traceId,
+    });
+    logSdkTiming("sandbox.create", "complete", opStart, {
+      sandbox_id: sandboxId,
+      status: SandboxStatus.RUNNING,
+      server_trace_id: traceId,
+      routing_hint: observed.routingHint,
+      ingress_endpoint: observed.ingressEndpoint,
+      sandbox_url: observed.sandboxUrl,
+    });
+    return sandbox;
   }
+}
+
+function startupFailure(
+  sandboxId: string,
+  status: SandboxStatus | string,
+  options: { errorDetails?: unknown; terminationReason?: string },
+): SandboxError {
+  return new SandboxError(formatStartupFailureMessage(sandboxId, status, options), {
+    reason: options.terminationReason,
+    sandboxId,
+  });
 }
 
 function resolveRequestTimeoutMs(options?: {

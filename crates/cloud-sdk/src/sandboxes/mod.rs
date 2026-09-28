@@ -8,6 +8,7 @@ use reqwest::StatusCode;
 use reqwest::header::{ACCEPT, CONTENT_LENGTH};
 use serde_json::Value;
 use std::path::Path;
+use std::time::{Duration, Instant};
 use tokio::fs::File;
 use tokio_util::io::ReaderStream;
 
@@ -16,9 +17,39 @@ use crate::{
         Client, Traced, build_bytes_post_request_from_builder,
         build_empty_post_request_from_builder,
     },
-    error::SdkError,
+    error::{SdkError, TransportFailure},
+    retry::{RetryDecision, RetryPolicy, RetryState, is_transient},
 };
 pub use desktop::SandboxDesktopClient;
+
+/// Default interval between `GET /sandboxes/{id}` polls while waiting for a
+/// sandbox to run (ADR 0086).
+pub const DEFAULT_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Terminal reason a pending sandbox is given when its `max_pending_secs`
+/// bound expires.
+pub const TERMINATION_REASON_NO_CAPACITY: &str = "no_capacity";
+
+/// Terminal reason of a pending sandbox that was deleted before it ran.
+pub const TERMINATION_REASON_CANCELLED: &str = "cancelled";
+
+/// Transient failures (502/503/504, a cut connection, a timed-out poll)
+/// tolerated per wait loop between two successful observations. Each
+/// observation resets the count, so a wait that spans a control-plane
+/// rollout keeps going. A pending sandbox is not routable yet, so the
+/// lifecycle gateway can answer a transient proxy error until it starts.
+const WAIT_TRANSIENT_RETRIES: usize = 10;
+
+/// Whether a sandbox `status` is one a readiness wait keeps polling through.
+pub fn is_sandbox_pending(status: &str) -> bool {
+    status == "pending"
+}
+
+/// Smallest HTTP timeout given to the first readiness poll of a wait, so a
+/// wait with almost no budget can still observe the state once. Later polls
+/// are capped at the remaining budget exactly: when it runs out the last
+/// observation is returned instead of waiting for a slow answer.
+pub const WAIT_POLL_MIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 use models::{
     ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, ClaimSandboxRequest,
@@ -27,10 +58,10 @@ use models::{
     DetachFileSystemRequest, FileSystemMount, GetSandboxLogsRequest, HealthResponse,
     ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
     ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
-    NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent, SandboxInfo,
-    SandboxLogsResponse, SandboxPoolInfo, SandboxPoolRequest, SandboxProcessLogFiltersResponse,
-    SendSignalResponse, SignBlobRequest, SnapshotInfo, SnapshotType, UpdateSandboxPoolRequest,
-    UpdateSandboxRequest,
+    NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent,
+    SandboxAccepted, SandboxInfo, SandboxLogsResponse, SandboxPoolInfo, SandboxPoolRequest,
+    SandboxProcessLogFiltersResponse, SendSignalResponse, SignBlobRequest, SnapshotInfo,
+    SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 
 pub const DEFAULT_SANDBOX_PROXY_URL: &str = "https://sandbox.tensorlake.ai";
@@ -378,6 +409,11 @@ impl SandboxesClient {
         format!("/v1/namespaces/{}/{}", self.namespace, endpoint)
     }
 
+    /// Blocking create: the server waits for readiness for at most the
+    /// client's request timeout and answers `status: timeout` (HTTP 504)
+    /// when it runs out, leaving the sandbox pending. Prefer
+    /// [`Self::create_no_wait`] followed by [`Self::wait_until_settled`]; this
+    /// shape is kept for callers that depend on the server-side wait.
     pub async fn create(
         &self,
         request: &CreateSandboxRequest,
@@ -391,6 +427,122 @@ impl SandboxesClient {
         self.client
             .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
             .await
+    }
+
+    /// Wait-free create (ADR 0086): sends `request` with `wait: false` and
+    /// returns the acknowledgement (HTTP 202) as soon as the sandbox is
+    /// durable. The sandbox starts whenever capacity allows; wait for it with
+    /// [`Self::wait_until_settled`] or poll [`Self::get`] / [`Self::list`].
+    ///
+    /// The call is not idempotent: a retry that the server did receive
+    /// creates a second sandbox. Callers that must not duplicate give the
+    /// sandbox a `name` (unique per namespace; a repeat is a 409) and resolve
+    /// it with get-or-create, and wrap this only in
+    /// [`crate::retry::RetryPolicy::non_idempotent`].
+    pub async fn create_no_wait(
+        &self,
+        request: &CreateSandboxRequest,
+    ) -> Result<Traced<SandboxAccepted>, SdkError> {
+        validate_mount_snapshot_pins(&request.file_systems)?;
+        validate_mount_owners(&request.file_systems)?;
+        let request = CreateSandboxRequest {
+            wait: Some(false),
+            ..request.clone()
+        };
+        let uri = self.endpoint("sandboxes");
+        let req = self
+            .client
+            .build_post_json_request(Method::POST, &uri, &request)?;
+        // A server that predates `wait: false` blocks and may answer its
+        // legacy `status: timeout` 504; the sandbox is pending either way.
+        self.client
+            .execute_json_allow_status(req, &[StatusCode::GATEWAY_TIMEOUT])
+            .await
+    }
+
+    /// Poll [`Self::get`] every `poll_interval` until the sandbox leaves
+    /// `pending` or `timeout` elapses, and return the last observation.
+    ///
+    /// Never deletes the sandbox and never treats a timeout as an error: a
+    /// `pending` status in the result means the caller's budget ran out
+    /// while the sandbox kept its place in the queue, and it is the caller's
+    /// decision to keep waiting, cancel, or raise. Any other status
+    /// (`running`, `suspended`, `terminated`, ...) ends the wait. A zero
+    /// `timeout` observes the state once without sleeping. Transient
+    /// failures (502/503/504, a cut connection, a timed-out poll) are
+    /// retried up to [`WAIT_TRANSIENT_RETRIES`] times between observations;
+    /// a missing sandbox surfaces as the poll's 404.
+    ///
+    /// The budget is honoured closely: it is checked before every poll and
+    /// every sleep, no sleep runs past the deadline, each poll's HTTP timeout
+    /// is capped at the remaining budget (only the very first attempt gets
+    /// [`WAIT_POLL_MIN_REQUEST_TIMEOUT`], so the state can be observed once),
+    /// and once the budget is spent the last observation is returned without
+    /// another request. When nothing was observed before the budget ran out
+    /// (the first attempts all failed), the last error is returned instead.
+    pub async fn wait_until_settled(
+        &self,
+        sandbox_id: &str,
+        timeout: Duration,
+        poll_interval: Duration,
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
+        let started = Instant::now();
+        let deadline = started + timeout;
+        let mut last: Option<Traced<SandboxInfo>> = None;
+        let mut last_error: Option<SdkError> = None;
+        let mut last_progress = started;
+        let mut retry = RetryState::new(RetryPolicy::idempotent(WAIT_TRANSIENT_RETRIES));
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                if let Some(last) = last {
+                    return Ok(last);
+                }
+                if let Some(error) = last_error {
+                    return Err(error);
+                }
+            }
+            // Only the very first attempt is allowed the floor; after a
+            // failed attempt every retry is capped at what is left.
+            let per_poll = if last.is_none() && last_error.is_none() {
+                remaining.max(WAIT_POLL_MIN_REQUEST_TIMEOUT)
+            } else {
+                remaining
+            };
+            match self.get_within(sandbox_id, per_poll).await {
+                Ok(info) => {
+                    if !is_sandbox_pending(&info.status) {
+                        return Ok(info);
+                    }
+                    last = Some(info);
+                    last_progress = Instant::now();
+                    retry = RetryState::new(RetryPolicy::idempotent(WAIT_TRANSIENT_RETRIES));
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Ok(last.expect("observed"));
+                    }
+                    tokio::time::sleep(poll_interval.min(remaining)).await;
+                }
+                Err(error) => {
+                    let cut_short = is_transient(&error)
+                        || error.transport_failure() == Some(TransportFailure::Timeout);
+                    match retry.decide_with_transient(&error, last_progress.elapsed(), cut_short) {
+                        RetryDecision::Retry(wait) => {
+                            let remaining = deadline.saturating_duration_since(Instant::now());
+                            if remaining.is_zero() {
+                                return match last {
+                                    Some(last) => Ok(last),
+                                    None => Err(error),
+                                };
+                            }
+                            tokio::time::sleep(wait.min(remaining)).await;
+                            last_error = Some(error);
+                        }
+                        RetryDecision::Stop => return Err(error),
+                    }
+                }
+            }
+        }
     }
 
     pub async fn claim(&self, pool_id: &str) -> Result<Traced<CreateSandboxResponse>, SdkError> {
@@ -468,6 +620,27 @@ impl SandboxesClient {
     pub async fn get(&self, sandbox_id: &str) -> Result<Traced<SandboxInfo>, SdkError> {
         let uri = self.endpoint(&format!("sandboxes/{sandbox_id}"));
         let req = self.client.request(Method::GET, &uri).build()?;
+        self.client.execute_json(req).await
+    }
+
+    /// [`Self::get`] with the HTTP timeout set to `timeout` (never above the
+    /// client's own timeout), so a readiness poll cannot outlive the wait it
+    /// serves.
+    async fn get_within(
+        &self,
+        sandbox_id: &str,
+        timeout: Duration,
+    ) -> Result<Traced<SandboxInfo>, SdkError> {
+        let timeout = match self.client.request_timeout() {
+            Some(client_timeout) => timeout.min(client_timeout),
+            None => timeout,
+        };
+        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}"));
+        let req = self
+            .client
+            .request(Method::GET, &uri)
+            .timeout(timeout)
+            .build()?;
         self.client.execute_json(req).await
     }
 
