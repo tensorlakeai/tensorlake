@@ -6,7 +6,7 @@ import json
 import os
 import time
 from collections.abc import Mapping
-from typing import TYPE_CHECKING, Any, Literal, overload
+from typing import TYPE_CHECKING, Any
 from urllib.parse import urlparse
 
 import httpx
@@ -21,7 +21,6 @@ from .exceptions import (
     SandboxError,
     SandboxNotFoundError,
     SandboxNotRoutableError,
-    SandboxPending,
 )
 from .models import (
     CheckpointType,
@@ -40,7 +39,6 @@ from .models import (
     OutputEvent,
     OutputMode,
     OutputResponse,
-    PendingSandbox,
     ProcessHealthCheck,
     ProcessInfo,
     ProcessUser,
@@ -327,8 +325,6 @@ class Sandbox:
     ) -> SandboxInfo:
         self._require_lifecycle_client("refresh proxy routing")
         identifier = self._lifecycle_identifier()
-        started = time.monotonic()
-        last: SandboxInfo | None = None
         while True:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
@@ -343,27 +339,15 @@ class Sandbox:
                 return info
             if info.status == SandboxStatus.TERMINATED:
                 raise SandboxError(
-                    f"Sandbox {identifier!r} terminated while refreshing proxy routing",
-                    reason=info.termination_reason,
-                    sandbox_id=info.sandbox_id,
+                    f"Sandbox {identifier!r} terminated while refreshing proxy routing"
                 )
-            last = info
             time.sleep(min(poll_interval, max(0.0, deadline - time.monotonic())))
-        if last is not None and last.status == SandboxStatus.PENDING:
-            # Still queued for capacity: it keeps its place, the caller decides.
-            raise SandboxPending(
-                last.sandbox_id,
-                pending_reason=last.pending_reason,
-                timeout=max(0.0, deadline - started),
-            )
         raise SandboxError(
-            f"Sandbox {identifier!r} did not provide refreshed proxy routing within timeout",
-            sandbox_id=identifier,
+            f"Sandbox {identifier!r} did not provide refreshed proxy routing within timeout"
         )
 
     # --- Class-level factory methods ---
 
-    @overload
     @classmethod
     def create(
         cls,
@@ -391,97 +375,11 @@ class Sandbox:
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
-        max_pending_secs: int | None = None,
-        cancel_on_timeout: bool = False,
-        wait: Literal[True] = True,
-    ) -> "Sandbox": ...
-
-    @overload
-    @classmethod
-    def create(
-        cls,
-        image: str | None = None,
-        cpus: float | None = None,
-        memory_mb: int | None = None,
-        disk_mb: int | None = None,
-        gpus: int | None = None,
-        gpu_model: GpuModel | str | None = None,
-        timeout_secs: int | None = None,
-        entrypoint: list[str] | None = None,
-        allow_internet_access: bool = True,
-        allow_out: list[str] | None = None,
-        deny_out: list[str] | None = None,
-        pool_id: str | None = None,
-        snapshot_id: str | None = None,
-        proxy_url: str | None = None,
-        request_timeout: float | None = None,
-        startup_timeout: float | None = None,
-        name: str | None = None,
-        file_systems: list[FileSystemMount] | None = None,
-        api_key: str | None = _defaults.API_KEY,
-        api_url: str = _defaults.API_URL,
-        organization_id: str | None = None,
-        project_id: str | None = None,
-        namespace: str | None = _defaults.NAMESPACE,
-        gpu: GpuRequest | None = None,
-        max_pending_secs: int | None = None,
-        cancel_on_timeout: bool = False,
-        *,
-        wait: Literal[False],
-    ) -> PendingSandbox: ...
-
-    @classmethod
-    def create(
-        cls,
-        image: str | None = None,
-        cpus: float | None = None,
-        memory_mb: int | None = None,
-        disk_mb: int | None = None,
-        gpus: int | None = None,
-        gpu_model: GpuModel | str | None = None,
-        timeout_secs: int | None = None,
-        entrypoint: list[str] | None = None,
-        allow_internet_access: bool = True,
-        allow_out: list[str] | None = None,
-        deny_out: list[str] | None = None,
-        pool_id: str | None = None,
-        snapshot_id: str | None = None,
-        proxy_url: str | None = None,
-        request_timeout: float | None = None,
-        startup_timeout: float | None = None,
-        name: str | None = None,
-        file_systems: list[FileSystemMount] | None = None,
-        api_key: str | None = _defaults.API_KEY,
-        api_url: str = _defaults.API_URL,
-        organization_id: str | None = None,
-        project_id: str | None = None,
-        namespace: str | None = _defaults.NAMESPACE,
-        gpu: GpuRequest | None = None,
-        max_pending_secs: int | None = None,
-        cancel_on_timeout: bool = False,
-        wait: bool = True,
-    ) -> "Sandbox | PendingSandbox":
+    ) -> "Sandbox":
         """Create a new sandbox and return a connected, running handle.
 
         Covers both fresh sandbox creation and restore-from-snapshot (set
-        ``snapshot_id``). With ``wait=True`` (the default) it blocks until
-        the sandbox is ``Running``: the create is sent with ``wait=False``
-        and the sandbox is polled every two seconds, with ``request_timeout``
-        as the wait budget.
-
-        With ``wait=False`` it returns a :class:`PendingSandbox` at once:
-        ``pending.ready()`` waits for it, ``pending.status()`` looks at it,
-        and ``Sandbox.connect(pending.sandbox_id)`` collects it from any
-        other process. This is the call for requesting many sandboxes ahead
-        of capacity.
-
-        **When the wait runs out the sandbox is not deleted.** A
-        ``SandboxPending`` is raised carrying the sandbox id; the sandbox
-        keeps its place in the queue and starts whenever capacity arrives.
-        Collect it later with ``Sandbox.connect(sandbox_id)`` or delete it
-        to give up. Pass ``cancel_on_timeout=True`` for the previous
-        delete-then-raise behaviour, or ``max_pending_secs`` to let the
-        server fail it after a bound.
+        ``snapshot_id``). Blocks until the sandbox is ``Running``.
 
         Args:
             image: Sandbox image name. When omitted, Tensorlake uses the
@@ -527,28 +425,12 @@ class Sandbox:
             organization_id: Organization ID for multi-tenant access.
             project_id: Project ID for scoping resources.
             namespace: Namespace for local-server deployments.
-            max_pending_secs: Longest the sandbox may wait for capacity
-                before the server fails it with reason ``no_capacity``.
-                Unset (the default) waits indefinitely; 30 minutes or more
-                is recommended for capacity waits because metal hosts take
-                up to 20 minutes to boot.
-            cancel_on_timeout: Delete the sandbox when ``request_timeout``
-                runs out while it is still pending, then raise
-                ``SandboxError``. Default False: raise ``SandboxPending``
-                and leave the sandbox queued.
-            wait: ``True`` (default) blocks until running; ``False``
-                returns a :class:`PendingSandbox` at once. Cannot be
-                combined with ``pool_id``.
 
         Returns:
-            Connected Sandbox handle (auto-terminates in context manager),
-            or a :class:`PendingSandbox` with ``wait=False``.
+            Connected Sandbox handle (auto-terminates in context manager).
 
         Raises:
-            SandboxPending: The wait ran out while the sandbox was still
-                pending; it keeps its place in the queue.
-            SandboxError: If the sandbox fails to start; ``reason`` carries
-                the server's reason (``no_capacity``, ``cancelled``, ...).
+            SandboxError: If sandbox fails to start or times out.
         """
         from .client import SandboxClient
 
@@ -570,33 +452,6 @@ class Sandbox:
             request_timeout=effective_request_timeout,
             _internal=True,
         )
-        if not wait:
-            if pool_id is not None:
-                raise SandboxError(
-                    "wait=False cannot be combined with pool_id: a pool claim is "
-                    "answered synchronously"
-                )
-            return client._request_pending(
-                image=image,
-                cpus=cpus,
-                memory_mb=memory_mb,
-                disk_mb=disk_mb,
-                gpus=gpus,
-                gpu_model=gpu_model,
-                timeout_secs=timeout_secs,
-                entrypoint=entrypoint,
-                allow_internet_access=allow_internet_access,
-                allow_out=allow_out,
-                deny_out=deny_out,
-                snapshot_id=snapshot_id,
-                name=name,
-                file_systems=file_systems,
-                gpu=gpu,
-                max_pending_secs=max_pending_secs,
-                proxy_url=proxy_url,
-                request_timeout=effective_request_timeout,
-                owns_sandbox=True,
-            )
         return client.create_and_connect(
             image=image,
             cpus=cpus,
@@ -616,8 +471,6 @@ class Sandbox:
             name=name,
             file_systems=file_systems,
             gpu=gpu,
-            max_pending_secs=max_pending_secs,
-            cancel_on_timeout=cancel_on_timeout,
         )
 
     @classmethod
@@ -702,7 +555,6 @@ class Sandbox:
         project_id: str | None = None,
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
-        max_pending_secs: int | None = None,
     ) -> "Sandbox":
         """Return the one sandbox bound to ``name``. Create it on first use.
 
@@ -833,7 +685,6 @@ class Sandbox:
                         project_id=project_id,
                         namespace=namespace,
                         gpu=gpu,
-                        max_pending_secs=max_pending_secs,
                     )
                 except RemoteAPIError as e:
                     if e.status_code != 409:
