@@ -535,18 +535,47 @@ export class SandboxClient {
     );
   }
 
-  /** List all sandboxes in the namespace. */
+  /**
+   * List all sandboxes in the namespace.
+   *
+   * The server paginates the list (a page holds 100 sandboxes by default).
+   * This method follows the `next_cursor` the server returns and fetches
+   * every page, so the result holds every sandbox in the namespace, not
+   * just the first page. `traceId` is the trace ID of the first page's
+   * request, the one that started the listing.
+   */
   async list(): Promise<Traced<SandboxInfo[]>> {
-    const { traceId, json } = await callNative(() =>
-      this.native.listSandboxes(),
+    const sandboxes: SandboxInfo[] = [];
+    let traceId: string | undefined;
+    let cursor: string | undefined;
+    for (let page = 0; page < defaults.MAX_LIST_PAGES; page++) {
+      const { traceId: pageTraceId, json } = await callNative(() =>
+        this.native.listSandboxes(null, cursor ?? null),
+      );
+      if (traceId === undefined) traceId = pageTraceId;
+      const parsed = JSON.parse(json) as {
+        sandboxes?: Record<string, unknown>[];
+        next_cursor?: string;
+      };
+      for (const s of parsed.sandboxes ?? []) {
+        sandboxes.push(fromSnakeKeys(s, "sandboxId") as SandboxInfo);
+      }
+      const nextCursor = parsed.next_cursor;
+      if (nextCursor === undefined) {
+        return Object.assign(sandboxes, { traceId: traceId as string });
+      }
+      if (nextCursor === cursor) {
+        throw new SandboxError(
+          `list() got the same pagination cursor twice (${JSON.stringify(
+            nextCursor,
+          )}); stopping to avoid an infinite loop`,
+        );
+      }
+      cursor = nextCursor;
+    }
+    throw new SandboxError(
+      `list() did not finish after ${defaults.MAX_LIST_PAGES} pages`,
     );
-    const parsed = JSON.parse(json) as {
-      sandboxes?: Record<string, unknown>[];
-    };
-    const sandboxes = (parsed.sandboxes ?? []).map(
-      (s) => fromSnakeKeys(s, "sandboxId") as SandboxInfo,
-    );
-    return Object.assign(sandboxes, { traceId });
   }
 
   /**
