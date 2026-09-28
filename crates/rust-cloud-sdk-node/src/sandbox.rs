@@ -29,8 +29,8 @@ use serde_json::Value;
 
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, ClaimSandboxRequest, CreateSandboxPoolRequest,
-    CreateSandboxRequest, GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType,
-    UpdateSandboxPoolRequest, UpdateSandboxRequest,
+    CreateSandboxRequest, GetSandboxLogsRequest, ListArchivedSandboxesParams, ListSandboxesParams,
+    SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     DEFAULT_WAIT_POLL_INTERVAL, SandboxProxyClient, SandboxProxyTarget, SandboxesClient,
@@ -511,13 +511,27 @@ impl NativeSandboxClient {
         .await
     }
 
+    /// Fetch one page of `GET /sandboxes`. `limit`/`cursor` mirror
+    /// `list_archived_sandboxes`; the TypeScript `list()` wrapper calls this
+    /// once per page and follows `next_cursor` until it is exhausted.
     #[napi]
-    pub async fn list_sandboxes(&self) -> napi::Result<TracedJson> {
-        with_retry(self.client().await?, 5, move |c| async move {
-            let traced = c.list().await?;
-            let trace_id = traced.trace_id.clone();
-            let json = serde_json::to_string(&serde_json::json!({ "sandboxes": *traced }))?;
-            Ok(TracedJson { trace_id, json })
+    pub async fn list_sandboxes(
+        &self,
+        limit: Option<u32>,
+        cursor: Option<String>,
+    ) -> napi::Result<TracedJson> {
+        let params = ListSandboxesParams {
+            limit: limit.map(|l| l as usize),
+            cursor,
+        };
+        with_retry(self.client().await?, 5, move |c| {
+            let params = params.clone();
+            async move {
+                let traced = c.list(&params).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced)?;
+                Ok(TracedJson { trace_id, json })
+            }
         })
         .await
     }

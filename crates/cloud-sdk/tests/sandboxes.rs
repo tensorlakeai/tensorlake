@@ -6,8 +6,9 @@ use tensorlake::{
         SandboxProxyClient, SandboxesClient, TERMINATION_REASON_NO_CAPACITY,
         models::{
             ClaimSandboxRequest, CreateSandboxPoolRequest, CreateSandboxRequest,
-            CreateSandboxResources, FileSystemMount, NetworkConfig, NetworkPolicyUpdate,
-            SandboxPoolRequest, UpdateSandboxPoolRequest, UpdateSandboxRequest,
+            CreateSandboxResources, FileSystemMount, ListSandboxesParams, NetworkConfig,
+            NetworkPolicyUpdate, SandboxPoolRequest, UpdateSandboxPoolRequest,
+            UpdateSandboxRequest,
         },
     },
 };
@@ -725,6 +726,101 @@ fn info(status: &str) -> &'static str {
         )
         .into_boxed_str(),
     )
+}
+
+/// Build one `GET /sandboxes` page body for the given sandbox ids, with an
+/// optional `next_cursor` (mirrors the server's `ListSandboxesResponse`).
+fn sandboxes_page(ids: &[String], next_cursor: Option<&str>) -> String {
+    let items: Vec<String> = ids
+        .iter()
+        .map(|id| {
+            format!(
+                r#"{{"id":"{id}","namespace":"default","status":"running","resources":{{"cpus":1.0,"memory_mb":512,"disk_mb":1024}}}}"#
+            )
+        })
+        .collect();
+    let cursor_field = match next_cursor {
+        Some(cursor) => format!(r#","next_cursor":"{cursor}""#),
+        None => String::new(),
+    };
+    format!(r#"{{"sandboxes":[{}]{cursor_field}}}"#, items.join(","))
+}
+
+#[tokio::test]
+async fn list_answers_a_single_page_with_no_next_cursor() {
+    let ids: Vec<String> = (0..40).map(|i| format!("sbx-{i}")).collect();
+    let body = sandboxes_page(&ids, None);
+    let (url, server) = scripted_server(vec![(200, Box::leak(body.into_boxed_str()))]).await;
+    let client = ClientBuilder::new(&url).build().expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+
+    let page = sandboxes
+        .list(&ListSandboxesParams::default())
+        .await
+        .expect("list sandboxes");
+
+    assert_eq!(page.sandboxes.len(), 40);
+    assert!(page.next_cursor.is_none());
+
+    let requests = server.await.expect("server join");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        request_line(&requests[0]),
+        "GET /v1/namespaces/default/sandboxes HTTP/1.1"
+    );
+}
+
+#[tokio::test]
+async fn list_pages_by_cursor_until_the_server_reports_no_more_sandboxes() {
+    // Reproduces the prod bug (2026-09-28): 1000 sandboxes in a namespace,
+    // and every `list()` poll stopped at exactly 100, the server's default
+    // page size. Here the server hands back 250 sandboxes over 3 pages
+    // (100, 100, 50); a caller that follows `next_cursor` gets all of them.
+    let page1_ids: Vec<String> = (0..100).map(|i| format!("sbx-{i}")).collect();
+    let page2_ids: Vec<String> = (100..200).map(|i| format!("sbx-{i}")).collect();
+    let page3_ids: Vec<String> = (200..250).map(|i| format!("sbx-{i}")).collect();
+    let page1 = sandboxes_page(&page1_ids, Some("cursor-1"));
+    let page2 = sandboxes_page(&page2_ids, Some("cursor-2"));
+    let page3 = sandboxes_page(&page3_ids, None);
+
+    let (url, server) = scripted_server(vec![
+        (200, Box::leak(page1.into_boxed_str())),
+        (200, Box::leak(page2.into_boxed_str())),
+        (200, Box::leak(page3.into_boxed_str())),
+    ])
+    .await;
+    let client = ClientBuilder::new(&url).build().expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+
+    // Walk pages the way the Python/TypeScript `list()` wrappers do: follow
+    // `next_cursor` until the server answers without one.
+    let mut all = Vec::new();
+    let mut cursor: Option<String> = None;
+    loop {
+        let params = ListSandboxesParams {
+            limit: None,
+            cursor: cursor.clone(),
+        };
+        let page = sandboxes.list(&params).await.expect("list page");
+        all.extend(page.sandboxes.clone());
+        cursor = page.next_cursor.clone();
+        if cursor.is_none() {
+            break;
+        }
+    }
+
+    assert_eq!(all.len(), 250);
+    assert_eq!(all.first().unwrap().sandbox_id, "sbx-0");
+    assert_eq!(all.last().unwrap().sandbox_id, "sbx-249");
+
+    let requests = server.await.expect("server join");
+    assert_eq!(requests.len(), 3);
+    assert_eq!(
+        request_line(&requests[0]),
+        "GET /v1/namespaces/default/sandboxes HTTP/1.1"
+    );
+    assert!(request_line(&requests[1]).contains("cursor=cursor-1"));
+    assert!(request_line(&requests[2]).contains("cursor=cursor-2"));
 }
 
 #[tokio::test]
