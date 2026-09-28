@@ -33,7 +33,7 @@ use crate::{
     sandbox_images::{
         CommonBuildOptions, DockerfileBuildPlan, SandboxImageBuildError, SandboxImageBuildEvent,
         SandboxImageContextFile, client_builder, collect_dir_files, follow_started_process_output,
-        is_localhost, normalize_context_file_path, resolve_build_context,
+        is_localhost, normalize_context_file_path, open_context_file, resolve_build_context,
         resolved_docker_config_json, sandbox_lifecycle_client, sandbox_proxy_client,
     },
     sandboxes::{SandboxesClient, models::ProcessInfo},
@@ -625,14 +625,17 @@ fn create_context_tar(
     let mut tar = tar::Builder::new(std::fs::File::create(tar_path)?);
     let mut archived_paths = HashSet::new();
     if context_dir.is_dir() {
-        for (full_path, relative_path) in collect_dir_files(context_dir, context_dir)? {
+        // The walker never follows symlinks, and the files are re-opened
+        // without following them either (see `open_context_file`).
+        let collected = collect_dir_files(context_dir, context_dir)?;
+        for (full_path, relative_path) in collected.files {
             if injected_dockerfile.is_some() && relative_path == INJECTED_DOCKERFILE_PATH {
                 return Err(SandboxImageBuildError::usage(format!(
                     "the build context already contains {INJECTED_DOCKERFILE_PATH}, which is \
                      reserved for the injected Dockerfile"
                 )));
             }
-            let mut file = std::fs::File::open(&full_path)?;
+            let mut file = open_context_file(&full_path)?;
             tar.append_file(&relative_path, &mut file)?;
             archived_paths.insert(relative_path);
         }

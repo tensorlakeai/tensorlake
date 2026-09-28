@@ -58,6 +58,7 @@ nanoid = { workspace = true }
 zstd = "0.13"
 
 [target.'cfg(unix)'.dependencies]
+libc = "0.2"
 xattr = { workspace = true }
 
 [dev-dependencies]
