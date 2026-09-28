@@ -13,6 +13,7 @@ import { build } from "esbuild";
 // must be fresh, and the parent must be able to detect a blocked event loop.
 if (!process.argv.includes("--child")) {
   await import("./test-native-stream-lifetime.mjs");
+  await import("./test-native-ready-timeout.mjs");
   if (process.platform !== "linux") {
     console.log("Forbidden certificate I/O regression requires Linux FIFOs.");
   } else {

@@ -6,7 +6,15 @@ from enum import Enum
 from typing import Annotated, Any, Literal
 from urllib.parse import urlparse, urlunparse
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_serializer
+from pydantic import (
+    AliasChoices,
+    BaseModel,
+    BeforeValidator,
+    ConfigDict,
+    Field,
+    PrivateAttr,
+    model_serializer,
+)
 
 _SANDBOX_MANAGEMENT_PORT = 9501
 
@@ -88,6 +96,32 @@ class SandboxStatus(str, Enum):
     TIMEOUT = "timeout"
     # Terminal status used by blocking create/claim responses.
     FAILED = "failed"
+
+
+class SandboxPendingReason(str, Enum):
+    """Why a pending sandbox is waiting (``pending_reason``).
+
+    The wire value is a snake_case string; unknown future reasons are kept as
+    plain strings on the models, so compare with ``.value`` or the string.
+    """
+
+    SCHEDULING = "scheduling"
+    WAITING_FOR_CONTAINER = "waiting_for_container"
+    NO_EXECUTORS_AVAILABLE = "no_executors_available"
+    NO_RESOURCES_AVAILABLE = "no_resources_available"
+    POOL_AT_CAPACITY = "pool_at_capacity"
+    MAX_CAPACITY_REACHED = "max_capacity_reached"
+    NO_EXECUTOR_FOR_SNAPSHOT_LOCATION = "no_executor_for_snapshot_location"
+    # The autoscaler reported that no fleet can ever place this shape.
+    UNPLACEABLE = "unplaceable"
+
+
+# Terminal ``termination_reason`` values introduced with asynchronous create.
+TERMINATION_REASON_NO_CAPACITY = "no_capacity"
+"""A ``max_pending_secs`` bound expired, or the shape is unplaceable."""
+
+TERMINATION_REASON_CANCELLED = "cancelled"
+"""A pending sandbox was deleted before it ran."""
 
 
 class SnapshotStatus(str, Enum):
@@ -395,6 +429,10 @@ class CreateSandboxRequest(BaseModel):
     snapshot_id: str | None = None
     name: str | None = None
     file_systems: list[FileSystemMount] | None = None
+    # ``False`` asks the server to answer as soon as the sandbox is durable
+    # (HTTP 202, ``state: pending``); unset is the blocking create.
+    wait: bool | None = None
+    max_pending_secs: int | None = None
 
     model_config = {"populate_by_name": True}
 
@@ -437,11 +475,160 @@ class SandboxPoolRequest(BaseModel):
 # --- Response models ---
 
 
-class CreateSandboxResponse(BaseModel):
-    """Response from creating a sandbox."""
+class PendingSandbox(BaseModel):
+    """A sandbox requested with ``wait=False``: the handle returned by
+    ``Sandbox.create(..., wait=False)`` / ``SandboxClient.create(..., wait=False)``.
+
+    The sandbox is durable and starts whenever capacity allows. Collect it
+    with :meth:`ready`, look at it with :meth:`status`, or from any other
+    process with ``Sandbox.connect(sandbox_id)`` (which waits while it is
+    pending) or ``client.list()``. ``pending_reason`` is ``scheduling`` at
+    create time; the capacity reasons appear after the first scheduler pass.
+    A server that predates ``wait=False`` answers the blocking create's
+    shape instead, so ``state`` may already be ``running``.
+    """
 
     sandbox_id: str
-    status: SandboxStatus
+    name: str | None = None
+    state: SandboxStatus = Field(
+        default=SandboxStatus.PENDING,
+        validation_alias=AliasChoices("state", "status"),
+    )
+    pending_reason: str | None = None
+    routing_hint: str | None = None
+    ingress_endpoint: str | None = None
+    sandbox_url: str | None = None
+    reason: str | None = None
+    termination_reason: str | None = None
+    error_details: Any | None = None
+    trace_id: str | None = Field(default=None, exclude=True)
+
+    # Set by the client that issued the create; see ``_bind``.
+    _client: Any = PrivateAttr(default=None)
+    _proxy_url: str | None = PrivateAttr(default=None)
+    _request_timeout: float | None = PrivateAttr(default=None)
+    _requested_name: str | None = PrivateAttr(default=None)
+    _owns_sandbox: bool = PrivateAttr(default=False)
+
+    model_config = {"populate_by_name": True}
+
+    def _bind(
+        self,
+        client: Any,
+        *,
+        proxy_url: str | None,
+        request_timeout: float | None,
+        requested_name: str | None,
+        owns_sandbox: bool,
+    ) -> "PendingSandbox":
+        self._client = client
+        self._proxy_url = proxy_url
+        self._request_timeout = request_timeout
+        self._requested_name = requested_name
+        self._owns_sandbox = owns_sandbox
+        return self
+
+    def _require_client(self) -> Any:
+        if self._client is None:
+            raise RuntimeError(
+                "PendingSandbox is not bound to a client; use the handle returned "
+                "by create(wait=False)"
+            )
+        return self._client
+
+    def status(self) -> "SandboxInfo":
+        """Fetch the sandbox's current state with one ``GET``."""
+        return self._require_client().get(self.sandbox_id).value
+
+    def ready(
+        self,
+        timeout: float | None = None,
+        *,
+        poll_interval: float = 2.0,
+        cancel_on_timeout: bool = False,
+    ) -> "Any":
+        """Wait for the sandbox to be running and return a connected ``Sandbox``.
+
+        Polls ``GET /sandboxes/{id}`` every ``poll_interval`` seconds. Call it
+        again after a ``SandboxPending`` to keep waiting.
+
+        Args:
+            timeout: Seconds to wait; defaults to the client request timeout.
+                ``0`` observes the current state once.
+            poll_interval: Seconds between polls (default 2).
+            cancel_on_timeout: Delete the sandbox when ``timeout`` runs out
+                while it is still pending, then raise ``SandboxError``
+                (the pre-ADR-0086 behaviour). Default False.
+
+        Raises:
+            SandboxPending: ``timeout`` elapsed while the sandbox was still
+                pending. It keeps its place in the queue; the exception
+                carries ``sandbox_id`` and ``pending_reason``.
+            SandboxError: The sandbox settled somewhere else: ``terminated``
+                or ``failed`` (``reason`` is the server's, such as
+                ``no_capacity`` or ``cancelled``), or ``suspended``.
+        """
+        client = self._require_client()
+        budget = client._request_timeout if timeout is None else timeout
+        observed = client._wait_for_sandbox(self.sandbox_id, budget, poll_interval)
+        return client._settle_wait(
+            observed,
+            budget=budget,
+            proxy_url=self._proxy_url,
+            request_timeout=self._request_timeout,
+            cancel_on_timeout=cancel_on_timeout,
+            requested_name=self._requested_name,
+            owns_sandbox=self._owns_sandbox,
+            trace_id=self.trace_id,
+        )
+
+
+class AsyncPendingSandbox(PendingSandbox):
+    """Async mirror of :class:`PendingSandbox`: the handle returned by
+    ``AsyncSandbox.create(..., wait=False)`` /
+    ``AsyncSandboxClient.create(..., wait=False)``."""
+
+    async def status(self) -> "SandboxInfo":  # type: ignore[override]
+        """Fetch the sandbox's current state with one ``GET``."""
+        return (await self._require_client().get(self.sandbox_id)).value
+
+    async def ready(  # type: ignore[override]
+        self,
+        timeout: float | None = None,
+        *,
+        poll_interval: float = 2.0,
+        cancel_on_timeout: bool = False,
+    ) -> "Any":
+        """Wait for the sandbox to be running and return a connected
+        ``AsyncSandbox``; see :meth:`PendingSandbox.ready`."""
+        client = self._require_client()
+        budget = client._request_timeout if timeout is None else timeout
+        observed = await client._wait_for_sandbox(
+            self.sandbox_id, budget, poll_interval
+        )
+        return await client._settle_wait(
+            observed,
+            budget=budget,
+            proxy_url=self._proxy_url,
+            request_timeout=self._request_timeout,
+            cancel_on_timeout=cancel_on_timeout,
+            requested_name=self._requested_name,
+            owns_sandbox=self._owns_sandbox,
+            trace_id=self.trace_id,
+        )
+
+
+class CreateSandboxResponse(BaseModel):
+    """Response from a blocking create or a pool claim.
+
+    The server waits for readiness for at most the request timeout and can
+    already report ``running``; a ``pending`` answer carries a
+    ``pending_reason``. Use ``connect(sandbox_id)`` to wait for a pending
+    sandbox, or ``create(..., wait=False)`` for a :class:`PendingSandbox`.
+    """
+
+    sandbox_id: str
+    status: SandboxStatus = Field(validation_alias=AliasChoices("status", "state"))
     reason: str | None = None
     routing_hint: str | None = None
     ingress_endpoint: str | None = None
@@ -449,6 +636,9 @@ class CreateSandboxResponse(BaseModel):
     name: str | None = None
     termination_reason: str | None = None
     error_details: Any | None = None
+    pending_reason: str | None = None
+
+    model_config = {"populate_by_name": True}
 
 
 class CopiedSandboxResponse(BaseModel):
@@ -494,6 +684,7 @@ class SandboxInfo(BaseModel):
     outcome: str | None = None
     termination_reason: str | None = None
     error_details: Any | None = None
+    pending_reason: str | None = None
     created_at: OptionalTimestamp = None
     terminated_at: OptionalTimestamp = None
     name: str | None = None

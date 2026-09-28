@@ -21,6 +21,7 @@ pub mod suspend;
 pub mod terminate;
 pub mod tunnel;
 pub mod update;
+pub mod wait;
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
@@ -44,6 +45,8 @@ struct SandboxFailureDetails {
 #[derive(Deserialize)]
 struct SandboxStatusResponse {
     status: String,
+    #[serde(default)]
+    pending_reason: Option<String>,
     #[serde(flatten)]
     failure: SandboxFailureDetails,
 }
@@ -145,6 +148,29 @@ pub const DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME: &str = "tensorlake/ubuntu-minimal"
 pub const DEFAULT_SANDBOX_WAIT_TIMEOUT: Duration = Duration::from_secs(120);
 const SANDBOX_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(1);
 
+/// Default interval between `GET /sandboxes/{id}` polls while waiting for a
+/// sandbox to run (ADR 0086).
+pub const DEFAULT_SANDBOX_WAIT_POLL_INTERVAL: Duration = Duration::from_secs(2);
+
+/// Message for a sandbox whose wait budget ran out while it was still queued.
+/// The sandbox keeps its place in the queue; nothing here deletes it.
+pub fn format_still_pending_message(
+    sandbox_id: &str,
+    target_status: &str,
+    timeout: Duration,
+    pending_reason: Option<&str>,
+) -> String {
+    let reason = pending_reason
+        .map(|reason| format!(" ({reason})"))
+        .unwrap_or_default();
+    format!(
+        "Sandbox {sandbox_id} did not reach '{target_status}' within {}s: still pending{reason}. \
+         It keeps its place in the queue and starts when capacity is available. \
+         Keep waiting with `tl sbx wait {sandbox_id}` or cancel with `tl sbx terminate {sandbox_id}`.",
+        timeout.as_secs(),
+    )
+}
+
 pub fn new_spinner(message: &str) -> indicatif::ProgressBar {
     let spinner = indicatif::ProgressBar::new_spinner();
     spinner.set_style(
@@ -158,12 +184,35 @@ pub fn new_spinner(message: &str) -> indicatif::ProgressBar {
     spinner
 }
 
+/// Poll `GET …/sandboxes/{id}` every [`SANDBOX_WAIT_POLL_INTERVAL`] until
+/// the sandbox reaches `target_status`, settles elsewhere, or `timeout`
+/// elapses. Never deletes the sandbox: a budget that runs out while the
+/// sandbox is still pending reports how to keep waiting (ADR 0086).
 pub async fn wait_for_sandbox_status(
     ctx: &CliContext,
     sandbox_id: &str,
     waiting_message: &str,
     target_status: &str,
     timeout: Duration,
+) -> Result<String> {
+    wait_for_sandbox_status_every(
+        ctx,
+        sandbox_id,
+        waiting_message,
+        target_status,
+        timeout,
+        SANDBOX_WAIT_POLL_INTERVAL,
+    )
+    .await
+}
+
+pub async fn wait_for_sandbox_status_every(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    waiting_message: &str,
+    target_status: &str,
+    timeout: Duration,
+    poll_interval: Duration,
 ) -> Result<String> {
     let client = ctx.client()?;
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
@@ -175,19 +224,9 @@ pub async fn wait_for_sandbox_status(
     };
 
     let deadline = Instant::now() + timeout;
+    let mut last_pending_reason: Option<String> = None;
+    let mut observed_pending = false;
     loop {
-        if Instant::now() > deadline {
-            if let Some(ref s) = spinner {
-                s.finish_and_clear();
-            }
-            return Err(CliError::Other(anyhow::anyhow!(
-                "Sandbox {} did not reach '{}' within {}s",
-                sandbox_id,
-                target_status,
-                timeout.as_secs()
-            )));
-        }
-
         let info_resp = client
             .get(sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}")))
             .send()
@@ -216,9 +255,39 @@ pub async fn wait_for_sandbox_status(
                 );
                 return Err(CliError::Other(anyhow::anyhow!(message)));
             }
+
+            observed_pending = current_status == "pending";
+            if observed_pending {
+                last_pending_reason = info.pending_reason;
+                if let (Some(s), Some(reason)) = (&spinner, last_pending_reason.as_deref()) {
+                    s.set_message(format!("{waiting_message} ({reason})..."));
+                }
+            }
         }
 
-        tokio::time::sleep(SANDBOX_WAIT_POLL_INTERVAL).await;
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            if let Some(ref s) = spinner {
+                s.finish_and_clear();
+            }
+            if observed_pending && target_status == "running" {
+                return Err(CliError::Other(anyhow::anyhow!(
+                    format_still_pending_message(
+                        sandbox_id,
+                        target_status,
+                        timeout,
+                        last_pending_reason.as_deref(),
+                    )
+                )));
+            }
+            return Err(CliError::Other(anyhow::anyhow!(
+                "Sandbox {} did not reach '{}' within {}s",
+                sandbox_id,
+                target_status,
+                timeout.as_secs()
+            )));
+        }
+        tokio::time::sleep(poll_interval.min(remaining)).await;
     }
 }
 

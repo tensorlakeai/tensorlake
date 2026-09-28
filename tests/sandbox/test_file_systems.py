@@ -90,6 +90,10 @@ class _FakeRustClient:
         self.create_request_json = request_json
         return ("trace-create", '{"sandbox_id":"sbx-1","status":"pending"}')
 
+    def create_sandbox_no_wait(self, *, request_json):
+        self.create_request_json = request_json
+        return ("trace-create", '{"sandbox_id":"sbx-1","state":"pending"}')
+
     def claim_sandbox(self, **kwargs):
         self.claim_calls.append(kwargs)
         return ("trace-claim", '{"sandbox_id":"sbx-1","status":"pending"}')
