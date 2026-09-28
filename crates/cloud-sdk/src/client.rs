@@ -242,6 +242,11 @@ impl Client {
         self.default_headers.clone()
     }
 
+    /// Total request timeout configured for this client, if any.
+    pub fn request_timeout(&self) -> Option<Duration> {
+        self.timeout
+    }
+
     /// Create a new client that shares the same underlying HTTP connection pool but uses a
     /// different base URL. Cloning `reqwest::Client` shares its Arc-backed connection pool, so
     /// HTTP/2 connections established for one base URL can be reused (via connection coalescing)

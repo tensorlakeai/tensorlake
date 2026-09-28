@@ -352,6 +352,21 @@ pub struct CreateSandboxRequest {
     /// absolute, unique guest mount path.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_systems: Vec<FileSystemMount>,
+    /// `Some(false)` asks the server to answer as soon as the sandbox is
+    /// durable (HTTP 202 with `state: pending`) instead of waiting for it to
+    /// run. Unset or `Some(true)` is the blocking create. Omitted from the
+    /// wire when unset so older servers keep accepting the body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub wait: Option<bool>,
+    /// Longest the sandbox may wait for capacity before the server fails it
+    /// with reason `no_capacity`. `0` fails at once when it cannot be placed;
+    /// unset (the default) waits indefinitely. Applies to capacity waits
+    /// only, not to image pull or boot. A bound shorter than the fleet's boot
+    /// time (up to 20 minutes on metal hosts) expires the very demand that
+    /// made the autoscaler launch a host; 30 minutes or more is recommended
+    /// for capacity waits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_pending_secs: Option<u64>,
 }
 
 /// Sandbox-specific state to apply while claiming a warm pool container.
@@ -635,6 +650,42 @@ pub struct CopySandboxResponse {
     pub sandboxes: Vec<CreateSandboxResponse>,
 }
 
+fn default_pending_state() -> String {
+    "pending".to_string()
+}
+
+/// The acknowledgement of a `wait: false` create (ADR 0086): the sandbox is
+/// durable and starts whenever capacity allows. Wait for it with
+/// [`super::SandboxesClient::wait_until_settled`] or poll [`super::SandboxesClient::get`].
+///
+/// A server that predates `wait: false` ignores the field and answers the
+/// blocking create's shape instead, so `status` is accepted as an alias of
+/// `state` and the routing fields are kept when present.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SandboxAccepted {
+    pub sandbox_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(default = "default_pending_state", alias = "status")]
+    pub state: String,
+    /// Why the sandbox is waiting, in snake_case (`scheduling` at create
+    /// time; the capacity reasons appear after the first scheduler pass).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pending_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub routing_hint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ingress_endpoint: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sandbox_url: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub termination_reason: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error_details: Option<serde_json::Value>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SandboxInfo {
     #[serde(alias = "id", alias = "sandbox_id")]
@@ -659,6 +710,9 @@ pub struct SandboxInfo {
     pub termination_reason: Option<String>,
     #[serde(default)]
     pub error_details: Option<serde_json::Value>,
+    /// Why a pending sandbox is waiting, in snake_case.
+    #[serde(default)]
+    pub pending_reason: Option<String>,
     #[serde(default)]
     pub created_at: Option<serde_json::Value>,
     #[serde(default)]

@@ -33,8 +33,8 @@ use tensorlake::sandboxes::models::{
     UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
-    SandboxProxyClient, SandboxProxyTarget, SandboxesClient, resolve_sandbox_proxy_target,
-    select_sandbox_proxy_url,
+    DEFAULT_WAIT_POLL_INTERVAL, SandboxProxyClient, SandboxProxyTarget, SandboxesClient,
+    resolve_sandbox_proxy_target, select_sandbox_proxy_url,
 };
 use tensorlake::{
     ClientBuilder,
@@ -162,6 +162,17 @@ pub(crate) fn duration_from_seconds(name: &str, seconds: f64) -> napi::Result<Du
     if !seconds.is_finite() || seconds <= 0.0 {
         return Err(usage_error(format!(
             "{name} must be a positive finite number"
+        )));
+    }
+    Ok(Duration::from_secs_f64(seconds))
+}
+
+/// Like [`duration_from_seconds`] but accepts zero: a zero wait budget is a
+/// single non-blocking observation of the sandbox state.
+fn duration_from_non_negative_seconds(name: &str, seconds: f64) -> napi::Result<Duration> {
+    if !seconds.is_finite() || seconds < 0.0 {
+        return Err(usage_error(format!(
+            "{name} must be a non-negative finite number"
         )));
     }
     Ok(Duration::from_secs_f64(seconds))
@@ -389,6 +400,56 @@ impl NativeSandboxClient {
         })
         .await
         .map_err(into_napi_error)?;
+        let json =
+            serde_json::to_string(&*traced).map_err(|e| into_napi_error(SdkError::from(e)))?;
+        Ok(TracedJson {
+            trace_id: traced.trace_id.clone(),
+            json,
+        })
+    }
+
+    /// Wait-free create (ADR 0086): sends `wait: false` and returns the
+    /// acknowledgement as soon as the sandbox is durable. Like the blocking
+    /// create it is not idempotent, so only failures that provably never
+    /// reached the server are replayed.
+    #[napi]
+    pub async fn create_sandbox_no_wait(&self, request_json: String) -> napi::Result<TracedJson> {
+        let request: CreateSandboxRequest = parse_json_payload(&request_json)?;
+        let traced = replay_if_never_delivered(self.client().await?, |client| {
+            let request = request.clone();
+            async move { client.create_no_wait(&request).await }
+        })
+        .await
+        .map_err(into_napi_error)?;
+        let json =
+            serde_json::to_string(&*traced).map_err(|e| into_napi_error(SdkError::from(e)))?;
+        Ok(TracedJson {
+            trace_id: traced.trace_id.clone(),
+            json,
+        })
+    }
+
+    /// Poll the sandbox every `poll_interval_sec` until it leaves `pending`
+    /// or `timeout_sec` elapses (ADR 0086), resolving with the last observed
+    /// `SandboxInfo`. A still-pending result means the budget ran out while
+    /// the sandbox kept its place in the queue; nothing here deletes it.
+    #[napi]
+    pub async fn wait_for_sandbox(
+        &self,
+        sandbox_id: String,
+        timeout_sec: f64,
+        poll_interval_sec: Option<f64>,
+    ) -> napi::Result<TracedJson> {
+        let timeout = duration_from_non_negative_seconds("timeout_sec", timeout_sec)?;
+        let poll_interval = poll_interval_sec
+            .map(|seconds| duration_from_seconds("poll_interval_sec", seconds))
+            .transpose()?
+            .unwrap_or(DEFAULT_WAIT_POLL_INTERVAL);
+        let client = self.client().await?;
+        let traced = client
+            .wait_until_settled(&sandbox_id, timeout, poll_interval)
+            .await
+            .map_err(into_napi_error)?;
         let json =
             serde_json::to_string(&*traced).map_err(|e| into_napi_error(SdkError::from(e)))?;
         Ok(TracedJson {

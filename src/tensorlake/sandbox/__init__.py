@@ -13,6 +13,7 @@ from .exceptions import (
     SandboxException,
     SandboxNotFoundError,
     SandboxNotRoutableError,
+    SandboxPending,
 )
 from .file_system import (
     create_file_system,
@@ -21,7 +22,10 @@ from .file_system import (
 )
 from .models import (
     CLEAR_NETWORK_POLICY,
+    TERMINATION_REASON_CANCELLED,
+    TERMINATION_REASON_NO_CAPACITY,
     ArchivedSandboxInfo,
+    AsyncPendingSandbox,
     CheckpointType,
     ClearNetworkPolicy,
     CommandResult,
@@ -50,6 +54,7 @@ from .models import (
     OutputEvent,
     OutputMode,
     OutputResponse,
+    PendingSandbox,
     PoolContainerInfo,
     ProcessHealthCheck,
     ProcessHealthCheckType,
@@ -63,6 +68,7 @@ from .models import (
     SandboxLogLevel,
     SandboxLogSignal,
     SandboxLogsResponse,
+    SandboxPendingReason,
     SandboxPoolInfo,
     SandboxPortAccess,
     SandboxProcessLogFilter,
@@ -95,8 +101,14 @@ __all__ = [
     "TunnelAddress",
     # Lifecycle models
     "SandboxStatus",
+    "SandboxPendingReason",
     "GetOrCreateOutcome",
     "SandboxInfo",
+    # Wait-free create and polling readiness (ADR 0086)
+    "PendingSandbox",
+    "AsyncPendingSandbox",
+    "TERMINATION_REASON_NO_CAPACITY",
+    "TERMINATION_REASON_CANCELLED",
     "SandboxPortAccess",
     "CreateSandboxResponse",
     "CopiedSandboxResponse",
@@ -164,6 +176,7 @@ __all__ = [
     "SandboxConnectionError",
     "SandboxNotFoundError",
     "SandboxNotRoutableError",
+    "SandboxPending",
     "PoolNotFoundError",
     "PoolInUseError",
     "RemoteAPIError",

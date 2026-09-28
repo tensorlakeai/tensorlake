@@ -1,7 +1,8 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
-    DEFAULT_SANDBOX_WAIT_TIMEOUT, SandboxFailureDetails, apply_proxy_access_settings,
-    build_network_config, sandbox_endpoint, sandbox_failure_detail, wait_for_sandbox_status,
+    DEFAULT_SANDBOX_WAIT_POLL_INTERVAL, DEFAULT_SANDBOX_WAIT_TIMEOUT, SandboxFailureDetails,
+    apply_proxy_access_settings, build_network_config, sandbox_endpoint, sandbox_failure_detail,
+    wait_for_sandbox_status_every,
 };
 use crate::error::{CliError, Result};
 use serde::Deserialize;
@@ -16,26 +17,34 @@ pub struct GpuRequest<'a> {
     pub model: &'a str,
 }
 
+/// The create acknowledgement: the `wait: false` record (`state`, HTTP 202)
+/// on servers that honour it, or the legacy blocking response (`status`).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct CreateSandboxResult {
     #[serde(alias = "sandboxId", alias = "id")]
     pub sandbox_id: String,
-    #[serde(default)]
+    #[serde(default, alias = "state")]
     pub status: Option<String>,
     #[serde(default, alias = "sandboxUrl")]
     pub sandbox_url: Option<String>,
     #[serde(default, alias = "ingressEndpoint")]
     pub ingress_endpoint: Option<String>,
+    #[serde(default)]
+    pub pending_reason: Option<String>,
 }
 
+/// Send the create with `wait: false` (ADR 0086) and, when `wait`, poll the
+/// sandbox until it runs. A wait that runs out never deletes the sandbox: it
+/// keeps its place in the queue and the error says how to keep waiting.
 pub async fn create_with_request(
     ctx: &CliContext,
-    body: serde_json::Value,
+    mut body: serde_json::Value,
     wait: bool,
 ) -> Result<CreateSandboxResult> {
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, "sandboxes");
 
+    body["wait"] = serde_json::Value::Bool(false);
     let resp = client
         .post(&url)
         .json(&body)
@@ -52,18 +61,30 @@ pub async fn create_with_request(
         )));
     }
 
-    let create_result: CreateSandboxResult = resp.json().await.map_err(CliError::Http)?;
-    let is_running = create_result.status.as_deref() == Some("running");
+    let mut create_result: CreateSandboxResult = resp.json().await.map_err(CliError::Http)?;
+    let is_running =
+        create_result.status.as_deref() == Some("running") && create_result.sandbox_url.is_some();
 
     if wait && !is_running {
-        wait_for_sandbox_status(
+        wait_for_sandbox_status_every(
             ctx,
             &create_result.sandbox_id,
             "Waiting for sandbox to start",
             "running",
             DEFAULT_SANDBOX_WAIT_TIMEOUT,
+            DEFAULT_SANDBOX_WAIT_POLL_INTERVAL,
         )
         .await?;
+        create_result.status = Some("running".to_string());
+        // The acknowledgement carries no routing; fetch it for the tips.
+        if create_result.sandbox_url.is_none()
+            && let Ok(target) =
+                crate::commands::sbx::resolve_sandbox_proxy_target(ctx, &create_result.sandbox_id)
+                    .await
+        {
+            create_result.sandbox_url = target.sandbox_url;
+            create_result.ingress_endpoint = target.ingress_endpoint;
+        }
     }
 
     Ok(create_result)
@@ -131,6 +152,8 @@ pub struct CreateArgs<'a> {
     /// Boot-time file system mounts, each as
     /// `<name>[@<snapshot_id>]:<mount_path>[:<opts>]`.
     pub file_systems: &'a [String],
+    /// Server-side bound on the capacity wait; unset waits indefinitely.
+    pub max_pending_secs: Option<u64>,
 }
 
 const FILESYSTEM_FLAG_USAGE: &str = "--filesystem must be <name>[@<snapshot_id>]:<mount_path>[:<opts>] where <opts> \
@@ -230,6 +253,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         network_allow,
         network_deny,
         file_systems,
+        max_pending_secs,
     } = args;
 
     let gpu = gpu_count.map(|count| GpuRequest {
@@ -261,21 +285,42 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
     if !file_system_mounts.is_empty() {
         body["file_systems"] = serde_json::Value::Array(file_system_mounts);
     }
+    if let Some(bound) = max_pending_secs {
+        body["max_pending_secs"] = serde_json::json!(bound);
+    }
 
     let create_result = create_with_request(ctx, body, wait).await?;
     let sandbox_id = create_result.sandbox_id.clone();
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let display_id = name.unwrap_or(&sandbox_id);
-    if is_tty {
-        eprint!("{}", format_ready_message(name, &sandbox_id));
-    }
+    let is_running = create_result.status.as_deref() == Some("running");
     if !is_tty {
         println!("{}", sandbox_id);
+        return Ok(());
     }
-    if is_tty {
+    if is_running {
+        eprint!("{}", format_ready_message(name, &sandbox_id));
         print_post_create_tip(&create_result, display_id, name.is_none());
+    } else {
+        eprint!(
+            "{}",
+            format_pending_message(name, &sandbox_id, create_result.pending_reason.as_deref())
+        );
     }
     Ok(())
+}
+
+/// Printed by `--no-wait`: the sandbox is queued and can be collected later.
+fn format_pending_message(name: Option<&str>, sandbox_id: &str, reason: Option<&str>) -> String {
+    let reason = reason.map(|r| format!(" ({r})")).unwrap_or_default();
+    let display = name.filter(|n| !n.is_empty()).unwrap_or(sandbox_id);
+    let id_line = match name.filter(|n| !n.is_empty()) {
+        Some(name) => format!("Sandbox {name} requested{reason}.\nID: {sandbox_id}\n"),
+        None => format!("Sandbox {sandbox_id} requested{reason}.\n"),
+    };
+    format!(
+        "{id_line}It starts when capacity is available. Wait for it with:\n  tl sbx wait {display}\n"
+    )
 }
 
 fn format_ready_message(name: Option<&str>, sandbox_id: &str) -> String {
@@ -811,6 +856,33 @@ mod tests {
     }
 
     #[test]
+    fn pending_message_points_at_the_wait_command() {
+        let output = super::format_pending_message(None, "sbx-123", Some("scheduling"));
+        assert_eq!(
+            output,
+            "Sandbox sbx-123 requested (scheduling).\nIt starts when capacity is available. \
+             Wait for it with:\n  tl sbx wait sbx-123\n"
+        );
+        let named = super::format_pending_message(Some("stable"), "sbx-123", None);
+        assert!(named.starts_with("Sandbox stable requested.\nID: sbx-123\n"));
+        assert!(named.ends_with("  tl sbx wait stable\n"));
+    }
+
+    #[test]
+    fn create_result_reads_the_wait_false_acknowledgement() {
+        let response: CreateSandboxResult = serde_json::from_value(serde_json::json!({
+            "sandbox_id": "sbx-123",
+            "name": "stable",
+            "state": "pending",
+            "pending_reason": "scheduling"
+        }))
+        .unwrap();
+        assert_eq!(response.sandbox_id, "sbx-123");
+        assert_eq!(response.status.as_deref(), Some("pending"));
+        assert_eq!(response.pending_reason.as_deref(), Some("scheduling"));
+    }
+
+    #[test]
     fn create_result_reads_endpoint_fields_from_typed_create_response() {
         let response: CreateSandboxResult = serde_json::from_value(serde_json::json!({
             "sandbox_id": "sbx-123",
@@ -829,6 +901,7 @@ mod tests {
                     "https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai/".to_string()
                 ),
                 ingress_endpoint: Some("https://sandbox.us-east-1.aws.tensorlake.ai/".to_string()),
+                pending_reason: None,
             }
         );
     }
@@ -840,6 +913,7 @@ mod tests {
             status: Some("running".to_string()),
             sandbox_url: Some("https://returned.example.com".to_string()),
             ingress_endpoint: Some("https://ingress.example.com".to_string()),
+            pending_reason: None,
         };
 
         assert_eq!(
@@ -859,6 +933,7 @@ mod tests {
             status: Some("running".to_string()),
             sandbox_url: Some("https://sbx-123.sandbox.us-east-1.aws.tensorlake.ai".to_string()),
             ingress_endpoint: Some("https://sandbox.us-east-1.aws.tensorlake.ai".to_string()),
+            pending_reason: None,
         };
 
         assert_eq!(
@@ -878,6 +953,7 @@ mod tests {
             status: Some("running".to_string()),
             sandbox_url: None,
             ingress_endpoint: Some("https://sandbox.us-east-1.aws.tensorlake.ai".to_string()),
+            pending_reason: None,
         };
 
         assert_eq!(
@@ -893,6 +969,7 @@ mod tests {
             status: Some("running".to_string()),
             sandbox_url: None,
             ingress_endpoint: Some("https://sandbox.us-east-1.aws.tensorlake.ai".to_string()),
+            pending_reason: None,
         };
 
         assert_eq!(

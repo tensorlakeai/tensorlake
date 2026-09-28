@@ -8,6 +8,7 @@ import {
   RemoteAPIError,
   SandboxError,
   SandboxNotFoundError,
+  SandboxPending,
 } from "./errors.js";
 import { type Traced } from "./traced.js";
 import {
@@ -55,6 +56,7 @@ import {
   fromSnakeKeys,
   toSnakeKeys,
 } from "./models.js";
+import type { PendingSandbox } from "./pending-sandbox.js";
 import {
   type CreateTunnelOptions,
   TcpTunnel,
@@ -635,24 +637,62 @@ export class Sandbox {
     this.lifecycleClient = client;
   }
 
+  /** @internal Used by PendingSandbox.ready for a non-owning handle. */
+  _setLifecycleClient(client: SandboxClient): void {
+    this.lifecycleClient = client;
+  }
+
   // --- Static factory methods ---
 
   /**
    * Create a new sandbox and return a connected, running handle.
    *
    * Covers both fresh sandbox creation and restore-from-snapshot (set
-   * `snapshotId`). Blocks until the sandbox is `Running`.
+   * `snapshotId`). With `wait` unset or `true` it blocks until the sandbox
+   * is `Running`: the create is sent with `wait: false` and the sandbox is
+   * polled every two seconds, with `requestTimeout` as the wait budget.
+   *
+   * With `wait: false` it returns a {@link PendingSandbox} at once:
+   * `pending.ready()` waits for it, `pending.status()` looks at it, and
+   * `Sandbox.connect({ sandboxId: pending.sandboxId })` collects it from any
+   * other process. This is the call for requesting many sandboxes ahead of
+   * capacity. `wait: false` cannot be combined with `poolId`.
+   *
+   * **When the wait runs out the sandbox is not deleted.** A
+   * `SandboxPending` is thrown carrying the sandbox id; the sandbox keeps
+   * its place in the queue and starts whenever capacity arrives. Collect it
+   * later with `Sandbox.connect` or delete it to give up. Pass
+   * `cancelOnTimeout: true` for the previous delete-then-throw behaviour,
+   * or `maxPendingSecs` to let the server fail it after a bound.
    *
    * When `name` is already claimed, the server rejects the create with
    * HTTP 409 (`RemoteAPIError`). To attach to the existing sandbox
    * instead, use {@link Sandbox.getOrCreate}.
    */
+  static async create<
+    O extends CreateAndConnectOptions & Partial<SandboxClientOptions> =
+      CreateAndConnectOptions & Partial<SandboxClientOptions>,
+  >(options?: O): Promise<O extends { wait: false } ? PendingSandbox : Sandbox>;
   static async create(
     options?: CreateAndConnectOptions & Partial<SandboxClientOptions>,
-  ): Promise<Sandbox> {
+  ): Promise<PendingSandbox | Sandbox> {
     // Dynamic import to break the circular dependency (client.ts imports Sandbox).
     const { SandboxClient } = await import("./client.js");
     const client = new SandboxClient(options, /* _internal */ true);
+    if (options?.wait === false) {
+      if (options.poolId != null) {
+        throw new SandboxError(
+          "wait: false cannot be combined with poolId: a pool claim is answered synchronously",
+        );
+      }
+      const requestTimeout =
+        options.requestTimeout ?? options.startupTimeout ?? undefined;
+      return client.requestPending(options, {
+        proxyUrl: options.proxyUrl,
+        requestTimeout,
+        ownsSandbox: true,
+      });
+    }
     return client.createAndConnect(options);
   }
 
@@ -997,6 +1037,7 @@ export class Sandbox {
     timeout: number,
   ): Promise<void> {
     const client = this.requireLifecycleClient("refresh proxy routing");
+    let last: SandboxInfo | undefined;
     while (Date.now() < deadline) {
       const info = await client.get(this.lifecycleIdentifier);
       if (
@@ -1009,12 +1050,22 @@ export class Sandbox {
       if (info.status === SandboxStatus.TERMINATED) {
         throw new SandboxError(
           `Sandbox ${this.lifecycleIdentifier} terminated while refreshing proxy routing`,
+          { reason: info.terminationReason, sandboxId: info.sandboxId },
         );
       }
+      last = info;
       await sleep(Math.min(pollInterval * 1000, Math.max(0, deadline - Date.now())));
+    }
+    if (last?.status === SandboxStatus.PENDING) {
+      // Still queued for capacity: it keeps its place, the caller decides.
+      throw new SandboxPending(last.sandboxId, {
+        pendingReason: last.pendingReason,
+        timeout,
+      });
     }
     throw new SandboxError(
       `Sandbox ${this.lifecycleIdentifier} did not provide refreshed proxy routing within ${timeout}s`,
+      { sandboxId: this.lifecycleIdentifier },
     );
   }
 
