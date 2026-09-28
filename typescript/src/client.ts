@@ -555,12 +555,14 @@ export class SandboxClient {
       if (traceId === undefined) traceId = pageTraceId;
       const parsed = JSON.parse(json) as {
         sandboxes?: Record<string, unknown>[];
-        next_cursor?: string;
+        next_cursor?: string | null;
       };
       for (const s of parsed.sandboxes ?? []) {
         sandboxes.push(fromSnakeKeys(s, "sandboxId") as SandboxInfo);
       }
-      const nextCursor = parsed.next_cursor;
+      // The server sends `"next_cursor": null` on the last page; an older
+      // server may omit the field. Both end the listing.
+      const nextCursor = parsed.next_cursor ?? undefined;
       if (nextCursor === undefined) {
         return Object.assign(sandboxes, { traceId: traceId as string });
       }

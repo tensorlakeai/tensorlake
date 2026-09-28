@@ -612,6 +612,42 @@ describe("SandboxClient", () => {
       client.close();
     });
 
+    it("ends on a null next_cursor", async () => {
+      // The real server sends `"next_cursor": null` on the last page, not
+      // an omitted field. list() must stop there and not ask again.
+      const calls: (string | null)[] = [];
+      installNativeStub({
+        client: {
+          listSandboxes: vi.fn(
+            async (_limit: number | null, cursor: string | null) => {
+              calls.push(cursor);
+              return {
+                traceId: "trace-null",
+                json: JSON.stringify({
+                  sandboxes: [
+                    {
+                      id: "sbx-1",
+                      namespace: "default",
+                      status: "running",
+                      resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
+                    },
+                  ],
+                  prev_cursor: null,
+                  next_cursor: null,
+                }),
+              };
+            },
+          ),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const list = await client.list();
+      expect(list).toHaveLength(1);
+      expect(calls).toEqual([null]);
+      client.close();
+    });
+
     it("stops on a repeated cursor", async () => {
       installNativeStub({
         client: {
