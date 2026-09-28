@@ -5,10 +5,12 @@ from unittest.mock import patch
 
 from tensorlake.sandbox import (
     CLEAR_NETWORK_POLICY,
+    AsyncPendingSandbox,
     NetworkConfig,
     PoolInUseError,
     SandboxNotFoundError,
     SandboxNotRoutableError,
+    SandboxPending,
     SandboxStatus,
     SnapshotStatus,
     SnapshotType,
@@ -17,6 +19,23 @@ from tensorlake.sandbox import (
 )
 from tensorlake.sandbox.async_client import AsyncSandboxClient
 from tensorlake.sandbox.exceptions import RemoteAPIError, SandboxError
+
+
+def _pending_from_create(create_json: str) -> str:
+    payload = json.loads(create_json)
+    payload["state"] = payload.pop("status", "pending")
+    return json.dumps(payload)
+
+
+async def _emulate_wait(fake, sandbox_id: str, *, max_polls: int = 5) -> str:
+    """Emulate the Rust polling loop in an async fake; see the sync module."""
+    last = None
+    for _ in range(max_polls):
+        _, info_json = await fake.get_sandbox_json_async(sandbox_id=sandbox_id)
+        last = info_json
+        if json.loads(info_json).get("status", "pending") != "pending":
+            return info_json
+    return last
 
 
 class _FakeAsyncRustProxyClient:
@@ -37,9 +56,33 @@ class _FakeAsyncRustClient:
         self.suspend_calls: list[str] = []
         self.resume_calls: list[str] = []
         self.connect_proxy_calls: list[dict] = []
+        self.wait_calls: list[dict] = []
+        self.delete_calls: list[str] = []
 
     def close(self):
         return None
+
+    async def create_sandbox_no_wait_async(self, *, request_json):
+        trace_id, response_json = await self.create_sandbox_async(
+            request_json=request_json
+        )
+        return trace_id, _pending_from_create(response_json)
+
+    async def wait_for_sandbox_async(
+        self, *, sandbox_id, timeout_sec, poll_interval_sec=None
+    ):
+        self.wait_calls.append(
+            {
+                "sandbox_id": sandbox_id,
+                "timeout_sec": timeout_sec,
+                "poll_interval_sec": poll_interval_sec,
+            }
+        )
+        return "trace-wait", await _emulate_wait(self, sandbox_id)
+
+    async def delete_sandbox_async(self, *, sandbox_id):
+        self.delete_calls.append(sandbox_id)
+        return "trace-delete"
 
     def connect_proxy(
         self, *, proxy_url, sandbox_id, routing_hint=None, request_timeout_sec=None
@@ -203,6 +246,7 @@ class _RecordingCreateRustClient:
         self.kwargs = kwargs
         self.create_calls = 0
         self.delete_calls: list[str] = []
+        self.wait_calls: list[dict] = []
         type(self).instances.append(self)
 
     def close(self):
@@ -214,6 +258,21 @@ class _RecordingCreateRustClient:
             "trace-create-sandbox",
             '{"sandbox_id":"sbx-1","status":"running",'
             '"sandbox_url":"https://sbx-1.sandbox.tensorlake.ai"}',
+        )
+
+    async def create_sandbox_no_wait_async(self, *, request_json):
+        trace_id, response_json = await self.create_sandbox_async(
+            request_json=request_json
+        )
+        return trace_id, _pending_from_create(response_json)
+
+    async def wait_for_sandbox_async(
+        self, *, sandbox_id, timeout_sec, poll_interval_sec=None
+    ):
+        self.wait_calls.append({"sandbox_id": sandbox_id, "timeout_sec": timeout_sec})
+        return "trace-wait", json.dumps(
+            _sandbox_info_payload(sandbox_id, status="pending")
+            | {"pending_reason": "no_resources_available"}
         )
 
     def select_sandbox_proxy_url(
@@ -610,7 +669,41 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             _RecordingRustClient.connect_proxy_kwargs,
         )
 
-    async def test_create_and_connect_deletes_sandbox_from_timeout_response(self):
+    async def test_create_and_connect_leaves_a_pending_sandbox_queued_on_timeout(self):
+        # ADR 0086: a wait that runs out raises SandboxPending with the id and
+        # never deletes the sandbox, which keeps its place in the queue.
+        class _TimeoutCreateRustClient(_RecordingCreateRustClient):
+            async def create_sandbox_async(self, *, request_json):
+                self.create_calls += 1
+                return (
+                    "trace-create-sandbox",
+                    '{"sandbox_id":"sbx-timeout","status":"pending"}',
+                )
+
+        with patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient",
+            _TimeoutCreateRustClient,
+        ):
+            client = AsyncSandboxClient(
+                api_url="http://localhost:8900",
+                api_key="k",
+                request_timeout=300.0,
+                _internal=True,
+            )
+            with self.assertRaises(SandboxPending) as caught:
+                await client.create_and_connect(
+                    image="python:3.11",
+                    request_timeout=10.0,
+                )
+
+        self.assertEqual(caught.exception.sandbox_id, "sbx-timeout")
+        self.assertEqual(caught.exception.pending_reason, "no_resources_available")
+        self.assertEqual(len(_TimeoutCreateRustClient.instances), 2)
+        self.assertEqual(_TimeoutCreateRustClient.instances[1].delete_calls, [])
+
+    async def test_create_and_connect_cancel_on_timeout_restores_delete_then_raise(
+        self,
+    ):
         class _TimeoutCreateRustClient(_RecordingCreateRustClient):
             async def create_sandbox_async(self, *, request_json):
                 self.create_calls += 1
@@ -629,17 +722,207 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
                 request_timeout=300.0,
                 _internal=True,
             )
-            with self.assertRaisesRegex(SandboxError, "did not start"):
+            with self.assertRaisesRegex(SandboxError, "did not start within 10s"):
                 await client.create_and_connect(
                     image="python:3.11",
                     request_timeout=10.0,
+                    cancel_on_timeout=True,
                 )
 
-        self.assertEqual(len(_TimeoutCreateRustClient.instances), 2)
         self.assertEqual(
             _TimeoutCreateRustClient.instances[1].delete_calls,
             ["sbx-timeout"],
         )
+
+    async def test_create_sends_wait_false_only_for_a_pending_handle(self):
+        fake = _FakeAsyncRustClient()
+        client = _make_client(fake)
+
+        response = await client.create(image="python:3.11", max_pending_secs=2700)
+
+        body = json.loads(fake.create_request_json)
+        self.assertNotIn("wait", body)
+        self.assertEqual(body["max_pending_secs"], 2700)
+        self.assertEqual(response.status, SandboxStatus.PENDING)
+
+        pending = await client.create(image="python:3.11", wait=False)
+        self.assertIsInstance(pending, AsyncPendingSandbox)
+        self.assertIs(json.loads(fake.create_request_json)["wait"], False)
+
+    async def test_create_wait_false_returns_the_pending_handle(self):
+        class _AcceptedRustClient(_FakeAsyncRustClient):
+            async def create_sandbox_no_wait_async(self, *, request_json):
+                self.create_request_json = request_json
+                return "trace-accepted", json.dumps(
+                    {
+                        "sandbox_id": "sbx-queued",
+                        "name": "coreauto-run-17",
+                        "state": "pending",
+                        "pending_reason": "scheduling",
+                    }
+                )
+
+        fake = _AcceptedRustClient()
+        client = _make_client(fake)
+
+        # The Appendix call shape: name + max_pending_secs + spec.
+        pending = await client.create(
+            name="coreauto-run-17",
+            max_pending_secs=45 * 60,
+            image="python:3.11",
+            cpus=4,
+            wait=False,
+        )
+
+        self.assertIsInstance(pending, AsyncPendingSandbox)
+        self.assertEqual(pending.sandbox_id, "sbx-queued")
+        self.assertEqual(pending.name, "coreauto-run-17")
+        self.assertEqual(pending.state, SandboxStatus.PENDING)
+        self.assertEqual(pending.pending_reason, "scheduling")
+        body = json.loads(fake.create_request_json)
+        self.assertEqual(body["max_pending_secs"], 2700)
+        self.assertEqual(body["resources"]["cpus"], 4)
+        self.assertEqual(fake.wait_calls, [])
+        self.assertEqual((await pending.status()).status, SandboxStatus.RUNNING)
+
+    async def test_ready_returns_a_connected_sandbox(self):
+        class _ReadyRustClient(_FakeAsyncRustClient):
+            async def wait_for_sandbox_async(
+                self, *, sandbox_id, timeout_sec, poll_interval_sec=None
+            ):
+                self.wait_calls.append(
+                    {"timeout_sec": timeout_sec, "poll_interval_sec": poll_interval_sec}
+                )
+                return "trace-wait", json.dumps(
+                    _sandbox_info_payload(
+                        "sbx-ready",
+                        sandbox_url="https://sbx-ready.sandbox.tensorlake.ai",
+                        routing_hint="hint-ready",
+                    )
+                )
+
+        fake = _ReadyRustClient()
+        client = _make_client(fake)
+
+        pending = await client.create(image="python:3.11", wait=False)
+        pending.sandbox_id = "sbx-ready"
+        sandbox = await pending.ready(timeout=45.0)
+
+        self.assertEqual(
+            fake.wait_calls, [{"timeout_sec": 45.0, "poll_interval_sec": 2.0}]
+        )
+        self.assertEqual(sandbox.sandbox_id, "sbx-ready")
+        self.assertEqual(
+            fake.connect_proxy_calls,
+            [
+                {
+                    "proxy_url": "https://sbx-ready.sandbox.tensorlake.ai",
+                    "sandbox_id": "sbx-ready",
+                    "routing_hint": "hint-ready",
+                }
+            ],
+        )
+        self.assertFalse(sandbox._owns_sandbox)
+
+    async def test_ready_raises_pending_without_deleting(self):
+        class _StillPendingRustClient(_FakeAsyncRustClient):
+            async def wait_for_sandbox_async(
+                self, *, sandbox_id, timeout_sec, poll_interval_sec=None
+            ):
+                return "trace-wait", json.dumps(
+                    _sandbox_info_payload(sandbox_id, status="pending")
+                    | {"pending_reason": "pool_at_capacity"}
+                )
+
+        fake = _StillPendingRustClient()
+        client = _make_client(fake)
+
+        pending = await client.create(image="python:3.11", wait=False)
+        with self.assertRaises(SandboxPending) as caught:
+            await pending.ready(timeout=30.0)
+        self.assertEqual(caught.exception.sandbox_id, "sbx-1")
+        self.assertEqual(caught.exception.pending_reason, "pool_at_capacity")
+        self.assertEqual(fake.delete_calls, [])
+
+        with self.assertRaisesRegex(SandboxError, "did not start within 30s"):
+            await pending.ready(timeout=30.0, cancel_on_timeout=True)
+        self.assertEqual(fake.delete_calls, ["sbx-1"])
+
+    async def test_ready_surfaces_no_capacity_with_the_reason(self):
+        class _NoCapacityRustClient(_FakeAsyncRustClient):
+            async def wait_for_sandbox_async(
+                self, *, sandbox_id, timeout_sec, poll_interval_sec=None
+            ):
+                return "trace-wait", json.dumps(
+                    _sandbox_info_payload(sandbox_id, status="terminated")
+                    | {
+                        "termination_reason": "no_capacity",
+                        "pending_reason": "no_executors_available",
+                    }
+                )
+
+        client = _make_client(_NoCapacityRustClient())
+        with self.assertRaises(SandboxError) as caught:
+            await (await client.create(image="python:3.11", wait=False)).ready(
+                timeout=5.0
+            )
+        self.assertNotIsInstance(caught.exception, SandboxPending)
+        self.assertEqual(caught.exception.reason, "no_capacity")
+
+    async def test_async_sandbox_create_wait_false_then_ready(self):
+        from tensorlake.sandbox.async_sandbox import AsyncSandbox
+
+        class _QueuedRustClient(_RecordingCreateRustClient):
+            async def create_sandbox_no_wait_async(self, *, request_json):
+                self.create_calls += 1
+                return "trace-accepted", json.dumps(
+                    {"sandbox_id": "sbx-q", "state": "pending"}
+                )
+
+            async def wait_for_sandbox_async(
+                self, *, sandbox_id, timeout_sec, poll_interval_sec=None
+            ):
+                self.wait_calls.append(
+                    {"sandbox_id": sandbox_id, "timeout_sec": timeout_sec}
+                )
+                return "trace-wait", json.dumps(
+                    _sandbox_info_payload(
+                        sandbox_id, sandbox_url="https://sbx-q.sandbox.tensorlake.ai"
+                    )
+                )
+
+            def connect_proxy(self, **kwargs):
+                return _FakeProxyClient()
+
+        with patch(
+            "tensorlake.sandbox.async_client.RustCloudSandboxClient", _QueuedRustClient
+        ):
+            pending = await AsyncSandbox.create(
+                image="python:3.11",
+                api_url="http://localhost:8900",
+                api_key="k",
+                wait=False,
+            )
+            self.assertIsInstance(pending, AsyncPendingSandbox)
+            self.assertEqual(pending.sandbox_id, "sbx-q")
+            sandbox = await pending.ready(timeout=30)
+
+        self.assertEqual(sandbox.sandbox_id, "sbx-q")
+        self.assertTrue(sandbox._owns_sandbox)
+        self.assertEqual(
+            _QueuedRustClient.instances[0].wait_calls,
+            [{"sandbox_id": "sbx-q", "timeout_sec": 30.0}],
+        )
+
+    async def test_connect_waits_for_a_pending_sandbox(self):
+        fake = _StatusSequenceRustClient(["pending", "running"])
+        client = _make_client(fake)
+
+        sandbox = await client.connect("sbx-1")
+
+        self.assertEqual(sandbox.sandbox_id, "sbx-1")
+        self.assertEqual(len(fake.wait_calls), 1)
+        self.assertEqual(len(fake.connect_proxy_calls), 1)
 
     async def test_connect_accepts_sandbox_name(self):
         client = _make_client()
@@ -722,7 +1005,7 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_connect_raises_not_routable_when_sandbox_not_running(self):
+    async def test_connect_raises_pending_when_the_sandbox_stays_queued(self):
         # A sandbox that is not Running yet has no sandbox_url. Without an
         # explicit proxy override, connect must raise SandboxNotRoutableError
         # (which get_or_create handles) instead of a generic proxy error.
@@ -748,11 +1031,31 @@ class TestAsyncSandboxClientRustBackend(unittest.IsolatedAsyncioTestCase):
         fake = _PendingRustClient()
         client = _make_client(fake)
 
+        with self.assertRaises(SandboxPending) as ctx:
+            await client.connect("stable-name", request_timeout=3.0)
+
+        self.assertEqual(ctx.exception.sandbox_id, "sbx-1")
+        self.assertEqual(fake.wait_calls[-1]["timeout_sec"], 3.0)
+        self.assertEqual(fake.connect_proxy_calls, [])
+        self.assertEqual(fake.delete_calls, [])
+
+    async def test_connect_raises_not_routable_for_a_settled_sandbox_without_routing(
+        self,
+    ):
+        class _UnroutableRustClient(_FakeAsyncRustClient):
+            async def get_sandbox_json_async(self, *, sandbox_id):
+                return "trace-get-sandbox", _sandbox_info_json(
+                    "sbx-1", status="suspending"
+                )
+
+        fake = _UnroutableRustClient()
+        client = _make_client(fake)
+
         with self.assertRaises(SandboxNotRoutableError) as ctx:
             await client.connect("stable-name")
 
         self.assertEqual(ctx.exception.sandbox_id, "sbx-1")
-        self.assertEqual(ctx.exception.status, SandboxStatus.PENDING)
+        self.assertEqual(ctx.exception.status, SandboxStatus.SUSPENDING)
         self.assertEqual(fake.connect_proxy_calls, [])
 
     async def test_create_uses_rust_backend(self):

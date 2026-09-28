@@ -1,6 +1,13 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { RemoteAPIError } from "../src/errors.js";
+import {
+  RemoteAPIError,
+  SandboxError,
+  SandboxNotFoundError,
+  SandboxPending,
+} from "../src/errors.js";
 import { SandboxClient } from "../src/client.js";
+import { PendingSandbox } from "../src/pending-sandbox.js";
+import { Sandbox } from "../src/sandbox.js";
 import { type GpuModel, SandboxStatus, SnapshotStatus } from "../src/models.js";
 import { clearNativeStub, installNativeStub } from "./native-stub.js";
 
@@ -1338,15 +1345,64 @@ describe("SandboxClient", () => {
       sandbox.close();
     });
 
-    it("deletes the sandbox returned by a readiness timeout response", async () => {
+    it("leaves a pending sandbox queued when the wait runs out (ADR 0086)", async () => {
+      const deleteSandbox = vi.fn(async () => "t");
+      const stub = installNativeStub({
+        client: {
+          createSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({ sandbox_id: "sbx-timeout", status: "pending" }),
+          })),
+          waitForSandbox: vi.fn(async (sandboxId: string) => ({
+            traceId: "t",
+            json: JSON.stringify({
+              id: sandboxId,
+              namespace: "default",
+              status: "pending",
+              pending_reason: "no_resources_available",
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
+            }),
+          })),
+          deleteSandbox,
+        },
+      });
+
+      const client = SandboxClient.forLocalhost({ requestTimeout: 300 });
+      const error = await client
+        .createAndConnect({ requestTimeout: 10 })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(SandboxPending);
+      const pending = error as SandboxPending;
+      expect(pending.sandboxId).toBe("sbx-timeout");
+      expect(pending.pendingReason).toBe("no_resources_available");
+      expect(pending.reason).toBe("no_resources_available");
+      expect(pending.message).toContain("sbx-timeout");
+      expect(pending.message).toContain("keeps its place in the queue");
+      // The create carried `wait: false`; the sandbox is not deleted.
+      const body = JSON.parse(
+        (stub.client.createSandbox.mock.calls[0] as [string])[0],
+      );
+      expect(body.wait).toBe(false);
+      expect(stub.client.waitForSandbox).toHaveBeenCalledWith("sbx-timeout", expect.any(Number), 2);
+      expect(deleteSandbox).not.toHaveBeenCalled();
+      client.close();
+    });
+
+    it("cancelOnTimeout restores delete-then-throw", async () => {
       const deleteSandbox = vi.fn(async () => "t");
       installNativeStub({
         client: {
           createSandbox: vi.fn(async () => ({
             traceId: "t",
+            json: JSON.stringify({ sandbox_id: "sbx-timeout", status: "timeout" }),
+          })),
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
             json: JSON.stringify({
-              sandbox_id: "sbx-timeout",
-              status: "timeout",
+              id: "sbx-timeout",
+              namespace: "default",
+              status: "pending",
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
             }),
           })),
           deleteSandbox,
@@ -1355,9 +1411,276 @@ describe("SandboxClient", () => {
 
       const client = SandboxClient.forLocalhost({ requestTimeout: 300 });
       await expect(
-        client.createAndConnect({ requestTimeout: 10 }),
+        client.createAndConnect({ requestTimeout: 10, cancelOnTimeout: true }),
       ).rejects.toThrow("Sandbox sbx-timeout did not start within 10s");
       expect(deleteSandbox).toHaveBeenCalledWith("sbx-timeout");
+      client.close();
+    });
+
+    it("sends wait:false only for a pending handle, and maxPendingSecs on create", async () => {
+      const stub = installNativeStub();
+      const client = SandboxClient.forLocalhost();
+      const first = await client.create({ maxPendingSecs: 2700, name: "job-17" });
+      const second = await client.create();
+      const calls = stub.client.createSandbox.mock.calls as [string][];
+      expect(calls).toHaveLength(2);
+      const bodies = calls.map(([json]) => JSON.parse(json));
+      // The blocking create keeps the wire unchanged: no `wait` key.
+      expect(bodies[0].wait).toBeUndefined();
+      expect(bodies[0].max_pending_secs).toBe(2700);
+      expect(bodies[0].name).toBe("job-17");
+      expect(bodies[1].max_pending_secs).toBeUndefined();
+      expect(first.status).toBeUndefined();
+      expect(second.sandboxId).toBeUndefined();
+
+      const pending = await client.create({ name: "job-18", wait: false });
+      expect(pending).toBeInstanceOf(PendingSandbox);
+      const noWait = stub.client.createSandbox.mock.calls as [string][];
+      expect(JSON.parse(noWait[2][0]).wait).toBe(false);
+      client.close();
+    });
+
+    it("create({ wait: false }) returns the pending handle without waiting", async () => {
+      const stub = installNativeStub({
+        client: {
+          createSandboxNoWait: vi.fn(async () => ({
+            traceId: "trace-accepted",
+            json: JSON.stringify({
+              sandbox_id: "sbx-queued",
+              name: "coreauto-run-17",
+              state: "pending",
+              pending_reason: "scheduling",
+            }),
+          })),
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              id: "sbx-queued",
+              namespace: "default",
+              status: "pending",
+              pending_reason: "no_resources_available",
+              resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
+            }),
+          })),
+        },
+      });
+      const client = SandboxClient.forLocalhost();
+      const pending = await client.create({
+        name: "coreauto-run-17",
+        maxPendingSecs: 45 * 60,
+        image: "python:3.11",
+        wait: false,
+      });
+      expect(pending).toBeInstanceOf(PendingSandbox);
+      expect(pending.traceId).toBe("trace-accepted");
+      expect(pending.sandboxId).toBe("sbx-queued");
+      expect(pending.name).toBe("coreauto-run-17");
+      expect(pending.state).toBe(SandboxStatus.PENDING);
+      expect(pending.pendingReason).toBe("scheduling");
+      expect(stub.client.waitForSandbox).not.toHaveBeenCalled();
+      // The handle looks at the sandbox with one GET.
+      const info = await pending.status();
+      expect(info.status).toBe(SandboxStatus.PENDING);
+      expect(info.pendingReason).toBe("no_resources_available");
+      expect(stub.client.getSandbox).toHaveBeenCalledWith("sbx-queued");
+      client.close();
+    });
+
+    it("rejects a negative maxPendingSecs before sending", async () => {
+      const stub = installNativeStub();
+      const client = SandboxClient.forLocalhost();
+      await expect(client.create({ maxPendingSecs: -1, wait: false })).rejects.toThrow(
+        "maxPendingSecs",
+      );
+      expect(stub.client.createSandboxNoWait).not.toHaveBeenCalled();
+      client.close();
+    });
+  });
+
+  describe("PendingSandbox.ready", () => {
+    const createSandboxNoWait = () =>
+      vi.fn(async () => ({
+        traceId: "t",
+        json: JSON.stringify({ sandbox_id: "sbx-1", state: "pending" }),
+      }));
+    const info = (status: string, extra: Record<string, unknown> = {}) =>
+      JSON.stringify({
+        id: "sbx-1",
+        namespace: "default",
+        status,
+        resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
+        ...extra,
+      });
+
+    it("returns a connected handle once the sandbox is running", async () => {
+      const stub = installNativeStub({
+        client: {
+          createSandboxNoWait: createSandboxNoWait(),
+          waitForSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: info("running", {
+              routing_hint: "hint-ready",
+              sandbox_url: "https://sbx-1.sandbox.tensorlake.ai",
+              name: "queued-name",
+            }),
+          })),
+        },
+      });
+      const client = SandboxClient.forCloud({ apiKey: "key" });
+      const pending = await client.create({ image: "python:3.11", wait: false });
+      const sandbox = await pending.ready({ timeout: 45, pollInterval: 0.5 });
+      expect(stub.client.waitForSandbox).toHaveBeenCalledWith("sbx-1", 45, 0.5);
+      expect(sandbox.sandboxId).toBe("sbx-1");
+      expect(sandbox.name).toBe("queued-name");
+      expect(stub.client.connectProxy).toHaveBeenCalledWith(
+        "https://sbx-1.sandbox.tensorlake.ai",
+        "sbx-1",
+        "hint-ready",
+        null,
+      );
+      expect(stub.client.deleteSandbox).not.toHaveBeenCalled();
+      sandbox.close();
+      client.close();
+    });
+
+    it("throws SandboxPending without deleting when the budget runs out", async () => {
+      const stub = installNativeStub({
+        client: {
+          createSandboxNoWait: createSandboxNoWait(),
+          waitForSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: info("pending", { pending_reason: "pool_at_capacity" }),
+          })),
+        },
+      });
+      const client = SandboxClient.forCloud({ apiKey: "key" });
+      const pending = await client.create({ image: "python:3.11", wait: false });
+      const error = await pending
+        .ready({ timeout: 30 })
+        .catch((error: unknown) => error);
+      expect(error).toBeInstanceOf(SandboxPending);
+      expect((error as SandboxPending).sandboxId).toBe("sbx-1");
+      expect((error as SandboxPending).pendingReason).toBe("pool_at_capacity");
+      expect((error as SandboxPending).timeout).toBe(30);
+      expect(stub.client.deleteSandbox).not.toHaveBeenCalled();
+      expect(stub.client.connectProxy).not.toHaveBeenCalled();
+
+      // Calling ready() again keeps waiting on the same handle.
+      await expect(pending.ready({ timeout: 30 })).rejects.toBeInstanceOf(SandboxPending);
+
+      await expect(
+        pending.ready({ timeout: 30, cancelOnTimeout: true }),
+      ).rejects.toThrow("Sandbox sbx-1 did not start within 30s");
+      expect(stub.client.deleteSandbox).toHaveBeenCalledWith("sbx-1");
+      client.close();
+    });
+
+    it("surfaces no_capacity and cancelled with the server reason", async () => {
+      for (const [reason, details] of [
+        ["no_capacity", "no host could place 4 CPUs within 1800s"],
+        ["cancelled", undefined],
+      ] as const) {
+        installNativeStub({
+          client: {
+            createSandboxNoWait: createSandboxNoWait(),
+            waitForSandbox: vi.fn(async () => ({
+              traceId: "t",
+              json: info("terminated", {
+                termination_reason: reason,
+                pending_reason: "no_executors_available",
+                error_details: details,
+              }),
+            })),
+          },
+        });
+        const client = SandboxClient.forCloud({ apiKey: "key" });
+        const pending = await client.create({ image: "python:3.11", wait: false });
+        const error = await pending
+          .ready({ timeout: 5 })
+          .catch((error: unknown) => error);
+        expect(error).toBeInstanceOf(SandboxError);
+        expect(error).not.toBeInstanceOf(SandboxPending);
+        expect((error as SandboxError).reason).toBe(reason);
+        expect((error as SandboxError).sandboxId).toBe("sbx-1");
+        expect((error as Error).message).toContain(reason);
+        if (details) expect((error as Error).message).toContain(details);
+        client.close();
+        clearNativeStub();
+      }
+    });
+
+    it("maps a 404 to SandboxNotFoundError", async () => {
+      installNativeStub({
+        client: {
+          createSandboxNoWait: createSandboxNoWait(),
+          waitForSandbox: vi.fn(async () => {
+            throw nativeError(404, "not found");
+          }),
+        },
+      });
+      const client = SandboxClient.forCloud({ apiKey: "key" });
+      const pending = await client.create({ image: "python:3.11", wait: false });
+      await expect(pending.ready({ timeout: 1 })).rejects.toBeInstanceOf(
+        SandboxNotFoundError,
+      );
+      client.close();
+    });
+
+    it("Sandbox.create({ wait: false }) then ready() collects a queued sandbox", async () => {
+      const stub = installNativeStub({
+        client: {
+          createSandboxNoWait: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({ sandbox_id: "sbx-1", state: "pending" }),
+          })),
+          waitForSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: info("running", { sandbox_url: "https://sbx-1.sandbox.tensorlake.ai" }),
+          })),
+        },
+      });
+      const pending = await Sandbox.create({ image: "python:3.11", apiKey: "key", wait: false });
+      expect(pending).toBeInstanceOf(PendingSandbox);
+      expect(pending.sandboxId).toBe("sbx-1");
+      expect(pending.state).toBe(SandboxStatus.PENDING);
+      const sandbox = await pending.ready({ timeout: 30 });
+      expect(sandbox.sandboxId).toBe("sbx-1");
+      expect(stub.client.waitForSandbox).toHaveBeenCalledWith("sbx-1", 30, 2);
+      sandbox.close();
+    });
+
+    it("Sandbox.create({ wait: false }) rejects poolId", async () => {
+      installNativeStub();
+      await expect(
+        Sandbox.create({ poolId: "pool-1", apiKey: "key", wait: false }),
+      ).rejects.toThrow("poolId");
+    });
+
+    it("a lazy connect waits for a pending sandbox before routing", async () => {
+      let getCalls = 0;
+      const stub = installNativeStub({
+        client: {
+          getSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: info(++getCalls === 1 ? "pending" : "running", {
+              ...(getCalls > 1
+                ? { sandbox_url: "https://sbx-1.sandbox.tensorlake.ai", routing_hint: "hint-1" }
+                : {}),
+            }),
+          })),
+        },
+      });
+      const client = SandboxClient.forCloud({ apiKey: "key", requestTimeout: 42 });
+      const sandbox = client.connect("sbx-1");
+      await sandbox.listProcesses();
+      expect(stub.client.waitForSandbox).toHaveBeenCalledWith("sbx-1", 42, 2);
+      expect(stub.client.connectProxy).toHaveBeenCalledWith(
+        "https://sbx-1.sandbox.tensorlake.ai",
+        "sbx-1",
+        "hint-1",
+        null,
+      );
+      sandbox.close();
       client.close();
     });
 

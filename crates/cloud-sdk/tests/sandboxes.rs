@@ -1,11 +1,13 @@
+use std::time::Duration;
+
 use tensorlake::{
     ClientBuilder,
     sandboxes::{
-        SandboxProxyClient, SandboxesClient,
+        SandboxProxyClient, SandboxesClient, TERMINATION_REASON_NO_CAPACITY,
         models::{
-            ClaimSandboxRequest, CreateSandboxPoolRequest, CreateSandboxResources, FileSystemMount,
-            NetworkConfig, NetworkPolicyUpdate, SandboxPoolRequest, UpdateSandboxPoolRequest,
-            UpdateSandboxRequest,
+            ClaimSandboxRequest, CreateSandboxPoolRequest, CreateSandboxRequest,
+            CreateSandboxResources, FileSystemMount, NetworkConfig, NetworkPolicyUpdate,
+            SandboxPoolRequest, UpdateSandboxPoolRequest, UpdateSandboxRequest,
         },
     },
 };
@@ -664,6 +666,364 @@ fn sandbox_network_policy_update_wire_shapes() {
     let clear: UpdateSandboxRequest =
         serde_json::from_str(&encode(NetworkPolicyUpdate::Clear)).expect("decode clear");
     assert_eq!(clear.network, NetworkPolicyUpdate::Clear);
+}
+
+// ---- ADR 0086: wait-free create and polling readiness ------------------------
+
+/// A scripted lifecycle server: each entry answers one connection with the
+/// given status and JSON body, and the request that arrived is recorded.
+async fn scripted_server(
+    responses: Vec<(u16, &'static str)>,
+) -> (String, tokio::task::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for (status, body) in responses {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            let request = read_http_request(&mut socket).await;
+            requests.push(String::from_utf8_lossy(&request).into_owned());
+            write_status_json_response(&mut socket, status, body).await;
+        }
+        requests
+    });
+    (format!("http://{address}"), server)
+}
+
+fn request_line(request: &str) -> &str {
+    request.lines().next().unwrap_or_default()
+}
+
+fn request_body(request: &str) -> &str {
+    request
+        .split_once("\r\n\r\n")
+        .map(|(_, body)| body)
+        .unwrap_or_default()
+}
+
+fn create_request() -> CreateSandboxRequest {
+    CreateSandboxRequest {
+        image: Some("tensorlake/ubuntu-minimal".to_string()),
+        resources: CreateSandboxResources::default(),
+        timeout_secs: None,
+        entrypoint: None,
+        network: None,
+        snapshot_id: None,
+        name: Some("coreauto-run-17".to_string()),
+        file_systems: Vec::new(),
+        wait: None,
+        max_pending_secs: Some(1800),
+    }
+}
+
+fn info(status: &str) -> &'static str {
+    Box::leak(
+        format!(
+            r#"{{"id":"sbx-1","namespace":"default","status":"{status}","resources":{{"cpus":1.0,"memory_mb":512,"disk_mb":1024}},"pending_reason":"no_resources_available","sandbox_url":"https://sbx-1.sandbox.tensorlake.ai","routing_hint":"hint-1"}}"#
+        )
+        .into_boxed_str(),
+    )
+}
+
+#[tokio::test]
+async fn create_no_wait_sends_wait_false_and_returns_the_acknowledgement() {
+    let accepted = r#"{"sandbox_id":"sbx-1","name":"coreauto-run-17","state":"pending","pending_reason":"scheduling"}"#;
+    let (url, server) = scripted_server(vec![(202, accepted)]).await;
+    let client = ClientBuilder::new(&url).build().expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+
+    let created = sandboxes
+        .create_no_wait(&create_request())
+        .await
+        .expect("create is acknowledged");
+    assert_eq!(created.sandbox_id, "sbx-1");
+    assert_eq!(created.name.as_deref(), Some("coreauto-run-17"));
+    assert_eq!(created.state, "pending");
+    assert_eq!(created.pending_reason.as_deref(), Some("scheduling"));
+
+    let requests = server.await.expect("server join");
+    assert_eq!(requests.len(), 1);
+    assert_eq!(
+        request_line(&requests[0]),
+        "POST /v1/namespaces/default/sandboxes HTTP/1.1"
+    );
+    let body: serde_json::Value = serde_json::from_str(request_body(&requests[0])).unwrap();
+    assert_eq!(body["wait"], false);
+    assert_eq!(body["max_pending_secs"], 1800);
+    assert_eq!(body["name"], "coreauto-run-17");
+}
+
+#[tokio::test]
+async fn blocking_create_omits_wait_and_an_unset_bound() {
+    let (url, server) =
+        scripted_server(vec![(200, r#"{"sandbox_id":"sbx-1","status":"running"}"#)]).await;
+    let client = ClientBuilder::new(&url).build().expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", false);
+    let request = CreateSandboxRequest {
+        max_pending_secs: None,
+        ..create_request()
+    };
+    sandboxes.create(&request).await.expect("create");
+    let requests = server.await.expect("server join");
+    let body = request_body(&requests[0]);
+    assert!(!body.contains("\"wait\""), "{body}");
+    assert!(!body.contains("max_pending_secs"), "{body}");
+}
+
+#[tokio::test]
+async fn create_no_wait_accepts_the_legacy_blocking_shape_from_older_servers() {
+    // A server that predates `wait: false` ignores it and answers the
+    // blocking create's shape, possibly already running or timed out.
+    let (url, server) = scripted_server(vec![
+        (200, r#"{"sandbox_id":"sbx-1","status":"running","sandbox_url":"https://sbx-1.sandbox.tensorlake.ai"}"#),
+        (504, r#"{"sandbox_id":"sbx-2","status":"timeout"}"#),
+    ])
+    .await;
+    let client = ClientBuilder::new(&url).build().expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+    let running = sandboxes
+        .create_no_wait(&create_request())
+        .await
+        .expect("running");
+    assert_eq!(running.state, "running");
+    assert_eq!(
+        running.sandbox_url.as_deref(),
+        Some("https://sbx-1.sandbox.tensorlake.ai")
+    );
+    let timed_out = sandboxes
+        .create_no_wait(&create_request())
+        .await
+        .expect("timeout");
+    assert_eq!(timed_out.sandbox_id, "sbx-2");
+    assert_eq!(timed_out.state, "timeout");
+    server.await.expect("server join");
+}
+
+#[tokio::test]
+async fn wait_until_settled_polls_until_the_sandbox_is_running() {
+    let (url, server) = scripted_server(vec![(200, info("pending")), (200, info("running"))]).await;
+    let client = ClientBuilder::new(&url).build().expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+
+    let observed = sandboxes
+        .wait_until_settled("sbx-1", Duration::from_secs(30), Duration::from_millis(10))
+        .await
+        .expect("wait");
+    assert_eq!(observed.status, "running");
+    assert_eq!(observed.routing_hint.as_deref(), Some("hint-1"));
+    let requests = server.await.expect("server join");
+    assert_eq!(requests.len(), 2);
+    for request in &requests {
+        assert_eq!(
+            request_line(request),
+            "GET /v1/namespaces/default/sandboxes/sbx-1 HTTP/1.1"
+        );
+    }
+}
+
+/// Like [`scripted_server`] but each answer can be delayed before it is
+/// written, to emulate a slow poll.
+async fn delayed_server(
+    responses: Vec<(u16, &'static str, Duration)>,
+) -> (String, tokio::task::JoinHandle<usize>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let mut served = 0;
+        for (status, body, delay) in responses {
+            let (mut socket, _) = listener.accept().await.expect("accept request");
+            read_http_request(&mut socket).await;
+            tokio::time::sleep(delay).await;
+            write_status_json_response(&mut socket, status, body).await;
+            served += 1;
+        }
+        served
+    });
+    (format!("http://{address}"), server)
+}
+
+#[tokio::test]
+async fn wait_until_settled_does_not_overshoot_its_budget() {
+    // The first poll answers at once (pending); the second would take two
+    // seconds. A 50 ms budget must return the pending state within the
+    // budget plus a small margin, without waiting for that second answer.
+    let (url, server) = delayed_server(vec![
+        (200, info("pending"), Duration::ZERO),
+        (200, info("running"), Duration::from_secs(2)),
+    ])
+    .await;
+    let client = ClientBuilder::new(&url)
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+
+    let budget = Duration::from_millis(50);
+    let started = std::time::Instant::now();
+    let observed = sandboxes
+        .wait_until_settled("sbx-1", budget, Duration::from_millis(10))
+        .await
+        .expect("a timed-out wait is not an error");
+    let elapsed = started.elapsed();
+    assert_eq!(observed.status, "pending");
+    assert!(
+        elapsed < budget + Duration::from_millis(300),
+        "wait overshot its budget: {elapsed:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn wait_until_settled_stops_at_the_deadline_after_a_failed_first_poll() {
+    // A 503 on the first poll, then a poll that stalls. The retry backoff
+    // consumes the 50 ms budget; the next poll must not be issued with the
+    // first-poll floor: the wait returns the 503 within the budget plus a
+    // small margin instead of waiting a second for the stalled answer.
+    let (url, server) = delayed_server(vec![
+        (503, r#"{"message":"busy"}"#, Duration::ZERO),
+        (200, info("pending"), Duration::from_secs(30)),
+    ])
+    .await;
+    let client = ClientBuilder::new(&url)
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+
+    let budget = Duration::from_millis(50);
+    let started = std::time::Instant::now();
+    let error = sandboxes
+        .wait_until_settled("sbx-1", budget, Duration::from_millis(10))
+        .await
+        .expect_err("nothing was observed before the budget ran out");
+    let elapsed = started.elapsed();
+    assert!(
+        matches!(&error, tensorlake::error::SdkError::ServerError { status, .. } if status.as_u16() == 503),
+        "the last error is surfaced: {error}"
+    );
+    assert!(
+        elapsed < Duration::from_millis(150),
+        "wait overshot its budget after a failed poll: {elapsed:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn wait_until_settled_caps_a_slow_first_poll_at_the_budget_floor() {
+    // With nothing observed yet the first poll is allowed the floor, not the
+    // client's full 30 s timeout: a poll that never answers fails within it.
+    let (url, server) = delayed_server(vec![(200, info("pending"), Duration::from_secs(30))]).await;
+    let client = ClientBuilder::new(&url)
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+
+    let started = std::time::Instant::now();
+    let result = sandboxes
+        .wait_until_settled(
+            "sbx-1",
+            Duration::from_millis(50),
+            Duration::from_millis(10),
+        )
+        .await;
+    let elapsed = started.elapsed();
+    assert!(result.is_err(), "a poll that never answers is an error");
+    assert!(
+        elapsed < tensorlake::sandboxes::WAIT_POLL_MIN_REQUEST_TIMEOUT + Duration::from_secs(2),
+        "poll outlived the floor: {elapsed:?}"
+    );
+    server.abort();
+}
+
+#[tokio::test]
+async fn wait_until_settled_returns_the_pending_state_when_the_budget_runs_out() {
+    let (url, server) = scripted_server(vec![(200, info("pending"))]).await;
+    let client = ClientBuilder::new(&url).build().expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+    let observed = sandboxes
+        .wait_until_settled("sbx-1", Duration::ZERO, Duration::from_secs(2))
+        .await
+        .expect("a timed-out wait is not an error");
+    // The sandbox keeps its place in the queue: the caller sees its state and
+    // decides. Nothing here deletes it (the server saw exactly one GET).
+    assert_eq!(observed.status, "pending");
+    assert_eq!(
+        observed.pending_reason.as_deref(),
+        Some("no_resources_available")
+    );
+    assert_eq!(server.await.expect("server join").len(), 1);
+}
+
+#[tokio::test]
+async fn wait_until_settled_surfaces_a_no_capacity_failure() {
+    let failed = r#"{"id":"sbx-1","namespace":"default","status":"terminated","resources":{"cpus":1.0,"memory_mb":512,"disk_mb":1024},"termination_reason":"no_capacity","pending_reason":"no_resources_available","error_details":"no host could place 4 CPUs within 1800s"}"#;
+    let (url, server) = scripted_server(vec![(200, failed)]).await;
+    let client = ClientBuilder::new(&url).build().expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+    let observed = sandboxes
+        .wait_until_settled("sbx-1", Duration::from_secs(30), Duration::from_secs(2))
+        .await
+        .expect("a terminal state ends the wait");
+    assert_eq!(observed.status, "terminated");
+    assert_eq!(
+        observed.termination_reason.as_deref(),
+        Some(TERMINATION_REASON_NO_CAPACITY)
+    );
+    server.await.expect("server join");
+}
+
+#[tokio::test]
+async fn wait_until_settled_repeats_a_poll_cut_short_by_an_intermediary() {
+    let (url, server) = scripted_server(vec![
+        (502, r#"{"message":"Failed to proxy request"}"#),
+        (200, info("running")),
+    ])
+    .await;
+    let client = ClientBuilder::new(&url).build().expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+    let observed = sandboxes
+        .wait_until_settled("sbx-1", Duration::from_secs(30), Duration::from_millis(10))
+        .await
+        .expect("a gateway error mid-wait is repeated");
+    assert_eq!(observed.status, "running");
+    assert_eq!(server.await.expect("server join").len(), 2);
+}
+
+#[tokio::test]
+async fn wait_until_settled_reports_a_missing_sandbox() {
+    let (url, server) = scripted_server(vec![(404, r#"{"message":"not found"}"#)]).await;
+    let client = ClientBuilder::new(&url).build().expect("build client");
+    let sandboxes = SandboxesClient::new(client, "default", true);
+    let error = sandboxes
+        .wait_until_settled(
+            "sbx-missing",
+            Duration::from_secs(30),
+            Duration::from_secs(2),
+        )
+        .await
+        .expect_err("a sandbox that does not exist is an error, not a wait");
+    assert!(
+        matches!(error, tensorlake::error::SdkError::ServerError { status, .. } if status.as_u16() == 404),
+        "unexpected error: {error}"
+    );
+    server.await.expect("server join");
+}
+
+async fn write_status_json_response(socket: &mut TcpStream, status: u16, body: &str) {
+    let response = format!(
+        "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+        body.len(),
+        body
+    );
+    socket
+        .write_all(response.as_bytes())
+        .await
+        .expect("write response");
 }
 
 async fn read_http_request(socket: &mut TcpStream) -> Vec<u8> {

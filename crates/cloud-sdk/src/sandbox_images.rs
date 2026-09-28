@@ -607,6 +607,10 @@ where
             snapshot_id: None,
             name: None,
             file_systems: Vec::new(),
+            // The builder waits on the server as before; image builds keep
+            // an unbounded capacity wait (ADR 0086).
+            wait: None,
+            max_pending_secs: None,
         })
         .await?;
     let sandbox_id = created.sandbox_id.clone();

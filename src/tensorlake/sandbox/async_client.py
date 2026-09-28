@@ -11,7 +11,7 @@ import asyncio
 import json
 import os
 import warnings
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal, overload
 from urllib.parse import urlparse
 
 from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
@@ -22,8 +22,9 @@ if TYPE_CHECKING:
 from . import _defaults
 from .client import (
     _RUST_SANDBOX_CLIENT_AVAILABLE,
+    DEFAULT_WAIT_POLL_INTERVAL_SEC,
     RustCloudSandboxClient,
-    _build_gpu_resources,
+    _build_create_request,
     _explicit_proxy_url_override,
     _normalize_log_levels,
     _normalize_user_ports,
@@ -31,7 +32,7 @@ from .client import (
     _raise_as_sandbox_error,
     _resolve_sandbox_identifier,
     _rust_status_code,
-    _startup_failure_message,
+    _startup_failure,
     _unsupported_request_timeout_kwarg,
 )
 from .exceptions import (
@@ -41,15 +42,16 @@ from .exceptions import (
     SandboxError,
     SandboxNotFoundError,
     SandboxNotRoutableError,
+    SandboxPending,
 )
 from .models import (
     CLEAR_NETWORK_POLICY,
     ArchivedSandboxInfo,
+    AsyncPendingSandbox,
     ClaimSandboxRequest,
     ClearNetworkPolicy,
     CopySandboxResponse,
     CreateSandboxPoolResponse,
-    CreateSandboxRequest,
     CreateSandboxResources,
     CreateSandboxResponse,
     CreateSnapshotResponse,
@@ -235,6 +237,7 @@ class AsyncSandboxClient:
 
     # --- Sandbox lifecycle ---
 
+    @overload
     async def create(
         self,
         image: str | None = None,
@@ -252,37 +255,99 @@ class AsyncSandboxClient:
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
-    ) -> Traced[CreateSandboxResponse]:
-        _validate_mount_snapshot_pins(file_systems)
-        _validate_mount_owners(file_systems)
-        network = None
-        if not allow_internet_access or allow_out is not None or deny_out is not None:
-            network = NetworkConfig(
+        max_pending_secs: int | None = None,
+        wait: Literal[True] = True,
+    ) -> Traced[CreateSandboxResponse]: ...
+
+    @overload
+    async def create(
+        self,
+        image: str | None = None,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: GpuModel | str | None = None,
+        timeout_secs: int | None = None,
+        entrypoint: list[str] | None = None,
+        allow_internet_access: bool = True,
+        allow_out: list[str] | None = None,
+        deny_out: list[str] | None = None,
+        snapshot_id: str | None = None,
+        name: str | None = None,
+        file_systems: list[FileSystemMount] | None = None,
+        gpu: GpuRequest | None = None,
+        max_pending_secs: int | None = None,
+        *,
+        wait: Literal[False],
+    ) -> AsyncPendingSandbox: ...
+
+    async def create(
+        self,
+        image: str | None = None,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: GpuModel | str | None = None,
+        timeout_secs: int | None = None,
+        entrypoint: list[str] | None = None,
+        allow_internet_access: bool = True,
+        allow_out: list[str] | None = None,
+        deny_out: list[str] | None = None,
+        snapshot_id: str | None = None,
+        name: str | None = None,
+        file_systems: list[FileSystemMount] | None = None,
+        gpu: GpuRequest | None = None,
+        max_pending_secs: int | None = None,
+        wait: bool = True,
+    ) -> "Traced[CreateSandboxResponse] | AsyncPendingSandbox":
+        """Create a new standalone sandbox.
+
+        Async mirror of :meth:`SandboxClient.create`. With ``wait=True`` (the
+        default) the server waits for readiness for at most the request
+        timeout and answers the blocking create's record; with
+        ``wait=False`` it answers as soon as the sandbox is durable and this
+        returns an :class:`AsyncPendingSandbox` at once: ``await pending.ready()`` waits
+        for it, ``await pending.status()`` looks at it. Give it a ``name``
+        when a retry must not create a second sandbox.
+        """
+        if not wait:
+            return await self._request_pending(
+                image=image,
+                cpus=cpus,
+                memory_mb=memory_mb,
+                disk_mb=disk_mb,
+                gpus=gpus,
+                gpu_model=gpu_model,
+                timeout_secs=timeout_secs,
+                entrypoint=entrypoint,
                 allow_internet_access=allow_internet_access,
-                allow_out=allow_out or [],
-                deny_out=deny_out or [],
+                allow_out=allow_out,
+                deny_out=deny_out,
+                snapshot_id=snapshot_id,
+                name=name,
+                file_systems=file_systems,
+                gpu=gpu,
+                max_pending_secs=max_pending_secs,
             )
-        if snapshot_id is None:
-            cpus = 1.0 if cpus is None else cpus
-            memory_mb = 1024 if memory_mb is None else memory_mb
-        resources = CreateSandboxResources(
+        request_model = _build_create_request(
+            image=image,
             cpus=cpus,
             memory_mb=memory_mb,
             disk_mb=disk_mb,
-            gpus=_build_gpu_resources(gpus, gpu_model, gpu),
-        )
-        if all(value is None for value in resources.model_dump().values()):
-            resources = None
-
-        request_model = CreateSandboxRequest(
-            image=image,
-            resources=resources,
+            gpus=gpus,
+            gpu_model=gpu_model,
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
-            network=network,
+            allow_internet_access=allow_internet_access,
+            allow_out=allow_out,
+            deny_out=deny_out,
             snapshot_id=snapshot_id,
             name=name,
             file_systems=file_systems,
+            gpu=gpu,
+            max_pending_secs=max_pending_secs,
         )
         try:
             trace_id, response_json = await self._rust_client.create_sandbox_async(
@@ -295,6 +360,161 @@ class AsyncSandboxClient:
             )
         except Exception as e:
             _raise_as_sandbox_error(e)
+
+    async def _request_pending(
+        self,
+        image: str | None = None,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        disk_mb: int | None = None,
+        gpus: int | None = None,
+        gpu_model: GpuModel | str | None = None,
+        timeout_secs: int | None = None,
+        entrypoint: list[str] | None = None,
+        allow_internet_access: bool = True,
+        allow_out: list[str] | None = None,
+        deny_out: list[str] | None = None,
+        snapshot_id: str | None = None,
+        name: str | None = None,
+        file_systems: list[FileSystemMount] | None = None,
+        gpu: GpuRequest | None = None,
+        max_pending_secs: int | None = None,
+        proxy_url: str | None = None,
+        request_timeout: float | None = None,
+        owns_sandbox: bool = False,
+    ) -> AsyncPendingSandbox:
+        """Send the create with ``wait=False`` and return the pending handle,
+        bound to this client so ``ready()`` / ``status()`` work."""
+        request_model = _build_create_request(
+            image=image,
+            cpus=cpus,
+            memory_mb=memory_mb,
+            disk_mb=disk_mb,
+            gpus=gpus,
+            gpu_model=gpu_model,
+            timeout_secs=timeout_secs,
+            entrypoint=entrypoint,
+            allow_internet_access=allow_internet_access,
+            allow_out=allow_out,
+            deny_out=deny_out,
+            snapshot_id=snapshot_id,
+            name=name,
+            file_systems=file_systems,
+            gpu=gpu,
+            max_pending_secs=max_pending_secs,
+            wait=False,
+        )
+        try:
+            trace_id, response_json = (
+                await self._rust_client.create_sandbox_no_wait_async(
+                    request_json=request_model.model_dump_json(
+                        by_alias=True, exclude_none=True
+                    )
+                )
+            )
+        except Exception as e:
+            _raise_as_sandbox_error(e)
+        pending = AsyncPendingSandbox.model_validate_json(response_json)
+        pending.trace_id = trace_id
+        return pending._bind(
+            self,
+            proxy_url=proxy_url,
+            request_timeout=request_timeout,
+            requested_name=name,
+            owns_sandbox=owns_sandbox,
+        )
+
+    async def _wait_for_sandbox(
+        self,
+        sandbox_id: str,
+        timeout: float,
+        poll_interval: float,
+    ) -> Traced[SandboxInfo]:
+        """Poll ``get`` every ``poll_interval`` seconds until the sandbox
+        leaves ``pending`` or ``timeout`` elapses, returning the last
+        observation. Never raises for a timeout and never deletes."""
+        if timeout < 0:
+            raise SandboxError("timeout must be non-negative")
+        if poll_interval <= 0:
+            raise SandboxError("poll_interval must be positive")
+        try:
+            trace_id, response_json = await self._rust_client.wait_for_sandbox_async(
+                sandbox_id=sandbox_id,
+                timeout_sec=float(timeout),
+                poll_interval_sec=float(poll_interval),
+            )
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    async def _settle_wait(
+        self,
+        observed: Traced[SandboxInfo],
+        *,
+        budget: float,
+        proxy_url: str | None,
+        request_timeout: float | None,
+        cancel_on_timeout: bool,
+        requested_name: str | None = None,
+        owns_sandbox: bool = False,
+        trace_id: str | None = None,
+    ) -> "AsyncSandbox":
+        """Turn the last observed sandbox state into a handle or an error."""
+        status = observed.status
+        sandbox_id = observed.sandbox_id
+        if status == SandboxStatus.PENDING:
+            if cancel_on_timeout:
+                try:
+                    await self.delete(sandbox_id)
+                except Exception:
+                    pass
+                raise SandboxError(
+                    f"Sandbox {sandbox_id} did not start within {budget:g}s",
+                    reason=observed.pending_reason,
+                    sandbox_id=sandbox_id,
+                )
+            raise SandboxPending(
+                sandbox_id,
+                pending_reason=observed.pending_reason,
+                timeout=budget,
+            )
+        if status == SandboxStatus.RUNNING:
+            sandbox = await self.connect(
+                sandbox_id,
+                proxy_url=proxy_url,
+                routing_hint=observed.routing_hint,
+                request_timeout=request_timeout,
+                _routing_info=observed.value,
+            )
+            sandbox._sandbox_id = sandbox_id
+            sandbox._owns_sandbox = owns_sandbox
+            sandbox._lifecycle_client = self
+            sandbox._trace_id = trace_id or observed.trace_id
+            sandbox._cached_info = observed.value
+            if observed.name is None and requested_name is not None:
+                sandbox._cached_info = observed.value.model_copy(
+                    update={"name": requested_name}
+                )
+            return sandbox
+        if status in (SandboxStatus.TERMINATED, SandboxStatus.FAILED):
+            raise _startup_failure(
+                sandbox_id,
+                status,
+                error_details=observed.error_details,
+                termination_reason=observed.termination_reason,
+            )
+        raise SandboxError(
+            f"Sandbox {sandbox_id} is {status.value}, not running; "
+            + (
+                "resume it to run it again"
+                if status == SandboxStatus.SUSPENDED
+                else "wait for it to settle"
+            ),
+            reason=status.value,
+            sandbox_id=sandbox_id,
+        )
 
     async def claim(
         self,
@@ -934,6 +1154,33 @@ class AsyncSandboxClient:
             info = await self.get(sandbox_identifier)
             routing_info = info.value
             cached_info = info.value
+            if info.status == SandboxStatus.PENDING:
+                # The sandbox is queued for capacity. Wait for it here rather
+                # than failing: readiness is a property of the sandbox, not
+                # of the create call that requested it.
+                budget = (
+                    request_timeout
+                    if request_timeout is not None
+                    else self._request_timeout
+                )
+                observed = await self._wait_for_sandbox(
+                    info.sandbox_id, budget, DEFAULT_WAIT_POLL_INTERVAL_SEC
+                )
+                if observed.status == SandboxStatus.PENDING:
+                    raise SandboxPending(
+                        observed.sandbox_id,
+                        pending_reason=observed.pending_reason,
+                        timeout=budget,
+                    )
+                if observed.status in (SandboxStatus.TERMINATED, SandboxStatus.FAILED):
+                    raise _startup_failure(
+                        observed.sandbox_id,
+                        observed.status,
+                        error_details=observed.error_details,
+                        termination_reason=observed.termination_reason,
+                    )
+                routing_info = observed.value
+                cached_info = observed.value
         if routing_info is not None:
             proxy_sandbox_id = routing_info.sandbox_id
             routing_hint = routing_hint or routing_info.routing_hint
@@ -1005,11 +1252,19 @@ class AsyncSandboxClient:
         name: str | None = None,
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
+        max_pending_secs: int | None = None,
+        cancel_on_timeout: bool = False,
+        poll_interval: float = DEFAULT_WAIT_POLL_INTERVAL_SEC,
     ) -> "AsyncSandbox":
         """Create a sandbox, wait for it to start, and return a connection.
 
-        When ``proxy_url`` is omitted, the connected sandbox uses the
-        server-returned ``sandbox_url``.
+        Async mirror of :meth:`SandboxClient.create_and_connect`:
+        ``create(..., wait=False)`` followed by
+        :meth:`AsyncPendingSandbox.ready` polling every ``poll_interval``. **When the
+        wait runs out the sandbox is not deleted**; ``SandboxPending`` is
+        raised with its id and it keeps its place in the queue. Pass
+        ``cancel_on_timeout=True`` for the previous delete-then-raise
+        behaviour, or ``max_pending_secs`` for a server-side bound.
         """
         wait_timeout = (
             request_timeout
@@ -1021,12 +1276,46 @@ class AsyncSandboxClient:
             )
         )
         request_client = self._with_request_timeout(wait_timeout)
+        deadline = asyncio.get_running_loop().time() + wait_timeout
 
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
             result = await request_client.claim(pool_id, file_systems=file_systems)
+            if result.status == SandboxStatus.RUNNING:
+                sandbox = await request_client.connect(
+                    result.sandbox_id,
+                    proxy_url=proxy_url,
+                    routing_hint=result.routing_hint,
+                    request_timeout=wait_timeout,
+                    _routing_info=result,
+                )
+                sandbox._sandbox_id = result.sandbox_id
+                sandbox._owns_sandbox = True
+                sandbox._lifecycle_client = request_client
+                sandbox._trace_id = result.trace_id
+                sandbox._cached_info = SandboxInfo.model_construct(
+                    sandbox_id=result.sandbox_id,
+                    status=result.status,
+                    ingress_endpoint=result.ingress_endpoint,
+                    sandbox_url=result.sandbox_url,
+                    name=result.name or requested_name,
+                )
+                return sandbox
+            if result.status in (
+                SandboxStatus.SUSPENDED,
+                SandboxStatus.TERMINATED,
+                SandboxStatus.FAILED,
+            ):
+                raise _startup_failure(
+                    result.sandbox_id,
+                    result.status,
+                    error_details=result.error_details,
+                    termination_reason=result.termination_reason or result.reason,
+                )
+            sandbox_id = result.sandbox_id
+            trace_id = result.trace_id
         else:
-            result = await request_client.create(
+            pending = await request_client._request_pending(
                 image=image,
                 cpus=cpus,
                 memory_mb=memory_mb,
@@ -1042,82 +1331,54 @@ class AsyncSandboxClient:
                 name=name,
                 file_systems=file_systems,
                 gpu=gpu,
+                max_pending_secs=max_pending_secs,
             )
-
-        if result.status == SandboxStatus.RUNNING:
-            sandbox = await request_client.connect(
-                result.sandbox_id,
-                proxy_url=proxy_url,
-                routing_hint=result.routing_hint,
-                request_timeout=wait_timeout,
-                _routing_info=result,
-            )
-            sandbox._sandbox_id = result.sandbox_id
-            sandbox._owns_sandbox = True
-            sandbox._lifecycle_client = request_client
-            sandbox._trace_id = result.trace_id
-            sandbox._cached_info = SandboxInfo.model_construct(
-                sandbox_id=result.sandbox_id,
-                status=result.status,
-                ingress_endpoint=result.ingress_endpoint,
-                sandbox_url=result.sandbox_url,
-                name=result.name or requested_name,
-            )
-            return sandbox
-        if result.status in (
-            SandboxStatus.SUSPENDED,
-            SandboxStatus.TERMINATED,
-            SandboxStatus.FAILED,
-        ):
-            raise SandboxError(
-                _startup_failure_message(
-                    result.sandbox_id,
-                    result.status,
-                    error_details=result.error_details,
-                    termination_reason=result.termination_reason or result.reason,
-                )
-            )
-        if result.status == SandboxStatus.TIMEOUT:
-            try:
-                await request_client.delete(result.sandbox_id)
-            except Exception:
-                pass
-            raise SandboxError(
-                f"Sandbox {result.sandbox_id} did not start within {wait_timeout}s"
-            )
-
-        deadline = asyncio.get_running_loop().time() + wait_timeout
-        while asyncio.get_running_loop().time() < deadline:
-            info = await request_client.get(result.sandbox_id)
-            if info.status == SandboxStatus.RUNNING:
+            sandbox_id = pending.sandbox_id
+            trace_id = pending.trace_id
+            # Fast path: a server without `wait: false` may already answer
+            # running, with a short-lived routing hint worth using directly.
+            if pending.state == SandboxStatus.RUNNING:
                 sandbox = await request_client.connect(
-                    info.sandbox_id,
+                    sandbox_id,
                     proxy_url=proxy_url,
-                    routing_hint=info.routing_hint,
+                    routing_hint=pending.routing_hint,
                     request_timeout=wait_timeout,
-                    _routing_info=info.value,
+                    _routing_info=pending,
                 )
-                sandbox._sandbox_id = info.sandbox_id
-                sandbox._cached_info = info.value
+                sandbox._sandbox_id = sandbox_id
                 sandbox._owns_sandbox = True
                 sandbox._lifecycle_client = request_client
-                sandbox._trace_id = result.trace_id
-                return sandbox
-            if info.status in (SandboxStatus.SUSPENDED, SandboxStatus.TERMINATED):
-                raise SandboxError(
-                    _startup_failure_message(
-                        result.sandbox_id,
-                        info.status,
-                        error_details=info.error_details,
-                        termination_reason=info.termination_reason,
-                    )
+                sandbox._trace_id = trace_id
+                sandbox._cached_info = SandboxInfo.model_construct(
+                    sandbox_id=sandbox_id,
+                    status=SandboxStatus.RUNNING,
+                    ingress_endpoint=pending.ingress_endpoint,
+                    sandbox_url=pending.sandbox_url,
+                    name=pending.name or requested_name,
                 )
-            await asyncio.sleep(0.5)
+                return sandbox
+            if pending.state in (SandboxStatus.TERMINATED, SandboxStatus.FAILED):
+                raise _startup_failure(
+                    sandbox_id,
+                    pending.state,
+                    error_details=pending.error_details,
+                    termination_reason=pending.termination_reason or pending.reason,
+                )
 
-        try:
-            await request_client.delete(result.sandbox_id)
-        except Exception:
-            pass
-        raise SandboxError(
-            f"Sandbox {result.sandbox_id} did not start within {wait_timeout}s"
+        # A `timeout` claim or a pending create: the sandbox exists and keeps
+        # its place in the queue. Poll it with whatever budget is left (a
+        # zero budget observes its state once without sleeping).
+        remaining = max(0.0, deadline - asyncio.get_running_loop().time())
+        observed = await request_client._wait_for_sandbox(
+            sandbox_id, remaining, poll_interval
+        )
+        return await request_client._settle_wait(
+            observed,
+            budget=wait_timeout,
+            proxy_url=proxy_url,
+            request_timeout=wait_timeout,
+            cancel_on_timeout=cancel_on_timeout,
+            requested_name=requested_name,
+            owns_sandbox=True,
+            trace_id=trace_id,
         )

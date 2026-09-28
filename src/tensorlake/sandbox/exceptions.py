@@ -14,9 +14,82 @@ class SandboxException(Exception):
 
 
 class SandboxError(SandboxException):
-    """General sandbox operation error."""
+    """General sandbox operation error.
 
-    pass
+    ``reason`` carries the server's reason when the error describes a
+    sandbox that failed or terminated: ``no_capacity`` when a
+    ``max_pending_secs`` bound expired, ``cancelled`` when a pending sandbox
+    was deleted, or a startup reason such as ``ConfigurationError``. It is
+    ``None`` for errors that are not about a sandbox's fate.
+    """
+
+    def __init__(
+        self,
+        message: str = "",
+        *,
+        reason: str | None = None,
+        sandbox_id: str | None = None,
+    ):
+        self._reason = reason
+        self._error_sandbox_id = sandbox_id
+        super().__init__(message)
+
+    @property
+    def reason(self) -> str | None:
+        """Server reason for a failed or terminated sandbox, when known."""
+        return self._reason
+
+    @property
+    def sandbox_id(self) -> str | None:
+        """The sandbox the error is about, when known."""
+        return self._error_sandbox_id
+
+
+class SandboxPending(SandboxError):
+    """The wait budget ran out while the sandbox was still queued.
+
+    Raised by ``Sandbox.create``, ``create_and_connect``,
+    ``PendingSandbox.ready`` and ``connect`` when their timeout elapses before
+    the sandbox is running. **The sandbox is not deleted**: it keeps its
+    place in the queue and starts whenever capacity arrives. Call ``ready()``
+    again to keep waiting, ``Sandbox.connect(sandbox_id)`` from any other
+    process, or ``delete`` it to give up. ``pending_reason`` is the last reason the scheduler recorded
+    (``scheduling``, ``no_resources_available``, ``pool_at_capacity``, ...).
+    """
+
+    def __init__(
+        self,
+        sandbox_id: str,
+        *,
+        pending_reason: str | None = None,
+        timeout: float | None = None,
+    ):
+        self._pending_reason = pending_reason
+        self._timeout = timeout
+        message = f"Sandbox {sandbox_id} is still pending"
+        if timeout is not None:
+            message += f" after {timeout:g}s"
+        if pending_reason:
+            message += f" ({pending_reason})"
+        message += (
+            "; it keeps its place in the queue. Wait again with ready() or "
+            f"Sandbox.connect({sandbox_id!r}), or delete it to cancel."
+        )
+        super().__init__(message, reason=pending_reason, sandbox_id=sandbox_id)
+
+    @property
+    def sandbox_id(self) -> str:
+        return self._error_sandbox_id or ""
+
+    @property
+    def pending_reason(self) -> str | None:
+        """Why the sandbox is waiting, in snake_case."""
+        return self._pending_reason
+
+    @property
+    def timeout(self) -> float | None:
+        """The wait budget, in seconds, that ran out."""
+        return self._timeout
 
 
 class SandboxConnectionError(SandboxError):
@@ -31,7 +104,7 @@ class SandboxNotFoundError(SandboxError):
 
     def __init__(self, sandbox_id: str):
         self._sandbox_id = sandbox_id
-        super().__init__(f"Sandbox not found: {sandbox_id}")
+        super().__init__(f"Sandbox not found: {sandbox_id}", sandbox_id=sandbox_id)
 
     @property
     def sandbox_id(self) -> str:
@@ -58,7 +131,8 @@ class SandboxNotRoutableError(SandboxError):
         super().__init__(
             f"Sandbox {sandbox_id} did not include proxy routing "
             f"information{status_part}; it may still be starting. Wait for "
-            "it to be Running and connect again, or pass an explicit proxy_url."
+            "it to be Running and connect again, or pass an explicit proxy_url.",
+            sandbox_id=sandbox_id,
         )
 
     @property
@@ -156,7 +230,11 @@ class RemoteAPIError(SandboxError):
                 display_message += f": {detail}"
             if not self._reason and not detail:
                 display_message = message
-        super().__init__(f"API error (status {status_code}): {display_message}")
+        super().__init__(
+            f"API error (status {status_code}): {display_message}",
+            reason=self._reason,
+            sandbox_id=self._sandbox_id,
+        )
 
     @property
     def sandbox_id(self) -> str | None:
