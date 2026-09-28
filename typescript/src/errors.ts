@@ -6,60 +6,11 @@ export class SandboxException extends Error {
   }
 }
 
-/**
- * General sandbox operation error.
- *
- * `reason` carries the server's reason when the error describes a sandbox
- * that failed or terminated: `no_capacity` when a `maxPendingSecs` bound
- * expired, `cancelled` when a pending sandbox was deleted, or a startup
- * reason such as `ConfigurationError`. It is undefined for errors that are
- * not about a sandbox's fate.
- */
+/** General sandbox operation error. */
 export class SandboxError extends SandboxException {
-  readonly reason?: string;
-  readonly sandboxId?: string;
-
-  constructor(
-    message: string,
-    options?: { reason?: string; sandboxId?: string },
-  ) {
+  constructor(message: string) {
     super(message);
     this.name = "SandboxError";
-    if (options?.reason !== undefined) this.reason = options.reason;
-    if (options?.sandboxId !== undefined) this.sandboxId = options.sandboxId;
-  }
-}
-
-/**
- * The wait budget ran out while the sandbox was still queued.
- *
- * Thrown by `Sandbox.create`, `createAndConnect`, `PendingSandbox.ready` and
- * a lazy `connect` when their timeout elapses before the sandbox is running.
- * **The sandbox is not deleted**: it keeps its place in the queue and starts
- * whenever capacity arrives. Call `ready()` again to keep waiting,
- * `Sandbox.connect` from any other process, or `delete` it to give up.
- * `pendingReason` is the last reason the scheduler recorded (`scheduling`,
- * `no_resources_available`, `pool_at_capacity`, ...).
- */
-export class SandboxPending extends SandboxError {
-  declare readonly sandboxId: string;
-  readonly pendingReason?: string;
-  readonly timeout?: number;
-
-  constructor(
-    sandboxId: string,
-    options?: { pendingReason?: string; timeout?: number },
-  ) {
-    let message = `Sandbox ${sandboxId} is still pending`;
-    if (options?.timeout !== undefined) message += ` after ${options.timeout}s`;
-    if (options?.pendingReason) message += ` (${options.pendingReason})`;
-    message +=
-      "; it keeps its place in the queue. Wait again with ready() or " +
-      `Sandbox.connect({ sandboxId: '${sandboxId}' }), or delete it to cancel.`;
-    super(message, { reason: options?.pendingReason, sandboxId });
-    this.name = "SandboxPending";
-    this.pendingReason = options?.pendingReason;
-    this.timeout = options?.timeout;
   }
 }
 
@@ -118,11 +69,12 @@ export function describeError(err: unknown): string {
 
 /** Raised when a sandbox is not found. */
 export class SandboxNotFoundError extends SandboxError {
-  declare readonly sandboxId: string;
+  readonly sandboxId: string;
 
   constructor(sandboxId: string) {
-    super(`Sandbox not found: ${sandboxId}`, { sandboxId });
+    super(`Sandbox not found: ${sandboxId}`);
     this.name = "SandboxNotFoundError";
+    this.sandboxId = sandboxId;
   }
 }
 
@@ -178,9 +130,9 @@ export class RemoteAPIError extends SandboxError {
   readonly statusCode: number;
   /** Original response body, retained for compatibility and diagnostics. */
   readonly responseMessage: string;
-  declare readonly sandboxId?: string;
+  readonly sandboxId?: string;
   /** Server reason, including unknown future reasons. */
-  declare readonly reason?: string;
+  readonly reason?: string;
   readonly errorDetails?: unknown;
 
   constructor(statusCode: number, message: string) {
@@ -211,10 +163,9 @@ export class RemoteAPIError extends SandboxError {
       if (detail) displayMessage += `: ${detail}`;
       if (!reason && !detail) displayMessage = message;
     }
-    super(`API error (status ${statusCode}): ${displayMessage}`, {
-      reason,
-      sandboxId,
-    });
+    super(`API error (status ${statusCode}): ${displayMessage}`);
+    this.sandboxId = sandboxId;
+    this.reason = reason;
     this.errorDetails = errorDetails;
     this.name = "RemoteAPIError";
     this.statusCode = statusCode;
