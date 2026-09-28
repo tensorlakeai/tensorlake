@@ -3490,11 +3490,30 @@ where
 /// Drive `operation` to completion on the shared runtime, retrying under
 /// `policy`, with the GIL released for the whole loop.
 ///
-/// The sync bindings reach this from `&self` methods that hold the GIL. An
-/// undelivered request can be replayed for up to
-/// [`tensorlake::retry::UNDELIVERED_REPLAY_BUDGET`], and holding the GIL
-/// across those sleeps would freeze every other Python thread for the length
-/// of a control-plane rollout.
+/// Every caller of this function is reached from a `#[pymethods]` entry
+/// point, which holds the GIL for the whole call. Without an explicit release
+/// region the GIL would stay held across the network round-trips and every
+/// back-off sleep below, so no other Python thread could run for the duration
+/// of an SDK call. An undelivered request can be replayed for up to
+/// [`tensorlake::retry::UNDELIVERED_REPLAY_BUDGET`], so holding the GIL would
+/// freeze every other Python thread for the length of a control-plane
+/// rollout. The async bindings in this file already take a token and are
+/// unaffected.
+///
+/// `Python::attach` re-derives a token for the GIL the caller already holds;
+/// it does not acquire a second one (when called with the GIL already
+/// released — the build-log streamers below detach first — it re-acquires
+/// briefly, and the `py.detach` below releases it again). Threading a
+/// `Python<'_>` parameter down from each entry point would state that
+/// contract in the signatures, but this function is reached from ~95
+/// `#[pymethods]` entry points, none of which take a token today. Deriving the
+/// token in one place keeps the release region and its safety argument
+/// together, which is where a reader needs them.
+///
+/// The released region returns the raw `SdkError` and never a `PyErr`: the
+/// conversion happens below, once the GIL is held again, so the region
+/// provably contains only Rust network I/O, retry bookkeeping, and
+/// sleeping — no Python object construction of any kind.
 fn run_bounded_blocking<C, T, F, Fut>(
     client: C,
     policy: RetryPolicy,
@@ -3508,7 +3527,11 @@ where
     F: FnMut(C) -> Fut + Send,
     Fut: Future<Output = Result<T, SdkError>>,
 {
-    Python::attach(|py| {
+    let result: Result<T, SdkError> = Python::attach(|py| {
+        // Release the GIL for the ENTIRE blocking section: the request(s)
+        // and every back-off sleep. Nothing inside touches Python objects,
+        // which is the condition for releasing it. Wrapping the whole loop
+        // rather than each iteration releases once instead of per retry.
         py.detach(move || {
             let started = std::time::Instant::now();
             let mut state = RetryState::new(policy);
@@ -3516,7 +3539,7 @@ where
                 match shared_runtime().block_on(operation(client.clone())) {
                     Ok(value) => return Ok(value),
                     Err(err) => match state.decide(&err, started.elapsed()) {
-                        RetryDecision::Stop => return Err(into_err(err)),
+                        RetryDecision::Stop => return Err(err),
                         RetryDecision::Retry(wait) => {
                             eprintln!(
                                 "Retrying {label} after {:.2} seconds. Retry count: {}. Retryable exception: {err}",
@@ -3527,14 +3550,15 @@ where
                             if started.elapsed() >= UNDELIVERED_REPLAY_BUDGET
                                 && err.never_reached_server()
                             {
-                                return Err(into_err(err));
+                                return Err(err);
                             }
                         }
                     },
                 }
             }
         })
-    })
+    });
+    result.map_err(into_err)
 }
 
 impl CloudApiClient {
