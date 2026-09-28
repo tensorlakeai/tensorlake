@@ -2175,7 +2175,26 @@ fn create_context_archive(
     let gz = flate2::write::GzEncoder::new(file, flate2::Compression::fast());
     let mut tar = tar::Builder::new(gz);
 
-    let files = collect_context_archive_files(context_dir)?;
+    let (files, skipped_symlinks) = collect_context_archive_files(context_dir)?;
+    if !skipped_symlinks.is_empty() {
+        const LISTED: usize = 10;
+        let shown = skipped_symlinks
+            .iter()
+            .take(LISTED)
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(", ");
+        let extra = skipped_symlinks.len().saturating_sub(LISTED);
+        let suffix = if extra > 0 {
+            format!(", and {extra} more")
+        } else {
+            String::new()
+        };
+        emit(SandboxImageBuildEvent::Status(format!(
+            "Skipping {} symlink(s) in the build context (symlinks are never uploaded): {shown}{suffix}",
+            skipped_symlinks.len()
+        )));
+    }
     let disk_paths = files
         .iter()
         .map(|file| file.relative_path.as_str())
@@ -2214,7 +2233,7 @@ fn create_context_archive(
     let mut last_emitted_bytes = 0_u64;
     let mut last_percent = upload_percent(0, uncompressed_bytes);
     for file in &files {
-        let input = File::open(&file.full_path)?;
+        let input = open_context_file(&file.full_path)?;
         let metadata = input.metadata()?;
         let file_bytes = metadata.len();
         let mut header = tar::Header::new_gnu();
@@ -2313,17 +2332,49 @@ pub(crate) fn normalize_context_file_path(path: &Path) -> Result<String> {
     Ok(components.join("/"))
 }
 
-fn collect_context_archive_files(context_dir: &Path) -> Result<Vec<ContextArchiveFile>> {
+fn collect_context_archive_files(
+    context_dir: &Path,
+) -> Result<(Vec<ContextArchiveFile>, Vec<String>)> {
+    let collected = collect_dir_files(context_dir, context_dir)?;
     let mut files = Vec::new();
-    for (full_path, relative_path) in collect_dir_files(context_dir, context_dir)? {
-        let bytes = std::fs::metadata(&full_path)?.len();
+    for (full_path, relative_path) in collected.files {
+        // `symlink_metadata` does not follow the entry, so a file swapped
+        // for a symlink after collection is detected here instead of being
+        // read through to its target.
+        let metadata = std::fs::symlink_metadata(&full_path)?;
+        if !metadata.file_type().is_file() {
+            return Err(SandboxImageBuildError::other(format!(
+                "Build context entry '{}' is no longer a regular file (it may have been \
+                 replaced by a symlink while preparing the archive); refusing to follow it",
+                full_path.display()
+            )));
+        }
         files.push(ContextArchiveFile {
             full_path,
             relative_path,
-            bytes,
+            bytes: metadata.len(),
         });
     }
-    Ok(files)
+    Ok((files, collected.skipped_symlinks))
+}
+
+/// Open a collected build-context file without following symlinks. On Unix
+/// the `O_NOFOLLOW` open fails with `ELOOP` if the path was replaced by a
+/// symlink between collection and read, instead of silently uploading the
+/// link target's bytes.
+pub(crate) fn open_context_file(full_path: &Path) -> std::io::Result<File> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        File::options()
+            .read(true)
+            .custom_flags(libc::O_NOFOLLOW)
+            .open(full_path)
+    }
+    #[cfg(not(unix))]
+    {
+        File::open(full_path)
+    }
 }
 
 fn emit_archive_progress(
@@ -3000,11 +3051,29 @@ fn join_posix(base: &str, child: &str) -> String {
     normalize_posix(&format!("{}/{}", base.trim_end_matches('/'), child))
 }
 
-pub(crate) fn collect_dir_files(root: &Path, current: &Path) -> Result<Vec<(PathBuf, String)>> {
+/// Files collected from a build-context directory. Symlinks are never
+/// followed, so `skipped_symlinks` reports the in-context paths that were
+/// left out (see `collect_dir_files_filtered`).
+pub(crate) struct CollectedDirFiles {
+    pub(crate) files: Vec<(PathBuf, String)>,
+    pub(crate) skipped_symlinks: Vec<String>,
+}
+
+pub(crate) fn collect_dir_files(root: &Path, current: &Path) -> Result<CollectedDirFiles> {
     let mut files = Vec::new();
+    let mut skipped_symlinks = Vec::new();
     let dockerignore = dockerignore_matcher(root)?;
-    collect_dir_files_filtered(root, current, dockerignore.as_ref(), &mut files)?;
-    Ok(files)
+    collect_dir_files_filtered(
+        root,
+        current,
+        dockerignore.as_ref(),
+        &mut files,
+        &mut skipped_symlinks,
+    )?;
+    Ok(CollectedDirFiles {
+        files,
+        skipped_symlinks,
+    })
 }
 
 fn dockerignore_matcher(root: &Path) -> Result<Option<Gitignore>> {
@@ -3032,16 +3101,34 @@ fn collect_dir_files_filtered(
     current: &Path,
     dockerignore: Option<&Gitignore>,
     files: &mut Vec<(PathBuf, String)>,
+    skipped_symlinks: &mut Vec<String>,
 ) -> Result<()> {
     for entry in std::fs::read_dir(current)? {
         let entry = entry?;
         let path = entry.path();
-        if path.is_dir() {
+        // Classify with the directory entry's own file type, which does NOT
+        // follow symlinks (unlike `Path::is_dir`/`Path::is_file`, which
+        // follow the link target). A symlink inside the context — e.g.
+        // `deploy/key -> ~/.ssh/id_rsa` planted in a cloned repository —
+        // must never be read or recursed into, otherwise the upload would
+        // send the target's bytes (potentially host secrets) to the remote
+        // builder; see GHSA-whqg-hfh6-hcpg.
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            if !is_dockerignored(root, &path, false, dockerignore) {
+                let relative = path
+                    .strip_prefix(root)
+                    .map_err(|error| SandboxImageBuildError::other(error.to_string()))?;
+                skipped_symlinks.push(relative.to_string_lossy().into_owned());
+            }
+            continue;
+        }
+        if file_type.is_dir() {
             if is_dockerignored(root, &path, true, dockerignore) {
                 continue;
             }
-            collect_dir_files_filtered(root, &path, dockerignore, files)?;
-        } else if path.is_file() {
+            collect_dir_files_filtered(root, &path, dockerignore, files, skipped_symlinks)?;
+        } else if file_type.is_file() {
             if is_dockerignored(root, &path, false, dockerignore) {
                 continue;
             }
@@ -4371,8 +4458,9 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         std::fs::write(root.join("cache/drop.txt"), "drop").unwrap();
         std::fs::write(root.join("cache/keep.txt"), "keep").unwrap();
 
-        let mut files = collect_dir_files(root, root)
-            .unwrap()
+        let collected = collect_dir_files(root, root).unwrap();
+        let mut files = collected
+            .files
             .into_iter()
             .map(|(_, relative)| relative)
             .collect::<Vec<_>>();
@@ -4382,6 +4470,89 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             files,
             vec![".dockerignore", "cache/keep.txt", "included.txt"]
         );
+        assert!(collected.skipped_symlinks.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn collect_dir_files_never_follows_symlinks_out_of_the_context() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+
+        // A secrets directory outside the build context, as a stand-in for
+        // ~/.ssh: the advisory's exploit plants a symlink pointing here.
+        let secrets = temp_dir.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        std::fs::write(secrets.join("id_rsa"), "PRIVATE KEY MATERIAL").unwrap();
+
+        let context = root.join("context");
+        std::fs::create_dir_all(context.join("deploy")).unwrap();
+        std::fs::write(context.join("deploy/app.txt"), "app").unwrap();
+        std::os::unix::fs::symlink(secrets.join("id_rsa"), context.join("deploy").join("key"))
+            .unwrap();
+        // A symlink to a directory must not be recursed into either.
+        std::os::unix::fs::symlink(&secrets, context.join("all-secrets")).unwrap();
+
+        let collected = collect_dir_files(&context, &context).unwrap();
+        let mut relatives = collected
+            .files
+            .into_iter()
+            .map(|(_, relative)| relative)
+            .collect::<Vec<_>>();
+        relatives.sort();
+
+        assert_eq!(relatives, vec!["deploy/app.txt"]);
+        let mut skipped = collected.skipped_symlinks;
+        skipped.sort();
+        assert_eq!(skipped, vec!["all-secrets", "deploy/key"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn create_context_archive_excludes_symlinks_and_warns() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let root = temp_dir.path();
+        let secrets = temp_dir.path().join("secrets");
+        std::fs::create_dir(&secrets).unwrap();
+        std::fs::write(secrets.join("id_rsa"), "PRIVATE KEY MATERIAL").unwrap();
+
+        let context = root.join("context");
+        std::fs::create_dir_all(context.join("deploy")).unwrap();
+        std::fs::write(context.join("deploy/app.txt"), "app").unwrap();
+        std::os::unix::fs::symlink(secrets.join("id_rsa"), context.join("deploy").join("key"))
+            .unwrap();
+
+        let archive_file = tempfile::NamedTempFile::new().unwrap();
+        let mut events = Vec::new();
+        let stats = create_context_archive(&context, &[], archive_file.path(), &mut |event| {
+            events.push(event);
+        })
+        .unwrap();
+
+        assert_eq!(stats.file_count, 1);
+        assert!(events.iter().any(|event| {
+            matches!(
+                event,
+                SandboxImageBuildEvent::Status(message)
+                    if message.contains("Skipping 1 symlink") && message.contains("deploy/key")
+            )
+        }));
+
+        // The symlink target's bytes must not be anywhere in the archive.
+        let file = File::open(archive_file.path()).unwrap();
+        let mut archive = tar::Archive::new(flate2::read::GzDecoder::new(file));
+        let mut names = Vec::new();
+        for entry in archive.entries().unwrap() {
+            names.push(
+                entry
+                    .unwrap()
+                    .path()
+                    .unwrap()
+                    .to_string_lossy()
+                    .into_owned(),
+            );
+        }
+        assert_eq!(names, vec!["deploy/app.txt"]);
     }
 
     #[test]
