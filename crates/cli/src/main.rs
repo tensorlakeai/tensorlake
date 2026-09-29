@@ -1180,7 +1180,7 @@ enum SbxCommands {
 
         /// Queue the sandbox and return at once with its ID instead of blocking until it runs.
         /// It starts when capacity is available; collect it with `tl sbx wait <id>`
-        #[arg(long, alias = "no-wait")]
+        #[arg(short = 'n', long, alias = "no-wait")]
         queue: bool,
 
         /// Longest the sandbox may wait for capacity, in seconds, before the server fails it
@@ -4380,6 +4380,20 @@ mod tests {
                 assert_eq!(user, None);
             }
             _ => panic!("expected sbx run command"),
+        }
+    }
+
+    #[test]
+    fn sbx_create_parses_queue_and_legacy_aliases() {
+        for flag in ["--queue", "--no-wait", "-n"] {
+            match parse_command(["tl", "sbx", "create", flag]) {
+                Commands::Sbx(SbxCommands::Create { queue, .. }) => assert!(queue),
+                _ => panic!("expected sbx create command"),
+            }
+        }
+        match parse_command(["tl", "sbx", "create"]) {
+            Commands::Sbx(SbxCommands::Create { queue, .. }) => assert!(!queue),
+            _ => panic!("expected sbx create command"),
         }
     }
 
