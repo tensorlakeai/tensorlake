@@ -7,9 +7,9 @@ use crate::commands::sbx::{
 };
 use crate::error::Result;
 
-/// `tl sbx wait <id>`: poll a sandbox until it is running (ADR 0086). Runs
+/// `tl sbx wait <id>`: poll a sandbox until it is running (ADR 0087). Runs
 /// from any process that knows the sandbox id, including after a
-/// `tl sbx create --no-wait` or a create whose own wait ran out. Never
+/// `tl sbx create --queue` or a create whose own wait ran out. Never
 /// deletes the sandbox: when the budget runs out the sandbox keeps its place
 /// in the queue and the error says how to keep waiting.
 pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: Duration) -> Result<()> {

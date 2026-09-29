@@ -62,11 +62,11 @@ tl login
 Create a sandbox, run a command, and clean up:
 
 ```bash
-# Create a sandbox (waits for it to run; a timeout leaves it queued, never cancels it)
+# Create a sandbox (one blocking request; a timeout leaves it queued, never cancels it)
 tl sbx create
 
-# Request a sandbox without waiting, then collect it later
-tl sbx create --no-wait
+# Queue a sandbox and return at once, then collect it later
+tl sbx create --queue
 tl sbx wait <sandbox-id> --timeout 1800
 
 # Run a command inside it

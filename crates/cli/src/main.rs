@@ -1178,10 +1178,10 @@ enum SbxCommands {
         #[arg(short, long, conflicts_with = "snapshot")]
         image: Option<String>,
 
-        /// Return immediately after creation instead of waiting for the sandbox to be running.
-        /// The sandbox is queued and starts when capacity is available; collect it with `tl sbx wait <id>`
-        #[arg(short, long)]
-        no_wait: bool,
+        /// Queue the sandbox and return at once with its ID instead of blocking until it runs.
+        /// It starts when capacity is available; collect it with `tl sbx wait <id>`
+        #[arg(short = 'n', long, alias = "no-wait")]
+        queue: bool,
 
         /// Longest the sandbox may wait for capacity, in seconds, before the server fails it
         /// with reason `no_capacity`. 0 fails at once when it cannot be placed. Unset waits
@@ -2189,7 +2189,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         entrypoint,
                         snapshot,
                         image,
-                        no_wait,
+                        queue,
                         max_pending_secs,
                         ports,
                         allow_unauthenticated_access,
@@ -2222,7 +2222,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 entrypoint: &entrypoint,
                                 snapshot_id: snapshot.as_deref(),
                                 image_name: image.as_deref(),
-                                wait: !no_wait,
+                                queue,
                                 ports: &ports,
                                 allow_unauthenticated_access,
                                 no_internet,
@@ -4380,6 +4380,20 @@ mod tests {
                 assert_eq!(user, None);
             }
             _ => panic!("expected sbx run command"),
+        }
+    }
+
+    #[test]
+    fn sbx_create_parses_queue_and_legacy_aliases() {
+        for flag in ["--queue", "--no-wait", "-n"] {
+            match parse_command(["tl", "sbx", "create", flag]) {
+                Commands::Sbx(SbxCommands::Create { queue, .. }) => assert!(queue),
+                _ => panic!("expected sbx create command"),
+            }
+        }
+        match parse_command(["tl", "sbx", "create"]) {
+            Commands::Sbx(SbxCommands::Create { queue, .. }) => assert!(!queue),
+            _ => panic!("expected sbx create command"),
         }
     }
 
