@@ -68,7 +68,9 @@ const CAS_SNAPSHOT_FORMAT_VERSION: &str = "content_addressed_streaming_v1";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct ProcessTerminalStatus {
-    code: i64,
+    /// Exit code, with signal termination reported as the negated signal
+    /// number. `None` when the process stopped without reporting either.
+    code: Option<i64>,
     oom_killed: bool,
 }
 
@@ -1864,19 +1866,31 @@ async fn run_streaming_process(
 
     let terminal_status = stream_started_process(proxy, started.pid, emit).await?;
 
-    if terminal_status.code != 0 {
-        let reason = if terminal_status.oom_killed {
-            " (process was killed by the kernel OOM killer)"
-        } else {
-            ""
-        };
-        return Err(SandboxImageBuildError::other(format!(
-            "Command '{}' failed with exit code {}{}",
-            command, terminal_status.code, reason
-        )));
-    }
+    classify_process_exit(command, terminal_status)
+}
 
-    Ok(())
+fn classify_process_exit(command: &str, status: ProcessTerminalStatus) -> Result<()> {
+    match status.code {
+        Some(0) => Ok(()),
+        Some(code) => {
+            let reason = if status.oom_killed {
+                " (process was killed by the kernel OOM killer)"
+            } else {
+                ""
+            };
+            Err(SandboxImageBuildError::other(format!(
+                "Command '{}' failed with exit code {}{}",
+                command, code, reason
+            )))
+        }
+        // The process stopped without reporting an exit code or a signal. The
+        // client cannot tell "not reported yet" from "lost", so fail the build
+        // step rather than publish a possibly incomplete image as a success.
+        None => Err(SandboxImageBuildError::other(format!(
+            "Command '{}' did not report an exit status; treating the build step as failed",
+            command
+        ))),
+    }
 }
 
 async fn start_or_recover_process(
@@ -2067,23 +2081,29 @@ fn process_terminal_status(info: &ProcessInfo) -> Option<ProcessTerminalStatus> 
 
     if oom_killed {
         Some(ProcessTerminalStatus {
-            code: info
-                .signal
-                .map(|signal| -signal)
-                .or(info.exit_code)
-                .unwrap_or(-9),
+            code: Some(
+                info.signal
+                    .map(|signal| -signal)
+                    .or(info.exit_code)
+                    .unwrap_or(-9),
+            ),
             oom_killed,
         })
     } else if let Some(code) = info.exit_code {
-        Some(ProcessTerminalStatus { code, oom_killed })
+        Some(ProcessTerminalStatus {
+            code: Some(code),
+            oom_killed,
+        })
     } else if let Some(signal) = info.signal {
         Some(ProcessTerminalStatus {
-            code: -signal,
+            code: Some(-signal),
             oom_killed,
         })
     } else if info.status != "running" {
+        // Stopped without an exit code or a signal: the outcome is unknown,
+        // not a success.
         Some(ProcessTerminalStatus {
-            code: 0,
+            code: None,
             oom_killed,
         })
     } else {
@@ -4702,8 +4722,76 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         };
 
         let status = process_terminal_status(&info).unwrap();
-        assert_eq!(status.code, -9);
+        assert_eq!(status.code, Some(-9));
         assert!(status.oom_killed);
+    }
+
+    fn process_info_with_exit(
+        status: &str,
+        exit_code: Option<i64>,
+        signal: Option<i64>,
+    ) -> ProcessInfo {
+        ProcessInfo {
+            handle: Some(1),
+            pid: 42,
+            status: status.to_string(),
+            exit_code,
+            signal,
+            oom_killed: false,
+            stdin_writable: false,
+            command: "/usr/local/bin/tl-rootfs-build".to_string(),
+            args: Vec::new(),
+            started_at: json!(123),
+            ended_at: Some(json!(456)),
+            managed: None,
+        }
+    }
+
+    #[test]
+    fn process_exit_classification_accepts_zero_exit_code() {
+        let status = process_terminal_status(&process_info_with_exit("exited", Some(0), None))
+            .expect("terminal status");
+
+        assert!(super::classify_process_exit("build-step", status).is_ok());
+    }
+
+    #[test]
+    fn process_exit_classification_rejects_nonzero_exit_code() {
+        let status = process_terminal_status(&process_info_with_exit("exited", Some(1), None))
+            .expect("terminal status");
+
+        let error = super::classify_process_exit("build-step", status).unwrap_err();
+
+        assert!(error.to_string().contains("exit code 1"), "{error}");
+    }
+
+    #[test]
+    fn process_exit_classification_rejects_signal() {
+        let status = process_terminal_status(&process_info_with_exit("signaled", None, Some(15)))
+            .expect("terminal status");
+
+        let error = super::classify_process_exit("build-step", status).unwrap_err();
+
+        assert!(error.to_string().contains("exit code -15"), "{error}");
+    }
+
+    #[test]
+    fn process_exit_classification_rejects_missing_exit_status() {
+        let status = process_terminal_status(&process_info_with_exit("exited", None, None))
+            .expect("a stopped process is terminal");
+        assert_eq!(status.code, None);
+
+        let error = super::classify_process_exit("build-step", status).unwrap_err();
+
+        assert!(
+            error.to_string().contains("did not report an exit status"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn running_process_is_not_terminal() {
+        assert!(process_terminal_status(&process_info_with_exit("running", None, None)).is_none());
     }
 
     fn prepared_build(rootfs_node_kind: &str) -> PreparedSandboxTemplateBuild {
