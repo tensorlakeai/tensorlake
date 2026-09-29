@@ -1,5 +1,6 @@
 //! `tl sbx create` / `tl sbx wait` against a scripted lifecycle server:
-//! wait-free create (`wait: false`) and readiness by polling (ADR 0086).
+//! the blocking create, the queued create (`--queue`, `wait: false`) and
+//! readiness by polling (ADR 0087).
 //! Every request the CLI sends is captured so the tests can assert on the
 //! body, the paths and, above all, on the absence of a DELETE.
 
@@ -98,9 +99,9 @@ fn info(status: &str, extra: Value) -> Value {
 }
 
 #[tokio::test]
-async fn create_no_wait_sends_wait_false_and_prints_the_id() {
+async fn create_queue_sends_wait_false_and_prints_the_id() {
     let run = run_cli(
-        &["create", "--no-wait", "--max-pending-secs", "1800"],
+        &["create", "--queue", "--max-pending-secs", "1800"],
         vec![(202, accepted("sbx-queued"))],
     )
     .await;
@@ -121,8 +122,17 @@ async fn create_no_wait_sends_wait_false_and_prints_the_id() {
 }
 
 #[tokio::test]
-async fn create_omits_an_unset_bound() {
+async fn create_no_wait_is_an_alias_for_queue() {
     let run = run_cli(&["create", "--no-wait"], vec![(202, accepted("sbx-1"))]).await;
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    assert!(run.output.status.success(), "{stderr}");
+    assert_eq!(run.requests.len(), 1, "queued: one request, no poll");
+    assert_eq!(body(&run.requests[0])["wait"], false);
+}
+
+#[tokio::test]
+async fn create_omits_an_unset_bound() {
+    let run = run_cli(&["create", "--queue"], vec![(202, accepted("sbx-1"))]).await;
     assert!(run.output.status.success());
     let sent = body(&run.requests[0]);
     assert_eq!(sent["wait"], false);
@@ -130,7 +140,64 @@ async fn create_omits_an_unset_bound() {
 }
 
 #[tokio::test]
-async fn create_polls_the_sandbox_until_running() {
+async fn create_blocks_on_the_server_in_one_request() {
+    let run = run_cli(
+        &["create"],
+        vec![(
+            200,
+            json!({
+                "sandbox_id": "sbx-1", "status": "running",
+                "sandbox_url": "https://sbx-1.sandbox.tensorlake.ai",
+            }),
+        )],
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    assert!(run.output.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&run.output.stdout).trim(), "sbx-1");
+    assert_eq!(
+        run.requests.len(),
+        1,
+        "the server held the request: no poll"
+    );
+    let sent = body(&run.requests[0]);
+    assert!(
+        sent.get("wait").is_none(),
+        "a blocking create leaves the server default in place: {sent}"
+    );
+    assert!(sent.get("max_pending_secs").is_none());
+}
+
+#[tokio::test]
+async fn create_timeout_leaves_the_sandbox_queued() {
+    // The server's blocking wait ran out: 504 with the sandbox still pending.
+    let run = run_cli(
+        &["create"],
+        vec![(
+            504,
+            json!({"sandbox_id": "sbx-1", "status": "timeout", "pending_reason": "no_resources_available"}),
+        )],
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    assert!(!run.output.status.success(), "{stderr}");
+    assert!(stderr.contains("sbx-1"), "{stderr}");
+    assert!(stderr.contains("still pending"), "{stderr}");
+    assert!(stderr.contains("no_resources_available"), "{stderr}");
+    assert!(stderr.contains("tl sbx wait sbx-1"), "{stderr}");
+    assert_eq!(run.requests.len(), 1);
+    assert!(
+        !run.requests
+            .iter()
+            .any(|r| request_line(r).starts_with("DELETE ")),
+        "never cancels"
+    );
+}
+
+#[tokio::test]
+async fn create_polls_when_the_server_answers_early() {
+    // A server that acknowledges before the sandbox runs still owes a
+    // running sandbox: the CLI finishes the wait by polling.
     let run = run_cli(
         &["create"],
         vec![
@@ -157,7 +224,7 @@ async fn create_polls_the_sandbox_until_running() {
     assert_eq!(String::from_utf8_lossy(&run.output.stdout).trim(), "sbx-1");
 
     assert_eq!(run.requests.len(), 3);
-    assert_eq!(body(&run.requests[0])["wait"], false);
+    assert!(body(&run.requests[0]).get("wait").is_none());
     for poll in &run.requests[1..] {
         assert_eq!(
             request_line(poll),
@@ -169,26 +236,6 @@ async fn create_polls_the_sandbox_until_running() {
             .iter()
             .any(|r| request_line(r).starts_with("DELETE "))
     );
-}
-
-#[tokio::test]
-async fn create_accepts_the_legacy_blocking_shape_from_older_servers() {
-    // A server that predates `wait: false` ignores it and answers the
-    // blocking create's shape, already running.
-    let run = run_cli(
-        &["create"],
-        vec![(
-            200,
-            json!({
-                "sandbox_id": "sbx-1", "status": "running",
-                "sandbox_url": "https://sbx-1.sandbox.tensorlake.ai",
-            }),
-        )],
-    )
-    .await;
-    let stderr = String::from_utf8_lossy(&run.output.stderr);
-    assert!(run.output.status.success(), "{stderr}");
-    assert_eq!(run.requests.len(), 1, "already running: nothing to poll");
 }
 
 #[tokio::test]

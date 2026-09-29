@@ -144,9 +144,9 @@ return a `PendingSandbox` (the return type follows the `wait` option);
 ## CLI
 
 ```bash
-tl sbx create                       # waits (2 min, polling); never cancels on timeout
-tl sbx create --no-wait             # prints the id; the sandbox starts when capacity is available
-tl sbx create --max-pending-secs 1800
+tl sbx create                       # one blocking request (server waits up to 5 min); never cancels on timeout
+tl sbx create --queue               # prints the id at once; the sandbox starts when capacity is available
+tl sbx create --queue --max-pending-secs 1800
 tl sbx wait <id> [--timeout 120]    # poll until running; run again to keep waiting
 ```
 

@@ -1,8 +1,8 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
     DEFAULT_SANDBOX_WAIT_POLL_INTERVAL, DEFAULT_SANDBOX_WAIT_TIMEOUT, SandboxFailureDetails,
-    apply_proxy_access_settings, build_network_config, sandbox_endpoint, sandbox_failure_detail,
-    wait_for_sandbox_status_every,
+    apply_proxy_access_settings, build_network_config, format_still_pending_message,
+    sandbox_endpoint, sandbox_failure_detail, wait_for_sandbox_status_every,
 };
 use crate::error::{CliError, Result};
 use serde::Deserialize;
@@ -10,6 +10,9 @@ use tensorlake::sandboxes::resolve_sandbox_proxy_target;
 
 const DEFAULT_SANDBOX_CPUS: f64 = 1.0;
 const DEFAULT_SANDBOX_MEMORY_MB: i64 = 1024;
+/// How long the server holds a blocking create before answering 504 with the
+/// sandbox still queued (`DEFAULT_SANDBOX_READY_TIMEOUT_SECS` server-side).
+const DEFAULT_SANDBOX_READY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(300);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct GpuRequest<'a> {
@@ -17,8 +20,8 @@ pub struct GpuRequest<'a> {
     pub model: &'a str,
 }
 
-/// The create acknowledgement: the `wait: false` record (`state`, HTTP 202)
-/// on servers that honour it, or the legacy blocking response (`status`).
+/// The create response: the blocking response (`status`, HTTP 200) or, with
+/// `--queue`, the `wait: false` acknowledgement (`state`, HTTP 202).
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
 pub struct CreateSandboxResult {
     #[serde(alias = "sandboxId", alias = "id")]
@@ -33,18 +36,23 @@ pub struct CreateSandboxResult {
     pub pending_reason: Option<String>,
 }
 
-/// Send the create with `wait: false` (ADR 0086) and, when `wait`, poll the
-/// sandbox until it runs. A wait that runs out never deletes the sandbox: it
-/// keeps its place in the queue and the error says how to keep waiting.
+/// Create a sandbox. By default the server blocks the request until the
+/// sandbox runs and answers in one round trip. With `queue` the create is
+/// sent with `wait: false` (ADR 0087): the server acknowledges the queued
+/// sandbox at once and the caller collects it later. Neither path ever
+/// deletes the sandbox: a blocking create whose server-side wait runs out
+/// leaves it in the queue and the error says how to keep waiting.
 pub async fn create_with_request(
     ctx: &CliContext,
     mut body: serde_json::Value,
-    wait: bool,
+    queue: bool,
 ) -> Result<CreateSandboxResult> {
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, "sandboxes");
 
-    body["wait"] = serde_json::Value::Bool(false);
+    if queue {
+        body["wait"] = serde_json::Value::Bool(false);
+    }
     let resp = client
         .post(&url)
         .json(&body)
@@ -65,7 +73,10 @@ pub async fn create_with_request(
     let is_running =
         create_result.status.as_deref() == Some("running") && create_result.sandbox_url.is_some();
 
-    if wait && !is_running {
+    // A blocking create normally returns running. A server or proxy that
+    // answered early (for example with the queued acknowledgement) still
+    // owes us a running sandbox, so finish the wait here by polling.
+    if !queue && !is_running {
         wait_for_sandbox_status_every(
             ctx,
             &create_result.sandbox_id,
@@ -95,8 +106,24 @@ fn format_create_error(status: reqwest::StatusCode, body: &str) -> String {
     struct SandboxCreateFailure {
         sandbox_id: String,
         status: String,
+        #[serde(default)]
+        pending_reason: Option<String>,
         #[serde(flatten)]
         failure: SandboxFailureDetails,
+    }
+
+    // The blocking create's server-side wait ran out (HTTP 504,
+    // `status: "timeout"`). The sandbox is still queued, not deleted.
+    if status == reqwest::StatusCode::GATEWAY_TIMEOUT
+        && let Ok(payload) = serde_json::from_str::<SandboxCreateFailure>(body)
+        && payload.status == "timeout"
+    {
+        return format_still_pending_message(
+            &payload.sandbox_id,
+            "running",
+            DEFAULT_SANDBOX_READY_TIMEOUT,
+            payload.pending_reason.as_deref(),
+        );
     }
 
     if let Ok(payload) = serde_json::from_str::<SandboxCreateFailure>(body)
@@ -143,7 +170,8 @@ pub struct CreateArgs<'a> {
     pub entrypoint: &'a [String],
     pub snapshot_id: Option<&'a str>,
     pub image_name: Option<&'a str>,
-    pub wait: bool,
+    /// Queue the sandbox and return at once instead of blocking until it runs.
+    pub queue: bool,
     pub ports: &'a [u16],
     pub allow_unauthenticated_access: bool,
     pub no_internet: bool,
@@ -246,7 +274,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         entrypoint,
         snapshot_id,
         image_name,
-        wait,
+        queue,
         ports,
         allow_unauthenticated_access,
         no_internet,
@@ -289,7 +317,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         body["max_pending_secs"] = serde_json::json!(bound);
     }
 
-    let create_result = create_with_request(ctx, body, wait).await?;
+    let create_result = create_with_request(ctx, body, queue).await?;
     let sandbox_id = create_result.sandbox_id.clone();
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     let display_id = name.unwrap_or(&sandbox_id);
@@ -310,7 +338,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
     Ok(())
 }
 
-/// Printed by `--no-wait`: the sandbox is queued and can be collected later.
+/// Printed by `--queue`: the sandbox is queued and can be collected later.
 fn format_pending_message(name: Option<&str>, sandbox_id: &str, reason: Option<&str>) -> String {
     let reason = reason.map(|r| format!(" ({r})")).unwrap_or_default();
     let display = name.filter(|n| !n.is_empty()).unwrap_or(sandbox_id);
