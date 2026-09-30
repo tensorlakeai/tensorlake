@@ -1670,6 +1670,117 @@ impl CloudSandboxClient {
         })
     }
 
+    fn network_events_json(
+        &self,
+        sandbox_id: String,
+        query_json: String,
+    ) -> PyResult<(String, String)> {
+        let query: tensorlake::sandboxes::network::NetworkQuery = parse_json_payload(&query_json)?;
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            let query = query.clone();
+            async move {
+                let traced = client.network_events(&sandbox_id, &query).await?;
+                Ok((
+                    traced.trace_id.clone(),
+                    serde_json::to_string(&*traced).map_err(SdkError::from)?,
+                ))
+            }
+        })
+    }
+    fn network_events_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+        query_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let query: tensorlake::sandboxes::network::NetworkQuery = parse_json_payload(&query_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |client| {
+                let sandbox_id = sandbox_id.clone();
+                let query = query.clone();
+                async move { client.network_events(&sandbox_id, &query).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok((
+                traced.trace_id.clone(),
+                serde_json::to_string(&*traced).map_err(sandbox_serde_err)?,
+            ))
+        })
+    }
+    fn network_destinations_json(
+        &self,
+        sandbox_id: String,
+        query_json: String,
+    ) -> PyResult<(String, String)> {
+        let query: tensorlake::sandboxes::network::NetworkQuery = parse_json_payload(&query_json)?;
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            let query = query.clone();
+            async move {
+                let traced = client.network_destinations(&sandbox_id, &query).await?;
+                Ok((
+                    traced.trace_id.clone(),
+                    serde_json::to_string(&*traced).map_err(SdkError::from)?,
+                ))
+            }
+        })
+    }
+    fn network_destinations_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+        query_json: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let query: tensorlake::sandboxes::network::NetworkQuery = parse_json_payload(&query_json)?;
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |client| {
+                let sandbox_id = sandbox_id.clone();
+                let query = query.clone();
+                async move { client.network_destinations(&sandbox_id, &query).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok((
+                traced.trace_id.clone(),
+                serde_json::to_string(&*traced).map_err(sandbox_serde_err)?,
+            ))
+        })
+    }
+    fn network_status_json(&self, sandbox_id: String) -> PyResult<(String, String)> {
+        self.run_with_retry(5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            async move {
+                let traced = client.network_status(&sandbox_id).await?;
+                Ok((
+                    traced.trace_id.clone(),
+                    serde_json::to_string(&*traced).map_err(SdkError::from)?,
+                ))
+            }
+        })
+    }
+    fn network_status_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        sandbox_id: String,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let client = self.client.clone();
+        future_into_py(py, async move {
+            let traced = retry_async_op(client, 5, move |client| {
+                let sandbox_id = sandbox_id.clone();
+                async move { client.network_status(&sandbox_id).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
+            Ok((
+                traced.trace_id.clone(),
+                serde_json::to_string(&*traced).map_err(sandbox_serde_err)?,
+            ))
+        })
+    }
     fn get_sandbox_logs_json(&self, request_json: String) -> PyResult<(String, String)> {
         let request: GetSandboxLogsRequest = parse_json_payload(&request_json)?;
         self.run_with_retry(5, move |client| {

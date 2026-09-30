@@ -1088,6 +1088,11 @@ impl GpuModelArg {
 
 #[derive(Subcommand)]
 enum SbxCommands {
+    /// Inspect captured network metadata and manage project capture consent
+    Network {
+        #[command(subcommand)]
+        command: commands::sbx::network::NetworkCommands,
+    },
     /// List all sandboxes
     Ls {
         /// Include sandboxes with status `terminated`
@@ -2162,6 +2167,9 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                     ensure_auth_and_project(ctx).await?;
                 }
                 match other {
+                    SbxCommands::Network { command } => {
+                        commands::sbx::network::run(ctx, command).await
+                    }
                     SbxCommands::Ls {
                         all,
                         running,

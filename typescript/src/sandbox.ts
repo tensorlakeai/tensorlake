@@ -1,5 +1,6 @@
 import { releaseNativeHandle } from "./native-worker-client.js";
 import type { SandboxClient } from "./client.js";
+import type { NetworkCaptureStatus, NetworkDestinationsResponse, NetworkEventsResponse, NetworkQuery } from "./network.js";
 import {
   type ConnectDesktopOptions,
   Desktop,
@@ -1273,6 +1274,27 @@ export class Sandbox {
       (p) => fromSnakeKeys(p) as ProcessInfo,
     );
     return Object.assign(processes, { traceId });
+  }
+
+  /** Read retained host network events without connecting to the guest. */
+  async networkEvents(options?: NetworkQuery): Promise<Traced<NetworkEventsResponse>> {
+    const client = this.requireLifecycleClient("networkEvents");
+    const info = await this.info();
+    return client.networkEvents(info.sandboxId, options);
+  }
+
+  /** Read observed connections by destination; counts are not HTTP requests. */
+  async networkDestinations(options?: NetworkQuery): Promise<Traced<NetworkDestinationsResponse>> {
+    const client = this.requireLifecycleClient("networkDestinations");
+    const info = await this.info();
+    return client.networkDestinations(info.sandboxId, options);
+  }
+
+  /** Read collector health, separately from the project's requested capture setting. */
+  async networkStatus(): Promise<Traced<NetworkCaptureStatus>> {
+    const client = this.requireLifecycleClient("networkStatus");
+    const info = await this.info();
+    return client.networkStatus(info.sandboxId);
   }
 
   /** Read persisted logs for this sandbox from the log service. */

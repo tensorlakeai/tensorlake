@@ -60,6 +60,11 @@ from .models import (
     _validate_mount_snapshot_pins,
     snapshot_satisfies_wait_condition,
 )
+from .network import (
+    NetworkCaptureStatus,
+    NetworkDestinationsResponse,
+    NetworkEventsResponse,
+)
 
 # Interval between ``GET /sandboxes/{id}`` polls while waiting for a sandbox
 # to run (ADR 0086).
@@ -1188,6 +1193,72 @@ class SandboxClient:
             if _rust_status_code(e) == 404:
                 raise SandboxNotFoundError(sandbox_id) from None
             _raise_as_sandbox_error(e)
+
+    def network_events(
+        self,
+        sandbox_id: str,
+        *,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> Traced[NetworkEventsResponse]:
+        """Read persisted network events; does not connect to or resume the guest."""
+        try:
+            trace_id, response_json = self._rust_client.network_events_json(
+                sandbox_id,
+                json.dumps(
+                    {
+                        "from_ms": from_ms,
+                        "to_ms": to_ms,
+                        "limit": limit,
+                        "cursor": cursor,
+                    }
+                ),
+            )
+            return Traced(
+                trace_id, NetworkEventsResponse.model_validate_json(response_json)
+            )
+        except Exception as error:
+            _raise_as_sandbox_error(error)
+
+    def network_destinations(
+        self,
+        sandbox_id: str,
+        *,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> Traced[NetworkDestinationsResponse]:
+        """Read persisted network destinations; does not connect to or resume the guest."""
+        try:
+            trace_id, response_json = self._rust_client.network_destinations_json(
+                sandbox_id,
+                json.dumps(
+                    {
+                        "from_ms": from_ms,
+                        "to_ms": to_ms,
+                        "limit": limit,
+                        "cursor": cursor,
+                    }
+                ),
+            )
+            return Traced(
+                trace_id, NetworkDestinationsResponse.model_validate_json(response_json)
+            )
+        except Exception as error:
+            _raise_as_sandbox_error(error)
+
+    def network_status(self, sandbox_id: str) -> Traced[NetworkCaptureStatus]:
+        """Read persisted network status; does not connect to or resume the guest."""
+        try:
+            trace_id, response_json = self._rust_client.network_status_json(sandbox_id)
+            return Traced(
+                trace_id, NetworkCaptureStatus.model_validate_json(response_json)
+            )
+        except Exception as error:
+            _raise_as_sandbox_error(error)
 
     def get_logs(
         self,

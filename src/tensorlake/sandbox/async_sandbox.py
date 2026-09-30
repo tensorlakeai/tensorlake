@@ -60,6 +60,11 @@ from .models import (
     SnapshotWaitCondition,
     StdinMode,
 )
+from .network import (
+    NetworkCaptureStatus,
+    NetworkDestinationsResponse,
+    NetworkEventsResponse,
+)
 from .sandbox import (
     _GET_OR_CREATE_ATTEMPTS,
     _GET_OR_CREATE_RETRY_DELAY_SEC,
@@ -865,6 +870,48 @@ class AsyncSandbox:
         all_snaps = await self._lifecycle_client.list_snapshots()
         filtered = [s for s in all_snaps if s.sandbox_id == my_id]
         return TracedIterator(all_snaps.trace_id, filtered)
+
+    async def network_events(
+        self,
+        *,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> Traced[NetworkEventsResponse]:
+        """Read retained host network events, without connecting to the guest."""
+        self._require_lifecycle_client("network_events")
+        sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
+        traced = await self._lifecycle_client.network_events(
+            sandbox_id, from_ms=from_ms, to_ms=to_ms, limit=limit, cursor=cursor
+        )
+        self._trace_id = traced.trace_id
+        return traced
+
+    async def network_destinations(
+        self,
+        *,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> Traced[NetworkDestinationsResponse]:
+        """Read retained host network destinations, without connecting to the guest."""
+        self._require_lifecycle_client("network_destinations")
+        sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
+        traced = await self._lifecycle_client.network_destinations(
+            sandbox_id, from_ms=from_ms, to_ms=to_ms, limit=limit, cursor=cursor
+        )
+        self._trace_id = traced.trace_id
+        return traced
+
+    async def network_status(self) -> Traced[NetworkCaptureStatus]:
+        """Read observed collector health, separate from project capture consent."""
+        self._require_lifecycle_client("network_status")
+        sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
+        traced = await self._lifecycle_client.network_status(sandbox_id)
+        self._trace_id = traced.trace_id
+        return traced
 
     async def get_logs(
         self,

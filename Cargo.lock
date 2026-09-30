@@ -5610,6 +5610,7 @@ version = "0.5.138"
 dependencies = [
  "anyhow",
  "base64",
+ "bytes",
  "chrono",
  "hex",
  "p256",

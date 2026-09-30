@@ -1,5 +1,6 @@
 pub mod desktop;
 pub mod models;
+pub mod network;
 
 use eventsource_stream::Eventsource;
 use futures::{StreamExt, TryStreamExt};

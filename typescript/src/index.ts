@@ -265,3 +265,5 @@ export type {
   RepositoryHandle,
   RepositoryInfo,
 } from "./repositories.js";
+
+export type { NetworkQuery, NetworkEvent, NetworkEventsResponse, NetworkDestination, NetworkDestinationsResponse, NetworkCaptureStatus } from "./network.js";

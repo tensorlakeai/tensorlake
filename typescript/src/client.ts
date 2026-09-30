@@ -1,3 +1,4 @@
+import type { NetworkQuery, NetworkEventsResponse, NetworkDestinationsResponse, NetworkCaptureStatus } from "./network.js";
 import * as defaults from "./defaults.js";
 import { SandboxError, SandboxPending, formatErrorDetails } from "./errors.js";
 import type { Traced } from "./traced.js";
@@ -588,6 +589,24 @@ export class SandboxClient {
       "sandboxId",
       { sandboxId, notFoundKind: "sandbox" },
     );
+  }
+
+  /** Read persisted network events without contacting the guest. */
+  async networkEvents(sandboxId: string, options?: NetworkQuery): Promise<Traced<NetworkEventsResponse>> {
+    const { traceId, json } = await callNative(() => this.native.networkEvents(sandboxId, JSON.stringify({ from_ms: options?.fromMs, to_ms: options?.toMs, limit: options?.limit, cursor: options?.cursor })));
+    return Object.assign(JSON.parse(json) as NetworkEventsResponse, { traceId });
+  }
+
+  /** Read persisted network destinations without contacting the guest. */
+  async networkDestinations(sandboxId: string, options?: NetworkQuery): Promise<Traced<NetworkDestinationsResponse>> {
+    const { traceId, json } = await callNative(() => this.native.networkDestinations(sandboxId, JSON.stringify({ from_ms: options?.fromMs, to_ms: options?.toMs, limit: options?.limit, cursor: options?.cursor })));
+    return Object.assign(JSON.parse(json) as NetworkDestinationsResponse, { traceId });
+  }
+
+  /** Read persisted network status without contacting the guest. */
+  async networkStatus(sandboxId: string): Promise<Traced<NetworkCaptureStatus>> {
+    const { traceId, json } = await callNative(() => this.native.networkStatus(sandboxId));
+    return Object.assign(JSON.parse(json) as NetworkCaptureStatus, { traceId });
   }
 
   /** Read persisted logs for a sandbox. */
