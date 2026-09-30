@@ -937,8 +937,9 @@ export class SandboxClient {
    * Create a snapshot and block until it is locally ready.
    *
    * Combines `snapshot()` with polling `getSnapshot()` until `local_ready`
-   * or `completed`. Pass `{ waitUntil: "completed" }` when durable
-   * `snapshotUri` metadata is required.
+   * or `completed`. Pass `{ waitUntil: "completed" }` to wait for durable
+   * completion. Readiness is determined by snapshot status; `snapshotUri`
+   * may be absent even after completion.
    */
   async snapshotAndWait(
     sandboxId: string,

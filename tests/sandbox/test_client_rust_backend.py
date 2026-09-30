@@ -2078,11 +2078,15 @@ class TestSandboxClientRustBackend(unittest.TestCase):
             def get_snapshot_json(self, snapshot_id):
                 self.get_calls += 1
                 status = "local_ready" if self.get_calls == 1 else "completed"
+                uri = (
+                    ',"snapshot_uri":"s3://snap-1.tar.zst"'
+                    if self.get_calls == 1
+                    else ""
+                )
                 return (
                     "trace-get",
                     '{"id":"snap-1","namespace":"default","sandbox_id":"sbx-1",'
-                    f'"base_image":"python:3.12","status":"{status}",'
-                    '"snapshot_uri":"s3://snap-1.tar.zst"}',
+                    f'"base_image":"python:3.12","status":"{status}"{uri}}}',
                 )
 
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")
@@ -2096,6 +2100,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         )
 
         self.assertEqual(info.status, SnapshotStatus.COMPLETED)
+        self.assertIsNone(info.snapshot_uri)
         self.assertEqual(fake.get_calls, 2)
 
     def test_snapshot_omits_snapshot_type_when_none(self):

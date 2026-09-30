@@ -1850,7 +1850,7 @@ describe("SandboxClient", () => {
                 sandbox_id: "sbx-1",
                 base_image: "python:3.12",
                 status: getCalls === 1 ? "local_ready" : "completed",
-                snapshot_uri: "s3://snap-1.tar.zst",
+                ...(getCalls === 1 ? { snapshot_uri: "s3://snap-1.tar.zst" } : {}),
               }),
             };
           }),
@@ -1863,6 +1863,7 @@ describe("SandboxClient", () => {
         waitUntil: "completed",
       });
       expect(info.status).toBe(SnapshotStatus.COMPLETED);
+      expect(info.snapshotUri).toBeUndefined();
       expect(getCalls).toBe(2);
       client.close();
     });
