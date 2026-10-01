@@ -182,10 +182,10 @@ fn resolve_inner(
     let scope = resolve_scope(
         organization_id,
         project_id,
-        selection.as_ref().map(|(name, _)| name.as_str()),
+        &final_api_url,
+        selection.as_ref().map(|(_, source)| *source),
         selected_entry,
         &local_config,
-        &contexts,
         stored_credentials.as_ref(),
     );
 
@@ -284,30 +284,26 @@ pub(crate) struct ResolvedScope {
 /// Merge the organization and project from the sources in lookup order.
 ///
 /// The `source` is where the project came from, or the organization when there is no project.
+///
+/// A context chosen by flag, env var, or local config comes before the local
+/// organization/project keys. The `current` context comes after them. A context for another
+/// API URL than `api_url` gives no scope: its organization and project belong to that URL.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn resolve_scope(
     org_flag: Option<&str>,
     proj_flag: Option<&str>,
-    selected: Option<&str>,
+    api_url: &str,
+    selected_source: Option<ContextSource>,
     selected_entry: Option<&ContextEntry>,
     local: &TomlTable,
-    contexts: &ContextsFile,
     stored: Option<&StoredCredentials>,
 ) -> ResolvedScope {
-    // The selected context, unless it is only `current`, in which case the local
-    // organization/project keys come first (steps 3 and 4).
-    let selected_is_current = selected.is_some()
-        && selected == contexts.current.as_deref()
-        && get_nested_value(local, "context").is_none();
-    let current_entry = contexts.current_entry().map(|(_, e)| e);
-    let early_context = if selected_is_current {
-        None
-    } else {
-        selected_entry
-    };
-    let late_context = if selected_is_current {
-        current_entry
-    } else {
-        None
+    let same_url = |entry: &&ContextEntry| entry.matches(api_url, None, None);
+    let selected_entry = selected_entry.filter(same_url);
+    let (early_context, late_context) = match selected_source {
+        Some(ContextSource::Current) => (None, selected_entry),
+        Some(_) => (selected_entry, None),
+        None => (None, None),
     };
 
     let org_sources: [(Option<String>, ScopeSource); 5] = [
@@ -364,6 +360,10 @@ pub(crate) fn resolve_scope(
 /// Find the token for the resolved scope: the selected context when it matches, else a
 /// context that works for the scope, else the old per-URL token when no context exists.
 ///
+/// A context with no saved token falls back to the old per-URL token when that token has the
+/// same organization and project. This keeps a migrated login working when the migration
+/// could not write `credentials.toml` (for example, a read-only home directory).
+///
 /// Returns `(token, context name)`.
 fn resolve_token(
     api_url: &str,
@@ -386,7 +386,9 @@ fn resolve_token(
     );
     match found {
         Some(name) => {
-            let token = load_context_token(name).map(|t| t.token);
+            let token = load_context_token(name)
+                .map(|t| t.token)
+                .or_else(|| legacy_token_for(contexts.get(name)?, stored?));
             Ok((token, Some(name.to_string())))
         }
         None => match scope.project_id.as_deref() {
@@ -396,6 +398,12 @@ fn resolve_token(
             None => Ok((None, None)),
         },
     }
+}
+
+/// The old per-URL token, when it was saved for the same organization and project as `entry`.
+fn legacy_token_for(entry: &ContextEntry, stored: &StoredCredentials) -> Option<String> {
+    (entry.organization == stored.organization_id && entry.project == stored.project_id)
+        .then(|| stored.token.clone())
 }
 
 fn resolve_api_url(
@@ -575,15 +583,16 @@ project = "project_local"
         };
         let staging = c.get("staging").unwrap();
         let default = c.get("default").unwrap();
+        let url = "https://api.tensorlake.ai";
 
         // 1. flags
         let s = resolve_scope(
             Some("org_flag"),
             Some("project_flag"),
-            Some("staging"),
+            url,
+            Some(ContextSource::Flag),
             Some(staging),
             &local_cfg,
-            &c,
             Some(&stored),
         );
         assert_eq!(s.project_id.as_deref(), Some("project_flag"));
@@ -593,10 +602,10 @@ project = "project_local"
         let s = resolve_scope(
             None,
             None,
-            Some("staging"),
+            url,
+            Some(ContextSource::Env),
             Some(staging),
             &local_cfg,
-            &c,
             Some(&stored),
         );
         assert_eq!(s.project_id.as_deref(), Some("project_staging"));
@@ -606,10 +615,10 @@ project = "project_local"
         let s = resolve_scope(
             None,
             None,
-            Some("default"),
+            url,
+            Some(ContextSource::Current),
             Some(default),
             &local_cfg,
-            &c,
             Some(&stored),
         );
         assert_eq!(s.project_id.as_deref(), Some("project_local"));
@@ -619,10 +628,10 @@ project = "project_local"
         let s = resolve_scope(
             None,
             None,
-            Some("default"),
+            url,
+            Some(ContextSource::Current),
             Some(default),
             &TomlTable::new(),
-            &c,
             Some(&stored),
         );
         assert_eq!(s.project_id.as_deref(), Some("project_default"));
@@ -632,14 +641,105 @@ project = "project_local"
         let s = resolve_scope(
             None,
             None,
+            url,
             None,
             None,
             &TomlTable::new(),
-            &ContextsFile::default(),
             Some(&stored),
         );
         assert_eq!(s.project_id.as_deref(), Some("project_stored"));
         assert_eq!(s.source, ScopeSource::Credentials);
+    }
+
+    #[test]
+    fn an_explicit_context_that_is_also_current_beats_the_local_config() {
+        let c = contexts();
+        let default = c.get("default").unwrap();
+        let local_cfg = local(
+            r#"
+organization = "org_local"
+project = "project_local"
+"#,
+        );
+        // `tl --context default` while `default` is current: the flag wins.
+        for source in [ContextSource::Flag, ContextSource::Env] {
+            let s = resolve_scope(
+                None,
+                None,
+                "https://api.tensorlake.ai",
+                Some(source),
+                Some(default),
+                &local_cfg,
+                None,
+            );
+            assert_eq!(s.project_id.as_deref(), Some("project_default"));
+            assert_eq!(s.source, ScopeSource::Context);
+        }
+        // `context = "default"` in the local config also wins over its sibling keys.
+        let s = resolve_scope(
+            None,
+            None,
+            "https://api.tensorlake.ai",
+            Some(ContextSource::LocalConfig),
+            Some(default),
+            &local_cfg,
+            None,
+        );
+        assert_eq!(s.project_id.as_deref(), Some("project_default"));
+    }
+
+    #[test]
+    fn a_context_for_another_api_url_gives_no_scope() {
+        let c = contexts();
+        let default = c.get("default").unwrap();
+        let stored = StoredCredentials {
+            token: "t".into(),
+            organization_id: Some("org_other".into()),
+            project_id: Some("project_other".into()),
+        };
+        // `tl --api-url http://localhost:8900` with `default` current: the saved scope of
+        // that URL wins, not the scope of `default`.
+        for source in [ContextSource::Current, ContextSource::Flag] {
+            let s = resolve_scope(
+                None,
+                None,
+                "http://localhost:8900",
+                Some(source),
+                Some(default),
+                &TomlTable::new(),
+                Some(&stored),
+            );
+            assert_eq!(s.project_id.as_deref(), Some("project_other"));
+            assert_eq!(s.source, ScopeSource::Credentials);
+        }
+    }
+
+    #[test]
+    fn a_context_with_no_saved_token_uses_the_matching_legacy_token() {
+        let c = contexts();
+        let default = c.get("default").unwrap();
+        // `resolve_token` reads `credentials.toml` from the home directory, so only the
+        // scope check is tested here.
+        let same_scope = StoredCredentials {
+            token: "legacy".into(),
+            organization_id: default.organization.clone(),
+            project_id: default.project.clone(),
+        };
+        assert_eq!(
+            legacy_token_for(default, &same_scope).as_deref(),
+            Some("legacy")
+        );
+        let other_scope = StoredCredentials {
+            project_id: Some("project_other".into()),
+            ..same_scope.clone()
+        };
+        assert_eq!(legacy_token_for(default, &other_scope), None);
+        let no_scope = StoredCredentials {
+            token: "legacy".into(),
+            organization_id: None,
+            project_id: None,
+        };
+        assert_eq!(legacy_token_for(default, &no_scope), None);
     }
 
     #[test]

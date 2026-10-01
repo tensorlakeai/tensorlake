@@ -285,7 +285,7 @@ async fn pick_project(api_url: &str, parent: &Parent) -> Result<String> {
 ///
 /// With a login token for the organization, mints a token for the project (no browser).
 /// Without one, or when the server has no mint route, runs the browser login and checks
-/// that the browser approved the wanted project.
+/// that the browser approved the wanted organization and project.
 pub async fn create(
     ctx: &CliContext,
     name: &str,
@@ -338,7 +338,7 @@ pub async fn create(
     }
 
     let login = browser_login(ctx, project).await?;
-    check_browser_project(&login, project)?;
+    check_browser_login(&login, organization, project)?;
     let entry = ContextEntry {
         api_url: ctx.api_url.clone(),
         organization: login.organization_id.clone(),
@@ -349,16 +349,31 @@ pub async fn create(
     Ok(())
 }
 
-/// Refuse a browser login for a project other than the one asked for.
-pub(crate) fn check_browser_project(login: &BrowserLogin, wanted: Option<&str>) -> Result<()> {
+/// Refuse a browser login for an organization or project other than the one asked for.
+pub(crate) fn check_browser_login(
+    login: &BrowserLogin,
+    wanted_organization: Option<&str>,
+    wanted_project: Option<&str>,
+) -> Result<()> {
+    check_approved(
+        "organization",
+        login.organization_id.as_deref(),
+        wanted_organization,
+    )?;
+    check_approved("project", login.project_id.as_deref(), wanted_project)
+}
+
+fn check_approved(what: &str, approved: Option<&str>, wanted: Option<&str>) -> Result<()> {
     let Some(wanted) = wanted else {
         return Ok(());
     };
-    match login.project_id.as_deref() {
+    match approved {
         Some(approved) if approved == wanted => Ok(()),
         approved => Err(CliError::auth(format!(
             "browser approved {}, but you asked for {wanted}. run the command again and pick {wanted} in the browser.",
-            approved.unwrap_or("no project")
+            approved
+                .map(str::to_string)
+                .unwrap_or_else(|| format!("no {what}"))
         ))),
     }
 }
@@ -528,17 +543,37 @@ mod tests {
 
     #[test]
     fn browser_project_must_match_the_wanted_one() {
-        assert!(check_browser_project(&login(Some("project_a")), None).is_ok());
-        assert!(check_browser_project(&login(Some("project_a")), Some("project_a")).is_ok());
-        let err =
-            check_browser_project(&login(Some("project_xyz")), Some("project_abc")).unwrap_err();
+        assert!(check_browser_login(&login(Some("project_a")), None, None).is_ok());
+        assert!(check_browser_login(&login(Some("project_a")), None, Some("project_a")).is_ok());
+        let err = check_browser_login(&login(Some("project_xyz")), None, Some("project_abc"))
+            .unwrap_err();
         assert_eq!(
             err.to_string(),
             "browser approved project_xyz, but you asked for project_abc. run the command again and pick project_abc in the browser."
         );
-        let err = check_browser_project(&login(None), Some("project_abc")).unwrap_err();
+        let err = check_browser_login(&login(None), None, Some("project_abc")).unwrap_err();
         assert!(
             err.to_string().starts_with("browser approved no project,"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn browser_organization_must_match_the_wanted_one() {
+        assert!(check_browser_login(&login(None), Some("org_1"), None).is_ok());
+        let err = check_browser_login(&login(None), Some("org_2"), None).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "browser approved org_1, but you asked for org_2. run the command again and pick org_2 in the browser."
+        );
+        let no_org = BrowserLogin {
+            organization_id: None,
+            ..login(None)
+        };
+        let err = check_browser_login(&no_org, Some("org_2"), None).unwrap_err();
+        assert!(
+            err.to_string()
+                .starts_with("browser approved no organization,"),
             "{err}"
         );
     }
