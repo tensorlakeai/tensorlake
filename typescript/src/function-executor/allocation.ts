@@ -257,6 +257,7 @@ type ReplayEntryKind = "call" | "watcher" | "result" | "unknown";
 interface ReplayEntry {
   readonly kind: ReplayEntryKind;
   readonly event: Message;
+  readonly clock: number;
   consumed: boolean;
 }
 
@@ -801,17 +802,24 @@ class ReplayHistory {
   private watcherCursor = 0;
   private prefixCursor = 0;
   private mismatch?: ReplayMismatchError;
+  private mismatchEventClockValue?: number;
 
   constructor(entries: Message[]) {
     this.causality = new ReplayCausality(() => this.failBlockedResultWithoutProducer());
     this.entries = entries.map((entry) => {
       if (entry.functionCallWatcherResult != null) {
-        return { kind: "result", event: entry.functionCallWatcherResult, consumed: false };
+        return {
+          kind: "result",
+          event: entry.functionCallWatcherResult,
+          clock: Number(entry.clock),
+          consumed: false,
+        };
       }
       if (entry.functionCallCreated != null) {
         const replayEntry: ReplayEntry = {
           kind: "call",
           event: entry.functionCallCreated,
+          clock: Number(entry.clock),
           consumed: false,
         };
         this.calls.push(replayEntry);
@@ -821,12 +829,18 @@ class ReplayHistory {
         const replayEntry: ReplayEntry = {
           kind: "watcher",
           event: entry.functionCallWatcherCreated,
+          clock: Number(entry.clock),
           consumed: false,
         };
         this.watchers.push(replayEntry);
         return replayEntry;
       }
-      return { kind: "unknown", event: entry, consumed: false };
+      return {
+        kind: "unknown",
+        event: entry,
+        clock: Number(entry.clock),
+        consumed: false,
+      };
     });
   }
 
@@ -852,6 +866,7 @@ class ReplayHistory {
         this.fail(
           `Unexpected ${kind} event for ${id} before replay ${blocked.kind}`
           + ` event ${String(blocked.event.functionCallId ?? "")}`,
+          blocked.clock,
         );
       }
       const waiter = deferred<void>();
@@ -864,7 +879,7 @@ class ReplayHistory {
     if (kind === "call") this.callCursor += 1;
     else this.watcherCursor += 1;
     if (entry.event.functionCallId !== id) {
-      this.fail(`Expected replay ${kind} event for ${id}`);
+      this.fail(`Expected replay ${kind} event for ${id}`, entry.clock);
     }
     expectedIds.delete(id);
     entry.consumed = true;
@@ -969,7 +984,10 @@ class ReplayHistory {
     if (this.prefixCursor >= this.entries.length || !hasWaiters) return;
     const blocked = this.entries[this.prefixCursor];
     if (blocked.kind === kind && blocked.event.functionCallId === id) {
-      this.fail(`Replay ${kind} event for ${id} can no longer be created`);
+      this.fail(
+        `Replay ${kind} event for ${id} can no longer be created`,
+        blocked.clock,
+      );
     }
   }
 
@@ -995,6 +1013,7 @@ class ReplayHistory {
       this.recordMismatch(
         `Replay result is blocked behind unreachable ${blocked.kind}`
         + ` event ${blockedId}`,
+        blocked.clock,
       );
     }
   }
@@ -1011,7 +1030,10 @@ class ReplayHistory {
     this.assertNoMismatch();
     this.advancePrefix();
     if (this.prefixCursor !== this.entries.length) {
-      throw new ReplayMismatchError("Function completed before its durable event history was consumed");
+      this.fail(
+        "Function completed before its durable event history was consumed",
+        this.entries[this.prefixCursor]?.clock,
+      );
     }
   }
 
@@ -1020,7 +1042,7 @@ class ReplayHistory {
     while (this.prefixCursor < this.entries.length) {
       const entry = this.entries[this.prefixCursor];
       if (entry.kind === "unknown") {
-        this.fail("Replay history contains an unknown allocation event");
+        this.fail("Replay history contains an unknown allocation event", entry.clock);
       }
       if (entry.kind === "call" || entry.kind === "watcher") {
         if (!entry.consumed) return;
@@ -1029,7 +1051,7 @@ class ReplayHistory {
       }
       entry.consumed = true;
       this.prefixCursor += 1;
-      this.releaseResult(entry.event);
+      this.releaseResult(entry.event, entry.clock);
     }
     for (const waiter of this.endWaiters.splice(0)) waiter.resolve();
     for (const waiters of this.resultWaiters.values()) {
@@ -1038,13 +1060,16 @@ class ReplayHistory {
     this.resultWaiters.clear();
   }
 
-  private releaseResult(event: Message): void {
+  private releaseResult(event: Message, clock: number): void {
     const id = String(event.functionCallId ?? "");
     if (!this.createdWatcherIds.has(id)) {
-      this.fail(`Replay watcher result for ${id} appeared before its watcher was created`);
+      this.fail(
+        `Replay watcher result for ${id} appeared before its watcher was created`,
+        clock,
+      );
     }
     if (this.releasedResultIds.has(id)) {
-      this.fail(`Replay history contains duplicate watcher results for ${id}`);
+      this.fail(`Replay history contains duplicate watcher results for ${id}`, clock);
     }
     this.releasedResultIds.add(id);
     const waiter = this.resultWaiters.get(id)?.shift();
@@ -1058,12 +1083,13 @@ class ReplayHistory {
     this.availableResults.set(id, available);
   }
 
-  private fail(message: string): never {
-    throw this.recordMismatch(message);
+  private fail(message: string, clock?: number): never {
+    throw this.recordMismatch(message, clock);
   }
 
-  private recordMismatch(message: string): ReplayMismatchError {
+  private recordMismatch(message: string, clock?: number): ReplayMismatchError {
     this.mismatch ??= new ReplayMismatchError(message);
+    this.mismatchEventClockValue ??= clock;
     this.causality.stop();
     for (const waiter of this.endWaiters.splice(0)) waiter.reject(this.mismatch);
     for (const waiters of this.resultWaiters.values()) {
@@ -1071,6 +1097,10 @@ class ReplayHistory {
     }
     this.resultWaiters.clear();
     return this.mismatch;
+  }
+
+  get mismatchEventClock(): number | undefined {
+    return this.mismatchEventClockValue;
   }
 }
 
@@ -1956,6 +1986,9 @@ export class AllocationRunner implements FunctionRuntime {
           : cancelled
           ? "ALLOCATION_FAILURE_REASON_FUNCTION_ERROR"
           : "ALLOCATION_FAILURE_REASON_INTERNAL_ERROR",
+        ...(replayMismatch && this.replay?.mismatchEventClock != null
+          ? { allocationEventClock: this.replay.mismatchEventClock }
+          : {}),
       });
     } finally {
       this.log("info", "allocation execution stopping", {

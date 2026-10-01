@@ -807,6 +807,7 @@ class AllocationExecutionEventFinishAllocation(_message.Message):
         "uploaded_function_outputs_blob",
         "request_error_output",
         "uploaded_request_error_blob",
+        "allocation_event_clock",
     )
     OUTCOME_CODE_FIELD_NUMBER: _ClassVar[int]
     FAILURE_REASON_FIELD_NUMBER: _ClassVar[int]
@@ -815,6 +816,7 @@ class AllocationExecutionEventFinishAllocation(_message.Message):
     UPLOADED_FUNCTION_OUTPUTS_BLOB_FIELD_NUMBER: _ClassVar[int]
     REQUEST_ERROR_OUTPUT_FIELD_NUMBER: _ClassVar[int]
     UPLOADED_REQUEST_ERROR_BLOB_FIELD_NUMBER: _ClassVar[int]
+    ALLOCATION_EVENT_CLOCK_FIELD_NUMBER: _ClassVar[int]
     outcome_code: AllocationOutcomeCode
     failure_reason: AllocationFailureReason
     value: SerializedObjectInsideBLOB
@@ -822,6 +824,7 @@ class AllocationExecutionEventFinishAllocation(_message.Message):
     uploaded_function_outputs_blob: BLOB
     request_error_output: SerializedObjectInsideBLOB
     uploaded_request_error_blob: BLOB
+    allocation_event_clock: int
     def __init__(
         self,
         outcome_code: _Optional[_Union[AllocationOutcomeCode, str]] = ...,
@@ -833,6 +836,7 @@ class AllocationExecutionEventFinishAllocation(_message.Message):
             _Union[SerializedObjectInsideBLOB, _Mapping]
         ] = ...,
         uploaded_request_error_blob: _Optional[_Union[BLOB, _Mapping]] = ...,
+        allocation_event_clock: _Optional[int] = ...,
     ) -> None: ...
 
 class AllocationExecutionEvent(_message.Message):
