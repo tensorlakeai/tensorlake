@@ -315,6 +315,107 @@ async fn unknown_context_is_a_clear_error() {
 }
 
 #[tokio::test]
+async fn an_api_key_runs_commands_even_when_the_context_is_unknown() {
+    // CI: `TENSORLAKE_API_KEY` is set, the checked-in `.tensorlake/config.toml` names a
+    // context that only developers have, and the runner has no `contexts.toml`.
+    let (url, server) = scripted_server(vec![(500, json!({"message": "test stop"}))]).await;
+    let home = Home::new();
+    let project = home.dir.join("project");
+    fs::create_dir_all(project.join(".tensorlake")).unwrap();
+    fs::write(
+        project.join(".tensorlake/config.toml"),
+        "context = \"staging\"\n",
+    )
+    .unwrap();
+
+    let run = tl(
+        &home,
+        &project,
+        &["--api-url", &url, "secrets", "ls"],
+        &[("TENSORLAKE_API_KEY", "tl_apiKey_ci")],
+    )
+    .await;
+    let requests = server.await.unwrap();
+    // The command got past configuration and reached the server with the API key.
+    assert!(
+        requests[0].contains("Bearer tl_apiKey_ci"),
+        "{}",
+        requests[0]
+    );
+    assert!(run.stderr.contains("HTTP 500"), "{}", run.stderr);
+    assert!(
+        run.stderr
+            .contains("warning: unknown context 'staging' (from .tensorlake/config.toml)"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !run.stderr.contains("Error: unknown context"),
+        "{}",
+        run.stderr
+    );
+
+    // The same for a PAT.
+    let (url, server) = scripted_server(vec![(500, json!({"message": "test stop"}))]).await;
+    let run = tl(
+        &home,
+        &project,
+        &["--api-url", &url, "secrets", "ls"],
+        &[("TENSORLAKE_PAT", "tl_pat_ci")],
+    )
+    .await;
+    let requests = server.await.unwrap();
+    assert!(requests[0].contains("Bearer tl_pat_ci"), "{}", requests[0]);
+    assert!(
+        run.stderr.contains("warning: unknown context 'staging'"),
+        "{}",
+        run.stderr
+    );
+}
+
+#[tokio::test]
+async fn a_broken_contexts_file_is_never_overwritten() {
+    let home = Home::new();
+    // A typo: the table header is missing its closing bracket.
+    let broken = "current = \"default\"\n\n[contexts.default\napi_url = \"https://api.tensorlake.ai\"\n\n[contexts.staging]\napi_url = \"https://api.tensorlake.ai\"\n";
+    home.write("contexts.toml", broken);
+
+    // Commands that write the file stop with a clear error and leave it alone.
+    for args in [
+        vec!["context", "use", "staging"],
+        vec!["context", "rename", "staging", "stage"],
+        vec!["context", "set", "staging", "project=project_x"],
+        vec!["context", "create", "new", "--project", "project_new"],
+    ] {
+        let run = tl(&home, &home.dir, &args, &[]).await;
+        assert!(!run.success, "{args:?}: {}", run.stdout);
+        assert!(
+            run.stderr.contains("contexts.toml does not parse"),
+            "{args:?}: {}",
+            run.stderr
+        );
+        assert!(
+            run.stderr.contains("fix the file or move it away"),
+            "{args:?}: {}",
+            run.stderr
+        );
+        assert_eq!(home.read("contexts.toml"), broken, "{args:?}");
+    }
+
+    // Commands that only read warn once and go on as if there were no contexts.
+    let run = tl(&home, &home.dir, &["context", "list"], &[]).await;
+    assert!(run.success, "{}", run.stderr);
+    assert_eq!(
+        run.stderr.matches("contexts.toml does not parse").count(),
+        1,
+        "{}",
+        run.stderr
+    );
+    assert!(run.stderr.contains("no contexts"), "{}", run.stderr);
+    assert_eq!(home.read("contexts.toml"), broken);
+}
+
+#[tokio::test]
 async fn a_project_with_no_token_says_how_to_get_one() {
     let home = Home::new();
     two_contexts(&home, PROD);
@@ -433,6 +534,46 @@ async fn a_project_in_another_organization_uses_that_organization_and_token() {
          drop --organization, or run: tl context create <name> --organization org_1 \
          --project project_other"
     );
+}
+
+#[tokio::test]
+async fn an_organization_flag_alone_uses_the_context_of_that_organization() {
+    let home = Home::new();
+    contexts_in_two_organizations(&home, "http://127.0.0.1:9");
+
+    // `tl --organization org_2` with `default` (org_1) current. The project of `default`
+    // belongs to org_1 and is dropped; the context of org_2 supplies the token and project.
+    let run = tl(
+        &home,
+        &home.dir,
+        &["--organization", "org_2", "whoami", "-o", "json"],
+        &[],
+    )
+    .await;
+    assert!(run.success, "{}", run.stderr);
+    let body: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(body["context"]["name"], "other");
+    assert_eq!(body["personalAccessToken"]["organizationId"], "org_2");
+    assert_eq!(body["personalAccessToken"]["projectId"], "project_other");
+    assert!(
+        body["personalAccessToken"]["token"]
+            .as_str()
+            .unwrap()
+            .starts_with("tl_other")
+    );
+
+    // The organization of the current context keeps its project.
+    let run = tl(
+        &home,
+        &home.dir,
+        &["--organization", "org_1", "whoami", "-o", "json"],
+        &[],
+    )
+    .await;
+    assert!(run.success, "{}", run.stderr);
+    let body: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(body["context"]["name"], "default");
+    assert_eq!(body["personalAccessToken"]["projectId"], "project_default");
 }
 
 #[tokio::test]

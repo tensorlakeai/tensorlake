@@ -13,7 +13,8 @@ use crate::auth::context::CliContext;
 use crate::auth::login::{BrowserLogin, browser_login};
 use crate::auth::mint::{MintOutcome, RevokeOutcome, mint_token, revoke_token};
 use crate::config::contexts::{
-    ContextEntry, ContextsFile, load_contexts, save_contexts, validate_context_name,
+    ContextEntry, ContextsFile, load_contexts, load_contexts_for_update, save_contexts,
+    validate_context_name,
 };
 use crate::config::files::{
     ContextToken, load_context_token, load_stored_credentials, remove_context_token,
@@ -141,7 +142,7 @@ pub fn show(name: &str, output_json: bool) -> Result<()> {
 
 /// Make `name` current. Local only: no network.
 pub fn use_context(name: &str) -> Result<()> {
-    let mut contexts = load_contexts();
+    let mut contexts = load_contexts_for_update()?;
     let entry = get_entry(&contexts, name)?.clone();
     contexts.current = Some(name.to_string());
     save_contexts(&contexts)?;
@@ -299,7 +300,8 @@ pub async fn create(
     if let Some(organization) = organization {
         validate_organization_id(organization)?;
     }
-    let contexts = load_contexts();
+    // Strict: a broken file must stop the command before a token is minted.
+    let contexts = load_contexts_for_update()?;
     if contexts.get(name).is_some() {
         return Err(CliError::usage(format!(
             "context '{name}' exists. run: tl context delete {name}, or tl login --context {name}"
@@ -383,7 +385,7 @@ fn check_approved(what: &str, approved: Option<&str>, wanted: Option<&str>) -> R
 }
 
 fn save_new_context(name: &str, entry: ContextEntry, token: &str, parent: bool) -> Result<()> {
-    let mut contexts = load_contexts();
+    let mut contexts = load_contexts_for_update()?;
     contexts.contexts.insert(name.to_string(), entry);
     save_context_token(name, token, parent)?;
     save_contexts(&contexts)
@@ -391,7 +393,7 @@ fn save_new_context(name: &str, entry: ContextEntry, token: &str, parent: bool) 
 
 /// `tl context set <name> key=value...` for `api_url`, `organization`, and `project`.
 pub fn set(name: &str, pairs: &[String]) -> Result<()> {
-    let mut contexts = load_contexts();
+    let mut contexts = load_contexts_for_update()?;
     let mut entry = get_entry(&contexts, name)?.clone();
     if pairs.is_empty() {
         return Err(CliError::usage(
@@ -438,7 +440,7 @@ pub fn set(name: &str, pairs: &[String]) -> Result<()> {
 
 pub fn rename(old: &str, new: &str) -> Result<()> {
     validate_context_name(new)?;
-    let mut contexts = load_contexts();
+    let mut contexts = load_contexts_for_update()?;
     let entry = get_entry(&contexts, old)?.clone();
     if contexts.get(new).is_some() {
         return Err(CliError::usage(format!("context '{new}' exists")));
@@ -456,7 +458,7 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
 
 /// `tl context delete <name>`: revoke the token on the server, then remove the context.
 pub async fn delete(name: &str, yes: bool) -> Result<()> {
-    let mut contexts = load_contexts();
+    let mut contexts = load_contexts_for_update()?;
     let entry = get_entry(&contexts, name)?.clone();
     let token = load_context_token(name);
 

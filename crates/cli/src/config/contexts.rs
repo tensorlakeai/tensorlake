@@ -146,25 +146,39 @@ pub fn validate_context_name(name: &str) -> Result<()> {
     }
 }
 
-/// Load `contexts.toml`. On the first run, build it from the tokens in `credentials.toml`.
+/// Load `contexts.toml` to read it. On the first run, build it from the tokens in
+/// `credentials.toml`.
+///
+/// A file that cannot be read or parsed is reported once on stderr and read as empty, so a
+/// command that needs no context (an API key, a PAT) still runs. Commands that change the
+/// file use [`load_contexts_for_update`], which refuses such a file.
 pub fn load_contexts() -> ContextsFile {
+    load_contexts_in(&config_dir()).unwrap_or_else(|e| {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| eprintln!("warning: {e}"));
+        ContextsFile::default()
+    })
+}
+
+/// Load `contexts.toml` to change and save it.
+///
+/// A file that cannot be read or parsed is an error. Saving over it would write back only
+/// the contexts of this run and lose all others.
+pub fn load_contexts_for_update() -> Result<ContextsFile> {
     load_contexts_in(&config_dir())
 }
 
-fn load_contexts_in(dir: &Path) -> ContextsFile {
+fn load_contexts_in(dir: &Path) -> Result<ContextsFile> {
     let path = dir.join("contexts.toml");
     if path.exists() {
-        return fs::read_to_string(&path)
-            .ok()
-            .and_then(|content| toml::from_str(&content).ok())
-            .unwrap_or_default();
+        return read_contexts_file(&path);
     }
 
     // First run: migrate the saved login(s) into a context each.
     let mut credentials = load_credentials_table();
     let (contexts, tokens) = migrate_from_credentials(&credentials);
     if contexts.contexts.is_empty() {
-        return contexts;
+        return Ok(contexts);
     }
     for (name, token) in &tokens {
         set_context_token(&mut credentials, name, token, true);
@@ -172,7 +186,19 @@ fn load_contexts_in(dir: &Path) -> ContextsFile {
     // Best effort: a read-only home directory must not stop the command.
     let _ = write_credentials_table(&credentials);
     let _ = save_contexts_in(&contexts, dir);
-    contexts
+    Ok(contexts)
+}
+
+fn read_contexts_file(path: &Path) -> Result<ContextsFile> {
+    let content = fs::read_to_string(path)
+        .map_err(|e| CliError::config(format!("cannot read {}: {e}", path.display())))?;
+    toml::from_str(&content).map_err(|e: toml::de::Error| {
+        CliError::config(format!(
+            "{} does not parse: {}. fix the file or move it away, then run the command again",
+            path.display(),
+            e.message()
+        ))
+    })
 }
 
 /// Write `contexts.toml`.
@@ -256,6 +282,19 @@ fn context_name_from_url(url: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_broken_file_is_an_error_and_is_left_alone() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("contexts.toml");
+        let broken = "current = \"default\"\n[contexts.default\napi_url = \"x\"\n";
+        fs::write(&path, broken).unwrap();
+
+        let err = load_contexts_in(dir.path()).unwrap_err().to_string();
+        assert!(err.contains("contexts.toml does not parse"), "{err}");
+        assert!(err.contains("fix the file or move it away"), "{err}");
+        assert_eq!(fs::read_to_string(&path).unwrap(), broken);
+    }
 
     fn entry(api_url: &str, org: Option<&str>, project: Option<&str>) -> ContextEntry {
         ContextEntry {

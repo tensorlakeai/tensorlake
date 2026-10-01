@@ -1,7 +1,9 @@
 use crate::auth::context::CliContext;
-use crate::auth::mint::{MintOutcome, mint_token, revoke_token};
+use crate::auth::mint::{MintOutcome, RevokeOutcome, mint_token, revoke_token};
 use crate::commands::init::run_init_flow;
-use crate::config::contexts::{ContextEntry, ContextsFile, load_contexts, save_contexts};
+use crate::config::contexts::{
+    ContextEntry, ContextsFile, load_contexts, load_contexts_for_update, save_contexts,
+};
 use crate::config::files::{
     ContextToken, load_context_token, remove_context_token, save_context_token, save_credentials,
 };
@@ -339,7 +341,7 @@ impl SavedLogin {
 /// Save a login token as context `name`, make it current, and copy it to the per-URL
 /// table that older CLI versions read.
 pub fn save_login_context(api_url: &str, name: &str, login: &BrowserLogin) -> Result<SavedLogin> {
-    let mut contexts = load_contexts();
+    let mut contexts = load_contexts_for_update()?;
     let saved = apply_login_to_contexts(&mut contexts, api_url, name, login);
     save_context_token(name, &login.token, true)?;
     save_credentials(
@@ -381,9 +383,15 @@ pub(crate) fn apply_login_to_contexts(
 ///
 /// Stops quietly when the server has no mint route. Other failures are reported for each
 /// context and do not fail the login.
-pub async fn refresh_child_tokens(api_url: &str, parent_name: &str, parent: &BrowserLogin) {
+///
+/// Returns the names of the contexts that did not get a new token.
+pub async fn refresh_child_tokens(
+    api_url: &str,
+    parent_name: &str,
+    parent: &BrowserLogin,
+) -> Vec<String> {
     let Some(organization) = parent.organization_id.as_deref() else {
-        return;
+        return Vec::new();
     };
     let contexts = load_contexts();
     let siblings = contexts_to_refresh(
@@ -393,11 +401,9 @@ pub async fn refresh_child_tokens(api_url: &str, parent_name: &str, parent: &Bro
         organization,
         load_context_token,
     );
-    if siblings.is_empty() {
-        return;
-    }
-
-    for (name, project) in siblings {
+    let mut kept_old = Vec::new();
+    let mut siblings = siblings.into_iter();
+    for (name, project) in siblings.by_ref() {
         match mint_token(api_url, &parent.token, &project).await {
             Ok(MintOutcome::Minted(minted)) => {
                 if let Some(old) = load_context_token(&name) {
@@ -405,16 +411,184 @@ pub async fn refresh_child_tokens(api_url: &str, parent_name: &str, parent: &Bro
                 }
                 if let Err(e) = save_context_token(&name, &minted.token, false) {
                     eprintln!("warning: could not save a new token for context '{name}': {e}");
+                    kept_old.push(name);
                 } else {
                     eprintln!("minted a new token for context '{name}' ({project}).");
                 }
             }
-            Ok(MintOutcome::Unsupported) => return,
+            Ok(MintOutcome::Unsupported) => {
+                kept_old.push(name);
+                break;
+            }
             Err(e) => {
                 eprintln!("warning: could not mint a new token for context '{name}': {e}");
+                kept_old.push(name);
             }
         }
     }
+    kept_old.extend(siblings.map(|(name, _)| name));
+    kept_old
+}
+
+/// The token that context `name` held before a login replaced it, with the organization
+/// it was saved for.
+pub(crate) struct ReplacedToken {
+    pub token: ContextToken,
+    pub organization: Option<String>,
+}
+
+/// Look up the token of context `name` before `tl login` replaces it.
+pub(crate) fn replaced_token(contexts: &ContextsFile, name: &str) -> Option<ReplacedToken> {
+    let token = load_context_token(name)?;
+    let organization = contexts.get(name).and_then(|e| e.organization.clone());
+    Some(ReplacedToken {
+        token,
+        organization,
+    })
+}
+
+/// Before the browser opens: say what a login as `name` puts at risk. The old login token
+/// of `name` is revoked after the login, and with it every token minted from it. When the
+/// new login is for the same organization, those contexts get new tokens. When it is for
+/// another organization, they do not, unless another login token of theirs is saved.
+pub(crate) fn note_before_replacing(
+    contexts: &ContextsFile,
+    api_url: &str,
+    name: &str,
+    replaced: Option<&ReplacedToken>,
+) -> Option<String> {
+    let replaced = replaced?;
+    if !replaced.token.parent {
+        return None;
+    }
+    let organization = replaced.organization.as_deref()?;
+    if other_parent(contexts, api_url, organization, name, load_context_token).is_some() {
+        return None;
+    }
+    let minted = contexts_minted_from(contexts, api_url, organization, name, load_context_token);
+    if minted.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "context '{name}' holds the login token of {organization}. the tokens of {} were \
+         minted from it. a login to {organization} replaces them; a login to another \
+         organization revokes them. to keep '{name}', log in as another context: \
+         tl login --context <name>",
+        minted.join(", ")
+    ))
+}
+
+/// After a login as `name`: revoke the token that `name` held before, so that it does not
+/// stay valid on the server after this machine forgot it.
+///
+/// A login token (a parent) takes the tokens minted from it with it. Contexts of the same
+/// organization got new tokens from the new login already. For another organization, the
+/// contexts get new tokens from another saved login token of that organization when there
+/// is one. The rest lose their token and need a new login.
+///
+/// `kept_old` names the contexts that `refresh_child_tokens` could not give a new token.
+pub(crate) async fn revoke_replaced_token(
+    api_url: &str,
+    name: &str,
+    replaced: ReplacedToken,
+    login: &BrowserLogin,
+    kept_old: &[String],
+) {
+    if replaced.token.token == login.token {
+        return;
+    }
+
+    let mut orphans: Vec<String> = Vec::new();
+    if replaced.token.parent
+        && let Some(organization) = replaced.organization.as_deref()
+    {
+        let contexts = load_contexts();
+        let minted =
+            contexts_minted_from(&contexts, api_url, organization, name, load_context_token);
+        if login.organization_id.as_deref() == Some(organization) {
+            orphans = minted
+                .into_iter()
+                .filter(|n| kept_old.contains(n))
+                .collect();
+        } else if let Some((parent_name, token)) =
+            other_parent(&contexts, api_url, organization, name, load_context_token)
+        {
+            let parent = BrowserLogin {
+                token,
+                organization_id: Some(organization.to_string()),
+                project_id: None,
+            };
+            let kept = refresh_child_tokens(api_url, &parent_name, &parent).await;
+            orphans = minted.into_iter().filter(|n| kept.contains(n)).collect();
+        } else {
+            orphans = minted;
+        }
+    }
+
+    match revoke_token(api_url, &replaced.token.token).await {
+        Ok(RevokeOutcome::Revoked) => {
+            eprintln!("revoked the old token of context '{name}' on the server.");
+        }
+        Ok(RevokeOutcome::Unsupported) => {
+            eprintln!(
+                "the server could not revoke the old token of context '{name}' (not supported yet)."
+            );
+            return;
+        }
+        Err(e) => {
+            eprintln!("warning: could not revoke the old token of context '{name}': {e}");
+            return;
+        }
+    }
+    for orphan in orphans {
+        if let Err(e) = remove_context_token(&orphan) {
+            eprintln!("warning: could not remove the token of context '{orphan}': {e}");
+        }
+        eprintln!(
+            "context '{orphan}' lost its token: it was minted from the old login. \
+             run: tl login --context {orphan}, or: tl context delete {orphan}"
+        );
+    }
+}
+
+/// The contexts of `organization` at `api_url` whose token was minted from a login token:
+/// every one with a saved token that is not a parent, except `parent_name`.
+pub(crate) fn contexts_minted_from(
+    contexts: &ContextsFile,
+    api_url: &str,
+    organization: &str,
+    parent_name: &str,
+    token_of: impl Fn(&str) -> Option<ContextToken>,
+) -> Vec<String> {
+    contexts
+        .for_api_url(api_url)
+        .filter(|(name, entry)| {
+            *name != parent_name
+                && entry.organization.as_deref() == Some(organization)
+                && token_of(name).is_some_and(|t| !t.parent)
+        })
+        .map(|(name, _)| name.to_string())
+        .collect()
+}
+
+/// Another context of `organization` at `api_url` that holds a login token, except
+/// `exclude`. Returns `(context name, token)`.
+pub(crate) fn other_parent(
+    contexts: &ContextsFile,
+    api_url: &str,
+    organization: &str,
+    exclude: &str,
+    token_of: impl Fn(&str) -> Option<ContextToken>,
+) -> Option<(String, String)> {
+    contexts
+        .for_api_url(api_url)
+        .filter(|(name, entry)| {
+            *name != exclude && entry.organization.as_deref() == Some(organization)
+        })
+        .find_map(|(name, _)| {
+            let token = token_of(name).filter(|t| t.parent)?;
+            Some((name.to_string(), token.token))
+        })
 }
 
 /// The contexts whose token is minted again after a login as `parent_name`: every other
@@ -477,6 +651,13 @@ pub async fn run_login_flow(
     auto_init: bool,
     context_name: &str,
 ) -> Result<LoginResult> {
+    let contexts = load_contexts();
+    let replaced = replaced_token(&contexts, context_name);
+    if let Some(note) =
+        note_before_replacing(&contexts, &ctx.api_url, context_name, replaced.as_ref())
+    {
+        eprintln!("note: {note}");
+    }
     let login = browser_login(ctx, None).await?;
     let saved = save_login_context(&ctx.api_url, context_name, &login)?;
     eprintln!("login successful!");
@@ -494,7 +675,10 @@ pub async fn run_login_flow(
         }
         None => eprintln!("saved context '{context_name}' and made it current."),
     }
-    refresh_child_tokens(&ctx.api_url, context_name, &login).await;
+    let kept_old = refresh_child_tokens(&ctx.api_url, context_name, &login).await;
+    if let Some(replaced) = replaced {
+        revoke_replaced_token(&ctx.api_url, context_name, replaced, &login, &kept_old).await;
+    }
 
     let access_token = login.token.clone();
     let mut org_id = login.organization_id.clone();
@@ -638,6 +822,59 @@ mod tests {
         assert_eq!(
             contexts_to_forget(&contexts, url, None),
             vec!["legacy".to_string()]
+        );
+    }
+
+    #[test]
+    fn minted_contexts_and_other_parents_of_an_organization() {
+        let url = "https://api.tensorlake.ai";
+        let mut contexts = ContextsFile::default();
+        for (name, org, project) in [
+            ("default", "org_1", "project_a"),
+            ("staging", "org_1", "project_b"),
+            ("review", "org_1", "project_c"),
+            ("empty", "org_1", "project_d"),
+            ("other-org", "org_2", "project_e"),
+        ] {
+            apply_login_to_contexts(&mut contexts, url, name, &login(org, project));
+        }
+        apply_login_to_contexts(
+            &mut contexts,
+            "https://other.example",
+            "other-url",
+            &login("org_1", "project_f"),
+        );
+        let token_of = |name: &str| match name {
+            "default" | "review" | "other-url" => Some(ContextToken {
+                token: format!("tl_{name}"),
+                parent: true,
+            }),
+            "staging" | "other-org" => Some(ContextToken {
+                token: format!("tl_{name}"),
+                parent: false,
+            }),
+            _ => None,
+        };
+
+        // Only tokens minted from a login count: not parents, not contexts without a
+        // token, not other organizations or API URLs.
+        assert_eq!(
+            contexts_minted_from(&contexts, url, "org_1", "default", token_of),
+            vec!["staging".to_string()]
+        );
+        // The replaced context itself is skipped; another login token of the organization
+        // is found.
+        assert_eq!(
+            other_parent(&contexts, url, "org_1", "default", token_of),
+            Some(("review".to_string(), "tl_review".to_string()))
+        );
+        assert_eq!(
+            other_parent(&contexts, url, "org_1", "review", token_of).map(|(n, _)| n),
+            Some("default".to_string())
+        );
+        assert_eq!(
+            other_parent(&contexts, url, "org_2", "default", token_of),
+            None
         );
     }
 

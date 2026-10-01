@@ -105,6 +105,9 @@ pub fn resolve(
 ///
 /// For commands that repair the configuration (`tl login`, `tl context ...`, `tl init`) and
 /// for `tl whoami`, which should show the problem.
+///
+/// `resolve` is already lenient about an unknown context when an API key or a PAT is given,
+/// because that credential logs in on its own.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve_lenient(
     api_url: Option<&str>,
@@ -153,10 +156,16 @@ fn resolve_inner(
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
 
+    let final_api_key = resolve_api_key(api_key, &local_config, &global_config);
+    // An API key or a PAT logs in on its own. An unknown context must not stop the command
+    // then, for example in CI where `TENSORLAKE_API_KEY` is set and the checked-in
+    // `.tensorlake/config.toml` names a context that only developers have.
+    let has_explicit_auth = pat.is_some() || final_api_key.is_some();
+
     let selection = match select_context(context, env_context.as_deref(), &local_config, &contexts)
     {
         Ok(selection) => selection,
-        Err(e) if lenient => {
+        Err(e) if lenient || has_explicit_auth => {
             eprintln!("warning: {e}");
             None
         }
@@ -174,7 +183,6 @@ fn resolve_inner(
     let final_cloud_url =
         resolve_cloud_url(cloud_url, &final_api_url, &local_config, &global_config);
     let final_namespace = resolve_namespace(namespace, &local_config, &global_config);
-    let final_api_key = resolve_api_key(api_key, &local_config, &global_config);
 
     let stored_credentials = if pat.is_none() {
         load_stored_credentials(&final_api_url)
@@ -350,7 +358,25 @@ pub(crate) fn resolve_scope(
     ];
 
     let org = org_sources.into_iter().find(|(v, _)| v.is_some());
-    let proj = proj_sources.into_iter().find(|(v, _)| v.is_some());
+    let mut proj = proj_sources.into_iter().find(|(v, _)| v.is_some());
+
+    // `--organization` alone. A project inherited from the current context or from the old
+    // login belongs to the organization of that source. When the flag names another
+    // organization, that project does not apply: drop it, so that the token lookup picks a
+    // context of the organization on the flag. A project from the local config or from a
+    // context named by flag, env var, or local config is explicit and stays; a conflict with
+    // it is reported by `align_scope`.
+    if let (Some((Some(flag_org), ScopeSource::Flags)), Some((_, proj_source))) = (&org, &proj) {
+        let source_org = match proj_source {
+            ScopeSource::Context => late_context.and_then(|e| e.organization.as_deref()),
+            ScopeSource::Credentials => stored.and_then(|s| s.organization_id.as_deref()),
+            _ => None,
+        };
+        if source_org.is_some_and(|o| o != flag_org) {
+            proj = None;
+        }
+    }
+
     let source = proj
         .as_ref()
         .or(org.as_ref())
@@ -372,8 +398,8 @@ pub(crate) fn resolve_scope(
 /// same organization and project. This keeps a migrated login working when the migration
 /// could not write `credentials.toml` (for example, a read-only home directory).
 ///
-/// The organization in `scope` is aligned with the found context, so that the token, the
-/// organization, and the project always belong together. See [`align_organization`].
+/// The organization and project in `scope` are aligned with the found context, so that the
+/// token, the organization, and the project always belong together. See [`align_scope`].
 ///
 /// Returns `(token, context name)`.
 fn resolve_token(
@@ -400,7 +426,7 @@ fn resolve_token(
             let entry = contexts
                 .get(name)
                 .expect("find_for_scope returns a saved name");
-            align_organization(scope, name, entry)?;
+            align_scope(scope, name, entry)?;
             let token = load_context_token(name)
                 .map(|t| t.token)
                 .or_else(|| legacy_token_for(entry, stored?));
@@ -415,14 +441,26 @@ fn resolve_token(
     }
 }
 
-/// Make the organization in `scope` agree with the context that supplies the token.
+/// Make the organization and project in `scope` agree with the context that supplies the
+/// token.
+///
+/// A scope with no project takes the project of the context. This happens when
+/// `--organization` alone names another organization than the current context: the
+/// inherited project was dropped, and the context found for that organization supplies
+/// its own.
 ///
 /// A project ID names one organization. When `--project` picks a context saved under another
 /// organization than the one in `scope`, the organization in `scope` is stale: it came from
 /// the current context, the local config, or the old login. Replace it with the one from the
 /// context. An organization given on the command line is explicit, so a conflict is an error
 /// instead.
-fn align_organization(scope: &mut ResolvedScope, name: &str, entry: &ContextEntry) -> Result<()> {
+fn align_scope(scope: &mut ResolvedScope, name: &str, entry: &ContextEntry) -> Result<()> {
+    if scope.project_id.is_none()
+        && let Some(project) = entry.project.as_deref()
+    {
+        scope.project_id = Some(project.to_string());
+        scope.source = ScopeSource::Context;
+    }
     let Some(context_org) = entry.organization.as_deref() else {
         return Ok(());
     };
@@ -929,6 +967,108 @@ project = "project_local"
         .unwrap();
         assert_eq!(name.as_deref(), Some("other"));
         assert_eq!(scope.organization_source, ScopeSource::Flags);
+    }
+
+    #[test]
+    fn an_organization_flag_drops_the_project_inherited_from_another_organization() {
+        let c = contexts();
+        let default = c.get("default").unwrap();
+        let url = "https://api.tensorlake.ai";
+        let stored = StoredCredentials {
+            token: "t".into(),
+            organization_id: Some("org_1".into()),
+            project_id: Some("project_stored".into()),
+        };
+
+        // `tl --organization org_2` with `default` (org_1) current: `project_default` is
+        // in org_1 and does not apply.
+        let s = resolve_scope(
+            Some("org_2"),
+            None,
+            url,
+            Some(ContextSource::Current),
+            Some(default),
+            &TomlTable::new(),
+            Some(&stored),
+        );
+        assert_eq!(s.organization_id.as_deref(), Some("org_2"));
+        assert_eq!(s.project_id, None);
+        assert_eq!(s.source, ScopeSource::Flags);
+
+        // The same organization keeps the project.
+        let s = resolve_scope(
+            Some("org_1"),
+            None,
+            url,
+            Some(ContextSource::Current),
+            Some(default),
+            &TomlTable::new(),
+            Some(&stored),
+        );
+        assert_eq!(s.project_id.as_deref(), Some("project_default"));
+
+        // The old login scope is inherited the same way.
+        let s = resolve_scope(
+            Some("org_2"),
+            None,
+            url,
+            None,
+            None,
+            &TomlTable::new(),
+            Some(&stored),
+        );
+        assert_eq!(s.project_id, None);
+
+        // A context named by flag is explicit: its project stays, and the conflict is
+        // reported later by `align_scope`.
+        let s = resolve_scope(
+            Some("org_2"),
+            None,
+            url,
+            Some(ContextSource::Flag),
+            Some(default),
+            &TomlTable::new(),
+            None,
+        );
+        assert_eq!(s.project_id.as_deref(), Some("project_default"));
+
+        // So does a project from the local config.
+        let s = resolve_scope(
+            Some("org_2"),
+            None,
+            url,
+            Some(ContextSource::Current),
+            Some(default),
+            &local("project = \"project_local\""),
+            None,
+        );
+        assert_eq!(s.project_id.as_deref(), Some("project_local"));
+    }
+
+    #[test]
+    fn an_organization_flag_alone_picks_a_context_of_that_organization() {
+        let c = contexts_in_two_organizations();
+        // `tl --organization org_2` with `default` (org_1) current, after the inherited
+        // project was dropped: the context of org_2 supplies the token and its project.
+        let mut scope = ResolvedScope {
+            organization_id: Some("org_2".into()),
+            project_id: None,
+            source: ScopeSource::Flags,
+            organization_source: ScopeSource::Flags,
+        };
+        let (_, name) = resolve_token(
+            "https://api.tensorlake.ai",
+            &mut scope,
+            Some("default"),
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(name.as_deref(), Some("other"));
+        assert_eq!(scope.organization_id.as_deref(), Some("org_2"));
+        assert_eq!(scope.organization_source, ScopeSource::Flags);
+        assert_eq!(scope.project_id.as_deref(), Some("project_other"));
+        assert_eq!(scope.source, ScopeSource::Context);
     }
 
     #[test]
