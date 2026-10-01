@@ -128,6 +128,7 @@ async fn pool_claim_with_file_systems_sends_json_body() {
         .claim_with_request(
             "pool-1",
             &ClaimSandboxRequest {
+                network_observability: false,
                 file_systems: vec![FileSystemMount {
                     file_system_id: "file_system_abc".to_string(),
                     mount_path: "/mnt/skills".to_string(),
@@ -174,6 +175,7 @@ async fn pool_claim_with_file_systems_rejects_server_without_acknowledgment() {
         .claim_with_request(
             "pool-1",
             &ClaimSandboxRequest {
+                network_observability: false,
                 file_systems: vec![FileSystemMount {
                     file_system_id: "file_system_abc".to_string(),
                     mount_path: "/mnt/skills".to_string(),
@@ -705,6 +707,7 @@ fn request_body(request: &str) -> &str {
 
 fn create_request() -> CreateSandboxRequest {
     CreateSandboxRequest {
+        network_observability: false,
         image: Some("tensorlake/ubuntu-minimal".to_string()),
         resources: CreateSandboxResources::default(),
         timeout_secs: None,
@@ -734,8 +737,10 @@ async fn create_no_wait_sends_wait_false_and_returns_the_acknowledgement() {
     let client = ClientBuilder::new(&url).build().expect("build client");
     let sandboxes = SandboxesClient::new(client, "default", true);
 
+    let mut request = create_request();
+    request.network_observability = true;
     let created = sandboxes
-        .create_no_wait(&create_request())
+        .create_no_wait(&request)
         .await
         .expect("create is acknowledged");
     assert_eq!(created.sandbox_id, "sbx-1");
@@ -750,6 +755,7 @@ async fn create_no_wait_sends_wait_false_and_returns_the_acknowledgement() {
         "POST /v1/namespaces/default/sandboxes HTTP/1.1"
     );
     let body: serde_json::Value = serde_json::from_str(request_body(&requests[0])).unwrap();
+    assert_eq!(body["network_observability"], true);
     assert_eq!(body["wait"], false);
     assert_eq!(body["max_pending_secs"], 1800);
     assert_eq!(body["name"], "coreauto-run-17");
@@ -762,6 +768,7 @@ async fn blocking_create_omits_wait_and_an_unset_bound() {
     let client = ClientBuilder::new(&url).build().expect("build client");
     let sandboxes = SandboxesClient::new(client, "default", false);
     let request = CreateSandboxRequest {
+        network_observability: false,
         max_pending_secs: None,
         ..create_request()
     };
@@ -1077,4 +1084,66 @@ async fn write_json_response(socket: &mut TcpStream, body: &str) {
         .write_all(response.as_bytes())
         .await
         .expect("write response");
+}
+
+#[tokio::test]
+async fn network_reads_use_scoped_telemetry_without_contacting_the_guest() {
+    use tensorlake::sandboxes::network::NetworkQuery;
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        let mut requests = Vec::new();
+        for body in [
+            r#"{"events":[],"next_cursor":"cursor+/=","from_ms":1000,"to_ms":2000}"#,
+            r#"{"destinations":[{"destination_ip":"192.0.2.1","destination_port":443,"transport":"tcp","observed_connections":1,"original_bytes":null,"reply_bytes":null,"unknown_byte_connections":1,"degraded_connections":0}],"truncated":false,"from_ms":0,"to_ms":60000}"#,
+            r#"{"state":"unknown","last_observed_at_ms":null,"allocation_id":null,"coverage":[],"limitations":["capture unavailable"]}"#,
+        ] {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            requests.push(String::from_utf8(read_http_request(&mut stream).await).unwrap());
+            write_json_response(&mut stream, body).await;
+        }
+        requests
+    });
+    let lifecycle = ClientBuilder::new("http://127.0.0.1:1").build().unwrap();
+    let telemetry = ClientBuilder::new(&format!("http://{address}"))
+        .bearer_token("test-token")
+        .scope("org-a", "project-a")
+        .build()
+        .unwrap();
+    let client = SandboxesClient::new(lifecycle, "project-a", false).with_log_client(telemetry);
+    let page = client
+        .network_events(
+            "sandbox-a",
+            &NetworkQuery {
+                from_ms: Some(1000),
+                to_ms: Some(2000),
+                limit: Some(5),
+                cursor: Some("cursor+/=".into()),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(page.next_cursor.as_deref(), Some("cursor+/="));
+    let destinations = client
+        .network_destinations("sandbox-a", &NetworkQuery::default())
+        .await
+        .unwrap();
+    assert_eq!(destinations.destinations[0].original_bytes, None);
+    assert_eq!(destinations.destinations[0].unknown_byte_connections, 1);
+    assert_eq!(
+        client.network_status("sandbox-a").await.unwrap().state,
+        "unknown"
+    );
+    let requests = tokio::time::timeout(Duration::from_secs(2), server)
+        .await
+        .unwrap()
+        .unwrap();
+    for (request, resource) in requests.iter().zip(["events", "destinations", "status"]) {
+        assert!(request.starts_with(&format!(
+            "GET /v1/namespaces/project-a/sandboxes/sandbox-a/network/{resource}"
+        )));
+        assert!(request.contains("authorization: Bearer test-token"));
+        assert!(request.contains("x-forwarded-project-id: project-a"));
+    }
+    assert!(requests[0].contains("cursor=cursor%2B%2F%3D"));
 }

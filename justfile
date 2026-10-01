@@ -317,3 +317,8 @@ fmt: fmt-rust fmt-python
 
 # Full CI check
 check: check-rust check-python-fmt
+
+# Shared telemetry transport and CLI/native binding build contract for network observation.
+test-network-observations:
+    just with-function-agent-core cargo nextest run -p tensorlake --test sandboxes network_reads_use_scoped_telemetry
+    just with-function-agent-core cargo check -p tensorlake-cli -p tensorlake-rust-cloud-sdk-py -p tensorlake-rust-cloud-sdk-node
