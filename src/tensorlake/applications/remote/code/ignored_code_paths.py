@@ -1,7 +1,12 @@
 import os
 import subprocess
 from pathlib import Path
-from typing import Optional, Set
+from typing import List, Optional, Set
+
+from ...interface import SDKUsageError
+
+# Marker file present in the root of every Python virtualenv.
+_VENV_MARKER_FILE = "pyvenv.cfg"
 
 
 def ignored_code_paths(root_dir: str) -> Set[str]:
@@ -13,26 +18,9 @@ def ignored_code_paths(root_dir: str) -> Set[str]:
     macOS where /var -> /private/var, causing exclusion checks to silently fail.
     """
     root = Path(os.path.abspath(root_dir))
+    _raise_if_virtualenv_root(root)
+
     exclude_paths = set()
-
-    # Exclude the active virtualenv if it's inside the root directory.
-    venv_path = os.environ.get("VIRTUAL_ENV")
-    if venv_path:
-        venv_path = Path(os.path.abspath(venv_path))
-        try:
-            venv_path.relative_to(root)
-            exclude_paths.add(str(venv_path))
-        except ValueError:
-            # venv is not inside root_dir, ignore
-            pass
-
-    # Exclude any other virtualenvs inside the root directory by looking for
-    # pyvenv.cfg — the standard marker file present in every Python venv.
-    for child in root.iterdir():
-        if child.is_dir() and (child / "pyvenv.cfg").exists():
-            abs_child = str(Path(os.path.abspath(child)))
-            if abs_child not in exclude_paths:
-                exclude_paths.add(abs_child)
 
     gitignore_path = root / ".gitignore"
     if gitignore_path.exists():
@@ -42,7 +30,79 @@ def ignored_code_paths(root_dir: str) -> Set[str]:
         else:
             exclude_paths.update(_parse_gitignore(root, gitignore_path))
 
+    # Computed after the gitignored paths so the scan can skip descending into them.
+    exclude_paths.update(_virtualenv_paths(root, exclude_paths))
+
     return exclude_paths
+
+
+def _is_inside(path: Path, root: Path) -> bool:
+    """Returns True if path is root itself or below it."""
+    try:
+        path.relative_to(root)
+        return True
+    except ValueError:
+        return False
+
+
+def _raise_if_virtualenv_root(root: Path) -> None:
+    """Rejects deploying an application file that sits in the root of a virtualenv.
+
+    The directory holding the application file is what gets deployed as the application
+    code. When that directory is a virtualenv there is no way to ship the application
+    without shipping the virtualenv around it, so the deploy has to fail here rather than
+    succeed and leave the application failing to load in the Function Executor.
+    """
+    if not (root / _VENV_MARKER_FILE).is_file():
+        return
+
+    raise SDKUsageError(
+        f"The application file is in `{root}`, which is the root directory of a Python "
+        "virtualenv. The directory that holds the application file is deployed as the "
+        "application code, so deploying from here would ship the virtualenv instead of the "
+        "application and the application would fail to load. Please move the application "
+        "file into its own directory outside of the virtualenv and deploy it from there."
+    )
+
+
+def _virtualenv_paths(root: Path, already_excluded: Set[str]) -> Set[str]:
+    """Returns absolute paths of all virtualenvs inside the root directory, at any depth.
+
+    Virtualenvs are identified by the pyvenv.cfg marker file that every Python venv has.
+    A virtualenv must never end up in the application code ZIP: it is large, its contents
+    are platform specific, and its modules shadow the application modules once the ZIP is
+    unpacked.
+
+    Symlinks are not followed, so a virtualenv reachable only through a symlink is found
+    only when it is the active one.
+    """
+    venv_paths: Set[str] = set()
+
+    # The active virtualenv is checked explicitly because it can be reached through a
+    # symlink that the walk below does not follow. Excluding the root itself is
+    # meaningless because walk_code only compares the paths under the root, so a
+    # virtualenv that is the root is rejected by _raise_if_virtualenv_root() instead.
+    active_venv: Optional[str] = os.environ.get("VIRTUAL_ENV")
+    if active_venv:
+        active_venv_path = Path(os.path.abspath(active_venv))
+        if active_venv_path != root and _is_inside(active_venv_path, root):
+            venv_paths.add(str(active_venv_path))
+
+    for dir_path, dir_names, _ in os.walk(root):
+        kept: List[str] = []
+        for dir_name in dir_names:
+            child: str = os.path.abspath(os.path.join(dir_path, dir_name))
+            # Don't descend into directories that are already excluded or already known
+            # to be virtualenvs.
+            if child in already_excluded or child in venv_paths:
+                continue
+            if os.path.isfile(os.path.join(child, _VENV_MARKER_FILE)):
+                venv_paths.add(child)
+                continue
+            kept.append(dir_name)
+        dir_names[:] = kept
+
+    return venv_paths
 
 
 def _git_ignored_paths(root: Path) -> Optional[Set[str]]:
