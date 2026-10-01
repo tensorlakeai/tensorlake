@@ -184,6 +184,7 @@ export interface AttachFileSystemOptions {
 }
 
 export interface ClaimSandboxOptions {
+  networkObservability?: boolean;
   /** File systems to mount before the claimed sandbox is reported as running. */
   fileSystems?: FileSystemMount[];
 }
@@ -231,6 +232,8 @@ export interface CreateSandboxOptions {
    * launch a host; 30 minutes or more is recommended for capacity waits.
    */
   maxPendingSecs?: number;
+  /** Enable network metadata collection for this sandbox. Defaults to false. */
+  networkObservability?: boolean;
 }
 
 export interface UpdateSandboxOptions {
@@ -328,6 +331,7 @@ export interface CopySandboxResponse {
 }
 
 export interface SandboxInfo {
+  networkObservability?: boolean;
   sandboxId: string;
   namespace: string;
   status: SandboxStatus;

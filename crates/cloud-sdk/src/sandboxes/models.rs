@@ -342,6 +342,9 @@ pub struct CreateSandboxRequest {
     pub entrypoint: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub network: Option<NetworkConfig>,
+    /// Immutable create-time opt-in to network telemetry; off by default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub network_observability: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub snapshot_id: Option<String>,
     /// Optional name for the sandbox. Named sandboxes support suspend/resume.
@@ -375,6 +378,8 @@ pub struct CreateSandboxRequest {
 /// sandbox created by the claim.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ClaimSandboxRequest {
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub network_observability: bool,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub file_systems: Vec<FileSystemMount>,
 }
@@ -688,6 +693,8 @@ pub struct SandboxAccepted {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SandboxInfo {
+    #[serde(default)]
+    pub network_observability: bool,
     #[serde(alias = "id", alias = "sandbox_id")]
     pub sandbox_id: String,
     pub namespace: String,

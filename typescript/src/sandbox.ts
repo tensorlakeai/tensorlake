@@ -1294,7 +1294,7 @@ export class Sandbox {
     return client.networkDestinations(sandboxId, options);
   }
 
-  /** Read collector health, separately from the project's requested capture setting. */
+  /** Read collector health, separately from the sandbox's creation setting. */
   async networkStatus(): Promise<Traced<NetworkCaptureStatus>> {
     const client = this.requireLifecycleClient("networkStatus");
     const sandboxId = this.canonicalSandboxId ?? (await this.info()).sandboxId;

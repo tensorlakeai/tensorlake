@@ -522,6 +522,7 @@ export class SandboxClient {
       }
       body.max_pending_secs = options.maxPendingSecs;
     }
+    if (options?.networkObservability === true) body.network_observability = true;
     // Sent only when false so older servers keep accepting the body.
     if (options?.wait === false) body.wait = false;
     return body;
@@ -865,9 +866,10 @@ export class SandboxClient {
     options?: ClaimSandboxOptions,
   ): Promise<Traced<CreateSandboxResponse>> {
     const requestJson =
-      options?.fileSystems != null && options.fileSystems.length > 0
+      options?.networkObservability === true || (options?.fileSystems != null && options.fileSystems.length > 0)
         ? JSON.stringify({
-            file_systems: options.fileSystems.map(fileSystemMountToWire),
+            file_systems: options?.fileSystems?.map(fileSystemMountToWire),
+            ...(options?.networkObservability === true ? { network_observability: true } : {}),
           })
         : undefined;
     return this.tracedJson<CreateSandboxResponse>(
@@ -1159,6 +1161,7 @@ export class SandboxClient {
       // Pool claims have no `wait: false`: the server answers from its own
       // wait, so a claim is often already running.
       const result = await requestClient.claim(options.poolId, {
+        networkObservability: options.networkObservability,
         fileSystems: options.fileSystems,
       });
       logSdkTiming("sandbox.create", "claim_response", createStart, {

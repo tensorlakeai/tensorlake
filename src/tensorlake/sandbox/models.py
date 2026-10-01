@@ -426,6 +426,7 @@ class CreateSandboxRequest(BaseModel):
     timeout_secs: int | None = None
     entrypoint: list[str] | None = None
     network: NetworkConfig | None = None
+    network_observability: bool | None = None
     snapshot_id: str | None = None
     name: str | None = None
     file_systems: list[FileSystemMount] | None = None
@@ -440,6 +441,7 @@ class CreateSandboxRequest(BaseModel):
 class ClaimSandboxRequest(BaseModel):
     """Sandbox-specific state applied while claiming from a warm pool."""
 
+    network_observability: bool | None = None
     file_systems: list[FileSystemMount] | None = None
 
     model_config = {"populate_by_name": True}
@@ -676,6 +678,7 @@ class SandboxInfo(BaseModel):
     resources: ContainerResourcesInfo
     timeout_secs: int | None = None
     entrypoint: list[str] | None = None
+    network_observability: bool = False
     network_policy: NetworkConfig | None = Field(
         default=None,
         description="Egress network policy currently applied to the sandbox.",

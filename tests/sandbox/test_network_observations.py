@@ -155,3 +155,31 @@ class TestNetworkObservations(unittest.IsolatedAsyncioTestCase):
             "removed-sandbox"
         )
         client._rust_client.connect_proxy.assert_not_called()
+
+
+def test_create_network_observability_is_explicit_and_defaults_off() -> None:
+    for enabled in (None, False, True):
+        client = object.__new__(SandboxClient)
+        client._rust_client = Mock()
+        client._rust_client.create_sandbox.return_value = (
+            "trace",
+            '{"sandbox_id":"sandbox-a","status":"running"}',
+        )
+        kwargs = {} if enabled is None else {"network_observability": enabled}
+        client.create(**kwargs)
+        call = client._rust_client.create_sandbox.call_args
+        request = json.loads(call.kwargs["request_json"])
+        assert request.get("network_observability", False) is (enabled is True)
+
+
+def test_pool_claim_sends_opt_in_without_requiring_mounts() -> None:
+    client = object.__new__(SandboxClient)
+    client._rust_client = Mock()
+    client._rust_client.claim_sandbox.return_value = (
+        "trace",
+        '{"sandbox_id":"sandbox-a","status":"running"}',
+    )
+    client.claim("pool-a", network_observability=True)
+    call = client._rust_client.claim_sandbox.call_args
+    assert call.kwargs["pool_id"] == "pool-a"
+    assert json.loads(call.kwargs["request_json"])["network_observability"] is True

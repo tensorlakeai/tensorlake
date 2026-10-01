@@ -261,6 +261,7 @@ class AsyncSandboxClient:
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         wait: Literal[True] = True,
     ) -> Traced[CreateSandboxResponse]: ...
 
@@ -283,6 +284,7 @@ class AsyncSandboxClient:
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         *,
         wait: Literal[False],
     ) -> AsyncPendingSandbox: ...
@@ -305,6 +307,7 @@ class AsyncSandboxClient:
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         wait: bool = True,
     ) -> "Traced[CreateSandboxResponse] | AsyncPendingSandbox":
         """Create a new standalone sandbox.
@@ -335,6 +338,7 @@ class AsyncSandboxClient:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                network_observability=network_observability,
             )
         request_model = _build_create_request(
             image=image,
@@ -353,6 +357,7 @@ class AsyncSandboxClient:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            network_observability=network_observability,
         )
         try:
             trace_id, response_json = await self._rust_client.create_sandbox_async(
@@ -384,6 +389,7 @@ class AsyncSandboxClient:
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         proxy_url: str | None = None,
         request_timeout: float | None = None,
         owns_sandbox: bool = False,
@@ -407,6 +413,7 @@ class AsyncSandboxClient:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            network_observability=network_observability,
             wait=False,
         )
         try:
@@ -526,13 +533,19 @@ class AsyncSandboxClient:
         pool_id: str,
         *,
         file_systems: list[FileSystemMount] | None = None,
+        network_observability: bool = False,
     ) -> Traced[CreateSandboxResponse]:
         _validate_mount_snapshot_pins(file_systems)
         _validate_mount_owners(file_systems)
         try:
             claim_kwargs: dict[str, str] = {"pool_id": pool_id}
-            if file_systems:
-                request = ClaimSandboxRequest(file_systems=file_systems)
+            if not isinstance(network_observability, bool):
+                raise SandboxError("network_observability must be a boolean")
+            if file_systems or network_observability:
+                request = ClaimSandboxRequest(
+                    file_systems=file_systems,
+                    network_observability=True if network_observability else None,
+                )
                 claim_kwargs["request_json"] = request.model_dump_json(
                     by_alias=True, exclude_none=True
                 )
@@ -1328,6 +1341,7 @@ class AsyncSandboxClient:
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         cancel_on_timeout: bool = False,
         poll_interval: float = DEFAULT_WAIT_POLL_INTERVAL_SEC,
     ) -> "AsyncSandbox":
@@ -1355,7 +1369,11 @@ class AsyncSandboxClient:
 
         requested_name = None if pool_id is not None else name
         if pool_id is not None:
-            result = await request_client.claim(pool_id, file_systems=file_systems)
+            result = await request_client.claim(
+                pool_id,
+                file_systems=file_systems,
+                network_observability=network_observability,
+            )
             if result.status == SandboxStatus.RUNNING:
                 sandbox = await request_client.connect(
                     result.sandbox_id,
@@ -1407,6 +1425,7 @@ class AsyncSandboxClient:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                network_observability=network_observability,
             )
             sandbox_id = pending.sandbox_id
             trace_id = pending.trace_id

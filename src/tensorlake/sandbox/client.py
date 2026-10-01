@@ -277,6 +277,7 @@ def _build_create_request(
     file_systems: list[FileSystemMount] | None,
     gpu: GpuRequest | None,
     max_pending_secs: int | None,
+    network_observability: bool = False,
     wait: bool | None = None,
 ) -> CreateSandboxRequest:
     """Validate create arguments and build the wire request. Shared by the
@@ -290,6 +291,8 @@ def _build_create_request(
         or max_pending_secs < 0
     ):
         raise SandboxError("max_pending_secs must be a non-negative integer")
+    if not isinstance(network_observability, bool):
+        raise SandboxError("network_observability must be a boolean")
     network = None
     if not allow_internet_access or allow_out is not None or deny_out is not None:
         network = NetworkConfig(
@@ -324,6 +327,7 @@ def _build_create_request(
         file_systems=file_systems,
         wait=False if wait is False else None,
         max_pending_secs=max_pending_secs,
+        network_observability=True if network_observability else None,
     )
 
 
@@ -532,6 +536,7 @@ class SandboxClient:
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         wait: Literal[True] = True,
     ) -> Traced[CreateSandboxResponse]: ...
 
@@ -554,6 +559,7 @@ class SandboxClient:
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         *,
         wait: Literal[False],
     ) -> PendingSandbox: ...
@@ -576,6 +582,7 @@ class SandboxClient:
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         wait: bool = True,
     ) -> "Traced[CreateSandboxResponse] | PendingSandbox":
         """Create a new standalone sandbox.
@@ -671,6 +678,7 @@ class SandboxClient:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                network_observability=network_observability,
             )
         request_model = _build_create_request(
             image=image,
@@ -689,6 +697,7 @@ class SandboxClient:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            network_observability=network_observability,
         )
         try:
             trace_id, response_json = self._rust_client.create_sandbox(
@@ -720,6 +729,7 @@ class SandboxClient:
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         proxy_url: str | None = None,
         request_timeout: float | None = None,
         owns_sandbox: bool = False,
@@ -743,6 +753,7 @@ class SandboxClient:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            network_observability=network_observability,
             wait=False,
         )
         try:
@@ -861,6 +872,7 @@ class SandboxClient:
         pool_id: str,
         *,
         file_systems: list[FileSystemMount] | None = None,
+        network_observability: bool = False,
     ) -> Traced[CreateSandboxResponse]:
         """Claim a sandbox from a pool.
 
@@ -871,6 +883,8 @@ class SandboxClient:
             pool_id: ID of the pool to claim from
             file_systems: File systems to mount into the claimed sandbox.
                 The sandbox becomes ready only after these mounts converge.
+            network_observability: Collect network metadata for this sandbox.
+                Defaults to False and cannot be changed after creation.
 
         Returns:
             Traced[CreateSandboxResponse] with sandbox_id, status, and trace_id
@@ -885,8 +899,13 @@ class SandboxClient:
         _validate_mount_owners(file_systems)
         try:
             claim_kwargs: dict[str, str] = {"pool_id": pool_id}
-            if file_systems:
-                request = ClaimSandboxRequest(file_systems=file_systems)
+            if not isinstance(network_observability, bool):
+                raise SandboxError("network_observability must be a boolean")
+            if file_systems or network_observability:
+                request = ClaimSandboxRequest(
+                    file_systems=file_systems,
+                    network_observability=True if network_observability else None,
+                )
                 claim_kwargs["request_json"] = request.model_dump_json(
                     by_alias=True, exclude_none=True
                 )
@@ -1995,6 +2014,7 @@ class SandboxClient:
         file_systems: list[FileSystemMount] | None = None,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         cancel_on_timeout: bool = False,
         poll_interval: float = DEFAULT_WAIT_POLL_INTERVAL_SEC,
     ) -> "Sandbox":
@@ -2096,7 +2116,11 @@ class SandboxClient:
         if pool_id is not None:
             # Pool claims have no `wait: false`: the server answers from its
             # own wait, so a claim is often already running.
-            result = request_client.claim(pool_id, file_systems=file_systems)
+            result = request_client.claim(
+                pool_id,
+                file_systems=file_systems,
+                network_observability=network_observability,
+            )
             if result.status == SandboxStatus.RUNNING:
                 sandbox = request_client.connect(
                     result.sandbox_id,
@@ -2148,6 +2172,7 @@ class SandboxClient:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                network_observability=network_observability,
             )
             sandbox_id = pending.sandbox_id
             trace_id = pending.trace_id

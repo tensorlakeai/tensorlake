@@ -412,18 +412,19 @@ dataplane must support the requested model and have matching capacity.
 
 ### Network observations (preview)
 
-On capture-enabled hosts, opt the project in as an organization administrator:
+On capture-enabled hosts, opt in when creating each sandbox:
 
 ```bash
-tl sbx network capture --enabled true
+tl sbx create --network-observability
 tl sbx network status <sandbox-id>
 tl sbx network events <sandbox-id> --limit 100 --json
 tl sbx network destinations <sandbox-id>
-tl sbx network capture --enabled false
 ```
 
-Capture defaults off and consent changes propagate within 30 seconds. Host
-rollout must also be enabled. Status reports the most recent collector heartbeat;
+Capture defaults off. Pass `network_observability=True` in Python or
+`networkObservability: true` in TypeScript to enable it on create or pool claim.
+The setting survives suspend/resume and copies inherit it; new creates from
+snapshots default to off. Host rollout must also be enabled. Status reports the most recent collector heartbeat;
 `unknown` or `stale` does not mean no traffic. These reads use persisted telemetry
 and work without connecting to the sandbox, including after termination.
 

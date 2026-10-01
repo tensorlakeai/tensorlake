@@ -1088,7 +1088,7 @@ impl GpuModelArg {
 
 #[derive(Subcommand)]
 enum SbxCommands {
-    /// Inspect captured network metadata and manage project capture consent
+    /// Inspect captured sandbox network metadata
     Network {
         #[command(subcommand)]
         command: commands::sbx::network::NetworkCommands,
@@ -1194,6 +1194,10 @@ enum SbxCommands {
         /// capacity waits
         #[arg(long = "max-pending-secs", value_name = "SECS")]
         max_pending_secs: Option<u64>,
+
+        /// Collect network metadata for this sandbox (off by default)
+        #[arg(long)]
+        network_observability: bool,
 
         /// Expose a port via the sandbox proxy (can be repeated)
         #[arg(short = 'x', long = "expose", value_parser = parse_user_port)]
@@ -2199,6 +2203,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                         image,
                         queue,
                         max_pending_secs,
+                        network_observability,
                         ports,
                         allow_unauthenticated_access,
                         no_internet,
@@ -2238,6 +2243,7 @@ async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<(
                                 network_deny: &network_deny,
                                 file_systems: &file_systems,
                                 max_pending_secs,
+                                network_observability,
                             },
                         )
                         .await

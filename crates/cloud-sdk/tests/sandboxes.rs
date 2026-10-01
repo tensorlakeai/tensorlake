@@ -128,6 +128,7 @@ async fn pool_claim_with_file_systems_sends_json_body() {
         .claim_with_request(
             "pool-1",
             &ClaimSandboxRequest {
+                network_observability: false,
                 file_systems: vec![FileSystemMount {
                     file_system_id: "file_system_abc".to_string(),
                     mount_path: "/mnt/skills".to_string(),
@@ -174,6 +175,7 @@ async fn pool_claim_with_file_systems_rejects_server_without_acknowledgment() {
         .claim_with_request(
             "pool-1",
             &ClaimSandboxRequest {
+                network_observability: false,
                 file_systems: vec![FileSystemMount {
                     file_system_id: "file_system_abc".to_string(),
                     mount_path: "/mnt/skills".to_string(),
@@ -705,6 +707,7 @@ fn request_body(request: &str) -> &str {
 
 fn create_request() -> CreateSandboxRequest {
     CreateSandboxRequest {
+        network_observability: false,
         image: Some("tensorlake/ubuntu-minimal".to_string()),
         resources: CreateSandboxResources::default(),
         timeout_secs: None,
@@ -734,8 +737,10 @@ async fn create_no_wait_sends_wait_false_and_returns_the_acknowledgement() {
     let client = ClientBuilder::new(&url).build().expect("build client");
     let sandboxes = SandboxesClient::new(client, "default", true);
 
+    let mut request = create_request();
+    request.network_observability = true;
     let created = sandboxes
-        .create_no_wait(&create_request())
+        .create_no_wait(&request)
         .await
         .expect("create is acknowledged");
     assert_eq!(created.sandbox_id, "sbx-1");
@@ -750,6 +755,7 @@ async fn create_no_wait_sends_wait_false_and_returns_the_acknowledgement() {
         "POST /v1/namespaces/default/sandboxes HTTP/1.1"
     );
     let body: serde_json::Value = serde_json::from_str(request_body(&requests[0])).unwrap();
+    assert_eq!(body["network_observability"], true);
     assert_eq!(body["wait"], false);
     assert_eq!(body["max_pending_secs"], 1800);
     assert_eq!(body["name"], "coreauto-run-17");
@@ -762,6 +768,7 @@ async fn blocking_create_omits_wait_and_an_unset_bound() {
     let client = ClientBuilder::new(&url).build().expect("build client");
     let sandboxes = SandboxesClient::new(client, "default", false);
     let request = CreateSandboxRequest {
+        network_observability: false,
         max_pending_secs: None,
         ..create_request()
     };

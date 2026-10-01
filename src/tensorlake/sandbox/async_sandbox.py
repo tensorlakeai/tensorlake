@@ -299,6 +299,7 @@ class AsyncSandbox:
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         cancel_on_timeout: bool = False,
         wait: Literal[True] = True,
     ) -> "AsyncSandbox": ...
@@ -332,6 +333,7 @@ class AsyncSandbox:
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         cancel_on_timeout: bool = False,
         *,
         wait: Literal[False],
@@ -365,6 +367,7 @@ class AsyncSandbox:
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         cancel_on_timeout: bool = False,
         wait: bool = True,
     ) -> "AsyncSandbox | AsyncPendingSandbox":
@@ -421,6 +424,7 @@ class AsyncSandbox:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                network_observability=network_observability,
                 proxy_url=proxy_url,
                 request_timeout=effective_request_timeout,
                 owns_sandbox=True,
@@ -445,6 +449,7 @@ class AsyncSandbox:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            network_observability=network_observability,
             cancel_on_timeout=cancel_on_timeout,
         )
 
@@ -512,6 +517,7 @@ class AsyncSandbox:
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
     ) -> "AsyncSandbox":
         """Return the one sandbox bound to ``name``. Create it on first use.
 
@@ -589,6 +595,7 @@ class AsyncSandbox:
                         namespace=namespace,
                         gpu=gpu,
                         max_pending_secs=max_pending_secs,
+                        network_observability=network_observability,
                     )
                 except RemoteAPIError as e:
                     if e.status_code != 409:
@@ -906,7 +913,7 @@ class AsyncSandbox:
         return traced
 
     async def network_status(self) -> Traced[NetworkCaptureStatus]:
-        """Read observed collector health, separate from project capture consent."""
+        """Read observed collector health, separate from the sandbox creation setting."""
         self._require_lifecycle_client("network_status")
         sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
         traced = await self._lifecycle_client.network_status(sandbox_id)

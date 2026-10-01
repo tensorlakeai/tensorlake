@@ -1,6 +1,5 @@
 use clap::{Args, Subcommand};
 use comfy_table::Cell;
-use serde::{Deserialize, Serialize};
 use tensorlake::sandboxes::{SandboxesClient, network::NetworkQuery};
 
 use crate::{
@@ -47,19 +46,6 @@ pub enum NetworkCommands {
     Destinations(QueryArgs),
     /// Show the last collector heartbeat and its declared coverage
     Status { sandbox_id: String },
-    /// Read or change project capture consent (changes require an org admin)
-    Capture {
-        /// Explicitly enable or disable capture; omit to read the setting
-        #[arg(long, action = clap::ArgAction::Set)]
-        enabled: Option<bool>,
-    },
-}
-
-#[derive(Deserialize, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct CaptureSettings {
-    enabled: bool,
-    max_propagation_seconds: u32,
 }
 
 pub async fn run(ctx: &CliContext, command: NetworkCommands) -> Result<()> {
@@ -147,39 +133,6 @@ pub async fn run(ctx: &CliContext, command: NetworkCommands) -> Result<()> {
             println!(
                 "{}",
                 serde_json::to_string_pretty(&*client.network_status(&sandbox_id).await?)?
-            );
-        }
-        NetworkCommands::Capture { enabled } => {
-            let org = ctx
-                .effective_organization_id()
-                .ok_or_else(|| CliError::usage("Select an organization to manage capture"))?;
-            let project = ctx
-                .effective_project_id()
-                .ok_or_else(|| CliError::usage("Select a project to manage capture"))?;
-            let url = format!(
-                "{}/platform/v1/organizations/{}/projects/{}/network-capture",
-                ctx.api_url.trim_end_matches('/'),
-                urlencoding::encode(&org),
-                urlencoding::encode(&project)
-            );
-            let http = ctx.client()?;
-            let request = match enabled {
-                Some(enabled) => http
-                    .patch(url)
-                    .json(&serde_json::json!({"enabled": enabled})),
-                None => http.get(url),
-            };
-            let response = request.send().await?;
-            if !response.status().is_success() {
-                return Err(CliError::Other(anyhow::anyhow!(
-                    "network capture setting failed (HTTP {}): {}",
-                    response.status(),
-                    response.text().await?
-                )));
-            }
-            println!(
-                "{}",
-                serde_json::to_string_pretty(&response.json::<CaptureSettings>().await?)?
             );
         }
     }

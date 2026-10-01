@@ -182,6 +182,7 @@ pub struct CreateArgs<'a> {
     pub file_systems: &'a [String],
     /// Server-side bound on the capacity wait; unset waits indefinitely.
     pub max_pending_secs: Option<u64>,
+    pub network_observability: bool,
 }
 
 const FILESYSTEM_FLAG_USAGE: &str = "--filesystem must be <name>[@<snapshot_id>]:<mount_path>[:<opts>] where <opts> \
@@ -282,6 +283,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
         network_deny,
         file_systems,
         max_pending_secs,
+        network_observability,
     } = args;
 
     let gpu = gpu_count.map(|count| GpuRequest {
@@ -313,6 +315,7 @@ pub async fn run(ctx: &CliContext, args: CreateArgs<'_>) -> Result<()> {
     if !file_system_mounts.is_empty() {
         body["file_systems"] = serde_json::Value::Array(file_system_mounts);
     }
+    body["network_observability"] = serde_json::json!(network_observability);
     if let Some(bound) = max_pending_secs {
         body["max_pending_secs"] = serde_json::json!(bound);
     }
