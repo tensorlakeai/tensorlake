@@ -292,13 +292,21 @@ pub fn save_credentials(
     write_credentials_table(&table)
 }
 
-/// Remove the per-URL table for `api_url`.
+/// Remove the per-URL table for `api_url`, and the legacy unscoped token if the file has one.
 pub fn remove_credentials(api_url: &str) -> Result<()> {
     let mut table = load_credentials_table();
     remove_url_tables(&mut table, api_url);
     write_credentials_table(&table)
 }
 
+/// Key of the legacy unscoped `token = "..."` entry at the top of `credentials.toml`.
+const LEGACY_TOKEN_KEY: &str = "token";
+
+/// Remove every entry that `extract_scoped_credentials` could return for `api_url`.
+///
+/// That is the per-URL table under each spelling of the URL, and the legacy unscoped token,
+/// which the lookup falls back to for any URL. Leaving the legacy token behind would keep the
+/// CLI logged in after `tl logout` or `tl context delete`.
 fn remove_url_tables(table: &mut TomlTable, api_url: &str) {
     let normalized_url = normalize_api_url(api_url);
     // Collapse equivalent URL keys so we always keep a single canonical entry.
@@ -310,6 +318,7 @@ fn remove_url_tables(table: &mut TomlTable, api_url: &str) {
     for key in keys_to_remove {
         table.remove(&key);
     }
+    table.remove(LEGACY_TOKEN_KEY);
 }
 
 pub(crate) fn set_scoped_credentials(
@@ -421,7 +430,7 @@ pub(crate) fn all_scoped_credentials(table: &TomlTable) -> Vec<(String, StoredCr
         }
     }
     if out.is_empty()
-        && let Some(token) = table.get("token").and_then(|v| v.as_str())
+        && let Some(token) = table.get(LEGACY_TOKEN_KEY).and_then(|v| v.as_str())
     {
         out.push((
             DEFAULT_API_URL.to_string(),
@@ -492,7 +501,7 @@ fn extract_scoped_credentials(credentials: &TomlTable, api_url: &str) -> Option<
 
     // 4) legacy unscoped format: token = "..."
     credentials
-        .get("token")
+        .get(LEGACY_TOKEN_KEY)
         .and_then(|v| v.as_str())
         .map(|s| StoredCredentials {
             token: s.to_string(),
@@ -552,7 +561,8 @@ fn add_to_gitignore(path: &Path, entry: &str) -> Result<()> {
 mod tests {
     use super::{
         all_scoped_credentials, context_token_from_table, extract_scoped_credentials,
-        extract_scoped_token, normalize_api_url, set_context_token, set_scoped_credentials,
+        extract_scoped_token, normalize_api_url, remove_url_tables, set_context_token,
+        set_scoped_credentials,
     };
 
     #[test]
@@ -658,6 +668,34 @@ project = "project_456"
             .map(|(url, _)| url)
             .collect();
         assert_eq!(urls, vec!["https://api.tensorlake.ai".to_string()]);
+    }
+
+    #[test]
+    fn remove_url_tables_drops_the_legacy_unscoped_token() {
+        let content = r#"
+token = "legacy-token"
+
+[contexts.default]
+token = "legacy-token"
+parent = true
+"#;
+        let mut table: super::TomlTable = toml::from_str(content).expect("valid toml");
+        assert!(extract_scoped_credentials(&table, "https://api.tensorlake.ai").is_some());
+
+        remove_url_tables(&mut table, "https://api.tensorlake.ai");
+
+        assert!(
+            extract_scoped_credentials(&table, "https://api.tensorlake.ai").is_none(),
+            "no token must survive removal: {table:?}"
+        );
+        assert!(all_scoped_credentials(&table).is_empty());
+        // Context tokens are removed separately, so they stay.
+        assert_eq!(
+            context_token_from_table(&table, "default")
+                .expect("context token")
+                .token,
+            "legacy-token"
+        );
     }
 
     #[test]

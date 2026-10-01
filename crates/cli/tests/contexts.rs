@@ -332,6 +332,109 @@ async fn a_project_with_no_token_says_how_to_get_one() {
     );
 }
 
+/// `default` (current) in org_1 and `other` in org_2, both with a token.
+fn contexts_in_two_organizations(home: &Home, api_url: &str) {
+    home.write(
+        "contexts.toml",
+        &format!(
+            r#"current = "default"
+
+[contexts.default]
+api_url = "{api_url}"
+organization = "org_1"
+project = "project_default"
+
+[contexts.other]
+api_url = "{api_url}"
+organization = "org_2"
+project = "project_other"
+"#
+        ),
+    );
+    home.write(
+        "credentials.toml",
+        r#"[contexts.default]
+token = "tl_default"
+parent = true
+
+[contexts.other]
+token = "tl_other"
+parent = true
+"#,
+    );
+}
+
+#[tokio::test]
+async fn a_project_in_another_organization_uses_that_organization_and_token() {
+    let home = Home::new();
+    // A closed port: whoami's name lookup fails fast and is skipped.
+    contexts_in_two_organizations(&home, "http://127.0.0.1:9");
+
+    // The organization inherited from the current context gives way to the one that
+    // owns the project, so the token, organization, and project stay together.
+    let run = tl(
+        &home,
+        &home.dir,
+        &["--project", "project_other", "whoami", "-o", "json"],
+        &[],
+    )
+    .await;
+    assert!(run.success, "{}", run.stderr);
+    let body: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(body["context"]["name"], "other");
+    assert_eq!(body["personalAccessToken"]["organizationId"], "org_2");
+    assert_eq!(body["personalAccessToken"]["projectId"], "project_other");
+    assert!(
+        body["personalAccessToken"]["token"]
+            .as_str()
+            .unwrap()
+            .starts_with("tl_other")
+    );
+
+    // An organization from the local config is inherited too.
+    let project = home.dir.join("project");
+    fs::create_dir_all(project.join(".tensorlake")).unwrap();
+    fs::write(
+        project.join(".tensorlake/config.toml"),
+        "organization = \"org_1\"\nproject = \"project_default\"\n",
+    )
+    .unwrap();
+    let run = tl(
+        &home,
+        &project,
+        &["--project", "project_other", "whoami", "-o", "json"],
+        &[],
+    )
+    .await;
+    assert!(run.success, "{}", run.stderr);
+    let body: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(body["context"]["name"], "other");
+    assert_eq!(body["personalAccessToken"]["organizationId"], "org_2");
+
+    // An explicit organization that conflicts with the project is an error.
+    let run = tl(
+        &home,
+        &home.dir,
+        &[
+            "--organization",
+            "org_1",
+            "--project",
+            "project_other",
+            "secrets",
+            "ls",
+        ],
+        &[],
+    )
+    .await;
+    assert!(!run.success);
+    assert_eq!(
+        run.stderr.trim(),
+        "Error: project project_other belongs to organization org_2 (context 'other'), not org_1. \
+         drop --organization, or run: tl context create <name> --organization org_1 \
+         --project project_other"
+    );
+}
+
 #[tokio::test]
 async fn bad_id_formats_are_rejected_before_any_request() {
     let home = Home::new();
@@ -495,6 +598,46 @@ async fn api_key_with_conflicting_flags_warns() {
     );
     let body: Value = serde_json::from_str(&run.stdout).unwrap();
     assert_eq!(body["apiKey"]["projectId"], "project_1");
+}
+
+#[tokio::test]
+async fn api_key_with_only_a_conflicting_organization_flag_warns() {
+    // The project comes from the current context, not from a flag. The organization flag
+    // still conflicts with the API key scope, so the warning names only the organization.
+    let (url, server) = scripted_server(vec![
+        (
+            200,
+            json!({"id": "key_1", "organizationId": "org_1", "projectId": "project_1"}),
+        ),
+        (200, json!({"name": "Prod", "organizationName": "Acme"})),
+    ])
+    .await;
+    let home = Home::new();
+    two_contexts(&home, &url);
+    let run = tl(
+        &home,
+        &home.dir,
+        &[
+            "--api-key",
+            "tl_apiKey_x",
+            "--organization",
+            "org_9",
+            "whoami",
+            "-o",
+            "json",
+        ],
+        &[],
+    )
+    .await;
+    server.await.unwrap();
+    assert!(run.success, "{}", run.stderr);
+    assert!(
+        run.stderr.contains("warning: --organization/--project (org_9/-) do not match the API key scope (org_1/project_1)"),
+        "{}",
+        run.stderr
+    );
+    let body: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(body["apiKey"]["organizationId"], "org_1");
 }
 
 #[tokio::test]
@@ -678,6 +821,182 @@ async fn logout_forgets_the_tokens_of_the_organization() {
             .iter()
             .all(|c| c["token"] == "none"),
         "{list}"
+    );
+}
+
+#[tokio::test]
+async fn logout_revokes_every_login_token_of_the_organization() {
+    // Two login tokens (parents) in one organization: `default` from `tl login`, and
+    // `review` from a `tl context create` that fell back to the browser login. `staging`
+    // was minted from `default`; the server revokes it with its parent.
+    let (url, server) = scripted_server(vec![(200, json!({})), (200, json!({}))]).await;
+    let home = Home::new();
+    two_contexts(&home, &url);
+    home.write(
+        "contexts.toml",
+        &format!(
+            r#"current = "staging"
+
+[contexts.default]
+api_url = "{url}"
+organization = "org_1"
+project = "project_default"
+
+[contexts.review]
+api_url = "{url}"
+organization = "org_1"
+project = "project_review"
+
+[contexts.staging]
+api_url = "{url}"
+organization = "org_1"
+project = "project_staging"
+"#
+        ),
+    );
+    home.write(
+        "credentials.toml",
+        &format!(
+            r#"["{url}"]
+token = "tl_default"
+organization = "org_1"
+project = "project_default"
+
+[contexts.default]
+token = "tl_default"
+parent = true
+
+[contexts.review]
+token = "tl_review"
+parent = true
+
+[contexts.staging]
+token = "tl_staging"
+parent = false
+"#
+        ),
+    );
+
+    let run = tl(&home, &home.dir, &["logout"], &[]).await;
+    let requests = server.await.unwrap();
+    assert!(run.success, "{}", run.stderr);
+    assert_eq!(requests.len(), 2, "{requests:?}");
+    let bearers: Vec<&str> = requests
+        .iter()
+        .map(|r| {
+            assert!(r.starts_with("POST /platform/cli/tokens/revoke "), "{r}");
+            r.lines()
+                .find_map(|l| l.strip_prefix("authorization: Bearer "))
+                .unwrap()
+                .trim()
+        })
+        .collect();
+    assert_eq!(bearers, vec!["tl_default", "tl_review"]);
+    assert!(
+        run.stderr
+            .contains("revoked the login token of context 'default'"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stderr
+            .contains("revoked the login token of context 'review'"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        run.stdout
+            .contains("removed the tokens of: default, review, staging"),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        home.toml("credentials.toml")["contexts"]
+            .as_table()
+            .map(|t| t.is_empty())
+            .unwrap_or(true),
+        "{}",
+        home.read("credentials.toml")
+    );
+}
+
+/// A `credentials.toml` from before per-URL tables: one unscoped token at the top.
+fn legacy_credentials(home: &Home) {
+    home.write("credentials.toml", "token = \"tl_legacy\"\n");
+}
+
+#[tokio::test]
+async fn logout_removes_the_legacy_unscoped_token() {
+    let (url, server) = scripted_server(vec![(404, json!({"message": "Not Found"}))]).await;
+    let home = Home::new();
+    legacy_credentials(&home);
+    // The first command migrates the legacy token into context `default`.
+    let run = tl(
+        &home,
+        &home.dir,
+        &["context", "set", "default", &format!("api_url={url}")],
+        &[],
+    )
+    .await;
+    assert!(run.success, "{}", run.stderr);
+    assert_eq!(
+        home.toml("credentials.toml")["contexts"]["default"]["token"],
+        toml::Value::from("tl_legacy")
+    );
+
+    let run = tl(&home, &home.dir, &["logout"], &[]).await;
+    let requests = server.await.unwrap();
+    assert!(run.success, "{}", run.stderr);
+    assert!(
+        requests[0].contains("authorization: Bearer tl_legacy"),
+        "{}",
+        requests[0]
+    );
+    assert!(
+        run.stderr.contains("removed from this machine only"),
+        "{}",
+        run.stderr
+    );
+
+    let credentials = home.read("credentials.toml");
+    assert!(
+        !credentials.contains("tl_legacy"),
+        "the legacy token must not survive logout: {credentials}"
+    );
+
+    // The next command is not logged in any more.
+    let run = tl(&home, &home.dir, &["secrets", "ls"], &[]).await;
+    assert!(!run.success, "{}", run.stdout);
+    assert!(run.stderr.contains("login"), "{}", run.stderr);
+}
+
+#[tokio::test]
+async fn delete_removes_the_legacy_unscoped_token() {
+    let home = Home::new();
+    legacy_credentials(&home);
+    // A closed port: the revoke attempt fails fast and the token is removed locally only.
+    let run = tl(
+        &home,
+        &home.dir,
+        &["context", "set", "default", "api_url=http://127.0.0.1:9"],
+        &[],
+    )
+    .await;
+    assert!(run.success, "{}", run.stderr);
+
+    let run = tl(&home, &home.dir, &["context", "delete", "default"], &[]).await;
+    assert!(run.success, "{}", run.stderr);
+    assert!(run.stderr.contains("could not revoke"), "{}", run.stderr);
+
+    let credentials = home.read("credentials.toml");
+    assert!(
+        !credentials.contains("tl_legacy"),
+        "the legacy token must not survive deletion: {credentials}"
+    );
+    assert!(
+        home.toml("contexts.toml")["contexts"]
+            .get("default")
+            .is_none()
     );
 }
 

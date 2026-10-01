@@ -25,27 +25,40 @@ pub async fn logout(ctx: &CliContext) -> Result<()> {
         .ok_or_else(|| CliError::config(format!("unknown context '{name}'")))?;
     let organization = entry.organization.as_deref();
 
-    // The parent is the login token for this organization. Revoking it makes the server
-    // revoke the tokens minted from it as well.
-    let parent = contexts
+    // Each login token (a parent) of this organization is revoked. The server then revokes
+    // the tokens minted from it. One organization can hold more than one parent: for
+    // example, when `tl context create` fell back to the browser login because the server
+    // could not mint tokens. Revoke them all, since all of them are forgotten below.
+    let mut to_revoke: Vec<(String, String)> = contexts
         .for_api_url(&entry.api_url)
         .filter(|(_, e)| e.organization.as_deref() == organization)
-        .find_map(|(n, _)| load_context_token(n).filter(|t| t.parent).map(|t| (n, t)));
-    let to_revoke = parent
-        .map(|(n, t)| (n.to_string(), t.token))
-        .or_else(|| load_context_token(name).map(|t| (name.to_string(), t.token)));
+        .filter_map(|(n, _)| {
+            load_context_token(n)
+                .filter(|t| t.parent)
+                .map(|t| (n.to_string(), t.token))
+        })
+        .collect();
+    if to_revoke.is_empty()
+        && let Some(t) = load_context_token(name)
+    {
+        to_revoke.push((name.to_string(), t.token));
+    }
 
-    match to_revoke {
-        Some((revoked_name, token)) => match revoke_token(&entry.api_url, &token).await {
+    if to_revoke.is_empty() {
+        eprintln!("no saved token for context '{name}'.");
+    }
+    for (revoked_name, token) in to_revoke {
+        match revoke_token(&entry.api_url, &token).await {
             Ok(RevokeOutcome::Revoked) => {
                 eprintln!("revoked the login token of context '{revoked_name}' on the server.")
             }
             Ok(RevokeOutcome::Unsupported) => eprintln!(
-                "the server could not revoke the token (not supported yet). tokens are removed from this machine only."
+                "the server could not revoke the token of context '{revoked_name}' (not supported yet). tokens are removed from this machine only."
             ),
-            Err(e) => eprintln!("warning: could not revoke the token: {e}"),
-        },
-        None => eprintln!("no saved token for context '{name}'."),
+            Err(e) => {
+                eprintln!("warning: could not revoke the token of context '{revoked_name}': {e}")
+            }
+        }
     }
 
     let forgotten = forget_organization_tokens(&entry.api_url, organization)?;

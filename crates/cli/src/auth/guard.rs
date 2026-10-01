@@ -180,6 +180,7 @@ mod tests {
             context_name: None,
             context_source: None,
             scope_source: crate::config::resolver::ScopeSource::None,
+            organization_source: crate::config::resolver::ScopeSource::None,
         });
 
         ensure_auth_for_api_key_scoped_project(&mut ctx)

@@ -58,7 +58,10 @@ pub struct ResolvedConfig {
     /// The context whose token and scope are in use, if any.
     pub context_name: Option<String>,
     pub context_source: Option<ContextSource>,
+    /// Where the project came from, or the organization when there is no project.
     pub scope_source: ScopeSource,
+    /// Where the organization came from.
+    pub organization_source: ScopeSource,
 }
 
 /// Resolve all configuration.
@@ -179,7 +182,7 @@ fn resolve_inner(
         None
     };
 
-    let scope = resolve_scope(
+    let mut scope = resolve_scope(
         organization_id,
         project_id,
         &final_api_url,
@@ -197,7 +200,7 @@ fn resolve_inner(
     } else {
         match resolve_token(
             &final_api_url,
-            &scope,
+            &mut scope,
             selection.as_ref().map(|(name, _)| name.as_str()),
             &contexts,
             stored_credentials.as_ref(),
@@ -230,6 +233,7 @@ fn resolve_inner(
         context_name,
         context_source,
         scope_source: scope.source,
+        organization_source: scope.organization_source,
     })
 }
 
@@ -278,7 +282,10 @@ fn unknown_context(name: &str, source: ContextSource, contexts: &ContextsFile) -
 pub(crate) struct ResolvedScope {
     pub organization_id: Option<String>,
     pub project_id: Option<String>,
+    /// Where the project came from, or the organization when there is no project.
     pub source: ScopeSource,
+    /// Where the organization came from.
+    pub organization_source: ScopeSource,
 }
 
 /// Merge the organization and project from the sources in lookup order.
@@ -351,6 +358,7 @@ pub(crate) fn resolve_scope(
         .unwrap_or(ScopeSource::None);
 
     ResolvedScope {
+        organization_source: org.as_ref().map(|(_, s)| *s).unwrap_or(ScopeSource::None),
         organization_id: org.and_then(|(v, _)| v),
         project_id: proj.and_then(|(v, _)| v),
         source,
@@ -364,10 +372,13 @@ pub(crate) fn resolve_scope(
 /// same organization and project. This keeps a migrated login working when the migration
 /// could not write `credentials.toml` (for example, a read-only home directory).
 ///
+/// The organization in `scope` is aligned with the found context, so that the token, the
+/// organization, and the project always belong together. See [`align_organization`].
+///
 /// Returns `(token, context name)`.
 fn resolve_token(
     api_url: &str,
-    scope: &ResolvedScope,
+    scope: &mut ResolvedScope,
     selected: Option<&str>,
     contexts: &ContextsFile,
     stored: Option<&StoredCredentials>,
@@ -386,9 +397,13 @@ fn resolve_token(
     );
     match found {
         Some(name) => {
+            let entry = contexts
+                .get(name)
+                .expect("find_for_scope returns a saved name");
+            align_organization(scope, name, entry)?;
             let token = load_context_token(name)
                 .map(|t| t.token)
-                .or_else(|| legacy_token_for(contexts.get(name)?, stored?));
+                .or_else(|| legacy_token_for(entry, stored?));
             Ok((token, Some(name.to_string())))
         }
         None => match scope.project_id.as_deref() {
@@ -397,6 +412,38 @@ fn resolve_token(
             ))),
             None => Ok((None, None)),
         },
+    }
+}
+
+/// Make the organization in `scope` agree with the context that supplies the token.
+///
+/// A project ID names one organization. When `--project` picks a context saved under another
+/// organization than the one in `scope`, the organization in `scope` is stale: it came from
+/// the current context, the local config, or the old login. Replace it with the one from the
+/// context. An organization given on the command line is explicit, so a conflict is an error
+/// instead.
+fn align_organization(scope: &mut ResolvedScope, name: &str, entry: &ContextEntry) -> Result<()> {
+    let Some(context_org) = entry.organization.as_deref() else {
+        return Ok(());
+    };
+    match scope.organization_id.as_deref() {
+        Some(org) if org == context_org => Ok(()),
+        Some(org) if scope.organization_source == ScopeSource::Flags => {
+            let project = scope.project_id.as_deref().unwrap_or_default();
+            Err(CliError::usage(format!(
+                "project {project} belongs to organization {context_org} (context '{name}'), \
+                 not {org}. drop --organization, or run: tl context create <name> \
+                 --organization {org} --project {project}"
+            )))
+        }
+        _ => {
+            scope.organization_id = Some(context_org.to_string());
+            scope.organization_source = ScopeSource::Context;
+            if scope.project_id.is_none() {
+                scope.source = ScopeSource::Context;
+            }
+            Ok(())
+        }
     }
 }
 
@@ -745,14 +792,15 @@ project = "project_local"
     #[test]
     fn a_project_with_no_context_is_a_clear_error() {
         let c = contexts();
-        let scope = ResolvedScope {
+        let mut scope = ResolvedScope {
             organization_id: Some("org_1".into()),
             project_id: Some("project_other".into()),
             source: ScopeSource::Flags,
+            organization_source: ScopeSource::Context,
         };
         let err = resolve_token(
             "https://api.tensorlake.ai",
-            &scope,
+            &mut scope,
             Some("default"),
             &c,
             None,
@@ -767,21 +815,120 @@ project = "project_local"
     #[test]
     fn a_project_flag_picks_the_matching_context() {
         let c = contexts();
-        let scope = ResolvedScope {
+        let mut scope = ResolvedScope {
             organization_id: Some("org_1".into()),
             project_id: Some("project_staging".into()),
             source: ScopeSource::Flags,
+            organization_source: ScopeSource::Context,
         };
         // No token on disk in unit tests, but the context is named.
         let (_, name) = resolve_token(
             "https://api.tensorlake.ai",
-            &scope,
+            &mut scope,
             Some("default"),
             &c,
             None,
         )
         .unwrap();
         assert_eq!(name.as_deref(), Some("staging"));
+    }
+
+    fn contexts_in_two_organizations() -> ContextsFile {
+        let mut c = contexts();
+        c.contexts.insert(
+            "other".into(),
+            entry("https://api.tensorlake.ai", "org_2", "project_other"),
+        );
+        c
+    }
+
+    #[test]
+    fn a_project_in_another_organization_takes_that_organization() {
+        let c = contexts_in_two_organizations();
+        // `tl --project project_other` with `default` (org_1) current: the organization
+        // was inherited, so it follows the context that owns the project.
+        for inherited in [
+            ScopeSource::Context,
+            ScopeSource::LocalConfig,
+            ScopeSource::Credentials,
+        ] {
+            let mut scope = ResolvedScope {
+                organization_id: Some("org_1".into()),
+                project_id: Some("project_other".into()),
+                source: ScopeSource::Flags,
+                organization_source: inherited,
+            };
+            let (_, name) = resolve_token(
+                "https://api.tensorlake.ai",
+                &mut scope,
+                Some("default"),
+                &c,
+                None,
+            )
+            .unwrap();
+            assert_eq!(name.as_deref(), Some("other"));
+            assert_eq!(scope.organization_id.as_deref(), Some("org_2"));
+            assert_eq!(scope.organization_source, ScopeSource::Context);
+            assert_eq!(scope.project_id.as_deref(), Some("project_other"));
+            assert_eq!(scope.source, ScopeSource::Flags);
+        }
+
+        // No organization at all: the context supplies one.
+        let mut scope = ResolvedScope {
+            organization_id: None,
+            project_id: Some("project_other".into()),
+            source: ScopeSource::Flags,
+            organization_source: ScopeSource::None,
+        };
+        resolve_token(
+            "https://api.tensorlake.ai",
+            &mut scope,
+            Some("default"),
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(scope.organization_id.as_deref(), Some("org_2"));
+    }
+
+    #[test]
+    fn an_explicit_organization_that_conflicts_with_the_project_is_an_error() {
+        let c = contexts_in_two_organizations();
+        let mut scope = ResolvedScope {
+            organization_id: Some("org_1".into()),
+            project_id: Some("project_other".into()),
+            source: ScopeSource::Flags,
+            organization_source: ScopeSource::Flags,
+        };
+        let err = resolve_token(
+            "https://api.tensorlake.ai",
+            &mut scope,
+            Some("default"),
+            &c,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "project project_other belongs to organization org_2 (context 'other'), not org_1. \
+             drop --organization, or run: tl context create <name> --organization org_1 \
+             --project project_other"
+        );
+        // The scope is left as given.
+        assert_eq!(scope.organization_id.as_deref(), Some("org_1"));
+
+        // The same organization on the flag is fine.
+        scope.organization_id = Some("org_2".into());
+        let (_, name) = resolve_token(
+            "https://api.tensorlake.ai",
+            &mut scope,
+            Some("default"),
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(name.as_deref(), Some("other"));
+        assert_eq!(scope.organization_source, ScopeSource::Flags);
     }
 
     #[test]
@@ -791,10 +938,10 @@ project = "project_local"
             organization_id: None,
             project_id: None,
         };
-        let scope = ResolvedScope::default();
+        let mut scope = ResolvedScope::default();
         let (token, name) = resolve_token(
             "https://api.tensorlake.ai",
-            &scope,
+            &mut scope,
             None,
             &ContextsFile::default(),
             Some(&stored),

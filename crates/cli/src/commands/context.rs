@@ -306,6 +306,8 @@ pub async fn create(
         )));
     }
 
+    // The project to ask the browser for: the flag, or the one picked from the parent's list.
+    let mut wanted_project: Option<String> = project.map(str::to_string);
     if let Some(parent) = find_parent(ctx, &contexts, organization) {
         let project_id = match project {
             Some(p) => p.to_string(),
@@ -328,6 +330,8 @@ pub async fn create(
             }
             MintOutcome::Unsupported => {
                 eprintln!("the server cannot mint tokens yet. using the browser login instead.");
+                // Keep the picked project so the browser login asks for it and checks it.
+                wanted_project = Some(project_id);
             }
         }
     } else {
@@ -337,8 +341,8 @@ pub async fn create(
         );
     }
 
-    let login = browser_login(ctx, project).await?;
-    check_browser_login(&login, organization, project)?;
+    let login = browser_login(ctx, wanted_project.as_deref()).await?;
+    check_browser_login(&login, organization, wanted_project.as_deref())?;
     let entry = ContextEntry {
         api_url: ctx.api_url.clone(),
         organization: login.organization_id.clone(),

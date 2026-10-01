@@ -83,6 +83,10 @@ impl ContextsFile {
     /// The name of a context that works for the given scope. Prefers `preferred` when it
     /// matches, then the current context, then an exact project match, then an unscoped
     /// context, in name order.
+    ///
+    /// An exact project match in the same organization comes before one in another
+    /// organization. The caller must then align its organization with the found context,
+    /// because a project ID names one organization and the token belongs to that one.
     pub fn find_for_scope(
         &self,
         api_url: &str,
@@ -98,13 +102,17 @@ impl ContextsFile {
                 return Some(found.as_str());
             }
         }
-        if let Some(project) = project
-            && let Some((name, _)) = self
-                .contexts
-                .iter()
-                .find(|(_, entry)| entry.is_for_project(api_url, project))
-        {
-            return Some(name);
+        if let Some(project) = project {
+            let exact = || {
+                self.contexts
+                    .iter()
+                    .filter(|(_, entry)| entry.is_for_project(api_url, project))
+            };
+            let same_org =
+                exact().find(|(_, entry)| entry.matches(api_url, organization, Some(project)));
+            if let Some((name, _)) = same_org.or_else(|| exact().next()) {
+                return Some(name);
+            }
         }
         self.contexts
             .iter()
@@ -363,6 +371,33 @@ token = "dev-token"
         assert_eq!(
             file.find_for_scope(url, Some("org_2"), Some("project_9"), None),
             None
+        );
+        // A project saved under another organization still finds its context: the
+        // organization in the scope was inherited and the caller aligns it.
+        file.contexts.insert(
+            "other".into(),
+            entry(
+                "https://api.tensorlake.ai",
+                Some("org_2"),
+                Some("project_2"),
+            ),
+        );
+        assert_eq!(
+            file.find_for_scope(url, Some("org_1"), Some("project_2"), None),
+            Some("other")
+        );
+        // But a context in the same organization comes first.
+        file.contexts.insert(
+            "mine".into(),
+            entry(
+                "https://api.tensorlake.ai",
+                Some("org_1"),
+                Some("project_2"),
+            ),
+        );
+        assert_eq!(
+            file.find_for_scope(url, Some("org_1"), Some("project_2"), None),
+            Some("mine")
         );
         // Another API URL has no token.
         assert_eq!(

@@ -22,8 +22,10 @@ pub struct CliContext {
     /// The context whose token and scope are in use, if any.
     pub context_name: Option<String>,
     pub context_source: Option<ContextSource>,
-    /// Where the organization and project came from.
+    /// Where the project came from, or the organization when there is no project.
     pub scope_source: ScopeSource,
+    /// Where the organization came from.
+    pub organization_source: ScopeSource,
     introspect_cache: Option<IntrospectResult>,
 }
 
@@ -49,6 +51,7 @@ impl CliContext {
             context_name: config.context_name,
             context_source: config.context_source,
             scope_source: config.scope_source,
+            organization_source: config.organization_source,
             introspect_cache: None,
         }
     }
@@ -216,15 +219,23 @@ impl CliContext {
         // API keys are scoped to exactly one project. Treat the server-returned
         // scope as authoritative so stale local config cannot route API-key
         // requests to an unrelated org/project and trigger confusing 403s.
-        // Tell the user when flags they gave are ignored for that reason.
-        if self.scope_source == ScopeSource::Flags
-            && let Some(warning) = api_key_scope_warning(
-                self.organization_id.as_deref(),
-                self.project_id.as_deref(),
-                result.organization_id.as_deref(),
-                result.project_id.as_deref(),
-            )
-        {
+        // Tell the user when flags they gave are ignored for that reason. The organization
+        // and the project can come from different sources, so check each on its own.
+        let flag_org = self
+            .organization_id
+            .as_deref()
+            .filter(|_| self.organization_source == ScopeSource::Flags);
+        // `scope_source` is the project's source whenever there is a project.
+        let flag_project = self
+            .project_id
+            .as_deref()
+            .filter(|_| self.scope_source == ScopeSource::Flags);
+        if let Some(warning) = api_key_scope_warning(
+            flag_org,
+            flag_project,
+            result.organization_id.as_deref(),
+            result.project_id.as_deref(),
+        ) {
             eprintln!("{warning}");
         }
         self.organization_id = result.organization_id.clone();
