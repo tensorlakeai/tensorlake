@@ -628,6 +628,9 @@ mod tests {
             organization_id: None,
             project_id: None,
             debug: false,
+            context_name: None,
+            context_source: None,
+            scope_source: crate::config::resolver::ScopeSource::None,
         })
     }
 

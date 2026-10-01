@@ -1,7 +1,48 @@
+use crate::config::contexts::{ContextEntry, ContextsFile, load_contexts};
 use crate::config::files::{
-    TomlTable, get_nested_value, load_global_config, load_local_config, load_stored_credentials,
-    normalize_api_url,
+    DEFAULT_API_URL, StoredCredentials, TomlTable, get_nested_value, load_context_token,
+    load_global_config, load_local_config, load_stored_credentials, normalize_api_url,
 };
+use crate::error::{CliError, Result};
+
+/// Where the selected context came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContextSource {
+    /// `--context` on the command line.
+    Flag,
+    /// `TENSORLAKE_CONTEXT`.
+    Env,
+    /// `context = "<name>"` in `.tensorlake/config.toml`.
+    LocalConfig,
+    /// `current` in `contexts.toml`.
+    Current,
+}
+
+impl ContextSource {
+    pub fn describe(self) -> &'static str {
+        match self {
+            ContextSource::Flag => "--context flag",
+            ContextSource::Env => "TENSORLAKE_CONTEXT",
+            ContextSource::LocalConfig => ".tensorlake/config.toml",
+            ContextSource::Current => "current context",
+        }
+    }
+}
+
+/// Where the organization and project came from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ScopeSource {
+    /// `--organization` / `--project` or their env vars.
+    Flags,
+    /// The selected context.
+    Context,
+    /// `organization` / `project` keys in `.tensorlake/config.toml`.
+    LocalConfig,
+    /// The old per-URL login scope in `credentials.toml`.
+    Credentials,
+    #[default]
+    None,
+}
 
 /// Resolved configuration values with source tracking.
 #[derive(Debug, Clone)]
@@ -14,10 +55,23 @@ pub struct ResolvedConfig {
     pub organization_id: Option<String>,
     pub project_id: Option<String>,
     pub debug: bool,
+    /// The context whose token and scope are in use, if any.
+    pub context_name: Option<String>,
+    pub context_source: Option<ContextSource>,
+    pub scope_source: ScopeSource,
 }
 
-/// Resolve all configuration from CLI args/env vars > stored login scope > local config > global config > defaults.
-/// CLI args and env vars are already merged by clap (via `env` attribute).
+/// Resolve all configuration.
+///
+/// Lookup order for the organization and project, from high to low:
+/// 1. `--organization` / `--project` flags and their env vars.
+/// 2. `--context` flag, then `TENSORLAKE_CONTEXT`.
+/// 3. Local `.tensorlake/config.toml`: a `context` key, or `organization` and `project` keys.
+/// 4. `current` in `contexts.toml`.
+/// 5. The old saved login scope in `credentials.toml`.
+///
+/// CLI args and env vars are already merged by clap (via `env` attribute), except for
+/// `--context`, where the caller passes the flag and `TENSORLAKE_CONTEXT` is read here.
 #[allow(clippy::too_many_arguments)]
 pub fn resolve(
     api_url: Option<&str>,
@@ -27,64 +81,344 @@ pub fn resolve(
     namespace: Option<&str>,
     organization_id: Option<&str>,
     project_id: Option<&str>,
+    context: Option<&str>,
     debug: bool,
-) -> ResolvedConfig {
-    let local_config = load_local_config();
-    let global_config = load_global_config();
-
-    let final_api_url = resolve_api_url(api_url, &local_config, &global_config);
-    let final_cloud_url =
-        resolve_cloud_url(cloud_url, &final_api_url, &local_config, &global_config);
-    let stored_credentials = load_stored_credentials(&final_api_url);
-    let use_stored_scope = pat.is_none();
-    let (final_api_key, final_pat) = resolve_auth(
+) -> Result<ResolvedConfig> {
+    resolve_inner(
+        api_url,
+        cloud_url,
         api_key,
         pat,
-        &local_config,
-        &global_config,
-        stored_credentials
-            .as_ref()
-            .map(|credentials| credentials.token.as_str()),
-    );
-    let final_namespace = resolve_namespace(namespace, &local_config, &global_config);
-    let (org_id, proj_id) = resolve_project_config(
+        namespace,
         organization_id,
         project_id,
+        context,
+        debug,
+        false,
+    )
+}
+
+/// Like `resolve`, but an unknown context or a missing token is a warning, not an error.
+///
+/// For commands that repair the configuration (`tl login`, `tl context ...`, `tl init`) and
+/// for `tl whoami`, which should show the problem.
+#[allow(clippy::too_many_arguments)]
+pub fn resolve_lenient(
+    api_url: Option<&str>,
+    cloud_url: Option<&str>,
+    api_key: Option<&str>,
+    pat: Option<&str>,
+    namespace: Option<&str>,
+    organization_id: Option<&str>,
+    project_id: Option<&str>,
+    context: Option<&str>,
+    debug: bool,
+) -> ResolvedConfig {
+    resolve_inner(
+        api_url,
+        cloud_url,
+        api_key,
+        pat,
+        namespace,
+        organization_id,
+        project_id,
+        context,
+        debug,
+        true,
+    )
+    .expect("lenient resolve never fails")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn resolve_inner(
+    api_url: Option<&str>,
+    cloud_url: Option<&str>,
+    api_key: Option<&str>,
+    pat: Option<&str>,
+    namespace: Option<&str>,
+    organization_id: Option<&str>,
+    project_id: Option<&str>,
+    context: Option<&str>,
+    debug: bool,
+    lenient: bool,
+) -> Result<ResolvedConfig> {
+    let local_config = load_local_config();
+    let global_config = load_global_config();
+    let contexts = load_contexts();
+    let env_context = std::env::var("TENSORLAKE_CONTEXT")
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
+
+    let selection = match select_context(context, env_context.as_deref(), &local_config, &contexts)
+    {
+        Ok(selection) => selection,
+        Err(e) if lenient => {
+            eprintln!("warning: {e}");
+            None
+        }
+        Err(e) => return Err(e),
+    };
+    let selected_entry = selection.as_ref().and_then(|(name, _)| contexts.get(name));
+
+    let final_api_url = resolve_api_url(
+        api_url,
+        selection.as_ref().map(|(_, source)| *source),
+        selected_entry,
         &local_config,
-        if use_stored_scope {
-            stored_credentials
-                .as_ref()
-                .and_then(|credentials| credentials.organization_id.as_deref())
-        } else {
-            None
-        },
-        if use_stored_scope {
-            stored_credentials
-                .as_ref()
-                .and_then(|credentials| credentials.project_id.as_deref())
-        } else {
-            None
-        },
+        &global_config,
+    );
+    let final_cloud_url =
+        resolve_cloud_url(cloud_url, &final_api_url, &local_config, &global_config);
+    let final_namespace = resolve_namespace(namespace, &local_config, &global_config);
+    let final_api_key = resolve_api_key(api_key, &local_config, &global_config);
+
+    let stored_credentials = if pat.is_none() {
+        load_stored_credentials(&final_api_url)
+    } else {
+        None
+    };
+
+    let scope = resolve_scope(
+        organization_id,
+        project_id,
+        selection.as_ref().map(|(name, _)| name.as_str()),
+        selected_entry,
+        &local_config,
+        &contexts,
+        stored_credentials.as_ref(),
     );
 
-    ResolvedConfig {
+    let (final_pat, token_context) = if let Some(pat) = pat {
+        (Some(pat.to_string()), None)
+    } else if final_api_key.is_some() {
+        // An API key wins over any PAT, so do not fail on a missing token here.
+        (None, None)
+    } else {
+        match resolve_token(
+            &final_api_url,
+            &scope,
+            selection.as_ref().map(|(name, _)| name.as_str()),
+            &contexts,
+            stored_credentials.as_ref(),
+        ) {
+            Ok(found) => found,
+            Err(e) if lenient => {
+                eprintln!("warning: {e}");
+                (None, None)
+            }
+            Err(e) => return Err(e),
+        }
+    };
+
+    let (context_name, context_source) = match (token_context, selection) {
+        (Some(name), Some((selected, source))) if name == selected => (Some(name), Some(source)),
+        (Some(name), _) => (Some(name), None),
+        (None, Some((selected, source))) => (Some(selected), Some(source)),
+        (None, None) => (None, None),
+    };
+
+    Ok(ResolvedConfig {
         api_url: final_api_url,
         cloud_url: final_cloud_url,
         namespace: final_namespace,
         api_key: final_api_key,
         personal_access_token: final_pat,
-        organization_id: org_id,
-        project_id: proj_id,
+        organization_id: scope.organization_id,
+        project_id: scope.project_id,
         debug,
+        context_name,
+        context_source,
+        scope_source: scope.source,
+    })
+}
+
+/// Pick the context named by the flag, the env var, the local config, or `current`.
+///
+/// A name that is not in `contexts.toml` is an error, except for `current`, which is
+/// ignored when stale.
+pub(crate) fn select_context(
+    flag: Option<&str>,
+    env: Option<&str>,
+    local: &TomlTable,
+    contexts: &ContextsFile,
+) -> Result<Option<(String, ContextSource)>> {
+    let local_context = get_nested_value(local, "context");
+    let named = [
+        (flag, ContextSource::Flag),
+        (env, ContextSource::Env),
+        (local_context.as_deref(), ContextSource::LocalConfig),
+    ];
+    for (name, source) in named {
+        let Some(name) = name else { continue };
+        if contexts.get(name).is_some() {
+            return Ok(Some((name.to_string(), source)));
+        }
+        return Err(unknown_context(name, source, contexts));
+    }
+    Ok(contexts
+        .current_entry()
+        .map(|(name, _)| (name.to_string(), ContextSource::Current)))
+}
+
+fn unknown_context(name: &str, source: ContextSource, contexts: &ContextsFile) -> CliError {
+    let known: Vec<&str> = contexts.contexts.keys().map(String::as_str).collect();
+    let hint = if known.is_empty() {
+        "no contexts are saved. run: tl login".to_string()
+    } else {
+        format!("saved contexts: {}", known.join(", "))
+    };
+    CliError::config(format!(
+        "unknown context '{name}' (from {}). {hint}",
+        source.describe()
+    ))
+}
+
+#[derive(Debug, Clone, Default)]
+pub(crate) struct ResolvedScope {
+    pub organization_id: Option<String>,
+    pub project_id: Option<String>,
+    pub source: ScopeSource,
+}
+
+/// Merge the organization and project from the sources in lookup order.
+///
+/// The `source` is where the project came from, or the organization when there is no project.
+pub(crate) fn resolve_scope(
+    org_flag: Option<&str>,
+    proj_flag: Option<&str>,
+    selected: Option<&str>,
+    selected_entry: Option<&ContextEntry>,
+    local: &TomlTable,
+    contexts: &ContextsFile,
+    stored: Option<&StoredCredentials>,
+) -> ResolvedScope {
+    // The selected context, unless it is only `current`, in which case the local
+    // organization/project keys come first (steps 3 and 4).
+    let selected_is_current = selected.is_some()
+        && selected == contexts.current.as_deref()
+        && get_nested_value(local, "context").is_none();
+    let current_entry = contexts.current_entry().map(|(_, e)| e);
+    let early_context = if selected_is_current {
+        None
+    } else {
+        selected_entry
+    };
+    let late_context = if selected_is_current {
+        current_entry
+    } else {
+        None
+    };
+
+    let org_sources: [(Option<String>, ScopeSource); 5] = [
+        (org_flag.map(str::to_string), ScopeSource::Flags),
+        (
+            early_context.and_then(|e| e.organization.clone()),
+            ScopeSource::Context,
+        ),
+        (
+            get_nested_value(local, "organization"),
+            ScopeSource::LocalConfig,
+        ),
+        (
+            late_context.and_then(|e| e.organization.clone()),
+            ScopeSource::Context,
+        ),
+        (
+            stored.and_then(|s| s.organization_id.clone()),
+            ScopeSource::Credentials,
+        ),
+    ];
+    let proj_sources: [(Option<String>, ScopeSource); 5] = [
+        (proj_flag.map(str::to_string), ScopeSource::Flags),
+        (
+            early_context.and_then(|e| e.project.clone()),
+            ScopeSource::Context,
+        ),
+        (get_nested_value(local, "project"), ScopeSource::LocalConfig),
+        (
+            late_context.and_then(|e| e.project.clone()),
+            ScopeSource::Context,
+        ),
+        (
+            stored.and_then(|s| s.project_id.clone()),
+            ScopeSource::Credentials,
+        ),
+    ];
+
+    let org = org_sources.into_iter().find(|(v, _)| v.is_some());
+    let proj = proj_sources.into_iter().find(|(v, _)| v.is_some());
+    let source = proj
+        .as_ref()
+        .or(org.as_ref())
+        .map(|(_, s)| *s)
+        .unwrap_or(ScopeSource::None);
+
+    ResolvedScope {
+        organization_id: org.and_then(|(v, _)| v),
+        project_id: proj.and_then(|(v, _)| v),
+        source,
     }
 }
 
-fn resolve_api_url(cli: Option<&str>, local: &TomlTable, global: &TomlTable) -> String {
+/// Find the token for the resolved scope: the selected context when it matches, else a
+/// context that works for the scope, else the old per-URL token when no context exists.
+///
+/// Returns `(token, context name)`.
+fn resolve_token(
+    api_url: &str,
+    scope: &ResolvedScope,
+    selected: Option<&str>,
+    contexts: &ContextsFile,
+    stored: Option<&StoredCredentials>,
+) -> Result<(Option<String>, Option<String>)> {
+    let has_contexts_for_url = contexts.for_api_url(api_url).next().is_some();
+    if !has_contexts_for_url {
+        // No contexts (first run with no login, or a hand-written file): old behaviour.
+        return Ok((stored.map(|s| s.token.clone()), None));
+    }
+
+    let found = contexts.find_for_scope(
+        api_url,
+        scope.organization_id.as_deref(),
+        scope.project_id.as_deref(),
+        selected,
+    );
+    match found {
+        Some(name) => {
+            let token = load_context_token(name).map(|t| t.token);
+            Ok((token, Some(name.to_string())))
+        }
+        None => match scope.project_id.as_deref() {
+            Some(project) => Err(CliError::auth(format!(
+                "no token for project {project}. run: tl context create <name> --project {project}"
+            ))),
+            None => Ok((None, None)),
+        },
+    }
+}
+
+fn resolve_api_url(
+    cli: Option<&str>,
+    context_source: Option<ContextSource>,
+    context: Option<&ContextEntry>,
+    local: &TomlTable,
+    global: &TomlTable,
+) -> String {
+    // A context named by flag, env var, or local config beats the local config URL.
+    // The current context only beats the global config.
+    let (early, late) = match context_source {
+        Some(ContextSource::Current) => (None, context),
+        Some(_) => (context, None),
+        None => (None, None),
+    };
     let api_url = cli
         .map(|s| s.to_string())
+        .or_else(|| early.map(|e| e.api_url.clone()))
         .or_else(|| get_nested_value(local, "tensorlake.api_url"))
+        .or_else(|| late.map(|e| e.api_url.clone()))
         .or_else(|| get_nested_value(global, "tensorlake.api_url"))
-        .unwrap_or_else(|| "https://api.tensorlake.ai".to_string());
+        .unwrap_or_else(|| DEFAULT_API_URL.to_string());
     normalize_api_url(&api_url)
 }
 
@@ -108,23 +442,11 @@ fn cloud_url_from_api_url(api_url: &str) -> String {
     }
 }
 
-fn resolve_auth(
-    api_key: Option<&str>,
-    pat: Option<&str>,
-    local: &TomlTable,
-    global: &TomlTable,
-    stored_pat: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    let final_api_key = api_key
+fn resolve_api_key(api_key: Option<&str>, local: &TomlTable, global: &TomlTable) -> Option<String> {
+    api_key
         .map(|s| s.to_string())
         .or_else(|| get_nested_value(local, "tensorlake.apikey"))
-        .or_else(|| get_nested_value(global, "tensorlake.apikey"));
-
-    let final_pat = pat
-        .map(|s| s.to_string())
-        .or_else(|| stored_pat.map(str::to_string));
-
-    (final_api_key, final_pat)
+        .or_else(|| get_nested_value(global, "tensorlake.apikey"))
 }
 
 fn resolve_namespace(cli: Option<&str>, local: &TomlTable, global: &TomlTable) -> String {
@@ -134,22 +456,320 @@ fn resolve_namespace(cli: Option<&str>, local: &TomlTable, global: &TomlTable) -
         .unwrap_or_else(|| "default".to_string())
 }
 
-fn resolve_project_config(
-    org_id: Option<&str>,
-    proj_id: Option<&str>,
-    local: &TomlTable,
-    stored_org_id: Option<&str>,
-    stored_proj_id: Option<&str>,
-) -> (Option<String>, Option<String>) {
-    let final_org_id = org_id
-        .map(|s| s.to_string())
-        .or_else(|| stored_org_id.map(str::to_string))
-        .or_else(|| get_nested_value(local, "organization"));
+/// Check the format of IDs given on the command line, so that a wrong value such as
+/// `organizations/org_...` gives a clear error instead of a 403 from the server.
+pub fn validate_organization_id(id: &str) -> Result<()> {
+    validate_id(id, "org_", "organization")
+}
 
-    let final_proj_id = proj_id
-        .map(|s| s.to_string())
-        .or_else(|| stored_proj_id.map(str::to_string))
-        .or_else(|| get_nested_value(local, "project"));
+pub fn validate_project_id(id: &str) -> Result<()> {
+    validate_id(id, "project_", "project")
+}
 
-    (final_org_id, final_proj_id)
+fn validate_id(id: &str, prefix: &str, what: &str) -> Result<()> {
+    let trimmed = id.trim();
+    let valid = trimmed.starts_with(prefix)
+        && trimmed.len() > prefix.len()
+        && trimmed
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-');
+    if valid {
+        Ok(())
+    } else {
+        Err(CliError::usage(format!(
+            "invalid {what} ID '{id}': expected an ID that starts with '{prefix}', for example {prefix}AbC123"
+        )))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::config::contexts::ContextEntry;
+
+    fn entry(api_url: &str, org: &str, project: &str) -> ContextEntry {
+        ContextEntry {
+            api_url: api_url.to_string(),
+            organization: Some(org.to_string()),
+            project: Some(project.to_string()),
+        }
+    }
+
+    fn contexts() -> ContextsFile {
+        let mut file = ContextsFile {
+            current: Some("default".into()),
+            ..Default::default()
+        };
+        file.contexts.insert(
+            "default".into(),
+            entry("https://api.tensorlake.ai", "org_1", "project_default"),
+        );
+        file.contexts.insert(
+            "staging".into(),
+            entry("https://api.tensorlake.ai", "org_1", "project_staging"),
+        );
+        file
+    }
+
+    fn local(text: &str) -> TomlTable {
+        toml::from_str(text).expect("valid toml")
+    }
+
+    #[test]
+    fn select_context_in_lookup_order() {
+        let c = contexts();
+        let with_local = local(r#"context = "staging""#);
+
+        assert_eq!(
+            select_context(Some("default"), Some("staging"), &with_local, &c).unwrap(),
+            Some(("default".into(), ContextSource::Flag))
+        );
+        assert_eq!(
+            select_context(None, Some("staging"), &with_local, &c).unwrap(),
+            Some(("staging".into(), ContextSource::Env))
+        );
+        assert_eq!(
+            select_context(None, None, &with_local, &c).unwrap(),
+            Some(("staging".into(), ContextSource::LocalConfig))
+        );
+        assert_eq!(
+            select_context(None, None, &TomlTable::new(), &c).unwrap(),
+            Some(("default".into(), ContextSource::Current))
+        );
+    }
+
+    #[test]
+    fn unknown_context_is_a_clear_error() {
+        let c = contexts();
+        let err = select_context(Some("nope"), None, &TomlTable::new(), &c).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("unknown context 'nope'"), "{msg}");
+        assert!(msg.contains("--context flag"), "{msg}");
+        assert!(msg.contains("default, staging"), "{msg}");
+
+        let err = select_context(None, Some("nope"), &TomlTable::new(), &c).unwrap_err();
+        assert!(err.to_string().contains("TENSORLAKE_CONTEXT"));
+
+        // A stale `current` is ignored, not an error.
+        let mut stale = contexts();
+        stale.current = Some("gone".into());
+        assert_eq!(
+            select_context(None, None, &TomlTable::new(), &stale).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn scope_sources_win_in_order() {
+        let c = contexts();
+        let local_cfg = local(
+            r#"
+organization = "org_local"
+project = "project_local"
+"#,
+        );
+        let stored = StoredCredentials {
+            token: "t".into(),
+            organization_id: Some("org_stored".into()),
+            project_id: Some("project_stored".into()),
+        };
+        let staging = c.get("staging").unwrap();
+        let default = c.get("default").unwrap();
+
+        // 1. flags
+        let s = resolve_scope(
+            Some("org_flag"),
+            Some("project_flag"),
+            Some("staging"),
+            Some(staging),
+            &local_cfg,
+            &c,
+            Some(&stored),
+        );
+        assert_eq!(s.project_id.as_deref(), Some("project_flag"));
+        assert_eq!(s.source, ScopeSource::Flags);
+
+        // 2. a context chosen by flag/env beats the local config
+        let s = resolve_scope(
+            None,
+            None,
+            Some("staging"),
+            Some(staging),
+            &local_cfg,
+            &c,
+            Some(&stored),
+        );
+        assert_eq!(s.project_id.as_deref(), Some("project_staging"));
+        assert_eq!(s.source, ScopeSource::Context);
+
+        // 3. the local config beats the current context and the stored scope
+        let s = resolve_scope(
+            None,
+            None,
+            Some("default"),
+            Some(default),
+            &local_cfg,
+            &c,
+            Some(&stored),
+        );
+        assert_eq!(s.project_id.as_deref(), Some("project_local"));
+        assert_eq!(s.source, ScopeSource::LocalConfig);
+
+        // 4. the current context beats the stored scope
+        let s = resolve_scope(
+            None,
+            None,
+            Some("default"),
+            Some(default),
+            &TomlTable::new(),
+            &c,
+            Some(&stored),
+        );
+        assert_eq!(s.project_id.as_deref(), Some("project_default"));
+        assert_eq!(s.source, ScopeSource::Context);
+
+        // 5. the stored scope is last
+        let s = resolve_scope(
+            None,
+            None,
+            None,
+            None,
+            &TomlTable::new(),
+            &ContextsFile::default(),
+            Some(&stored),
+        );
+        assert_eq!(s.project_id.as_deref(), Some("project_stored"));
+        assert_eq!(s.source, ScopeSource::Credentials);
+    }
+
+    #[test]
+    fn a_project_with_no_context_is_a_clear_error() {
+        let c = contexts();
+        let scope = ResolvedScope {
+            organization_id: Some("org_1".into()),
+            project_id: Some("project_other".into()),
+            source: ScopeSource::Flags,
+        };
+        let err = resolve_token(
+            "https://api.tensorlake.ai",
+            &scope,
+            Some("default"),
+            &c,
+            None,
+        )
+        .unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "no token for project project_other. run: tl context create <name> --project project_other"
+        );
+    }
+
+    #[test]
+    fn a_project_flag_picks_the_matching_context() {
+        let c = contexts();
+        let scope = ResolvedScope {
+            organization_id: Some("org_1".into()),
+            project_id: Some("project_staging".into()),
+            source: ScopeSource::Flags,
+        };
+        // No token on disk in unit tests, but the context is named.
+        let (_, name) = resolve_token(
+            "https://api.tensorlake.ai",
+            &scope,
+            Some("default"),
+            &c,
+            None,
+        )
+        .unwrap();
+        assert_eq!(name.as_deref(), Some("staging"));
+    }
+
+    #[test]
+    fn no_contexts_falls_back_to_the_stored_token() {
+        let stored = StoredCredentials {
+            token: "legacy".into(),
+            organization_id: None,
+            project_id: None,
+        };
+        let scope = ResolvedScope::default();
+        let (token, name) = resolve_token(
+            "https://api.tensorlake.ai",
+            &scope,
+            None,
+            &ContextsFile::default(),
+            Some(&stored),
+        )
+        .unwrap();
+        assert_eq!(token.as_deref(), Some("legacy"));
+        assert_eq!(name, None);
+    }
+
+    #[test]
+    fn context_api_url_order() {
+        let staging = ContextEntry {
+            api_url: "https://api.staging.tensorlake.ai".into(),
+            organization: None,
+            project: None,
+        };
+        let local_cfg = local(
+            r#"
+[tensorlake]
+api_url = "http://localhost:8900"
+"#,
+        );
+        // A flag beats everything.
+        assert_eq!(
+            resolve_api_url(
+                Some("http://flag:1"),
+                Some(ContextSource::Flag),
+                Some(&staging),
+                &local_cfg,
+                &TomlTable::new()
+            ),
+            "http://flag:1"
+        );
+        // A context chosen by flag beats the local config URL.
+        assert_eq!(
+            resolve_api_url(
+                None,
+                Some(ContextSource::Flag),
+                Some(&staging),
+                &local_cfg,
+                &TomlTable::new()
+            ),
+            "https://api.staging.tensorlake.ai"
+        );
+        // The current context does not.
+        assert_eq!(
+            resolve_api_url(
+                None,
+                Some(ContextSource::Current),
+                Some(&staging),
+                &local_cfg,
+                &TomlTable::new()
+            ),
+            "http://localhost:8900"
+        );
+        // But it beats the default.
+        assert_eq!(
+            resolve_api_url(
+                None,
+                Some(ContextSource::Current),
+                Some(&staging),
+                &TomlTable::new(),
+                &TomlTable::new()
+            ),
+            "https://api.staging.tensorlake.ai"
+        );
+    }
+
+    #[test]
+    fn id_format_is_checked() {
+        assert!(validate_organization_id("org_AbC123").is_ok());
+        assert!(validate_project_id("project_AbC-123").is_ok());
+        let err = validate_organization_id("organizations/org_AbC123").unwrap_err();
+        assert!(err.to_string().contains("starts with 'org_'"), "{err}");
+        assert!(validate_project_id("org_AbC123").is_err());
+        assert!(validate_project_id("project_").is_err());
+    }
 }

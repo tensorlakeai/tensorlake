@@ -1,6 +1,8 @@
+use std::io::IsTerminal;
 use std::path::Path;
 
 use crate::auth::context::CliContext;
+use crate::config::contexts::load_contexts;
 use crate::config::files::{load_credentials, load_local_config, save_local_config};
 use crate::error::{CliError, Result};
 use crate::http;
@@ -13,6 +15,7 @@ pub async fn run_init_flow(
     interactive: bool,
     create_local_config: bool,
     skip_if_provided: bool,
+    force: bool,
     project_root: &Path,
 ) -> Result<(String, String)> {
     // Check if we should skip
@@ -28,14 +31,62 @@ pub async fn run_init_flow(
 
     // Check if local config already exists
     let local_config = load_local_config();
-    if let (Some(org), Some(proj)) = (
+    let existing_scope = match (
         local_config.get("organization").and_then(|v| v.as_str()),
         local_config.get("project").and_then(|v| v.as_str()),
+        local_config.get("context").and_then(|v| v.as_str()),
     ) {
+        (Some(org), Some(proj), _) => Some((org.to_string(), proj.to_string())),
+        (_, _, Some(name)) => load_contexts()
+            .get(name)
+            .and_then(|entry| Some((entry.organization.clone()?, entry.project.clone()?))),
+        _ => None,
+    };
+    if let Some((org, proj)) = existing_scope
+        && !force
+    {
         if interactive {
             eprintln!("local configuration already exists in .tensorlake/config.toml");
         }
-        return Ok((org.to_string(), proj.to_string()));
+        let replace = interactive
+            && std::io::stdin().is_terminal()
+            && dialoguer::Confirm::new()
+                .with_prompt("Replace it?")
+                .default(false)
+                .interact()
+                .unwrap_or(false);
+        if !replace {
+            if interactive {
+                eprintln!("keeping it. run 'tl init --force' to replace it without a prompt.");
+            }
+            return Ok((org, proj));
+        }
+    }
+
+    // Offer the current context, so the directory follows it.
+    if interactive && create_local_config && std::io::stdin().is_terminal() {
+        let contexts = load_contexts();
+        if let Some(name) = ctx.context_name.as_deref()
+            && let Some(entry) = contexts.get(name)
+            && let (Some(org), Some(proj)) = (entry.organization.clone(), entry.project.clone())
+        {
+            let use_context = dialoguer::Confirm::new()
+                .with_prompt(format!(
+                    "Use context '{name}' ({org} / {proj}) for this directory?"
+                ))
+                .default(true)
+                .interact()
+                .map_err(|_| CliError::Cancelled)?;
+            if use_context {
+                let mut config = crate::config::files::TomlTable::new();
+                config.insert("context".to_string(), toml::Value::String(name.to_string()));
+                save_local_config(&config, project_root)?;
+                let config_path = project_root.join(".tensorlake").join("config.toml");
+                eprintln!("configuration saved to {}", config_path.display());
+                eprintln!("this directory now follows context '{name}'.");
+                return Ok((org, proj));
+            }
+        }
     }
 
     let pat = ctx
@@ -279,7 +330,12 @@ pub async fn run_init_flow(
 }
 
 /// CLI entry point for `tensorlake init`.
-pub async fn run(ctx: &CliContext, directory: Option<&str>, no_confirm: bool) -> Result<()> {
+pub async fn run(
+    ctx: &CliContext,
+    directory: Option<&str>,
+    no_confirm: bool,
+    force: bool,
+) -> Result<()> {
     let project_root = if let Some(dir) = directory {
         let path = std::path::Path::new(dir).canonicalize()?;
         eprintln!("using specified directory: {}", path.display());
@@ -313,6 +369,6 @@ pub async fn run(ctx: &CliContext, directory: Option<&str>, no_confirm: bool) ->
         }
     };
 
-    run_init_flow(ctx, true, true, false, &project_root).await?;
+    run_init_flow(ctx, true, true, false, force, &project_root).await?;
     Ok(())
 }

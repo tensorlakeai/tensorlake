@@ -1,7 +1,7 @@
 use reqwest::header::{HeaderMap, HeaderValue};
 use tensorlake::{Client, ClientBuilder};
 
-use crate::config::resolver::ResolvedConfig;
+use crate::config::resolver::{ContextSource, ResolvedConfig, ScopeSource};
 use crate::error::{CliError, Result};
 use crate::http;
 
@@ -19,6 +19,11 @@ pub struct CliContext {
     /// W3C trace ID for this CLI invocation (32 lowercase hex chars),
     /// injected as the `traceparent` header on every request.
     pub trace_id: String,
+    /// The context whose token and scope are in use, if any.
+    pub context_name: Option<String>,
+    pub context_source: Option<ContextSource>,
+    /// Where the organization and project came from.
+    pub scope_source: ScopeSource,
     introspect_cache: Option<IntrospectResult>,
 }
 
@@ -41,6 +46,9 @@ impl CliContext {
             project_id: config.project_id,
             debug: config.debug,
             trace_id: hex::encode(rand::random::<[u8; 16]>()),
+            context_name: config.context_name,
+            context_source: config.context_source,
+            scope_source: config.scope_source,
             introspect_cache: None,
         }
     }
@@ -208,6 +216,17 @@ impl CliContext {
         // API keys are scoped to exactly one project. Treat the server-returned
         // scope as authoritative so stale local config cannot route API-key
         // requests to an unrelated org/project and trigger confusing 403s.
+        // Tell the user when flags they gave are ignored for that reason.
+        if self.scope_source == ScopeSource::Flags
+            && let Some(warning) = api_key_scope_warning(
+                self.organization_id.as_deref(),
+                self.project_id.as_deref(),
+                result.organization_id.as_deref(),
+                result.project_id.as_deref(),
+            )
+        {
+            eprintln!("{warning}");
+        }
         self.organization_id = result.organization_id.clone();
         self.project_id = result.project_id.clone();
 
@@ -232,6 +251,30 @@ impl CliContext {
     }
 }
 
+/// The warning for `--organization` / `--project` values that differ from the API key's scope.
+pub(crate) fn api_key_scope_warning(
+    requested_org: Option<&str>,
+    requested_project: Option<&str>,
+    key_org: Option<&str>,
+    key_project: Option<&str>,
+) -> Option<String> {
+    let org_differs = matches!((requested_org, key_org), (Some(a), Some(b)) if a != b);
+    let project_differs = matches!((requested_project, key_project), (Some(a), Some(b)) if a != b);
+    if !org_differs && !project_differs {
+        return None;
+    }
+    let requested = format!(
+        "{}/{}",
+        requested_org.unwrap_or("-"),
+        requested_project.unwrap_or("-")
+    );
+    let actual = format!("{}/{}", key_org.unwrap_or("-"), key_project.unwrap_or("-"));
+    Some(format!(
+        "warning: --organization/--project ({requested}) do not match the API key scope ({actual}). \
+         the API key scope is used. unset TENSORLAKE_API_KEY to use a context instead."
+    ))
+}
+
 /// The project a pre-provisioned git credential is scoped to, read from the JWT `iss` claim
 /// (artifact-storage mints carry `iss: "project_..."`). `None` for opaque dev tokens and
 /// malformed payloads — callers fall back to configured scope.
@@ -245,4 +288,32 @@ pub(crate) fn project_from_git_token() -> Option<String> {
     let claims: serde_json::Value = serde_json::from_slice(&bytes).ok()?;
     let iss = claims.get("iss")?.as_str()?;
     iss.starts_with("project_").then(|| iss.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::api_key_scope_warning;
+
+    #[test]
+    fn warns_only_when_flags_conflict_with_the_api_key_scope() {
+        assert!(api_key_scope_warning(None, None, Some("org_1"), Some("project_1")).is_none());
+        assert!(
+            api_key_scope_warning(
+                Some("org_1"),
+                Some("project_1"),
+                Some("org_1"),
+                Some("project_1")
+            )
+            .is_none()
+        );
+        let warning = api_key_scope_warning(
+            Some("org_1"),
+            Some("project_9"),
+            Some("org_1"),
+            Some("project_1"),
+        )
+        .expect("conflict");
+        assert!(warning.contains("org_1/project_9"), "{warning}");
+        assert!(warning.contains("org_1/project_1"), "{warning}");
+    }
 }

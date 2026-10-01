@@ -57,6 +57,24 @@ export TENSORLAKE_API_KEY="your-api-key"
 tl login
 ```
 
+### Work in More Than One Project (CLI)
+
+`tl login` saves a context named `default`. A context is one organization, one
+project, and one token. Switch projects with a context instead of a new login:
+
+```bash
+tl context create staging --project project_abc   # get a token for another project
+tl context list                                   # the current context is marked with *
+tl context use staging                            # switch; no network
+tl --context default sbx ls                       # run one command in another context
+TENSORLAKE_CONTEXT=staging tl sbx ls
+tl context delete staging                         # revoke its token and remove it
+```
+
+`tl profile` is an alias for `tl context`. `tl whoami` shows the active context and
+where it came from. Contexts live in `~/.config/tensorlake/contexts.toml` (no secrets);
+tokens stay in `credentials.toml`.
+
 ### Create Your First Sandbox (CLI)
 
 Create a sandbox, run a command, and clean up:
