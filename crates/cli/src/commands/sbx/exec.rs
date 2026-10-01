@@ -288,7 +288,7 @@ fn top_level_subcommand_index(args: &[String]) -> Option<usize> {
         match args[index].as_str() {
             "--debug" => index += 1,
             "--api-url" | "--cloud-url" | "--api-key" | "--pat" | "--namespace"
-            | "--organization" | "--project" => {
+            | "--organization" | "--project" | "--context" => {
                 if index + 1 == args.len() {
                     return None;
                 }
@@ -302,7 +302,8 @@ fn top_level_subcommand_index(args: &[String]) -> Option<usize> {
                     || option.starts_with("--pat=")
                     || option.starts_with("--namespace=")
                     || option.starts_with("--organization=")
-                    || option.starts_with("--project=") =>
+                    || option.starts_with("--project=")
+                    || option.starts_with("--context=") =>
             {
                 index += 1;
             }
@@ -1236,6 +1237,38 @@ mod tests {
 
         assert_eq!(command.mountpoint, "/code");
         assert_eq!(command.args[5], "--foreground");
+    }
+
+    #[test]
+    fn direct_mount_skips_the_context_option() {
+        let command = rewrite_direct_mount(
+            "tl",
+            &[
+                "--context".to_string(),
+                "staging".to_string(),
+                "fs".to_string(),
+                "mount".to_string(),
+                "drive".to_string(),
+                "/code".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(command.mountpoint, "/code");
+        assert_eq!(command.args[4], "--foreground");
+
+        let command = rewrite_direct_mount(
+            "tl",
+            &[
+                "--context=staging".to_string(),
+                "git".to_string(),
+                "mount".to_string(),
+                "repo".to_string(),
+                "/src".to_string(),
+            ],
+        )
+        .unwrap();
+        assert_eq!(command.mountpoint, "/src");
+        assert_eq!(command.args[3], "--foreground");
     }
 
     #[test]

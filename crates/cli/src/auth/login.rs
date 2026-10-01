@@ -3,7 +3,7 @@ use crate::auth::mint::{MintOutcome, mint_token, revoke_token};
 use crate::commands::init::run_init_flow;
 use crate::config::contexts::{ContextEntry, ContextsFile, load_contexts, save_contexts};
 use crate::config::files::{
-    load_context_token, remove_context_token, save_context_token, save_credentials,
+    ContextToken, load_context_token, remove_context_token, save_context_token, save_credentials,
 };
 use crate::config::resolver;
 use crate::error::{CliError, Result};
@@ -375,6 +375,10 @@ pub(crate) fn apply_login_to_contexts(
 /// After a login, mint new tokens for the other saved contexts in the same organization,
 /// so that they keep working when the old parent token expires or is revoked.
 ///
+/// Contexts that hold their own login token are left alone. Such a token works on its own,
+/// and `tl logout` revokes it only while it is still saved as a parent. Replacing it with a
+/// minted token would leave it valid on the server but forgotten on this machine.
+///
 /// Stops quietly when the server has no mint route. Other failures are reported for each
 /// context and do not fail the login.
 pub async fn refresh_child_tokens(api_url: &str, parent_name: &str, parent: &BrowserLogin) {
@@ -382,15 +386,13 @@ pub async fn refresh_child_tokens(api_url: &str, parent_name: &str, parent: &Bro
         return;
     };
     let contexts = load_contexts();
-    let siblings: Vec<(String, String)> = contexts
-        .for_api_url(api_url)
-        .filter(|(name, entry)| {
-            *name != parent_name
-                && entry.organization.as_deref() == Some(organization)
-                && entry.project.is_some()
-        })
-        .map(|(name, entry)| (name.to_string(), entry.project.clone().unwrap_or_default()))
-        .collect();
+    let siblings = contexts_to_refresh(
+        &contexts,
+        api_url,
+        parent_name,
+        organization,
+        load_context_token,
+    );
     if siblings.is_empty() {
         return;
     }
@@ -398,9 +400,7 @@ pub async fn refresh_child_tokens(api_url: &str, parent_name: &str, parent: &Bro
     for (name, project) in siblings {
         match mint_token(api_url, &parent.token, &project).await {
             Ok(MintOutcome::Minted(minted)) => {
-                if let Some(old) = load_context_token(&name)
-                    && !old.parent
-                {
+                if let Some(old) = load_context_token(&name) {
                     let _ = revoke_token(api_url, &old.token).await;
                 }
                 if let Err(e) = save_context_token(&name, &minted.token, false) {
@@ -417,25 +417,58 @@ pub async fn refresh_child_tokens(api_url: &str, parent_name: &str, parent: &Bro
     }
 }
 
+/// The contexts whose token is minted again after a login as `parent_name`: every other
+/// context of `organization` at `api_url` that has a project and does not hold its own
+/// login token. Returns `(context name, project)` pairs.
+pub(crate) fn contexts_to_refresh(
+    contexts: &ContextsFile,
+    api_url: &str,
+    parent_name: &str,
+    organization: &str,
+    token_of: impl Fn(&str) -> Option<ContextToken>,
+) -> Vec<(String, String)> {
+    contexts
+        .for_api_url(api_url)
+        .filter(|(name, entry)| {
+            *name != parent_name
+                && entry.organization.as_deref() == Some(organization)
+                && entry.project.is_some()
+                && !token_of(name).is_some_and(|t| t.parent)
+        })
+        .map(|(name, entry)| (name.to_string(), entry.project.clone().unwrap_or_default()))
+        .collect()
+}
+
 /// Remove the saved tokens of every context for `api_url` in `organization`. Used by
 /// `tl logout`, after the parent token is revoked on the server.
+///
+/// `None` selects only the contexts that have no organization (a migrated legacy login).
+/// This is the same selection that `tl logout` revokes, so that no context loses its local
+/// token while its server token stays active.
 pub fn forget_organization_tokens(
     api_url: &str,
     organization: Option<&str>,
 ) -> Result<Vec<String>> {
     let contexts = load_contexts();
-    let names: Vec<String> = contexts
-        .for_api_url(api_url)
-        .filter(|(_, entry)| match organization {
-            Some(org) => entry.organization.as_deref() == Some(org),
-            None => true,
-        })
-        .map(|(name, _)| name.to_string())
-        .collect();
+    let names = contexts_to_forget(&contexts, api_url, organization);
     for name in &names {
         remove_context_token(name)?;
     }
     Ok(names)
+}
+
+/// The contexts of `organization` at `api_url`, by exact match: `None` matches only
+/// contexts without an organization.
+pub(crate) fn contexts_to_forget(
+    contexts: &ContextsFile,
+    api_url: &str,
+    organization: Option<&str>,
+) -> Vec<String> {
+    contexts
+        .for_api_url(api_url)
+        .filter(|(_, entry)| entry.organization.as_deref() == organization)
+        .map(|(name, _)| name.to_string())
+        .collect()
 }
 
 /// Run the interactive device code login flow and save the token as context `context_name`.
@@ -565,5 +598,97 @@ mod tests {
         );
         assert_eq!(contexts.current.as_deref(), Some("default"));
         assert_eq!(contexts.contexts.len(), 1);
+    }
+
+    #[test]
+    fn forget_matches_the_organization_exactly() {
+        let url = "https://api.tensorlake.ai";
+        let mut contexts = ContextsFile::default();
+        for (name, org, project) in [
+            ("default", "org_1", "project_a"),
+            ("staging", "org_1", "project_b"),
+            ("other-org", "org_2", "project_c"),
+        ] {
+            apply_login_to_contexts(&mut contexts, url, name, &login(org, project));
+        }
+        contexts.contexts.insert(
+            "legacy".into(),
+            ContextEntry {
+                api_url: url.into(),
+                organization: None,
+                project: None,
+            },
+        );
+        apply_login_to_contexts(
+            &mut contexts,
+            "https://other.example",
+            "other-url",
+            &login("org_1", "project_d"),
+        );
+
+        let mut forgotten = contexts_to_forget(&contexts, url, Some("org_1"));
+        forgotten.sort();
+        assert_eq!(
+            forgotten,
+            vec!["default".to_string(), "staging".to_string()]
+        );
+
+        // A migrated legacy login has no organization. Logging out of it must not drop
+        // the tokens of other organizations: their server tokens stay active.
+        assert_eq!(
+            contexts_to_forget(&contexts, url, None),
+            vec!["legacy".to_string()]
+        );
+    }
+
+    #[test]
+    fn refresh_skips_contexts_that_hold_their_own_login_token() {
+        let url = "https://api.tensorlake.ai";
+        let mut contexts = ContextsFile::default();
+        for (name, org, project) in [
+            ("default", "org_1", "project_a"),
+            ("staging", "org_1", "project_b"),
+            ("child", "org_1", "project_c"),
+            ("fresh", "org_1", "project_d"),
+            ("other-org", "org_2", "project_e"),
+        ] {
+            apply_login_to_contexts(&mut contexts, url, name, &login(org, project));
+        }
+        apply_login_to_contexts(
+            &mut contexts,
+            "https://other.example",
+            "other-url",
+            &login("org_1", "project_f"),
+        );
+        contexts.contexts.insert(
+            "no-project".into(),
+            ContextEntry {
+                api_url: url.into(),
+                organization: Some("org_1".into()),
+                project: None,
+            },
+        );
+
+        let token_of = |name: &str| match name {
+            "default" => Some(ContextToken {
+                token: "tl_default".into(),
+                parent: true,
+            }),
+            "child" => Some(ContextToken {
+                token: "tl_child".into(),
+                parent: false,
+            }),
+            _ => None,
+        };
+
+        let mut got = contexts_to_refresh(&contexts, url, "staging", "org_1", token_of);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                ("child".to_string(), "project_c".to_string()),
+                ("fresh".to_string(), "project_d".to_string()),
+            ]
+        );
     }
 }
