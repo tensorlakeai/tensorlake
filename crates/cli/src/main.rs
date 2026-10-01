@@ -64,11 +64,11 @@ struct Cli {
     cloud_url: Option<String>,
 
     /// The Tensorlake API key
-    #[arg(long, env = "TENSORLAKE_API_KEY")]
+    #[arg(long, env = "TENSORLAKE_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
     /// The Tensorlake Personal Access Token
-    #[arg(long = "pat", env = "TENSORLAKE_PAT")]
+    #[arg(long = "pat", env = "TENSORLAKE_PAT", hide_env_values = true)]
     personal_access_token: Option<String>,
 
     /// The namespace to use
@@ -796,7 +796,7 @@ enum GitCommands {
         #[arg(long, default_value = "t")]
         git_username: String,
         /// Git token/password for the admin-capable credential
-        #[arg(long, env = "TENSORLAKE_GIT_TOKEN")]
+        #[arg(long, env = "TENSORLAKE_GIT_TOKEN", hide_env_values = true)]
         git_token: String,
         /// Output JSON
         #[arg(long)]
@@ -894,7 +894,7 @@ enum GitOpCommands {
         #[arg(long, default_value = "t")]
         git_username: String,
         /// Git token/password for the admin-capable credential
-        #[arg(long, env = "TENSORLAKE_GIT_TOKEN")]
+        #[arg(long, env = "TENSORLAKE_GIT_TOKEN", hide_env_values = true)]
         git_token: String,
         /// Output JSON
         #[arg(long)]

@@ -147,7 +147,7 @@ jobs:
           node-version: "24"
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Setup Zig
         uses: mlugg/setup-zig@v2
@@ -249,7 +249,7 @@ jobs:
         run: npm ci
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2

@@ -20,7 +20,9 @@ jobs:
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
       - uses: taiki-e/install-action@just
       - uses: Swatinem/rust-cache@v2
       - name: Deny implicit platform trust in SDK and CLI
