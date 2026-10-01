@@ -1,5 +1,6 @@
 pub mod applications;
 pub mod build_images;
+pub mod context;
 pub mod cron;
 pub mod deploy;
 // Logical-v1 FUSE/FSKit mount stack — private implementation sources are swapped into official

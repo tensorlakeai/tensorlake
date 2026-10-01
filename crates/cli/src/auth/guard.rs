@@ -1,7 +1,7 @@
 use crate::auth::context::CliContext;
 use crate::auth::login::run_login_flow;
 use crate::commands::init::run_init_flow;
-use crate::config::resolver;
+use crate::config::resolver::{self, UnknownContext};
 use crate::error::{CliError, Result};
 use crate::project::detection::find_project_root;
 
@@ -13,7 +13,7 @@ pub async fn ensure_auth(ctx: &mut CliContext) -> Result<()> {
         return Ok(());
     }
     eprintln!("It seems like you're not logged in. Let's log you in...\n");
-    let login_result = match run_login_flow(ctx, true).await {
+    let login_result = match run_login_flow(ctx, true, login_context_name(ctx)).await {
         Ok(result) => result,
         Err(CliError::Cancelled) => {
             return Err(CliError::auth(
@@ -30,8 +30,10 @@ pub async fn ensure_auth(ctx: &mut CliContext) -> Result<()> {
         Some(&ctx.namespace),
         login_result.organization_id.as_deref(),
         login_result.project_id.as_deref(),
+        None,
+        UnknownContext::Error,
         ctx.debug,
-    );
+    )?;
     *ctx = CliContext::from_resolved(resolved);
     if !ctx.has_authentication() {
         return Err(CliError::auth(
@@ -75,7 +77,7 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
     }
     if !ctx.has_authentication() {
         eprintln!("It seems like you're not logged in. Let's log you in...\n");
-        let login_result = match run_login_flow(ctx, true).await {
+        let login_result = match run_login_flow(ctx, true, login_context_name(ctx)).await {
             Ok(result) => result,
             Err(CliError::Cancelled) => {
                 return Err(CliError::auth(
@@ -94,8 +96,10 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
             Some(&ctx.namespace),
             login_result.organization_id.as_deref(),
             login_result.project_id.as_deref(),
+            None,
+            UnknownContext::Error,
             ctx.debug,
-        );
+        )?;
         *ctx = CliContext::from_resolved(resolved);
 
         if !ctx.has_authentication() {
@@ -143,11 +147,20 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
         Some(&ctx.namespace),
         Some(&org_id),
         Some(&proj_id),
+        None,
+        UnknownContext::Error,
         ctx.debug,
-    );
+    )?;
     *ctx = CliContext::from_resolved(resolved);
 
     Ok(())
+}
+
+/// The context an automatic login saves into: the selected one, else `default`.
+fn login_context_name(ctx: &CliContext) -> &str {
+    ctx.context_name
+        .as_deref()
+        .unwrap_or(crate::config::contexts::DEFAULT_CONTEXT_NAME)
 }
 
 #[cfg(test)]
@@ -167,6 +180,8 @@ mod tests {
             organization_id: None,
             project_id: None,
             debug: false,
+            context_name: None,
+            context_source: None,
         });
 
         ensure_auth_for_api_key_scoped_project(&mut ctx)

@@ -31,6 +31,16 @@ pub fn credentials_path() -> PathBuf {
     config_dir().join("credentials.toml")
 }
 
+/// Key of the table in `credentials.toml` that holds one token for each context.
+pub const CONTEXT_TOKENS_KEY: &str = "contexts";
+
+/// The token saved for one context in `credentials.toml`: a browser login token that
+/// works for the one project of that context.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContextToken {
+    pub token: String,
+}
+
 /// Cached minted git credentials: ~/.config/tensorlake/git-credentials.toml
 ///
 /// Minted artifact-storage tokens are short-lived and project/repo-scoped, not per-mount, so they
@@ -100,13 +110,7 @@ pub fn save_git_credential(
         toml::Value::Table(section),
     );
     let content = toml::to_string_pretty(&toml::Value::Table(table))?;
-    fs::write(&path, &content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
-    }
-    Ok(())
+    write_private_file(&path, content.as_bytes())
 }
 
 /// Purge the minted-git-credential cache (e.g. after an authentication failure, so the next run
@@ -228,44 +232,118 @@ pub fn load_credentials(api_url: &str) -> Option<String> {
 
 /// Load PAT and selected scope from credentials file for the given API URL.
 pub fn load_stored_credentials(api_url: &str) -> Option<StoredCredentials> {
-    let path = credentials_path();
-    if !path.exists() {
-        return None;
-    }
-    let content = fs::read_to_string(&path).ok()?;
-    let table = parse_toml_table(&content)?;
+    let table = load_credentials_table();
     extract_scoped_credentials(&table, api_url)
 }
 
+/// Read `credentials.toml` as a table. A missing or unreadable file gives an empty table.
+pub fn load_credentials_table() -> TomlTable {
+    let path = credentials_path();
+    if !path.exists() {
+        return TomlTable::new();
+    }
+    fs::read_to_string(&path)
+        .ok()
+        .and_then(|content| parse_toml_table(&content))
+        .unwrap_or_default()
+}
+
+/// Write `credentials.toml` so that only the owner can read it.
+pub fn write_credentials_table(table: &TomlTable) -> Result<()> {
+    let dir = config_dir();
+    fs::create_dir_all(&dir)?;
+    let content = toml::to_string_pretty(&toml::Value::Table(table.clone()))?;
+    write_private_file(&credentials_path(), content.as_bytes())
+}
+
+/// Write `content` to `path` with mode 0600.
+pub(crate) fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
+    fs::write(path, content)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    }
+    Ok(())
+}
+
 /// Save PAT to credentials file scoped by API URL.
+///
+/// This per-URL table is what older CLI versions read. It always holds a copy of the
+/// current context's token.
 pub fn save_credentials(
     api_url: &str,
     token: &str,
     organization_id: Option<&str>,
     project_id: Option<&str>,
 ) -> Result<()> {
-    let dir = config_dir();
-    fs::create_dir_all(&dir)?;
+    let mut table = load_credentials_table();
+    set_scoped_credentials(&mut table, api_url, token, organization_id, project_id);
+    write_credentials_table(&table)
+}
 
-    let path = credentials_path();
-    let mut table: TomlTable = if path.exists() {
-        let content = fs::read_to_string(&path)?;
-        parse_toml_table(&content).unwrap_or_default()
-    } else {
-        TomlTable::new()
-    };
+/// Remove the per-URL table for `api_url`, and the legacy unscoped token if the file has one.
+pub fn remove_credentials(api_url: &str) -> Result<()> {
+    let mut table = load_credentials_table();
+    remove_url_tables(&mut table, api_url);
+    write_credentials_table(&table)
+}
 
+/// Remove every per-URL table and the legacy unscoped token. The context tokens stay.
+///
+/// Returns the normalized API URL of each removed login. A per-URL table outlives its
+/// context when a login replaces the context with one for another URL, so `tl logout --all`
+/// calls this after it has forgotten the token of each context.
+pub fn remove_all_url_credentials() -> Result<Vec<String>> {
+    let mut table = load_credentials_table();
+    let urls = remove_all_url_tables(&mut table);
+    if !urls.is_empty() {
+        write_credentials_table(&table)?;
+    }
+    Ok(urls)
+}
+
+fn remove_all_url_tables(table: &mut TomlTable) -> Vec<String> {
+    let urls: Vec<String> = all_scoped_credentials(table)
+        .into_iter()
+        .map(|(url, _)| url)
+        .collect();
+    for url in &urls {
+        remove_url_tables(table, url);
+    }
+    urls
+}
+
+/// Key of the legacy unscoped `token = "..."` entry at the top of `credentials.toml`.
+const LEGACY_TOKEN_KEY: &str = "token";
+
+/// Remove every entry that `extract_scoped_credentials` could return for `api_url`.
+///
+/// That is the per-URL table under each spelling of the URL, and the legacy unscoped token,
+/// which the lookup falls back to for any URL. Leaving the legacy token behind would keep the
+/// CLI logged in after `tl logout` or `tl context delete`.
+fn remove_url_tables(table: &mut TomlTable, api_url: &str) {
     let normalized_url = normalize_api_url(api_url);
-
     // Collapse equivalent URL keys so we always keep a single canonical entry.
     let keys_to_remove: Vec<String> = table
         .keys()
-        .filter(|k| normalize_api_url(k) == normalized_url)
+        .filter(|k| k.as_str() != CONTEXT_TOKENS_KEY && normalize_api_url(k) == normalized_url)
         .cloned()
         .collect();
     for key in keys_to_remove {
         table.remove(&key);
     }
+    table.remove(LEGACY_TOKEN_KEY);
+}
+
+pub(crate) fn set_scoped_credentials(
+    table: &mut TomlTable,
+    api_url: &str,
+    token: &str,
+    organization_id: Option<&str>,
+    project_id: Option<&str>,
+) {
+    remove_url_tables(table, api_url);
 
     let mut section = TomlTable::new();
     section.insert("token".to_string(), toml::Value::String(token.to_string()));
@@ -281,19 +359,103 @@ pub fn save_credentials(
             toml::Value::String(project_id.to_string()),
         );
     }
-    table.insert(normalized_url, toml::Value::Table(section));
+    table.insert(normalize_api_url(api_url), toml::Value::Table(section));
+}
 
-    let content = toml::to_string_pretty(&toml::Value::Table(table))?;
-    fs::write(&path, &content)?;
+/// Load the token saved for context `name`.
+pub fn load_context_token(name: &str) -> Option<ContextToken> {
+    context_token_from_table(&load_credentials_table(), name)
+}
 
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&path, fs::Permissions::from_mode(0o600))?;
+/// Save the token for context `name`.
+pub fn save_context_token(name: &str, token: &str) -> Result<()> {
+    let mut table = load_credentials_table();
+    set_context_token(&mut table, name, token);
+    write_credentials_table(&table)
+}
+
+/// Remove the token saved for context `name`. A missing token is not an error.
+pub fn remove_context_token(name: &str) -> Result<()> {
+    let mut table = load_credentials_table();
+    if remove_context_token_from_table(&mut table, name) {
+        write_credentials_table(&table)?;
     }
-
     Ok(())
 }
+
+/// Move the token of context `old` to context `new`.
+pub fn rename_context_token(old: &str, new: &str) -> Result<()> {
+    let mut table = load_credentials_table();
+    if let Some(token) = context_token_from_table(&table, old) {
+        remove_context_token_from_table(&mut table, old);
+        set_context_token(&mut table, new, &token.token);
+        write_credentials_table(&table)?;
+    }
+    Ok(())
+}
+
+pub(crate) fn context_token_from_table(table: &TomlTable, name: &str) -> Option<ContextToken> {
+    let section = table.get(CONTEXT_TOKENS_KEY)?.get(name)?;
+    let token = section.get("token")?.as_str()?.to_string();
+    Some(ContextToken { token })
+}
+
+pub(crate) fn set_context_token(table: &mut TomlTable, name: &str, token: &str) {
+    let contexts = match table.get_mut(CONTEXT_TOKENS_KEY) {
+        Some(toml::Value::Table(t)) => t,
+        _ => {
+            table.insert(
+                CONTEXT_TOKENS_KEY.to_string(),
+                toml::Value::Table(TomlTable::new()),
+            );
+            match table.get_mut(CONTEXT_TOKENS_KEY) {
+                Some(toml::Value::Table(t)) => t,
+                _ => unreachable!("just inserted a table"),
+            }
+        }
+    };
+    let mut section = TomlTable::new();
+    section.insert("token".to_string(), toml::Value::String(token.to_string()));
+    contexts.insert(name.to_string(), toml::Value::Table(section));
+}
+
+fn remove_context_token_from_table(table: &mut TomlTable, name: &str) -> bool {
+    match table.get_mut(CONTEXT_TOKENS_KEY) {
+        Some(toml::Value::Table(t)) => t.remove(name).is_some(),
+        _ => false,
+    }
+}
+
+/// All per-URL tables in `credentials.toml` as `(normalized api url, credentials)`.
+///
+/// The legacy unscoped `token = "..."` format counts as the default API URL.
+pub(crate) fn all_scoped_credentials(table: &TomlTable) -> Vec<(String, StoredCredentials)> {
+    let mut out = Vec::new();
+    for (key, value) in table {
+        if key == CONTEXT_TOKENS_KEY {
+            continue;
+        }
+        if let Some(credentials) = credentials_from_value(value) {
+            out.push((normalize_api_url(key), credentials));
+        }
+    }
+    if out.is_empty()
+        && let Some(token) = table.get(LEGACY_TOKEN_KEY).and_then(|v| v.as_str())
+    {
+        out.push((
+            DEFAULT_API_URL.to_string(),
+            StoredCredentials {
+                token: token.to_string(),
+                organization_id: None,
+                project_id: None,
+            },
+        ));
+    }
+    out
+}
+
+/// The API URL the CLI uses when nothing else sets one.
+pub const DEFAULT_API_URL: &str = "https://api.tensorlake.ai";
 
 #[cfg(test)]
 fn extract_scoped_token(credentials: &TomlTable, api_url: &str) -> Option<String> {
@@ -339,7 +501,8 @@ fn extract_scoped_credentials(credentials: &TomlTable, api_url: &str) -> Option<
 
     // 3) compatible lookup across previously stored URL variants
     for (key, value) in credentials {
-        if normalize_api_url(key) == normalized_api_url
+        if key != CONTEXT_TOKENS_KEY
+            && normalize_api_url(key) == normalized_api_url
             && let Some(credentials) = credentials_from_value(value)
         {
             return Some(credentials);
@@ -348,7 +511,7 @@ fn extract_scoped_credentials(credentials: &TomlTable, api_url: &str) -> Option<
 
     // 4) legacy unscoped format: token = "..."
     credentials
-        .get("token")
+        .get(LEGACY_TOKEN_KEY)
         .and_then(|v| v.as_str())
         .map(|s| StoredCredentials {
             token: s.to_string(),
@@ -406,7 +569,42 @@ fn add_to_gitignore(path: &Path, entry: &str) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_scoped_credentials, extract_scoped_token, normalize_api_url};
+    use super::{
+        all_scoped_credentials, context_token_from_table, extract_scoped_credentials,
+        extract_scoped_token, normalize_api_url, remove_all_url_tables, remove_url_tables,
+        set_context_token, set_scoped_credentials,
+    };
+
+    #[test]
+    fn remove_all_url_tables_keeps_the_context_tokens() {
+        let mut table: toml::value::Table = toml::from_str(
+            r#"token = "tl_legacy"
+
+["https://api.a.example"]
+token = "tl_a"
+
+["https://api.b.example/"]
+token = "tl_b"
+
+[contexts.default]
+token = "tl_b"
+"#,
+        )
+        .unwrap();
+        let mut removed = remove_all_url_tables(&mut table);
+        removed.sort();
+        assert_eq!(
+            removed,
+            vec!["https://api.a.example", "https://api.b.example"]
+        );
+        assert!(all_scoped_credentials(&table).is_empty(), "{table:?}");
+        assert!(table.get("token").is_none(), "legacy token removed");
+        assert_eq!(
+            context_token_from_table(&table, "default").unwrap().token,
+            "tl_b"
+        );
+        assert!(remove_all_url_tables(&mut table).is_empty());
+    }
 
     #[test]
     fn normalize_api_url_collapses_common_equivalents() {
@@ -467,5 +665,84 @@ project = "project_456"
             extract_scoped_token(&table, "https://api.tensorlake.ai").expect("legacy token"),
             "legacy-token"
         );
+    }
+
+    #[test]
+    fn context_tokens_live_beside_the_per_url_table() {
+        let mut table = super::TomlTable::new();
+        set_scoped_credentials(
+            &mut table,
+            "https://api.tensorlake.ai/",
+            "login-token",
+            Some("org_1"),
+            Some("project_1"),
+        );
+        set_context_token(&mut table, "default", "login-token");
+        set_context_token(&mut table, "staging", "staging-token");
+
+        // The per-URL table is unchanged, so an older CLI still finds its token.
+        let legacy = extract_scoped_credentials(&table, "https://api.tensorlake.ai")
+            .expect("per-URL credentials");
+        assert_eq!(legacy.token, "login-token");
+        assert_eq!(legacy.project_id.as_deref(), Some("project_1"));
+
+        let default = context_token_from_table(&table, "default").expect("default token");
+        assert_eq!(default.token, "login-token");
+        let staging = context_token_from_table(&table, "staging").expect("staging token");
+        assert_eq!(staging.token, "staging-token");
+        assert!(context_token_from_table(&table, "missing").is_none());
+
+        // The file round-trips through TOML.
+        let text = toml::to_string_pretty(&toml::Value::Table(table)).expect("serialize");
+        let parsed: super::TomlTable = toml::from_str(&text).expect("parse");
+        assert_eq!(
+            context_token_from_table(&parsed, "staging")
+                .expect("staging")
+                .token,
+            "staging-token"
+        );
+        // The context table is never mistaken for a URL table.
+        let urls: Vec<String> = all_scoped_credentials(&parsed)
+            .into_iter()
+            .map(|(url, _)| url)
+            .collect();
+        assert_eq!(urls, vec!["https://api.tensorlake.ai".to_string()]);
+    }
+
+    #[test]
+    fn remove_url_tables_drops_the_legacy_unscoped_token() {
+        let content = r#"
+token = "legacy-token"
+
+[contexts.default]
+token = "legacy-token"
+"#;
+        let mut table: super::TomlTable = toml::from_str(content).expect("valid toml");
+        assert!(extract_scoped_credentials(&table, "https://api.tensorlake.ai").is_some());
+
+        remove_url_tables(&mut table, "https://api.tensorlake.ai");
+
+        assert!(
+            extract_scoped_credentials(&table, "https://api.tensorlake.ai").is_none(),
+            "no token must survive removal: {table:?}"
+        );
+        assert!(all_scoped_credentials(&table).is_empty());
+        // Context tokens are removed separately, so they stay.
+        assert_eq!(
+            context_token_from_table(&table, "default")
+                .expect("context token")
+                .token,
+            "legacy-token"
+        );
+    }
+
+    #[test]
+    fn all_scoped_credentials_reads_the_legacy_unscoped_format() {
+        let table: super::TomlTable =
+            toml::from_str(r#"token = "legacy-token""#).expect("valid toml");
+        let all = all_scoped_credentials(&table);
+        assert_eq!(all.len(), 1);
+        assert_eq!(all[0].0, super::DEFAULT_API_URL);
+        assert_eq!(all[0].1.token, "legacy-token");
     }
 }

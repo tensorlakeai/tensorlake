@@ -1,7 +1,10 @@
 use crate::auth::context::CliContext;
 use crate::commands::init::run_init_flow;
-use crate::config::files::save_credentials;
-use crate::config::resolver;
+use crate::config::contexts::{
+    ContextEntry, ContextsFile, load_contexts_for_update, save_contexts,
+};
+use crate::config::files::{save_context_token, save_credentials};
+use crate::config::resolver::{self, UnknownContext};
 use crate::error::{CliError, Result};
 use crate::http;
 use crate::project::detection::find_project_root;
@@ -9,6 +12,14 @@ use std::io::{IsTerminal, Write};
 
 /// Result of a successful login flow.
 pub struct LoginResult {
+    pub token: String,
+    pub organization_id: Option<String>,
+    pub project_id: Option<String>,
+}
+
+/// What the browser login approved. Not yet saved anywhere.
+#[derive(Debug, Clone)]
+pub struct BrowserLogin {
     pub token: String,
     pub organization_id: Option<String>,
     pub project_id: Option<String>,
@@ -91,8 +102,8 @@ async fn wait_before_next_login_poll(attempt: u64, seconds: u64, interactive: bo
     }
 }
 
-/// Run the interactive device code login flow.
-pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginResult> {
+/// Run the interactive device code login flow in the browser. Saves nothing.
+pub async fn browser_login(ctx: &CliContext) -> Result<BrowserLogin> {
     let login_start_url = format!("{}/platform/cli/login/start", ctx.api_url);
 
     let http = http::client_builder()
@@ -265,16 +276,122 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         .and_then(|v| v.as_str())
         .map(|s| s.to_string());
 
-    save_credentials(
-        &ctx.api_url,
-        &access_token,
-        exchange_org_id.as_deref(),
-        exchange_project_id.as_deref(),
-    )?;
-    eprintln!("login successful!");
+    Ok(BrowserLogin {
+        token: access_token,
+        organization_id: exchange_org_id,
+        project_id: exchange_project_id,
+    })
+}
 
-    let mut org_id = exchange_org_id;
-    let mut proj_id = exchange_project_id;
+/// What `save_login_context` changed.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SavedLogin {
+    pub name: String,
+    /// `Some(old)` when a context with this name existed before.
+    pub replaced: Option<ContextEntry>,
+    pub entry: ContextEntry,
+}
+
+impl SavedLogin {
+    /// One line for each field that changed, for the user.
+    pub fn changes(&self) -> Vec<String> {
+        let Some(old) = &self.replaced else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        let fields = [
+            (
+                "api_url",
+                Some(old.api_url.as_str()),
+                Some(self.entry.api_url.as_str()),
+            ),
+            (
+                "organization",
+                old.organization.as_deref(),
+                self.entry.organization.as_deref(),
+            ),
+            (
+                "project",
+                old.project.as_deref(),
+                self.entry.project.as_deref(),
+            ),
+        ];
+        for (field, before, after) in fields {
+            if before != after {
+                out.push(format!(
+                    "  {field}: {} -> {}",
+                    before.unwrap_or("(none)"),
+                    after.unwrap_or("(none)")
+                ));
+            }
+        }
+        out
+    }
+}
+
+/// Save a login token as context `name`, make it current, and copy it to the per-URL
+/// table that older CLI versions read.
+pub fn save_login_context(api_url: &str, name: &str, login: &BrowserLogin) -> Result<SavedLogin> {
+    let mut contexts = load_contexts_for_update()?;
+    let saved = apply_login_to_contexts(&mut contexts, api_url, name, login);
+    save_context_token(name, &login.token)?;
+    save_credentials(
+        api_url,
+        &login.token,
+        login.organization_id.as_deref(),
+        login.project_id.as_deref(),
+    )?;
+    save_contexts(&contexts)?;
+    Ok(saved)
+}
+
+pub(crate) fn apply_login_to_contexts(
+    contexts: &mut ContextsFile,
+    api_url: &str,
+    name: &str,
+    login: &BrowserLogin,
+) -> SavedLogin {
+    let entry = ContextEntry {
+        api_url: api_url.to_string(),
+        organization: login.organization_id.clone(),
+        project: login.project_id.clone(),
+    };
+    let replaced = contexts.contexts.insert(name.to_string(), entry.clone());
+    contexts.current = Some(name.to_string());
+    SavedLogin {
+        name: name.to_string(),
+        replaced,
+        entry,
+    }
+}
+
+/// Run the interactive device code login flow and save the token as context `context_name`.
+pub async fn run_login_flow(
+    ctx: &CliContext,
+    auto_init: bool,
+    context_name: &str,
+) -> Result<LoginResult> {
+    let login = browser_login(ctx).await?;
+    let saved = save_login_context(&ctx.api_url, context_name, &login)?;
+    eprintln!("login successful!");
+    match &saved.replaced {
+        Some(_) => {
+            let changes = saved.changes();
+            if changes.is_empty() {
+                eprintln!("replaced the token of context '{context_name}'.");
+            } else {
+                eprintln!("replaced context '{context_name}':");
+                for line in changes {
+                    eprintln!("{line}");
+                }
+            }
+        }
+        None => eprintln!("saved context '{context_name}' and made it current."),
+    }
+
+    let access_token = login.token.clone();
+    let mut org_id = login.organization_id.clone();
+    let mut proj_id = login.project_id.clone();
 
     if auto_init {
         // Recreate context with new PAT
@@ -286,8 +403,11 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
             Some(&ctx.namespace),
             org_id.as_deref().or(ctx.organization_id.as_deref()),
             proj_id.as_deref().or(ctx.project_id.as_deref()),
+            None,
+            // `tl login` runs with a missing named context ignored; stay that way here.
+            UnknownContext::Ignore,
             ctx.debug,
-        );
+        )?;
         let updated_ctx = CliContext::from_resolved(resolved);
 
         if updated_ctx.has_org_and_project() {
@@ -318,4 +438,60 @@ pub async fn run_login_flow(ctx: &CliContext, auto_init: bool) -> Result<LoginRe
         organization_id: org_id,
         project_id: proj_id,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn login(org: &str, project: &str) -> BrowserLogin {
+        BrowserLogin {
+            token: "tl_new".into(),
+            organization_id: Some(org.into()),
+            project_id: Some(project.into()),
+        }
+    }
+
+    #[test]
+    fn login_adds_a_context_and_makes_it_current() {
+        let mut contexts = ContextsFile::default();
+        let saved = apply_login_to_contexts(
+            &mut contexts,
+            "https://api.tensorlake.ai",
+            "staging",
+            &login("org_1", "project_s"),
+        );
+        assert_eq!(saved.replaced, None);
+        assert!(saved.changes().is_empty());
+        assert_eq!(contexts.current.as_deref(), Some("staging"));
+        assert_eq!(
+            contexts.get("staging").unwrap().project.as_deref(),
+            Some("project_s")
+        );
+    }
+
+    #[test]
+    fn login_replaces_an_existing_context_and_reports_the_change() {
+        let mut contexts = ContextsFile::default();
+        apply_login_to_contexts(
+            &mut contexts,
+            "https://api.tensorlake.ai",
+            "default",
+            &login("org_1", "project_a"),
+        );
+        contexts.current = Some("other".into());
+        let saved = apply_login_to_contexts(
+            &mut contexts,
+            "https://api.tensorlake.ai",
+            "default",
+            &login("org_1", "project_b"),
+        );
+        assert!(saved.replaced.is_some());
+        assert_eq!(
+            saved.changes(),
+            vec!["  project: project_a -> project_b".to_string()]
+        );
+        assert_eq!(contexts.current.as_deref(), Some("default"));
+        assert_eq!(contexts.contexts.len(), 1);
+    }
 }
