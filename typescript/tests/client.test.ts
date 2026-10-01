@@ -552,6 +552,130 @@ describe("SandboxClient", () => {
       expect(list.traceId.length).toBeGreaterThan(0);
       client.close();
     });
+
+    it("follows the cursor across pages", async () => {
+      // Reproduces the prod bug (2026-09-28): 1000 sandboxes in a
+      // namespace, every poll of list() stopped at exactly 100, the
+      // server's default page size. Here the server hands back 250
+      // sandboxes over 3 pages (100, 100, 50); list() must return all of
+      // them, not just the first page.
+      const page = (ids: number[], nextCursor?: string) =>
+        JSON.stringify({
+          sandboxes: ids.map((i) => ({
+            id: `sbx-${i}`,
+            namespace: "default",
+            status: "running",
+            resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
+          })),
+          ...(nextCursor !== undefined ? { next_cursor: nextCursor } : {}),
+        });
+      const range = (start: number, end: number) =>
+        Array.from({ length: end - start }, (_, i) => start + i);
+
+      const calls: (string | null)[] = [];
+      installNativeStub({
+        client: {
+          listSandboxes: vi.fn(
+            async (_limit: number | null, cursor: string | null) => {
+              calls.push(cursor);
+              if (cursor === null) {
+                return {
+                  traceId: "trace-page-1",
+                  json: page(range(0, 100), "cursor-1"),
+                };
+              }
+              if (cursor === "cursor-1") {
+                return {
+                  traceId: "trace-page-2",
+                  json: page(range(100, 200), "cursor-2"),
+                };
+              }
+              if (cursor === "cursor-2") {
+                return { traceId: "trace-page-3", json: page(range(200, 250)) };
+              }
+              throw new Error(`unexpected cursor ${String(cursor)}`);
+            },
+          ),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const list = await client.list();
+
+      expect(list).toHaveLength(250);
+      expect(list[0].sandboxId).toBe("sbx-0");
+      expect(list[249].sandboxId).toBe("sbx-249");
+      expect(calls).toEqual([null, "cursor-1", "cursor-2"]);
+      // The trace ID of the whole listing is the first page's, the one
+      // that started it.
+      expect(list.traceId).toBe("trace-page-1");
+      client.close();
+    });
+
+    it("ends on a null next_cursor", async () => {
+      // The real server sends `"next_cursor": null` on the last page, not
+      // an omitted field. list() must stop there and not ask again.
+      const calls: (string | null)[] = [];
+      installNativeStub({
+        client: {
+          listSandboxes: vi.fn(
+            async (_limit: number | null, cursor: string | null) => {
+              calls.push(cursor);
+              return {
+                traceId: "trace-null",
+                json: JSON.stringify({
+                  sandboxes: [
+                    {
+                      id: "sbx-1",
+                      namespace: "default",
+                      status: "running",
+                      resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
+                    },
+                  ],
+                  prev_cursor: null,
+                  next_cursor: null,
+                }),
+              };
+            },
+          ),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      const list = await client.list();
+      expect(list).toHaveLength(1);
+      expect(calls).toEqual([null]);
+      client.close();
+    });
+
+    it("stops on a repeated cursor", async () => {
+      installNativeStub({
+        client: {
+          // A broken server that always answers the same next_cursor,
+          // however it is called.
+          listSandboxes: vi.fn(async () => ({
+            traceId: "trace-loop",
+            json: JSON.stringify({
+              sandboxes: [
+                {
+                  id: "sbx-1",
+                  namespace: "default",
+                  status: "running",
+                  resources: { cpus: 1, memory_mb: 1024, disk_mb: 1024 },
+                },
+              ],
+              next_cursor: "same-cursor",
+            }),
+          })),
+        },
+      });
+
+      const client = SandboxClient.forLocalhost();
+      await expect(client.list()).rejects.toThrow(
+        "same pagination cursor twice",
+      );
+      client.close();
+    });
   });
 
   describe("update", () => {

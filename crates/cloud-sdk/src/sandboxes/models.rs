@@ -736,9 +736,27 @@ pub struct SandboxInfo {
     pub file_systems: Vec<FileSystemMount>,
 }
 
+/// One page of `GET /sandboxes`. The server's default page size is 100
+/// sandboxes; `next_cursor` is set when a later page exists and must be
+/// passed as `cursor` on the following call to fetch it.
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct ListSandboxesResponse {
     pub sandboxes: Vec<SandboxInfo>,
+    #[serde(default)]
+    pub prev_cursor: Option<String>,
+    #[serde(default)]
+    pub next_cursor: Option<String>,
+}
+
+/// Pagination params for `SandboxesClient::list`. Same shape as
+/// [`ListArchivedSandboxesParams`] minus direction: a live-sandbox listing
+/// always walks forward through the pages.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ListSandboxesParams {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
 }
 
 /// Sandbox information plus the archival timestamp. Returned by

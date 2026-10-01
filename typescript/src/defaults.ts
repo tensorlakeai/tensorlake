@@ -11,3 +11,8 @@ export const SANDBOX_PROXY_URL =
 export const DEFAULT_HTTP_TIMEOUT_MS = 300_000;
 export const MAX_RETRIES = 3;
 export const RETRY_BACKOFF_MS = 500;
+
+// Upper bound on pages `list()` follows. Guards against an infinite loop if
+// the server ever repeats a cursor. 10,000 pages is far more than any real
+// namespace needs (the CLI's `tl sbx ls` uses the same bound).
+export const MAX_LIST_PAGES = 10_000;

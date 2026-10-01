@@ -94,7 +94,11 @@ export interface NativeSandboxClient {
   claimSandbox(poolId: string, requestJson?: string): Promise<TracedJson>;
   copySandbox(sandboxId: string, times: number): Promise<TracedJson>;
   getSandbox(sandboxId: string): Promise<TracedJson>;
-  listSandboxes(): Promise<TracedJson>;
+  /** Fetch one page of `GET /sandboxes`; `limit`/`cursor` mirror `listArchivedSandboxes`. */
+  listSandboxes(
+    limit?: number | null,
+    cursor?: string | null,
+  ): Promise<TracedJson>;
   listArchivedSandboxes(
     limit?: number | null,
     cursor?: string | null,

@@ -732,9 +732,15 @@ class SandboxPortAccess(BaseModel):
 
 
 class ListSandboxesResponse(BaseModel):
-    """Response from listing sandboxes (internal use)."""
+    """One page of listed sandboxes (internal use).
+
+    The server's default page size is 100 sandboxes. ``next_cursor`` is set
+    when a later page exists.
+    """
 
     sandboxes: list[SandboxInfo]
+    prev_cursor: str | None = None
+    next_cursor: str | None = None
 
 
 class ArchivedSandboxInfo(SandboxInfo):
