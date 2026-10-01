@@ -110,7 +110,7 @@ jobs:
           cache-dependency-path: typescript/package-lock.json
 
       - name: Setup Rust
-        uses: dtolnay/rust-toolchain@stable
+        uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Setup Zig
         if: matrix.native_build_tool == 'cargo-zigbuild'
