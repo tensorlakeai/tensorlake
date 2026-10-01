@@ -79,6 +79,8 @@ jobs:
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@1.98.1
+        with:
+          components: clippy
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
