@@ -161,15 +161,20 @@ pub(crate) fn configure_credential_helper(
     Ok(())
 }
 
-/// The command line git runs for credential lookups. Deployment and organization are baked in so
-/// the helper does not depend on cwd-relative config discovery: git invokes it wherever the user
-/// happens to run git, usually nowhere near a `.tensorlake/config.toml`. Baking the org is also
-/// why the registration is repo-local — each repo carries the org it belongs to. The project is
-/// not baked in; it comes from the URL path.
+/// The command line git runs for credential lookups. Deployment, context, and organization are
+/// baked in so the helper does not depend on cwd-relative config discovery: git invokes it
+/// wherever the user happens to run git, usually nowhere near a `.tensorlake/config.toml`.
+/// Baking the org is also why the registration is repo-local — each repo carries the org it
+/// belongs to. The context is baked in because its token works for one project only: without
+/// it, the helper would use whichever context is current when git runs, not the one setup ran
+/// with. The project is not baked in; it comes from the URL path.
 fn credential_helper_invocation(ctx: &CliContext) -> String {
     let mut invocation = tl_command();
     if ctx.api_url != normalize_api_url(DEFAULT_API_URL) {
         invocation.push_str(&format!(" --api-url {}", ctx.api_url));
+    }
+    if let Some(context_name) = &ctx.context_name {
+        invocation.push_str(&format!(" --context {context_name}"));
     }
     if let Some(organization_id) = ctx.effective_organization_id() {
         invocation.push_str(&format!(" --organization {organization_id}"));
@@ -586,6 +591,11 @@ mod tests {
             values[1]
         );
         assert!(values[1].contains("--organization org_1"));
+        assert!(
+            !values[1].contains("--context"),
+            "no context: {}",
+            values[1]
+        );
         assert!(values[1].ends_with(" git credential-helper"));
 
         // Re-running must replace, not accumulate.
@@ -601,6 +611,19 @@ mod tests {
         )
         .unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 2);
+    }
+
+    #[test]
+    fn helper_invocation_bakes_in_the_selected_context() {
+        let mut ctx = test_ctx(None);
+        ctx.organization_id = Some("org_1".to_string());
+        ctx.context_name = Some("staging".to_string());
+        ctx.context_source = Some(crate::config::resolver::ContextSource::Flag);
+        let invocation = credential_helper_invocation(&ctx);
+        assert!(
+            invocation.contains(" --context staging --organization org_1 git credential-helper"),
+            "{invocation}"
+        );
     }
 
     #[test]

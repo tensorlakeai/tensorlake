@@ -102,8 +102,15 @@ fn load_contexts_in(dir: &Path) -> Result<ContextsFile> {
     for (name, token) in &tokens {
         set_context_token(&mut credentials, name, token);
     }
-    // Best effort: a read-only home directory must not stop the command.
-    let _ = write_credentials_table(&credentials);
+    // The resolver reads a context's token from `credentials.toml` only. If the tokens cannot
+    // be saved there, the new contexts would have no token, and a logged-in user would be
+    // asked to log in again. Report it and let the old per-URL login stay in use.
+    write_credentials_table(&credentials).map_err(|e| {
+        CliError::config(format!(
+            "cannot save the token of each context to credentials.toml: {e}"
+        ))
+    })?;
+    // Best effort: with the tokens saved, the next run migrates again and finds them.
     let _ = save_contexts_in(&contexts, dir);
     Ok(contexts)
 }
