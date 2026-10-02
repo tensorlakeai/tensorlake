@@ -1158,3 +1158,67 @@ token = "tl_staging"
         requests[2]
     );
 }
+
+#[tokio::test]
+async fn init_does_not_use_the_token_of_another_context() {
+    // One scripted answer: if init calls the server, the test can tell.
+    let (url, server) = scripted_server(vec![(
+        200,
+        json!({"items": [{"id": "org_1", "name": "Org"}]}),
+    )])
+    .await;
+    let home = Home::new();
+    home.write(
+        "contexts.toml",
+        &format!(
+            r#"current = "default"
+
+[contexts.default]
+api_url = "{url}"
+organization = "org_1"
+project = "project_default"
+
+[contexts.staging]
+api_url = "{url}"
+"#
+        ),
+    );
+    // `staging` has no token (as after `tl --context staging logout`). The per-URL table
+    // holds the token of `default`.
+    home.write(
+        "credentials.toml",
+        &format!(
+            r#"["{url}"]
+token = "tl_default"
+
+[contexts.default]
+token = "tl_default"
+"#
+        ),
+    );
+    let project = home.dir.join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    let run = tl(
+        &home,
+        &project,
+        &["--context", "staging", "init", "--no-confirm"],
+        &[],
+    )
+    .await;
+    assert!(!run.success, "{}", run.stdout);
+    assert!(
+        run.stderr.contains("context 'staging' has no token")
+            && run.stderr.contains("tl login --context staging"),
+        "{}",
+        run.stderr
+    );
+    assert!(
+        !project.join(".tensorlake/config.toml").exists(),
+        "init must not write a project chosen with another context's token"
+    );
+    assert!(
+        timeout(Duration::from_millis(500), server).await.is_err(),
+        "init must not call the server with the token of another context"
+    );
+}

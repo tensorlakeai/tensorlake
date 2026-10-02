@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use crate::auth::context::CliContext;
-use crate::config::files::{load_credentials, load_local_config, save_local_config};
+use crate::config::files::{load_local_config, save_local_config};
 use crate::error::{CliError, Result};
 use crate::http;
 use crate::project::detection::{find_project_root, get_detection_reason};
@@ -38,16 +38,20 @@ pub async fn run_init_flow(
         return Ok((org.to_string(), proj.to_string()));
     }
 
-    let pat = ctx
-        .personal_access_token
-        .clone()
-        .or_else(|| load_credentials(&ctx.api_url))
-        .ok_or_else(|| {
-            if interactive {
-                eprintln!("no valid credentials found. please run 'tl login' first.");
+    // The resolver already chose the token of this run: the token of the selected context,
+    // else the per-URL login. Do not fall back to the per-URL table here: it holds a copy of
+    // the current context's token, so a context with no token would init as another one.
+    let pat = ctx.personal_access_token.clone().ok_or_else(|| {
+        if interactive {
+            match ctx.context_name.as_deref() {
+                Some(name) => {
+                    eprintln!("context '{name}' has no token. run: tl login --context {name}")
+                }
+                None => eprintln!("no valid credentials found. please run 'tl login' first."),
             }
-            CliError::Cancelled
-        })?;
+        }
+        CliError::Cancelled
+    })?;
 
     if interactive {
         eprintln!("initializing TensorLake configuration...\n");

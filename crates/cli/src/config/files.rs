@@ -225,11 +225,6 @@ pub fn save_local_config(config: &TomlTable, project_root: &Path) -> Result<()> 
     Ok(())
 }
 
-/// Load PAT from credentials file for the given API URL.
-pub fn load_credentials(api_url: &str) -> Option<String> {
-    load_stored_credentials(api_url).map(|credentials| credentials.token)
-}
-
 /// Load PAT and selected scope from credentials file for the given API URL.
 pub fn load_stored_credentials(api_url: &str) -> Option<StoredCredentials> {
     let table = load_credentials_table();
