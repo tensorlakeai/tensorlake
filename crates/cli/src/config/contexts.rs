@@ -301,6 +301,31 @@ pub fn login_name_for_url(contexts: &ContextsFile, api_url: &str) -> String {
     name
 }
 
+/// The saved context for `api_url`, when the current context is for another URL.
+///
+/// Prefers the name a login for `api_url` would be saved as (see [`login_name_for_url`]):
+/// `default`, else the name from the host that the upgrade gave the old per-URL login. Any
+/// other context for the URL comes next, by name. None when no context is for the URL.
+pub fn context_for_url<'a>(
+    contexts: &'a ContextsFile,
+    api_url: &str,
+) -> Option<(&'a str, &'a ContextEntry)> {
+    let wanted = normalize_api_url(api_url);
+    let is_for_url = |entry: &ContextEntry| normalize_api_url(&entry.api_url) == wanted;
+    let preferred = login_name_for_url(contexts, api_url);
+    contexts
+        .contexts
+        .get_key_value(&preferred)
+        .filter(|(_, entry)| is_for_url(entry))
+        .or_else(|| {
+            contexts
+                .contexts
+                .iter()
+                .find(|(_, entry)| is_for_url(entry))
+        })
+        .map(|(name, entry)| (name.as_str(), entry))
+}
+
 fn context_name_from_url(url: &str) -> String {
     let host = url::Url::parse(url)
         .ok()
@@ -530,6 +555,41 @@ token = "dev-token"
         assert!(!text.contains("token"), "no secrets: {text}");
         let parsed: ContextsFile = toml::from_str(&text).expect("parse");
         assert_eq!(parsed, file);
+    }
+
+    #[test]
+    fn the_context_for_a_url_prefers_the_login_name() {
+        let other = "https://api.example.test";
+        let entry = |api_url: &str| ContextEntry {
+            api_url: api_url.to_string(),
+            organization: None,
+            project: None,
+            storage: None,
+        };
+        let mut contexts = ContextsFile::default();
+        assert!(context_for_url(&contexts, other).is_none());
+
+        // The name the upgrade gave the old per-URL login wins over an earlier name.
+        contexts.contexts.insert("a-dev".into(), entry(other));
+        contexts
+            .contexts
+            .insert("api-example-test".into(), entry(other));
+        contexts
+            .contexts
+            .insert("default".into(), entry(DEFAULT_API_URL));
+        let (name, _) = context_for_url(&contexts, other).unwrap();
+        assert_eq!(name, "api-example-test");
+        let (name, _) = context_for_url(&contexts, DEFAULT_API_URL).unwrap();
+        assert_eq!(name, "default");
+
+        // Without that name, the first context for the URL by name.
+        contexts.contexts.remove("api-example-test");
+        let (name, _) = context_for_url(&contexts, other).unwrap();
+        assert_eq!(name, "a-dev");
+
+        // `default` for another URL does not stand in.
+        contexts.contexts.remove("a-dev");
+        assert!(context_for_url(&contexts, other).is_none());
     }
 
     #[test]

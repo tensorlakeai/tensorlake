@@ -1,4 +1,4 @@
-use crate::config::contexts::{ContextEntry, ContextsFile, load_contexts};
+use crate::config::contexts::{ContextEntry, ContextsFile, context_for_url, load_contexts};
 use crate::config::files::{
     DEFAULT_API_URL, StoredCredentials, TomlTable, get_nested_value, load_global_config,
     load_local_config, load_stored_credentials, normalize_api_url,
@@ -15,6 +15,9 @@ pub enum ContextSource {
     Env,
     /// `current` in `contexts.toml`.
     Current,
+    /// The saved context for the API URL of this run, when the current context is for
+    /// another URL.
+    ApiUrl,
 }
 
 impl ContextSource {
@@ -23,6 +26,7 @@ impl ContextSource {
             ContextSource::Flag => "--context flag",
             ContextSource::Env => "TENSORLAKE_CONTEXT",
             ContextSource::Current => "current context",
+            ContextSource::ApiUrl => "API URL of this run",
         }
     }
 }
@@ -66,10 +70,13 @@ pub struct ResolvedConfig {
 /// flag and `TENSORLAKE_CONTEXT` is read here.
 ///
 /// A context applies only to its own API URL. When the `current` context is for another URL
-/// than `--api-url`, or there is no context at all, the old per-URL login in
-/// `credentials.toml` is used instead. A context named by `--context` or `TENSORLAKE_CONTEXT`
-/// that cannot apply, because of `--api-url` or `--pat`, is an error: the user asked for that
-/// context, and running as another login instead would be a surprise.
+/// than `--api-url`, the saved context for that URL is used instead (see
+/// [`context_for_url`]): the upgrade turned each old per-URL login into such a context, so
+/// `--api-url` keeps finding the login it found before. When no context is for the URL, the
+/// old per-URL login in `credentials.toml` is used. A context named by `--context` or
+/// `TENSORLAKE_CONTEXT` that cannot apply, because of `--api-url` or `--pat`, is an error:
+/// the user asked for that context, and running as another login instead would be a
+/// surprise.
 ///
 /// The token of a context works for its one project only. So `--organization` or `--project`
 /// that names another scope than the context is an error, unless `--pat` or an API key
@@ -189,6 +196,15 @@ fn resolve_with(
             flag_name(source)
         )));
     }
+    // The `current` context is for another URL: the saved context for the URL of this run
+    // stands in. Not with `--pat`, which brings its own scope.
+    let context = context.or_else(|| {
+        if inputs.pat.is_some() {
+            return None;
+        }
+        let (name, entry) = context_for_url(contexts, &api_url)?;
+        Some((name, ContextSource::ApiUrl, entry))
+    });
     let stored = match (context, inputs.pat) {
         (None, None) => stored_credentials(&api_url),
         _ => None,
@@ -296,6 +312,7 @@ fn flag_name(source: ContextSource) -> &'static str {
         ContextSource::Flag => "--context",
         ContextSource::Env => "TENSORLAKE_CONTEXT",
         ContextSource::Current => "the current context",
+        ContextSource::ApiUrl => "--api-url",
     }
 }
 
@@ -618,6 +635,55 @@ api_url = "https://api.example.test"
         assert_eq!(r.context_name, None);
         assert_eq!(r.personal_access_token, None);
         assert_eq!(r.project_id, None);
+    }
+
+    #[test]
+    fn the_saved_context_for_the_api_url_stands_in_for_the_current_one() {
+        // After the upgrade, the old login for another server is a context that is not
+        // current. `--api-url` for that server must find it, as it found the old login.
+        let other = "https://api.example.test";
+        let mut contexts = contexts();
+        contexts.contexts.insert(
+            "api-example-test".into(),
+            entry(other, "org_2", "project_other"),
+        );
+        fn token(name: &str, _: &ContextEntry) -> Result<Option<String>> {
+            Ok((name == "api-example-test").then(|| "tl_other".to_string()))
+        }
+        let r = resolve_with(
+            &Inputs {
+                api_url: Some(other),
+                ..inputs()
+            },
+            &TomlTable::new(),
+            &TomlTable::new(),
+            &contexts,
+            stored,
+            token,
+        )
+        .expect("resolves");
+        assert_eq!(r.context_name.as_deref(), Some("api-example-test"));
+        assert_eq!(r.context_source, Some(ContextSource::ApiUrl));
+        assert_eq!(r.personal_access_token.as_deref(), Some("tl_other"));
+        assert_eq!(r.organization_id.as_deref(), Some("org_2"));
+        assert_eq!(r.project_id.as_deref(), Some("project_other"));
+
+        // `--pat` brings its own scope: no context stands in.
+        let r = resolve_with(
+            &Inputs {
+                api_url: Some(other),
+                pat: Some("tl_pat"),
+                ..inputs()
+            },
+            &TomlTable::new(),
+            &TomlTable::new(),
+            &contexts,
+            stored,
+            token,
+        )
+        .expect("resolves");
+        assert_eq!(r.context_name, None);
+        assert_eq!(r.personal_access_token.as_deref(), Some("tl_pat"));
     }
 
     #[test]

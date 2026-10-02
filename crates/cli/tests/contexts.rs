@@ -1309,3 +1309,67 @@ token = "tl_default"
         "init must not call the server with the token of another context"
     );
 }
+
+#[tokio::test]
+async fn after_migration_api_url_finds_the_login_of_another_context() {
+    let home = Home::new();
+    // A closed port: whoami's name lookup fails fast and is skipped.
+    let other = "http://127.0.0.1:9";
+    // Two logins from before contexts: production and another server.
+    home.write(
+        "credentials.toml",
+        &format!(
+            r#"["{PROD}"]
+token = "tl_prod"
+organization = "org_1"
+project = "project_prod"
+
+["{other}"]
+token = "tl_other"
+organization = "org_2"
+project = "project_other"
+"#
+        ),
+    );
+
+    // Before the upgrade, `--api-url <other>` used the login for that server. The upgrade
+    // moves that login into a context that is not current. `--api-url` must still find it.
+    let run = tl(
+        &home,
+        &home.dir,
+        &["--api-url", other, "whoami", "-o", "json"],
+        &[],
+    )
+    .await;
+    assert!(run.success, "{}", run.stderr);
+    let body: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(body["context"]["name"], "127-0-0-1", "{}", run.stdout);
+    assert!(
+        body["personalAccessToken"]["token"]
+            .as_str()
+            .unwrap()
+            .starts_with("tl_other"),
+        "{}",
+        run.stdout
+    );
+    assert_eq!(body["personalAccessToken"]["projectId"], "project_other");
+
+    // The old per-URL tables are gone; the tokens live with their contexts.
+    let credentials = home.toml("credentials.toml");
+    assert!(credentials.get(PROD).is_none(), "{credentials}");
+    assert!(credentials.get(other).is_none(), "{credentials}");
+
+    // Without `--api-url`, the current context (production) is used, as before.
+    let run = tl(&home, &home.dir, &["whoami", "-o", "json"], &[]).await;
+    assert!(run.success, "{}", run.stderr);
+    let body: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert_eq!(body["context"]["name"], "default");
+    assert!(
+        body["personalAccessToken"]["token"]
+            .as_str()
+            .unwrap()
+            .starts_with("tl_prod"),
+        "{}",
+        run.stdout
+    );
+}
