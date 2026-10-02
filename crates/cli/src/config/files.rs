@@ -237,34 +237,123 @@ pub fn load_stored_credentials(api_url: &str) -> Option<StoredCredentials> {
 }
 
 /// Read `credentials.toml` as a table. A missing or unreadable file gives an empty table.
+///
+/// A file that does not parse is reported once on stderr and read as empty, so a command
+/// that needs no saved token (an API key, a PAT) still runs. Code that changes the file uses
+/// [`update_credentials_table`], which refuses such a file.
 pub fn load_credentials_table() -> TomlTable {
-    let path = credentials_path();
+    read_credentials_table(&credentials_path()).unwrap_or_else(|e| {
+        static WARNED: std::sync::Once = std::sync::Once::new();
+        WARNED.call_once(|| eprintln!("warning: {e}"));
+        TomlTable::new()
+    })
+}
+
+/// Read `credentials.toml` at `path`. A missing file is an empty table. A file that cannot
+/// be read or parsed is an error.
+fn read_credentials_table(path: &Path) -> Result<TomlTable> {
     if !path.exists() {
-        return TomlTable::new();
+        return Ok(TomlTable::new());
     }
-    fs::read_to_string(&path)
-        .ok()
-        .and_then(|content| parse_toml_table(&content))
-        .unwrap_or_default()
+    let content = fs::read_to_string(path)
+        .map_err(|e| CliError::config(format!("cannot read {}: {e}", path.display())))?;
+    toml::from_str(&content).map_err(|e: toml::de::Error| {
+        CliError::config(format!(
+            "{} does not parse: {}. fix the file or move it away, then run the command again",
+            path.display(),
+            e.message()
+        ))
+    })
 }
 
-/// Write `credentials.toml` so that only the owner can read it.
-pub fn write_credentials_table(table: &TomlTable) -> Result<()> {
-    let dir = config_dir();
-    fs::create_dir_all(&dir)?;
-    let content = toml::to_string_pretty(&toml::Value::Table(table.clone()))?;
-    write_private_file(&credentials_path(), content.as_bytes())
+/// Change `credentials.toml` in one step: lock it, read it, apply `change`, write it.
+///
+/// Other `tl` processes wait on the lock, so two commands that save a token at the same time
+/// both keep the other's token. A file that does not parse is an error here: saving over it
+/// would write back only the tokens of this run and lose all others.
+pub fn update_credentials_table(change: impl FnOnce(&mut TomlTable)) -> Result<()> {
+    update_credentials_table_in(&config_dir(), change)
 }
 
-/// Write `content` to `path` with mode 0600.
+fn update_credentials_table_in(dir: &Path, change: impl FnOnce(&mut TomlTable)) -> Result<()> {
+    fs::create_dir_all(dir)?;
+    let _lock = CredentialsLock::acquire(dir)?;
+    let path = dir.join("credentials.toml");
+    let mut table = read_credentials_table(&path)?;
+    change(&mut table);
+    let content = toml::to_string_pretty(&toml::Value::Table(table))?;
+    write_private_file(&path, content.as_bytes())
+}
+
+/// An exclusive lock on `credentials.toml.lock`, held while the file is read and written.
+struct CredentialsLock {
+    file: fs::File,
+}
+
+impl CredentialsLock {
+    fn acquire(dir: &Path) -> Result<Self> {
+        let path = dir.join("credentials.toml.lock");
+        let file = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(&path)?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&path, fs::Permissions::from_mode(0o600));
+        }
+        file.lock()?;
+        Ok(CredentialsLock { file })
+    }
+}
+
+impl Drop for CredentialsLock {
+    fn drop(&mut self) {
+        let _ = self.file.unlock();
+    }
+}
+
+/// Write `content` to `path` with mode 0600, all at once (see [`write_file_atomically`]).
 pub(crate) fn write_private_file(path: &Path, content: &[u8]) -> Result<()> {
-    fs::write(path, content)?;
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
+    write_file_atomically(path, content, Some(0o600))
+}
+
+/// Write `content` to `path` all at once, with `mode` when one is given.
+///
+/// The content goes to a temporary file beside `path` first, and a rename puts it in place.
+/// A reader never sees a half-written or empty file, and a crash leaves the old file intact.
+pub(crate) fn write_file_atomically(path: &Path, content: &[u8], mode: Option<u32>) -> Result<()> {
+    #[cfg(not(unix))]
+    let _ = mode;
+    let dir = path.parent().unwrap_or_else(|| Path::new("."));
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("file");
+    let temp = dir.join(format!(".{name}.{}.tmp", std::process::id()));
+    let result = (|| -> Result<()> {
+        let mut options = fs::OpenOptions::new();
+        options.create(true).truncate(true).write(true);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(mode);
+        }
+        let mut file = options.open(&temp)?;
+        use std::io::Write;
+        file.write_all(content)?;
+        file.sync_all()?;
+        drop(file);
+        #[cfg(unix)]
+        if let Some(mode) = mode {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&temp, fs::Permissions::from_mode(mode))?;
+        }
+        fs::rename(&temp, path)?;
+        Ok(())
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temp);
     }
-    Ok(())
+    result
 }
 
 /// Save PAT to credentials file scoped by API URL.
@@ -277,16 +366,14 @@ pub fn save_credentials(
     organization_id: Option<&str>,
     project_id: Option<&str>,
 ) -> Result<()> {
-    let mut table = load_credentials_table();
-    set_scoped_credentials(&mut table, api_url, token, organization_id, project_id);
-    write_credentials_table(&table)
+    update_credentials_table(|table| {
+        set_scoped_credentials(table, api_url, token, organization_id, project_id)
+    })
 }
 
 /// Remove the per-URL table for `api_url`, and the legacy unscoped token if the file has one.
 pub fn remove_credentials(api_url: &str) -> Result<()> {
-    let mut table = load_credentials_table();
-    remove_url_tables(&mut table, api_url);
-    write_credentials_table(&table)
+    update_credentials_table(|table| remove_url_tables(table, api_url))
 }
 
 /// Remove every per-URL table and the legacy unscoped token. The context tokens stay.
@@ -295,12 +382,28 @@ pub fn remove_credentials(api_url: &str) -> Result<()> {
 /// context when a login replaces the context with one for another URL, so `tl logout --all`
 /// calls this after it has forgotten the token of each context.
 pub fn remove_all_url_credentials() -> Result<Vec<String>> {
-    let mut table = load_credentials_table();
-    let urls = remove_all_url_tables(&mut table);
-    if !urls.is_empty() {
-        write_credentials_table(&table)?;
-    }
+    let mut urls = Vec::new();
+    update_credentials_table(|table| urls = remove_all_url_tables(table))?;
     Ok(urls)
+}
+
+/// Remove the token of every context, listed in `contexts.toml` or not.
+///
+/// Returns the names, sorted. `tl logout --all` calls this last: a token whose context was
+/// removed from `contexts.toml` by hand, or by another CLI version, must not outlive it.
+pub fn remove_all_context_tokens() -> Result<Vec<String>> {
+    let mut names = Vec::new();
+    update_credentials_table(|table| names = remove_all_context_tokens_from_table(table))?;
+    Ok(names)
+}
+
+fn remove_all_context_tokens_from_table(table: &mut TomlTable) -> Vec<String> {
+    let names = match table.get(CONTEXT_TOKENS_KEY) {
+        Some(toml::Value::Table(t)) => t.keys().cloned().collect(),
+        _ => Vec::new(),
+    };
+    table.remove(CONTEXT_TOKENS_KEY);
+    names
 }
 
 fn remove_all_url_tables(table: &mut TomlTable) -> Vec<String> {
@@ -369,29 +472,24 @@ pub fn load_context_token(name: &str) -> Option<ContextToken> {
 
 /// Save the token for context `name`.
 pub fn save_context_token(name: &str, token: &str) -> Result<()> {
-    let mut table = load_credentials_table();
-    set_context_token(&mut table, name, token);
-    write_credentials_table(&table)
+    update_credentials_table(|table| set_context_token(table, name, token))
 }
 
 /// Remove the token saved for context `name`. A missing token is not an error.
 pub fn remove_context_token(name: &str) -> Result<()> {
-    let mut table = load_credentials_table();
-    if remove_context_token_from_table(&mut table, name) {
-        write_credentials_table(&table)?;
-    }
-    Ok(())
+    update_credentials_table(|table| {
+        remove_context_token_from_table(table, name);
+    })
 }
 
 /// Move the token of context `old` to context `new`.
 pub fn rename_context_token(old: &str, new: &str) -> Result<()> {
-    let mut table = load_credentials_table();
-    if let Some(token) = context_token_from_table(&table, old) {
-        remove_context_token_from_table(&mut table, old);
-        set_context_token(&mut table, new, &token.token);
-        write_credentials_table(&table)?;
-    }
-    Ok(())
+    update_credentials_table(|table| {
+        if let Some(token) = context_token_from_table(table, old) {
+            remove_context_token_from_table(table, old);
+            set_context_token(table, new, &token.token);
+        }
+    })
 }
 
 pub(crate) fn context_token_from_table(table: &TomlTable, name: &str) -> Option<ContextToken> {
@@ -571,9 +669,33 @@ fn add_to_gitignore(path: &Path, entry: &str) -> Result<()> {
 mod tests {
     use super::{
         all_scoped_credentials, context_token_from_table, extract_scoped_credentials,
-        extract_scoped_token, normalize_api_url, remove_all_url_tables, remove_url_tables,
-        set_context_token, set_scoped_credentials,
+        extract_scoped_token, normalize_api_url, remove_all_context_tokens_from_table,
+        remove_all_url_tables, remove_url_tables, set_context_token, set_scoped_credentials,
+        update_credentials_table_in,
     };
+
+    #[test]
+    fn remove_all_context_tokens_keeps_the_url_tables() {
+        let mut table: toml::value::Table = toml::from_str(
+            r#"["https://api.a.example"]
+token = "tl_a"
+
+[contexts.default]
+token = "tl_a"
+
+[contexts.orphan]
+token = "tl_orphan"
+"#,
+        )
+        .unwrap();
+        assert_eq!(
+            remove_all_context_tokens_from_table(&mut table),
+            vec!["default".to_string(), "orphan".to_string()]
+        );
+        assert!(context_token_from_table(&table, "orphan").is_none());
+        assert_eq!(all_scoped_credentials(&table).len(), 1, "{table:?}");
+        assert!(remove_all_context_tokens_from_table(&mut table).is_empty());
+    }
 
     #[test]
     fn remove_all_url_tables_keeps_the_context_tokens() {
@@ -744,5 +866,57 @@ token = "legacy-token"
         assert_eq!(all.len(), 1);
         assert_eq!(all[0].0, super::DEFAULT_API_URL);
         assert_eq!(all[0].1.token, "legacy-token");
+    }
+
+    #[test]
+    fn an_update_refuses_a_credentials_file_that_does_not_parse() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("credentials.toml");
+        let broken = "[contexts.default\ntoken = \"tl_default\"\n";
+        std::fs::write(&path, broken).unwrap();
+
+        let err = update_credentials_table_in(dir.path(), |table| {
+            set_context_token(table, "staging", "tl_staging");
+        })
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("credentials.toml does not parse"), "{err}");
+        assert!(err.contains("fix the file or move it away"), "{err}");
+        // The broken file is left for the user to repair; nothing was lost.
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    #[test]
+    fn parallel_updates_keep_every_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path();
+        let names: Vec<String> = (0..16).map(|i| format!("ctx{i}")).collect();
+        std::thread::scope(|scope| {
+            for name in &names {
+                scope.spawn(move || {
+                    update_credentials_table_in(path, |table| {
+                        set_context_token(table, name, &format!("tl_{name}"));
+                    })
+                    .unwrap();
+                });
+            }
+        });
+
+        let content = std::fs::read_to_string(dir.path().join("credentials.toml")).unwrap();
+        let table: super::TomlTable = toml::from_str(&content).unwrap();
+        for name in &names {
+            assert_eq!(
+                context_token_from_table(&table, name).map(|t| t.token),
+                Some(format!("tl_{name}")),
+                "{content}"
+            );
+        }
+        // No temporary file is left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .filter(|n| n.ends_with(".tmp"))
+            .collect();
+        assert!(leftovers.is_empty(), "{leftovers:?}");
     }
 }

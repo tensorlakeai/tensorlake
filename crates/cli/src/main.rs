@@ -2095,12 +2095,10 @@ async fn main() {
         _ => None,
     };
 
-    // These commands put the saved contexts right, so a named context that is missing
-    // must not stop them. Every other command runs in the selected context and needs it.
-    let unknown_context = match &command {
-        Commands::Version | Commands::Login { .. } | Commands::Context(_) => UnknownContext::Ignore,
-        Commands::Logout { all: true } => UnknownContext::Ignore,
-        _ => UnknownContext::Error,
+    let unknown_context = if runs_in_context(&command) {
+        UnknownContext::Error
+    } else {
+        UnknownContext::Ignore
     };
 
     let resolved = match resolver::resolve(
@@ -2117,6 +2115,14 @@ async fn main() {
     ) {
         Ok(resolved) => resolved,
         Err(e) => {
+            // Git runs the helper on every fetch and push. A context deleted since
+            // `tl git setup`, or a config that no longer resolves, must fail softly: say why
+            // on stderr and exit 0, so git falls through to its other helpers or a prompt.
+            if matches!(command, Commands::Git(GitCommands::CredentialHelper { .. })) {
+                eprintln!("tl: {e}. run `tl git setup` in the repo again");
+                drain_stdin();
+                std::process::exit(0);
+            }
             eprintln!("Error: {e}");
             std::process::exit(1);
         }
@@ -2125,8 +2131,13 @@ async fn main() {
     let mut ctx = CliContext::from_resolved(resolved);
 
     // The context named by `--context` or `TENSORLAKE_CONTEXT`, saved or not. `tl login`
-    // saves into it, so a login made to repair a missing context lands under its name.
-    let named_context = cli.context.as_deref();
+    // saves into it, so a login made to repair a missing context lands under its name. An
+    // empty `TENSORLAKE_CONTEXT` names nothing, as in the resolver.
+    let named_context = cli
+        .context
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
     let result = run_command(&mut ctx, command, named_context).await;
 
     if let Err(e) = result {
@@ -2156,6 +2167,44 @@ async fn main() {
             }
         }
     }
+}
+
+/// Whether `command` runs in the selected context, so that a `--context` or
+/// `TENSORLAKE_CONTEXT` that is not saved, or a `--project` for another project, stops it.
+///
+/// Two kinds of command do not. The recovery commands (`tl login`, `tl logout --all`,
+/// `tl context`) put the saved contexts right, so a stale name must not block them. The local
+/// commands (`tl new`, `tl build-images`, `tl fs setup`, `tl fs doctor`, ...) use no token and
+/// no project, so a stale `TENSORLAKE_CONTEXT` or an exported `TENSORLAKE_PROJECT_ID` left in
+/// the shell must not stop them either.
+fn runs_in_context(command: &Commands) -> bool {
+    !matches!(
+        command,
+        Commands::Version
+            | Commands::Login { .. }
+            | Commands::Logout { all: true }
+            | Commands::Context(_)
+            | Commands::New { .. }
+            | Commands::BuildImages { .. }
+            | Commands::Fs(
+                FsCommands::Setup { .. }
+                    | FsCommands::KernelRefresh { .. }
+                    | FsCommands::Prefetch { .. }
+                    | FsCommands::Doctor { .. }
+            )
+            | Commands::Git(GitCommands::Prefetch { .. })
+    )
+}
+
+/// Read and drop what git wrote on stdin, so git never sees a broken pipe. A terminal is
+/// not read: a human who runs the helper by hand would wait on it.
+fn drain_stdin() {
+    use std::io::IsTerminal;
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return;
+    }
+    let _ = std::io::copy(&mut stdin.lock(), &mut std::io::sink());
 }
 
 fn run_context_command(command: ContextCommands) -> error::Result<()> {

@@ -11,7 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::files::{
     DEFAULT_API_URL, StoredCredentials, TomlTable, all_scoped_credentials, config_dir,
-    load_credentials_table, normalize_api_url, set_context_token, write_credentials_table,
+    load_credentials_table, normalize_api_url, set_context_token, update_credentials_table,
+    write_file_atomically,
 };
 use crate::error::{CliError, Result};
 
@@ -94,18 +95,20 @@ fn load_contexts_in(dir: &Path) -> Result<ContextsFile> {
     }
 
     // First run: migrate the saved login(s) into a context each.
-    let mut credentials = load_credentials_table();
+    let credentials = load_credentials_table();
     let (contexts, tokens) = migrate_from_credentials(&credentials);
     if contexts.contexts.is_empty() {
         return Ok(contexts);
     }
-    for (name, token) in &tokens {
-        set_context_token(&mut credentials, name, token);
-    }
     // The resolver reads a context's token from `credentials.toml` only. If the tokens cannot
     // be saved there, the new contexts would have no token, and a logged-in user would be
     // asked to log in again. Report it and let the old per-URL login stay in use.
-    write_credentials_table(&credentials).map_err(|e| {
+    update_credentials_table(|credentials| {
+        for (name, token) in &tokens {
+            set_context_token(credentials, name, token);
+        }
+    })
+    .map_err(|e| {
         CliError::config(format!(
             "cannot save the token of each context to credentials.toml: {e}"
         ))
@@ -132,11 +135,12 @@ pub fn save_contexts(contexts: &ContextsFile) -> Result<()> {
     save_contexts_in(contexts, &config_dir())
 }
 
+/// The write is atomic, so a `tl` command that runs at the same time reads the old file or
+/// the new one, never a half-written one.
 fn save_contexts_in(contexts: &ContextsFile, dir: &Path) -> Result<()> {
     fs::create_dir_all(dir)?;
     let content = toml::to_string_pretty(contexts)?;
-    fs::write(dir.join("contexts.toml"), content)?;
-    Ok(())
+    write_file_atomically(&dir.join("contexts.toml"), content.as_bytes(), None)
 }
 
 /// Build contexts from the per-URL tables of an old `credentials.toml`.
@@ -188,6 +192,32 @@ pub(crate) fn migrate_from_credentials(
     (file, tokens)
 }
 
+/// The name a login for `api_url` is saved as when the user names no context.
+///
+/// `default` when no context has that name, or when the saved `default` is for the same API
+/// URL. Otherwise a name from the host, such as `api-staging-tensorlake-ai`, with `-2`, `-3`
+/// added while a context of that name is for another URL. A login for a dev or staging
+/// server must not replace the `default` login for production.
+pub fn login_name_for_url(contexts: &ContextsFile, api_url: &str) -> String {
+    let wanted = normalize_api_url(api_url);
+    let fits = |name: &str| {
+        contexts
+            .get(name)
+            .is_none_or(|entry| normalize_api_url(&entry.api_url) == wanted)
+    };
+    if fits(DEFAULT_CONTEXT_NAME) {
+        return DEFAULT_CONTEXT_NAME.to_string();
+    }
+    let base = context_name_from_url(&wanted);
+    let mut name = base.clone();
+    let mut n = 2;
+    while !fits(&name) {
+        name = format!("{base}-{n}");
+        n += 1;
+    }
+    name
+}
+
 fn context_name_from_url(url: &str) -> String {
     let host = url::Url::parse(url)
         .ok()
@@ -220,6 +250,36 @@ mod tests {
         assert!(err.contains("contexts.toml does not parse"), "{err}");
         assert!(err.contains("fix the file or move it away"), "{err}");
         assert_eq!(fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    #[test]
+    fn a_login_name_fits_the_api_url() {
+        let dev = "https://api.tensorlake.dev";
+        let mut file = ContextsFile::default();
+        assert_eq!(login_name_for_url(&file, DEFAULT_API_URL), "default");
+        assert_eq!(login_name_for_url(&file, dev), "default");
+
+        // `default` is for production: a dev login gets its own name.
+        file.contexts
+            .insert("default".into(), entry(DEFAULT_API_URL, None, None));
+        assert_eq!(login_name_for_url(&file, DEFAULT_API_URL), "default");
+        assert_eq!(login_name_for_url(&file, dev), "api-tensorlake-dev");
+        // The same spelled differently is the same URL.
+        assert_eq!(
+            login_name_for_url(&file, "https://api.tensorlake.ai/"),
+            "default"
+        );
+
+        // The host name is taken by a context for another URL: add a number.
+        file.contexts.insert(
+            "api-tensorlake-dev".into(),
+            entry("http://127.0.0.1:9", None, None),
+        );
+        assert_eq!(login_name_for_url(&file, dev), "api-tensorlake-dev-2");
+        // A context for the same URL is reused, whatever its name.
+        file.contexts
+            .insert("api-tensorlake-dev-2".into(), entry(dev, None, None));
+        assert_eq!(login_name_for_url(&file, dev), "api-tensorlake-dev-2");
     }
 
     fn entry(api_url: &str, org: Option<&str>, project: Option<&str>) -> ContextEntry {

@@ -64,8 +64,11 @@ pub struct ResolvedConfig {
 /// merged by clap (via `env` attribute), except for `--context`, where the caller passes the
 /// flag and `TENSORLAKE_CONTEXT` is read here.
 ///
-/// A context applies only to its own API URL. With `--api-url` for another URL, or with no
-/// context at all, the old per-URL login in `credentials.toml` is used instead.
+/// A context applies only to its own API URL. When the `current` context is for another URL
+/// than `--api-url`, or there is no context at all, the old per-URL login in
+/// `credentials.toml` is used instead. A context named by `--context` or `TENSORLAKE_CONTEXT`
+/// that cannot apply, because of `--api-url` or `--pat`, is an error: the user asked for that
+/// context, and running as another login instead would be a surprise.
 ///
 /// The token of a context works for its one project only. So `--organization` or `--project`
 /// that names another scope than the context is an error, unless `--pat` or an API key
@@ -143,11 +146,27 @@ fn resolve_with(
         inputs.unknown_context,
         contexts,
     )?;
-    // `--pat` brings its own scope, so neither the context nor the old login applies then.
-    let selected = selection
+    let named = selection
         .as_ref()
-        .filter(|_| inputs.pat.is_none())
         .and_then(|(name, source)| Some((name.as_str(), *source, contexts.get(name)?)));
+    // A context named by `--context` or `TENSORLAKE_CONTEXT` is what the user asked for. When
+    // it cannot apply, stop, instead of going on with another login. The recovery commands
+    // (`tl login`, `tl logout --all`, `tl context`) run with `UnknownContext::Ignore` and
+    // must still run, so that `TENSORLAKE_CONTEXT=staging tl login --api-url <url>` works.
+    let explicit = named.filter(|(_, source, _)| {
+        *source != ContextSource::Current && inputs.unknown_context == UnknownContext::Error
+    });
+
+    // `--pat` brings its own scope, so neither the context nor the old login applies then.
+    if let (Some(pat_context), Some(_)) = (explicit, inputs.pat) {
+        return Err(CliError::usage(format!(
+            "--pat cannot be used with context '{}': a PAT brings its own scope. \
+             drop --pat to use the context, or drop {}",
+            pat_context.0,
+            flag_name(pat_context.1)
+        )));
+    }
+    let selected = named.filter(|_| inputs.pat.is_none());
 
     let api_url = resolve_api_url(
         inputs.api_url,
@@ -161,6 +180,14 @@ fn resolve_with(
 
     // The context applies only to its own API URL.
     let context = selected.filter(|(_, _, entry)| normalize_api_url(&entry.api_url) == api_url);
+    if let (Some((name, source, entry)), None) = (explicit, context) {
+        return Err(CliError::usage(format!(
+            "context '{name}' is for {} but the API URL of this run is {api_url}. \
+             drop --api-url (or TENSORLAKE_API_URL) to use the context, or drop {}",
+            normalize_api_url(&entry.api_url),
+            flag_name(source)
+        )));
+    }
     let stored = match (context, inputs.pat) {
         (None, None) => stored_credentials(&api_url),
         _ => None,
@@ -256,6 +283,15 @@ fn unknown_context(name: &str, source: ContextSource, contexts: &ContextsFile) -
 
 /// The token of a context works for its own project only, so a flag that names another
 /// organization or project cannot work with it.
+/// How the user named a context, for error messages.
+fn flag_name(source: ContextSource) -> &'static str {
+    match source {
+        ContextSource::Flag => "--context",
+        ContextSource::Env => "TENSORLAKE_CONTEXT",
+        ContextSource::Current => "the current context",
+    }
+}
+
 fn check_flags_match_context(
     org_flag: Option<&str>,
     project_flag: Option<&str>,
@@ -525,6 +561,84 @@ api_url = "https://api.example.test"
         assert_eq!(r.context_name, None);
         assert_eq!(r.personal_access_token, None);
         assert_eq!(r.project_id, None);
+    }
+
+    #[test]
+    fn a_named_context_for_another_api_url_is_an_error() {
+        let other = "https://api.example.test";
+        let err = resolve_with(
+            &Inputs {
+                api_url: Some(other),
+                context_flag: Some("staging"),
+                ..inputs()
+            },
+            &TomlTable::new(),
+            &TomlTable::new(),
+            &contexts(),
+            stored,
+            token,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.starts_with(
+                "context 'staging' is for https://api.tensorlake.ai but the API URL of this run is https://api.example.test."
+            ),
+            "{err}"
+        );
+        assert!(err.contains("drop --context"), "{err}");
+
+        let err = resolve_with(
+            &Inputs {
+                api_url: Some(other),
+                context_env: Some("staging"),
+                ..inputs()
+            },
+            &TomlTable::new(),
+            &TomlTable::new(),
+            &contexts(),
+            stored,
+            token,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(err.contains("drop TENSORLAKE_CONTEXT"), "{err}");
+
+        // The recovery commands still run: `tl login --api-url <other>` saves under the name.
+        let r = resolve_test(
+            &Inputs {
+                api_url: Some(other),
+                context_flag: Some("staging"),
+                unknown_context: UnknownContext::Ignore,
+                ..inputs()
+            },
+            &TomlTable::new(),
+            &contexts(),
+        );
+        assert_eq!(r.context_name, None);
+        assert_eq!(r.api_url, other);
+    }
+
+    #[test]
+    fn a_pat_with_a_named_context_is_an_error() {
+        let err = resolve_with(
+            &Inputs {
+                pat: Some("tl_flag"),
+                context_flag: Some("staging"),
+                ..inputs()
+            },
+            &TomlTable::new(),
+            &TomlTable::new(),
+            &contexts(),
+            stored,
+            token,
+        )
+        .unwrap_err()
+        .to_string();
+        assert!(
+            err.starts_with("--pat cannot be used with context 'staging'"),
+            "{err}"
+        );
     }
 
     #[test]

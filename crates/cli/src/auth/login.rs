@@ -363,6 +363,9 @@ pub(crate) fn apply_login_to_contexts(
 /// Callers that go on in this run rebuild their `CliContext` from the saved context by name;
 /// the resolver reads the token, organization, and project from the files this flow wrote.
 pub async fn run_login_flow(ctx: &CliContext, auto_init: bool, context_name: &str) -> Result<()> {
+    // A `contexts.toml` that does not parse stops the save. Find that out now, before the
+    // user approves the login in the browser, or the approved token would be thrown away.
+    load_contexts_for_update()?;
     let login = browser_login(ctx).await?;
     let saved = save_login_context(&ctx.api_url, context_name, &login)?;
     eprintln!("login successful!");

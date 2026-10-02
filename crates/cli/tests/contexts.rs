@@ -508,7 +508,8 @@ async fn a_broken_contexts_file_is_never_overwritten() {
 #[tokio::test]
 async fn a_project_flag_for_another_project_is_an_error() {
     let home = Home::new();
-    two_contexts(&home, PROD);
+    // A closed port: the second command fails after configuration, not during it.
+    two_contexts(&home, "http://127.0.0.1:9");
     let run = tl(
         &home,
         &home.dir,
@@ -530,8 +531,7 @@ async fn a_project_flag_for_another_project_is_an_error() {
         run.stderr
     );
 
-    // The same project with its own context is fine. The server is a closed port, so the
-    // command fails after configuration, not during it.
+    // The same project with its own context is fine.
     let run = tl(
         &home,
         &home.dir,
@@ -540,8 +540,6 @@ async fn a_project_flag_for_another_project_is_an_error() {
             "staging",
             "--project",
             "project_staging",
-            "--api-url",
-            "http://127.0.0.1:9",
             "whoami",
             "-o",
             "json",
@@ -720,10 +718,10 @@ async fn logout_all_forgets_every_saved_token() {
         "per-URL table removed: {credentials}"
     );
     assert!(
-        credentials["contexts"]
-            .as_table()
-            .map(|t| t.is_empty())
-            .unwrap_or(true),
+        credentials
+            .get("contexts")
+            .and_then(|t| t.as_table())
+            .is_none_or(|t| t.is_empty()),
         "{credentials}"
     );
     // The contexts stay, without tokens.
@@ -787,5 +785,376 @@ async fn delete_removes_the_legacy_unscoped_token() {
         home.toml("contexts.toml")["contexts"]
             .get("default")
             .is_none()
+    );
+}
+
+#[tokio::test]
+async fn a_named_context_for_another_api_url_is_an_error() {
+    let home = Home::new();
+    two_contexts(&home, PROD);
+    let other = "http://127.0.0.1:9";
+
+    let run = tl(
+        &home,
+        &home.dir,
+        &["--context", "staging", "--api-url", other, "secrets", "ls"],
+        &[],
+    )
+    .await;
+    assert!(!run.success);
+    assert!(
+        run.stderr.starts_with(&format!(
+            "Error: context 'staging' is for {PROD} but the API URL of this run is {other}."
+        )),
+        "{}",
+        run.stderr
+    );
+
+    let run = tl(
+        &home,
+        &home.dir,
+        &["secrets", "ls"],
+        &[
+            ("TENSORLAKE_CONTEXT", "staging"),
+            ("TENSORLAKE_API_URL", other),
+        ],
+    )
+    .await;
+    assert!(!run.success);
+    assert!(
+        run.stderr.contains("drop TENSORLAKE_CONTEXT"),
+        "{}",
+        run.stderr
+    );
+
+    // The `current` context for another URL is skipped, as before, not an error.
+    let run = tl(
+        &home,
+        &home.dir,
+        &["--api-url", other, "whoami", "-o", "json"],
+        &[],
+    )
+    .await;
+    assert!(run.success, "{}", run.stderr);
+    let body: Value = serde_json::from_str(&run.stdout).unwrap();
+    assert!(body["context"].is_null(), "{}", run.stdout);
+
+    // The context commands still work with the mismatch, so the user can fix it.
+    let run = tl(
+        &home,
+        &home.dir,
+        &[
+            "--context",
+            "staging",
+            "--api-url",
+            other,
+            "context",
+            "current",
+        ],
+        &[],
+    )
+    .await;
+    assert!(run.success, "{}", run.stderr);
+}
+
+#[tokio::test]
+async fn a_broken_credentials_toml_is_an_error_and_is_left_alone() {
+    let home = Home::new();
+    two_contexts(&home, PROD);
+    let broken = "[contexts.default\ntoken = \"tl_default\"\n";
+    home.write("credentials.toml", broken);
+
+    // Reads warn and go on without a token.
+    let run = tl(&home, &home.dir, &["context", "list", "-o", "json"], &[]).await;
+    assert!(run.success, "{}", run.stderr);
+    assert!(
+        run.stderr.contains("credentials.toml does not parse"),
+        "{}",
+        run.stderr
+    );
+
+    // A write stops instead of saving over the file.
+    let run = tl(
+        &home,
+        &home.dir,
+        &["context", "rename", "staging", "stage"],
+        &[],
+    )
+    .await;
+    assert!(!run.success, "{}", run.stderr);
+    assert!(
+        run.stderr.contains("credentials.toml does not parse"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(home.read("credentials.toml"), broken);
+}
+
+#[tokio::test]
+async fn parallel_commands_keep_every_token() {
+    let home = Home::new();
+    two_contexts(&home, PROD);
+
+    // `tl context use` copies the token of the new current context into the per-URL table,
+    // a read-modify-write of `credentials.toml`. Run many at once.
+    let home = &home;
+    let runs = (0..8).map(|i| async move {
+        let name = if i % 2 == 0 { "default" } else { "staging" };
+        tl(home, &home.dir, &["context", "use", name], &[]).await
+    });
+    for run in futures::future::join_all(runs).await {
+        assert!(run.success, "{}", run.stderr);
+    }
+
+    let credentials = home.toml("credentials.toml");
+    assert_eq!(
+        credentials["contexts"]["default"]["token"],
+        toml::Value::from("tl_default")
+    );
+    assert_eq!(
+        credentials["contexts"]["staging"]["token"],
+        toml::Value::from("tl_staging")
+    );
+}
+
+/// Like [`tl`], with `stdin` written to the command, as git writes a credential request.
+async fn tl_with_stdin(home: &Home, args: &[&str], stdin: &str) -> Run {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_tl"));
+    cmd.args(args)
+        .current_dir(&home.dir)
+        .env("HOME", &home.dir)
+        .env("NO_COLOR", "1")
+        .env_remove("TENSORLAKE_CONTEXT")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true);
+    let mut child = cmd.spawn().unwrap();
+    let mut pipe = child.stdin.take().unwrap();
+    let input = stdin.to_string();
+    tokio::spawn(async move {
+        let _ = pipe.write_all(input.as_bytes()).await;
+    });
+    let output = timeout(Duration::from_secs(30), child.wait_with_output())
+        .await
+        .expect("CLI must finish within 30 seconds")
+        .unwrap();
+    Run {
+        stdout: String::from_utf8_lossy(&output.stdout).to_string(),
+        stderr: String::from_utf8_lossy(&output.stderr).to_string(),
+        success: output.status.success(),
+    }
+}
+
+/// `--all` means every saved token, so a context token whose context is no longer in
+/// `contexts.toml` goes too.
+#[tokio::test]
+async fn logout_all_removes_a_token_whose_context_is_not_listed() {
+    let home = Home::new();
+    two_contexts(&home, PROD);
+    home.write(
+        "credentials.toml",
+        &format!(
+            r#"["{PROD}"]
+token = "tl_default"
+
+[contexts.default]
+token = "tl_default"
+
+[contexts.staging]
+token = "tl_staging"
+
+[contexts.removed-by-hand]
+token = "tl_orphan"
+"#
+        ),
+    );
+
+    let run = tl(&home, &home.dir, &["logout", "--all"], &[]).await;
+    assert!(run.success, "{}", run.stderr);
+    assert!(
+        run.stdout
+            .contains("removed the tokens of: default, staging"),
+        "{}",
+        run.stdout
+    );
+    assert!(
+        run.stderr.contains(
+            "also removed the token of a context that contexts.toml does not list: removed-by-hand"
+        ),
+        "{}",
+        run.stderr
+    );
+    let credentials = home.read("credentials.toml");
+    assert!(!credentials.contains("tl_orphan"), "{credentials}");
+    assert!(!credentials.contains("tl_staging"), "{credentials}");
+}
+
+/// A local command uses no token and no project, so a stale `TENSORLAKE_CONTEXT` or an
+/// exported `TENSORLAKE_PROJECT_ID` for another project must not stop it.
+#[tokio::test]
+async fn local_commands_run_with_a_stale_context_or_another_project() {
+    let home = Home::new();
+    two_contexts(&home, PROD);
+    let stale = [
+        ("TENSORLAKE_CONTEXT", "gone"),
+        ("TENSORLAKE_PROJECT_ID", "project_other"),
+    ];
+
+    let run = tl(&home, &home.dir, &["new", "demo"], &stale).await;
+    assert!(run.success, "{}", run.stderr);
+    assert!(home.dir.join("demo").is_dir(), "the app was scaffolded");
+
+    // A command that runs in the context still needs it.
+    let run = tl(&home, &home.dir, &["secrets", "ls"], &stale).await;
+    assert!(!run.success);
+    assert!(
+        run.stderr
+            .contains("unknown context 'gone' (from TENSORLAKE_CONTEXT)"),
+        "{}",
+        run.stderr
+    );
+}
+
+/// Git runs the helper on every fetch and push. When the context baked into the helper line
+/// is gone, the helper says why and exits 0, so git falls through to a prompt instead of
+/// failing the fetch with a `tl` error.
+#[tokio::test]
+async fn credential_helper_fails_softly_when_its_context_is_gone() {
+    let home = Home::new();
+    two_contexts(&home, PROD);
+    let request = "protocol=https\nhost=git.tensorlake.ai\npath=project_1/demo\n\n";
+
+    let run = tl_with_stdin(
+        &home,
+        &[
+            "--context",
+            "gone",
+            "--organization",
+            "org_1",
+            "git",
+            "credential-helper",
+            "get",
+        ],
+        request,
+    )
+    .await;
+    assert!(run.success, "exit 0 so git falls through: {}", run.stderr);
+    assert_eq!(run.stdout, "", "no protocol lines on stdout");
+    assert!(
+        run.stderr.contains("unknown context 'gone'") && run.stderr.contains("tl git setup"),
+        "{}",
+        run.stderr
+    );
+
+    // Any other command still fails loudly.
+    let run = tl(
+        &home,
+        &home.dir,
+        &["--context", "gone", "secrets", "ls"],
+        &[],
+    )
+    .await;
+    assert!(!run.success);
+}
+
+/// An empty `TENSORLAKE_CONTEXT` names nothing. `tl login` must not try to save under ''.
+#[tokio::test]
+async fn an_empty_context_env_var_does_not_block_login() {
+    let (url, server) = scripted_server(vec![(500, json!({"message": "test stop"}))]).await;
+    let home = Home::new();
+    two_contexts(&home, &url);
+    let run = tl(&home, &home.dir, &["login"], &[("TENSORLAKE_CONTEXT", "")]).await;
+    let requests = timeout(Duration::from_secs(10), server)
+        .await
+        .unwrap_or_else(|_| panic!("the login never reached the server: {}", run.stderr))
+        .unwrap();
+    assert!(!run.success);
+    assert!(
+        !run.stderr.contains("invalid context name"),
+        "{}",
+        run.stderr
+    );
+    assert_eq!(requests.len(), 1, "the browser login talked to the server");
+    assert!(
+        requests[0].starts_with("POST /platform/cli/login/start "),
+        "{}",
+        requests[0]
+    );
+}
+
+/// A context with no organization and project runs the init flow first. The run stays in
+/// that context afterwards: its token is used, not the current context's.
+#[tokio::test]
+async fn after_init_the_run_stays_in_its_context() {
+    let (url, server) = scripted_server(vec![
+        (200, json!({"items": [{"id": "org_1", "name": "Org"}]})),
+        (
+            200,
+            json!({"items": [{"id": "project_new", "name": "New"}]}),
+        ),
+        (500, json!({"message": "test stop"})),
+    ])
+    .await;
+    let home = Home::new();
+    home.write(
+        "contexts.toml",
+        &format!(
+            r#"current = "default"
+
+[contexts.default]
+api_url = "{url}"
+organization = "org_1"
+project = "project_default"
+
+[contexts.staging]
+api_url = "{url}"
+"#
+        ),
+    );
+    home.write(
+        "credentials.toml",
+        &format!(
+            r#"["{url}"]
+token = "tl_default"
+
+[contexts.default]
+token = "tl_default"
+
+[contexts.staging]
+token = "tl_staging"
+"#
+        ),
+    );
+    // A directory with no `.tensorlake/config.toml`, so init has to ask the server.
+    let project = home.dir.join("project");
+    fs::create_dir_all(&project).unwrap();
+
+    let run = tl(
+        &home,
+        &project,
+        &["--context", "staging", "secrets", "ls"],
+        &[],
+    )
+    .await;
+    let requests = timeout(Duration::from_secs(10), server)
+        .await
+        .unwrap_or_else(|_| panic!("the command never reached the server: {}", run.stderr))
+        .unwrap();
+    assert_eq!(requests.len(), 3, "{}", run.stderr);
+    assert!(
+        requests[0].contains("/platform/v1/organizations ") && requests[0].contains("tl_staging"),
+        "init uses the token of the named context: {}",
+        requests[0]
+    );
+    assert!(
+        requests[2].contains("Bearer tl_staging"),
+        "the command runs with the token of the named context: {}",
+        requests[2]
+    );
+    assert!(
+        requests[2].contains("project_new"),
+        "the command runs in the project init chose: {}",
+        requests[2]
     );
 }
