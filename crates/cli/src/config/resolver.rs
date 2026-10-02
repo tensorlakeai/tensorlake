@@ -118,7 +118,7 @@ pub fn resolve(
         &inputs,
         &load_local_config(),
         &load_global_config(),
-        &load_contexts(),
+        &load_contexts()?,
         load_stored_credentials,
         |name, entry| load_context_token(name, entry.storage).map(|t| t.map(|t| t.token)),
     )

@@ -14,7 +14,7 @@ pub async fn ensure_auth(ctx: &mut CliContext) -> Result<()> {
         return Ok(());
     }
     eprintln!("It seems like you're not logged in. Let's log you in...\n");
-    let context_name = login_context_name(ctx);
+    let context_name = login_context_name(ctx)?;
     match run_login_flow(ctx, true, &context_name).await {
         Ok(_) => {}
         Err(CliError::Cancelled) => {
@@ -67,7 +67,7 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
     }
     if !ctx.has_authentication() {
         eprintln!("It seems like you're not logged in. Let's log you in...\n");
-        let context_name = login_context_name(ctx);
+        let context_name = login_context_name(ctx)?;
         match run_login_flow(ctx, true, &context_name).await {
             Ok(_) => {}
             Err(CliError::Cancelled) => {
@@ -152,11 +152,11 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
 ///
 /// With no selected context, `default` is not a safe guess: the run may be for another API
 /// URL than the saved `default`, and saving over it would log the user out of production.
-fn login_context_name(ctx: &CliContext) -> String {
-    match ctx.context_name.as_deref() {
+fn login_context_name(ctx: &CliContext) -> Result<String> {
+    Ok(match ctx.context_name.as_deref() {
         Some(name) => name.to_string(),
-        None => login_name_for_url(&load_contexts(), &ctx.api_url),
-    }
+        None => login_name_for_url(&load_contexts()?, &ctx.api_url),
+    })
 }
 
 /// Rebuild `ctx` from the context that the login flow saved as `name`.

@@ -95,14 +95,18 @@ pub fn check_no_case_clash(contexts: &ContextsFile, name: &str) -> Result<()> {
 /// A file that cannot be read or parsed is reported once on stderr and read as empty, so a
 /// command that needs no context (an API key, a PAT) still runs. Commands that change the
 /// file use [`load_contexts_for_update`], which refuses such a file.
-pub fn load_contexts() -> ContextsFile {
-    Backend::from_env()
-        .and_then(|backend| load_contexts_in(&config_dir(), &backend))
-        .unwrap_or_else(|e| {
+///
+/// An invalid `TENSORLAKE_TOKEN_STORAGE` is an error for every command. Read as "no
+/// contexts", it would turn a typo into "not logged in" while the token is right there.
+pub fn load_contexts() -> Result<ContextsFile> {
+    let backend = Backend::from_env()?;
+    Ok(
+        load_contexts_in(&config_dir(), &backend).unwrap_or_else(|e| {
             static WARNED: std::sync::Once = std::sync::Once::new();
             WARNED.call_once(|| eprintln!("warning: {e}"));
             ContextsFile::default()
-        })
+        }),
+    )
 }
 
 /// Load `contexts.toml` to change and save it.

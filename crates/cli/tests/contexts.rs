@@ -723,6 +723,24 @@ async fn an_invalid_storage_setting_is_an_error() {
         "{}",
         run.stderr
     );
+
+    // A read-only command must not read the setting as "no contexts" and say "not logged
+    // in": the token is there, the setting is wrong.
+    let run = tl(
+        &home,
+        &home.dir,
+        &["whoami"],
+        &[("TENSORLAKE_TOKEN_STORAGE", "cloud")],
+    )
+    .await;
+    assert!(!run.success, "{}", run.stdout);
+    assert!(
+        run.stderr
+            .contains("TENSORLAKE_TOKEN_STORAGE=cloud is not valid"),
+        "{}",
+        run.stderr
+    );
+    assert!(!run.stderr.contains("not logged in"), "{}", run.stderr);
 }
 
 #[tokio::test]

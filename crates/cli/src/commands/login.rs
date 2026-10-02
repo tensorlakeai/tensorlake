@@ -13,7 +13,7 @@ use crate::error::{CliError, Result};
 /// `name` is the subcommand's own `--context`. `named_context` is the context named by the
 /// global `--context` flag or `TENSORLAKE_CONTEXT`, saved or not.
 pub async fn run(ctx: &CliContext, name: Option<&str>, named_context: Option<&str>) -> Result<()> {
-    let contexts = load_contexts();
+    let contexts = load_contexts()?;
     let name = login_context_name(name, named_context, &contexts, &ctx.api_url);
     validate_context_name(&name)?;
     check_no_case_clash(&contexts, &name)?;
@@ -42,7 +42,7 @@ fn login_context_name(
 /// every saved context. The contexts stay in `contexts.toml` without a token;
 /// `tl login --context <name>` fills them again.
 pub fn logout(ctx: &CliContext, all: bool) -> Result<()> {
-    let contexts = load_contexts();
+    let contexts = load_contexts()?;
     let names: Vec<String> = if all {
         contexts.contexts.keys().cloned().collect()
     } else {

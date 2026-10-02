@@ -80,7 +80,7 @@ fn get_entry<'a>(contexts: &'a ContextsFile, name: &str) -> Result<&'a ContextEn
 }
 
 pub fn list(output_json: bool) -> Result<()> {
-    let contexts = load_contexts();
+    let contexts = load_contexts()?;
     if output_json {
         let views: Vec<ContextView> = contexts
             .contexts
@@ -120,7 +120,7 @@ pub fn list(output_json: bool) -> Result<()> {
 }
 
 pub fn current() -> Result<()> {
-    let contexts = load_contexts();
+    let contexts = load_contexts()?;
     match contexts.current_entry() {
         Some((name, _)) => {
             println!("{name}");
@@ -133,7 +133,7 @@ pub fn current() -> Result<()> {
 }
 
 pub fn show(name: &str, output_json: bool) -> Result<()> {
-    let contexts = load_contexts();
+    let contexts = load_contexts()?;
     let entry = get_entry(&contexts, name)?;
     let v = view(&contexts, name, entry);
     if output_json {
