@@ -1286,12 +1286,16 @@ describe("Sandbox", () => {
               mountPath: string,
               readOnly?: boolean,
               prefetch?: boolean,
+              _snapshotId?: string | null,
+              _owner?: string | null,
+              sourcePath?: string | null,
             ) => {
               expect(sandboxId).toBe("sbx-abc");
               expect(fileSystemId).toBe("file_system_abc");
               expect(mountPath).toBe("/mnt/skills");
               expect(readOnly).toBe(true);
               expect(prefetch).toBe(true);
+              expect(sourcePath).toBe("/shared/models");
               return {
                 traceId: "t",
                 json: fsSandboxInfoBody({
@@ -1317,6 +1321,7 @@ describe("Sandbox", () => {
       const info = await sbx.attachFileSystem("file_system_abc", "/mnt/skills", {
         readOnly: true,
         prefetch: true,
+        sourcePath: "/shared/models",
       });
       expect(info.fileSystems).toEqual([
         {
