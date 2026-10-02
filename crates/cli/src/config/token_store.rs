@@ -57,7 +57,8 @@ pub enum Policy {
     Auto,
     /// The keychain only.
     Keychain,
-    /// The file only. The keychain is never called.
+    /// The file only. New tokens go to the file. The keychain is read only for a context
+    /// whose `storage` says its token is there.
     File,
 }
 

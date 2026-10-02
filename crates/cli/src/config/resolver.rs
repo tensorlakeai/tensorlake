@@ -213,9 +213,15 @@ fn resolve_with(
         .map(str::to_string)
         .or_else(|| get_nested_value(local, "project"));
 
+    // The token of the context is read only when this run uses it: a command that runs in
+    // the context, with no API key. The token may be in an OS keychain that is locked or
+    // does not answer. That must not stop `tl login`, `tl context use`, or a run that
+    // brings its own API key: those are the ways out.
+    let uses_context_token = api_key.is_none() && inputs.unknown_context == UnknownContext::Error;
     let personal_access_token = match (inputs.pat, context, stored) {
         (Some(pat), _, _) => Some(pat.to_string()),
-        (None, Some((name, _, entry)), _) => context_token(name, entry)?,
+        (None, Some((name, _, entry)), _) if uses_context_token => context_token(name, entry)?,
+        (None, Some(_), _) => None,
         (None, None, stored) => stored.map(|s| s.token),
     };
 
@@ -503,7 +509,56 @@ mod tests {
         i.unknown_context = lenient;
         let r = resolve_test(&i, &TomlTable::new(), &c);
         assert_eq!(r.context_name.as_deref(), Some("default"));
-        assert_eq!(r.personal_access_token.as_deref(), Some("tl_default"));
+        assert_eq!(r.project_id.as_deref(), Some("project_default"));
+    }
+
+    /// A token that cannot be read, say from a locked keychain, must not stop the commands
+    /// that put things right: `tl login`, `tl context use`, and a run with an API key.
+    #[test]
+    fn a_token_that_cannot_be_read_stops_only_the_commands_that_use_it() {
+        fn locked(_: &str, _: &ContextEntry) -> Result<Option<String>> {
+            Err(CliError::config("the keychain is locked"))
+        }
+        let run = |i: Inputs| {
+            resolve_with(
+                &i,
+                &TomlTable::new(),
+                &TomlTable::new(),
+                &contexts(),
+                stored,
+                locked,
+            )
+        };
+
+        let err = run(inputs()).unwrap_err().to_string();
+        assert!(err.contains("the keychain is locked"), "{err}");
+
+        // A recovery command does not read the token.
+        let r = run(Inputs {
+            unknown_context: UnknownContext::Ignore,
+            ..inputs()
+        })
+        .unwrap();
+        assert_eq!(r.context_name.as_deref(), Some("default"));
+        assert_eq!(r.personal_access_token, None);
+
+        // An API key is the credential of the run, so the context token is not read.
+        let r = run(Inputs {
+            api_key: Some("tl_apiKey"),
+            ..inputs()
+        })
+        .unwrap();
+        assert_eq!(r.api_key.as_deref(), Some("tl_apiKey"));
+        assert_eq!(r.personal_access_token, None);
+        assert_eq!(r.project_id.as_deref(), Some("project_default"));
+
+        // `--pat` never reads the context token.
+        let r = run(Inputs {
+            pat: Some("tl_flag"),
+            ..inputs()
+        })
+        .unwrap();
+        assert_eq!(r.personal_access_token.as_deref(), Some("tl_flag"));
     }
 
     #[test]
