@@ -191,8 +191,12 @@ fn resolve_with(
         (None, None, stored) => stored.map(|s| s.token),
     };
 
+    // The recovery commands (`tl login`, `tl logout --all`, `tl context`) do not use the
+    // token of the selected context, so a `--project` or `TENSORLAKE_PROJECT_ID` for another
+    // project must not stop them. The check names them as the way out of a mismatch.
     if let Some((name, _, entry)) = context
         && api_key.is_none()
+        && inputs.unknown_context == UnknownContext::Error
     {
         check_flags_match_context(inputs.organization_id, inputs.project_id, name, entry)?;
     }
@@ -618,6 +622,23 @@ api_url = "https://api.example.test"
                 .starts_with("--organization org_2 does not match context 'default' (org_1)."),
             "{err}"
         );
+    }
+
+    /// `tl context use <name>` and `tl login --context <name>` are what the mismatch error
+    /// tells the user to run. They must not fail with the same error.
+    #[test]
+    fn a_recovery_command_skips_the_context_check() {
+        let r = resolve_test(
+            &Inputs {
+                project_id: Some("project_staging"),
+                unknown_context: UnknownContext::Ignore,
+                ..inputs()
+            },
+            &TomlTable::new(),
+            &contexts(),
+        );
+        assert_eq!(r.context_name.as_deref(), Some("default"));
+        assert_eq!(r.project_id.as_deref(), Some("project_staging"));
     }
 
     #[test]

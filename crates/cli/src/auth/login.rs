@@ -10,13 +10,6 @@ use crate::http;
 use crate::project::detection::find_project_root;
 use std::io::{IsTerminal, Write};
 
-/// Result of a successful login flow.
-pub struct LoginResult {
-    pub token: String,
-    pub organization_id: Option<String>,
-    pub project_id: Option<String>,
-}
-
 /// What the browser login approved. Not yet saved anywhere.
 #[derive(Debug, Clone)]
 pub struct BrowserLogin {
@@ -366,11 +359,10 @@ pub(crate) fn apply_login_to_contexts(
 }
 
 /// Run the interactive device code login flow and save the token as context `context_name`.
-pub async fn run_login_flow(
-    ctx: &CliContext,
-    auto_init: bool,
-    context_name: &str,
-) -> Result<LoginResult> {
+///
+/// Callers that go on in this run rebuild their `CliContext` from the saved context by name;
+/// the resolver reads the token, organization, and project from the files this flow wrote.
+pub async fn run_login_flow(ctx: &CliContext, auto_init: bool, context_name: &str) -> Result<()> {
     let login = browser_login(ctx).await?;
     let saved = save_login_context(&ctx.api_url, context_name, &login)?;
     eprintln!("login successful!");
@@ -389,20 +381,19 @@ pub async fn run_login_flow(
         None => eprintln!("saved context '{context_name}' and made it current."),
     }
 
-    let access_token = login.token.clone();
-    let mut org_id = login.organization_id.clone();
-    let mut proj_id = login.project_id.clone();
-
     if auto_init {
         // Recreate context with new PAT
         let resolved = resolver::resolve(
             Some(&ctx.api_url),
             Some(&ctx.cloud_url),
             None,
-            Some(&access_token),
+            Some(&login.token),
             Some(&ctx.namespace),
-            org_id.as_deref().or(ctx.organization_id.as_deref()),
-            proj_id.as_deref().or(ctx.project_id.as_deref()),
+            login
+                .organization_id
+                .as_deref()
+                .or(ctx.organization_id.as_deref()),
+            login.project_id.as_deref().or(ctx.project_id.as_deref()),
             None,
             // `tl login` runs with a missing named context ignored; stay that way here.
             UnknownContext::Ignore,
@@ -410,34 +401,21 @@ pub async fn run_login_flow(
         )?;
         let updated_ctx = CliContext::from_resolved(resolved);
 
-        if updated_ctx.has_org_and_project() {
-            org_id = updated_ctx.effective_organization_id();
-            proj_id = updated_ctx.effective_project_id();
-        } else {
+        if !updated_ctx.has_org_and_project() {
             eprintln!(
                 "\nNo organization and project configuration found. Let's set up your project.\n"
             );
             let project_root = find_project_root(None);
-            match run_init_flow(&updated_ctx, true, true, false, &project_root).await {
-                Ok((o, p)) => {
-                    org_id = Some(o);
-                    proj_id = Some(p);
-                }
-                Err(e) => {
-                    eprintln!("\nYou can run 'tl init' later to complete the setup.");
-                    if ctx.debug {
-                        eprintln!("Error: {}", e);
-                    }
+            if let Err(e) = run_init_flow(&updated_ctx, true, true, false, &project_root).await {
+                eprintln!("\nYou can run 'tl init' later to complete the setup.");
+                if ctx.debug {
+                    eprintln!("Error: {}", e);
                 }
             }
         }
     }
 
-    Ok(LoginResult {
-        token: access_token,
-        organization_id: org_id,
-        project_id: proj_id,
-    })
+    Ok(())
 }
 
 #[cfg(test)]

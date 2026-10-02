@@ -13,28 +13,17 @@ pub async fn ensure_auth(ctx: &mut CliContext) -> Result<()> {
         return Ok(());
     }
     eprintln!("It seems like you're not logged in. Let's log you in...\n");
-    let login_result = match run_login_flow(ctx, true, login_context_name(ctx)).await {
-        Ok(result) => result,
+    let context_name = login_context_name(ctx).to_string();
+    match run_login_flow(ctx, true, &context_name).await {
+        Ok(_) => {}
         Err(CliError::Cancelled) => {
             return Err(CliError::auth(
                 "Login cancelled. Set TENSORLAKE_API_KEY or run 'tl login' to authenticate.",
             ));
         }
         Err(e) => return Err(e),
-    };
-    let resolved = resolver::resolve(
-        Some(&ctx.api_url),
-        Some(&ctx.cloud_url),
-        None,
-        Some(&login_result.token),
-        Some(&ctx.namespace),
-        login_result.organization_id.as_deref(),
-        login_result.project_id.as_deref(),
-        None,
-        UnknownContext::Error,
-        ctx.debug,
-    )?;
-    *ctx = CliContext::from_resolved(resolved);
+    }
+    reload_from_saved_context(ctx, &context_name)?;
     if !ctx.has_authentication() {
         return Err(CliError::auth(
             "Authentication failed. Please try running 'tl login' manually.",
@@ -77,30 +66,17 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
     }
     if !ctx.has_authentication() {
         eprintln!("It seems like you're not logged in. Let's log you in...\n");
-        let login_result = match run_login_flow(ctx, true, login_context_name(ctx)).await {
-            Ok(result) => result,
+        let context_name = login_context_name(ctx).to_string();
+        match run_login_flow(ctx, true, &context_name).await {
+            Ok(_) => {}
             Err(CliError::Cancelled) => {
                 return Err(CliError::auth(
                     "Login cancelled. Set TENSORLAKE_API_KEY or run 'tl login' to authenticate.",
                 ));
             }
             Err(e) => return Err(e),
-        };
-
-        // Reload context with new credentials and org/project from login flow
-        let resolved = resolver::resolve(
-            Some(&ctx.api_url),
-            Some(&ctx.cloud_url),
-            None,
-            Some(&login_result.token),
-            Some(&ctx.namespace),
-            login_result.organization_id.as_deref(),
-            login_result.project_id.as_deref(),
-            None,
-            UnknownContext::Error,
-            ctx.debug,
-        )?;
-        *ctx = CliContext::from_resolved(resolved);
+        }
+        reload_from_saved_context(ctx, &context_name)?;
 
         if !ctx.has_authentication() {
             return Err(CliError::auth(
@@ -161,6 +137,30 @@ fn login_context_name(ctx: &CliContext) -> &str {
     ctx.context_name
         .as_deref()
         .unwrap_or(crate::config::contexts::DEFAULT_CONTEXT_NAME)
+}
+
+/// Rebuild `ctx` from the context that the login flow saved as `name`.
+///
+/// The login saved its token under `name`, so the resolver finds the token, organization,
+/// and project by that name. Resolving by name instead of by the new token keeps the context
+/// identity: `tl --context staging git setup` then bakes `--context staging` into the
+/// credential helper even when setup had to log in first. A context token works for one
+/// project only, so a helper without the name would use whichever context is current later.
+fn reload_from_saved_context(ctx: &mut CliContext, name: &str) -> Result<()> {
+    let resolved = resolver::resolve(
+        Some(&ctx.api_url),
+        Some(&ctx.cloud_url),
+        None,
+        None,
+        Some(&ctx.namespace),
+        None,
+        None,
+        Some(name),
+        UnknownContext::Error,
+        ctx.debug,
+    )?;
+    *ctx = CliContext::from_resolved(resolved);
+    Ok(())
 }
 
 #[cfg(test)]
