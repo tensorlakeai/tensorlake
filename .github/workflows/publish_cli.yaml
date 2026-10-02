@@ -194,11 +194,9 @@ jobs:
           printf '  %s\n' "${candidates[@]}" >&2
           exit 1
 
-      # The token of each context lives in the login keychain on macOS. macOS binds a keychain
-      # item to the code signature of the program that saved it. A fixed identifier and the
-      # same Developer ID certificate keep that signature the same across releases, so an
-      # upgrade does not prompt for the login password. Not notarized: `curl | sh` sets no
-      # quarantine flag, and a bare binary cannot be stapled.
+      # Sign with the same identifier and Developer ID on every release, so an upgraded CLI
+      # can read the tokens the old one saved in the keychain without a password prompt.
+      # Not notarized: our `curl | sh` install never triggers the check that notarization is for.
       - name: Import Developer ID certificate
         if: matrix.target_id == 'darwin-aarch64'
         env:
