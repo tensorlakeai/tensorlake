@@ -2070,19 +2070,29 @@ async fn main() {
         Ok(cli) => cli,
         Err(e) => e.exit(),
     };
-    // `--context` on the command line beats TENSORLAKE_CONTEXT; the resolver reads the
-    // env var itself so that `tl whoami` can say where the context came from.
-    let context_flag = match matches.value_source("context") {
-        Some(ValueSource::CommandLine) => cli.context.as_deref(),
-        _ => None,
-    };
-
     let command = match cli.command {
         Some(command) => command,
         None => {
             eprintln!("{}", missing_subcommand_error());
             std::process::exit(2);
         }
+    };
+
+    // `--context` on the command line beats TENSORLAKE_CONTEXT; the resolver reads the
+    // env var itself so that `tl whoami` can say where the context came from.
+    //
+    // `tl login --context <name>` saves into `<name>`, so it also runs in `<name>`: a saved
+    // context keeps its own API URL through a login that refreshes it. An explicit
+    // `--api-url` still wins in the resolver.
+    let context_flag = match (&command, matches.value_source("context")) {
+        (
+            Commands::Login {
+                context: Some(name),
+            },
+            _,
+        ) => Some(name.as_str()),
+        (_, Some(ValueSource::CommandLine)) => cli.context.as_deref(),
+        _ => None,
     };
 
     // These commands put the saved contexts right, so a named context that is missing

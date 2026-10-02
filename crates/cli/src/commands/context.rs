@@ -14,8 +14,8 @@ use crate::config::contexts::{
     validate_context_name,
 };
 use crate::config::files::{
-    ContextToken, load_context_token, load_stored_credentials, remove_context_token,
-    remove_credentials, rename_context_token, save_credentials,
+    ContextToken, load_context_token, load_stored_credentials, purge_git_credentials,
+    remove_context_token, remove_credentials, rename_context_token, save_credentials,
 };
 use crate::error::{CliError, Result};
 use crate::output::table::new_table;
@@ -184,11 +184,14 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
 }
 
 /// Remove the token of context `name` from `credentials.toml`. The per-URL table loses the
-/// token too when it holds the same one.
+/// token too when it holds the same one. The cache of minted git credentials goes as well:
+/// git reads it before the login token, so a cached entry would keep git authenticated
+/// after the logout until it expires. The next `git fetch` mints a new one.
 ///
 /// Used by `tl context delete` and `tl logout`.
 pub(crate) fn forget_token(name: &str, entry: &ContextEntry, token: &ContextToken) -> Result<()> {
     remove_context_token(name)?;
+    purge_git_credentials();
     let url_table_has_it =
         load_stored_credentials(&entry.api_url).is_some_and(|stored| stored.token == token.token);
     if url_table_has_it {
