@@ -1,8 +1,9 @@
 use crate::config::contexts::{ContextEntry, ContextsFile, load_contexts};
 use crate::config::files::{
-    DEFAULT_API_URL, StoredCredentials, TomlTable, get_nested_value, load_context_token,
-    load_global_config, load_local_config, load_stored_credentials, normalize_api_url,
+    DEFAULT_API_URL, StoredCredentials, TomlTable, get_nested_value, load_global_config,
+    load_local_config, load_stored_credentials, normalize_api_url,
 };
+use crate::config::token_store::load_context_token;
 use crate::error::{CliError, Result};
 
 /// Where the selected context came from.
@@ -112,7 +113,7 @@ pub fn resolve(
         &load_global_config(),
         &load_contexts(),
         load_stored_credentials,
-        |name| load_context_token(name).map(|t| t.token),
+        |name, entry| load_context_token(name, entry.storage).map(|t| t.map(|t| t.token)),
     )
 }
 
@@ -138,7 +139,7 @@ fn resolve_with(
     global: &TomlTable,
     contexts: &ContextsFile,
     stored_credentials: impl Fn(&str) -> Option<StoredCredentials>,
-    context_token: impl Fn(&str) -> Option<String>,
+    context_token: impl Fn(&str, &ContextEntry) -> Result<Option<String>>,
 ) -> Result<ResolvedConfig> {
     let selection = select_context(
         inputs.context_flag,
@@ -214,7 +215,7 @@ fn resolve_with(
 
     let personal_access_token = match (inputs.pat, context, stored) {
         (Some(pat), _, _) => Some(pat.to_string()),
-        (None, Some((name, _, _)), _) => context_token(name),
+        (None, Some((name, _, entry)), _) => context_token(name, entry)?,
         (None, None, stored) => stored.map(|s| s.token),
     };
 
@@ -377,6 +378,7 @@ mod tests {
             api_url: api_url.to_string(),
             organization: Some(org.to_string()),
             project: Some(project.to_string()),
+            storage: None,
         }
     }
 
@@ -393,12 +395,12 @@ mod tests {
         file
     }
 
-    fn token(name: &str) -> Option<String> {
-        match name {
+    fn token(name: &str, _: &ContextEntry) -> Result<Option<String>> {
+        Ok(match name {
             "default" => Some("tl_default".into()),
             "staging" => Some("tl_staging".into()),
             _ => None,
-        }
+        })
     }
 
     fn stored(api_url: &str) -> Option<StoredCredentials> {

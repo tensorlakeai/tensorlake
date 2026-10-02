@@ -53,7 +53,8 @@ Authentication:
 
 Contexts:
   Use 'tl context' (alias: 'tl profile') to switch between saved projects without logging in again
-  Use --context or TENSORLAKE_CONTEXT to run one command in another context"
+  Use --context or TENSORLAKE_CONTEXT to run one command in another context
+  Tokens go to the OS keychain; set TENSORLAKE_TOKEN_STORAGE=file to keep them in a file"
 )]
 struct Cli {
     /// Show detailed error information and stack traces

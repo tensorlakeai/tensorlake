@@ -4,9 +4,8 @@ use crate::commands::context::forget_token;
 use crate::config::contexts::{
     ContextsFile, load_contexts, login_name_for_url, validate_context_name,
 };
-use crate::config::files::{
-    load_context_token, remove_all_context_tokens, remove_all_url_credentials,
-};
+use crate::config::files::{remove_all_context_tokens, remove_all_url_credentials};
+use crate::config::token_store::load_context_token;
 use crate::error::{CliError, Result};
 
 /// `tl login [--context <name>]`: browser login, saved as a context.
@@ -61,7 +60,7 @@ pub fn logout(ctx: &CliContext, all: bool) -> Result<()> {
         let entry = contexts
             .get(name)
             .ok_or_else(|| CliError::config(format!("unknown context '{name}'")))?;
-        let Some(token) = load_context_token(name) else {
+        let Some(token) = load_context_token(name, entry.storage)? else {
             if !all {
                 eprintln!("no saved token for context '{name}'.");
             }
@@ -127,6 +126,7 @@ mod tests {
                 api_url: api_url.into(),
                 organization: None,
                 project: None,
+                storage: None,
             },
         );
         file

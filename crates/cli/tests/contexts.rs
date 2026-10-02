@@ -61,6 +61,8 @@ async fn tl(home: &Home, cwd: &Path, args: &[&str], env: &[(&str, &str)]) -> Run
         .current_dir(cwd)
         .env("HOME", &home.dir)
         .env("NO_COLOR", "1")
+        // Never the keychain of the machine that runs the tests.
+        .env("TENSORLAKE_TOKEN_STORAGE", "file")
         .env_remove("TENSORLAKE_API_KEY")
         .env_remove("TENSORLAKE_PAT")
         .env_remove("TENSORLAKE_API_URL")
@@ -160,7 +162,7 @@ token = "tl_staging"
 }
 
 #[tokio::test]
-async fn migration_creates_default_and_keeps_the_old_table() {
+async fn migration_creates_default_and_removes_the_old_table() {
     let home = Home::new();
     home.write(
         "credentials.toml",
@@ -178,15 +180,19 @@ project = "project_1"
     assert_eq!(list[0]["project"], "project_1");
     assert_eq!(list[0]["token"], "saved");
 
-    // contexts.toml has no secrets.
+    // contexts.toml has no secrets, and says where the token is.
     let contexts = home.read("contexts.toml");
     assert!(contexts.contains(r#"current = "default""#), "{contexts}");
     assert!(!contexts.contains("tl_old"), "{contexts}");
+    assert_eq!(
+        home.toml("contexts.toml")["contexts"]["default"]["storage"],
+        toml::Value::from("file")
+    );
+    assert_eq!(list[0]["storage"], "file");
 
-    // credentials.toml keeps the per-URL table an older CLI reads, and gains the context token.
+    // credentials.toml holds the context token only. The per-URL table was a copy of it.
     let credentials = home.toml("credentials.toml");
-    assert_eq!(credentials[PROD]["token"], toml::Value::from("tl_old"));
-    assert_eq!(credentials[PROD]["project"], toml::Value::from("project_1"));
+    assert!(credentials.get(PROD).is_none(), "{credentials}");
     assert_eq!(
         credentials["contexts"]["default"]["token"],
         toml::Value::from("tl_old")
@@ -219,12 +225,12 @@ async fn use_rename_and_delete_update_current() {
         home.toml("contexts.toml")["current"],
         toml::Value::from("staging")
     );
-    // The per-URL table now holds the staging token, so an older CLI sees it.
+    // A switch writes no token anywhere. The per-URL copy an older CLI wrote is gone.
     let credentials = home.toml("credentials.toml");
-    assert_eq!(credentials[PROD]["token"], toml::Value::from("tl_staging"));
+    assert!(credentials.get(PROD).is_none(), "{credentials}");
     assert_eq!(
-        credentials[PROD]["project"],
-        toml::Value::from("project_staging")
+        credentials["contexts"]["staging"]["token"],
+        toml::Value::from("tl_staging")
     );
 
     let run = tl(
@@ -693,9 +699,29 @@ async fn logout_of_another_context_uses_the_context_flag() {
         "{credentials}"
     );
     assert_eq!(
-        credentials[PROD]["token"],
+        credentials["contexts"]["default"]["token"],
         toml::Value::from("tl_default"),
-        "the per-URL table holds the current context's token, which stays"
+        "the current context keeps its token"
+    );
+}
+
+#[tokio::test]
+async fn an_invalid_storage_setting_is_an_error() {
+    let home = Home::new();
+    two_contexts(&home, PROD);
+    let run = tl(
+        &home,
+        &home.dir,
+        &["context", "use", "staging"],
+        &[("TENSORLAKE_TOKEN_STORAGE", "cloud")],
+    )
+    .await;
+    assert!(!run.success);
+    assert!(
+        run.stderr
+            .contains("TENSORLAKE_TOKEN_STORAGE=cloud is not valid"),
+        "{}",
+        run.stderr
     );
 }
 
@@ -895,8 +921,8 @@ async fn parallel_commands_keep_every_token() {
     let home = Home::new();
     two_contexts(&home, PROD);
 
-    // `tl context use` copies the token of the new current context into the per-URL table,
-    // a read-modify-write of `credentials.toml`. Run many at once.
+    // The first run of each process moves the tokens and rewrites `credentials.toml` and
+    // `contexts.toml`. Run many at once.
     let home = &home;
     let runs = (0..8).map(|i| async move {
         let name = if i % 2 == 0 { "default" } else { "staging" };
@@ -924,6 +950,7 @@ async fn tl_with_stdin(home: &Home, args: &[&str], stdin: &str) -> Run {
         .current_dir(&home.dir)
         .env("HOME", &home.dir)
         .env("NO_COLOR", "1")
+        .env("TENSORLAKE_TOKEN_STORAGE", "file")
         .env_remove("TENSORLAKE_CONTEXT")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())

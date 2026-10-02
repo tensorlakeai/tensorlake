@@ -3,8 +3,8 @@ use crate::commands::init::run_init_flow;
 use crate::config::contexts::{
     ContextEntry, ContextsFile, load_contexts_for_update, save_contexts,
 };
-use crate::config::files::{save_context_token, save_credentials};
 use crate::config::resolver::{self, UnknownContext};
+use crate::config::token_store::{TokenStorage, save_context_token};
 use crate::error::{CliError, Result};
 use crate::http;
 use crate::project::detection::find_project_root;
@@ -322,18 +322,16 @@ impl SavedLogin {
     }
 }
 
-/// Save a login token as context `name`, make it current, and copy it to the per-URL
-/// table that older CLI versions read.
+/// Save a login token as context `name` and make it current.
+///
+/// The token goes to the OS keychain, or to `credentials.toml` where there is none, and the
+/// context records which. The token is saved first: a context whose token failed to save
+/// would say "logged in" and then fail at the first command.
 pub fn save_login_context(api_url: &str, name: &str, login: &BrowserLogin) -> Result<SavedLogin> {
     let mut contexts = load_contexts_for_update()?;
-    let saved = apply_login_to_contexts(&mut contexts, api_url, name, login);
-    save_context_token(name, &login.token)?;
-    save_credentials(
-        api_url,
-        &login.token,
-        login.organization_id.as_deref(),
-        login.project_id.as_deref(),
-    )?;
+    let previous = contexts.get(name).and_then(|entry| entry.storage);
+    let storage = save_context_token(name, &login.token, previous)?;
+    let saved = apply_login_to_contexts(&mut contexts, api_url, name, login, storage);
     save_contexts(&contexts)?;
     Ok(saved)
 }
@@ -343,11 +341,13 @@ pub(crate) fn apply_login_to_contexts(
     api_url: &str,
     name: &str,
     login: &BrowserLogin,
+    storage: TokenStorage,
 ) -> SavedLogin {
     let entry = ContextEntry {
         api_url: api_url.to_string(),
         organization: login.organization_id.clone(),
         project: login.project_id.clone(),
+        storage: Some(storage),
     };
     let replaced = contexts.contexts.insert(name.to_string(), entry.clone());
     contexts.current = Some(name.to_string());
@@ -441,8 +441,13 @@ mod tests {
             "https://api.tensorlake.ai",
             "staging",
             &login("org_1", "project_s"),
+            TokenStorage::Keychain,
         );
         assert_eq!(saved.replaced, None);
+        assert_eq!(
+            contexts.get("staging").unwrap().storage,
+            Some(TokenStorage::Keychain)
+        );
         assert!(saved.changes().is_empty());
         assert_eq!(contexts.current.as_deref(), Some("staging"));
         assert_eq!(
@@ -459,6 +464,7 @@ mod tests {
             "https://api.tensorlake.ai",
             "default",
             &login("org_1", "project_a"),
+            TokenStorage::File,
         );
         contexts.current = Some("other".into());
         let saved = apply_login_to_contexts(
@@ -466,6 +472,7 @@ mod tests {
             "https://api.tensorlake.ai",
             "default",
             &login("org_1", "project_b"),
+            TokenStorage::File,
         );
         assert!(saved.replaced.is_some());
         assert_eq!(

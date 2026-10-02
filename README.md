@@ -80,8 +80,12 @@ With `--context` or `TENSORLAKE_CONTEXT` set, `tl login` saves into that context
 `tl logout --all`, and `tl context` run even when the named context does not exist.
 
 `tl profile` is an alias for `tl context`. `tl whoami` shows the active context and
-where it came from. Contexts live in `~/.config/tensorlake/contexts.toml` (no secrets);
-tokens stay in `credentials.toml`, which only you can read.
+where it came from. Contexts live in `~/.config/tensorlake/contexts.toml` (no secrets).
+Tokens go to the OS keychain: the macOS Keychain, the Windows Credential Manager, or
+the Secret Service on Linux. Where there is no keychain, for example in CI or in a
+container, the token goes to `credentials.toml`, which only you can read. Set
+`TENSORLAKE_TOKEN_STORAGE=file` to keep tokens in that file, for example over SSH to
+a Mac. `tl context list` shows where each token is.
 
 ### Create Your First Sandbox (CLI)
 

@@ -26,11 +26,6 @@ pub fn global_config_path() -> PathBuf {
     config_dir().join(".tensorlake_config")
 }
 
-/// Credentials file: ~/.config/tensorlake/credentials.toml
-pub fn credentials_path() -> PathBuf {
-    config_dir().join("credentials.toml")
-}
-
 /// Key of the table in `credentials.toml` that holds one token for each context.
 pub const CONTEXT_TOKENS_KEY: &str = "contexts";
 
@@ -237,7 +232,11 @@ pub fn load_stored_credentials(api_url: &str) -> Option<StoredCredentials> {
 /// that needs no saved token (an API key, a PAT) still runs. Code that changes the file uses
 /// [`update_credentials_table`], which refuses such a file.
 pub fn load_credentials_table() -> TomlTable {
-    read_credentials_table(&credentials_path()).unwrap_or_else(|e| {
+    load_credentials_table_in(&config_dir())
+}
+
+pub(crate) fn load_credentials_table_in(dir: &Path) -> TomlTable {
+    read_credentials_table(&dir.join("credentials.toml")).unwrap_or_else(|e| {
         static WARNED: std::sync::Once = std::sync::Once::new();
         WARNED.call_once(|| eprintln!("warning: {e}"));
         TomlTable::new()
@@ -351,35 +350,41 @@ pub(crate) fn write_file_atomically(path: &Path, content: &[u8], mode: Option<u3
     result
 }
 
-/// Save PAT to credentials file scoped by API URL.
-///
-/// This per-URL table is what older CLI versions read. It always holds a copy of the
-/// current context's token.
-pub fn save_credentials(
-    api_url: &str,
-    token: &str,
-    organization_id: Option<&str>,
-    project_id: Option<&str>,
-) -> Result<()> {
-    update_credentials_table(|table| {
-        set_scoped_credentials(table, api_url, token, organization_id, project_id)
-    })
-}
-
 /// Remove the per-URL table for `api_url`, and the legacy unscoped token if the file has one.
+///
+/// Older CLI versions wrote one such table per login. This version writes none: the token
+/// of each context lives in the OS keychain or under `[contexts]`, and a second copy in the
+/// file would undo what the keychain protects.
 pub fn remove_credentials(api_url: &str) -> Result<()> {
     update_credentials_table(|table| remove_url_tables(table, api_url))
 }
 
 /// Remove every per-URL table and the legacy unscoped token. The context tokens stay.
 ///
-/// Returns the normalized API URL of each removed login. A per-URL table outlives its
-/// context when a login replaces the context with one for another URL, so `tl logout --all`
-/// calls this after it has forgotten the token of each context.
+/// Returns the normalized API URL of each removed login. `tl logout --all` calls this after
+/// it has forgotten the token of each context, and the first run of this version calls it
+/// once the per-URL logins have become contexts.
 pub fn remove_all_url_credentials() -> Result<Vec<String>> {
+    remove_all_url_credentials_in(&config_dir())
+}
+
+pub(crate) fn remove_all_url_credentials_in(dir: &Path) -> Result<Vec<String>> {
     let mut urls = Vec::new();
-    update_credentials_table(|table| urls = remove_all_url_tables(table))?;
+    update_credentials_table_in(dir, |table| urls = remove_all_url_tables(table))?;
     Ok(urls)
+}
+
+/// Remove the per-URL tables for `api_urls` only. A table for another URL stays: it is a
+/// login with no context, and `tl logout --all` is what removes those.
+pub(crate) fn remove_url_credentials_in(dir: &Path, api_urls: &[String]) -> Result<()> {
+    if api_urls.is_empty() || !dir.join("credentials.toml").exists() {
+        return Ok(());
+    }
+    update_credentials_table_in(dir, |table| {
+        for url in api_urls {
+            remove_url_tables(table, url);
+        }
+    })
 }
 
 /// Remove the token of every context, listed in `contexts.toml` or not.
@@ -434,6 +439,7 @@ fn remove_url_tables(table: &mut TomlTable, api_url: &str) {
     table.remove(LEGACY_TOKEN_KEY);
 }
 
+#[cfg(test)]
 pub(crate) fn set_scoped_credentials(
     table: &mut TomlTable,
     api_url: &str,
@@ -460,30 +466,38 @@ pub(crate) fn set_scoped_credentials(
     table.insert(normalize_api_url(api_url), toml::Value::Table(section));
 }
 
-/// Load the token saved for context `name`.
-pub fn load_context_token(name: &str) -> Option<ContextToken> {
-    context_token_from_table(&load_credentials_table(), name)
+/// The token of context `name` in `credentials.toml`, if the file holds one.
+///
+/// This is the file half of the token store. Callers go through
+/// `config::token_store`, which also knows the OS keychain.
+pub(crate) fn load_context_token_from_file_in(dir: &Path, name: &str) -> Option<ContextToken> {
+    context_token_from_table(&load_credentials_table_in(dir), name)
 }
 
-/// Save the token for context `name`.
-pub fn save_context_token(name: &str, token: &str) -> Result<()> {
-    update_credentials_table(|table| set_context_token(table, name, token))
+/// Like [`load_context_token_from_file_in`], but a file that does not parse is an error.
+/// For code that goes on to change where the token is: a file read as empty would move
+/// nothing and report success.
+pub(crate) fn load_context_token_from_file_strict_in(
+    dir: &Path,
+    name: &str,
+) -> Result<Option<ContextToken>> {
+    let table = read_credentials_table(&dir.join("credentials.toml"))?;
+    Ok(context_token_from_table(&table, name))
 }
 
-/// Remove the token saved for context `name`. A missing token is not an error.
-pub fn remove_context_token(name: &str) -> Result<()> {
-    update_credentials_table(|table| {
+/// Save the token of context `name` in `credentials.toml`.
+pub(crate) fn save_context_token_to_file_in(dir: &Path, name: &str, token: &str) -> Result<()> {
+    update_credentials_table_in(dir, |table| set_context_token(table, name, token))
+}
+
+/// Remove the token of context `name` from `credentials.toml`. A missing token is not an
+/// error, and a missing file is left missing.
+pub(crate) fn remove_context_token_from_file_in(dir: &Path, name: &str) -> Result<()> {
+    if !dir.join("credentials.toml").exists() {
+        return Ok(());
+    }
+    update_credentials_table_in(dir, |table| {
         remove_context_token_from_table(table, name);
-    })
-}
-
-/// Move the token of context `old` to context `new`.
-pub fn rename_context_token(old: &str, new: &str) -> Result<()> {
-    update_credentials_table(|table| {
-        if let Some(token) = context_token_from_table(table, old) {
-            remove_context_token_from_table(table, old);
-            set_context_token(table, new, &token.token);
-        }
     })
 }
 

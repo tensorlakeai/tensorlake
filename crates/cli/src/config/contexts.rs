@@ -1,7 +1,8 @@
 //! `~/.config/tensorlake/contexts.toml`: the named contexts and which one is current.
 //!
 //! This file holds no secrets, so users can read, edit, and share it. The token for each
-//! context lives in `credentials.toml` (see `files::save_context_token`).
+//! context lives in the OS keychain, or in `credentials.toml` where there is no keychain;
+//! `storage` on each context says which (see `config::token_store`).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -11,9 +12,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::config::files::{
     DEFAULT_API_URL, StoredCredentials, TomlTable, all_scoped_credentials, config_dir,
-    load_credentials_table, normalize_api_url, set_context_token, update_credentials_table,
-    write_file_atomically,
+    load_credentials_table_in, normalize_api_url, remove_url_credentials_in, write_file_atomically,
 };
+use crate::config::token_store::{Backend, TokenStorage};
 use crate::error::{CliError, Result};
 
 /// The name `tl login` uses when the user gives none.
@@ -27,6 +28,10 @@ pub struct ContextEntry {
     pub organization: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub project: Option<String>,
+    /// Where the token is. `None` on a context written by an older version of this CLI,
+    /// which kept every token in `credentials.toml`; the next run moves it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<TokenStorage>,
 }
 
 /// The whole `contexts.toml` file.
@@ -73,11 +78,13 @@ pub fn validate_context_name(name: &str) -> Result<()> {
 /// command that needs no context (an API key, a PAT) still runs. Commands that change the
 /// file use [`load_contexts_for_update`], which refuses such a file.
 pub fn load_contexts() -> ContextsFile {
-    load_contexts_in(&config_dir()).unwrap_or_else(|e| {
-        static WARNED: std::sync::Once = std::sync::Once::new();
-        WARNED.call_once(|| eprintln!("warning: {e}"));
-        ContextsFile::default()
-    })
+    Backend::from_env()
+        .and_then(|backend| load_contexts_in(&config_dir(), &backend))
+        .unwrap_or_else(|e| {
+            static WARNED: std::sync::Once = std::sync::Once::new();
+            WARNED.call_once(|| eprintln!("warning: {e}"));
+            ContextsFile::default()
+        })
 }
 
 /// Load `contexts.toml` to change and save it.
@@ -85,37 +92,94 @@ pub fn load_contexts() -> ContextsFile {
 /// A file that cannot be read or parsed is an error. Saving over it would write back only
 /// the contexts of this run and lose all others.
 pub fn load_contexts_for_update() -> Result<ContextsFile> {
-    load_contexts_in(&config_dir())
+    load_contexts_in(&config_dir(), &Backend::from_env()?)
 }
 
-fn load_contexts_in(dir: &Path) -> Result<ContextsFile> {
+fn load_contexts_in(dir: &Path, backend: &Backend) -> Result<ContextsFile> {
     let path = dir.join("contexts.toml");
     if path.exists() {
-        return read_contexts_file(&path);
+        let mut contexts = read_contexts_file(&path)?;
+        // Tokens that an older version left in `credentials.toml` move to the keychain. A
+        // keychain that will not take them is reported once; the tokens stay in the file
+        // and keep working from there.
+        match migrate_tokens(&mut contexts, dir, backend) {
+            Ok(true) => save_contexts_in(&contexts, dir)?,
+            Ok(false) => {}
+            Err(e) => {
+                static WARNED: std::sync::Once = std::sync::Once::new();
+                WARNED.call_once(|| eprintln!("warning: {e}"));
+            }
+        }
+        return Ok(contexts);
     }
 
     // First run: migrate the saved login(s) into a context each.
-    let credentials = load_credentials_table();
-    let (contexts, tokens) = migrate_from_credentials(&credentials);
+    let credentials = load_credentials_table_in(dir);
+    let (mut contexts, tokens) = migrate_from_credentials(&credentials);
     if contexts.contexts.is_empty() {
         return Ok(contexts);
     }
-    // The resolver reads a context's token from `credentials.toml` only. If the tokens cannot
-    // be saved there, the new contexts would have no token, and a logged-in user would be
-    // asked to log in again. Report it and let the old per-URL login stay in use.
-    update_credentials_table(|credentials| {
-        for (name, token) in &tokens {
-            set_context_token(credentials, name, token);
+    // If a token cannot be saved, the new context would have none, and a logged-in user
+    // would be asked to log in again. Report it and let the old per-URL login stay in use.
+    for (name, token) in &tokens {
+        let storage = backend.save(dir, name, token, None).map_err(|e| {
+            CliError::config(format!("cannot save the token of context '{name}': {e}"))
+        })?;
+        if let Some(entry) = contexts.contexts.get_mut(name) {
+            entry.storage = Some(storage);
         }
-    })
-    .map_err(|e| {
-        CliError::config(format!(
-            "cannot save the token of each context to credentials.toml: {e}"
-        ))
-    })?;
-    // Best effort: with the tokens saved, the next run migrates again and finds them.
-    let _ = save_contexts_in(&contexts, dir);
+    }
+    save_contexts_in(&contexts, dir)?;
+    // The per-URL tables are now copies of the context tokens. Best effort: a copy that
+    // stays is swept by `tl logout --all`.
+    let _ = remove_url_credentials_in(dir, &context_urls(&contexts));
     Ok(contexts)
+}
+
+/// The API URL of each context, for the per-URL tables that are copies of their tokens.
+fn context_urls(contexts: &ContextsFile) -> Vec<String> {
+    contexts
+        .contexts
+        .values()
+        .map(|entry| entry.api_url.clone())
+        .collect()
+}
+
+/// Move the tokens of contexts that do not say where their token is. Returns whether any
+/// context changed. Stops at the first token that cannot move; the ones before it stay
+/// moved and recorded.
+fn migrate_tokens(contexts: &mut ContextsFile, dir: &Path, backend: &Backend) -> Result<bool> {
+    let mut changed = false;
+    let mut error = None;
+    for (name, entry) in contexts.contexts.iter_mut() {
+        if entry.storage.is_some() {
+            continue;
+        }
+        match backend.migrate_from_file(dir, name) {
+            Ok(Some(storage)) => {
+                entry.storage = Some(storage);
+                changed = true;
+            }
+            Ok(None) => {}
+            Err(e) => {
+                error = Some(CliError::config(format!(
+                    "the token of context '{name}' stays in credentials.toml: {e}"
+                )));
+                break;
+            }
+        }
+    }
+    if changed {
+        save_contexts_in(contexts, dir)?;
+        // Older versions kept a copy of the current context's token in a per-URL table.
+        // This version writes none, and a copy that stays would keep the token in plain
+        // text after it moved to the keychain.
+        let _ = remove_url_credentials_in(dir, &context_urls(contexts));
+    }
+    match error {
+        Some(e) => Err(e),
+        None => Ok(changed),
+    }
 }
 
 fn read_contexts_file(path: &Path) -> Result<ContextsFile> {
@@ -179,6 +243,7 @@ pub(crate) fn migrate_from_credentials(
                 api_url: url,
                 organization: stored.organization_id,
                 project: stored.project_id,
+                storage: None,
             },
         );
         tokens.push((name, stored.token));
@@ -246,7 +311,9 @@ mod tests {
         let broken = "current = \"default\"\n[contexts.default\napi_url = \"x\"\n";
         fs::write(&path, broken).unwrap();
 
-        let err = load_contexts_in(dir.path()).unwrap_err().to_string();
+        let err = load_contexts_in(dir.path(), &Backend::file_only())
+            .unwrap_err()
+            .to_string();
         assert!(err.contains("contexts.toml does not parse"), "{err}");
         assert!(err.contains("fix the file or move it away"), "{err}");
         assert_eq!(fs::read_to_string(&path).unwrap(), broken);
@@ -287,7 +354,81 @@ mod tests {
             api_url: api_url.to_string(),
             organization: org.map(str::to_string),
             project: project.map(str::to_string),
+            storage: None,
         }
+    }
+
+    fn file_token(dir: &Path, name: &str) -> Option<String> {
+        crate::config::files::load_context_token_from_file_in(dir, name).map(|t| t.token)
+    }
+
+    #[test]
+    fn the_first_run_turns_per_url_logins_into_contexts_with_a_token_each() {
+        let dir = tempfile::tempdir().unwrap();
+        fs::write(
+            dir.path().join("credentials.toml"),
+            r#"["https://api.tensorlake.ai"]
+token = "prod-token"
+organization = "org_1"
+project = "project_1"
+"#,
+        )
+        .unwrap();
+
+        let contexts = load_contexts_in(dir.path(), &Backend::file_only()).unwrap();
+        let default = contexts.get("default").unwrap();
+        assert_eq!(default.storage, Some(TokenStorage::File));
+        assert_eq!(default.project.as_deref(), Some("project_1"));
+        assert_eq!(
+            file_token(dir.path(), "default").as_deref(),
+            Some("prod-token")
+        );
+        // The per-URL copy is gone, and the file is saved.
+        let credentials = fs::read_to_string(dir.path().join("credentials.toml")).unwrap();
+        assert!(!credentials.contains("api.tensorlake.ai"), "{credentials}");
+        let saved = read_contexts_file(&dir.path().join("contexts.toml")).unwrap();
+        assert_eq!(saved, contexts);
+    }
+
+    #[test]
+    fn a_context_without_storage_gets_its_token_moved_and_recorded() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut file = ContextsFile {
+            current: Some("default".into()),
+            ..Default::default()
+        };
+        file.contexts
+            .insert("default".into(), entry(DEFAULT_API_URL, None, None));
+        file.contexts
+            .insert("logged-out".into(), entry(DEFAULT_API_URL, None, None));
+        save_contexts_in(&file, dir.path()).unwrap();
+        fs::write(
+            dir.path().join("credentials.toml"),
+            format!(
+                "[\"{DEFAULT_API_URL}\"]\ntoken = \"tok\"\n\n[contexts.default]\ntoken = \"tok\"\n"
+            ),
+        )
+        .unwrap();
+
+        let contexts = load_contexts_in(dir.path(), &Backend::file_only()).unwrap();
+        let credentials = fs::read_to_string(dir.path().join("credentials.toml")).unwrap();
+        assert!(
+            !credentials.contains("api.tensorlake.ai"),
+            "the per-URL copy goes: {credentials}"
+        );
+        assert_eq!(file_token(dir.path(), "default").as_deref(), Some("tok"));
+        assert_eq!(
+            contexts.get("default").unwrap().storage,
+            Some(TokenStorage::File)
+        );
+        // No token, so nothing to record: the next login decides.
+        assert_eq!(contexts.get("logged-out").unwrap().storage, None);
+        let saved = read_contexts_file(&dir.path().join("contexts.toml")).unwrap();
+        assert_eq!(saved, contexts);
+
+        // The second run changes nothing.
+        let again = load_contexts_in(dir.path(), &Backend::file_only()).unwrap();
+        assert_eq!(again, contexts);
     }
 
     #[test]
