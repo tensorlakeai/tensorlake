@@ -9,8 +9,8 @@ use comfy_table::Cell;
 use serde::Serialize;
 
 use crate::config::contexts::{
-    ContextEntry, ContextsFile, load_contexts, load_contexts_for_update, save_contexts,
-    validate_context_name,
+    ContextEntry, ContextsFile, check_no_case_clash, load_contexts, load_contexts_for_update,
+    save_contexts, validate_context_name,
 };
 use crate::config::files::{
     ContextToken, load_stored_credentials, purge_git_credentials, remove_credentials,
@@ -180,6 +180,16 @@ pub fn rename(old: &str, new: &str) -> Result<()> {
     if contexts.get(new).is_some() {
         return Err(CliError::usage(format!("context '{new}' exists")));
     }
+    // `staging` to `STAGING` would save and then delete one Windows keychain item, and lose
+    // the token.
+    if old.eq_ignore_ascii_case(new) {
+        return Err(CliError::usage(format!(
+            "cannot rename context '{old}' to '{new}': the names differ only by case. \
+             the Windows keychain does not tell such names apart, so the token would be \
+             lost. choose a name that differs in more than case"
+        )));
+    }
+    check_no_case_clash(&contexts, new)?;
     // The token moves first. A rename that saved the contexts and then failed to move the
     // token would leave the token under a name that no context has.
     entry.storage = rename_context_token(old, new, entry.storage)?;

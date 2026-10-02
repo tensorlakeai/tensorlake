@@ -2,7 +2,7 @@ use crate::auth::context::CliContext;
 use crate::auth::login::run_login_flow;
 use crate::commands::context::forget_token;
 use crate::config::contexts::{
-    ContextsFile, load_contexts, login_name_for_url, validate_context_name,
+    ContextsFile, check_no_case_clash, load_contexts, login_name_for_url, validate_context_name,
 };
 use crate::config::files::{remove_all_context_tokens, remove_all_url_credentials};
 use crate::config::token_store::load_context_token;
@@ -13,8 +13,10 @@ use crate::error::{CliError, Result};
 /// `name` is the subcommand's own `--context`. `named_context` is the context named by the
 /// global `--context` flag or `TENSORLAKE_CONTEXT`, saved or not.
 pub async fn run(ctx: &CliContext, name: Option<&str>, named_context: Option<&str>) -> Result<()> {
-    let name = login_context_name(name, named_context, &load_contexts(), &ctx.api_url);
+    let contexts = load_contexts();
+    let name = login_context_name(name, named_context, &contexts, &ctx.api_url);
     validate_context_name(&name)?;
+    check_no_case_clash(&contexts, &name)?;
     run_login_flow(ctx, true, &name).await?;
     Ok(())
 }

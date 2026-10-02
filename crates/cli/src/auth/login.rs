@@ -1,7 +1,7 @@
 use crate::auth::context::CliContext;
 use crate::commands::init::run_init_flow;
 use crate::config::contexts::{
-    ContextEntry, ContextsFile, load_contexts_for_update, save_contexts,
+    ContextEntry, ContextsFile, check_no_case_clash, load_contexts_for_update, save_contexts,
 };
 use crate::config::resolver::{self, UnknownContext};
 use crate::config::token_store::{TokenStorage, save_context_token};
@@ -329,6 +329,7 @@ impl SavedLogin {
 /// would say "logged in" and then fail at the first command.
 pub fn save_login_context(api_url: &str, name: &str, login: &BrowserLogin) -> Result<SavedLogin> {
     let mut contexts = load_contexts_for_update()?;
+    check_no_case_clash(&contexts, name)?;
     let previous = contexts.get(name).and_then(|entry| entry.storage);
     let storage = save_context_token(name, &login.token, previous)?;
     let saved = apply_login_to_contexts(&mut contexts, api_url, name, login, storage);

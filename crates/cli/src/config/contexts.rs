@@ -71,6 +71,24 @@ pub fn validate_context_name(name: &str) -> Result<()> {
     }
 }
 
+/// Check that no saved context has `name` in another case. `staging` and `STAGING` are one
+/// item in the Windows keychain, so two such contexts would share one token. A saved
+/// context with exactly this name is fine: a login refreshes it.
+pub fn check_no_case_clash(contexts: &ContextsFile, name: &str) -> Result<()> {
+    let clash = contexts
+        .contexts
+        .keys()
+        .find(|saved| saved.as_str() != name && saved.eq_ignore_ascii_case(name));
+    match clash {
+        Some(saved) => Err(CliError::usage(format!(
+            "context name '{name}' differs from the saved context '{saved}' only by case. \
+             the Windows keychain does not tell such names apart, so both would share one \
+             token. use '{saved}', or choose a name that differs in more than case"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// Load `contexts.toml` to read it. On the first run, build it from the tokens in
 /// `credentials.toml`.
 ///
@@ -521,5 +539,29 @@ token = "dev-token"
         assert!(validate_context_name("").is_err());
         assert!(validate_context_name("has space").is_err());
         assert!(validate_context_name("a/b").is_err());
+    }
+
+    #[test]
+    fn a_name_that_differs_from_a_saved_one_only_by_case_is_an_error() {
+        let mut file = ContextsFile::default();
+        file.contexts.insert(
+            "staging".into(),
+            entry("https://api.tensorlake.ai", None, None),
+        );
+        assert!(
+            check_no_case_clash(&file, "staging").is_ok(),
+            "the same name"
+        );
+        assert!(check_no_case_clash(&file, "stage").is_ok());
+        let err = check_no_case_clash(&file, "STAGING")
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.starts_with(
+                "context name 'STAGING' differs from the saved context 'staging' only by case."
+            ),
+            "{err}"
+        );
+        assert!(err.contains("use 'staging'"), "{err}");
     }
 }

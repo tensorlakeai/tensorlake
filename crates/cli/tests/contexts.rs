@@ -1085,6 +1085,66 @@ async fn credential_helper_fails_softly_when_its_context_is_gone() {
     assert!(!run.success);
 }
 
+/// The Windows keychain does not tell `staging` from `STAGING`, so such names are refused
+/// everywhere, before a browser opens or a token moves.
+#[tokio::test]
+async fn a_name_that_differs_only_by_case_is_refused() {
+    let home = Home::new();
+    two_contexts(&home, PROD);
+    // The first run records where each token is. Take the baseline after that.
+    let run = tl(&home, &home.dir, &["context", "list"], &[]).await;
+    assert!(run.success, "{}", run.stderr);
+    let before = home.read("contexts.toml");
+
+    let run = tl(&home, &home.dir, &["login", "--context", "Default"], &[]).await;
+    assert!(!run.success);
+    assert!(
+        run.stderr.contains(
+            "context name 'Default' differs from the saved context 'default' only by case"
+        ) && run.stderr.contains("use 'default'"),
+        "{}",
+        run.stderr
+    );
+
+    let run = tl(
+        &home,
+        &home.dir,
+        &["context", "rename", "staging", "STAGING"],
+        &[],
+    )
+    .await;
+    assert!(!run.success);
+    assert!(
+        run.stderr
+            .contains("cannot rename context 'staging' to 'STAGING'")
+            && run.stderr.contains("differ only by case"),
+        "{}",
+        run.stderr
+    );
+
+    let run = tl(
+        &home,
+        &home.dir,
+        &["context", "rename", "staging", "DEFAULT"],
+        &[],
+    )
+    .await;
+    assert!(!run.success);
+    assert!(
+        run.stderr
+            .contains("differs from the saved context 'default' only by case"),
+        "{}",
+        run.stderr
+    );
+
+    assert_eq!(home.read("contexts.toml"), before, "nothing changed");
+    let credentials = home.toml("credentials.toml");
+    assert_eq!(
+        credentials["contexts"]["staging"]["token"],
+        toml::Value::from("tl_staging")
+    );
+}
+
 /// An empty `TENSORLAKE_CONTEXT` names nothing. `tl login` must not try to save under ''.
 #[tokio::test]
 async fn an_empty_context_env_var_does_not_block_login() {
