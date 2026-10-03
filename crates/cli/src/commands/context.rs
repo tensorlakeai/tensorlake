@@ -256,12 +256,12 @@ mod tests {
     use super::*;
 
     #[test]
-    fn token_kinds() {
-        assert_eq!(token_kind(&Ok(None)), "none");
+    fn token_statuses() {
+        assert_eq!(token_status(&Ok(None)), "none");
         assert_eq!(
-            token_kind(&Ok(Some(ContextToken { token: "t".into() }))),
+            token_status(&Ok(Some(ContextToken { token: "t".into() }))),
             "saved"
         );
-        assert_eq!(token_kind(&Err(CliError::config("locked"))), "unreadable");
+        assert_eq!(token_status(&Err(CliError::config("locked"))), "unreadable");
     }
 }
