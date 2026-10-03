@@ -100,6 +100,16 @@ pub async fn run(ctx: &mut CliContext, output_json: bool) -> Result<()> {
     if output_json {
         let mut root = serde_json::Map::new();
 
+        if let Some(name) = &ctx.context_name {
+            root.insert(
+                "context".to_string(),
+                serde_json::json!({
+                    "name": name,
+                    "source": ctx.context_source.map(|s| s.describe()),
+                }),
+            );
+        }
+
         root.insert(
             "endpoints".to_string(),
             serde_json::json!({
@@ -196,6 +206,16 @@ pub async fn run(ctx: &mut CliContext, output_json: bool) -> Result<()> {
             serde_json::to_string_pretty(&serde_json::Value::Object(root))?
         );
         return Ok(());
+    }
+
+    if let Some(name) = &ctx.context_name {
+        println!("Context");
+        println!("  Name        : {}", name);
+        println!(
+            "  Source      : {}",
+            ctx.context_source.map(|s| s.describe()).unwrap_or("-")
+        );
+        println!();
     }
 
     println!("Endpoints");

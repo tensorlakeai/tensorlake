@@ -40,7 +40,7 @@ For validations that must run inside the real Tensorlake builder image, use a th
 
 Key points:
 - Install from PyPI in a fresh venv: `python3 -m venv /tmp/tl-validate-venv && /tmp/tl-validate-venv/bin/python -m pip install -q --upgrade pip tensorlake`.
-- Read the token from `~/.config/tensorlake/credentials.toml`, but never print it. The published SDK reads `TENSORLAKE_API_KEY`; `TENSORLAKE_PAT` is not enough for sandbox creation.
+- Read the token of the current `tl` context, but never print it. `~/.config/tensorlake/contexts.toml` says whether it is in the OS keychain or in `credentials.toml`. The published SDK reads `TENSORLAKE_API_KEY`; `TENSORLAKE_PAT` is not enough for sandbox creation.
 - Read `organization` and `project` from `.tensorlake/config.toml` and pass them explicitly to `SandboxClient.for_cloud(...)`. Relying only on environment variables can produce missing scope headers.
 - Create the throwaway sandbox from `tensorlake/rootfs-builder`, run validation commands, and always delete it with `client.delete(sandbox_id)` in a `finally` block.
 - Commands run as `tl-user` by default. Builder-image checks that start `dockerd` must run as root, e.g. `sudo -n <script>`.
@@ -49,19 +49,23 @@ Minimal pattern:
 
 ```python
 import os
+import subprocess
+import tomllib
 from pathlib import Path
 from tensorlake.sandbox import SandboxClient
 
 
-def token_for(endpoint: str) -> str:
-    current = None
-    for raw in (Path.home() / ".config/tensorlake/credentials.toml").read_text().splitlines():
-        line = raw.strip()
-        if line.startswith("["):
-            current = line.strip("[]").strip().strip('"')
-        elif current == endpoint and line.startswith("token"):
-            return line.split("=", 1)[1].strip().strip('"')
-    raise RuntimeError(f"no token for {endpoint}")
+def token_for(context: str = "default") -> str:
+    config = Path.home() / ".config/tensorlake"
+    entry = tomllib.loads((config / "contexts.toml").read_text())["contexts"][context]
+    if entry.get("storage") == "keychain":
+        # macOS. The item belongs to `tl`, so the keychain asks once to allow this.
+        return subprocess.run(
+            ["security", "find-generic-password", "-s", "tensorlake", "-a", context, "-w"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+    credentials = tomllib.loads((config / "credentials.toml").read_text())
+    return credentials["contexts"][context]["token"]
 
 
 def local_config() -> dict[str, str]:
@@ -75,7 +79,7 @@ def local_config() -> dict[str, str]:
 
 
 endpoint = "https://api.tensorlake.ai"
-token = token_for(endpoint)
+token = token_for()
 cfg = local_config()
 os.environ["TENSORLAKE_API_KEY"] = token
 

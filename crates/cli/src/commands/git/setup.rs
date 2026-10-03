@@ -161,21 +161,43 @@ pub(crate) fn configure_credential_helper(
     Ok(())
 }
 
-/// The command line git runs for credential lookups. Deployment and organization are baked in so
-/// the helper does not depend on cwd-relative config discovery: git invokes it wherever the user
-/// happens to run git, usually nowhere near a `.tensorlake/config.toml`. Baking the org is also
-/// why the registration is repo-local — each repo carries the org it belongs to. The project is
-/// not baked in; it comes from the URL path.
+/// The command line git runs for credential lookups. Deployment, context, and organization are
+/// baked in so the helper does not depend on cwd-relative config discovery: git invokes it
+/// wherever the user happens to run git, usually nowhere near a `.tensorlake/config.toml`.
+/// Baking the org is also why the registration is repo-local — each repo carries the org it
+/// belongs to. The context is baked in because its token works for one project only: without
+/// it, the helper would use whichever context is current when git runs, not the one setup ran
+/// with. The project is not baked in; it comes from the URL path.
 fn credential_helper_invocation(ctx: &CliContext) -> String {
     let mut invocation = tl_command();
     if ctx.api_url != normalize_api_url(DEFAULT_API_URL) {
-        invocation.push_str(&format!(" --api-url {}", ctx.api_url));
+        invocation.push_str(&format!(" --api-url {}", shell_word(&ctx.api_url)));
+    }
+    if let Some(context_name) = &ctx.context_name {
+        invocation.push_str(&format!(" --context {}", shell_word(context_name)));
     }
     if let Some(organization_id) = ctx.effective_organization_id() {
-        invocation.push_str(&format!(" --organization {organization_id}"));
+        invocation.push_str(&format!(" --organization {}", shell_word(&organization_id)));
     }
     invocation.push_str(" git credential-helper");
     invocation
+}
+
+/// `value` as one word for the shell that git runs the helper line with.
+///
+/// A value made of safe characters is left as it is, so the line stays readable in
+/// `.git/config`. Anything else is single-quoted. A context name is checked at `tl login`,
+/// but `contexts.toml` can be edited by hand.
+fn shell_word(value: &str) -> String {
+    let safe = !value.is_empty()
+        && value.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.' | '/' | ':' | '@' | '%' | '+')
+        });
+    if safe {
+        value.to_string()
+    } else {
+        format!("'{}'", value.replace('\'', "'\\''"))
+    }
 }
 
 fn tl_command() -> String {
@@ -439,6 +461,8 @@ mod tests {
             organization_id: None,
             project_id: project_id.map(str::to_string),
             debug: false,
+            context_name: None,
+            context_source: None,
         })
     }
 
@@ -584,6 +608,11 @@ mod tests {
             values[1]
         );
         assert!(values[1].contains("--organization org_1"));
+        assert!(
+            !values[1].contains("--context"),
+            "no context: {}",
+            values[1]
+        );
         assert!(values[1].ends_with(" git credential-helper"));
 
         // Re-running must replace, not accumulate.
@@ -599,6 +628,37 @@ mod tests {
         )
         .unwrap();
         assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 2);
+    }
+
+    #[test]
+    fn helper_invocation_bakes_in_the_selected_context() {
+        let mut ctx = test_ctx(None);
+        ctx.organization_id = Some("org_1".to_string());
+        ctx.context_name = Some("staging".to_string());
+        ctx.context_source = Some(crate::config::resolver::ContextSource::Flag);
+        let invocation = credential_helper_invocation(&ctx);
+        assert!(
+            invocation.contains(" --context staging --organization org_1 git credential-helper"),
+            "{invocation}"
+        );
+    }
+
+    #[test]
+    fn helper_invocation_quotes_a_name_the_shell_would_split() {
+        let mut ctx = test_ctx(None);
+        ctx.context_name = Some("my ctx's".to_string());
+        let invocation = credential_helper_invocation(&ctx);
+        assert!(
+            invocation.contains(" --context 'my ctx'\\''s' git credential-helper"),
+            "{invocation}"
+        );
+        assert_eq!(
+            shell_word("api-staging.tensorlake.ai"),
+            "api-staging.tensorlake.ai"
+        );
+        assert_eq!(shell_word("http://localhost:8080"), "http://localhost:8080");
+        assert_eq!(shell_word("a b"), "'a b'");
+        assert_eq!(shell_word(""), "''");
     }
 
     #[test]

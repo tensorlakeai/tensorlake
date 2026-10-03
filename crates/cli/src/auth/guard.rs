@@ -1,7 +1,8 @@
 use crate::auth::context::CliContext;
 use crate::auth::login::run_login_flow;
 use crate::commands::init::run_init_flow;
-use crate::config::resolver;
+use crate::config::contexts::{load_contexts, login_name_for_url};
+use crate::config::resolver::{self, UnknownContext};
 use crate::error::{CliError, Result};
 use crate::project::detection::find_project_root;
 
@@ -13,26 +14,17 @@ pub async fn ensure_auth(ctx: &mut CliContext) -> Result<()> {
         return Ok(());
     }
     eprintln!("It seems like you're not logged in. Let's log you in...\n");
-    let login_result = match run_login_flow(ctx, true).await {
-        Ok(result) => result,
+    let context_name = login_context_name(ctx)?;
+    match run_login_flow(ctx, true, &context_name).await {
+        Ok(_) => {}
         Err(CliError::Cancelled) => {
             return Err(CliError::auth(
                 "Login cancelled. Set TENSORLAKE_API_KEY or run 'tl login' to authenticate.",
             ));
         }
         Err(e) => return Err(e),
-    };
-    let resolved = resolver::resolve(
-        Some(&ctx.api_url),
-        Some(&ctx.cloud_url),
-        None,
-        Some(&login_result.token),
-        Some(&ctx.namespace),
-        login_result.organization_id.as_deref(),
-        login_result.project_id.as_deref(),
-        ctx.debug,
-    );
-    *ctx = CliContext::from_resolved(resolved);
+    }
+    reload_from_saved_context(ctx, &context_name)?;
     if !ctx.has_authentication() {
         return Err(CliError::auth(
             "Authentication failed. Please try running 'tl login' manually.",
@@ -75,28 +67,17 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
     }
     if !ctx.has_authentication() {
         eprintln!("It seems like you're not logged in. Let's log you in...\n");
-        let login_result = match run_login_flow(ctx, true).await {
-            Ok(result) => result,
+        let context_name = login_context_name(ctx)?;
+        match run_login_flow(ctx, true, &context_name).await {
+            Ok(_) => {}
             Err(CliError::Cancelled) => {
                 return Err(CliError::auth(
                     "Login cancelled. Set TENSORLAKE_API_KEY or run 'tl login' to authenticate.",
                 ));
             }
             Err(e) => return Err(e),
-        };
-
-        // Reload context with new credentials and org/project from login flow
-        let resolved = resolver::resolve(
-            Some(&ctx.api_url),
-            Some(&ctx.cloud_url),
-            None,
-            Some(&login_result.token),
-            Some(&ctx.namespace),
-            login_result.organization_id.as_deref(),
-            login_result.project_id.as_deref(),
-            ctx.debug,
-        );
-        *ctx = CliContext::from_resolved(resolved);
+        }
+        reload_from_saved_context(ctx, &context_name)?;
 
         if !ctx.has_authentication() {
             return Err(CliError::auth(
@@ -134,19 +115,71 @@ pub async fn ensure_auth_and_project(ctx: &mut CliContext) -> Result<()> {
     let project_root = find_project_root(None);
     let (org_id, proj_id) = run_init_flow(ctx, true, true, false, &project_root).await?;
 
-    // Update context with new org/project
+    // Rebuild `ctx` with the chosen organization and project. The run stays in its context:
+    // the context supplies the token by name, so `tl --context staging git setup` bakes
+    // `--context staging` into the credential helper even when setup had to init first.
+    // A PAT beside a named context is an error in the resolver, so the PAT is passed only
+    // when no context is in use.
+    let context_name = ctx.context_name.clone();
+    let pat = match context_name {
+        Some(_) => None,
+        None => ctx.personal_access_token.as_deref(),
+    };
     let resolved = resolver::resolve(
         Some(&ctx.api_url),
         Some(&ctx.cloud_url),
         ctx.api_key.as_deref(),
-        ctx.personal_access_token.as_deref(),
+        pat,
         Some(&ctx.namespace),
         Some(&org_id),
         Some(&proj_id),
+        context_name.as_deref(),
+        UnknownContext::Error,
         ctx.debug,
-    );
+    )?;
+    // The name was passed as if by `--context`; keep where it really came from.
+    let context_source = ctx.context_source;
     *ctx = CliContext::from_resolved(resolved);
+    if ctx.context_name == context_name {
+        ctx.context_source = context_source;
+    }
 
+    Ok(())
+}
+
+/// The context an automatic login saves into: the selected one, else a name that fits the
+/// API URL of this run (see [`login_name_for_url`]).
+///
+/// With no selected context, `default` is not a safe guess: the run may be for another API
+/// URL than the saved `default`, and saving over it would log the user out of production.
+fn login_context_name(ctx: &CliContext) -> Result<String> {
+    Ok(match ctx.context_name.as_deref() {
+        Some(name) => name.to_string(),
+        None => login_name_for_url(&load_contexts()?, &ctx.api_url),
+    })
+}
+
+/// Rebuild `ctx` from the context that the login flow saved as `name`.
+///
+/// The login saved its token under `name`, so the resolver finds the token, organization,
+/// and project by that name. Resolving by name instead of by the new token keeps the context
+/// identity: `tl --context staging git setup` then bakes `--context staging` into the
+/// credential helper even when setup had to log in first. A context token works for one
+/// project only, so a helper without the name would use whichever context is current later.
+fn reload_from_saved_context(ctx: &mut CliContext, name: &str) -> Result<()> {
+    let resolved = resolver::resolve(
+        Some(&ctx.api_url),
+        Some(&ctx.cloud_url),
+        None,
+        None,
+        Some(&ctx.namespace),
+        None,
+        None,
+        Some(name),
+        UnknownContext::Error,
+        ctx.debug,
+    )?;
+    *ctx = CliContext::from_resolved(resolved);
     Ok(())
 }
 
@@ -167,6 +200,8 @@ mod tests {
             organization_id: None,
             project_id: None,
             debug: false,
+            context_name: None,
+            context_source: None,
         });
 
         ensure_auth_for_api_key_scoped_project(&mut ctx)

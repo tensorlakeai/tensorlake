@@ -1,7 +1,7 @@
 use reqwest::header::{HeaderMap, HeaderValue};
 use tensorlake::{Client, ClientBuilder};
 
-use crate::config::resolver::ResolvedConfig;
+use crate::config::resolver::{ContextSource, ResolvedConfig};
 use crate::error::{CliError, Result};
 use crate::http;
 
@@ -19,6 +19,9 @@ pub struct CliContext {
     /// W3C trace ID for this CLI invocation (32 lowercase hex chars),
     /// injected as the `traceparent` header on every request.
     pub trace_id: String,
+    /// The context whose token and scope are in use, if any.
+    pub context_name: Option<String>,
+    pub context_source: Option<ContextSource>,
     introspect_cache: Option<IntrospectResult>,
 }
 
@@ -41,6 +44,8 @@ impl CliContext {
             project_id: config.project_id,
             debug: config.debug,
             trace_id: hex::encode(rand::random::<[u8; 16]>()),
+            context_name: config.context_name,
+            context_source: config.context_source,
             introspect_cache: None,
         }
     }
