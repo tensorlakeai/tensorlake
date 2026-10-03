@@ -178,7 +178,7 @@ project = "project_1"
     assert_eq!(list[0]["name"], "default");
     assert_eq!(list[0]["current"], true);
     assert_eq!(list[0]["project"], "project_1");
-    assert_eq!(list[0]["token"], "saved");
+    assert_eq!(list[0]["token_status"], "saved");
 
     // contexts.toml has no secrets, and says where the token is.
     let contexts = home.read("contexts.toml");
@@ -682,9 +682,9 @@ async fn logout_forgets_the_current_context_only() {
     let run = tl(&home, &home.dir, &["context", "list", "-o", "json"], &[]).await;
     let list: Value = serde_json::from_str(&run.stdout).unwrap();
     assert_eq!(list[0]["name"], "default");
-    assert_eq!(list[0]["token"], "none");
+    assert_eq!(list[0]["token_status"], "none");
     assert_eq!(list[1]["name"], "staging");
-    assert_eq!(list[1]["token"], "saved");
+    assert_eq!(list[1]["token_status"], "saved");
 }
 
 #[tokio::test]
@@ -776,7 +776,7 @@ async fn logout_all_forgets_every_saved_token() {
         list.as_array()
             .unwrap()
             .iter()
-            .all(|c| c["token"] == "none"),
+            .all(|c| c["token_status"] == "none"),
         "{list}"
     );
 }
@@ -807,7 +807,7 @@ async fn logout_removes_the_legacy_unscoped_token() {
     );
     let run = tl(&home, &home.dir, &["context", "list", "-o", "json"], &[]).await;
     let list: Value = serde_json::from_str(&run.stdout).unwrap();
-    assert_eq!(list[0]["token"], "none");
+    assert_eq!(list[0]["token_status"], "none");
 }
 
 #[tokio::test]

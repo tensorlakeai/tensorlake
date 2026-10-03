@@ -31,15 +31,15 @@ struct ContextView<'a> {
     organization: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     project: Option<&'a str>,
-    /// `saved` when the context has a token, `none` when it has none (for example after
-    /// `tl logout`), `unreadable` when the keychain that holds it did not answer.
-    token: &'static str,
+    /// Not the token. `saved` when the context has a token, `none` when it has none (for
+    /// example after `tl logout`), `unreadable` when the keychain that holds it did not answer.
+    token_status: &'static str,
     /// Where the token is: `keychain` or `file`. Absent when the context has no token.
     #[serde(skip_serializing_if = "Option::is_none")]
     storage: Option<TokenStorage>,
 }
 
-fn token_kind(token: &Result<Option<ContextToken>>) -> &'static str {
+fn token_status(token: &Result<Option<ContextToken>>) -> &'static str {
     match token {
         Ok(Some(_)) => "saved",
         Ok(None) => "none",
@@ -58,7 +58,7 @@ fn view<'a>(contexts: &'a ContextsFile, name: &'a str, entry: &'a ContextEntry) 
         api_url: &entry.api_url,
         organization: entry.organization.as_deref(),
         project: entry.project.as_deref(),
-        token: token_kind(&token),
+        token_status: token_status(&token),
         storage: entry.storage.filter(|_| !matches!(token, Ok(None))),
     }
 }
@@ -111,7 +111,7 @@ pub fn list(output_json: bool) -> Result<()> {
             Cell::new(v.organization.unwrap_or("-")),
             Cell::new(v.project.unwrap_or("-")),
             Cell::new(v.api_url),
-            Cell::new(v.token),
+            Cell::new(v.token_status),
             Cell::new(v.storage.map_or("-".to_string(), |s| s.to_string())),
         ]);
     }
@@ -148,7 +148,7 @@ pub fn show(name: &str, output_json: bool) -> Result<()> {
     println!("Organization : {}", v.organization.unwrap_or("-"));
     println!("Project      : {}", v.project.unwrap_or("-"));
     println!("API URL      : {}", v.api_url);
-    println!("Token        : {}", v.token);
+    println!("Token        : {}", v.token_status);
     println!(
         "Storage      : {}",
         v.storage.map_or("-".to_string(), |s| s.to_string())
