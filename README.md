@@ -238,6 +238,10 @@ See [sandbox failure diagnostics](docs/sandbox-errors.md) for error handling exa
 
 ## Cloud Volumes
 
+Git repository and filesystem clients accept an explicit `region="eu-central-1"`
+(Python) or `region: "eu-central-1"` (TypeScript). See
+[Artifact Storage regions](docs/artifact-storage-regions.md) for Rust and routing details.
+
 `FilesystemClient` manages durable, versioned file trees without mounting them. SDK writes hash
 files locally, upload missing 64 MiB parts directly to checksum-bound object-store URLs, and then
 atomically publish metadata. Reads resolve an authenticated immutable plan and fetch the selected

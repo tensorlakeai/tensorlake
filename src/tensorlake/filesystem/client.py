@@ -34,6 +34,10 @@ from datetime import datetime, timezone
 from os import PathLike
 from typing import Dict, Iterable, List, Optional, Union
 
+from tensorlake.artifact_storage_region import (
+    ArtifactStorageRegion,
+    resolve_artifact_storage_api_url,
+)
 from tensorlake.cli._common import build_context_from_env
 
 from ._cli import FsCli
@@ -84,6 +88,8 @@ class FilesystemClient:
         api_url: Optional[str] = None,
         organization_id: Optional[str] = None,
         project_id: Optional[str] = None,
+        *,
+        region: ArtifactStorageRegion | None = None,
     ):
         """Create a client.
 
@@ -93,6 +99,7 @@ class FilesystemClient:
         ``tl`` CLI used by local mount operations.
         """
         ctx = build_context_from_env()
+        api_url = resolve_artifact_storage_api_url(api_url or ctx.api_url, region)
         native_organization_id = organization_id
         native_project_id = project_id
         token = api_key or ctx.api_key

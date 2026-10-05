@@ -14,7 +14,10 @@ pub mod history_push;
 pub mod ingest;
 pub mod merge;
 pub mod models;
+pub mod region;
 pub mod workspaces;
+
+pub use region::ArtifactStorageRegion;
 
 use models::{
     CreateRepoRequest, GitCredential, ListBranchesResponse, ListOperationsResponse,

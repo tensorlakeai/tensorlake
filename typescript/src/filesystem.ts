@@ -1,3 +1,4 @@
+import { resolveArtifactStorageApiUrl, type ArtifactStorageRegion } from "./artifact-storage-region.js";
 /**
  * Client for Tensorlake filesystems.
  *
@@ -55,6 +56,8 @@ import { buildContextFromEnv } from "./sandbox-image.js";
 const FILESYSTEM_REPO_KIND = "filesystem";
 
 export interface FilesystemClientOptions {
+  /** Production storage region; omitted preserves the configured endpoint. */
+  region?: ArtifactStorageRegion;
   apiKey?: string;
   apiUrl?: string;
   /** @deprecated Scope is selected by ingress for SDK API keys; used only by local `tl` mounts. */
@@ -179,6 +182,7 @@ export class FilesystemClient {
    */
   constructor(options: FilesystemClientOptions = {}) {
     const context = buildContextFromEnv();
+    const apiUrl = resolveArtifactStorageApiUrl(options.apiUrl ?? context.apiUrl, options.region);
     const token = options.apiKey ?? context.apiKey;
     if (!token) {
       if (context.personalAccessToken) {
@@ -202,7 +206,7 @@ export class FilesystemClient {
         );
       }
       this.native = new binding.NativeRepositoryClient(
-        options.apiUrl ?? context.apiUrl,
+        apiUrl,
         token,
         null,
         null,
@@ -214,7 +218,7 @@ export class FilesystemClient {
       TENSORLAKE_API_KEY: token,
       // The CLI must target the same deployment the data plane does, or a
       // mount could resolve a same-named filesystem in the wrong environment.
-      TENSORLAKE_API_URL: options.apiUrl ?? context.apiUrl,
+      TENSORLAKE_API_URL: apiUrl,
     };
     if (organizationId) envOverrides.TENSORLAKE_ORGANIZATION_ID = organizationId;
     if (projectId) envOverrides.TENSORLAKE_PROJECT_ID = projectId;

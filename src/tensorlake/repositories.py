@@ -10,6 +10,10 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from tensorlake.artifact_storage_region import (
+    ArtifactStorageRegion,
+    resolve_artifact_storage_api_url,
+)
 from tensorlake.cloud_client import CloudClient
 
 
@@ -214,6 +218,8 @@ class RepositoryClient:
         api_key: str | None = None,
         organization_id: str | None = None,
         project_id: str | None = None,
+        *,
+        region: ArtifactStorageRegion | None = None,
     ):
         """Create an API-key client.
 
@@ -221,6 +227,7 @@ class RepositoryClient:
         ignored; ingress selects the project authorized by the API key.
         """
         ctx = _build_context_from_env()
+        api_url = resolve_artifact_storage_api_url(api_url or ctx.api_url, region)
         token = api_key or ctx.api_key
         if not token:
             if ctx.personal_access_token:

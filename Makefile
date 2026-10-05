@@ -1,5 +1,15 @@
 WITH_FUNCTION_AGENT_CORE=./scripts/with_function_agent_core.sh
 
+# Credential-free regional endpoint and wrapper checks. The Python interpreter must have
+# the SDK dependencies installed; an existing development environment can be selected explicitly.
+SDK_TEST_PYTHON ?= python3
+.PHONY: test-artifact-storage-regions
+test-artifact-storage-regions:
+	just test-artifact-storage
+	PYTHONPATH=src $(SDK_TEST_PYTHON) -m unittest discover -s tests -p 'test_artifact_storage_region.py'
+	npm --prefix typescript run test -- tests/artifact-storage-region.test.ts tests/repositories.test.ts tests/filesystem.test.ts tests/repository-mount.test.ts
+	npm --prefix typescript run typecheck
+
 all: build
 
 build:

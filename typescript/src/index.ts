@@ -1,3 +1,4 @@
+export type { ArtifactStorageRegion } from "./artifact-storage-region.js";
 // Public API
 export { SandboxClient } from "./client.js";
 export { Sandbox } from "./sandbox.js";

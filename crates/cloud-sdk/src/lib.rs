@@ -273,6 +273,19 @@ impl Sdk {
         )
     }
 
+    /// Get an independent Artifact Storage client for a production region.
+    /// Both credential minting and repository/filesystem traffic use the selected region.
+    pub fn artifact_storage_in_region(
+        &self,
+        region: ArtifactStorageRegion,
+    ) -> Result<ArtifactStorageClient, error::SdkError> {
+        let api_url = region.resolve_api_url(&self.api_url)?;
+        ArtifactStorageClient::new(
+            self.client.with_base_url(api_url),
+            resolve_artifact_storage_url(api_url),
+        )
+    }
+
     /// Get a client for Artifact Storage using an explicit Git/data-plane base URL.
     pub fn artifact_storage_with_url(
         &self,

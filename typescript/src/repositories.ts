@@ -1,3 +1,4 @@
+import { resolveArtifactStorageApiUrl, type ArtifactStorageRegion } from "./artifact-storage-region.js";
 import * as defaults from "./defaults.js";
 import { releaseNativeHandle } from "./native-worker-client.js";
 import { SandboxError } from "./errors.js";
@@ -18,6 +19,8 @@ import {
 } from "./repository-mount.js";
 
 export interface RepositoryClientOptions {
+  /** Production storage region; omitted preserves the configured endpoint. */
+  region?: ArtifactStorageRegion;
   apiUrl?: string;
   apiKey?: string;
   /** @deprecated Scope is selected by ingress for SDK API keys; used only by local `tl` mounts. */
@@ -206,6 +209,7 @@ export class RepositoryClient {
   private readonly cli: GitCli;
 
   constructor(options?: RepositoryClientOptions) {
+    const apiUrl = resolveArtifactStorageApiUrl(options?.apiUrl ?? defaults.API_URL, options?.region);
     this.requestTimeoutMs = resolveRequestTimeoutMs(options);
     const apiKey = options?.apiKey ?? defaults.API_KEY;
     if (!apiKey) {
@@ -218,7 +222,7 @@ export class RepositoryClient {
       );
     }
     this.native = new binding.NativeRepositoryClient(
-      options?.apiUrl ?? defaults.API_URL,
+      apiUrl,
       apiKey,
       null,
       null,
@@ -228,7 +232,7 @@ export class RepositoryClient {
     const context = buildContextFromEnv();
     const envOverrides: Record<string, string> = {
       TENSORLAKE_API_KEY: apiKey,
-      TENSORLAKE_API_URL: options?.apiUrl ?? defaults.API_URL,
+      TENSORLAKE_API_URL: apiUrl,
     };
     const organizationId = options?.organizationId ?? context.organizationId;
     const projectId = options?.projectId ?? context.projectId;
