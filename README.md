@@ -439,3 +439,39 @@ Python exposes `GpuModel.RTX_PRO_6000` and `GpuModel.L40`.
 `RTX-PRO-6000` selects the 96 GB Blackwell Server Edition, not the workstation
 editions. These names request exact models; L40 does not select L40S. The server and
 dataplane must support the requested model and have matching capacity.
+
+### Network observations (preview)
+
+On capture-enabled hosts, opt in when creating each sandbox:
+
+```bash
+tl sbx create --network-observability
+tl sbx network status <sandbox-id>
+tl sbx network events <sandbox-id> --limit 100 --json
+tl sbx network destinations <sandbox-id>
+```
+
+Capture defaults off. Pass `network_observability=True` in Python or
+`networkObservability: true` in TypeScript to enable it on create or pool claim.
+The setting survives suspend/resume and copies inherit it; new creates from
+snapshots default to off. Host rollout must also be enabled. Status reports the most recent collector heartbeat;
+`unknown` or `stale` does not mean no traffic. These reads use persisted telemetry
+and work without connecting to the sandbox, including after termination.
+
+```python
+status = client.network_status(sandbox_id)
+page = client.network_events(sandbox_id, limit=100)
+summary = client.network_destinations(sandbox_id)
+# Pass page.value.next_cursor as cursor to read the next event page.
+```
+
+`Sandbox` and `AsyncSandbox` also expose `network_events()`,
+`network_destinations()` and `network_status()` on an existing handle.
+The async Python client exposes the same methods. In TypeScript use
+`client.networkStatus(id)`, `client.networkEvents(id, { limit: 100 })` and
+`client.networkDestinations(id)`. Rust exposes the same reads on `SandboxesClient`.
+Windows are at most 24 hours; records have seven-day retention. Destination
+counts describe observed TCP/UDP connections, not HTTP requests. Missing byte
+counters stay unknown. UDP DNS, kernel and proxy policy events carry their own source;
+read gap/status rows for incomplete coverage. Process identity, HTTP and TLS
+request details are not part of this preview.

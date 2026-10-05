@@ -599,6 +599,7 @@ where
     )));
     let created = sandboxes
         .create(&CreateSandboxRequest {
+            network_observability: false,
             image: Some(prepared.builder.image.clone()),
             resources,
             timeout_secs: Some(BUILDER_SANDBOX_TIMEOUT_SECS),

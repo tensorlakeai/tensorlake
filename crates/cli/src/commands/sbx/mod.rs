@@ -8,6 +8,7 @@ pub mod image;
 pub mod ls;
 pub mod name;
 pub mod native_ssh;
+pub mod network;
 pub mod port;
 pub mod process;
 pub mod pty;

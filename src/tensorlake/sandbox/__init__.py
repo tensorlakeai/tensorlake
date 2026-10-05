@@ -87,6 +87,11 @@ from .sandbox import Sandbox
 from .tunnel import AsyncTcpTunnel, TcpTunnel, TunnelAddress
 
 __all__ = [
+    "NetworkEvent",
+    "NetworkEventsResponse",
+    "NetworkDestination",
+    "NetworkDestinationsResponse",
+    "NetworkCaptureStatus",
     # Lifecycle management
     "SandboxClient",
     "AsyncSandboxClient",
@@ -181,3 +186,11 @@ __all__ = [
     "PoolInUseError",
     "RemoteAPIError",
 ]
+
+from .network import (
+    NetworkCaptureStatus,
+    NetworkDestination,
+    NetworkDestinationsResponse,
+    NetworkEvent,
+    NetworkEventsResponse,
+)

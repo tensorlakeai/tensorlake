@@ -557,6 +557,60 @@ impl NativeSandboxClient {
     }
 
     #[napi]
+    pub async fn network_events(
+        &self,
+        sandbox_id: String,
+        query_json: String,
+    ) -> napi::Result<TracedJson> {
+        let query: tensorlake::sandboxes::network::NetworkQuery = parse_json_payload(&query_json)?;
+        with_retry(self.client().await?, 5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            let query = query.clone();
+            async move {
+                let traced = client.network_events(&sandbox_id, &query).await?;
+                Ok(TracedJson {
+                    trace_id: traced.trace_id.clone(),
+                    json: serde_json::to_string(&*traced)?,
+                })
+            }
+        })
+        .await
+    }
+    #[napi]
+    pub async fn network_destinations(
+        &self,
+        sandbox_id: String,
+        query_json: String,
+    ) -> napi::Result<TracedJson> {
+        let query: tensorlake::sandboxes::network::NetworkQuery = parse_json_payload(&query_json)?;
+        with_retry(self.client().await?, 5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            let query = query.clone();
+            async move {
+                let traced = client.network_destinations(&sandbox_id, &query).await?;
+                Ok(TracedJson {
+                    trace_id: traced.trace_id.clone(),
+                    json: serde_json::to_string(&*traced)?,
+                })
+            }
+        })
+        .await
+    }
+    #[napi]
+    pub async fn network_status(&self, sandbox_id: String) -> napi::Result<TracedJson> {
+        with_retry(self.client().await?, 5, move |client| {
+            let sandbox_id = sandbox_id.clone();
+            async move {
+                let traced = client.network_status(&sandbox_id).await?;
+                Ok(TracedJson {
+                    trace_id: traced.trace_id.clone(),
+                    json: serde_json::to_string(&*traced)?,
+                })
+            }
+        })
+        .await
+    }
+    #[napi]
     pub async fn get_sandbox_logs(&self, request_json: String) -> napi::Result<TracedJson> {
         let request: GetSandboxLogsRequest = parse_json_payload(&request_json)?;
         with_retry(self.client().await?, 5, move |c| {

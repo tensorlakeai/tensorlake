@@ -1,5 +1,6 @@
 import { releaseNativeHandle } from "./native-worker-client.js";
 import type { SandboxClient } from "./client.js";
+import type { NetworkCaptureStatus, NetworkDestinationsResponse, NetworkEventsResponse, NetworkQuery } from "./network.js";
 import {
   type ConnectDesktopOptions,
   Desktop,
@@ -586,6 +587,9 @@ export class Sandbox {
   private ownsSandbox = false;
   private lifecycleClient: SandboxClient | null = null;
   private lifecycleIdentifier: string;
+  // Retained telemetry stays readable after lifecycle GETs stop resolving a
+  // terminated sandbox. Only a server response establishes the canonical ID.
+  private canonicalSandboxId: string | null = null;
   private sandboxName: string | null = null;
 
   constructor(options: SandboxOptions) {
@@ -624,6 +628,7 @@ export class Sandbox {
   /** @internal Used by lifecycle operations to pin to canonical sandbox ID. */
   _setLifecycleIdentifier(identifier: string): void {
     this.lifecycleIdentifier = identifier;
+    this.canonicalSandboxId = identifier;
   }
 
   /** @internal Used by the lazy proxy resolver. */
@@ -1273,6 +1278,27 @@ export class Sandbox {
       (p) => fromSnakeKeys(p) as ProcessInfo,
     );
     return Object.assign(processes, { traceId });
+  }
+
+  /** Read retained host network events without connecting to the guest. */
+  async networkEvents(options?: NetworkQuery): Promise<Traced<NetworkEventsResponse>> {
+    const client = this.requireLifecycleClient("networkEvents");
+    const sandboxId = this.canonicalSandboxId ?? (await this.info()).sandboxId;
+    return client.networkEvents(sandboxId, options);
+  }
+
+  /** Read observed connections by destination; counts are not HTTP requests. */
+  async networkDestinations(options?: NetworkQuery): Promise<Traced<NetworkDestinationsResponse>> {
+    const client = this.requireLifecycleClient("networkDestinations");
+    const sandboxId = this.canonicalSandboxId ?? (await this.info()).sandboxId;
+    return client.networkDestinations(sandboxId, options);
+  }
+
+  /** Read collector health, separately from the sandbox's creation setting. */
+  async networkStatus(): Promise<Traced<NetworkCaptureStatus>> {
+    const client = this.requireLifecycleClient("networkStatus");
+    const sandboxId = this.canonicalSandboxId ?? (await this.info()).sandboxId;
+    return client.networkStatus(sandboxId);
   }
 
   /** Read persisted logs for this sandbox from the log service. */

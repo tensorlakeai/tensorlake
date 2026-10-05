@@ -102,6 +102,9 @@ export interface NativeSandboxClient {
   ): Promise<TracedJson>;
   getArchivedSandbox(sandboxId: string): Promise<TracedJson>;
   getSandboxLogs(requestJson: string): Promise<TracedJson>;
+  networkEvents(sandboxId: string, queryJson: string): Promise<TracedJson>;
+  networkDestinations(sandboxId: string, queryJson: string): Promise<TracedJson>;
+  networkStatus(sandboxId: string): Promise<TracedJson>;
   listSandboxLogProcesses(sandboxId: string): Promise<TracedJson>;
   updateSandbox(sandboxId: string, requestJson: string): Promise<TracedJson>;
   deleteSandbox(sandboxId: string): Promise<string>;

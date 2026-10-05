@@ -60,6 +60,11 @@ from .models import (
     SnapshotWaitCondition,
     StdinMode,
 )
+from .network import (
+    NetworkCaptureStatus,
+    NetworkDestinationsResponse,
+    NetworkEventsResponse,
+)
 from .sandbox import (
     _GET_OR_CREATE_ATTEMPTS,
     _GET_OR_CREATE_RETRY_DELAY_SEC,
@@ -294,6 +299,7 @@ class AsyncSandbox:
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         cancel_on_timeout: bool = False,
         wait: Literal[True] = True,
     ) -> "AsyncSandbox": ...
@@ -327,6 +333,7 @@ class AsyncSandbox:
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         cancel_on_timeout: bool = False,
         *,
         wait: Literal[False],
@@ -360,6 +367,7 @@ class AsyncSandbox:
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
         cancel_on_timeout: bool = False,
         wait: bool = True,
     ) -> "AsyncSandbox | AsyncPendingSandbox":
@@ -416,6 +424,7 @@ class AsyncSandbox:
                 file_systems=file_systems,
                 gpu=gpu,
                 max_pending_secs=max_pending_secs,
+                network_observability=network_observability,
                 proxy_url=proxy_url,
                 request_timeout=effective_request_timeout,
                 owns_sandbox=True,
@@ -440,6 +449,7 @@ class AsyncSandbox:
             file_systems=file_systems,
             gpu=gpu,
             max_pending_secs=max_pending_secs,
+            network_observability=network_observability,
             cancel_on_timeout=cancel_on_timeout,
         )
 
@@ -507,6 +517,7 @@ class AsyncSandbox:
         namespace: str | None = _defaults.NAMESPACE,
         gpu: GpuRequest | None = None,
         max_pending_secs: int | None = None,
+        network_observability: bool = False,
     ) -> "AsyncSandbox":
         """Return the one sandbox bound to ``name``. Create it on first use.
 
@@ -584,6 +595,7 @@ class AsyncSandbox:
                         namespace=namespace,
                         gpu=gpu,
                         max_pending_secs=max_pending_secs,
+                        network_observability=network_observability,
                     )
                 except RemoteAPIError as e:
                     if e.status_code != 409:
@@ -865,6 +877,48 @@ class AsyncSandbox:
         all_snaps = await self._lifecycle_client.list_snapshots()
         filtered = [s for s in all_snaps if s.sandbox_id == my_id]
         return TracedIterator(all_snaps.trace_id, filtered)
+
+    async def network_events(
+        self,
+        *,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> Traced[NetworkEventsResponse]:
+        """Read retained host network events, without connecting to the guest."""
+        self._require_lifecycle_client("network_events")
+        sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
+        traced = await self._lifecycle_client.network_events(
+            sandbox_id, from_ms=from_ms, to_ms=to_ms, limit=limit, cursor=cursor
+        )
+        self._trace_id = traced.trace_id
+        return traced
+
+    async def network_destinations(
+        self,
+        *,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+        limit: int | None = None,
+        cursor: str | None = None,
+    ) -> Traced[NetworkDestinationsResponse]:
+        """Read retained host network destinations, without connecting to the guest."""
+        self._require_lifecycle_client("network_destinations")
+        sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
+        traced = await self._lifecycle_client.network_destinations(
+            sandbox_id, from_ms=from_ms, to_ms=to_ms, limit=limit, cursor=cursor
+        )
+        self._trace_id = traced.trace_id
+        return traced
+
+    async def network_status(self) -> Traced[NetworkCaptureStatus]:
+        """Read observed collector health, separate from the sandbox creation setting."""
+        self._require_lifecycle_client("network_status")
+        sandbox_id = self._sandbox_id or (await self._fetch_info()).sandbox_id
+        traced = await self._lifecycle_client.network_status(sandbox_id)
+        self._trace_id = traced.trace_id
+        return traced
 
     async def get_logs(
         self,
