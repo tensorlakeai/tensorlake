@@ -982,6 +982,20 @@ class TestFileSystemRegistry(unittest.TestCase):
         self.assertEqual(fs.name, "skills")
         self.assertEqual(fs.description, "skills volume")
 
+    def test_create_file_system_in_region(self):
+        fake = _FakeFilesystemClient()
+        with (
+            patch(
+                "tensorlake.sandbox.file_system._filesystem_client", return_value=fake
+            ),
+            patch.object(
+                fake, "create", return_value=SimpleNamespace(name="regional")
+            ) as create,
+        ):
+            fs = create_file_system("regional", region="eu-central-1")
+        create.assert_called_once_with("regional", region="eu-central-1")
+        self.assertEqual(fs.id, "regional")
+
     def test_list_file_systems(self):
         fake = _FakeFilesystemClient()
         with patch(

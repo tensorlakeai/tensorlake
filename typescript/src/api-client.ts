@@ -60,9 +60,11 @@ export class APIClient {
   async createFileSystem(
     name: string,
     description?: string,
-    _options?: { organizationId?: string; projectId?: string },
+    options?: { organizationId?: string; projectId?: string; region?: string },
   ): Promise<FileSystem> {
-    const filesystem = await new FilesystemClient(this.filesystemOptions).create(name);
+    const filesystem = await new FilesystemClient(this.filesystemOptions).create(
+      name, { region: options?.region },
+    );
     return {
       id: filesystem.name,
       name: filesystem.name,

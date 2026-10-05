@@ -23,7 +23,9 @@ def _filesystem_client():
     return FilesystemClient()
 
 
-def create_file_system(name: str, description: str | None = None) -> FileSystem:
+def create_file_system(
+    name: str, description: str | None = None, *, region: str | None = None
+) -> FileSystem:
     """Create an Artifact Storage filesystem for the API key's project.
 
     ``description`` is retained for source compatibility but Artifact Storage
@@ -32,6 +34,7 @@ def create_file_system(name: str, description: str | None = None) -> FileSystem:
     Args:
         name: Human-readable file system name.
         description: Optional description.
+        region: Optional immutable storage region; omission keeps legacy placement.
 
     Returns:
         The registered :class:`FileSystem`.
@@ -45,7 +48,12 @@ def create_file_system(name: str, description: str | None = None) -> FileSystem:
         raise TypeError("name must be a non-empty string")
 
     try:
-        filesystem = _filesystem_client().create(name)
+        client = _filesystem_client()
+        filesystem = (
+            client.create(name)
+            if region is None
+            else client.create(name, region=region)
+        )
     except Exception as e:
         raise SandboxError(f"{type(e).__name__}: {e}") from e
     return FileSystem(

@@ -89,7 +89,11 @@ class NativeFilesystems:
         adopted a pre-existing filesystem inside the native binding.
         """
         raw = self._call(
-            lambda: self._client.create_filesystem(self.project_id, name, region),
+            lambda: (
+                self._client.create_filesystem(self.project_id, name)
+                if region is None
+                else self._client.create_filesystem(self.project_id, name, region)
+            ),
             not_found=None,
         )
         return str(json.loads(raw).get("default_branch") or "main")

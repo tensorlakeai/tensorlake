@@ -296,6 +296,8 @@ Rust callers use `artifact_storage.create_filesystem(project, name, Some("eu-cen
 Omitting `region` keeps the legacy location. Placement is fixed for the filesystem's storage
 network: forks inherit it, and changes to a project's region do not move existing files.
 An unsupported region is rejected; the SDK never silently substitutes another region.
+The compatibility `create_file_system(..., region="eu-central-1")` and
+`createFileSystem(name, description, { region: "eu-central-1" })` helpers accept the same choice.
 
 `writeFile()` and `writeFiles()` accept bytes already in memory. Prefer `writeFileFromPath()` or
 `writeFilesFromPaths()` for large local files so neither JavaScript nor Rust retains the complete

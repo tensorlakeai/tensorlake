@@ -124,5 +124,6 @@ test_filesystem_placement:
 
 test_filesystem_placement_wrappers:
 	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests/filesystem -p 'test_filesystem_unit.py'
+	PYTHONPATH=src $(PYTHON) -m unittest tests.sandbox.test_file_systems
 	npm --prefix typescript run typecheck
-	npm --prefix typescript test -- tests/filesystem.test.ts
+	npm --prefix typescript test

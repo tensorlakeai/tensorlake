@@ -240,7 +240,9 @@ export class FilesystemClient {
         "region must be a nonempty string without surrounding whitespace",
       );
     }
-    const raw = await callNative(() => this.native.createFilesystem(name, region));
+    const raw = await callNative(() => region === undefined
+      ? this.native.createFilesystem(name)
+      : this.native.createFilesystem(name, region));
     // The binding reports the effective default branch; it differs from
     // "main" only when a lost-response retry adopted a pre-existing
     // filesystem.

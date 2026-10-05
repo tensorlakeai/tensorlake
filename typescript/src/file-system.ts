@@ -16,13 +16,14 @@ import { FilesystemClient } from "./filesystem.js";
 
 /** Register a new file system for the current project. */
 export async function createFileSystem(
-  name: string,
+    name: string,
   description?: string,
+  options: { region?: string } = {},
 ): Promise<FileSystem> {
   if (typeof name !== "string" || name.length === 0) {
     throw new TypeError("name must be a non-empty string");
   }
-  const filesystem = await new FilesystemClient().create(name);
+  const filesystem = await new FilesystemClient().create(name, options);
   return {
     id: filesystem.name,
     name: filesystem.name,

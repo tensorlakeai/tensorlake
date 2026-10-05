@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { clearCloudStub, installCloudStub as mockFetch } from "./cloud-stub.js";
 import { APIClient } from "../src/api-client.js";
+import { createFileSystem } from "../src/file-system.js";
 import {
   RequestExecutionError,
   RequestFailedError,
@@ -14,6 +15,7 @@ describe("APIClient", () => {
     clearNativeStub();
     clearCloudStub();
     vi.restoreAllMocks();
+    vi.unstubAllEnvs();
   });
 
   it("throws RequestNotFinishedError when output is requested too early", async () => {
@@ -96,6 +98,17 @@ describe("APIClient", () => {
       null,
     ]);
     client.close();
+  });
+
+  it("preserves an explicit region through compatibility creation helpers", async () => {
+    const stub = installNativeStub();
+    const client = new APIClient({ apiKey: "api-key" });
+    await client.createFileSystem("regional", undefined, { region: "eu-central-1" });
+    expect(stub.repository.createFilesystem).toHaveBeenLastCalledWith("regional", "eu-central-1");
+    client.close();
+    vi.stubEnv("TENSORLAKE_API_KEY", "api-key");
+    await createFileSystem("helper", undefined, { region: "eu-central-1" });
+    expect(stub.repository.createFilesystem).toHaveBeenLastCalledWith("helper", "eu-central-1");
   });
 
   it("deletes a file system through Artifact Storage", async () => {
