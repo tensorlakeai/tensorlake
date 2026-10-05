@@ -6050,6 +6050,7 @@ version = "0.5.139"
 dependencies = [
  "anyhow",
  "base64",
+ "bytes",
  "chrono",
  "hex",
  "p256",

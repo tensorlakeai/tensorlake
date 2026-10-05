@@ -127,3 +127,17 @@ test_filesystem_placement_wrappers:
 	PYTHONPATH=src $(PYTHON) -m unittest tests.sandbox.test_file_systems
 	npm --prefix typescript run typecheck
 	npm --prefix typescript test
+
+# Socket-free wire checks complement the full placement retry/transport gate above.
+.PHONY: test_filesystem_placement_unit
+test_filesystem_placement_unit:
+	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) test -p tensorlake --lib artifact_storage::models::placement_tests
+	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) clippy -p tensorlake -p tensorlake-rust-cloud-sdk-py -p tensorlake-rust-cloud-sdk-node --all-targets --no-deps -- -D warnings
+
+# In-process wrapper checks; the full wrapper target retains the socket integration suite.
+.PHONY: test_filesystem_placement_wrapper_unit
+test_filesystem_placement_wrapper_unit:
+	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests/filesystem -p 'test_filesystem_unit.py'
+	PYTHONPATH=src $(PYTHON) -m unittest tests.sandbox.test_file_systems
+	npm --prefix typescript run typecheck
+	npm --prefix typescript test -- --cache=false tests/filesystem.test.ts tests/sandbox.test.ts
