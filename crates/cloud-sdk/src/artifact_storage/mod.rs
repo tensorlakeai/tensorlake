@@ -299,9 +299,74 @@ impl ArtifactStorageClient {
         git_username: &str,
         git_token: &str,
     ) -> Result<Traced<()>, SdkError> {
+        self.create_repo_with_placement(
+            project_id,
+            repo,
+            default_branch,
+            kind,
+            None,
+            git_username,
+            git_token,
+        )
+        .await
+    }
+
+    /// Create a filesystem in an explicitly selected storage region. The service endpoint and
+    /// project remain unchanged; the choice applies to this new filesystem's storage network.
+    pub async fn create_filesystem(
+        &self,
+        project_id: &str,
+        name: &str,
+        region: Option<&str>,
+    ) -> Result<Traced<()>, SdkError> {
+        validate_filesystem_region(region)?;
+        let credential = self.git_credential_for_project(project_id).await?;
+        self.create_filesystem_with_credential(
+            project_id,
+            name,
+            region,
+            &credential.git_username,
+            &credential.token,
+        )
+        .await
+    }
+
+    pub async fn create_filesystem_with_credential(
+        &self,
+        project_id: &str,
+        name: &str,
+        region: Option<&str>,
+        git_username: &str,
+        git_token: &str,
+    ) -> Result<Traced<()>, SdkError> {
+        validate_filesystem_region(region)?;
+        self.create_repo_with_placement(
+            project_id,
+            name,
+            Some("main"),
+            Some(REPO_KIND_FILESYSTEM),
+            region,
+            git_username,
+            git_token,
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    async fn create_repo_with_placement(
+        &self,
+        project_id: &str,
+        repo: &str,
+        default_branch: Option<&str>,
+        kind: Option<&str>,
+        region: Option<&str>,
+        git_username: &str,
+        git_token: &str,
+    ) -> Result<Traced<()>, SdkError> {
         let request = CreateRepoRequest {
             default_branch: default_branch.unwrap_or("main").to_string(),
             kind: kind.map(str::to_string),
+            region: region.map(str::to_owned),
         };
         let (request_builder, trace_id) = self.git_request(
             Method::POST,
@@ -3886,82 +3951,83 @@ mod tests {
     /// `Retry-After` (the artifact-storage answer to an FDB transaction-window overrun) is
     /// replayed instead of surfacing as a terminal error to a one-off filesystem creator.
     #[tokio::test]
-    async fn create_repo_replays_congestion_rejections() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let base = format!("http://{}", listener.local_addr().unwrap());
-        let requests = Arc::new(Mutex::new(Vec::<String>::new()));
-        let seen = requests.clone();
-        let server = tokio::spawn(async move {
-            for attempt in 0..2 {
-                let (mut stream, _) = listener.accept().await.unwrap();
-                let mut bytes = Vec::new();
-                let header_end = loop {
-                    let mut chunk = [0u8; 4096];
-                    let read = stream.read(&mut chunk).await.unwrap();
-                    assert_ne!(read, 0);
-                    bytes.extend_from_slice(&chunk[..read]);
-                    if let Some(offset) = bytes.windows(4).position(|part| part == b"\r\n\r\n") {
-                        break offset + 4;
+    async fn filesystem_region_creation_replays_congestion_rejections() {
+        for region in [None, Some("eu-central-1")] {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+            let base = format!("http://{}", listener.local_addr().unwrap());
+            let requests = Arc::new(Mutex::new(Vec::<String>::new()));
+            let seen = requests.clone();
+            let server = tokio::spawn(async move {
+                for attempt in 0..2 {
+                    let (mut stream, _) = listener.accept().await.unwrap();
+                    let mut bytes = Vec::new();
+                    let header_end = loop {
+                        let mut chunk = [0u8; 4096];
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        assert_ne!(read, 0);
+                        bytes.extend_from_slice(&chunk[..read]);
+                        if let Some(offset) = bytes.windows(4).position(|part| part == b"\r\n\r\n")
+                        {
+                            break offset + 4;
+                        }
+                    };
+                    let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
+                    let content_len = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    while bytes.len() < header_end + content_len {
+                        let mut chunk = [0u8; 4096];
+                        let read = stream.read(&mut chunk).await.unwrap();
+                        assert_ne!(read, 0);
+                        bytes.extend_from_slice(&chunk[..read]);
                     }
-                };
-                let headers = String::from_utf8(bytes[..header_end].to_vec()).unwrap();
-                let content_len = headers
-                    .lines()
-                    .find_map(|line| {
-                        let (name, value) = line.split_once(':')?;
-                        name.eq_ignore_ascii_case("content-length")
-                            .then(|| value.trim().parse::<usize>().unwrap())
-                    })
-                    .unwrap();
-                while bytes.len() < header_end + content_len {
-                    let mut chunk = [0u8; 4096];
-                    let read = stream.read(&mut chunk).await.unwrap();
-                    assert_ne!(read, 0);
-                    bytes.extend_from_slice(&chunk[..read]);
+                    seen.lock().unwrap().push(format!(
+                        "{} {}",
+                        headers.lines().next().unwrap(),
+                        String::from_utf8_lossy(&bytes[header_end..])
+                    ));
+                    let response = if attempt == 0 {
+                        "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Type: text/plain\r\nContent-Length: 49\r\nConnection: close\r\n\r\ncreate repo: transaction timed out; retry shortly"
+                    } else {
+                        "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+                    };
+                    stream.write_all(response.as_bytes()).await.unwrap();
                 }
-                seen.lock().unwrap().push(format!(
-                    "{} {}",
-                    headers.lines().next().unwrap(),
-                    String::from_utf8_lossy(&bytes[header_end..])
-                ));
-                let response = if attempt == 0 {
-                    "HTTP/1.1 503 Service Unavailable\r\nRetry-After: 1\r\nContent-Type: text/plain\r\nContent-Length: 49\r\nConnection: close\r\n\r\ncreate repo: transaction timed out; retry shortly"
-                } else {
-                    "HTTP/1.1 201 Created\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
-                };
-                stream.write_all(response.as_bytes()).await.unwrap();
-            }
-        });
-        let _ = rustls::crypto::ring::default_provider().install_default();
-        let client = super::ArtifactStorageClient::with_http_client(
-            None,
-            &base,
-            crate::http_transport::https_builder().build().unwrap(),
-        );
-        client
-            .create_repo_with_credential(
-                "proj",
-                "one-off-fs",
+            });
+            let _ = rustls::crypto::ring::default_provider().install_default();
+            let client = super::ArtifactStorageClient::with_http_client(
                 None,
-                Some("filesystem"),
-                "git",
-                "tok",
-            )
-            .await
-            .expect("the replayed create succeeds");
-        server.await.unwrap();
-        let seen = requests.lock().unwrap();
-        assert_eq!(
-            seen.len(),
-            2,
-            "one rejected attempt plus one replay: {seen:?}"
-        );
-        for request in seen.iter() {
-            assert!(
-                request.starts_with("POST /project/proj/repos/one-off-fs "),
-                "every attempt is the same create: {request}"
+                &base,
+                crate::http_transport::https_builder().build().unwrap(),
             );
-            assert!(request.contains("\"kind\":\"filesystem\""), "{request}");
+            client
+                .create_filesystem_with_credential("proj", "one-off-fs", region, "git", "tok")
+                .await
+                .expect("the replayed create succeeds");
+            server.await.unwrap();
+            let seen = requests.lock().unwrap();
+            assert_eq!(
+                seen.len(),
+                2,
+                "one rejected attempt plus one replay: {seen:?}"
+            );
+            for request in seen.iter() {
+                assert_eq!(
+                    request.contains("\"region\":\"eu-central-1\""),
+                    region.is_some(),
+                    "retry preserves the exact requested placement: {request}"
+                );
+                assert!(
+                    request.starts_with("POST /project/proj/repos/one-off-fs "),
+                    "every attempt is the same create: {request}"
+                );
+                assert!(request.contains("\"kind\":\"filesystem\""), "{request}");
+            }
         }
     }
 
@@ -4084,4 +4150,13 @@ mod tests {
             "{error}"
         );
     }
+}
+
+fn validate_filesystem_region(region: Option<&str>) -> Result<(), SdkError> {
+    if region.is_some_and(|region| region.is_empty() || region.trim() != region) {
+        return Err(SdkError::ClientError(
+            "filesystem region must be nonempty and have no surrounding whitespace".into(),
+        ));
+    }
+    Ok(())
 }

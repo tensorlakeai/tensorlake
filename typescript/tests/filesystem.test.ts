@@ -65,8 +65,8 @@ class StubNative {
     if (failure) throw nativeError(failure);
   }
 
-  async createFilesystem(name: string): Promise<string> {
-    this.record("createFilesystem", [name]);
+  async createFilesystem(name: string, region?: string): Promise<string> {
+    this.record("createFilesystem", [name, region]);
     return JSON.stringify({
       trace_id: "trace-1",
       // Non-"main" simulates the binding adopting a pre-existing filesystem
@@ -689,5 +689,22 @@ describe("FilesystemClient", () => {
     // The error must point at the supported read-only alternatives.
     expect(String(failure.message)).toContain("readOnly: true");
     expect(String(failure.message)).toContain("tl git mount --ro");
+  });
+});
+
+describe("filesystem creation placement", () => {
+  it("passes region per filesystem without changing the next create", async () => {
+    const stub = new StubNative();
+    const client = clientWith(stub);
+    await client.create("eu-fs", { region: "eu-central-1" });
+    await client.create("legacy-fs");
+    expect(stub.calls).toEqual([
+      { method: "createFilesystem", args: ["eu-fs", "eu-central-1"] },
+      { method: "createFilesystem", args: ["legacy-fs", undefined] },
+    ]);
+    for (const region of ["", " eu-central-1", "eu-central-1 "]) {
+      await expect(client.create("invalid", { region })).rejects.toThrow(FilesystemError);
+    }
+    expect(stub.calls).toHaveLength(2);
   });
 });

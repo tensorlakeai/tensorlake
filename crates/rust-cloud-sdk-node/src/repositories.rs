@@ -464,12 +464,17 @@ impl NativeRepositoryClient {
     /// branch differs from "main" only when a lost-response retry adopted a
     /// pre-existing filesystem.
     #[napi]
-    pub async fn create_filesystem(&self, name: String) -> napi::Result<String> {
+    pub async fn create_filesystem(
+        &self,
+        name: String,
+        region: Option<String>,
+    ) -> napi::Result<String> {
         let project_id = self.project_id().await?;
         let maybe_executed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         with_retry(self.client.clone(), 5, move |client| {
             let project_id = project_id.clone();
             let name = name.clone();
+            let region = region.clone();
             let maybe_executed = maybe_executed.clone();
             async move {
                 // Minted before the forgiveness-tracked call: a mint failure
@@ -477,11 +482,10 @@ impl NativeRepositoryClient {
                 // it must never arm the 409 forgiveness below.
                 let credential = client.git_credential_for_project(&project_id).await?;
                 match client
-                    .create_repo_with_credential(
+                    .create_filesystem_with_credential(
                         &project_id,
                         &name,
-                        Some("main"),
-                        Some(REPO_KIND_FILESYSTEM),
+                        region.as_deref(),
                         &credential.git_username,
                         &credential.token,
                     )
@@ -513,7 +517,7 @@ impl NativeRepositoryClient {
                                 &credential.token,
                             )
                             .await?;
-                        if meta.is_filesystem() {
+                        if meta.matches_filesystem_region(region.as_deref()) {
                             // Report the adopted filesystem's real default
                             // branch so the SDK handle never assumes "main".
                             Ok(serde_json::to_string(&serde_json::json!({
@@ -522,7 +526,7 @@ impl NativeRepositoryClient {
                             }))?)
                         } else {
                             Err(SdkError::ClientError(format!(
-                                "a non-filesystem repo named {name} already exists"
+                                "an existing repo named {name} does not match the requested filesystem kind and region"
                             )))
                         }
                     }

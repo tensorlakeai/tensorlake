@@ -180,7 +180,7 @@ export interface NativeRepositoryClient {
     base?: string | null,
   ): Promise<TracedJson>;
   commitConflicts(repo: string, commit: string): Promise<TracedJson>;
-  createFilesystem(name: string): Promise<string>;
+  createFilesystem(name: string, region?: string): Promise<string>;
   forkFilesystem(
     name: string,
     base: string,

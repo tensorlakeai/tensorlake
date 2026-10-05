@@ -112,3 +112,17 @@ bump_version:
 # Build tl first (cargo build -p tl) or point TL_BIN at a binary.
 fs-posix-conformance:
 	bash tests/fs-posix-conformance/run_conformance.sh
+
+# Filesystem placement wire contract and both public SDK wrappers (no cloud credentials).
+CARGO ?= cargo
+PYTHON ?= poetry run python
+.PHONY: test_filesystem_placement test_filesystem_placement_wrappers
+
+test_filesystem_placement:
+	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) test -p tensorlake --lib filesystem_region_
+	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) clippy -p tensorlake -p tensorlake-rust-cloud-sdk-py -p tensorlake-rust-cloud-sdk-node --all-targets --no-deps -- -D warnings
+
+test_filesystem_placement_wrappers:
+	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests/filesystem -p 'test_filesystem_unit.py'
+	npm --prefix typescript run typecheck
+	npm --prefix typescript test -- tests/filesystem.test.ts
