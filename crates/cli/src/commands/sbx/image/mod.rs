@@ -294,6 +294,8 @@ mod tests {
             organization_id: Some("org-1".to_string()),
             project_id: Some("proj-1".to_string()),
             debug: false,
+            context_name: None,
+            context_source: None,
         })
     }
 

@@ -30,12 +30,13 @@ mod output;
 mod project;
 mod python_ast;
 
-use clap::{Args, Parser, Subcommand, ValueEnum};
+use clap::parser::ValueSource;
+use clap::{Args, CommandFactory, FromArgMatches, Parser, Subcommand, ValueEnum};
 use std::num::NonZeroUsize;
 
 use auth::context::CliContext;
 use auth::guard::{ensure_auth, ensure_auth_and_project, ensure_auth_for_api_key_scoped_project};
-use config::resolver;
+use config::resolver::{self, UnknownContext};
 use error::CliError;
 
 #[derive(Parser)]
@@ -48,7 +49,12 @@ use error::CliError;
 Authentication:
   Use --api-key or TENSORLAKE_API_KEY for API key authentication
   Use --pat or TENSORLAKE_PAT for Personal Access Token authentication
-  Use 'tl login' to obtain a PAT interactively"
+  Use 'tl login' to obtain a PAT interactively
+
+Contexts:
+  Use 'tl context' (alias: 'tl profile') to switch between saved projects without logging in again
+  Use --context or TENSORLAKE_CONTEXT to run one command in another context
+  Tokens go to the OS keychain; set TENSORLAKE_TOKEN_STORAGE=file to keep them in a file"
 )]
 struct Cli {
     /// Show detailed error information and stack traces
@@ -83,6 +89,10 @@ struct Cli {
     #[arg(long, env = "TENSORLAKE_PROJECT_ID")]
     project: Option<String>,
 
+    /// The saved context (organization, project, and token) to use for this command
+    #[arg(long, env = "TENSORLAKE_CONTEXT")]
+    context: Option<String>,
+
     #[command(subcommand)]
     command: Option<Commands>,
 }
@@ -99,7 +109,23 @@ enum Commands {
     Version,
 
     /// Login to TensorLake
-    Login,
+    Login {
+        /// Name of the context to save the login as (default: the context named by
+        /// --context or TENSORLAKE_CONTEXT, else "default")
+        #[arg(long)]
+        context: Option<String>,
+    },
+
+    /// Forget the token of the current context
+    Logout {
+        /// Forget the tokens of all saved contexts
+        #[arg(long)]
+        all: bool,
+    },
+
+    /// Manage contexts: one saved organization, project, and token each
+    #[command(subcommand, alias = "profile")]
+    Context(ContextCommands),
 
     /// Print authentication status
     #[command(alias = "info")]
@@ -229,6 +255,52 @@ enum Commands {
 }
 
 use std::path::PathBuf;
+
+#[derive(Subcommand)]
+enum ContextCommands {
+    /// List the saved contexts. The current one is marked with *
+    #[command(alias = "ls")]
+    List {
+        /// Output format
+        #[arg(short, long, default_value = "text", value_enum)]
+        output: OutputFormat,
+    },
+
+    /// Print the name of the current context
+    Current,
+
+    /// Switch to a context. Local only, no network
+    Use {
+        /// Context name
+        name: String,
+    },
+
+    /// Print one context
+    Show {
+        /// Context name
+        name: String,
+
+        /// Output format
+        #[arg(short, long, default_value = "text", value_enum)]
+        output: OutputFormat,
+    },
+
+    /// Rename a context
+    Rename {
+        /// Current name
+        old: String,
+
+        /// New name
+        new: String,
+    },
+
+    /// Forget the token of a context and remove it
+    #[command(alias = "rm")]
+    Delete {
+        /// Context name
+        name: String,
+    },
+}
 
 #[derive(Subcommand)]
 enum FsCommands {
@@ -1994,21 +2066,11 @@ fn parse_tcp_port(value: &str) -> std::result::Result<u16, String> {
 
 #[tokio::main]
 async fn main() {
-    let cli = Cli::parse();
-
-    let resolved = resolver::resolve(
-        cli.api_url.as_deref(),
-        cli.cloud_url.as_deref(),
-        cli.api_key.as_deref(),
-        cli.personal_access_token.as_deref(),
-        cli.namespace.as_deref(),
-        cli.organization.as_deref(),
-        cli.project.as_deref(),
-        cli.debug,
-    );
-
-    let mut ctx = CliContext::from_resolved(resolved);
-
+    let matches = Cli::command().get_matches();
+    let cli = match Cli::from_arg_matches(&matches) {
+        Ok(cli) => cli,
+        Err(e) => e.exit(),
+    };
     let command = match cli.command {
         Some(command) => command,
         None => {
@@ -2017,7 +2079,67 @@ async fn main() {
         }
     };
 
-    let result = run_command(&mut ctx, command).await;
+    // `--context` on the command line beats TENSORLAKE_CONTEXT; the resolver reads the
+    // env var itself so that `tl whoami` can say where the context came from.
+    //
+    // `tl login --context <name>` saves into `<name>`, so it also runs in `<name>`: a saved
+    // context keeps its own API URL through a login that refreshes it. An explicit
+    // `--api-url` still wins in the resolver.
+    let context_flag = match (&command, matches.value_source("context")) {
+        (
+            Commands::Login {
+                context: Some(name),
+            },
+            _,
+        ) => Some(name.as_str()),
+        (_, Some(ValueSource::CommandLine)) => cli.context.as_deref(),
+        _ => None,
+    };
+
+    let unknown_context = if runs_in_context(&command) {
+        UnknownContext::Error
+    } else {
+        UnknownContext::Ignore
+    };
+
+    let resolved = match resolver::resolve(
+        cli.api_url.as_deref(),
+        cli.cloud_url.as_deref(),
+        cli.api_key.as_deref(),
+        cli.personal_access_token.as_deref(),
+        cli.namespace.as_deref(),
+        cli.organization.as_deref(),
+        cli.project.as_deref(),
+        context_flag,
+        unknown_context,
+        cli.debug,
+    ) {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            // Git runs the helper on every fetch and push. A context deleted since
+            // `tl git setup`, or a config that no longer resolves, must fail softly: say why
+            // on stderr and exit 0, so git falls through to its other helpers or a prompt.
+            if matches!(command, Commands::Git(GitCommands::CredentialHelper { .. })) {
+                eprintln!("tl: {e}. run `tl git setup` in the repo again");
+                drain_stdin();
+                std::process::exit(0);
+            }
+            eprintln!("Error: {e}");
+            std::process::exit(1);
+        }
+    };
+
+    let mut ctx = CliContext::from_resolved(resolved);
+
+    // The context named by `--context` or `TENSORLAKE_CONTEXT`, saved or not. `tl login`
+    // saves into it, so a login made to repair a missing context lands under its name. An
+    // empty `TENSORLAKE_CONTEXT` names nothing, as in the resolver.
+    let named_context = cli
+        .context
+        .as_deref()
+        .map(str::trim)
+        .filter(|name| !name.is_empty());
+    let result = run_command(&mut ctx, command, named_context).await;
 
     if let Err(e) = result {
         match &e {
@@ -2048,17 +2170,78 @@ async fn main() {
     }
 }
 
+/// Whether `command` runs in the selected context, so that a `--context` or
+/// `TENSORLAKE_CONTEXT` that is not saved, or a `--project` for another project, stops it.
+///
+/// Two kinds of command do not. The recovery commands (`tl login`, `tl logout --all`,
+/// `tl context`) put the saved contexts right, so a stale name must not block them. The local
+/// commands (`tl new`, `tl build-images`, `tl fs setup`, `tl fs doctor`, ...) use no token and
+/// no project, so a stale `TENSORLAKE_CONTEXT` or an exported `TENSORLAKE_PROJECT_ID` left in
+/// the shell must not stop them either.
+fn runs_in_context(command: &Commands) -> bool {
+    !matches!(
+        command,
+        Commands::Version
+            | Commands::Login { .. }
+            | Commands::Logout { all: true }
+            | Commands::Context(_)
+            | Commands::New { .. }
+            | Commands::BuildImages { .. }
+            | Commands::Fs(
+                FsCommands::Setup { .. }
+                    | FsCommands::KernelRefresh { .. }
+                    | FsCommands::Prefetch { .. }
+                    | FsCommands::Doctor { .. }
+            )
+            | Commands::Git(GitCommands::Prefetch { .. })
+    )
+}
+
+/// Read and drop what git wrote on stdin, so git never sees a broken pipe. A terminal is
+/// not read: a human who runs the helper by hand would wait on it.
+fn drain_stdin() {
+    use std::io::IsTerminal;
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return;
+    }
+    let _ = std::io::copy(&mut stdin.lock(), &mut std::io::sink());
+}
+
+fn run_context_command(command: ContextCommands) -> error::Result<()> {
+    match command {
+        ContextCommands::List { output } => {
+            commands::context::list(matches!(output, OutputFormat::Json))
+        }
+        ContextCommands::Current => commands::context::current(),
+        ContextCommands::Use { name } => commands::context::use_context(&name),
+        ContextCommands::Show { name, output } => {
+            commands::context::show(&name, matches!(output, OutputFormat::Json))
+        }
+        ContextCommands::Rename { old, new } => commands::context::rename(&old, &new),
+        ContextCommands::Delete { name } => commands::context::delete(&name),
+    }
+}
+
 fn missing_subcommand_error() -> &'static str {
     "error: 'tl' requires a subcommand but one was not provided\n\nUsage: tl [OPTIONS] <COMMAND>\n\nFor more information, try '--help'."
 }
 
-async fn run_command(ctx: &mut CliContext, command: Commands) -> error::Result<()> {
+async fn run_command(
+    ctx: &mut CliContext,
+    command: Commands,
+    named_context: Option<&str>,
+) -> error::Result<()> {
     match command {
         Commands::Version => {
             println!("tl {}", env!("CARGO_PKG_VERSION"));
             Ok(())
         }
-        Commands::Login => commands::login::run(ctx).await,
+        Commands::Login { context } => {
+            commands::login::run(ctx, context.as_deref(), named_context).await
+        }
+        Commands::Logout { all } => commands::login::logout(ctx, all),
+        Commands::Context(subcmd) => run_context_command(subcmd),
         Commands::Whoami { output } => {
             commands::whoami::run(ctx, matches!(output, OutputFormat::Json)).await
         }
