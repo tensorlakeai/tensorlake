@@ -445,6 +445,45 @@ class ClaimSandboxRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class ResizeStatus(str, Enum):
+    """Status of a live resource resize generation."""
+
+    PENDING = "pending"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class ResizeErrorReason(str, Enum):
+    """Why a resize failed or its completion could not be observed."""
+
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    SUPERSEDED = "superseded"
+    INTERRUPTED = "interrupted"
+    INCOMPATIBLE_RESPONSE = "incompatible_response"
+
+
+class ResizeSandboxResources(BaseModel):
+    """Partial live resize targets, using the same names and units as create."""
+
+    cpus: float | None = None
+    memory_mb: int | None = None
+    disk_mb: int | None = None
+
+
+class SandboxResourceResizeInfo(BaseModel):
+    """Latest resize generation; SandboxInfo.resources is the confirmed allocation.
+
+    Known statuses use ResizeStatus; future server statuses remain plain strings
+    so the sandbox can still be fetched and inspected.
+    """
+
+    generation: int
+    requested: ContainerResourcesInfo
+    status: ResizeStatus | str = Field(union_mode="left_to_right")
+    error_message: str | None = None
+
+
 class UpdateSandboxRequest(BaseModel):
     """Request payload for updating a sandbox.
 
@@ -454,6 +493,7 @@ class UpdateSandboxRequest(BaseModel):
     :data:`CLEAR_NETWORK_POLICY` sentinel rather than this model.
     """
 
+    resources: ResizeSandboxResources | None = None
     name: str | None = None
     allow_unauthenticated_access: bool | None = None
     exposed_ports: list[int] | None = None
@@ -673,6 +713,8 @@ class SandboxInfo(BaseModel):
     namespace: str
     status: SandboxStatus
     image: str | None = None
+    runtime: str | None = None
+    resource_resize: SandboxResourceResizeInfo | None = None
     resources: ContainerResourcesInfo
     timeout_secs: int | None = None
     entrypoint: list[str] | None = None

@@ -12,7 +12,19 @@ use crate::error::Result;
 /// `tl sbx create --queue` or a create whose own wait ran out. Never
 /// deletes the sandbox: when the budget runs out the sandbox keeps its place
 /// in the queue and the error says how to keep waiting.
-pub async fn run(ctx: &CliContext, sandbox_id: &str, timeout: Duration) -> Result<()> {
+pub async fn run(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    timeout: Duration,
+    resize_generation: Option<u64>,
+) -> Result<()> {
+    if let Some(generation) = resize_generation {
+        let client = super::resize::client(ctx)?;
+        let completed = super::resize::wait(&client, sandbox_id, generation, timeout, None).await?;
+        super::resize::print_completed(&completed);
+        super::resize::print_id(&completed);
+        return Ok(());
+    }
     let is_tty = std::io::IsTerminal::is_terminal(&std::io::stdout());
     wait_for_sandbox_status_every(
         ctx,

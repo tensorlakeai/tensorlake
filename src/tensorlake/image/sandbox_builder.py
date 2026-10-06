@@ -577,9 +577,9 @@ def build_sandbox_image(
         registered_name: Name to register the image under. Defaults to the
             image's ``name`` or the Dockerfile stem.
         cpus: CPUs for the build sandbox.
-        memory_mb: Memory for the build sandbox in MB.
-        disk_mb: Root disk size for the generated sandbox image in MB.
-        builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
+        memory_mb: Memory for the build sandbox in MiB.
+        disk_mb: Root disk size for the generated sandbox image in MiB.
+        builder_disk_mb: Root disk size for the temporary builder sandbox in MiB.
         is_public: Make the registered image publicly accessible.
         docker_compat: Use Docker/BuildKit max compatibility mode (build is
             slower and uses more memory and disk space on builder sandbox).
@@ -713,9 +713,9 @@ def import_sandbox_image(
             image reference's last path segment with any tag/digest stripped
             (e.g. ``pytorch/pytorch:2.4.1`` -> ``pytorch``).
         cpus: CPUs for the build sandbox.
-        memory_mb: Memory for the build sandbox in MB.
-        disk_mb: Root disk size for the generated sandbox image in MB.
-        builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
+        memory_mb: Memory for the build sandbox in MiB.
+        disk_mb: Root disk size for the generated sandbox image in MiB.
+        builder_disk_mb: Root disk size for the temporary builder sandbox in MiB.
         is_public: Make the registered image publicly accessible.
         docker_compat: Use Docker/BuildKit max compatibility mode (import is
             slower and uses more memory and disk space on builder sandbox).

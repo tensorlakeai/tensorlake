@@ -163,7 +163,7 @@ async fn create_snapshot_with_details_until(
                 )));
             }
             if current_status == "completed" {
-                spinner.finish_with_message(format!("Snapshot completed ({:.1} MB)", size_mb));
+                spinner.finish_with_message(format!("Snapshot completed ({:.1} MiB)", size_mb));
             } else {
                 spinner.finish_with_message("Snapshot locally ready");
             }

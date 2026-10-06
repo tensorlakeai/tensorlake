@@ -195,9 +195,9 @@ export interface CreateSandboxOptions {
   image?: string;
   /** CPU count. Defaults to 1 for fresh creates; snapshot restores inherit it when omitted. */
   cpus?: number;
-  /** Memory in MB. Defaults to 1024 for fresh creates; snapshot restores inherit it when omitted. */
+  /** Memory in MiB. Defaults to 1024 for fresh creates; snapshot restores inherit it when omitted. */
   memoryMb?: number;
-  /** Root disk size in megabytes. When omitted, the server uses its default disk size. */
+  /** Root disk size in MiB. When omitted, the server uses its default disk size. */
   diskMb?: number;
   /** Number of GPUs to allocate. Defaults to A10 unless gpuModel is set. GPU sandboxes require a CAS image. */
   gpus?: number;
@@ -233,7 +233,46 @@ export interface CreateSandboxOptions {
   maxPendingSecs?: number;
 }
 
-export interface UpdateSandboxOptions {
+/**
+ * Bounded generation wait. Timeout never cancels a resize. Times are seconds.
+ * A zero timeout checks once without polling again.
+ */
+export interface ResourceResizeWaitOptions {
+  timeout?: number;
+  pollInterval?: number;
+}
+
+export enum ResizeStatus {
+  PENDING = "pending",
+  SUCCEEDED = "succeeded",
+  FAILED = "failed",
+}
+
+export enum ResizeErrorReason {
+  FAILED = "failed",
+  TIMEOUT = "timeout",
+  SUPERSEDED = "superseded",
+  INTERRUPTED = "interrupted",
+  INCOMPATIBLE_RESPONSE = "incompatible_response",
+}
+
+export interface SandboxResourceResizeInfo {
+  generation: number;
+  requested: ContainerResourcesInfo;
+  status: ResizeStatus | (string & {});
+  errorMessage?: string | null;
+}
+
+/** Wait options apply only to resource updates and are ignored for other properties. */
+export interface UpdateSandboxOptions extends ResourceResizeWaitOptions {
+  /** Whole live vCPU target; omitted retains the current allocation. */
+  cpus?: number;
+  /** Memory target in MiB, with the same units as create; never rounded by the SDK. */
+  memoryMb?: number;
+  /** Root disk target in MiB; can only grow. */
+  diskMb?: number;
+  /** Wait for resize completion (default true). False returns admission. */
+  wait?: boolean;
   /** New name for the sandbox. Naming an ephemeral sandbox enables suspend/resume. */
   name?: string;
   /** Whether exposed user ports should be reachable without TensorLake auth. */
@@ -328,6 +367,8 @@ export interface CopySandboxResponse {
 }
 
 export interface SandboxInfo {
+  runtime?: string;
+  resourceResize?: SandboxResourceResizeInfo | null;
   sandboxId: string;
   namespace: string;
   status: SandboxStatus;
@@ -477,7 +518,7 @@ export interface CreatePoolOptions {
   image: string;
   cpus?: number;
   memoryMb?: number;
-  /** Root disk size in megabytes. Omit to use the registered image's size. */
+  /** Root disk size in MiB. Omit to use the registered image's size. */
   diskMb?: number;
   timeoutSecs?: number;
   entrypoint?: string[];
@@ -498,7 +539,7 @@ export interface UpdatePoolOptions {
   image: string;
   cpus?: number;
   memoryMb?: number;
-  /** Root disk size in megabytes. Omit to use the registered image's size. */
+  /** Root disk size in MiB. Omit to use the registered image's size. */
   diskMb?: number;
   timeoutSecs?: number;
   entrypoint?: string[];

@@ -1,5 +1,6 @@
 pub mod desktop;
 pub mod models;
+pub mod resize;
 
 use eventsource_stream::Eventsource;
 use futures::{StreamExt, TryStreamExt};
@@ -731,16 +732,16 @@ impl SandboxesClient {
         self.log_client.execute_json(req).await
     }
 
+    /// Update sandbox settings, or perform a standalone live resource resize.
+    /// Resource updates wait up to 300 seconds for the admitted generation.
+    /// Use `update_with_options` to return admission or change the wait budget.
     pub async fn update(
         &self,
         sandbox_id: &str,
         request: &UpdateSandboxRequest,
     ) -> Result<Traced<SandboxInfo>, SdkError> {
-        let uri = self.endpoint(&format!("sandboxes/{sandbox_id}"));
-        let req = self
-            .client
-            .build_post_json_request(Method::PATCH, &uri, request)?;
-        self.client.execute_json(req).await
+        self.update_with_options(sandbox_id, request, resize::ResizeOptions::default())
+            .await
     }
 
     pub async fn delete(&self, sandbox_id: &str) -> Result<Traced<()>, SdkError> {
