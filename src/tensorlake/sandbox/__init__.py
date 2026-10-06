@@ -63,7 +63,9 @@ from .models import (
     ProcessStatus,
     ProcessUser,
     ProcessUserSpec,
+    ResizeErrorReason,
     ResizeSandboxResources,
+    ResizeStatus,
     RestartPolicy,
     RestartPolicyConfig,
     SandboxInfo,
@@ -90,9 +92,6 @@ from .sandbox import Sandbox
 from .tunnel import AsyncTcpTunnel, TcpTunnel, TunnelAddress
 
 __all__ = [
-    "SandboxResizeError",
-    "SandboxResourceResizeInfo",
-    "ResizeSandboxResources",
     # Lifecycle management
     "SandboxClient",
     "AsyncSandboxClient",
@@ -110,6 +109,10 @@ __all__ = [
     "SandboxPendingReason",
     "GetOrCreateOutcome",
     "SandboxInfo",
+    "ResizeStatus",
+    "ResizeErrorReason",
+    "SandboxResourceResizeInfo",
+    "ResizeSandboxResources",
     # Wait-free create and polling readiness (ADR 0086)
     "PendingSandbox",
     "AsyncPendingSandbox",
@@ -183,6 +186,7 @@ __all__ = [
     "SandboxNotFoundError",
     "SandboxNotRoutableError",
     "SandboxPending",
+    "SandboxResizeError",
     "PoolNotFoundError",
     "PoolInUseError",
     "RemoteAPIError",

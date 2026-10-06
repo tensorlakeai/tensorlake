@@ -11,6 +11,8 @@ from tensorlake.sandbox import (
     CLEAR_NETWORK_POLICY,
     AsyncSandbox,
     AsyncSandboxClient,
+    ResizeErrorReason,
+    ResizeStatus,
     Sandbox,
     SandboxClient,
     SandboxError,
@@ -85,6 +87,7 @@ class TestResourceResize(unittest.TestCase):
                     "poll_interval_sec": 1.0,
                 }
                 assert result.resource_resize.generation == 7
+                assert result.resource_resize.status is ResizeStatus.PENDING
                 assert result.resources.memory_mb == 1024
 
     def test_invalid_values_are_rejected_before_native_serialization(self):
@@ -98,7 +101,9 @@ class TestResourceResize(unittest.TestCase):
             {"memory_mb": True},
             {"memory_mb": -1},
             {"disk_mb": 0},
-            {"disk_mb": 1.0},
+            {"disk_mb": 1.5},
+            {"memory_mb": float("nan")},
+            {"disk_mb": float("inf")},
             {"disk_mb": "2048"},
         ]:
             with self.subTest(kwargs=kwargs):
@@ -106,6 +111,32 @@ class TestResourceResize(unittest.TestCase):
                 with self.assertRaisesRegex(SandboxError, next(iter(kwargs))):
                     obj.update_sandbox("sb-1", **kwargs)
                 obj._rust_client.update_sandbox.assert_not_called()
+
+    def test_integral_floats_match_create_coercion_without_rounding(self):
+        for async_ in [False, True]:
+            obj = client(async_)
+            result = obj.update_sandbox("sb-1", memory_mb=2048.0, disk_mb=4096.0)
+            if async_:
+                asyncio.run(result)
+            native = getattr(
+                obj._rust_client, "update_sandbox_async" if async_ else "update_sandbox"
+            )
+            resources = json.loads(native.call_args.kwargs["request_json"])["resources"]
+            assert resources == {"memory_mb": 2048, "disk_mb": 4096}
+            assert all(isinstance(value, int) for value in resources.values())
+
+    def test_resize_error_can_be_constructed_without_a_wire_payload_or_observation(
+        self,
+    ):
+        error = SandboxResizeError(
+            "sb-1",
+            generation=7,
+            reason=ResizeErrorReason.TIMEOUT,
+            message="wait timed out",
+        )
+        assert error.reason is ResizeErrorReason.TIMEOUT
+        assert error.confirmed_resources is None
+        assert "last confirmed allocation: unavailable" in str(error)
 
     def test_resource_updates_must_be_standalone(self):
         for kwargs in [
@@ -159,7 +190,9 @@ class TestResourceResize(unittest.TestCase):
                     _raise_as_sandbox_error(
                         RustCloudSandboxClientError("resize", None, json.dumps(payload))
                     )
-                assert raised.exception.reason == reason
+                assert raised.exception.reason is ResizeErrorReason(reason)
+                assert raised.exception.confirmed_resources.memory_mb == 1024
+                assert "1 CPUs, 1024 MiB memory, 1024 MiB disk" in str(raised.exception)
                 assert raised.exception.generation == 7
                 assert raised.exception.info.resources.memory_mb == 1024
                 assert "below immutable boot memory" in str(raised.exception)

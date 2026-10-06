@@ -117,6 +117,8 @@ export {
 
 // Models & enums
 export {
+  ResizeStatus,
+  ResizeErrorReason,
   SandboxStatus,
   SandboxPendingReason,
   SnapshotStatus,

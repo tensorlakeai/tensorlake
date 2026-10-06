@@ -952,10 +952,12 @@ export class Sandbox {
   }
 
   /**
+   * Update this sandbox's properties or resize its resources.
+   *
    * Resource targets use create's cpus, memoryMb, and diskMb names. Resize
    * waits by default; wait=false returns admission. Timeout does not cancel it.
-   * Update this sandbox's properties (name, exposed ports, proxy auth, and
-   * egress network policy).
+   * Wait, timeout, and pollInterval are ignored on non-resource updates.
+   * A no-op returns current resources with absent or earlier resize metadata.
    *
    * Naming an ephemeral sandbox makes it non-ephemeral and enables
    * suspend/resume. For `network`, omit to keep the current policy, pass an

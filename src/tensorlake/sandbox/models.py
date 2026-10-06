@@ -445,6 +445,24 @@ class ClaimSandboxRequest(BaseModel):
     model_config = {"populate_by_name": True}
 
 
+class ResizeStatus(str, Enum):
+    """Status of a live resource resize generation."""
+
+    PENDING = "pending"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class ResizeErrorReason(str, Enum):
+    """Why a resize failed or its completion could not be observed."""
+
+    FAILED = "failed"
+    TIMEOUT = "timeout"
+    SUPERSEDED = "superseded"
+    INTERRUPTED = "interrupted"
+    INCOMPATIBLE_RESPONSE = "incompatible_response"
+
+
 class ResizeSandboxResources(BaseModel):
     """Partial live resize targets, using the same names and units as create."""
 
@@ -458,7 +476,7 @@ class SandboxResourceResizeInfo(BaseModel):
 
     generation: int
     requested: ContainerResourcesInfo
-    status: str
+    status: ResizeStatus
     error_message: str | None = None
 
 

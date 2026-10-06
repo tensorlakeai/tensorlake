@@ -1,4 +1,4 @@
-import type { SandboxInfo } from "./models.js";
+import type { ContainerResourcesInfo, ResizeErrorReason, SandboxInfo } from "./models.js";
 /** Base exception for all sandbox-related errors. */
 export class SandboxException extends Error {
   constructor(message: string) {
@@ -33,13 +33,14 @@ export class SandboxError extends SandboxException {
 
 /** A failed, timed-out, interrupted, or superseded resize, with confirmed allocation. */
 export class SandboxResizeError extends SandboxError {
+  declare readonly reason: ResizeErrorReason;
   readonly generation: number;
   readonly info?: SandboxInfo;
 
   constructor(payload: {
     sandboxId: string;
     generation: number;
-    reason: string;
+    reason: ResizeErrorReason;
     message: string;
     info?: SandboxInfo | null;
   }) {
@@ -54,6 +55,11 @@ export class SandboxResizeError extends SandboxError {
     this.name = "SandboxResizeError";
     this.generation = payload.generation;
     this.info = payload.info ?? undefined;
+  }
+
+  /** Last confirmed allocation, if an observation was available. */
+  get confirmedResources(): ContainerResourcesInfo | undefined {
+    return this.info?.resources;
   }
 }
 

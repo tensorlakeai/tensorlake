@@ -629,6 +629,8 @@ export class SandboxClient {
    * Update properties or resize a Running Cloud Hypervisor sandbox.
    * Resource names match create. Resize waits by default; wait=false returns
    * admission. Timeout leaves the resize running and reports its generation.
+   * Wait, timeout, and pollInterval are ignored on non-resource updates.
+   * A no-op returns current resources with absent or earlier resize metadata.
    */
   async update(
     sandboxId: string,

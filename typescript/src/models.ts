@@ -239,13 +239,28 @@ export interface ResourceResizeWaitOptions {
   pollInterval?: number;
 }
 
+export enum ResizeStatus {
+  PENDING = "pending",
+  SUCCEEDED = "succeeded",
+  FAILED = "failed",
+}
+
+export enum ResizeErrorReason {
+  FAILED = "failed",
+  TIMEOUT = "timeout",
+  SUPERSEDED = "superseded",
+  INTERRUPTED = "interrupted",
+  INCOMPATIBLE_RESPONSE = "incompatible_response",
+}
+
 export interface SandboxResourceResizeInfo {
   generation: number;
   requested: ContainerResourcesInfo;
-  status: "pending" | "succeeded" | "failed" | (string & {});
+  status: ResizeStatus | (string & {});
   errorMessage?: string | null;
 }
 
+/** Wait options apply only to resource updates and are ignored for other properties. */
 export interface UpdateSandboxOptions extends ResourceResizeWaitOptions {
   /** Whole live vCPU target; omitted retains the current allocation. */
   cpus?: number;

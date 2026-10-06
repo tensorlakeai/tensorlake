@@ -1,4 +1,4 @@
-"""Strict validation before Pydantic/JSON can coerce resource inputs."""
+"""Validate live targets without rounding; preserve create's integral numeric coercion."""
 
 import math
 
@@ -22,7 +22,11 @@ def resize_resources(
             )
     for field, value in (("memory_mb", memory_mb), ("disk_mb", disk_mb)):
         if value is not None and (
-            isinstance(value, bool) or not isinstance(value, int) or value <= 0
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or (isinstance(value, float) and not math.isfinite(value))
+            or value <= 0
+            or value % 1 != 0
         ):
             raise SandboxError(
                 f"{field} {value!r} must be a positive integer number of MiB"

@@ -25,6 +25,13 @@ impl Default for ResizeOptions {
     }
 }
 
+/// Update observation and the generation admitted by this call, if any.
+/// A no-op retains prior resize metadata in `info`, but admits no generation.
+pub struct SandboxUpdateResult {
+    pub info: Traced<SandboxInfo>,
+    pub resize_generation: Option<u64>,
+}
+
 /// Carries the last observation so failure/timeout never hides actual allocation.
 #[derive(Debug, Clone, Serialize, Deserialize, thiserror::Error)]
 #[error("Sandbox {sandbox_id} resize generation {generation}: {message}; last confirmed allocation: {allocation}", allocation = allocation_text(info))]
@@ -141,6 +148,20 @@ impl SandboxesClient {
         request: &UpdateSandboxRequest,
         options: ResizeOptions,
     ) -> Result<Traced<SandboxInfo>, SdkError> {
+        Ok(self
+            .update_with_result(sandbox_id, request, options)
+            .await?
+            .info)
+    }
+
+    /// Like `update_with_options`, with an explicit admission outcome so callers
+    /// can distinguish a no-op from a new resize without another preflight GET.
+    pub async fn update_with_result(
+        &self,
+        sandbox_id: &str,
+        request: &UpdateSandboxRequest,
+        options: ResizeOptions,
+    ) -> Result<SandboxUpdateResult, SdkError> {
         let mut request = request.clone();
         if let Some(resources) = &request.resources {
             if request.name.is_some()
@@ -161,7 +182,10 @@ impl SandboxesClient {
             let current = self.get(sandbox_id).await?;
             let resources = resources.against(&current)?;
             if resources.is_empty() {
-                return Ok(current);
+                return Ok(SandboxUpdateResult {
+                    info: current,
+                    resize_generation: None,
+                });
             }
             request.resources = Some(resources);
         }
@@ -172,7 +196,10 @@ impl SandboxesClient {
         // Never replay admission when a later poll fails.
         let admitted: Traced<SandboxInfo> = self.client.execute_json(req).await?;
         if request.resources.is_none() {
-            return Ok(admitted);
+            return Ok(SandboxUpdateResult {
+                info: admitted,
+                resize_generation: None,
+            });
         }
         let generation = admitted
             .resource_resize
@@ -188,16 +215,24 @@ impl SandboxesClient {
             })?
             .generation;
         if resize_complete(sandbox_id, generation, &admitted)? || !options.wait {
-            return Ok(admitted);
+            return Ok(SandboxUpdateResult {
+                info: admitted,
+                resize_generation: Some(generation),
+            });
         }
-        self.poll_resource_resize(
-            &admitted.sandbox_id,
-            generation,
-            options.timeout,
-            options.poll_interval,
-            Some(admitted.clone()),
-        )
-        .await
+        let info = self
+            .poll_resource_resize(
+                &admitted.sandbox_id,
+                generation,
+                options.timeout,
+                options.poll_interval,
+                Some(admitted.clone()),
+            )
+            .await?;
+        Ok(SandboxUpdateResult {
+            info,
+            resize_generation: Some(generation),
+        })
     }
 
     /// Wait for this exact generation. Timeout does not cancel the resize.

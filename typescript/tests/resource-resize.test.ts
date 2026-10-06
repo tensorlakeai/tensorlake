@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Sandbox } from "../src/sandbox.js";
 import { SandboxClient } from "../src/client.js";
 import { SandboxError, SandboxResizeError, RemoteAPIError } from "../src/errors.js";
-import type { UpdateSandboxOptions } from "../src/models.js";
+import { ResizeStatus, ResizeErrorReason, type UpdateSandboxOptions } from "../src/models.js";
 import { installNativeStub, clearNativeStub } from "./native-stub.js";
 
 const info = {
@@ -24,6 +24,7 @@ describe("resource resize", () => {
     const result = await client.update("named", options);
     expect(stub.client.updateSandbox).toHaveBeenCalledWith("named", JSON.stringify({ resources }), true, 300, 1);
     expect(result.resourceResize?.generation).toBe(7);
+    expect(result.resourceResize?.status).toBe(ResizeStatus.PENDING);
     expect(result.resources.memoryMb).toBe(1024);
     client.close();
   });
@@ -60,7 +61,7 @@ describe("resource resize", () => {
     client.close();
   });
 
-  it.each(["failed", "timeout", "superseded"])("preserves %s generation, driver details and confirmed allocation", async (reason) => {
+  it.each([ResizeErrorReason.FAILED, ResizeErrorReason.TIMEOUT, ResizeErrorReason.SUPERSEDED])("preserves %s generation, driver details and confirmed allocation", async (reason) => {
     installNativeStub({ client: { updateSandbox: vi.fn(async () => {
       throw new Error(JSON.stringify({ category: "resize", status: null, message: JSON.stringify({
         sandbox_id: "sb-1", generation: 7, reason, message: "ConfigurationError: below immutable boot memory", info,
@@ -71,6 +72,8 @@ describe("resource resize", () => {
     expect(error).toBeInstanceOf(SandboxResizeError);
     expect(error).toMatchObject({ reason, generation: 7, sandboxId: "sb-1", info: { resources: { memoryMb: 1024 } } });
     expect((error as Error).message).toContain("below immutable boot memory");
+    expect((error as SandboxResizeError).confirmedResources?.memoryMb).toBe(1024);
+    expect((error as Error).message).toContain("1 CPUs, 1024 MiB memory, 1024 MiB disk");
     client.close();
   });
 
@@ -85,6 +88,12 @@ describe("resource resize", () => {
     await sandbox.waitForResourceResize(7, { timeout: 12 });
     expect(stub.client.waitForResourceResize).toHaveBeenCalledWith("sb-1", 7, 12, 1);
     sandbox.close();
+  });
+
+  it("supports typed resize errors without an observation", () => {
+    const error = new SandboxResizeError({ sandboxId: "sb-1", generation: 7, reason: ResizeErrorReason.TIMEOUT, message: "wait timed out" });
+    expect(error.confirmedResources).toBeUndefined();
+    expect(error.message).toContain("last confirmed allocation: unavailable");
   });
 
   it("preserves policy rejection details", async () => {

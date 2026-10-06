@@ -13,6 +13,7 @@ struct SandboxDescription {
     name: Option<String>,
     namespace: Option<String>,
     status: Option<String>,
+    runtime: Option<String>,
     #[serde(flatten)]
     failure: SandboxFailureDetails,
     resources: Option<SandboxResources>,
@@ -137,6 +138,10 @@ fn print_sandbox_details(item: &SandboxDescription) {
     println!("Namespace:       {}", namespace);
     println!("Status:          {}", status);
     println!("Image:           {}", image);
+    println!(
+        "Runtime:         {}",
+        item.runtime.as_deref().unwrap_or("-")
+    );
 
     let resources = item.resources.as_ref();
     let cpus = resources
@@ -145,18 +150,18 @@ fn print_sandbox_details(item: &SandboxDescription) {
         .unwrap_or_else(|| "-".to_string());
     let memory = resources
         .and_then(|r| r.memory_mb)
-        .map(|v| format!("{} MB", v))
+        .map(|v| format!("{} MiB", v))
         .unwrap_or_else(|| "-".to_string());
     let disk = resources
         .and_then(|r| r.disk_mb.or(r.ephemeral_disk_mb))
-        .map(|v| format!("{} MB", v))
+        .map(|v| format!("{} MiB", v))
         .unwrap_or_else(|| "-".to_string());
     println!("CPUs:            {}", cpus);
     println!("Memory:          {}", memory);
     println!("Disk:            {}", disk);
     if let Some(resize) = &item.resource_resize {
         println!(
-            "Resize:          generation {} — {}",
+            "Resize:          generation {}: {}",
             resize.generation, resize.status
         );
         println!(
