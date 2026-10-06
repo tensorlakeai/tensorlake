@@ -78,6 +78,14 @@ pub enum SdkError {
     /// EventSource (SSE) stream error
     #[error("EventSource error: {0}")]
     EventSourceError(String),
+
+    /// A streamed response did not start, or stopped sending data, within the
+    /// client's request timeout.
+    #[error("timed out after {timeout:?} waiting for {waiting_for}")]
+    StreamTimeout {
+        waiting_for: &'static str,
+        timeout: std::time::Duration,
+    },
 }
 
 /// Error codes the Sandbox Proxy returns when it gave up on a request *before*
@@ -116,7 +124,8 @@ pub enum TransportFailure {
     /// DNS resolution, TCP connect, or the TLS handshake failed. The server
     /// never saw the request.
     Connect,
-    /// The request was sent but no response completed within the deadline.
+    /// The request was sent, but its response, or the next part of a streamed
+    /// response, did not arrive within the deadline.
     Timeout,
 }
 
@@ -145,6 +154,9 @@ impl SdkError {
     /// that identify it (`tcp connect error`, `dns error`) appear only in the
     /// [`std::error::Error::source`] chain.
     pub fn transport_failure(&self) -> Option<TransportFailure> {
+        if matches!(self, Self::StreamTimeout { .. }) {
+            return Some(TransportFailure::Timeout);
+        }
         let error = self.as_reqwest()?;
         if error.is_timeout() {
             Some(TransportFailure::Timeout)

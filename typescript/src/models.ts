@@ -764,9 +764,12 @@ export interface SandboxClientOptions {
   namespace?: string;
   maxRetries?: number;
   retryBackoffMs?: number;
-  /** Total HTTP request timeout in seconds. Default: 300. */
+  /**
+   * HTTP request timeout in seconds. For a streamed response it bounds the
+   * wait for the stream to start and each wait for more data. Default: 300.
+   */
   requestTimeout?: number;
-  /** @deprecated Use requestTimeout. Total HTTP request timeout in milliseconds. */
+  /** @deprecated Use requestTimeout. HTTP request timeout in milliseconds. */
   timeoutMs?: number;
 }
 
@@ -787,9 +790,14 @@ export interface SandboxOptions {
   resolveProxyInfo?: (
     identifier: string,
   ) => Promise<SandboxInfo & { readonly traceId: string }>;
-  /** Optional total HTTP request timeout in seconds for sandbox proxy operations. Omit for no total proxy timeout. */
+  /**
+   * Optional HTTP request timeout in seconds for sandbox proxy operations. For
+   * streamed responses, such as `run()` and output follows, it bounds the wait
+   * for the stream to start and each wait for more data. Omit for no proxy
+   * timeout.
+   */
   requestTimeout?: number;
-  /** @deprecated Use requestTimeout. Optional total HTTP request timeout in milliseconds for sandbox proxy operations. */
+  /** @deprecated Use requestTimeout. Optional HTTP request timeout in milliseconds for sandbox proxy operations. */
   timeoutMs?: number;
   /**
    * @internal Shared Rust-backed lifecycle client. When provided, the proxy
