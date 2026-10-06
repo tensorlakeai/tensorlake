@@ -57,7 +57,7 @@ pub async fn run(
         );
         let current = client.get(sandbox_id).await?;
         if target.against(&current)?.is_empty() {
-            println!("No resource changes for sandbox {sandbox_id}");
+            println!("No resource changes for sandbox {}", current.sandbox_id);
             return Ok(());
         }
         let request = UpdateSandboxRequest {
@@ -80,7 +80,7 @@ pub async fn run(
         if admitted.resource_resize == current.resource_resize
             && target_satisfied(&request, &admitted)
         {
-            println!("No resource changes for sandbox {sandbox_id}");
+            println!("No resource changes for sandbox {}", admitted.sandbox_id);
             return Ok(());
         }
         let Some(resize) = &admitted.resource_resize else {
