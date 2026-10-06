@@ -46,9 +46,9 @@ tl sbx describe my-sandbox
 
 The hint includes `--timeout 300`, matching update's default wait budget.
 `--timeout 0` on a resize wait (or `--wait-timeout 0` on update) checks status once
-without polling again. That request gets up to one second, or the client's
-shorter request timeout. It succeeds if the resize is already complete and
-otherwise returns the observed failure or a timeout with the latest allocation.
+without polling again. The client's request timeout applies to that check.
+It succeeds if the resize is already complete and otherwise returns the observed
+failure or a timeout with the latest allocation.
 
 Timeout ends the wait, not the resize. Copy the generation from the timeout
 error and keep waiting for it; do not resubmit the resource update to wait.
@@ -109,9 +109,9 @@ print(info.resources)
 ```
 
 `timeout` defaults to 300 seconds and `poll_interval` to 1 second. A zero timeout
-checks status once with the same bounded request as the CLI. These options control
-polling, not sandbox lifetime, and have no effect with `wait=False`. All wait
-options are ignored on updates without resource targets. CPU values must be
+checks status once. These options control polling, not sandbox lifetime, and
+have no effect with `wait=False`. All wait options are ignored on updates without
+resource targets. CPU values must be
 positive whole numbers. Memory/disk accept positive integers and integer-valued
 floats such as `2048.0`, matching create's numeric coercion; fractional values,
 booleans, and numeric strings are rejected without rounding.

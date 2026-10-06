@@ -1533,8 +1533,8 @@ async fn resize_zero_timeout_checks_once_and_preserves_terminal_results() {
 }
 
 #[tokio::test]
-async fn resize_zero_timeout_bounds_the_single_request_by_client_timeout_and_one_second() {
-    for request_timeout in [Duration::from_millis(50), Duration::from_secs(30)] {
+async fn resize_zero_timeout_bounds_the_single_request_by_client_timeout() {
+    for request_timeout in [Duration::from_millis(50), Duration::from_millis(200)] {
         let (url, server) =
             delayed_server(vec![(200, SANDBOX_INFO_JSON, Duration::from_secs(30))]).await;
         let client = SandboxesClient::new(
@@ -1546,7 +1546,7 @@ async fn resize_zero_timeout_bounds_the_single_request_by_client_timeout_and_one
             true,
         );
         let result = tokio::time::timeout(
-            request_timeout.min(Duration::from_secs(1)) + Duration::from_millis(500),
+            request_timeout + Duration::from_millis(500),
             client.wait_for_resource_resize("sb-1", 7, Duration::ZERO, Duration::from_secs(1)),
         )
         .await
@@ -1557,4 +1557,37 @@ async fn resize_zero_timeout_bounds_the_single_request_by_client_timeout_and_one
         assert_eq!(error.reason, "timeout");
         server.abort();
     }
+}
+
+#[tokio::test]
+async fn resize_zero_timeout_allows_a_response_slower_than_one_second() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = SandboxesClient::new(
+        ClientBuilder::new(&format!("http://{}", listener.local_addr().unwrap()))
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap(),
+        "default",
+        false,
+    );
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut socket).await;
+        tokio::time::sleep(Duration::from_millis(1250)).await;
+        write_json_response(
+            &mut socket,
+            &resize_info(7, "succeeded", 1536, None).to_string(),
+        )
+        .await;
+        request
+    });
+    let info = tokio::time::timeout(
+        Duration::from_secs(4),
+        client.wait_for_resource_resize("sb-1", 7, Duration::ZERO, Duration::from_secs(1)),
+    )
+    .await
+    .expect("the check must respect the client's request timeout")
+    .expect("a completed resize is observed even if the check takes over one second");
+    assert_eq!(info.resources.memory_mb, 1536);
+    assert!(server.await.unwrap().starts_with(b"GET "));
 }

@@ -116,7 +116,7 @@ class Image:
         Args:
             registered_name: Name to register the image under. Defaults to ``self.name``.
             cpus: CPUs for the build sandbox (default 2.0).
-            memory_mb: Memory for the build sandbox in MB (default 4096).
+            memory_mb: Memory for the build sandbox in MiB (default 4096).
             disk_mb: Root disk size for the generated sandbox image in MiB.
             builder_disk_mb: Root disk size for the temporary builder sandbox in MiB.
             is_public: Make the registered image publicly accessible.

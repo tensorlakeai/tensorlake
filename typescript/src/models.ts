@@ -235,8 +235,7 @@ export interface CreateSandboxOptions {
 
 /**
  * Bounded generation wait. Timeout never cancels a resize. Times are seconds.
- * A zero timeout checks once, with a request capped at one second or the client's
- * shorter request timeout, without polling again.
+ * A zero timeout checks once without polling again.
  */
 export interface ResourceResizeWaitOptions {
   timeout?: number;

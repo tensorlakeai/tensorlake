@@ -237,8 +237,7 @@ impl SandboxesClient {
     }
 
     /// Wait for this exact generation. Timeout does not cancel the resize.
-    /// A zero timeout checks once, allowing up to one second for that request
-    /// (or the client's shorter request timeout), without polling again.
+    /// A zero timeout checks once without polling again.
     pub async fn wait_for_resource_resize(
         &self,
         sandbox_id: &str,
@@ -281,12 +280,12 @@ impl SandboxesClient {
                     last.as_deref(),
                 ));
             }
-            let request_timeout = if first_check {
-                Duration::from_secs(1)
+            let observation = if first_check {
+                self.get(sandbox_id).await
             } else {
-                remaining
+                self.get_within(sandbox_id, remaining).await
             };
-            match self.get_within(sandbox_id, request_timeout).await {
+            match observation {
                 Ok(info) => {
                     if resize_complete(sandbox_id, generation, &info)? {
                         return Ok(info);
