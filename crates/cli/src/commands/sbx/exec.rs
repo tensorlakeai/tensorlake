@@ -1,4 +1,3 @@
-use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::{StatusCode, header::ACCEPT};
 use serde_json::Value;
@@ -891,7 +890,7 @@ fn parse_http_health_spec(spec: &str) -> Result<(u16, Option<String>)> {
 /// Read a streaming `POST /api/v1/processes/run` SSE response, print output
 /// lines to stdout/stderr, and return the exit code from the final event.
 async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
-    let mut stream = Box::pin(resp.bytes_stream().eventsource());
+    let mut stream = tensorlake::sse::event_stream(resp, None);
     let mut exit_code: Option<i32> = None;
 
     while let Some(event) = stream.next().await {
@@ -913,7 +912,7 @@ async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
             Err(error) => {
                 return Err(CliError::Other(anyhow::anyhow!(
                     "failed to stream process output: {}",
-                    error
+                    error.detail()
                 )));
             }
         }

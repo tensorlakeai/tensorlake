@@ -9,10 +9,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{
-    client::{Client, event_stream},
-    error::SdkError,
-};
+use crate::{client::Client, error::SdkError, sse::event_stream};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentAiResponse {

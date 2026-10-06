@@ -1,4 +1,3 @@
-use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::header::ACCEPT;
 use sha2::{Digest, Sha256};
@@ -143,13 +142,13 @@ pub async fn run(
         )));
     }
 
-    let stream = sse_resp.bytes_stream().eventsource();
-    futures::pin_mut!(stream);
+    let mut stream = tensorlake::sse::event_stream(sse_resp, None);
 
     let mut result: Option<String> = None;
 
     while let Some(event) = stream.next().await {
-        let event = event.map_err(|e| CliError::usage(format!("SSE stream error: {}", e)))?;
+        let event =
+            event.map_err(|e| CliError::usage(format!("SSE stream error: {}", e.detail())))?;
 
         match event.event.as_str() {
             "parse_done" => {

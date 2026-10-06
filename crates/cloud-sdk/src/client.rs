@@ -1,5 +1,4 @@
 //! HTTP client that interacts with the Tensorlake Cloud API.
-use eventsource_stream::{EventStreamError, Eventsource};
 use futures::{Future, Stream, StreamExt};
 use reqwest::{
     Method, Request, Response, StatusCode,
@@ -15,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use crate::error::SdkError;
+use crate::{error::SdkError, sse::event_stream};
 
 pub const REQUEST_TIMEOUT_HEADER: &str = "X-Tensorlake-Request-Timeout-Ms";
 
@@ -238,12 +237,7 @@ impl ClientBuilder {
 
 type EventSourceStream<T> = Pin<Box<dyn Stream<Item = Result<T, SdkError>> + Send>>;
 
-/// The events of a server-sent events response body.
-pub(crate) type SseEvents =
-    Pin<Box<dyn Stream<Item = Result<eventsource_stream::Event, SdkError>> + Send>>;
-
 const WAITING_FOR_RESPONSE_HEADERS: &str = "the response headers";
-const WAITING_FOR_STREAM_DATA: &str = "more data on the stream";
 
 impl Client {
     pub(crate) fn base_url(&self) -> &str {
@@ -571,47 +565,6 @@ impl Client {
             _ => Ok(response),
         }
     }
-}
-
-/// Decode a server-sent events response body. When `idle_timeout` is set,
-/// each wait for more of the body must end within it; keep-alive comments
-/// count as data. The timer runs only while the stream is waiting for bytes.
-pub(crate) fn event_stream(response: Response, idle_timeout: Option<Duration>) -> SseEvents {
-    let body = response
-        .bytes_stream()
-        .map(|chunk| chunk.map_err(SdkError::EventStreamTransport));
-    let body = match idle_timeout {
-        Some(timeout) => idle_bounded(body, timeout).left_stream(),
-        None => body.right_stream(),
-    };
-    Box::pin(body.eventsource().map(|event| {
-        event.map_err(|error| match error {
-            EventStreamError::Transport(error) => error,
-            error => SdkError::EventSourceError(error.to_string()),
-        })
-    }))
-}
-
-/// End `stream` with [`SdkError::StreamTimeout`] when it yields nothing for
-/// `timeout`.
-fn idle_bounded<S, T>(stream: S, timeout: Duration) -> impl Stream<Item = Result<T, SdkError>>
-where
-    S: Stream<Item = Result<T, SdkError>> + Send + 'static,
-{
-    futures::stream::unfold(Some(Box::pin(stream)), move |stream| async move {
-        let mut stream = stream?;
-        match tokio::time::timeout(timeout, stream.next()).await {
-            Ok(Some(item)) => Some((item, Some(stream))),
-            Ok(None) => None,
-            Err(_) => Some((
-                Err(SdkError::StreamTimeout {
-                    waiting_for: WAITING_FOR_STREAM_DATA,
-                    timeout,
-                }),
-                None,
-            )),
-        }
-    })
 }
 
 async fn within_timeout<T>(

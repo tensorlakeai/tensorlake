@@ -15,10 +15,11 @@ use tokio_util::io::ReaderStream;
 use crate::{
     client::{
         Client, Traced, build_bytes_post_request_from_builder,
-        build_empty_post_request_from_builder, event_stream,
+        build_empty_post_request_from_builder,
     },
     error::{SdkError, TransportFailure},
     retry::{RetryDecision, RetryPolicy, RetryState, is_transient},
+    sse::event_stream,
 };
 pub use desktop::SandboxDesktopClient;
 
