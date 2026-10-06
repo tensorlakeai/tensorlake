@@ -173,6 +173,10 @@ except SandboxPending as still:
     print(still.pending_reason)  # still queued; call ready() again
 ```
 
+Running Cloud Hypervisor sandboxes support live CPU, memory, and root-disk updates
+through `tl sbx update` and every Sandbox SDK. Resource arguments match create,
+and updates wait for confirmed completion by default. See [sandbox resource resize](docs/sandbox-resize.md).
+
 ### Snapshots
 
 Save the state of a sandbox and restore it later:

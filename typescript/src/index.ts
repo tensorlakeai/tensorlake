@@ -103,6 +103,7 @@ export type {
 export {
   SandboxException,
   SandboxError,
+  SandboxResizeError,
   SandboxPending,
   SandboxConnectionError,
   SandboxNotFoundError,
@@ -171,6 +172,9 @@ export type {
   CopiedSandboxResponse,
   CopySandboxResponse,
   CreateSandboxOptions,
+  UpdateSandboxOptions,
+  ResourceResizeWaitOptions,
+  SandboxResourceResizeInfo,
   GpuModel,
   GpuRequest,
   GPUResources,

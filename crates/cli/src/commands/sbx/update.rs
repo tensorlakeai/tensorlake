@@ -1,7 +1,12 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{build_network_config, sandbox_endpoint};
 use crate::error::{CliError, Result};
+use std::time::Duration;
 use tensorlake::sandboxes::models::{NetworkPolicyUpdate, UpdateSandboxRequest};
+use tensorlake::sandboxes::{
+    models::{ResizeSandboxResources, SandboxInfo},
+    resize::ResizeOptions,
+};
 
 #[derive(Clone, Copy)]
 pub struct UpdateNetworkArgs<'a> {
@@ -11,7 +16,101 @@ pub struct UpdateNetworkArgs<'a> {
     pub network_deny: &'a [String],
 }
 
-pub async fn run(ctx: &CliContext, sandbox_id: &str, args: UpdateNetworkArgs<'_>) -> Result<()> {
+#[derive(Clone, Copy, Default)]
+pub struct UpdateResourceArgs {
+    pub cpus: Option<f64>,
+    pub memory: Option<i64>,
+    pub disk_mb: Option<u64>,
+    pub no_wait: bool,
+    pub timeout: u64,
+}
+
+pub async fn run(
+    ctx: &CliContext,
+    sandbox_id: &str,
+    args: UpdateNetworkArgs<'_>,
+    resources: UpdateResourceArgs,
+) -> Result<()> {
+    let target = ResizeSandboxResources {
+        cpus: resources.cpus,
+        memory_mb: resources.memory,
+        disk_mb: resources.disk_mb,
+    };
+    if !target.is_empty() {
+        if args.clear_network
+            || args.no_internet
+            || !args.network_allow.is_empty()
+            || !args.network_deny.is_empty()
+        {
+            return Err(CliError::usage(
+                "resource changes cannot be combined with network settings",
+            ));
+        }
+        target
+            .validate()
+            .map_err(|e| CliError::usage(e.to_string()))?;
+        let client = tensorlake::sandboxes::SandboxesClient::new(
+            ctx.scoped_cloud_client()?
+                .with_base_url(&super::resolve_sandbox_lifecycle_url(&ctx.api_url)),
+            &ctx.namespace,
+            super::is_localhost(&ctx.api_url),
+        );
+        let current = client.get(sandbox_id).await?;
+        if target.against(&current)?.is_empty() {
+            println!("No resource changes for sandbox {sandbox_id}");
+            return Ok(());
+        }
+        let request = UpdateSandboxRequest {
+            resources: Some(target),
+            name: None,
+            allow_unauthenticated_access: None,
+            exposed_ports: None,
+            network: NetworkPolicyUpdate::Keep,
+        };
+        let admitted = client
+            .update_with_options(
+                sandbox_id,
+                &request,
+                ResizeOptions {
+                    wait: false,
+                    ..Default::default()
+                },
+            )
+            .await?;
+        if admitted.resource_resize == current.resource_resize
+            && target_satisfied(&request, &admitted)
+        {
+            println!("No resource changes for sandbox {sandbox_id}");
+            return Ok(());
+        }
+        let Some(resize) = &admitted.resource_resize else {
+            return Err(CliError::usage(
+                "server omitted resize generation; inspect the sandbox before retrying",
+            ));
+        };
+        print_resize(&admitted);
+        if !resources.no_wait && resize.status == "pending" {
+            let completed = client
+                .wait_for_resource_resize(
+                    &admitted.sandbox_id,
+                    resize.generation,
+                    Duration::from_secs(resources.timeout),
+                    Duration::from_secs(1),
+                )
+                .await
+                .map_err(|error| match error {
+                    tensorlake::error::SdkError::SandboxResize(mut error) => {
+                        if error.info.is_none() {
+                            error.info = Some(Box::new(admitted.clone().into_inner()));
+                        }
+                        tensorlake::error::SdkError::SandboxResize(error)
+                    }
+                    error => error,
+                })?;
+            print_resize(&completed);
+        }
+        return Ok(());
+    }
     let client = ctx.client()?;
     let url = sandbox_endpoint(ctx, &format!("sandboxes/{sandbox_id}"));
     let request = build_update_request(args)?;
@@ -41,6 +140,31 @@ pub async fn run(ctx: &CliContext, sandbox_id: &str, args: UpdateNetworkArgs<'_>
     Ok(())
 }
 
+fn target_satisfied(request: &UpdateSandboxRequest, info: &SandboxInfo) -> bool {
+    request.resources.as_ref().is_some_and(|r| {
+        r.cpus.is_none_or(|v| v == info.resources.cpus)
+            && r.memory_mb.is_none_or(|v| v == info.resources.memory_mb)
+            && r.disk_mb
+                .is_none_or(|v| info.resources.disk_mb >= 0 && v == info.resources.disk_mb as u64)
+    })
+}
+
+fn print_resize(info: &SandboxInfo) {
+    if let Some(resize) = &info.resource_resize {
+        println!(
+            "Sandbox {} resize generation {}: {}",
+            info.sandbox_id, resize.generation, resize.status
+        );
+        println!(
+            "Confirmed allocation: {} CPUs, {} MiB memory, {} MiB disk",
+            info.resources.cpus, info.resources.memory_mb, info.resources.disk_mb
+        );
+        if resize.status == "pending" {
+            println!("Inspect with: tl sbx describe {}", info.sandbox_id);
+        }
+    }
+}
+
 fn build_update_request(args: UpdateNetworkArgs<'_>) -> Result<UpdateSandboxRequest> {
     if args.clear_network
         && (args.no_internet || !args.network_allow.is_empty() || !args.network_deny.is_empty())
@@ -59,6 +183,7 @@ fn build_update_request(args: UpdateNetworkArgs<'_>) -> Result<UpdateSandboxRequ
     };
 
     Ok(UpdateSandboxRequest {
+        resources: None,
         name: None,
         allow_unauthenticated_access: None,
         exposed_ports: None,

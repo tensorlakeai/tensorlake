@@ -309,3 +309,163 @@ async fn wait_surfaces_a_no_capacity_failure() {
     assert!(stderr.contains("no_capacity"), "{stderr}");
     assert!(stderr.contains("no host could place"), "{stderr}");
 }
+
+fn resize_info(status: &str, memory: u64, error: Option<&str>) -> Value {
+    let mut result = info(
+        "running",
+        json!({"runtime":"cloud-hypervisor", "sandbox_url":"https://sbx-1.sandbox.tensorlake.ai"}),
+    );
+    result["resources"]["memory_mb"] = memory.into();
+    result["resource_resize"] = json!({
+        "generation": 7, "status": status, "error_message": error,
+        "requested": {"cpus":1.0,"memory_mb":2048,"disk_mb":10240},
+    });
+    result
+}
+
+#[tokio::test]
+async fn resize_waits_by_default_and_only_prints_success_after_confirmation() {
+    let current = info("running", json!({}));
+    let run = run_cli(
+        &["update", "sbx-1", "-m", "2048", "-c", "1.0"],
+        vec![
+            (200, current.clone()),
+            (200, current),
+            (200, resize_info("pending", 1024, None)),
+            (200, resize_info("succeeded", 2048, None)),
+        ],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    assert!(
+        run.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.output.stderr)
+    );
+    assert!(stdout.contains("generation 7: pending"), "{stdout}");
+    assert!(stdout.contains("generation 7: succeeded"), "{stdout}");
+    assert!(stdout.contains("2048 MiB memory"), "{stdout}");
+    assert_eq!(
+        body(&run.requests[2]),
+        json!({"resources":{"memory_mb":2048}})
+    );
+    assert_eq!(
+        run.requests
+            .iter()
+            .filter(|r| request_line(r).starts_with("PATCH "))
+            .count(),
+        1
+    );
+}
+
+#[tokio::test]
+async fn resize_no_wait_prints_admission_without_claiming_completion() {
+    let current = info("running", json!({}));
+    let run = run_cli(
+        &["update", "sbx-1", "--memory", "2048", "--no-wait"],
+        vec![
+            (200, current.clone()),
+            (200, current),
+            (200, resize_info("pending", 1024, None)),
+        ],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    assert!(
+        run.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.output.stderr)
+    );
+    assert!(stdout.contains("generation 7: pending"));
+    assert!(!stdout.contains("succeeded"));
+    assert!(stdout.contains("1024 MiB memory"));
+    assert!(stdout.contains("tl sbx describe sbx-1"));
+    assert_eq!(run.requests.len(), 3);
+}
+
+#[tokio::test]
+async fn resize_driver_failure_and_timeout_exit_nonzero_without_cancellation() {
+    for failed in [true, false] {
+        let current = info("running", json!({}));
+        let mut responses = vec![
+            (200, current.clone()),
+            (200, current),
+            (200, resize_info("pending", 1024, None)),
+        ];
+        let args = if failed {
+            responses.push((
+                200,
+                resize_info(
+                    "failed",
+                    1536,
+                    Some("ConfigurationError: pinned guest memory"),
+                ),
+            ));
+            vec!["update", "sbx-1", "--memory", "2048"]
+        } else {
+            vec!["update", "sbx-1", "--memory", "2048", "--timeout", "0"]
+        };
+        let run = run_cli(&args, responses).await;
+        let stderr = String::from_utf8_lossy(&run.output.stderr);
+        assert!(!run.output.status.success());
+        assert!(stderr.contains("generation 7"), "{stderr}");
+        assert!(
+            stderr.contains(if failed {
+                "pinned guest memory"
+            } else {
+                "not cancelled"
+            }),
+            "{stderr}"
+        );
+        if failed {
+            assert!(stderr.contains("1536 MiB memory"), "{stderr}");
+        }
+        assert!(
+            !run.requests
+                .iter()
+                .any(|r| request_line(r).starts_with("DELETE "))
+        );
+    }
+}
+
+#[tokio::test]
+async fn resize_rejects_fractional_cpu_and_disk_shrink_without_patch() {
+    for (args, responses, diagnostic) in [
+        (vec!["update", "sbx-1", "--cpus", "1.5"], vec![], "1.5"),
+        (
+            vec!["update", "sbx-1", "--disk_mb", "100"],
+            vec![(200, info("running", json!({})))],
+            "current 10240",
+        ),
+    ] {
+        let run = run_cli(&args, responses).await;
+        assert!(!run.output.status.success());
+        assert!(String::from_utf8_lossy(&run.output.stderr).contains(diagnostic));
+        assert!(
+            !run.requests
+                .iter()
+                .any(|r| request_line(r).starts_with("PATCH "))
+        );
+    }
+}
+
+#[tokio::test]
+async fn describe_displays_resize_generation_and_driver_error() {
+    let run = run_cli(
+        &["describe", "sbx-1"],
+        vec![(
+            200,
+            resize_info("failed", 1536, Some("below boot-memory floor")),
+        )],
+    )
+    .await;
+    let stdout = String::from_utf8_lossy(&run.output.stdout);
+    assert!(
+        run.output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&run.output.stderr)
+    );
+    assert!(stdout.contains("generation 7"), "{stdout}");
+    assert!(stdout.contains("failed"), "{stdout}");
+    assert!(stdout.contains("below boot-memory floor"), "{stdout}");
+}

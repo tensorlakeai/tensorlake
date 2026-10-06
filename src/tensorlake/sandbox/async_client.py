@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 
 from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
 
+from ._resize import resize_resources, validate_resize_wait
+
 if TYPE_CHECKING:
     from .async_sandbox import AsyncSandbox
 
@@ -636,10 +638,29 @@ class AsyncSandboxClient:
         sandbox_id: str,
         name: str | None = None,
         *,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        disk_mb: int | None = None,
+        wait: bool = True,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
         network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
+        """Update properties or resize a Running CH sandbox; see SandboxClient.update_sandbox."""
+        resources = resize_resources(cpus, memory_mb, disk_mb)
+        if resources is not None:
+            validate_resize_wait(timeout, poll_interval)
+            if (
+                name is not None
+                or allow_unauthenticated_access is not None
+                or exposed_ports is not None
+                or network is not None
+            ):
+                raise SandboxError(
+                    "resources cannot be combined with other sandbox update fields"
+                )
         normalized_ports = (
             _normalize_user_ports(exposed_ports) if exposed_ports is not None else None
         )
@@ -651,9 +672,11 @@ class AsyncSandboxClient:
             and normalized_ports is None
             and network_config is None
             and not clearing_network
+            and resources is None
         ):
             raise SandboxError("At least one sandbox update field must be provided.")
         request = UpdateSandboxRequest(
+            resources=resources,
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=normalized_ports,
@@ -664,10 +687,41 @@ class AsyncSandboxClient:
         payload = json.loads(request.model_dump_json(exclude_none=True))
         if clearing_network:
             payload["network"] = None
+        wait_options = (
+            dict(wait=wait, timeout_sec=timeout, poll_interval_sec=poll_interval)
+            if resources is not None
+            else {}
+        )
         try:
             trace_id, response_json = await self._rust_client.update_sandbox_async(
                 sandbox_id=sandbox_id,
                 request_json=json.dumps(payload),
+                **wait_options,
+            )
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    async def wait_for_resource_resize(
+        self,
+        sandbox_id: str,
+        generation: int,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+    ) -> Traced[SandboxInfo]:
+        """Wait for an exact resize generation. Timeout leaves the resize running."""
+        validate_resize_wait(timeout, poll_interval, generation)
+        try:
+            trace_id, response_json = (
+                await self._rust_client.wait_for_resource_resize_async(
+                    sandbox_id=sandbox_id,
+                    generation=generation,
+                    timeout_sec=timeout,
+                    poll_interval_sec=poll_interval,
+                )
             )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:

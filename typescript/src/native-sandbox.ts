@@ -1,9 +1,11 @@
+import { fromSnakeKeys } from "./models.js";
 import {
   PoolInUseError,
   PoolNotFoundError,
   RemoteAPIError,
   SandboxConnectionError,
   SandboxError,
+  SandboxResizeError,
   SandboxNotFoundError,
 } from "./errors.js";
 import { workerBinding } from "./native-worker-client.js";
@@ -103,7 +105,14 @@ export interface NativeSandboxClient {
   getArchivedSandbox(sandboxId: string): Promise<TracedJson>;
   getSandboxLogs(requestJson: string): Promise<TracedJson>;
   listSandboxLogProcesses(sandboxId: string): Promise<TracedJson>;
-  updateSandbox(sandboxId: string, requestJson: string): Promise<TracedJson>;
+  updateSandbox(
+    sandboxId: string, requestJson: string, wait?: boolean,
+    timeoutSec?: number, pollIntervalSec?: number,
+  ): Promise<TracedJson>;
+  waitForResourceResize(
+    sandboxId: string, generation: number,
+    timeoutSec?: number, pollIntervalSec?: number,
+  ): Promise<TracedJson>;
   deleteSandbox(sandboxId: string): Promise<string>;
   suspendSandbox(sandboxId: string): Promise<string>;
   resumeSandbox(sandboxId: string): Promise<string>;
@@ -348,6 +357,11 @@ export function translateNativeError(
 
   const { category, status, message } = payload;
 
+  if (category === "resize") {
+    return new SandboxResizeError(
+      fromSnakeKeys(JSON.parse(message), "sandboxId") as ConstructorParameters<typeof SandboxResizeError>[0],
+    );
+  }
   if (category === "connection") {
     return new SandboxConnectionError(message, { cause: error });
   }

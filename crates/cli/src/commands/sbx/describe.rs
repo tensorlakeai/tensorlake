@@ -16,6 +16,7 @@ struct SandboxDescription {
     #[serde(flatten)]
     failure: SandboxFailureDetails,
     resources: Option<SandboxResources>,
+    resource_resize: Option<tensorlake::sandboxes::models::SandboxResourceResizeInfo>,
     #[serde(alias = "allow_unauthenticated_proxy_access")]
     allow_unauthenticated_access: Option<bool>,
     network_policy: Option<SandboxNetwork>,
@@ -153,6 +154,19 @@ fn print_sandbox_details(item: &SandboxDescription) {
     println!("CPUs:            {}", cpus);
     println!("Memory:          {}", memory);
     println!("Disk:            {}", disk);
+    if let Some(resize) = &item.resource_resize {
+        println!(
+            "Resize:          generation {} — {}",
+            resize.generation, resize.status
+        );
+        println!(
+            "Requested:       {} CPUs, {} MiB memory, {} MiB disk",
+            resize.requested.cpus, resize.requested.memory_mb, resize.requested.disk_mb
+        );
+        if let Some(error) = &resize.error_message {
+            println!("Resize error:    {error}");
+        }
+    }
 
     let allow_unauthenticated = item.allow_unauthenticated_access.unwrap_or(false);
     println!(

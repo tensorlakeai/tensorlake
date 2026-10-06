@@ -1558,16 +1558,36 @@ enum SbxCommands {
         new_name: String,
     },
 
-    /// Update the network configuration of a running sandbox
+    /// Update resources or the network configuration of a running sandbox
     #[command(group(
-        clap::ArgGroup::new("network_update")
+        clap::ArgGroup::new("sandbox_update")
             .required(true)
             .multiple(true)
-            .args(["no_internet", "network_allow", "network_deny", "clear_network"])
+            .args(["no_internet", "network_allow", "network_deny", "clear_network", "cpus", "memory", "disk_mb"])
     ))]
     Update {
         /// Sandbox ID or name
         sandbox_id: String,
+
+        /// Whole CPU target (omitted leaves the allocation unchanged)
+        #[arg(short, long, conflicts_with_all = ["no_internet", "network_allow", "network_deny", "clear_network"])]
+        cpus: Option<f64>,
+
+        /// Memory target in MB (omitted leaves the allocation unchanged)
+        #[arg(short, long, conflicts_with_all = ["no_internet", "network_allow", "network_deny", "clear_network"])]
+        memory: Option<i64>,
+
+        /// Root disk target in MB; can only grow
+        #[arg(long = "disk_mb", conflicts_with_all = ["no_internet", "network_allow", "network_deny", "clear_network"])]
+        disk_mb: Option<u64>,
+
+        /// Return on resize admission instead of waiting for completion
+        #[arg(long)]
+        no_wait: bool,
+
+        /// Maximum seconds to wait for resize completion; timeout does not cancel it
+        #[arg(long, default_value = "300")]
+        timeout: u64,
 
         /// Replace the network policy and block all outbound internet access, including DNS
         #[arg(
@@ -2423,6 +2443,11 @@ async fn run_command(
                     } => commands::sbx::name::run(ctx, &sandbox_id, &new_name).await,
                     SbxCommands::Update {
                         sandbox_id,
+                        cpus,
+                        memory,
+                        disk_mb,
+                        no_wait,
+                        timeout,
                         no_internet,
                         network_allow,
                         network_deny,
@@ -2436,6 +2461,13 @@ async fn run_command(
                                 no_internet,
                                 network_allow: &network_allow,
                                 network_deny: &network_deny,
+                            },
+                            commands::sbx::update::UpdateResourceArgs {
+                                cpus,
+                                memory,
+                                disk_mb,
+                                no_wait,
+                                timeout,
                             },
                         )
                         .await
@@ -4701,6 +4733,7 @@ mod tests {
                 network_allow,
                 network_deny,
                 clear_network,
+                ..
             }) => {
                 assert_eq!(sandbox_id, "sbx-123");
                 assert!(!no_internet);
@@ -4709,6 +4742,79 @@ mod tests {
                 assert!(!clear_network);
             }
             _ => panic!("expected sbx update command"),
+        }
+    }
+
+    #[test]
+    fn sbx_update_resource_flags_match_create_and_wait_by_default() {
+        for flags in [["-c", "-m"], ["--cpus", "--memory"]] {
+            match parse_command([
+                "tl",
+                "sbx",
+                "update",
+                "named",
+                flags[0],
+                "2.0",
+                flags[1],
+                "2048",
+                "--disk_mb",
+                "30720",
+            ]) {
+                Commands::Sbx(SbxCommands::Update {
+                    cpus,
+                    memory,
+                    disk_mb,
+                    no_wait,
+                    timeout,
+                    ..
+                }) => {
+                    assert_eq!(cpus, Some(2.0));
+                    assert_eq!(memory, Some(2048));
+                    assert_eq!(disk_mb, Some(30720));
+                    assert!(!no_wait);
+                    assert_eq!(timeout, 300);
+                }
+                _ => panic!("expected update"),
+            }
+        }
+    }
+
+    #[test]
+    fn sbx_update_resource_flags_conflict_with_all_network_changes() {
+        for resource in ["--cpus", "--memory", "--disk_mb"] {
+            for network in [
+                vec!["--no-internet"],
+                vec!["--clear-network"],
+                vec!["--network-allow", "example.com"],
+                vec!["--network-deny", "example.com"],
+            ] {
+                let mut args = vec!["tl", "sbx", "update", "named", resource, "2048"];
+                args.extend(network);
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn sbx_update_allows_admission_only_and_bounded_wait() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "update",
+            "named",
+            "--memory",
+            "2048",
+            "--no-wait",
+            "--timeout",
+            "15",
+        ]) {
+            Commands::Sbx(SbxCommands::Update {
+                no_wait, timeout, ..
+            }) => {
+                assert!(no_wait);
+                assert_eq!(timeout, 15);
+            }
+            _ => panic!("expected update"),
         }
     }
 

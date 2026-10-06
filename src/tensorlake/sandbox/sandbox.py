@@ -1403,11 +1403,21 @@ class Sandbox:
         self,
         name: str | None = None,
         *,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        disk_mb: int | None = None,
+        wait: bool = True,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
         network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
         """Update this sandbox's properties.
+
+        Resource arguments match create. Resize is standalone and waits by
+        default; wait=False returns admission, and timeout does not cancel it.
+        See SandboxClient.update_sandbox for validation and error details.
 
         Supports updating the sandbox name, sandbox proxy access settings, and
         the egress network policy. Naming an ephemeral sandbox makes it
@@ -1427,12 +1437,44 @@ class Sandbox:
             Traced[SandboxInfo] with the updated sandbox details.
         """
         self._require_lifecycle_client("update")
+        resource_options = (
+            dict(
+                cpus=cpus,
+                memory_mb=memory_mb,
+                disk_mb=disk_mb,
+                wait=wait,
+                timeout=timeout,
+                poll_interval=poll_interval,
+            )
+            if any(value is not None for value in (cpus, memory_mb, disk_mb))
+            else {}
+        )
         traced = self._lifecycle_client.update_sandbox(
             self._lifecycle_identifier(),
+            **resource_options,
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=exposed_ports,
             network=network,
+        )
+        self._sandbox_id = traced.sandbox_id
+        self._cached_info = traced.value
+        return traced
+
+    def wait_for_resource_resize(
+        self,
+        generation: int,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+    ) -> Traced[SandboxInfo]:
+        """Wait for this exact resize generation without submitting another update."""
+        self._require_lifecycle_client("wait_for_resource_resize")
+        traced = self._lifecycle_client.wait_for_resource_resize(
+            self._lifecycle_identifier(),
+            generation,
+            timeout=timeout,
+            poll_interval=poll_interval,
         )
         self._sandbox_id = traced.sandbox_id
         self._cached_info = traced.value

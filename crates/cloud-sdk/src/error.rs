@@ -17,6 +17,9 @@ use crate::{
 /// including client-specific errors, authentication issues, and general HTTP errors.
 #[derive(Debug, Error)]
 pub enum SdkError {
+    /// A resize failed or could not be observed to completion.
+    #[error(transparent)]
+    SandboxResize(#[from] Box<crate::sandboxes::resize::SandboxResizeError>),
     /// Errors specific to the Applications client
     #[error(transparent)]
     Applications(#[from] ApplicationsError),

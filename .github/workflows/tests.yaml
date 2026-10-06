@@ -265,6 +265,7 @@ jobs:
             tests.sandbox.test_file_systems \
             tests.sandbox.test_get_or_create \
             tests.sandbox.test_ready_timeout \
+            tests.sandbox.test_resource_resize \
             tests.image.test_sandbox_builder \
             tests.function_agent.test_runner
 

@@ -14,6 +14,7 @@ from .exceptions import (
     SandboxNotFoundError,
     SandboxNotRoutableError,
     SandboxPending,
+    SandboxResizeError,
 )
 from .file_system import (
     create_file_system,
@@ -62,6 +63,7 @@ from .models import (
     ProcessStatus,
     ProcessUser,
     ProcessUserSpec,
+    ResizeSandboxResources,
     RestartPolicy,
     RestartPolicyConfig,
     SandboxInfo,
@@ -73,6 +75,7 @@ from .models import (
     SandboxPortAccess,
     SandboxProcessLogFilter,
     SandboxProcessLogFiltersResponse,
+    SandboxResourceResizeInfo,
     SandboxStatus,
     SendSignalResponse,
     SnapshotInfo,
@@ -87,6 +90,9 @@ from .sandbox import Sandbox
 from .tunnel import AsyncTcpTunnel, TcpTunnel, TunnelAddress
 
 __all__ = [
+    "SandboxResizeError",
+    "SandboxResourceResizeInfo",
+    "ResizeSandboxResources",
     # Lifecycle management
     "SandboxClient",
     "AsyncSandboxClient",

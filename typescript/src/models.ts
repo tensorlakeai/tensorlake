@@ -233,7 +233,28 @@ export interface CreateSandboxOptions {
   maxPendingSecs?: number;
 }
 
-export interface UpdateSandboxOptions {
+/** Bounded generation wait. Timeout never cancels a resize. Times are seconds. */
+export interface ResourceResizeWaitOptions {
+  timeout?: number;
+  pollInterval?: number;
+}
+
+export interface SandboxResourceResizeInfo {
+  generation: number;
+  requested: ContainerResourcesInfo;
+  status: "pending" | "succeeded" | "failed" | (string & {});
+  errorMessage?: string | null;
+}
+
+export interface UpdateSandboxOptions extends ResourceResizeWaitOptions {
+  /** Whole live vCPU target; omitted retains the current allocation. */
+  cpus?: number;
+  /** Memory target in MiB, with the same units as create; never rounded by the SDK. */
+  memoryMb?: number;
+  /** Root disk target in MiB; can only grow. */
+  diskMb?: number;
+  /** Wait for resize completion (default true). False returns admission. */
+  wait?: boolean;
   /** New name for the sandbox. Naming an ephemeral sandbox enables suspend/resume. */
   name?: string;
   /** Whether exposed user ports should be reachable without TensorLake auth. */
@@ -328,6 +349,8 @@ export interface CopySandboxResponse {
 }
 
 export interface SandboxInfo {
+  runtime?: string;
+  resourceResize?: SandboxResourceResizeInfo | null;
   sandboxId: string;
   namespace: string;
   status: SandboxStatus;

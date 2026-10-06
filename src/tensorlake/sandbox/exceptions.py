@@ -45,6 +45,31 @@ class SandboxError(SandboxException):
         return self._error_sandbox_id
 
 
+class SandboxResizeError(SandboxError):
+    """A resize failed or its completion could not be observed.
+
+    ``info`` contains the last observation, including confirmed allocation.
+    A timeout never cancels the admitted resize; wait for ``generation`` again.
+    """
+
+    def __init__(self, payload: dict):
+        from .models import SandboxInfo
+
+        self.generation = payload["generation"]
+        self.info = (
+            SandboxInfo.model_validate(payload["info"])
+            if payload.get("info") is not None
+            else None
+        )
+        allocation = self.info.resources if self.info is not None else "unavailable"
+        super().__init__(
+            f"Sandbox {payload['sandbox_id']} resize generation {self.generation}: "
+            f"{payload['message']}; last confirmed allocation: {allocation}",
+            reason=payload["reason"],
+            sandbox_id=payload["sandbox_id"],
+        )
+
+
 class SandboxPending(SandboxError):
     """The wait budget ran out while the sandbox was still queued.
 

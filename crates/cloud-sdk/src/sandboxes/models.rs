@@ -387,8 +387,34 @@ pub struct DetachFileSystemRequest {
     pub mount_path: String,
 }
 
+/// Resource targets for a running Cloud Hypervisor sandbox. Names and numeric
+/// types match create; values are optional to support partial updates.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct ResizeSandboxResources {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub memory_mb: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub disk_mb: Option<u64>,
+}
+
+/// Latest resize operation. `SandboxInfo.resources` is the confirmed allocation,
+/// including when a failed operation only partially converged.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct SandboxResourceResizeInfo {
+    pub generation: u64,
+    pub requested: ContainerResourcesInfo,
+    pub status: String,
+    #[serde(default)]
+    pub error_message: Option<String>,
+}
+
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct UpdateSandboxRequest {
+    /// Standalone live resize; omitted dimensions retain their confirmed allocation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resources: Option<ResizeSandboxResources>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -688,6 +714,10 @@ pub struct SandboxAccepted {
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct SandboxInfo {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_resize: Option<SandboxResourceResizeInfo>,
     #[serde(alias = "id", alias = "sandbox_id")]
     pub sandbox_id: String,
     pub namespace: String,

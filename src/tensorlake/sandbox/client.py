@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
 
 from . import _defaults
+from ._resize import resize_resources, validate_resize_wait
 from .exceptions import (
     PoolInUseError,
     PoolNotFoundError,
@@ -21,6 +22,7 @@ from .exceptions import (
     SandboxNotFoundError,
     SandboxNotRoutableError,
     SandboxPending,
+    SandboxResizeError,
     _format_error_details,
 )
 from .models import (
@@ -159,6 +161,8 @@ def _raise_as_sandbox_error(e: Exception) -> NoReturn:
         and len(e.args) > 0
     ):
         kind, status_code, message = _parse_rust_client_error_fields(e)
+        if kind == "resize":
+            raise SandboxResizeError(json.loads(message)) from None
         if kind == "connection":
             raise SandboxConnectionError(message) from None
         if status_code is not None:
@@ -1048,11 +1052,24 @@ class SandboxClient:
         sandbox_id: str,
         name: str | None = None,
         *,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        disk_mb: int | None = None,
+        wait: bool = True,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
         network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
         """Update a running sandbox's properties.
+
+        Resource names and units match create: cpus, memory_mb, disk_mb.
+        Omitted dimensions retain their allocation. Resize is standalone and
+        waits for its generation by default (timeout=300 seconds). Use
+        wait=False to return on admission, then wait_for_resource_resize().
+        A timeout never cancels the resize. SandboxResizeError carries the
+        generation and last confirmed allocation; requests are never rounded.
 
         Supports updating the sandbox name, sandbox proxy access settings, and
         the egress network policy.
@@ -1081,6 +1098,18 @@ class SandboxClient:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
         """
+        resources = resize_resources(cpus, memory_mb, disk_mb)
+        if resources is not None:
+            validate_resize_wait(timeout, poll_interval)
+            if (
+                name is not None
+                or allow_unauthenticated_access is not None
+                or exposed_ports is not None
+                or network is not None
+            ):
+                raise SandboxError(
+                    "resources cannot be combined with other sandbox update fields"
+                )
         normalized_ports = (
             _normalize_user_ports(exposed_ports) if exposed_ports is not None else None
         )
@@ -1092,10 +1121,12 @@ class SandboxClient:
             and normalized_ports is None
             and network_config is None
             and not clearing_network
+            and resources is None
         ):
             raise SandboxError("At least one sandbox update field must be provided.")
 
         request = UpdateSandboxRequest(
+            resources=resources,
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=normalized_ports,
@@ -1107,10 +1138,39 @@ class SandboxClient:
         payload = json.loads(request.model_dump_json(exclude_none=True))
         if clearing_network:
             payload["network"] = None
+        wait_options = (
+            dict(wait=wait, timeout_sec=timeout, poll_interval_sec=poll_interval)
+            if resources is not None
+            else {}
+        )
         try:
             trace_id, response_json = self._rust_client.update_sandbox(
                 sandbox_id=sandbox_id,
                 request_json=json.dumps(payload),
+                **wait_options,
+            )
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    def wait_for_resource_resize(
+        self,
+        sandbox_id: str,
+        generation: int,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+    ) -> Traced[SandboxInfo]:
+        """Wait for an exact resize generation. Timeout leaves the resize running."""
+        validate_resize_wait(timeout, poll_interval, generation)
+        try:
+            trace_id, response_json = self._rust_client.wait_for_resource_resize(
+                sandbox_id=sandbox_id,
+                generation=generation,
+                timeout_sec=timeout,
+                poll_interval_sec=poll_interval,
             )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:
