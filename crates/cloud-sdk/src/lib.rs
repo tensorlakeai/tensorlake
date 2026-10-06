@@ -79,6 +79,7 @@ pub mod sandbox_images;
 pub mod sandbox_templates;
 pub mod sandboxes;
 pub mod secrets;
+pub mod sse;
 use applications::*;
 use artifact_storage::*;
 use cron::*;

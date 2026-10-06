@@ -11,6 +11,11 @@ use tensorlake::{
         },
     },
 };
+use tensorlake::{
+    error::{SdkError, TransportFailure},
+    retry::is_transient,
+    sandboxes::models::RunProcessEvent,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -1013,6 +1018,174 @@ async fn wait_until_settled_reports_a_missing_sandbox() {
     assert!(
         matches!(error, tensorlake::error::SdkError::ServerError { status, .. } if status.as_u16() == 404),
         "unexpected error: {error}"
+    );
+    server.await.expect("server join");
+}
+
+/// Serve one `POST /api/v1/processes/run` with an event-stream body made of
+/// `parts`, each written after its delay. The body ends when the connection
+/// closes; `None` for the headers delay never answers at all.
+async fn run_stream_server(
+    headers_delay: Option<Duration>,
+    parts: Vec<(Duration, &'static str)>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept run");
+        read_http_request(&mut socket).await;
+        let Some(headers_delay) = headers_delay else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        tokio::time::sleep(headers_delay).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("write headers");
+        for (delay, part) in parts {
+            tokio::time::sleep(delay).await;
+            socket.write_all(part.as_bytes()).await.expect("write part");
+        }
+    });
+    (format!("http://{address}"), server)
+}
+
+fn run_stream_proxy(url: &str, timeout: Duration) -> SandboxProxyClient {
+    let client = ClientBuilder::new(url)
+        .timeout(timeout)
+        .build()
+        .expect("build client");
+    SandboxProxyClient::new(client, None)
+}
+
+const STARTED: &str = "data: {\"pid\":7,\"started_at\":0}\n\n";
+const KEEP_ALIVE: &str = ":\n\n";
+const EXITED: &str = "data: {\"exit_code\":0}\n\n";
+
+#[tokio::test]
+async fn run_stream_outlives_the_request_timeout_while_data_arrives() {
+    // Keep-alive comments every 50 ms for 400 ms, then the exit: longer than
+    // the 150 ms request timeout, but no gap reaches it.
+    let mut parts = vec![(Duration::ZERO, STARTED)];
+    parts.extend(std::iter::repeat_n(
+        (Duration::from_millis(50), KEEP_ALIVE),
+        8,
+    ));
+    parts.push((Duration::from_millis(50), EXITED));
+    let (url, server) = run_stream_server(Some(Duration::ZERO), parts).await;
+    let proxy = run_stream_proxy(&url, Duration::from_millis(150));
+
+    let events = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.run_process(&serde_json::json!({"command": "true"})),
+    )
+    .await
+    .expect("run finishes")
+    .expect("run succeeds")
+    .into_inner();
+
+    assert!(matches!(
+        events.last(),
+        Some(RunProcessEvent::Exited {
+            exit_code: Some(0),
+            ..
+        })
+    ));
+    server.await.expect("server join");
+}
+
+#[tokio::test]
+async fn run_stream_times_out_waiting_for_response_headers() {
+    let (url, server) = run_stream_server(None, Vec::new()).await;
+    let proxy = run_stream_proxy(&url, Duration::from_millis(150));
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.run_process(&serde_json::json!({"command": "true"})),
+    )
+    .await
+    .expect("run finishes")
+    .expect_err("headers never arrive");
+
+    assert!(
+        matches!(&error, SdkError::StreamTimeout { waiting_for, .. } if *waiting_for == "the response headers"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(error.transport_failure(), Some(TransportFailure::Timeout));
+    assert!(!is_transient(&error));
+    server.abort();
+}
+
+#[tokio::test]
+async fn run_stream_times_out_when_the_stream_stops_sending() {
+    // The stream starts, then sends nothing for longer than the timeout.
+    let (url, server) = run_stream_server(
+        Some(Duration::ZERO),
+        vec![(Duration::ZERO, STARTED), (Duration::from_secs(30), EXITED)],
+    )
+    .await;
+    let proxy = run_stream_proxy(&url, Duration::from_millis(150));
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.run_process(&serde_json::json!({"command": "true"})),
+    )
+    .await
+    .expect("run finishes")
+    .expect_err("stream stalls");
+
+    assert!(
+        matches!(&error, SdkError::StreamTimeout { waiting_for, .. } if *waiting_for == "more data on the stream"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(error.transport_failure(), Some(TransportFailure::Timeout));
+    assert!(!is_transient(&error));
+    server.abort();
+}
+
+#[tokio::test]
+async fn run_stream_connection_failure_keeps_its_cause() {
+    // A chunked body that announces 4 KiB, sends a few bytes and closes.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept run");
+        read_http_request(&mut socket).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n1000\r\ndata: {",
+            )
+            .await
+            .expect("write partial body");
+    });
+    let proxy = run_stream_proxy(&format!("http://{address}"), Duration::from_secs(5));
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.run_process(&serde_json::json!({"command": "true"})),
+    )
+    .await
+    .expect("run finishes")
+    .expect_err("connection closes mid-chunk");
+
+    assert!(
+        matches!(error, SdkError::EventStreamTransport(_)),
+        "unexpected error: {error:?}"
+    );
+    assert!(error.as_reqwest().is_some());
+    assert_eq!(error.transport_failure(), None);
+    assert!(is_transient(&error));
+    assert!(
+        error.detail().len() > error.to_string().len(),
+        "detail() must add the cause; got {:?}",
+        error.detail()
     );
     server.await.expect("server join");
 }

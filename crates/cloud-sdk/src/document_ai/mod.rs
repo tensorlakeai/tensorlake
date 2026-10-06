@@ -1,6 +1,5 @@
 use std::collections::HashMap;
 
-use eventsource_stream::Eventsource;
 use futures::StreamExt;
 use reqwest::{
     Method,
@@ -10,7 +9,7 @@ use reqwest::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::{client::Client, error::SdkError};
+use crate::{client::Client, error::SdkError, sse::event_stream};
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct DocumentAiResponse {
@@ -100,7 +99,8 @@ impl DocumentAiClient {
             .request(Method::GET, &format!("parse/{parse_id}"))
             .header(ACCEPT, "text/event-stream")
             .build()?;
-        let response = self.client.execute_raw(req).await?;
+        let (response, idle_timeout) = self.client.execute_stream_raw_traced(req).await?;
+        let response = response.into_inner();
         let status = response.status();
 
         if !status.is_success() {
@@ -111,18 +111,15 @@ impl DocumentAiClient {
             return Err(SdkError::ServerError { status, message });
         }
 
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .filter_map(move |event| async move {
-                match event {
-                    Ok(msg) => Some(Ok(DocumentAiEvent {
-                        event: msg.event,
-                        data: msg.data,
-                    })),
-                    Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
-                }
-            });
+        let stream = event_stream(response, idle_timeout).filter_map(move |event| async move {
+            match event {
+                Ok(msg) => Some(Ok(DocumentAiEvent {
+                    event: msg.event,
+                    data: msg.data,
+                })),
+                Err(error) => Some(Err(error)),
+            }
+        });
 
         futures::pin_mut!(stream);
         let mut events = Vec::new();

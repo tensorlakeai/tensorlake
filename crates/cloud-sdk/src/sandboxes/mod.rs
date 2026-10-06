@@ -2,7 +2,6 @@ pub mod desktop;
 pub mod models;
 pub mod resize;
 
-use eventsource_stream::Eventsource;
 use futures::{StreamExt, TryStreamExt};
 use reqwest::Method;
 use reqwest::StatusCode;
@@ -20,6 +19,7 @@ use crate::{
     },
     error::{SdkError, TransportFailure},
     retry::{RetryDecision, RetryPolicy, RetryState, is_transient},
+    sse::event_stream,
 };
 pub use desktop::SandboxDesktopClient;
 
@@ -1295,7 +1295,7 @@ impl SandboxProxyClient {
             .header(ACCEPT, "text/event-stream")
             .json(payload)
             .build()?;
-        let response = self.client.execute_traced(req).await?;
+        let (response, idle_timeout) = self.client.execute_stream_traced(req).await?;
         let trace_id = response.trace_id.clone();
         let content_type = response
             .headers()
@@ -1308,11 +1308,8 @@ impl SandboxProxyClient {
                 "expected text/event-stream response from {path}, got content-type: {content_type}"
             )));
         }
-        let stream = response
-            .into_inner()
-            .bytes_stream()
-            .eventsource()
-            .filter_map(move |event| async move {
+        let stream =
+            event_stream(response.into_inner(), idle_timeout).filter_map(move |event| async move {
                 match event {
                     Ok(msg) => {
                         // The Exited variant has all-optional fields so it acts as a
@@ -1328,7 +1325,7 @@ impl SandboxProxyClient {
                             Err(_) => None,
                         }
                     }
-                    Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
+                    Err(error) => Some(Err(error)),
                 }
             });
         futures::pin_mut!(stream);
@@ -1350,7 +1347,7 @@ impl SandboxProxyClient {
             .request(Method::GET, path)
             .header(ACCEPT, "text/event-stream")
             .build()?;
-        let response = self.client.execute_traced(req).await?;
+        let (response, idle_timeout) = self.client.execute_stream_traced(req).await?;
         let trace_id = response.trace_id.clone();
         let content_type = response
             .headers()
@@ -1363,17 +1360,14 @@ impl SandboxProxyClient {
                 "expected text/event-stream response from {path}, got content-type: {content_type}"
             )));
         }
-        let stream = response
-            .into_inner()
-            .bytes_stream()
-            .eventsource()
-            .filter_map(move |event| async move {
+        let stream =
+            event_stream(response.into_inner(), idle_timeout).filter_map(move |event| async move {
                 match event {
                     Ok(msg) => match serde_json::from_str::<OutputEvent>(&msg.data) {
                         Ok(evt) => Some(Ok(evt)),
                         Err(_) => None, // skip heartbeats / non-output events
                     },
-                    Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
+                    Err(error) => Some(Err(error)),
                 }
             });
         futures::pin_mut!(stream);

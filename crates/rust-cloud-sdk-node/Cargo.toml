@@ -24,7 +24,6 @@ napi-derive = { workspace = true }
 uuid = { workspace = true }
 url = { workspace = true }
 futures = { workspace = true }
-eventsource-stream = { workspace = true }
 async-compression = { workspace = true }
 bytes = { workspace = true }
 tokio-util = { workspace = true }
