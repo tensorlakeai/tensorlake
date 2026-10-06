@@ -93,8 +93,8 @@ class _StubNative:
     #: a pre-existing filesystem on a lost-response retry.
     create_branch = "main"
 
-    def create_filesystem(self, project_id, name):
-        self.calls.append(("create_filesystem", (project_id, name)))
+    def create_filesystem(self, project_id, name, region=None):
+        self.calls.append(("create_filesystem", (project_id, name, region)))
         self._maybe_fail("create_filesystem")
         return json.dumps({"trace_id": "trace-1", "default_branch": self.create_branch})
 
@@ -248,6 +248,23 @@ class TestModels(unittest.TestCase):
 
 
 class TestFilesystemClient(unittest.TestCase):
+    def test_creation_region_is_per_filesystem_and_defaults_to_omission(self):
+        stub = _StubNative()
+        client = _client_with_stub(stub)
+        client.create("eu-fs", region="eu-central-1")
+        client.create("legacy-fs")
+        self.assertEqual(
+            stub.calls,
+            [
+                ("create_filesystem", (_PROJECT, "eu-fs", "eu-central-1")),
+                ("create_filesystem", (_PROJECT, "legacy-fs", None)),
+            ],
+        )
+        for region in ("", " eu-central-1", "eu-central-1 ", 123):
+            with self.assertRaises(FilesystemError):
+                client.create("invalid", region=region)
+        self.assertEqual(len(stub.calls), 2)
+
     def test_lifecycle_calls_native_with_project_scope(self):
         stub = _StubNative(
             repos=[

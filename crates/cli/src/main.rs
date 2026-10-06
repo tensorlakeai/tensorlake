@@ -322,6 +322,10 @@ enum FsCommands {
         /// Filesystem name
         name: String,
 
+        /// Storage region for the new filesystem (for example, eu-central-1)
+        #[arg(long)]
+        region: Option<String>,
+
         /// Output JSON
         #[arg(long)]
         json: bool,
@@ -3032,8 +3036,8 @@ async fn run_fs_command(ctx: &mut CliContext, subcmd: FsCommands) -> error::Resu
             unreachable!("handled before the auth guard")
         }
         FsCommands::Prefetch { .. } => unreachable!("handled before the auth guard"),
-        FsCommands::Create { name, json } => {
-            commands::fs::create_filesystem(ctx, &name, json).await
+        FsCommands::Create { name, region, json } => {
+            commands::fs::create_filesystem(ctx, &name, region.as_deref(), json).await
         }
         FsCommands::Token { name, json } => commands::fs::token(ctx, &name, json).await,
         FsCommands::Ls { file_system, json } => match file_system {
@@ -3963,10 +3967,34 @@ mod tests {
         }
 
         match parse_command(["tl", "fs", "create", "scratch"]) {
-            Commands::Fs(FsCommands::Create { name, json: false }) => {
+            Commands::Fs(FsCommands::Create {
+                name,
+                region: None,
+                json: false,
+            }) => {
                 assert_eq!(name, "scratch");
             }
             _ => panic!("expected fs create command"),
+        }
+
+        match parse_command([
+            "tl",
+            "fs",
+            "create",
+            "scratch",
+            "--region",
+            "eu-central-1",
+            "--json",
+        ]) {
+            Commands::Fs(FsCommands::Create {
+                name,
+                region: Some(region),
+                json: true,
+            }) => {
+                assert_eq!(name, "scratch");
+                assert_eq!(region, "eu-central-1");
+            }
+            _ => panic!("expected regional fs create command"),
         }
 
         match parse_command(["tl", "fs", "token", "scratch", "--json"]) {

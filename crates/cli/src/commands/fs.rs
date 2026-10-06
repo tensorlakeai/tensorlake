@@ -112,8 +112,24 @@ pub fn hydrate_scope_from_mount(ctx: &mut CliContext, path: &Path) -> Result<()>
     Ok(())
 }
 
-pub async fn create_filesystem(ctx: &CliContext, name: &str, json: bool) -> Result<()> {
-    map(gsvc_fs_client::create_filesystem(&private_context(ctx), name, json).await)
+pub async fn create_filesystem(
+    ctx: &CliContext,
+    name: &str,
+    region: Option<&str>,
+    json: bool,
+) -> Result<()> {
+    map(gsvc_fs_client::create_filesystem_with(
+        &private_context(ctx),
+        name,
+        json,
+        async |client, project, name, user, token| {
+            client
+                .create_filesystem_with_credential(project, name, region, user, token)
+                .await?;
+            Ok(())
+        },
+    )
+    .await)
 }
 
 pub async fn token(ctx: &CliContext, name: &str, json: bool) -> Result<()> {

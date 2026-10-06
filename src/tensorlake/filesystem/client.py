@@ -120,11 +120,21 @@ class FilesystemClient:
 
     # -- lifecycle -----------------------------------------------------------
 
-    def create(self, name: str) -> "Filesystem":
-        """Create a new filesystem and return a handle to it."""
+    def create(self, name: str, *, region: Optional[str] = None) -> "Filesystem":
+        """Create a filesystem with optional immutable storage placement.
+
+        ``region="eu-central-1"`` keeps its objects in Frankfurt. Omitting region
+        uses the legacy location. Forks inherit their parent network's placement.
+        """
         if not name:
             raise FilesystemError("filesystem name must not be empty")
-        default_branch = self._native.create_filesystem(name)
+        if region is not None and (
+            not isinstance(region, str) or not region or region.strip() != region
+        ):
+            raise FilesystemError(
+                "region must be a nonempty string without surrounding whitespace"
+            )
+        default_branch = self._native.create_filesystem(name, region=region)
         return Filesystem(self, name, default_branch=default_branch)
 
     def get(self, name: str) -> "Filesystem":

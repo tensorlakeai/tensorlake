@@ -2,6 +2,11 @@ WITH_FUNCTION_AGENT_CORE=./scripts/with_function_agent_core.sh
 
 all: build
 
+# Validate the exact CI source pin and locked graph without compiling the SDK.
+.PHONY: check_function_agent_source_parity
+check_function_agent_source_parity:
+	@$(WITH_FUNCTION_AGENT_CORE) sh -c 'test "$$(cat .function-agent-core-staged)" = "$$(cat crates/function-agent-core/CEI_REVISION)" && $(CARGO) metadata --locked --format-version 1 >/dev/null'
+
 build:
 	@rm -rf dist
 	@$(WITH_FUNCTION_AGENT_CORE) poetry install --with=dev
@@ -112,3 +117,32 @@ bump_version:
 # Build tl first (cargo build -p tl) or point TL_BIN at a binary.
 fs-posix-conformance:
 	bash tests/fs-posix-conformance/run_conformance.sh
+
+# Filesystem placement wire contract and both public SDK wrappers (no cloud credentials).
+CARGO ?= cargo
+PYTHON ?= poetry run python
+.PHONY: test_filesystem_placement test_filesystem_placement_wrappers
+
+test_filesystem_placement:
+	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) test -p tensorlake --lib filesystem_region_
+	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) clippy -p tensorlake -p tensorlake-rust-cloud-sdk-py -p tensorlake-rust-cloud-sdk-node --all-targets --no-deps -- -D warnings
+
+test_filesystem_placement_wrappers:
+	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests/filesystem -p 'test_filesystem_unit.py'
+	PYTHONPATH=src $(PYTHON) -m unittest tests.sandbox.test_file_systems
+	npm --prefix typescript run typecheck
+	npm --prefix typescript test
+
+# Socket-free wire checks complement the full placement retry/transport gate above.
+.PHONY: test_filesystem_placement_unit
+test_filesystem_placement_unit:
+	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) test -p tensorlake --lib artifact_storage::models::placement_tests
+	@$(WITH_FUNCTION_AGENT_CORE) $(CARGO) clippy -p tensorlake -p tensorlake-rust-cloud-sdk-py -p tensorlake-rust-cloud-sdk-node --all-targets --no-deps -- -D warnings
+
+# In-process wrapper checks; the full wrapper target retains the socket integration suite.
+.PHONY: test_filesystem_placement_wrapper_unit
+test_filesystem_placement_wrapper_unit:
+	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests/filesystem -p 'test_filesystem_unit.py'
+	PYTHONPATH=src $(PYTHON) -m unittest tests.sandbox.test_file_systems
+	npm --prefix typescript run typecheck
+	npm --prefix typescript test -- --cache=false tests/filesystem.test.ts tests/sandbox.test.ts

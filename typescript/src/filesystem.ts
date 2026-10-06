@@ -223,15 +223,26 @@ export class FilesystemClient {
 
   // -- lifecycle --------------------------------------------------------------
 
-  /** Create a new filesystem and return a handle to it. */
-  async create(name: string): Promise<Filesystem> {
+  /** Create a filesystem; region fixes its storage placement. Forks inherit placement. */
+  async create(name: string, options: { region?: string } = {}): Promise<Filesystem> {
     if (typeof name !== "string") {
       throw new TypeError("name must be a string");
     }
     if (name.length === 0) {
       throw new FilesystemError("filesystem name must not be empty");
     }
-    const raw = await callNative(() => this.native.createFilesystem(name));
+    const { region } = options;
+    if (
+      region !== undefined &&
+      (typeof region !== "string" || region.length === 0 || region.trim() !== region)
+    ) {
+      throw new FilesystemError(
+        "region must be a nonempty string without surrounding whitespace",
+      );
+    }
+    const raw = await callNative(() => region === undefined
+      ? this.native.createFilesystem(name)
+      : this.native.createFilesystem(name, region));
     // The binding reports the effective default branch; it differs from
     // "main" only when a lost-response retry adopted a pre-existing
     // filesystem.

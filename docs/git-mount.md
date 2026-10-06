@@ -150,7 +150,10 @@ the same rule: without `-m` it is an autosave, while `-m` creates a permanent sn
 
 Filesystem snapshots are path-addressed rather than repository-style named commits. `PATH` is a
 mounted or tracked directory and defaults to the attachment containing the current directory. A
-filesystem gets its name at `tl fs create`; there is no `tl fs name` command or snapshot-name
+filesystem gets its name at `tl fs create`; pass `--region eu-central-1` to choose the
+new filesystem's storage region. Omitting `--region` preserves the service default. Placement
+is immutable; changing the CLI context or sandbox region does not move an existing filesystem.
+There is no `tl fs name` command or snapshot-name
 argument. `-m`/`--message` is descriptive metadata. Use `tl fs history [FILESYSTEM|PATH]` to see
 permanent snapshots first and the visibly ephemeral recent autosave WAL second. Its JSON output
 keeps these as distinct `snapshots` and `autosaves` arrays. `tl fs status [PATH]` reports local

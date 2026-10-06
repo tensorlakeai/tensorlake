@@ -14,6 +14,10 @@ pub struct CreateRepoRequest {
     /// stays valid against servers that predate repo kinds (`deny_unknown_fields`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub kind: Option<String>,
+    /// Immutable storage-network placement, supported only for filesystem creation.
+    /// Omitted requests retain the server's legacy location.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 impl Default for CreateRepoRequest {
@@ -21,6 +25,7 @@ impl Default for CreateRepoRequest {
         Self {
             default_branch: "main".to_string(),
             kind: None,
+            region: None,
         }
     }
 }
@@ -74,11 +79,20 @@ pub struct RepoMetaInfo {
     pub status: String,
     #[serde(default = "default_repo_kind")]
     pub kind: String,
+    /// Storage-network placement. Older servers omit this; an explicit-region retry must
+    /// never adopt an existing filesystem without matching placement evidence.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
 }
 
 impl RepoMetaInfo {
     pub fn is_filesystem(&self) -> bool {
         self.kind == REPO_KIND_FILESYSTEM
+    }
+    /// Response-loss recovery must not adopt a same-named filesystem in a different region.
+    pub fn matches_filesystem_region(&self, requested: Option<&str>) -> bool {
+        self.is_filesystem()
+            && requested.is_none_or(|region| self.region.as_deref() == Some(region))
     }
 }
 
@@ -339,4 +353,39 @@ pub struct NativeDirectFilePathWrite {
 pub struct NativeDirectPathTransfer {
     pub from: String,
     pub to: String,
+}
+
+#[cfg(test)]
+mod placement_tests {
+    use super::*;
+
+    #[test]
+    fn filesystem_region_retry_requires_explicit_matching_placement() {
+        let mut meta: RepoMetaInfo = serde_json::from_str(r#"{"name":"fs","full_name":"project/fs","default_branch":"main","status":"active","kind":"filesystem"}"#).unwrap();
+        assert!(meta.matches_filesystem_region(None));
+        assert!(!meta.matches_filesystem_region(Some("eu-central-1")));
+        meta.region = Some("us-east-1".into());
+        assert!(!meta.matches_filesystem_region(Some("eu-central-1")));
+        meta.region = Some("eu-central-1".into());
+        assert!(meta.matches_filesystem_region(Some("eu-central-1")));
+        meta.kind = REPO_KIND_REPOSITORY.into();
+        assert!(!meta.matches_filesystem_region(Some("eu-central-1")));
+    }
+
+    #[test]
+    fn filesystem_region_wire_preserves_omission_and_explicit_placement() {
+        let mut request = CreateRepoRequest {
+            kind: Some(REPO_KIND_FILESYSTEM.into()),
+            ..Default::default()
+        };
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"default_branch":"main","kind":"filesystem"}"#
+        );
+        request.region = Some("eu-central-1".into());
+        assert_eq!(
+            serde_json::to_string(&request).unwrap(),
+            r#"{"default_branch":"main","kind":"filesystem","region":"eu-central-1"}"#
+        );
+    }
 }
