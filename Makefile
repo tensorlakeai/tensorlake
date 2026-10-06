@@ -2,6 +2,11 @@ WITH_FUNCTION_AGENT_CORE=./scripts/with_function_agent_core.sh
 
 all: build
 
+# Validate the exact CI source pin and locked graph without compiling the SDK.
+.PHONY: check_function_agent_source_parity
+check_function_agent_source_parity:
+	@$(WITH_FUNCTION_AGENT_CORE) sh -c 'test "$$(cat .function-agent-core-staged)" = "$$(cat crates/function-agent-core/CEI_REVISION)" && $(CARGO) metadata --locked --format-version 1 >/dev/null'
+
 build:
 	@rm -rf dist
 	@$(WITH_FUNCTION_AGENT_CORE) poetry install --with=dev
