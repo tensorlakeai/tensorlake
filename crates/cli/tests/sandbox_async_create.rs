@@ -393,7 +393,11 @@ async fn resize_no_wait_prints_admission_without_claiming_completion() {
     assert!(!stderr.contains("succeeded"));
     assert!(stderr.contains("Requested: 1 CPUs, 2048 MiB memory"));
     assert!(!stderr.contains("Confirmed allocation"));
-    assert!(stderr.contains("tl sbx wait sbx-1 --resize 7"));
+    assert!(
+        stderr
+            .lines()
+            .any(|line| line == "Wait with: tl sbx wait sbx-1 --resize 7 --timeout 300")
+    );
     assert!(stderr.contains("tl sbx describe sbx-1"));
     assert_eq!(run.requests.len(), 2);
 }
@@ -414,6 +418,7 @@ async fn resize_driver_failure_and_timeout_exit_nonzero_without_cancellation() {
             ));
             vec!["update", "sbx-1", "--memory", "2048"]
         } else {
+            responses.push((200, resize_info("pending", 1024, None)));
             vec!["update", "sbx-1", "--memory", "2048", "--wait-timeout", "0"]
         };
         let run = run_cli(&args, responses).await;
@@ -433,8 +438,16 @@ async fn resize_driver_failure_and_timeout_exit_nonzero_without_cancellation() {
             assert!(stderr.contains("1536 MiB memory"), "{stderr}");
         } else {
             assert!(stderr.contains("1024 MiB memory"), "{stderr}");
-            assert!(stderr.contains("tl sbx wait sbx-1 --resize 7"), "{stderr}");
-            assert!(stderr.contains("tl sbx describe sbx-1"), "{stderr}");
+            let lines: Vec<_> = stderr.lines().collect();
+            assert_eq!(
+                lines[lines.len() - 2],
+                "Wait with: tl sbx wait sbx-1 --resize 7 --timeout 300"
+            );
+            assert_eq!(
+                lines[lines.len() - 1],
+                "Inspect with: tl sbx describe sbx-1"
+            );
+            assert!(lines[lines.len() - 3].contains("last confirmed allocation"));
         }
         assert!(
             !run.requests
@@ -557,7 +570,11 @@ async fn wait_resize_reports_failure_superseding_and_resumable_timeout() {
             "pinned guest memory",
         ),
         (vec![(200, superseded)], "10", "superseded"),
-        (vec![], "0", "tl sbx wait named --resize 7"),
+        (
+            vec![(200, resize_info("pending", 1024, None))],
+            "0",
+            "tl sbx wait sbx-1 --resize 7 --timeout 300",
+        ),
     ] {
         let run = run_cli(
             &["wait", "named", "--resize", "7", "--timeout", timeout],
@@ -567,6 +584,7 @@ async fn wait_resize_reports_failure_superseding_and_resumable_timeout() {
         let stderr = String::from_utf8_lossy(&run.output.stderr);
         assert!(!run.output.status.success());
         assert!(run.output.stdout.is_empty());
+        assert_eq!(run.requests.len(), 1, "a zero budget still checks once");
         assert!(stderr.contains(diagnostic), "{stderr}");
         assert!(
             run.requests
@@ -574,4 +592,19 @@ async fn wait_resize_reports_failure_superseding_and_resumable_timeout() {
                 .all(|r| request_line(r).starts_with("GET "))
         );
     }
+}
+
+#[tokio::test]
+async fn wait_resize_zero_timeout_observes_an_already_completed_resize() {
+    let run = run_cli(
+        &["wait", "named", "--resize", "7", "--timeout", "0"],
+        vec![(200, resize_info("succeeded", 2048, None))],
+    )
+    .await;
+    let stderr = String::from_utf8_lossy(&run.output.stderr);
+    assert!(run.output.status.success(), "{stderr}");
+    assert_eq!(String::from_utf8_lossy(&run.output.stdout).trim(), "sbx-1");
+    assert!(stderr.contains("generation 7: succeeded"), "{stderr}");
+    assert_eq!(run.requests.len(), 1);
+    assert!(request_line(&run.requests[0]).starts_with("GET "));
 }

@@ -608,9 +608,9 @@ class SandboxClient:
                 When omitted, Tensorlake uses the default managed environment.
             cpus: Number of CPUs to allocate. Defaults to 1 for a fresh
                 sandbox; omitted snapshot restores inherit this value.
-            memory_mb: Memory in megabytes. Defaults to 1024 for a fresh
+            memory_mb: Memory in MiB. Defaults to 1024 for a fresh
                 sandbox; omitted snapshot restores inherit this value.
-            disk_mb: Root disk size in megabytes. When omitted, the server
+            disk_mb: Root disk size in MiB. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
                 ``A10`` unless ``gpu_model`` is set. GPU sandboxes require a
@@ -1099,7 +1099,8 @@ class SandboxClient:
                 admission; use wait_for_resource_resize() to continue later.
             timeout: Maximum seconds to wait for resize completion (default
                 300). Does not change sandbox lifetime or cancel the resize.
-                Ignored when wait is False.
+                Zero checks once (up to one second per request, capped by the
+                client's request timeout). Ignored when wait is False.
             poll_interval: Seconds between resize polls (default 1.0); must
                 be positive. Ignored when wait is False.
             allow_unauthenticated_access: Whether exposed user ports should be
@@ -1196,6 +1197,8 @@ class SandboxClient:
             generation: Positive generation returned by the update or timeout error.
             timeout: Maximum wait in seconds (default 300). Timeout never
                 cancels the resize; call this method again to keep waiting.
+                Zero checks once with a request capped at one second or the
+                client's shorter request timeout.
             poll_interval: Positive seconds between polls (default 1.0).
 
         Returns:
@@ -1705,8 +1708,8 @@ class SandboxClient:
             image: Sandbox image name to boot from, such as
                 ``tensorlake/ubuntu-minimal`` or a registered Sandbox Image name.
             cpus: Number of CPUs to allocate
-            memory_mb: Memory in megabytes
-            disk_mb: Root disk size in megabytes. When omitted, the registered
+            memory_mb: Memory in MiB
+            disk_mb: Root disk size in MiB. When omitted, the registered
                 image's root disk size is used.
             timeout_secs: Timeout in seconds (default: 0 = no timeout)
             entrypoint: Custom entrypoint command (optional)
@@ -1818,8 +1821,8 @@ class SandboxClient:
             image: Sandbox image name to boot from, such as
                 ``tensorlake/ubuntu-minimal`` or a registered Sandbox Image name.
             cpus: Number of CPUs to allocate
-            memory_mb: Memory in megabytes
-            disk_mb: Root disk size in megabytes. When omitted, the registered
+            memory_mb: Memory in MiB
+            disk_mb: Root disk size in MiB. When omitted, the registered
                 image's root disk size is used.
             timeout_secs: Timeout in seconds (default: 0 = no timeout)
             entrypoint: Custom entrypoint command (optional)
@@ -2053,9 +2056,9 @@ class SandboxClient:
                 (optional if using pool).
             cpus: Number of CPUs to allocate. Defaults to 1 for fresh
                 creates; omitted snapshot restores inherit this value.
-            memory_mb: Memory in megabytes. Defaults to 1024 for fresh
+            memory_mb: Memory in MiB. Defaults to 1024 for fresh
                 creates; omitted snapshot restores inherit this value.
-            disk_mb: Root disk size in megabytes. When omitted, the server
+            disk_mb: Root disk size in MiB. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
                 ``A10`` unless ``gpu_model`` is set. GPU sandboxes require a

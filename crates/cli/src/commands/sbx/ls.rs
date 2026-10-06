@@ -233,7 +233,7 @@ fn format_memory(resources: Option<&serde_json::Value>) -> String {
     resources
         .and_then(|r| r.get("memory_mb"))
         .and_then(|v| v.as_i64())
-        .map(|v| format!("{} MB", v))
+        .map(|v| format!("{} MiB", v))
         .unwrap_or_else(|| "-".to_string())
 }
 
@@ -247,7 +247,7 @@ fn format_disk(resources: Option<&serde_json::Value>, include_ephemeral_fallback
             }
         })
         .and_then(|v| v.as_i64())
-        .map(|v| format!("{} MB", v))
+        .map(|v| format!("{} MiB", v))
         .unwrap_or_else(|| "-".to_string())
 }
 

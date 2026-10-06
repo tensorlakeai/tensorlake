@@ -73,6 +73,19 @@ class TestResourceResize(unittest.TestCase):
                     assert update[name].default is None
                 assert update["wait"].default is True
 
+    def test_future_resize_status_preserves_sandbox_info_and_wire_value(self):
+        payload = {
+            **INFO,
+            "resource_resize": {**INFO["resource_resize"], "status": "reconciling"},
+        }
+        info = SandboxInfo.model_validate(payload)
+        assert info.resource_resize.status == "reconciling"
+        assert info.resources.memory_mb == 1024
+        assert (
+            json.loads(info.model_dump_json())["resource_resize"]["status"]
+            == "reconciling"
+        )
+
     def test_partial_targets_match_create_wire_shape_and_default_wait(self):
         for kwargs in [{"cpus": 2.0}, {"memory_mb": 1001}, {"disk_mb": 2048}]:
             with self.subTest(kwargs=kwargs):
@@ -227,3 +240,7 @@ class TestResourceResize(unittest.TestCase):
                     "sb-1", 7, timeout=12, poll_interval=1.0
                 )
                 assert obj._cached_info.resource_resize.generation == 7
+
+
+if __name__ == "__main__":
+    unittest.main()

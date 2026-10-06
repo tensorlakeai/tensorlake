@@ -667,7 +667,7 @@ export async function runCreateSandboxImageCli(argv = process.argv.slice(2)) {
   const dockerfilePath = parsed.positionals[0];
   if (!dockerfilePath) {
     throw new Error(
-      "Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--builder_disk_mb MB] [--docker_compat] [--public]",
+      "Usage: tensorlake-create-sandbox-image <dockerfile_path> [--name NAME] [--cpus N] [--memory MiB] [--disk_mb MiB] [--builder_disk_mb MiB] [--docker_compat] [--public]",
     );
   }
 
@@ -729,7 +729,7 @@ export async function runImportSandboxImageCli(argv = process.argv.slice(2)) {
   const imageReference = parsed.positionals[0];
   if (!imageReference) {
     throw new Error(
-      "Usage: tensorlake-import-sandbox-image <image_reference> [--name NAME] [--cpus N] [--memory MB] [--disk_mb MB] [--builder_disk_mb MB] [--docker_compat] [--public]",
+      "Usage: tensorlake-import-sandbox-image <image_reference> [--name NAME] [--cpus N] [--memory MiB] [--disk_mb MiB] [--builder_disk_mb MiB] [--docker_compat] [--public]",
     );
   }
 

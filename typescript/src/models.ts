@@ -195,9 +195,9 @@ export interface CreateSandboxOptions {
   image?: string;
   /** CPU count. Defaults to 1 for fresh creates; snapshot restores inherit it when omitted. */
   cpus?: number;
-  /** Memory in MB. Defaults to 1024 for fresh creates; snapshot restores inherit it when omitted. */
+  /** Memory in MiB. Defaults to 1024 for fresh creates; snapshot restores inherit it when omitted. */
   memoryMb?: number;
-  /** Root disk size in megabytes. When omitted, the server uses its default disk size. */
+  /** Root disk size in MiB. When omitted, the server uses its default disk size. */
   diskMb?: number;
   /** Number of GPUs to allocate. Defaults to A10 unless gpuModel is set. GPU sandboxes require a CAS image. */
   gpus?: number;
@@ -233,7 +233,11 @@ export interface CreateSandboxOptions {
   maxPendingSecs?: number;
 }
 
-/** Bounded generation wait. Timeout never cancels a resize. Times are seconds. */
+/**
+ * Bounded generation wait. Timeout never cancels a resize. Times are seconds.
+ * A zero timeout checks once, with a request capped at one second or the client's
+ * shorter request timeout, without polling again.
+ */
 export interface ResourceResizeWaitOptions {
   timeout?: number;
   pollInterval?: number;
@@ -515,7 +519,7 @@ export interface CreatePoolOptions {
   image: string;
   cpus?: number;
   memoryMb?: number;
-  /** Root disk size in megabytes. Omit to use the registered image's size. */
+  /** Root disk size in MiB. Omit to use the registered image's size. */
   diskMb?: number;
   timeoutSecs?: number;
   entrypoint?: string[];
@@ -536,7 +540,7 @@ export interface UpdatePoolOptions {
   image: string;
   cpus?: number;
   memoryMb?: number;
-  /** Root disk size in megabytes. Omit to use the registered image's size. */
+  /** Root disk size in MiB. Omit to use the registered image's size. */
   diskMb?: number;
   timeoutSecs?: number;
   entrypoint?: string[];

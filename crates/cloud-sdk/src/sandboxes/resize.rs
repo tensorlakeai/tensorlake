@@ -27,6 +27,7 @@ impl Default for ResizeOptions {
 
 /// Update observation and the generation admitted by this call, if any.
 /// A no-op retains prior resize metadata in `info`, but admits no generation.
+#[derive(Debug, Clone)]
 pub struct SandboxUpdateResult {
     pub info: Traced<SandboxInfo>,
     pub resize_generation: Option<u64>,
@@ -236,6 +237,8 @@ impl SandboxesClient {
     }
 
     /// Wait for this exact generation. Timeout does not cancel the resize.
+    /// A zero timeout checks once, allowing up to one second for that request
+    /// (or the client's shorter request timeout), without polling again.
     pub async fn wait_for_resource_resize(
         &self,
         sandbox_id: &str,
@@ -265,9 +268,11 @@ impl SandboxesClient {
         let deadline = Instant::now().checked_add(timeout).ok_or_else(|| {
             SdkError::ClientError("timeout is outside the supported duration range".into())
         })?;
+        let mut check_once = timeout.is_zero();
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if remaining.is_zero() {
+            let first_check = std::mem::take(&mut check_once);
+            if remaining.is_zero() && !first_check {
                 return Err(failure(
                     sandbox_id,
                     generation,
@@ -276,7 +281,12 @@ impl SandboxesClient {
                     last.as_deref(),
                 ));
             }
-            match self.get_within(sandbox_id, remaining).await {
+            let request_timeout = if first_check {
+                Duration::from_secs(1)
+            } else {
+                remaining
+            };
+            match self.get_within(sandbox_id, request_timeout).await {
                 Ok(info) => {
                     if resize_complete(sandbox_id, generation, &info)? {
                         return Ok(info);

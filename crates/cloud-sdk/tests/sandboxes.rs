@@ -1306,11 +1306,12 @@ async fn resize_wait_detects_superseded_and_interrupted_generations() {
     }
 }
 #[tokio::test]
-async fn resize_timeout_retains_admission_and_never_cancels() {
+async fn resize_timeout_retains_latest_observation_and_never_cancels() {
     use tensorlake::sandboxes::{models::ResizeSandboxResources, resize::ResizeOptions};
     let (client, task) = resize_server(vec![
         (200, serde_json::from_str(SANDBOX_INFO_JSON).unwrap()),
         (200, resize_info(3, "pending", 1024, None)),
+        (200, resize_info(3, "pending", 1536, None)),
     ])
     .await;
     let error = client
@@ -1332,8 +1333,10 @@ async fn resize_timeout_retains_admission_and_never_cancels() {
     };
     assert_eq!(error.reason, "timeout");
     assert_eq!(error.generation, 3);
-    assert_eq!(error.info.unwrap().resources.memory_mb, 1024);
-    assert_eq!(task.await.unwrap().len(), 2);
+    assert_eq!(error.info.unwrap().resources.memory_mb, 1536);
+    let requests = task.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].starts_with("GET "));
 }
 #[tokio::test]
 async fn resize_missing_admission_metadata_is_not_completion() {
@@ -1501,4 +1504,57 @@ async fn resize_deadline_bounds_a_stalled_poll_and_keeps_last_observation() {
     assert_eq!(error.generation, 12);
     assert_eq!(error.info.unwrap().resources.memory_mb, 1024);
     task.abort();
+}
+
+#[tokio::test]
+async fn resize_zero_timeout_checks_once_and_preserves_terminal_results() {
+    for (status, reason) in [
+        ("pending", Some("timeout")),
+        ("failed", Some("failed")),
+        ("succeeded", None),
+    ] {
+        let (client, task) = resize_server(vec![(200, resize_info(7, status, 1536, None))]).await;
+        let result = client
+            .wait_for_resource_resize("sb-1", 7, Duration::ZERO, Duration::from_secs(1))
+            .await;
+        if let Some(reason) = reason {
+            let tensorlake::error::SdkError::SandboxResize(error) = result.unwrap_err() else {
+                panic!("expected typed resize error");
+            };
+            assert_eq!(error.reason, reason);
+            assert_eq!(error.info.unwrap().resources.memory_mb, 1536);
+        } else {
+            assert_eq!(result.unwrap().resources.memory_mb, 1536);
+        }
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("GET "));
+    }
+}
+
+#[tokio::test]
+async fn resize_zero_timeout_bounds_the_single_request_by_client_timeout_and_one_second() {
+    for request_timeout in [Duration::from_millis(50), Duration::from_secs(30)] {
+        let (url, server) =
+            delayed_server(vec![(200, SANDBOX_INFO_JSON, Duration::from_secs(30))]).await;
+        let client = SandboxesClient::new(
+            ClientBuilder::new(&url)
+                .timeout(request_timeout)
+                .build()
+                .unwrap(),
+            "default",
+            true,
+        );
+        let result = tokio::time::timeout(
+            request_timeout.min(Duration::from_secs(1)) + Duration::from_millis(500),
+            client.wait_for_resource_resize("sb-1", 7, Duration::ZERO, Duration::from_secs(1)),
+        )
+        .await
+        .expect("zero timeout checks once with a bounded request");
+        let tensorlake::error::SdkError::SandboxResize(error) = result.unwrap_err() else {
+            panic!("expected typed timeout");
+        };
+        assert_eq!(error.reason, "timeout");
+        server.abort();
+    }
 }

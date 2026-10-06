@@ -44,6 +44,12 @@ tl sbx wait my-sandbox --resize 8 --timeout 300
 tl sbx describe my-sandbox
 ```
 
+The hint includes `--timeout 300`, matching update's default wait budget.
+`--timeout 0` on a resize wait (or `--wait-timeout 0` on update) checks status once
+without polling again. That request gets up to one second, or the client's
+shorter request timeout. It succeeds if the resize is already complete and
+otherwise returns the observed failure or a timeout with the latest allocation.
+
 Timeout ends the wait, not the resize. Copy the generation from the timeout
 error and keep waiting for it; do not resubmit the resource update to wait.
 `--no-wait` and `--wait-timeout` cannot be combined, and neither is accepted on a
@@ -102,7 +108,8 @@ except SandboxResizeError as error:
 print(info.resources)
 ```
 
-`timeout` defaults to 300 seconds and `poll_interval` to 1 second. They control
+`timeout` defaults to 300 seconds and `poll_interval` to 1 second. A zero timeout
+checks status once with the same bounded request as the CLI. These options control
 polling, not sandbox lifetime, and have no effect with `wait=False`. All wait
 options are ignored on updates without resource targets. CPU values must be
 positive whole numbers. Memory/disk accept positive integers and integer-valued
@@ -169,7 +176,8 @@ This also lets the CLI report no-ops without a second preflight GET.
 Each accepted resize has a generation. `resources` is the confirmed allocation;
 `resource_resize.requested` (`resourceResize.requested` in TypeScript) is the
 operation's target. Status is `pending`, `succeeded`, or `failed`, exposed as
-`ResizeStatus` in Python and TypeScript. A failed resize can partially converge,
+`ResizeStatus` in Python and TypeScript. Unknown future statuses remain strings
+so the sandbox can still be fetched and inspected. A failed resize can partially converge,
 so inspect confirmed resources on failure.
 
 Waiting for an older generation never treats a newer successful resize as its

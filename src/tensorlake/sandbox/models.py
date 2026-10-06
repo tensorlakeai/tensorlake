@@ -472,11 +472,15 @@ class ResizeSandboxResources(BaseModel):
 
 
 class SandboxResourceResizeInfo(BaseModel):
-    """Latest resize generation; SandboxInfo.resources is the confirmed allocation."""
+    """Latest resize generation; SandboxInfo.resources is the confirmed allocation.
+
+    Known statuses use ResizeStatus; future server statuses remain plain strings
+    so the sandbox can still be fetched and inspected.
+    """
 
     generation: int
     requested: ContainerResourcesInfo
-    status: ResizeStatus
+    status: ResizeStatus | str = Field(union_mode="left_to_right")
     error_message: str | None = None
 
 

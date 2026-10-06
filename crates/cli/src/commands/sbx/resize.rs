@@ -7,7 +7,10 @@ use tensorlake::{
     sandboxes::{SandboxesClient, models::SandboxInfo},
 };
 
-use crate::{auth::context::CliContext, error::Result};
+use crate::{
+    auth::context::CliContext,
+    error::{CliError, Result},
+};
 
 pub(super) fn client(ctx: &CliContext) -> Result<SandboxesClient> {
     Ok(SandboxesClient::new(
@@ -54,12 +57,14 @@ pub(super) fn print_completed(info: &SandboxInfo) {
     print_confirmed(info);
 }
 
+fn follow_up(sandbox_id: &str, generation: u64) -> String {
+    format!(
+        "Wait with: tl sbx wait {sandbox_id} --resize {generation} --timeout 300\nInspect with: tl sbx describe {sandbox_id}"
+    )
+}
+
 pub(super) fn print_follow_up(info: &SandboxInfo, generation: u64) {
-    eprintln!(
-        "Wait with: tl sbx wait {} --resize {generation}",
-        info.sandbox_id
-    );
-    eprintln!("Inspect with: tl sbx describe {}", info.sandbox_id);
+    eprintln!("{}", follow_up(&info.sandbox_id, generation));
 }
 
 pub(super) async fn wait(
@@ -85,11 +90,13 @@ pub(super) async fn wait(
                     error.info = initial.cloned().map(Box::new);
                 }
                 if error.reason == "timeout" {
-                    let id = error.info.as_ref().map_or(error.sandbox_id.as_str(), |i| &i.sandbox_id);
-                    error.message = format!(
-                        "wait timed out; resize is not cancelled. Continue with: tl sbx wait {id} --resize {}. Inspect with: tl sbx describe {id}",
-                        error.generation
-                    );
+                    error.message = "wait timed out; resize is not cancelled".into();
+                    let id = error
+                        .info
+                        .as_ref()
+                        .map_or(error.sandbox_id.as_str(), |i| &i.sandbox_id);
+                    let hint = follow_up(id, error.generation);
+                    return CliError::Other(anyhow::anyhow!("{error}\n{hint}"));
                 }
                 SdkError::SandboxResize(error)
             }

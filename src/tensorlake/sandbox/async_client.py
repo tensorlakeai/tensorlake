@@ -673,7 +673,8 @@ class AsyncSandboxClient:
                 admission; use wait_for_resource_resize() to continue later.
             timeout: Maximum seconds to wait for resize completion (default
                 300). Does not change sandbox lifetime or cancel the resize.
-                Ignored when wait is False.
+                Zero checks once (up to one second per request, capped by the
+                client's request timeout). Ignored when wait is False.
             poll_interval: Seconds between resize polls (default 1.0); must
                 be positive. Ignored when wait is False.
             allow_unauthenticated_access: Whether exposed user ports should be
@@ -768,6 +769,8 @@ class AsyncSandboxClient:
             generation: Positive generation returned by the update or timeout error.
             timeout: Maximum wait in seconds (default 300). Timeout never
                 cancels the resize; call this method again to keep waiting.
+                Zero checks once with a request capped at one second or the
+                client's shorter request timeout.
             poll_interval: Positive seconds between polls (default 1.0).
 
         Returns:

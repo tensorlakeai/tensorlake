@@ -117,8 +117,8 @@ class Image:
             registered_name: Name to register the image under. Defaults to ``self.name``.
             cpus: CPUs for the build sandbox (default 2.0).
             memory_mb: Memory for the build sandbox in MB (default 4096).
-            disk_mb: Root disk size for the generated sandbox image in MB.
-            builder_disk_mb: Root disk size for the temporary builder sandbox in MB.
+            disk_mb: Root disk size for the generated sandbox image in MiB.
+            builder_disk_mb: Root disk size for the temporary builder sandbox in MiB.
             is_public: Make the registered image publicly accessible.
             docker_compat: Use Docker/BuildKit max compatibility mode (build
                 is slower and uses more memory and disk space on builder
