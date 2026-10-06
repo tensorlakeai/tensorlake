@@ -79,6 +79,12 @@ pub enum SdkError {
     #[error("EventSource error: {0}")]
     EventSourceError(String),
 
+    /// The connection failed while an EventSource (SSE) response body was
+    /// streaming. reqwest reports every such failure as "error decoding
+    /// response body"; the cause is in the error's source chain.
+    #[error("EventSource error: {0}")]
+    EventStreamTransport(#[source] reqwest::Error),
+
     /// A streamed response did not start, or stopped sending data, within the
     /// client's request timeout.
     #[error("timed out after {timeout:?} waiting for {waiting_for}")]
@@ -142,6 +148,7 @@ impl SdkError {
         match self {
             Self::Http(error) => Some(error),
             Self::Middleware(reqwest_middleware::Error::Reqwest(error)) => Some(error),
+            Self::EventStreamTransport(error) => Some(error),
             _ => None,
         }
     }

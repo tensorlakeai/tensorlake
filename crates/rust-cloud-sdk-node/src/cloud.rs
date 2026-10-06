@@ -159,6 +159,7 @@ fn into_cloud_error(error: SdkError) -> napi::Error {
         error @ (SdkError::Http(_)
         | SdkError::Middleware(_)
         | SdkError::EventSourceError(_)
+        | SdkError::EventStreamTransport(_)
         | SdkError::Io(_)) => connection_error(&error.detail()),
         error => into_napi_error(error),
     }

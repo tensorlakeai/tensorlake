@@ -70,6 +70,7 @@ pub fn is_transient(error: &SdkError) -> bool {
                 || *status == reqwest::StatusCode::GATEWAY_TIMEOUT
         }
         SdkError::EventSourceError(_) => true,
+        SdkError::EventStreamTransport(error) => !error.is_timeout(),
         _ => false,
     }
 }

@@ -1148,6 +1148,48 @@ async fn run_stream_times_out_when_the_stream_stops_sending() {
     server.abort();
 }
 
+#[tokio::test]
+async fn run_stream_connection_failure_keeps_its_cause() {
+    // A chunked body that announces 4 KiB, sends a few bytes and closes.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept run");
+        read_http_request(&mut socket).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n1000\r\ndata: {",
+            )
+            .await
+            .expect("write partial body");
+    });
+    let proxy = run_stream_proxy(&format!("http://{address}"), Duration::from_secs(5));
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.run_process(&serde_json::json!({"command": "true"})),
+    )
+    .await
+    .expect("run finishes")
+    .expect_err("connection closes mid-chunk");
+
+    assert!(
+        matches!(error, SdkError::EventStreamTransport(_)),
+        "unexpected error: {error:?}"
+    );
+    assert!(error.as_reqwest().is_some());
+    assert_eq!(error.transport_failure(), None);
+    assert!(is_transient(&error));
+    assert!(
+        error.detail().len() > error.to_string().len(),
+        "detail() must add the cause; got {:?}",
+        error.detail()
+    );
+    server.await.expect("server join");
+}
+
 async fn write_status_json_response(socket: &mut TcpStream, status: u16, body: &str) {
     let response = format!(
         "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",

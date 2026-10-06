@@ -579,7 +579,7 @@ impl Client {
 pub(crate) fn event_stream(response: Response, idle_timeout: Option<Duration>) -> SseEvents {
     let body = response
         .bytes_stream()
-        .map(|chunk| chunk.map_err(stream_transport_error));
+        .map(|chunk| chunk.map_err(SdkError::EventStreamTransport));
     let body = match idle_timeout {
         Some(timeout) => idle_bounded(body, timeout).left_stream(),
         None => body.right_stream(),
@@ -590,10 +590,6 @@ pub(crate) fn event_stream(response: Response, idle_timeout: Option<Duration>) -
             error => SdkError::EventSourceError(error.to_string()),
         })
     }))
-}
-
-fn stream_transport_error(error: reqwest::Error) -> SdkError {
-    SdkError::EventSourceError(format!("Transport error: {error}"))
 }
 
 /// End `stream` with [`SdkError::StreamTimeout`] when it yields nothing for
