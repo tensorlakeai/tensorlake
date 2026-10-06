@@ -109,6 +109,7 @@ function makeClient(proxy: FakeFns): FakeFns {
     listArchivedSandboxes: vi.fn(tracedJson('{"sandboxes":[]}')),
     getArchivedSandbox: vi.fn(tracedJson()),
     updateSandbox: vi.fn(tracedJson()),
+    waitForResourceResize: vi.fn(tracedJson()),
     deleteSandbox: vi.fn(tracedId()),
     suspendSandbox: vi.fn(tracedId()),
     resumeSandbox: vi.fn(tracedId()),

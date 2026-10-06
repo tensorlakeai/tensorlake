@@ -1,6 +1,5 @@
 //! HTTP client that interacts with the Tensorlake Cloud API.
-use eventsource_stream::Eventsource;
-use futures::{Stream, StreamExt};
+use futures::{Future, Stream, StreamExt};
 use reqwest::{
     Method, Request, Response, StatusCode,
     header::{ACCEPT, CONTENT_LENGTH, HeaderMap, HeaderValue, InvalidHeaderValue},
@@ -15,7 +14,7 @@ use std::{
     time::Duration,
 };
 
-use crate::error::SdkError;
+use crate::{error::SdkError, sse::event_stream};
 
 pub const REQUEST_TIMEOUT_HEADER: &str = "X-Tensorlake-Request-Timeout-Ms";
 
@@ -137,7 +136,12 @@ impl ClientBuilder {
         self
     }
 
-    /// Set the total timeout for each HTTP request.
+    /// Set the timeout for each HTTP request.
+    ///
+    /// It bounds a whole request and response. For a streamed response, such
+    /// as server-sent events, it bounds the wait for the response headers and
+    /// each wait for more of the stream, so a stream that keeps sending data
+    /// runs until the server closes it.
     pub fn timeout(mut self, timeout: Duration) -> Self {
         self.timeout = Some(timeout);
         self
@@ -233,6 +237,8 @@ impl ClientBuilder {
 
 type EventSourceStream<T> = Pin<Box<dyn Stream<Item = Result<T, SdkError>> + Send>>;
 
+const WAITING_FOR_RESPONSE_HEADERS: &str = "the response headers";
+
 impl Client {
     pub(crate) fn base_url(&self) -> &str {
         &self.base_url
@@ -263,10 +269,7 @@ impl Client {
         }
     }
 
-    /// Create a new client for a different base URL without a total request timeout.
-    ///
-    /// Sandbox proxy clients use this for long-running process and follow streams,
-    /// where the server-side process timeout is independent from lifecycle HTTP deadlines.
+    /// Create a new client for a different base URL without a request timeout.
     pub fn with_base_url_without_timeout(&self, new_url: &str) -> Result<Self, SdkError> {
         self.with_base_url_and_timeout(new_url, None)
     }
@@ -356,6 +359,47 @@ impl Client {
         Ok(Traced::new(trace_id, response))
     }
 
+    /// Execute a request whose response body is a stream, such as server-sent
+    /// events. The client's request timeout bounds the wait for the response
+    /// headers and is returned so [`event_stream`] can bound each wait for
+    /// more of the body. Non-success statuses become [`SdkError`]s.
+    pub(crate) async fn execute_stream_traced(
+        &self,
+        request: Request,
+    ) -> Result<(Traced<Response>, Option<Duration>), SdkError> {
+        self.send_stream(request, true).await
+    }
+
+    /// [`Self::execute_stream_traced`] without mapping non-success statuses.
+    pub(crate) async fn execute_stream_raw_traced(
+        &self,
+        request: Request,
+    ) -> Result<(Traced<Response>, Option<Duration>), SdkError> {
+        self.send_stream(request, false).await
+    }
+
+    async fn send_stream(
+        &self,
+        mut request: Request,
+        map_status: bool,
+    ) -> Result<(Traced<Response>, Option<Duration>), SdkError> {
+        let trace_id = self.prepare_traced_request(&mut request);
+        // reqwest applies a request timeout until the body ends, which would
+        // cut off a stream that is still delivering data. Keep the timeout
+        // header for the server and enforce the deadline here instead.
+        let timeout = request.timeout_mut().take();
+        let response = within_timeout(timeout, WAITING_FOR_RESPONSE_HEADERS, async {
+            let response = self.client.execute(request).await?;
+            if map_status {
+                self.handle_response(response).await
+            } else {
+                Ok(response)
+            }
+        })
+        .await?;
+        Ok((Traced::new(trace_id, response), timeout))
+    }
+
     /// Execute an HTTP request, inject a W3C `traceparent` header, deserialize
     /// the JSON response body, and return both alongside the `trace_id`.
     ///
@@ -424,27 +468,26 @@ impl Client {
             .header(ACCEPT, "text/event-stream")
             .header("traceparent", traceparent);
         if let Some(timeout) = self.timeout {
-            request_builder = request_builder.timeout(timeout);
             let millis = timeout.as_millis();
             if millis > 0 {
                 request_builder =
                     request_builder.header(REQUEST_TIMEOUT_HEADER, millis.to_string());
             }
         }
-        let response = request_builder.send().await?;
+        let response = within_timeout(self.timeout, WAITING_FOR_RESPONSE_HEADERS, async {
+            Ok(request_builder.send().await?)
+        })
+        .await?;
 
-        let stream = response
-            .bytes_stream()
-            .eventsource()
-            .filter_map(move |event| async move {
-                match event {
-                    Ok(msg) => match serde_json::from_str::<T>(&msg.data) {
-                        Ok(evt) => Some(Ok(evt)),
-                        Err(error) => Some(Err(SdkError::Json(error))),
-                    },
-                    Err(error) => Some(Err(SdkError::EventSourceError(error.to_string()))),
-                }
-            });
+        let stream = event_stream(response, self.timeout).filter_map(move |event| async move {
+            match event {
+                Ok(msg) => match serde_json::from_str::<T>(&msg.data) {
+                    Ok(evt) => Some(Ok(evt)),
+                    Err(error) => Some(Err(SdkError::Json(error))),
+                },
+                Err(error) => Some(Err(error)),
+            }
+        });
         Ok(Traced::new(trace_id, Box::pin(stream)))
     }
 
@@ -521,6 +564,24 @@ impl Client {
             }
             _ => Ok(response),
         }
+    }
+}
+
+async fn within_timeout<T>(
+    timeout: Option<Duration>,
+    waiting_for: &'static str,
+    future: impl Future<Output = Result<T, SdkError>>,
+) -> Result<T, SdkError> {
+    match timeout {
+        Some(timeout) => {
+            tokio::time::timeout(timeout, future)
+                .await
+                .map_err(|_| SdkError::StreamTimeout {
+                    waiting_for,
+                    timeout,
+                })?
+        }
+        None => future.await,
     }
 }
 

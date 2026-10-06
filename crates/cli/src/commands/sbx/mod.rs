@@ -11,6 +11,7 @@ pub mod native_ssh;
 pub mod port;
 pub mod process;
 pub mod pty;
+mod resize;
 pub mod resume;
 pub mod run;
 pub mod snapshot;

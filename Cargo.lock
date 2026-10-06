@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "gsvc-fs-client"
-version = "0.5.139"
+version = "0.5.142"
 dependencies = [
  "anyhow",
  "base64",
@@ -5933,7 +5933,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.139"
+version = "0.5.142"
 dependencies = [
  "anyhow",
  "base64",
@@ -5988,7 +5988,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.139"
+version = "0.5.142"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6004,7 +6004,6 @@ dependencies = [
  "dirs",
  "docker-credentials-config",
  "env-file-reader",
- "eventsource-stream",
  "flate2",
  "futures",
  "gethostname 0.5.0",
@@ -6046,7 +6045,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-function-agent-core"
-version = "0.5.139"
+version = "0.5.142"
 dependencies = [
  "anyhow",
  "base64",
@@ -6071,13 +6070,12 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.139"
+version = "0.5.142"
 dependencies = [
  "anyhow",
  "async-compression",
  "base64",
  "bytes",
- "eventsource-stream",
  "futures",
  "napi",
  "napi-build",
@@ -6096,7 +6094,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.139"
+version = "0.5.142"
 dependencies = [
  "base64",
  "chrono",

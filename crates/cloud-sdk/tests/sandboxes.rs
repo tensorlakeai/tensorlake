@@ -11,6 +11,11 @@ use tensorlake::{
         },
     },
 };
+use tensorlake::{
+    error::{SdkError, TransportFailure},
+    retry::is_transient,
+    sandboxes::models::RunProcessEvent,
+};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
 
@@ -565,6 +570,7 @@ async fn update_sandbox_replaces_network_policy() {
         .update(
             "sb-1",
             &UpdateSandboxRequest {
+                resources: None,
                 name: None,
                 allow_unauthenticated_access: None,
                 exposed_ports: None,
@@ -617,6 +623,7 @@ async fn update_sandbox_clear_sends_explicit_null_network() {
         .update(
             "sb-1",
             &UpdateSandboxRequest {
+                resources: None,
                 name: None,
                 allow_unauthenticated_access: None,
                 exposed_ports: None,
@@ -640,6 +647,7 @@ fn sandbox_network_policy_update_wire_shapes() {
     // the tri-state PATCH semantics the running-sandbox update relies on.
     let encode = |network| {
         serde_json::to_string(&UpdateSandboxRequest {
+            resources: None,
             name: None,
             allow_unauthenticated_access: None,
             exposed_ports: None,
@@ -1014,6 +1022,174 @@ async fn wait_until_settled_reports_a_missing_sandbox() {
     server.await.expect("server join");
 }
 
+/// Serve one `POST /api/v1/processes/run` with an event-stream body made of
+/// `parts`, each written after its delay. The body ends when the connection
+/// closes; `None` for the headers delay never answers at all.
+async fn run_stream_server(
+    headers_delay: Option<Duration>,
+    parts: Vec<(Duration, &'static str)>,
+) -> (String, tokio::task::JoinHandle<()>) {
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept run");
+        read_http_request(&mut socket).await;
+        let Some(headers_delay) = headers_delay else {
+            std::future::pending::<()>().await;
+            return;
+        };
+        tokio::time::sleep(headers_delay).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: close\r\n\r\n",
+            )
+            .await
+            .expect("write headers");
+        for (delay, part) in parts {
+            tokio::time::sleep(delay).await;
+            socket.write_all(part.as_bytes()).await.expect("write part");
+        }
+    });
+    (format!("http://{address}"), server)
+}
+
+fn run_stream_proxy(url: &str, timeout: Duration) -> SandboxProxyClient {
+    let client = ClientBuilder::new(url)
+        .timeout(timeout)
+        .build()
+        .expect("build client");
+    SandboxProxyClient::new(client, None)
+}
+
+const STARTED: &str = "data: {\"pid\":7,\"started_at\":0}\n\n";
+const KEEP_ALIVE: &str = ":\n\n";
+const EXITED: &str = "data: {\"exit_code\":0}\n\n";
+
+#[tokio::test]
+async fn run_stream_outlives_the_request_timeout_while_data_arrives() {
+    // Keep-alive comments every 50 ms for 400 ms, then the exit: longer than
+    // the 150 ms request timeout, but no gap reaches it.
+    let mut parts = vec![(Duration::ZERO, STARTED)];
+    parts.extend(std::iter::repeat_n(
+        (Duration::from_millis(50), KEEP_ALIVE),
+        8,
+    ));
+    parts.push((Duration::from_millis(50), EXITED));
+    let (url, server) = run_stream_server(Some(Duration::ZERO), parts).await;
+    let proxy = run_stream_proxy(&url, Duration::from_millis(150));
+
+    let events = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.run_process(&serde_json::json!({"command": "true"})),
+    )
+    .await
+    .expect("run finishes")
+    .expect("run succeeds")
+    .into_inner();
+
+    assert!(matches!(
+        events.last(),
+        Some(RunProcessEvent::Exited {
+            exit_code: Some(0),
+            ..
+        })
+    ));
+    server.await.expect("server join");
+}
+
+#[tokio::test]
+async fn run_stream_times_out_waiting_for_response_headers() {
+    let (url, server) = run_stream_server(None, Vec::new()).await;
+    let proxy = run_stream_proxy(&url, Duration::from_millis(150));
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.run_process(&serde_json::json!({"command": "true"})),
+    )
+    .await
+    .expect("run finishes")
+    .expect_err("headers never arrive");
+
+    assert!(
+        matches!(&error, SdkError::StreamTimeout { waiting_for, .. } if *waiting_for == "the response headers"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(error.transport_failure(), Some(TransportFailure::Timeout));
+    assert!(!is_transient(&error));
+    server.abort();
+}
+
+#[tokio::test]
+async fn run_stream_times_out_when_the_stream_stops_sending() {
+    // The stream starts, then sends nothing for longer than the timeout.
+    let (url, server) = run_stream_server(
+        Some(Duration::ZERO),
+        vec![(Duration::ZERO, STARTED), (Duration::from_secs(30), EXITED)],
+    )
+    .await;
+    let proxy = run_stream_proxy(&url, Duration::from_millis(150));
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.run_process(&serde_json::json!({"command": "true"})),
+    )
+    .await
+    .expect("run finishes")
+    .expect_err("stream stalls");
+
+    assert!(
+        matches!(&error, SdkError::StreamTimeout { waiting_for, .. } if *waiting_for == "more data on the stream"),
+        "unexpected error: {error:?}"
+    );
+    assert_eq!(error.transport_failure(), Some(TransportFailure::Timeout));
+    assert!(!is_transient(&error));
+    server.abort();
+}
+
+#[tokio::test]
+async fn run_stream_connection_failure_keeps_its_cause() {
+    // A chunked body that announces 4 KiB, sends a few bytes and closes.
+    let listener = TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind test listener");
+    let address = listener.local_addr().expect("listener address");
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.expect("accept run");
+        read_http_request(&mut socket).await;
+        socket
+            .write_all(
+                b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nTransfer-Encoding: chunked\r\n\r\n1000\r\ndata: {",
+            )
+            .await
+            .expect("write partial body");
+    });
+    let proxy = run_stream_proxy(&format!("http://{address}"), Duration::from_secs(5));
+
+    let error = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.run_process(&serde_json::json!({"command": "true"})),
+    )
+    .await
+    .expect("run finishes")
+    .expect_err("connection closes mid-chunk");
+
+    assert!(
+        matches!(error, SdkError::EventStreamTransport(_)),
+        "unexpected error: {error:?}"
+    );
+    assert!(error.as_reqwest().is_some());
+    assert_eq!(error.transport_failure(), None);
+    assert!(is_transient(&error));
+    assert!(
+        error.detail().len() > error.to_string().len(),
+        "detail() must add the cause; got {:?}",
+        error.detail()
+    );
+    server.await.expect("server join");
+}
+
 async fn write_status_json_response(socket: &mut TcpStream, status: u16, body: &str) {
     let response = format!(
         "HTTP/1.1 {status} Test\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
@@ -1077,4 +1253,514 @@ async fn write_json_response(socket: &mut TcpStream, body: &str) {
         .write_all(response.as_bytes())
         .await
         .expect("write response");
+}
+
+// Resize uses the real HTTP client so tests cover admission, polling, and the
+// wire shape shared by Python, TypeScript, and CLI.
+fn resize_info(
+    generation: u64,
+    status: &str,
+    memory: i64,
+    error: Option<&str>,
+) -> serde_json::Value {
+    let mut info: serde_json::Value = serde_json::from_str(SANDBOX_INFO_JSON).unwrap();
+    info["runtime"] = "cloud_hypervisor".into();
+    info["resources"]["memory_mb"] = memory.into();
+    info["resource_resize"] = serde_json::json!({
+        "generation": generation, "status": status,
+        "requested": {"cpus": 2.0, "memory_mb": 2048, "disk_mb": 1024},
+        "error_message": error,
+    });
+    info
+}
+fn resize_request(
+    resources: tensorlake::sandboxes::models::ResizeSandboxResources,
+) -> UpdateSandboxRequest {
+    UpdateSandboxRequest {
+        resources: Some(resources),
+        name: None,
+        allow_unauthenticated_access: None,
+        exposed_ports: None,
+        network: NetworkPolicyUpdate::Keep,
+    }
+}
+async fn resize_server(
+    responses: Vec<(u16, serde_json::Value)>,
+) -> (SandboxesClient, tokio::task::JoinHandle<Vec<String>>) {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = SandboxesClient::new(
+        ClientBuilder::new(&format!("http://{}", listener.local_addr().unwrap()))
+            .build()
+            .unwrap(),
+        "default",
+        false,
+    );
+    let task = tokio::spawn(async move {
+        let mut requests = vec![];
+        for (status, body) in responses {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            requests.push(String::from_utf8(read_http_request(&mut socket).await).unwrap());
+            let body = body.to_string();
+            socket.write_all(format!("HTTP/1.1 {status} Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+        }
+        requests
+    });
+    (client, task)
+}
+#[tokio::test]
+async fn resize_omits_unchanged_dimensions_and_waits_for_confirmed_generation() {
+    use tensorlake::sandboxes::{models::ResizeSandboxResources, resize::ResizeOptions};
+    let (client, task) = resize_server(vec![
+        (200, serde_json::from_str(SANDBOX_INFO_JSON).unwrap()),
+        (200, resize_info(7, "pending", 1024, None)),
+        (200, resize_info(7, "pending", 1024, None)),
+        (200, resize_info(7, "succeeded", 2048, None)),
+    ])
+    .await;
+    let info = client
+        .update_with_options(
+            "sb-1",
+            &resize_request(ResizeSandboxResources {
+                cpus: Some(1.0),
+                memory_mb: Some(2048),
+                disk_mb: Some(1024),
+            }),
+            ResizeOptions {
+                poll_interval: Duration::from_millis(1),
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(info.resources.memory_mb, 2048);
+    assert_eq!(info.resource_resize.as_ref().unwrap().status, "succeeded");
+    let requests = task.await.unwrap();
+    assert!(requests[1].starts_with("PATCH "));
+    let body: serde_json::Value =
+        serde_json::from_str(requests[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+    assert_eq!(body, serde_json::json!({"resources":{"memory_mb":2048}}));
+    assert_eq!(
+        requests.iter().filter(|r| r.starts_with("PATCH ")).count(),
+        1
+    );
+}
+#[tokio::test]
+async fn resize_admission_only_keeps_the_old_confirmed_allocation() {
+    use tensorlake::sandboxes::{models::ResizeSandboxResources, resize::ResizeOptions};
+    let (client, task) = resize_server(vec![
+        (200, serde_json::from_str(SANDBOX_INFO_JSON).unwrap()),
+        (200, resize_info(2, "pending", 1024, None)),
+    ])
+    .await;
+    let info = client
+        .update_with_options(
+            "sb-1",
+            &resize_request(ResizeSandboxResources {
+                cpus: Some(2.0),
+                ..Default::default()
+            }),
+            ResizeOptions {
+                wait: false,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(info.resources.memory_mb, 1024);
+    assert_eq!(info.resource_resize.as_ref().unwrap().generation, 2);
+    assert_eq!(task.await.unwrap().len(), 2);
+}
+#[tokio::test]
+async fn resize_noop_never_submits_or_waits_on_an_old_failed_generation() {
+    use tensorlake::sandboxes::models::ResizeSandboxResources;
+    let (client, task) = resize_server(vec![(
+        200,
+        resize_info(4, "failed", 1024, Some("old failure")),
+    )])
+    .await;
+    client
+        .update(
+            "sb-1",
+            &resize_request(ResizeSandboxResources {
+                disk_mb: Some(1024),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(task.await.unwrap().len(), 1);
+}
+#[tokio::test]
+async fn resize_terminal_errors_preserve_driver_diagnostics_and_actual_allocation() {
+    use tensorlake::sandboxes::{models::ResizeSandboxResources, resize::ResizeOptions};
+    for diagnosis in [
+        "ConfigurationError: requested memory 512 MiB is below boot size 1024 MiB",
+        "ConfigurationError: rounded target exceeds hotplug window",
+        "pinned guest memory stopped shrink at 1536 MiB",
+        "VMM refused CPU resize: vCPU eject pending",
+    ] {
+        let (client, task) = resize_server(vec![
+            (200, serde_json::from_str(SANDBOX_INFO_JSON).unwrap()),
+            (200, resize_info(5, "pending", 1024, None)),
+            (200, resize_info(5, "failed", 1536, Some(diagnosis))),
+        ])
+        .await;
+        let error = client
+            .update_with_options(
+                "sb-1",
+                &resize_request(ResizeSandboxResources {
+                    memory_mb: Some(512),
+                    ..Default::default()
+                }),
+                ResizeOptions::default(),
+            )
+            .await
+            .unwrap_err();
+        let tensorlake::error::SdkError::SandboxResize(error) = error else {
+            panic!("expected typed resize error")
+        };
+        assert_eq!(error.generation, 5);
+        assert_eq!(error.reason, "failed");
+        assert_eq!(error.info.as_ref().unwrap().resources.memory_mb, 1536);
+        assert!(error.to_string().contains(diagnosis));
+        let requests = task.await.unwrap();
+        assert!(
+            requests[1].contains("\"memory_mb\":512"),
+            "client must not guess the boot floor"
+        );
+        assert_eq!(requests.len(), 3);
+    }
+}
+#[tokio::test]
+async fn resize_server_policy_errors_are_not_replaced_or_retried() {
+    use tensorlake::sandboxes::models::ResizeSandboxResources;
+    let message = "requested disk exceeds project entitlement";
+    let (client, task) = resize_server(vec![
+        (200, serde_json::from_str(SANDBOX_INFO_JSON).unwrap()),
+        (422, serde_json::json!({"error":message})),
+    ])
+    .await;
+    let error = client
+        .update(
+            "sb-1",
+            &resize_request(ResizeSandboxResources {
+                disk_mb: Some(2048),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains(message));
+    assert!(matches!(
+        error,
+        tensorlake::error::SdkError::ServerError { .. }
+    ));
+    assert_eq!(task.await.unwrap().len(), 2); // A disk below the create minimum still reaches PATCH.
+}
+#[tokio::test]
+async fn resize_wait_detects_superseded_and_interrupted_generations() {
+    for (mut info, reason) in [
+        (resize_info(9, "succeeded", 2048, None), "superseded"),
+        (resize_info(8, "pending", 1024, None), "interrupted"),
+    ] {
+        if reason == "interrupted" {
+            info["status"] = "suspended".into();
+        }
+        let (client, task) = resize_server(vec![(200, info)]).await;
+        let error = client
+            .wait_for_resource_resize("sb-1", 8, Duration::from_secs(1), Duration::from_millis(1))
+            .await
+            .unwrap_err();
+        let tensorlake::error::SdkError::SandboxResize(error) = error else {
+            panic!("expected typed resize error")
+        };
+        assert_eq!(error.reason, reason);
+        task.await.unwrap();
+    }
+}
+#[tokio::test]
+async fn resize_timeout_retains_latest_observation_and_never_cancels() {
+    use tensorlake::sandboxes::{models::ResizeSandboxResources, resize::ResizeOptions};
+    let (client, task) = resize_server(vec![
+        (200, serde_json::from_str(SANDBOX_INFO_JSON).unwrap()),
+        (200, resize_info(3, "pending", 1024, None)),
+        (200, resize_info(3, "pending", 1536, None)),
+    ])
+    .await;
+    let error = client
+        .update_with_options(
+            "sb-1",
+            &resize_request(ResizeSandboxResources {
+                cpus: Some(2.0),
+                ..Default::default()
+            }),
+            ResizeOptions {
+                timeout: Duration::ZERO,
+                ..Default::default()
+            },
+        )
+        .await
+        .unwrap_err();
+    let tensorlake::error::SdkError::SandboxResize(error) = error else {
+        panic!("expected typed resize error")
+    };
+    assert_eq!(error.reason, "timeout");
+    assert_eq!(error.generation, 3);
+    assert_eq!(error.info.unwrap().resources.memory_mb, 1536);
+    let requests = task.await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[2].starts_with("GET "));
+}
+#[tokio::test]
+async fn resize_missing_admission_metadata_is_not_completion() {
+    use tensorlake::sandboxes::models::ResizeSandboxResources;
+    let plain = serde_json::from_str(SANDBOX_INFO_JSON).unwrap();
+    let (client, task) = resize_server(vec![
+        (200, plain),
+        (200, serde_json::from_str(SANDBOX_INFO_JSON).unwrap()),
+    ])
+    .await;
+    let error = client
+        .update(
+            "sb-1",
+            &resize_request(ResizeSandboxResources {
+                cpus: Some(2.0),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap_err();
+    assert!(error.to_string().contains("server omitted resource_resize"));
+    task.await.unwrap();
+}
+#[test]
+fn resize_validation_only_enforces_observable_live_constraints() {
+    use tensorlake::sandboxes::models::{ResizeSandboxResources, SandboxInfo};
+    for cpus in [0.0, -1.0, 0.5, 1.5, f64::NAN, f64::INFINITY] {
+        assert!(
+            ResizeSandboxResources {
+                cpus: Some(cpus),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    for memory_mb in [0, -1] {
+        assert!(
+            ResizeSandboxResources {
+                memory_mb: Some(memory_mb),
+                ..Default::default()
+            }
+            .validate()
+            .is_err()
+        );
+    }
+    assert!(ResizeSandboxResources::default().validate().is_err());
+    assert!(
+        ResizeSandboxResources {
+            disk_mb: Some(0),
+            ..Default::default()
+        }
+        .validate()
+        .is_err()
+    );
+    let mut info: SandboxInfo = serde_json::from_str(SANDBOX_INFO_JSON).unwrap();
+    let request = ResizeSandboxResources {
+        cpus: Some(32.0),
+        memory_mb: Some(100_001),
+        disk_mb: Some(2048),
+    };
+    assert_eq!(
+        request.against(&info).unwrap(),
+        request,
+        "server owns caps, memory alignment, ratio and create disk minimum"
+    );
+    assert!(
+        ResizeSandboxResources {
+            disk_mb: Some(1023),
+            ..Default::default()
+        }
+        .against(&info)
+        .unwrap_err()
+        .to_string()
+        .contains("current 1024")
+    );
+    for runtime in ["firecracker", "gvisor"] {
+        info.runtime = Some(runtime.into());
+        assert!(request.against(&info).is_err());
+    }
+    info.runtime = Some("cloud_hypervisor".into());
+    for status in ["suspended", "paused", "pending", "terminated"] {
+        info.status = status.into();
+        assert!(request.against(&info).is_err());
+    }
+}
+#[tokio::test]
+async fn resize_rejects_mixed_updates_before_network_io() {
+    use tensorlake::sandboxes::models::ResizeSandboxResources;
+    let client = SandboxesClient::new(
+        ClientBuilder::new("http://127.0.0.1:1").build().unwrap(),
+        "default",
+        false,
+    );
+    for which in 0..4 {
+        let mut request = resize_request(ResizeSandboxResources {
+            cpus: Some(2.0),
+            ..Default::default()
+        });
+        match which {
+            0 => request.name = Some("rename".into()),
+            1 => request.network = NetworkPolicyUpdate::Clear,
+            2 => request.exposed_ports = Some(vec![]),
+            _ => request.allow_unauthenticated_access = Some(false),
+        }
+        assert!(
+            client
+                .update("sb-1", &request)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("cannot be combined")
+        );
+    }
+}
+
+#[tokio::test]
+async fn resize_deadline_bounds_a_stalled_poll_and_keeps_last_observation() {
+    use tensorlake::sandboxes::{models::ResizeSandboxResources, resize::ResizeOptions};
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = SandboxesClient::new(
+        ClientBuilder::new(&format!("http://{}", listener.local_addr().unwrap()))
+            .build()
+            .unwrap(),
+        "default",
+        false,
+    );
+    let task = tokio::spawn(async move {
+        for body in [
+            serde_json::from_str(SANDBOX_INFO_JSON).unwrap(),
+            resize_info(12, "pending", 1024, None),
+        ] {
+            let (mut socket, _) = listener.accept().await.unwrap();
+            read_http_request(&mut socket).await;
+            write_json_response(&mut socket, &body.to_string()).await;
+        }
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut socket).await;
+        assert!(request.starts_with(b"GET "));
+        // Hold the response open until the client enforces its own deadline.
+        std::future::pending::<()>().await;
+        drop(socket);
+    });
+    let result = tokio::time::timeout(
+        Duration::from_secs(2),
+        client.update_with_options(
+            "sb-1",
+            &resize_request(ResizeSandboxResources {
+                memory_mb: Some(2048),
+                ..Default::default()
+            }),
+            ResizeOptions {
+                timeout: Duration::from_millis(50),
+                poll_interval: Duration::from_millis(1),
+                ..Default::default()
+            },
+        ),
+    )
+    .await
+    .expect("poll must respect resize deadline");
+    let tensorlake::error::SdkError::SandboxResize(error) = result.unwrap_err() else {
+        panic!("expected typed timeout")
+    };
+    assert_eq!(error.reason, "timeout");
+    assert_eq!(error.generation, 12);
+    assert_eq!(error.info.unwrap().resources.memory_mb, 1024);
+    task.abort();
+}
+
+#[tokio::test]
+async fn resize_zero_timeout_checks_once_and_preserves_terminal_results() {
+    for (status, reason) in [
+        ("pending", Some("timeout")),
+        ("failed", Some("failed")),
+        ("succeeded", None),
+    ] {
+        let (client, task) = resize_server(vec![(200, resize_info(7, status, 1536, None))]).await;
+        let result = client
+            .wait_for_resource_resize("sb-1", 7, Duration::ZERO, Duration::from_secs(1))
+            .await;
+        if let Some(reason) = reason {
+            let tensorlake::error::SdkError::SandboxResize(error) = result.unwrap_err() else {
+                panic!("expected typed resize error");
+            };
+            assert_eq!(error.reason, reason);
+            assert_eq!(error.info.unwrap().resources.memory_mb, 1536);
+        } else {
+            assert_eq!(result.unwrap().resources.memory_mb, 1536);
+        }
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 1);
+        assert!(requests[0].starts_with("GET "));
+    }
+}
+
+#[tokio::test]
+async fn resize_zero_timeout_bounds_the_single_request_by_client_timeout() {
+    for request_timeout in [Duration::from_millis(50), Duration::from_millis(200)] {
+        let (url, server) =
+            delayed_server(vec![(200, SANDBOX_INFO_JSON, Duration::from_secs(30))]).await;
+        let client = SandboxesClient::new(
+            ClientBuilder::new(&url)
+                .timeout(request_timeout)
+                .build()
+                .unwrap(),
+            "default",
+            true,
+        );
+        let result = tokio::time::timeout(
+            request_timeout + Duration::from_millis(500),
+            client.wait_for_resource_resize("sb-1", 7, Duration::ZERO, Duration::from_secs(1)),
+        )
+        .await
+        .expect("zero timeout checks once with a bounded request");
+        let tensorlake::error::SdkError::SandboxResize(error) = result.unwrap_err() else {
+            panic!("expected typed timeout");
+        };
+        assert_eq!(error.reason, "timeout");
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn resize_zero_timeout_allows_a_response_slower_than_one_second() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = SandboxesClient::new(
+        ClientBuilder::new(&format!("http://{}", listener.local_addr().unwrap()))
+            .timeout(Duration::from_secs(3))
+            .build()
+            .unwrap(),
+        "default",
+        false,
+    );
+    let server = tokio::spawn(async move {
+        let (mut socket, _) = listener.accept().await.unwrap();
+        let request = read_http_request(&mut socket).await;
+        tokio::time::sleep(Duration::from_millis(1250)).await;
+        write_json_response(
+            &mut socket,
+            &resize_info(7, "succeeded", 1536, None).to_string(),
+        )
+        .await;
+        request
+    });
+    let info = tokio::time::timeout(
+        Duration::from_secs(4),
+        client.wait_for_resource_resize("sb-1", 7, Duration::ZERO, Duration::from_secs(1)),
+    )
+    .await
+    .expect("the check must respect the client's request timeout")
+    .expect("a completed resize is observed even if the check takes over one second");
+    assert_eq!(info.resources.memory_mb, 1536);
+    assert!(server.await.unwrap().starts_with(b"GET "));
 }

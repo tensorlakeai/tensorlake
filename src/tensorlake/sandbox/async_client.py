@@ -16,6 +16,8 @@ from urllib.parse import urlparse
 
 from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
 
+from ._resize import resize_resources, validate_resize_wait
+
 if TYPE_CHECKING:
     from .async_sandbox import AsyncSandbox
 
@@ -636,10 +638,78 @@ class AsyncSandboxClient:
         sandbox_id: str,
         name: str | None = None,
         *,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        disk_mb: int | None = None,
+        wait: bool = True,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
         network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
+        """Update a running sandbox's properties.
+
+        Resource names and units match create. Resize requires a running Cloud
+        Hypervisor sandbox and cannot be mixed with name, proxy, or network
+        changes. Omitted dimensions retain their confirmed allocation.
+        Integer-valued floats such as 2048.0 are accepted for memory and disk;
+        fractional values and booleans are rejected without rounding.
+
+        If all targets already match, no update is sent. The returned resources
+        are current, but resource_resize can be None or describe an earlier
+        operation, including a failed one. Wait options are ignored when no
+        resource targets are supplied.
+
+        Args:
+            sandbox_id: ID or name of the sandbox to update.
+            name: New sandbox name. Naming an ephemeral sandbox makes it
+                non-ephemeral and enables suspend/resume.
+            cpus: Finite positive whole-vCPU target, using create's CPU units.
+            memory_mb: Positive integer memory target in MiB.
+            disk_mb: Positive integer root disk target in MiB; cannot shrink
+                below the current confirmed disk size.
+            wait: Wait for resize completion (default True). False returns
+                admission; use wait_for_resource_resize() to continue later.
+            timeout: Maximum seconds to wait for resize completion (default
+                300). Does not change sandbox lifetime or cancel the resize.
+                Zero checks once. Ignored when wait is False.
+            poll_interval: Seconds between resize polls (default 1.0); must
+                be positive. Ignored when wait is False.
+            allow_unauthenticated_access: Whether exposed user ports should be
+                reachable without Tensorlake auth.
+            exposed_ports: User ports routable through the sandbox proxy.
+                Port 9501 is reserved for sandbox management.
+            network: Egress network policy. Omit to leave it unchanged, pass a
+                NetworkConfig to replace it atomically, or CLEAR_NETWORK_POLICY
+                to restore unrestricted egress. Unresolvable destinations
+                reject the update and leave the previous policy enforced.
+
+        Returns:
+            Traced[SandboxInfo] with confirmed resources and the latest resize
+            metadata, which may belong to an earlier operation for a no-op.
+
+        Raises:
+            SandboxResizeError: The resize failed, timed out, was interrupted,
+                was superseded, or returned incompatible completion metadata.
+                Carries generation, reason, and confirmed_resources.
+            SandboxError: Invalid targets, wait options, or mixed update fields.
+            SandboxNotFoundError: The sandbox does not exist.
+            RemoteAPIError: The API rejected the request.
+            SandboxConnectionError: The server is unreachable.
+        """
+        resources = resize_resources(cpus, memory_mb, disk_mb)
+        if resources is not None:
+            validate_resize_wait(timeout, poll_interval)
+            if (
+                name is not None
+                or allow_unauthenticated_access is not None
+                or exposed_ports is not None
+                or network is not None
+            ):
+                raise SandboxError(
+                    "resources cannot be combined with other sandbox update fields"
+                )
         normalized_ports = (
             _normalize_user_ports(exposed_ports) if exposed_ports is not None else None
         )
@@ -651,9 +721,11 @@ class AsyncSandboxClient:
             and normalized_ports is None
             and network_config is None
             and not clearing_network
+            and resources is None
         ):
             raise SandboxError("At least one sandbox update field must be provided.")
         request = UpdateSandboxRequest(
+            resources=resources,
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=normalized_ports,
@@ -664,10 +736,61 @@ class AsyncSandboxClient:
         payload = json.loads(request.model_dump_json(exclude_none=True))
         if clearing_network:
             payload["network"] = None
+        wait_options = (
+            dict(wait=wait, timeout_sec=timeout, poll_interval_sec=poll_interval)
+            if resources is not None
+            else {}
+        )
         try:
             trace_id, response_json = await self._rust_client.update_sandbox_async(
                 sandbox_id=sandbox_id,
                 request_json=json.dumps(payload),
+                **wait_options,
+            )
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    async def wait_for_resource_resize(
+        self,
+        sandbox_id: str,
+        generation: int,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+    ) -> Traced[SandboxInfo]:
+        """Wait for an exact resize generation without submitting another update.
+
+        Args:
+            sandbox_id: ID or name of the sandbox to observe.
+            generation: Positive generation returned by the update or timeout error.
+            timeout: Maximum wait in seconds (default 300). Timeout never
+                cancels the resize; call this method again to keep waiting.
+                Zero checks once.
+            poll_interval: Positive seconds between polls (default 1.0).
+
+        Returns:
+            Traced[SandboxInfo] with the completed generation's confirmed resources.
+
+        Raises:
+            SandboxResizeError: Failure, timeout, interruption, superseding, or
+                incompatible metadata; includes the last confirmed_resources.
+            SandboxError: Invalid generation or wait options.
+            SandboxNotFoundError: The sandbox does not exist.
+            RemoteAPIError: The API rejected the request.
+            SandboxConnectionError: The server is unreachable.
+        """
+        validate_resize_wait(timeout, poll_interval, generation)
+        try:
+            trace_id, response_json = (
+                await self._rust_client.wait_for_resource_resize_async(
+                    sandbox_id=sandbox_id,
+                    generation=generation,
+                    timeout_sec=timeout,
+                    poll_interval_sec=poll_interval,
+                )
             )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:

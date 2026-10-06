@@ -1217,11 +1217,11 @@ enum SbxCommands {
         #[arg(short, long)]
         cpus: Option<f64>,
 
-        /// Memory in MB (default: 1024 for new sandboxes, inherited for snapshot restores)
+        /// Memory in MiB (default: 1024 for new sandboxes, inherited for snapshot restores)
         #[arg(short, long)]
         memory: Option<i64>,
 
-        /// Root disk size in MB (default: 10240 for new sandboxes)
+        /// Root disk size in MiB (default: 10240 for new sandboxes)
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
@@ -1326,13 +1326,17 @@ enum SbxCommands {
         no_wait: bool,
     },
 
-    /// Wait for a sandbox to be running, polling every two seconds. Resumable: run it again
-    /// after a timeout to keep waiting. Never cancels the sandbox
+    /// Wait for a sandbox to be running or a resize generation to complete.
+    /// Run again after a timeout to keep waiting; never cancels the operation
     Wait {
         /// Sandbox ID or name
         sandbox_id: String,
 
-        /// Max seconds to wait before giving up (the sandbox keeps its place in the queue)
+        /// Resize generation to wait for, instead of waiting for the running state
+        #[arg(long, value_name = "GENERATION", value_parser = clap::value_parser!(u64).range(1..))]
+        resize: Option<u64>,
+
+        /// Maximum seconds to wait; timeout does not cancel the operation
         #[arg(short, long, default_value_t = 120)]
         timeout: u64,
     },
@@ -1497,11 +1501,11 @@ enum SbxCommands {
         #[arg(short, long, default_value = "1.0")]
         cpus: f64,
 
-        /// Memory in MB
+        /// Memory in MiB
         #[arg(short, long, default_value = "1024")]
         memory: i64,
 
-        /// Root disk size in MB (default: 10240 for new sandboxes)
+        /// Root disk size in MiB (default: 10240 for new sandboxes)
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
@@ -1562,16 +1566,45 @@ enum SbxCommands {
         new_name: String,
     },
 
-    /// Update the network configuration of a running sandbox
+    /// Update resources or the network configuration of a running sandbox
     #[command(group(
-        clap::ArgGroup::new("network_update")
+        clap::ArgGroup::new("sandbox_update")
             .required(true)
             .multiple(true)
-            .args(["no_internet", "network_allow", "network_deny", "clear_network"])
+            .args(["no_internet", "network_allow", "network_deny", "clear_network", "cpus", "memory", "disk_mb"])
+    ), group(
+        clap::ArgGroup::new("resize_resources")
+            .multiple(true)
+            .args(["cpus", "memory", "disk_mb"])
     ))]
     Update {
         /// Sandbox ID or name
         sandbox_id: String,
+
+        /// Whole CPU target (omitted leaves the allocation unchanged)
+        #[arg(short, long, conflicts_with_all = ["no_internet", "network_allow", "network_deny", "clear_network"])]
+        cpus: Option<f64>,
+
+        /// Memory target in MiB (omitted leaves the allocation unchanged)
+        #[arg(short, long, conflicts_with_all = ["no_internet", "network_allow", "network_deny", "clear_network"])]
+        memory: Option<i64>,
+
+        /// Root disk target in MiB; can only grow
+        #[arg(long = "disk_mb", conflicts_with_all = ["no_internet", "network_allow", "network_deny", "clear_network"])]
+        disk_mb: Option<u64>,
+
+        /// Return on resize admission instead of waiting for completion
+        #[arg(
+            short = 'n',
+            long,
+            requires = "resize_resources",
+            conflicts_with = "wait_timeout"
+        )]
+        no_wait: bool,
+
+        /// Maximum seconds to wait for resize completion (default: 300); does not change sandbox lifetime
+        #[arg(long, requires = "resize_resources", conflicts_with = "no_wait")]
+        wait_timeout: Option<u64>,
 
         /// Replace the network policy and block all outbound internet access, including DNS
         #[arg(
@@ -1727,11 +1760,11 @@ enum ImageCommands {
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
 
-        /// Root disk size in MB for the generated sandbox image (default: 10240)
+        /// Root disk size in MiB for the generated sandbox image (default: 10240)
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
-        /// Root disk size in MB for the temporary builder sandbox
+        /// Root disk size in MiB for the temporary builder sandbox
         #[arg(long = "builder_disk_mb")]
         builder_disk_mb: Option<u64>,
 
@@ -1743,7 +1776,7 @@ enum ImageCommands {
         #[arg(long)]
         cpus: Option<f64>,
 
-        /// Memory in MB for the temporary build sandbox
+        /// Memory in MiB for the temporary build sandbox
         #[arg(long)]
         memory: Option<i64>,
 
@@ -1783,11 +1816,11 @@ enum ImageCommands {
         #[arg(short = 'n', long)]
         registered_name: Option<String>,
 
-        /// Root disk size in MB for the generated sandbox image (default: 10240)
+        /// Root disk size in MiB for the generated sandbox image (default: 10240)
         #[arg(long = "disk_mb")]
         disk_mb: Option<u64>,
 
-        /// Root disk size in MB for the temporary builder sandbox
+        /// Root disk size in MiB for the temporary builder sandbox
         #[arg(long = "builder_disk_mb")]
         builder_disk_mb: Option<u64>,
 
@@ -1795,7 +1828,7 @@ enum ImageCommands {
         #[arg(long)]
         cpus: Option<f64>,
 
-        /// Memory in MB for the temporary build sandbox
+        /// Memory in MiB for the temporary build sandbox
         #[arg(long)]
         memory: Option<i64>,
 
@@ -2427,6 +2460,11 @@ async fn run_command(
                     } => commands::sbx::name::run(ctx, &sandbox_id, &new_name).await,
                     SbxCommands::Update {
                         sandbox_id,
+                        cpus,
+                        memory,
+                        disk_mb,
+                        no_wait,
+                        wait_timeout,
                         no_internet,
                         network_allow,
                         network_deny,
@@ -2440,6 +2478,13 @@ async fn run_command(
                                 no_internet,
                                 network_allow: &network_allow,
                                 network_deny: &network_deny,
+                            },
+                            commands::sbx::update::UpdateResourceArgs {
+                                cpus,
+                                memory,
+                                disk_mb,
+                                no_wait,
+                                wait_timeout: wait_timeout.unwrap_or(300),
                             },
                         )
                         .await
@@ -2455,11 +2500,13 @@ async fn run_command(
                     SbxCommands::Wait {
                         sandbox_id,
                         timeout,
+                        resize,
                     } => {
                         commands::sbx::wait::run(
                             ctx,
                             &sandbox_id,
                             std::time::Duration::from_secs(timeout),
+                            resize,
                         )
                         .await
                     }
@@ -4729,6 +4776,7 @@ mod tests {
                 network_allow,
                 network_deny,
                 clear_network,
+                ..
             }) => {
                 assert_eq!(sandbox_id, "sbx-123");
                 assert!(!no_internet);
@@ -4737,6 +4785,131 @@ mod tests {
                 assert!(!clear_network);
             }
             _ => panic!("expected sbx update command"),
+        }
+    }
+
+    #[test]
+    fn sbx_update_resource_flags_match_create_and_wait_by_default() {
+        for flags in [["-c", "-m"], ["--cpus", "--memory"]] {
+            match parse_command([
+                "tl",
+                "sbx",
+                "update",
+                "named",
+                flags[0],
+                "2.0",
+                flags[1],
+                "2048",
+                "--disk_mb",
+                "30720",
+            ]) {
+                Commands::Sbx(SbxCommands::Update {
+                    cpus,
+                    memory,
+                    disk_mb,
+                    no_wait,
+                    wait_timeout,
+                    ..
+                }) => {
+                    assert_eq!(cpus, Some(2.0));
+                    assert_eq!(memory, Some(2048));
+                    assert_eq!(disk_mb, Some(30720));
+                    assert!(!no_wait);
+                    assert_eq!(wait_timeout, None);
+                }
+                _ => panic!("expected update"),
+            }
+        }
+    }
+
+    #[test]
+    fn sbx_update_resource_flags_conflict_with_all_network_changes() {
+        for resource in ["--cpus", "--memory", "--disk_mb"] {
+            for network in [
+                vec!["--no-internet"],
+                vec!["--clear-network"],
+                vec!["--network-allow", "example.com"],
+                vec!["--network-deny", "example.com"],
+            ] {
+                let mut args = vec!["tl", "sbx", "update", "named", resource, "2048"];
+                args.extend(network);
+                assert!(Cli::try_parse_from(args).is_err());
+            }
+        }
+    }
+
+    #[test]
+    fn sbx_update_wait_options_require_resources_and_cannot_conflict() {
+        for flag in ["--no-wait", "-n"] {
+            match parse_command(["tl", "sbx", "update", "named", "--memory", "2048", flag]) {
+                Commands::Sbx(SbxCommands::Update {
+                    no_wait,
+                    wait_timeout,
+                    ..
+                }) => {
+                    assert!(no_wait);
+                    assert_eq!(wait_timeout, None);
+                }
+                _ => panic!("expected update"),
+            }
+        }
+        match parse_command([
+            "tl",
+            "sbx",
+            "update",
+            "named",
+            "--memory",
+            "2048",
+            "--wait-timeout",
+            "15",
+        ]) {
+            Commands::Sbx(SbxCommands::Update {
+                no_wait,
+                wait_timeout,
+                ..
+            }) => {
+                assert!(!no_wait);
+                assert_eq!(wait_timeout, Some(15));
+            }
+            _ => panic!("expected update"),
+        }
+        for args in [
+            vec!["--clear-network", "--no-wait"],
+            vec!["--clear-network", "--wait-timeout", "15"],
+            vec!["--memory", "2048", "--no-wait", "--wait-timeout", "15"],
+            vec!["--memory", "2048", "--timeout", "3600"],
+        ] {
+            let mut command = vec!["tl", "sbx", "update", "named"];
+            command.extend(args);
+            assert!(Cli::try_parse_from(command).is_err());
+        }
+    }
+
+    #[test]
+    fn sbx_wait_accepts_only_positive_resize_generations() {
+        match parse_command([
+            "tl",
+            "sbx",
+            "wait",
+            "named",
+            "--resize",
+            "7",
+            "--timeout",
+            "15",
+        ]) {
+            Commands::Sbx(SbxCommands::Wait {
+                resize, timeout, ..
+            }) => {
+                assert_eq!(resize, Some(7));
+                assert_eq!(timeout, 15);
+            }
+            _ => panic!("expected wait"),
+        }
+        for generation in ["0", "-1", "1.5"] {
+            assert!(
+                Cli::try_parse_from(["tl", "sbx", "wait", "named", "--resize", generation])
+                    .is_err()
+            );
         }
     }
 

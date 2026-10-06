@@ -1,10 +1,17 @@
 """Exception hierarchy for sandbox operations."""
 
+from __future__ import annotations
+
 import json
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from .models import SandboxStatus
+    from .models import (
+        ContainerResourcesInfo,
+        ResizeErrorReason,
+        SandboxInfo,
+        SandboxStatus,
+    )
 
 
 class SandboxException(Exception):
@@ -43,6 +50,52 @@ class SandboxError(SandboxException):
     def sandbox_id(self) -> str | None:
         """The sandbox the error is about, when known."""
         return self._error_sandbox_id
+
+
+class SandboxResizeError(SandboxError):
+    """A resize failed or its completion could not be observed.
+
+    ``info`` contains the last observation, including confirmed allocation.
+    A timeout never cancels the admitted resize; wait for ``generation`` again.
+    """
+
+    def __init__(
+        self,
+        sandbox_id: str,
+        *,
+        generation: int,
+        reason: ResizeErrorReason,
+        message: str,
+        info: SandboxInfo | None = None,
+    ):
+        from .models import ResizeErrorReason
+
+        self.generation = generation
+        self.info = info
+        self._resize_reason = ResizeErrorReason(reason)
+        resources = self.confirmed_resources
+        allocation = (
+            f"{resources.cpus:g} CPUs, {resources.memory_mb} MiB memory, "
+            f"{resources.disk_mb} MiB disk"
+            if resources is not None
+            else "unavailable"
+        )
+        super().__init__(
+            f"Sandbox {sandbox_id} resize generation {self.generation}: "
+            f"{message}; last confirmed allocation: {allocation}",
+            reason=self._resize_reason,
+            sandbox_id=sandbox_id,
+        )
+
+    @property
+    def reason(self) -> ResizeErrorReason:
+        """Typed reason for the failure or incomplete wait."""
+        return self._resize_reason
+
+    @property
+    def confirmed_resources(self) -> ContainerResourcesInfo | None:
+        """Last confirmed allocation, or None if no observation was available."""
+        return self.info.resources if self.info is not None else None
 
 
 class SandboxPending(SandboxError):

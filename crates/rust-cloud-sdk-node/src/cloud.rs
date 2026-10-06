@@ -5,7 +5,6 @@ use std::{collections::HashMap, io, pin::Pin, sync::Arc, time::Duration};
 
 use async_compression::tokio::bufread::GzipDecoder;
 use bytes::Bytes;
-use eventsource_stream::Eventsource;
 use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 use napi::threadsafe_function::{ErrorStrategy, ThreadsafeFunction};
 use napi::{
@@ -21,7 +20,7 @@ use serde::Deserialize;
 use tensorlake::retry::{
     RetryDecision, RetryPolicy, RetryState, UNDELIVERED_REPLAY_BUDGET, is_transient,
 };
-use tensorlake::{Client, ClientBuilder, Traced, error::SdkError};
+use tensorlake::{Client, ClientBuilder, Traced, error::SdkError, sse::sse_events};
 use tokio_util::io::{ReaderStream, StreamReader};
 
 use crate::sandbox::{DeferredHttpClient, NativeStreamCall, into_napi_error, usage_error};
@@ -159,6 +158,7 @@ fn into_cloud_error(error: SdkError) -> napi::Error {
         error @ (SdkError::Http(_)
         | SdkError::Middleware(_)
         | SdkError::EventSourceError(_)
+        | SdkError::EventStreamTransport(_)
         | SdkError::Io(_)) => connection_error(&error.detail()),
         error => into_napi_error(error),
     }
@@ -497,8 +497,9 @@ impl NativeCloudClient {
         emit: ThreadsafeFunction<String, ErrorStrategy::Fatal>,
     ) -> napi::Result<String> {
         let timeout = Duration::from_secs_f64(self.options.timeout_ms / 1000.0);
-        // Bound establishment and retries, but allow progress/log streams to
-        // remain open until completion or explicit cancellation.
+        // The timeout bounds establishment with its retries, then each wait
+        // for more of the stream; progress and log streams stay open while
+        // they keep sending.
         let response = tokio::time::timeout(timeout, async {
             let client = self
                 .http_client(&spec)
@@ -521,9 +522,9 @@ impl NativeCloudClient {
         .await
         .map_err(|_| connection_error("cloud stream connection deadline exceeded"))??;
         let trace_id = response.trace_id.clone();
-        let mut events = response_stream(response.into_inner()).await.eventsource();
+        let mut events = sse_events(response_stream(response.into_inner()).await, Some(timeout));
         while let Some(event) = events.next().await {
-            let event = event.map_err(|error| connection_error(&error.to_string()))?;
+            let event = event.map_err(into_cloud_error)?;
             // Preserve the existing CloudClient convention of skipping invalid JSON.
             if serde_json::from_str::<serde_json::Value>(&event.data).is_err() {
                 continue;

@@ -99,9 +99,9 @@ fn format_size(size_bytes: Option<&serde_json::Value>) -> String {
     };
 
     if size_bytes >= 1024 * 1024 {
-        format!("{:.1} MB", size_bytes as f64 / (1024.0 * 1024.0))
+        format!("{:.1} MiB", size_bytes as f64 / (1024.0 * 1024.0))
     } else if size_bytes >= 1024 {
-        format!("{:.1} KB", size_bytes as f64 / 1024.0)
+        format!("{:.1} KiB", size_bytes as f64 / 1024.0)
     } else {
         format!("{} B", size_bytes)
     }

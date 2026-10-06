@@ -17,6 +17,9 @@ use crate::{
 /// including client-specific errors, authentication issues, and general HTTP errors.
 #[derive(Debug, Error)]
 pub enum SdkError {
+    /// A resize failed or could not be observed to completion.
+    #[error(transparent)]
+    SandboxResize(#[from] Box<crate::sandboxes::resize::SandboxResizeError>),
     /// Errors specific to the Applications client
     #[error(transparent)]
     Applications(#[from] ApplicationsError),
@@ -75,6 +78,20 @@ pub enum SdkError {
     /// EventSource (SSE) stream error
     #[error("EventSource error: {0}")]
     EventSourceError(String),
+
+    /// The connection failed while an EventSource (SSE) response body was
+    /// streaming. reqwest reports every such failure as "error decoding
+    /// response body"; the cause is in the error's source chain.
+    #[error("EventSource error: {0}")]
+    EventStreamTransport(#[source] reqwest::Error),
+
+    /// A streamed response did not start, or stopped sending data, within the
+    /// client's request timeout.
+    #[error("timed out after {timeout:?} waiting for {waiting_for}")]
+    StreamTimeout {
+        waiting_for: &'static str,
+        timeout: std::time::Duration,
+    },
 }
 
 /// Error codes the Sandbox Proxy returns when it gave up on a request *before*
@@ -113,7 +130,8 @@ pub enum TransportFailure {
     /// DNS resolution, TCP connect, or the TLS handshake failed. The server
     /// never saw the request.
     Connect,
-    /// The request was sent but no response completed within the deadline.
+    /// The request was sent, but its response, or the next part of a streamed
+    /// response, did not arrive within the deadline.
     Timeout,
 }
 
@@ -130,6 +148,7 @@ impl SdkError {
         match self {
             Self::Http(error) => Some(error),
             Self::Middleware(reqwest_middleware::Error::Reqwest(error)) => Some(error),
+            Self::EventStreamTransport(error) => Some(error),
             _ => None,
         }
     }
@@ -142,6 +161,9 @@ impl SdkError {
     /// that identify it (`tcp connect error`, `dns error`) appear only in the
     /// [`std::error::Error::source`] chain.
     pub fn transport_failure(&self) -> Option<TransportFailure> {
+        if matches!(self, Self::StreamTimeout { .. }) {
+            return Some(TransportFailure::Timeout);
+        }
         let error = self.as_reqwest()?;
         if error.is_timeout() {
             Some(TransportFailure::Timeout)

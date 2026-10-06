@@ -13,9 +13,11 @@ struct SandboxDescription {
     name: Option<String>,
     namespace: Option<String>,
     status: Option<String>,
+    runtime: Option<String>,
     #[serde(flatten)]
     failure: SandboxFailureDetails,
     resources: Option<SandboxResources>,
+    resource_resize: Option<tensorlake::sandboxes::models::SandboxResourceResizeInfo>,
     #[serde(alias = "allow_unauthenticated_proxy_access")]
     allow_unauthenticated_access: Option<bool>,
     network_policy: Option<SandboxNetwork>,
@@ -136,6 +138,10 @@ fn print_sandbox_details(item: &SandboxDescription) {
     println!("Namespace:       {}", namespace);
     println!("Status:          {}", status);
     println!("Image:           {}", image);
+    println!(
+        "Runtime:         {}",
+        item.runtime.as_deref().unwrap_or("-")
+    );
 
     let resources = item.resources.as_ref();
     let cpus = resources
@@ -144,15 +150,28 @@ fn print_sandbox_details(item: &SandboxDescription) {
         .unwrap_or_else(|| "-".to_string());
     let memory = resources
         .and_then(|r| r.memory_mb)
-        .map(|v| format!("{} MB", v))
+        .map(|v| format!("{} MiB", v))
         .unwrap_or_else(|| "-".to_string());
     let disk = resources
         .and_then(|r| r.disk_mb.or(r.ephemeral_disk_mb))
-        .map(|v| format!("{} MB", v))
+        .map(|v| format!("{} MiB", v))
         .unwrap_or_else(|| "-".to_string());
     println!("CPUs:            {}", cpus);
     println!("Memory:          {}", memory);
     println!("Disk:            {}", disk);
+    if let Some(resize) = &item.resource_resize {
+        println!(
+            "Resize:          generation {}: {}",
+            resize.generation, resize.status
+        );
+        println!(
+            "Requested:       {} CPUs, {} MiB memory, {} MiB disk",
+            resize.requested.cpus, resize.requested.memory_mb, resize.requested.disk_mb
+        );
+        if let Some(error) = &resize.error_message {
+            println!("Resize error:    {error}");
+        }
+    }
 
     let allow_unauthenticated = item.allow_unauthenticated_access.unwrap_or(false);
     println!(

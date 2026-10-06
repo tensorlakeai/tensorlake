@@ -12,6 +12,7 @@ from urllib.parse import urlparse
 from tensorlake._tracing import USER_AGENT, Traced, TracedIterator
 
 from . import _defaults
+from ._resize import resize_resources, validate_resize_wait
 from .exceptions import (
     PoolInUseError,
     PoolNotFoundError,
@@ -21,6 +22,7 @@ from .exceptions import (
     SandboxNotFoundError,
     SandboxNotRoutableError,
     SandboxPending,
+    SandboxResizeError,
     _format_error_details,
 )
 from .models import (
@@ -43,6 +45,7 @@ from .models import (
     ListSnapshotsResponse,
     NetworkConfig,
     PendingSandbox,
+    ResizeErrorReason,
     SandboxInfo,
     SandboxLogLevel,
     SandboxLogsResponse,
@@ -159,6 +162,19 @@ def _raise_as_sandbox_error(e: Exception) -> NoReturn:
         and len(e.args) > 0
     ):
         kind, status_code, message = _parse_rust_client_error_fields(e)
+        if kind == "resize":
+            payload = json.loads(message)
+            raise SandboxResizeError(
+                payload["sandbox_id"],
+                generation=payload["generation"],
+                reason=ResizeErrorReason(payload["reason"]),
+                message=payload["message"],
+                info=(
+                    SandboxInfo.model_validate(payload["info"])
+                    if payload.get("info") is not None
+                    else None
+                ),
+            ) from None
         if kind == "connection":
             raise SandboxConnectionError(message) from None
         if status_code is not None:
@@ -592,9 +608,9 @@ class SandboxClient:
                 When omitted, Tensorlake uses the default managed environment.
             cpus: Number of CPUs to allocate. Defaults to 1 for a fresh
                 sandbox; omitted snapshot restores inherit this value.
-            memory_mb: Memory in megabytes. Defaults to 1024 for a fresh
+            memory_mb: Memory in MiB. Defaults to 1024 for a fresh
                 sandbox; omitted snapshot restores inherit this value.
-            disk_mb: Root disk size in megabytes. When omitted, the server
+            disk_mb: Root disk size in MiB. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
                 ``A10`` unless ``gpu_model`` is set. GPU sandboxes require a
@@ -1048,39 +1064,78 @@ class SandboxClient:
         sandbox_id: str,
         name: str | None = None,
         *,
+        cpus: float | None = None,
+        memory_mb: int | None = None,
+        disk_mb: int | None = None,
+        wait: bool = True,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
         allow_unauthenticated_access: bool | None = None,
         exposed_ports: list[int] | None = None,
         network: NetworkConfig | ClearNetworkPolicy | None = None,
     ) -> Traced[SandboxInfo]:
         """Update a running sandbox's properties.
 
-        Supports updating the sandbox name, sandbox proxy access settings, and
-        the egress network policy.
+        Resource names and units match create. Resize requires a running Cloud
+        Hypervisor sandbox and cannot be mixed with name, proxy, or network
+        changes. Omitted dimensions retain their confirmed allocation.
+        Integer-valued floats such as 2048.0 are accepted for memory and disk;
+        fractional values and booleans are rejected without rounding.
+
+        If all targets already match, no update is sent. The returned resources
+        are current, but resource_resize can be None or describe an earlier
+        operation, including a failed one. Wait options are ignored when no
+        resource targets are supplied.
 
         Args:
-            sandbox_id: ID or name of the sandbox to update
-            name: New name for the sandbox. Naming an ephemeral sandbox makes it
+            sandbox_id: ID or name of the sandbox to update.
+            name: New sandbox name. Naming an ephemeral sandbox makes it
                 non-ephemeral and enables suspend/resume.
+            cpus: Finite positive whole-vCPU target, using create's CPU units.
+            memory_mb: Positive integer memory target in MiB.
+            disk_mb: Positive integer root disk target in MiB; cannot shrink
+                below the current confirmed disk size.
+            wait: Wait for resize completion (default True). False returns
+                admission; use wait_for_resource_resize() to continue later.
+            timeout: Maximum seconds to wait for resize completion (default
+                300). Does not change sandbox lifetime or cancel the resize.
+                Zero checks once. Ignored when wait is False.
+            poll_interval: Seconds between resize polls (default 1.0); must
+                be positive. Ignored when wait is False.
             allow_unauthenticated_access: Whether exposed user ports should be
-                reachable without TensorLake auth.
-            exposed_ports: User ports that should be routable through the sandbox
-                proxy. Port ``9501`` is reserved for sandbox management and cannot
-                be configured here.
-            network: Egress network policy update, applied to the running VM's
-                firewall in one atomic swap. Omit (the default) to leave the
-                current policy unchanged, pass a :class:`NetworkConfig` to
-                replace it, or pass :data:`CLEAR_NETWORK_POLICY` to clear it to
-                unrestricted egress. A destination that fails to resolve rejects
-                the update and the previous policy stays enforced.
+                reachable without Tensorlake auth.
+            exposed_ports: User ports routable through the sandbox proxy.
+                Port 9501 is reserved for sandbox management.
+            network: Egress network policy. Omit to leave it unchanged, pass a
+                NetworkConfig to replace it atomically, or CLEAR_NETWORK_POLICY
+                to restore unrestricted egress. Unresolvable destinations
+                reject the update and leave the previous policy enforced.
 
         Returns:
-            SandboxInfo with updated sandbox details
+            Traced[SandboxInfo] with confirmed resources and the latest resize
+            metadata, which may belong to an earlier operation for a no-op.
 
         Raises:
-            SandboxNotFoundError: If sandbox doesn't exist
-            RemoteAPIError: If the API request fails
-            SandboxConnectionError: If the server is unreachable
+            SandboxResizeError: The resize failed, timed out, was interrupted,
+                was superseded, or returned incompatible completion metadata.
+                Carries generation, reason, and confirmed_resources.
+            SandboxError: Invalid targets, wait options, or mixed update fields.
+            SandboxNotFoundError: The sandbox does not exist.
+            RemoteAPIError: The API rejected the request.
+            SandboxConnectionError: The server is unreachable.
         """
+        resources = resize_resources(cpus, memory_mb, disk_mb)
+        if resources is not None:
+            validate_resize_wait(timeout, poll_interval)
+            if (
+                name is not None
+                or allow_unauthenticated_access is not None
+                or exposed_ports is not None
+                or network is not None
+            ):
+                raise SandboxError(
+                    "resources cannot be combined with other sandbox update fields"
+                )
         normalized_ports = (
             _normalize_user_ports(exposed_ports) if exposed_ports is not None else None
         )
@@ -1092,10 +1147,12 @@ class SandboxClient:
             and normalized_ports is None
             and network_config is None
             and not clearing_network
+            and resources is None
         ):
             raise SandboxError("At least one sandbox update field must be provided.")
 
         request = UpdateSandboxRequest(
+            resources=resources,
             name=name,
             allow_unauthenticated_access=allow_unauthenticated_access,
             exposed_ports=normalized_ports,
@@ -1107,10 +1164,59 @@ class SandboxClient:
         payload = json.loads(request.model_dump_json(exclude_none=True))
         if clearing_network:
             payload["network"] = None
+        wait_options = (
+            dict(wait=wait, timeout_sec=timeout, poll_interval_sec=poll_interval)
+            if resources is not None
+            else {}
+        )
         try:
             trace_id, response_json = self._rust_client.update_sandbox(
                 sandbox_id=sandbox_id,
                 request_json=json.dumps(payload),
+                **wait_options,
+            )
+            return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
+        except Exception as e:
+            if _rust_status_code(e) == 404:
+                raise SandboxNotFoundError(sandbox_id) from None
+            _raise_as_sandbox_error(e)
+
+    def wait_for_resource_resize(
+        self,
+        sandbox_id: str,
+        generation: int,
+        *,
+        timeout: float = 300,
+        poll_interval: float = 1.0,
+    ) -> Traced[SandboxInfo]:
+        """Wait for an exact resize generation without submitting another update.
+
+        Args:
+            sandbox_id: ID or name of the sandbox to observe.
+            generation: Positive generation returned by the update or timeout error.
+            timeout: Maximum wait in seconds (default 300). Timeout never
+                cancels the resize; call this method again to keep waiting.
+                Zero checks once.
+            poll_interval: Positive seconds between polls (default 1.0).
+
+        Returns:
+            Traced[SandboxInfo] with the completed generation's confirmed resources.
+
+        Raises:
+            SandboxResizeError: Failure, timeout, interruption, superseding, or
+                incompatible metadata; includes the last confirmed_resources.
+            SandboxError: Invalid generation or wait options.
+            SandboxNotFoundError: The sandbox does not exist.
+            RemoteAPIError: The API rejected the request.
+            SandboxConnectionError: The server is unreachable.
+        """
+        validate_resize_wait(timeout, poll_interval, generation)
+        try:
+            trace_id, response_json = self._rust_client.wait_for_resource_resize(
+                sandbox_id=sandbox_id,
+                generation=generation,
+                timeout_sec=timeout,
+                poll_interval_sec=poll_interval,
             )
             return Traced(trace_id, SandboxInfo.model_validate_json(response_json))
         except Exception as e:
@@ -1600,8 +1706,8 @@ class SandboxClient:
             image: Sandbox image name to boot from, such as
                 ``tensorlake/ubuntu-minimal`` or a registered Sandbox Image name.
             cpus: Number of CPUs to allocate
-            memory_mb: Memory in megabytes
-            disk_mb: Root disk size in megabytes. When omitted, the registered
+            memory_mb: Memory in MiB
+            disk_mb: Root disk size in MiB. When omitted, the registered
                 image's root disk size is used.
             timeout_secs: Timeout in seconds (default: 0 = no timeout)
             entrypoint: Custom entrypoint command (optional)
@@ -1713,8 +1819,8 @@ class SandboxClient:
             image: Sandbox image name to boot from, such as
                 ``tensorlake/ubuntu-minimal`` or a registered Sandbox Image name.
             cpus: Number of CPUs to allocate
-            memory_mb: Memory in megabytes
-            disk_mb: Root disk size in megabytes. When omitted, the registered
+            memory_mb: Memory in MiB
+            disk_mb: Root disk size in MiB. When omitted, the registered
                 image's root disk size is used.
             timeout_secs: Timeout in seconds (default: 0 = no timeout)
             entrypoint: Custom entrypoint command (optional)
@@ -1948,9 +2054,9 @@ class SandboxClient:
                 (optional if using pool).
             cpus: Number of CPUs to allocate. Defaults to 1 for fresh
                 creates; omitted snapshot restores inherit this value.
-            memory_mb: Memory in megabytes. Defaults to 1024 for fresh
+            memory_mb: Memory in MiB. Defaults to 1024 for fresh
                 creates; omitted snapshot restores inherit this value.
-            disk_mb: Root disk size in megabytes. When omitted, the server
+            disk_mb: Root disk size in MiB. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
                 ``A10`` unless ``gpu_model`` is set. GPU sandboxes require a

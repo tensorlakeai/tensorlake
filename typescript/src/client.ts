@@ -43,6 +43,7 @@ import {
   type SuspendResumeOptions,
   type UpdatePoolOptions,
   type UpdateSandboxOptions,
+  type ResourceResizeWaitOptions,
   fromSnakeKeys,
   toSnakeKeys,
 } from "./models.js";
@@ -624,12 +625,47 @@ export class SandboxClient {
     });
   }
 
-  /** Update sandbox properties such as name, exposed ports, and proxy auth settings. */
+  /**
+   * Update properties or resize a Running Cloud Hypervisor sandbox.
+   * Resource names match create. Resize waits by default; wait=false returns
+   * admission. Timeout leaves the resize running and reports its generation.
+   * Wait, timeout, and pollInterval are ignored on non-resource updates.
+   * A no-op returns current resources with absent or earlier resize metadata.
+   */
   async update(
     sandboxId: string,
     options: UpdateSandboxOptions,
   ): Promise<Traced<SandboxInfo>> {
     const body: Record<string, unknown> = {};
+    const resources: Record<string, number> = {};
+    for (const [field, wire, value] of [
+      ["cpus", "cpus", options.cpus],
+      ["memoryMb", "memory_mb", options.memoryMb],
+      ["diskMb", "disk_mb", options.diskMb],
+    ] as const) {
+      if (value === undefined) continue;
+      if (typeof value !== "number" || !Number.isSafeInteger(value) || value <= 0) {
+        throw new SandboxError(
+          `${field} ${String(value)} must be a finite positive ${field === "cpus" ? "whole-vCPU count" : "integer number of MiB"}`,
+        );
+      }
+      resources[wire] = value;
+    }
+    const resizing = Object.keys(resources).length > 0;
+    if (resizing) {
+      validateResizeWait(options);
+      if (
+        options.name != null ||
+        options.allowUnauthenticatedAccess != null ||
+        options.exposedPorts != null ||
+        options.network !== undefined
+      ) {
+        throw new SandboxError(
+          "resources cannot be combined with other sandbox update fields",
+        );
+      }
+      body.resources = resources;
+    }
     if (options.name != null) body.name = options.name;
     if (options.allowUnauthenticatedAccess != null) {
       body.allow_unauthenticated_access = options.allowUnauthenticatedAccess;
@@ -649,7 +685,31 @@ export class SandboxClient {
       );
     }
     return this.tracedJson<SandboxInfo>(
-      () => this.native.updateSandbox(sandboxId, JSON.stringify(body)),
+      () => resizing
+        ? this.native.updateSandbox(
+            sandboxId, JSON.stringify(body), options.wait ?? true,
+            options.timeout ?? 300, options.pollInterval ?? 1,
+          )
+        : this.native.updateSandbox(sandboxId, JSON.stringify(body)),
+      "sandboxId",
+      { sandboxId, notFoundKind: "sandbox" },
+    );
+  }
+
+  /** Wait for this exact generation. Timeout leaves the resize running. */
+  async waitForResourceResize(
+    sandboxId: string,
+    generation: number,
+    options: ResourceResizeWaitOptions = {},
+  ): Promise<Traced<SandboxInfo>> {
+    validateResizeWait(options);
+    if (!Number.isSafeInteger(generation) || generation < 1) {
+      throw new SandboxError("generation must be a positive safe integer");
+    }
+    return this.tracedJson<SandboxInfo>(
+      () => this.native.waitForResourceResize(
+        sandboxId, generation, options.timeout ?? 300, options.pollInterval ?? 1,
+      ),
       "sandboxId",
       { sandboxId, notFoundKind: "sandbox" },
     );
@@ -1366,4 +1426,15 @@ function validateUserPort(port: number): number {
 
 function dedupeAndSortPorts(ports: number[]): number[] {
   return [...new Set(ports)].sort((a, b) => a - b);
+}
+
+function validateResizeWait(options: ResourceResizeWaitOptions): void {
+  const timeout = options.timeout ?? 300;
+  const poll = options.pollInterval ?? 1;
+  if (typeof timeout !== "number" || !Number.isFinite(timeout) || timeout < 0) {
+    throw new SandboxError("timeout must be finite and non-negative");
+  }
+  if (typeof poll !== "number" || !Number.isFinite(poll) || poll <= 0) {
+    throw new SandboxError("pollInterval must be finite and positive");
+  }
 }

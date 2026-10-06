@@ -18,6 +18,7 @@
 use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
+use tensorlake::sandboxes::resize::ResizeOptions;
 use tokio::sync::OnceCell;
 
 use napi::bindgen_prelude::{Buffer, Either, Promise};
@@ -90,6 +91,11 @@ fn make_napi_error(category: &str, status: Option<u16>, message: String) -> napi
 /// substring reported real DNS and TCP failures as opaque internal errors.
 pub(crate) fn into_napi_error(error: SdkError) -> napi::Error {
     match error {
+        SdkError::SandboxResize(error) => make_napi_error(
+            "resize",
+            None,
+            serde_json::to_string(&error).expect("serializable resize error"),
+        ),
         SdkError::Authentication(message) => make_napi_error("sdk_usage", Some(401), message),
         SdkError::Authorization(message) => make_napi_error("sdk_usage", Some(403), message),
         SdkError::ServerError { status, message } => {
@@ -590,19 +596,71 @@ impl NativeSandboxClient {
         &self,
         sandbox_id: String,
         request_json: String,
+        wait: Option<bool>,
+        timeout_sec: Option<f64>,
+        poll_interval_sec: Option<f64>,
     ) -> napi::Result<TracedJson> {
         let request: UpdateSandboxRequest = parse_json_payload(&request_json)?;
+        let options = resize_options(wait, timeout_sec, poll_interval_sec)?;
+        if request.resources.is_some() {
+            let traced = self
+                .client()
+                .await?
+                .update_with_options(&sandbox_id, &request, options)
+                .await
+                .map_err(into_napi_error)?;
+            return Ok(TracedJson {
+                trace_id: traced.trace_id.clone(),
+                json: serde_json::to_string(&*traced).map_err(|e| into_napi_error(e.into()))?,
+            });
+        }
         with_retry(self.client().await?, 5, move |c| {
-            let sandbox_id = sandbox_id.clone();
+            let id = sandbox_id.clone();
             let request = request.clone();
             async move {
-                let traced = c.update(&sandbox_id, &request).await?;
-                let trace_id = traced.trace_id.clone();
-                let json = serde_json::to_string(&*traced)?;
-                Ok(TracedJson { trace_id, json })
+                let traced = c.update(&id, &request).await?;
+                Ok(TracedJson {
+                    trace_id: traced.trace_id.clone(),
+                    json: serde_json::to_string(&*traced)?,
+                })
             }
         })
         .await
+    }
+
+    #[napi]
+    pub async fn wait_for_resource_resize(
+        &self,
+        sandbox_id: String,
+        generation: f64,
+        timeout_sec: Option<f64>,
+        poll_interval_sec: Option<f64>,
+    ) -> napi::Result<TracedJson> {
+        if !generation.is_finite()
+            || generation < 1.0
+            || generation.fract() != 0.0
+            || generation > 9_007_199_254_740_991.0
+        {
+            return Err(usage_error(
+                "generation must be a positive safe integer".into(),
+            ));
+        }
+        let options = resize_options(Some(true), timeout_sec, poll_interval_sec)?;
+        let traced = self
+            .client()
+            .await?
+            .wait_for_resource_resize(
+                &sandbox_id,
+                generation as u64,
+                options.timeout,
+                options.poll_interval,
+            )
+            .await
+            .map_err(into_napi_error)?;
+        Ok(TracedJson {
+            trace_id: traced.trace_id.clone(),
+            json: serde_json::to_string(&*traced).map_err(|e| into_napi_error(e.into()))?,
+        })
     }
 
     #[napi]
@@ -1317,4 +1375,26 @@ async fn emit_event<E: serde::Serialize>(
             .await
             .map_err(|error| SdkError::ClientError(error.to_string())),
     }
+}
+
+fn resize_options(
+    wait: Option<bool>,
+    timeout: Option<f64>,
+    poll: Option<f64>,
+) -> napi::Result<ResizeOptions> {
+    let timeout = timeout.unwrap_or(300.0);
+    let poll = poll.unwrap_or(1.0);
+    if !timeout.is_finite() || timeout < 0.0 || !poll.is_finite() || poll <= 0.0 {
+        return Err(usage_error(
+            "timeout must be finite and non-negative; pollInterval must be finite and positive"
+                .into(),
+        ));
+    }
+    Ok(ResizeOptions {
+        wait: wait.unwrap_or(true),
+        timeout: std::time::Duration::try_from_secs_f64(timeout)
+            .map_err(|e| usage_error(e.to_string()))?,
+        poll_interval: std::time::Duration::try_from_secs_f64(poll)
+            .map_err(|e| usage_error(e.to_string()))?,
+    })
 }
