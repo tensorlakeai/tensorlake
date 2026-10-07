@@ -454,22 +454,43 @@ export async function* nativeEventStream(
  * Reduce the buffered `runProcess` events into a `CommandResult`, matching the
  * SSE-parsing logic the undici `run()` path used.
  */
+interface OutputChunk {
+  line: string;
+  lineEnding?: string;
+}
+
+/**
+ * Join one stream's output chunks into the text the process wrote. A daemon
+ * that honors `exact_output` sends each chunk's `line_ending` ("" for a partial
+ * chunk); an older daemon sends lines without terminators, joined with "\n".
+ */
+function joinOutput(chunks: OutputChunk[]): string {
+  if (chunks.every((chunk) => chunk.lineEnding !== undefined)) {
+    return chunks.map((chunk) => chunk.line + chunk.lineEnding).join("");
+  }
+  return chunks.map((chunk) => chunk.line).join("\n");
+}
+
 export function assembleCommandResult(events: string[]): {
   exitCode: number;
   stdout: string;
   stderr: string;
 } {
-  const stdoutLines: string[] = [];
-  const stderrLines: string[] = [];
+  const stdoutChunks: OutputChunk[] = [];
+  const stderrChunks: OutputChunk[] = [];
   let exitCode = -1;
 
   for (const eventJson of events) {
     const raw = JSON.parse(eventJson) as Record<string, unknown>;
     if (typeof raw.line === "string") {
+      const chunk: OutputChunk = {
+        line: raw.line,
+        lineEnding: typeof raw.line_ending === "string" ? raw.line_ending : undefined,
+      };
       if (raw.stream === "stderr") {
-        stderrLines.push(raw.line);
+        stderrChunks.push(chunk);
       } else {
-        stdoutLines.push(raw.line);
+        stdoutChunks.push(chunk);
       }
     } else if ("exit_code" in raw || "signal" in raw) {
       if (typeof raw.exit_code === "number") {
@@ -480,5 +501,5 @@ export function assembleCommandResult(events: string[]): {
     }
   }
 
-  return { exitCode, stdout: stdoutLines.join("\n"), stderr: stderrLines.join("\n") };
+  return { exitCode, stdout: joinOutput(stdoutChunks), stderr: joinOutput(stderrChunks) };
 }

@@ -148,6 +148,28 @@ describe("Sandbox native proxy path", () => {
     sbx.close();
   });
 
+  it("asks for exact output and joins chunks with their line endings", async () => {
+    const { proxy } = installFakeBinding({
+      runProcess: vi.fn(async () => ({
+        traceId: "tr-run",
+        events: [
+          JSON.stringify({ pid: 7, started_at: 1 }),
+          JSON.stringify({ line: "a", line_ending: "", timestamp: 2 }),
+          JSON.stringify({ line: "b", line_ending: "\r\n", timestamp: 3 }),
+          JSON.stringify({ line: "", line_ending: "\n", timestamp: 4 }),
+          JSON.stringify({ line: "oops", line_ending: "\n", stream: "stderr", timestamp: 5 }),
+          JSON.stringify({ exit_code: 0 }),
+        ],
+      })),
+    });
+    const sbx = makeSandbox();
+    const result = await sbx.run("sh");
+    expect(JSON.parse(proxy.runProcess.mock.calls[0][0]).exact_output).toBe(true);
+    expect(result.stdout).toBe("ab\r\n\n");
+    expect(result.stderr).toBe("oops\n");
+    sbx.close();
+  });
+
   it("streams followStdout events live via the emit bridge", async () => {
     const { proxy } = installFakeBinding({
       followStdout: vi.fn(async (_process: string, emit: (e: string) => void) => {

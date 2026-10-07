@@ -1069,6 +1069,11 @@ pub struct OutputEvent {
     pub timestamp: serde_json::Value,
     #[serde(default)]
     pub stream: Option<String>,
+    /// The terminator the daemon removed from `line`: `"\n"`, `"\r\n"`, or
+    /// `""` for a partial chunk. Present only when the run asked for
+    /// `exact_output` and the daemon supports it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_ending: Option<String>,
 }
 
 /// Events returned by the streaming `POST /api/v1/processes/run` endpoint.
@@ -1616,5 +1621,22 @@ mod tests {
                 model: "H100".to_string(),
             }
         );
+    }
+
+    #[test]
+    fn run_output_events_keep_their_line_ending() {
+        let line_ending = |data: &str| {
+            let event: RunProcessEvent = serde_json::from_str(data).unwrap();
+            serde_json::to_value(&event)
+                .unwrap()
+                .get("line_ending")
+                .cloned()
+        };
+
+        assert_eq!(
+            line_ending(r#"{"line":"a","timestamp":1,"line_ending":"\r\n"}"#),
+            Some(serde_json::json!("\r\n"))
+        );
+        assert_eq!(line_ending(r#"{"line":"a","timestamp":1}"#), None);
     }
 }

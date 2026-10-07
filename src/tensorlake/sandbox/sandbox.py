@@ -147,6 +147,42 @@ def _validate_managed_name_client_side(name: str) -> None:
     _vmn(name)
 
 
+def _join_output(chunks: list[dict]) -> str:
+    """Join one stream's output chunks into the text the process wrote.
+
+    A daemon that honors ``exact_output`` sends each chunk's ``line_ending``
+    (``""`` for a partial chunk), so the chunks join exactly. An older daemon
+    sends lines without their terminators, which can only be joined with
+    ``"\n"``.
+    """
+    if all("line_ending" in chunk for chunk in chunks):
+        return "".join(chunk["line"] + chunk["line_ending"] for chunk in chunks)
+    return "\n".join(chunk["line"] for chunk in chunks)
+
+
+def _command_result(events_json: list[str]) -> CommandResult:
+    """Build the result of ``run`` from its stream of process events."""
+    stdout: list[dict] = []
+    stderr: list[dict] = []
+    exit_code: int | None = None
+    for event_json in events_json:
+        event = json.loads(event_json)
+        if "line" in event:
+            (stderr if event.get("stream") == "stderr" else stdout).append(event)
+        elif "exit_code" in event or "signal" in event:
+            if event.get("exit_code") is not None:
+                exit_code = event["exit_code"]
+            elif event.get("signal") is not None:
+                exit_code = -event["signal"]
+    if exit_code is None:
+        raise SandboxConnectionError(
+            "sandbox process stream ended without an exit event"
+        )
+    return CommandResult(
+        exit_code=exit_code, stdout=_join_output(stdout), stderr=_join_output(stderr)
+    )
+
+
 def _resolve_process_arg(process: object, pid: object) -> str:
     """Resolve the process selector from the new ``process`` arg and the deprecated ``pid``.
 
@@ -1691,6 +1727,7 @@ class Sandbox:
             working_dir,
             timeout=timeout,
             user=process_user,
+            exact_output=True,
         )
 
         try:
@@ -1700,36 +1737,7 @@ class Sandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-        exit_code: int | None = None
-
-        for event_json in events_json:
-            event = json.loads(event_json)
-            if "line" in event:
-                if event.get("stream") == "stderr":
-                    stderr_lines.append(event["line"])
-                else:
-                    stdout_lines.append(event["line"])
-            elif "exit_code" in event or "signal" in event:
-                if event.get("exit_code") is not None:
-                    exit_code = event["exit_code"]
-                elif event.get("signal") is not None:
-                    exit_code = -event["signal"]
-
-        if exit_code is None:
-            raise SandboxConnectionError(
-                "sandbox process stream ended without an exit event"
-            )
-
-        return Traced(
-            trace_id,
-            CommandResult(
-                exit_code=exit_code,
-                stdout="\n".join(stdout_lines),
-                stderr="\n".join(stderr_lines),
-            ),
-        )
+        return Traced(trace_id, _command_result(events_json))
 
     # --- Process management ---
 

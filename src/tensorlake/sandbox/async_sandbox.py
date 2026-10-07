@@ -21,7 +21,6 @@ from tensorlake._tracing import USER_AGENT, Traced, TracedIterator, inject_trace
 from . import _defaults
 from .exceptions import (
     RemoteAPIError,
-    SandboxConnectionError,
     SandboxError,
     SandboxNotFoundError,
     SandboxNotRoutableError,
@@ -67,6 +66,7 @@ from .sandbox import (
     _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE,
     RustCloudSandboxProxyClient,
     Sandbox,
+    _command_result,
     _raise_as_sandbox_error,
     _resolve_process_arg,
     _validate_managed_name_client_side,
@@ -1115,6 +1115,7 @@ class AsyncSandbox:
             working_dir,
             timeout=timeout,
             user=process_user,
+            exact_output=True,
         )
         try:
             trace_id, events_json = await self._rust_client.run_process_json_async(
@@ -1123,33 +1124,7 @@ class AsyncSandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-        exit_code: int | None = None
-        for event_json in events_json:
-            event = json.loads(event_json)
-            if "line" in event:
-                if event.get("stream") == "stderr":
-                    stderr_lines.append(event["line"])
-                else:
-                    stdout_lines.append(event["line"])
-            elif "exit_code" in event or "signal" in event:
-                if event.get("exit_code") is not None:
-                    exit_code = event["exit_code"]
-                elif event.get("signal") is not None:
-                    exit_code = -event["signal"]
-        if exit_code is None:
-            raise SandboxConnectionError(
-                "sandbox process stream ended without an exit event"
-            )
-        return Traced(
-            trace_id,
-            CommandResult(
-                exit_code=exit_code,
-                stdout="\n".join(stdout_lines),
-                stderr="\n".join(stderr_lines),
-            ),
-        )
+        return Traced(trace_id, _command_result(events_json))
 
     # --- Process management ---
 

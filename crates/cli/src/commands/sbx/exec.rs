@@ -2,6 +2,7 @@ use futures::StreamExt;
 use reqwest::{StatusCode, header::ACCEPT};
 use serde_json::Value;
 use std::future::Future;
+use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
 
@@ -749,7 +750,7 @@ fn build_process_payload(
             SANDBOX_EXEC_MODE_ENV.to_string(),
             Value::String(SANDBOX_EXEC_MODE_ONE_SHOT.to_string()),
         );
-    let mut body = serde_json::json!({ "command": command });
+    let mut body = serde_json::json!({ "command": command, "exact_output": true });
     if !args.is_empty() {
         body["args"] = serde_json::json!(args);
     }
@@ -898,10 +899,11 @@ async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
             Ok(msg) => {
                 if let Some(parsed) = parse_run_event(&msg.data)? {
                     match parsed {
-                        RunEvent::Output { line, stream } => match stream.as_deref() {
-                            Some("stderr") => eprintln!("{}", line),
-                            _ => println!("{}", line),
-                        },
+                        RunEvent::Output {
+                            line,
+                            line_ending,
+                            stream,
+                        } => write_output(&line, line_ending.as_deref(), stream.as_deref()),
                         RunEvent::Exited { code } => {
                             exit_code = Some(code);
                         }
@@ -921,9 +923,32 @@ async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
     Ok(exit_code.unwrap_or(1))
 }
 
+/// Print one output chunk. A chunk with its `line_ending` is printed as it was
+/// written, so partial lines join up; an older daemon's chunk is a line.
+fn write_output(line: &str, line_ending: Option<&str>, stream: Option<&str>) {
+    let Some(ending) = line_ending else {
+        match stream {
+            Some("stderr") => eprintln!("{line}"),
+            _ => println!("{line}"),
+        }
+        return;
+    };
+    match stream {
+        Some("stderr") => {
+            eprint!("{line}{ending}");
+            let _ = std::io::stderr().flush();
+        }
+        _ => {
+            print!("{line}{ending}");
+            let _ = std::io::stdout().flush();
+        }
+    }
+}
+
 enum RunEvent {
     Output {
         line: String,
+        line_ending: Option<String>,
         stream: Option<String>,
     },
     Exited {
@@ -949,8 +974,13 @@ fn parse_run_event(data: &str) -> Result<Option<RunEvent>> {
             .get("stream")
             .and_then(|v| v.as_str())
             .map(str::to_string);
+        let line_ending = value
+            .get("line_ending")
+            .and_then(|v| v.as_str())
+            .map(str::to_string);
         return Ok(Some(RunEvent::Output {
             line: line.to_string(),
+            line_ending,
             stream,
         }));
     }
@@ -1112,9 +1142,31 @@ mod tests {
             .unwrap();
 
         match event {
-            super::RunEvent::Output { line, stream } => {
+            super::RunEvent::Output {
+                line,
+                line_ending,
+                stream,
+            } => {
                 assert_eq!(line, "hello");
+                assert_eq!(line_ending, None);
                 assert_eq!(stream.as_deref(), Some("stdout"));
+            }
+            _ => panic!("expected Output"),
+        }
+    }
+
+    #[test]
+    fn parse_run_event_keeps_the_line_ending() {
+        let event = parse_run_event(r#"{"line":"","line_ending":"\r\n"}"#)
+            .unwrap()
+            .unwrap();
+
+        match event {
+            super::RunEvent::Output {
+                line, line_ending, ..
+            } => {
+                assert_eq!(line, "");
+                assert_eq!(line_ending.as_deref(), Some("\r\n"));
             }
             _ => panic!("expected Output"),
         }
