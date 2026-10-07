@@ -1,7 +1,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Sandbox } from "../src/sandbox.js";
 import { SandboxClient } from "../src/client.js";
-import { ProcessStatus, SandboxStatus } from "../src/models.js";
+import { CommandExitReason, ProcessStatus, SandboxStatus } from "../src/models.js";
 import { SandboxError } from "../src/errors.js";
 import { clearNativeStub, installNativeStub } from "./native-stub.js";
 
@@ -441,6 +441,28 @@ describe("Sandbox", () => {
       expect(result.exitCode).toBe(0);
       expect(result.stdout).toBe("hello");
       expect(result.stderr).toBe("");
+      expect(result.reason).toBe(CommandExitReason.EXITED);
+      expect(result.timedOut).toBe(false);
+      sbx.close();
+    });
+
+    it("reports a run killed by its timeout", async () => {
+      installNativeStub({
+        proxy: {
+          runProcess: vi.fn(async () =>
+            runEvents([
+              { pid: 42, started_at: 1700000000 },
+              { exit_code: null, signal: 9, oom_killed: false, reason: "timed_out" },
+            ]),
+          ),
+        },
+      });
+
+      const sbx = makeSandbox();
+      const result = await sbx.run("sleep", { args: ["100"], timeout: 1 });
+      expect(result.exitCode).toBe(-9);
+      expect(result.reason).toBe(CommandExitReason.TIMED_OUT);
+      expect(result.timedOut).toBe(true);
       sbx.close();
     });
 

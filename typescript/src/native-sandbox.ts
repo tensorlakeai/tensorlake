@@ -1,4 +1,4 @@
-import { fromSnakeKeys } from "./models.js";
+import { CommandExitReason, fromSnakeKeys } from "./models.js";
 import {
   PoolInUseError,
   PoolNotFoundError,
@@ -458,10 +458,12 @@ export function assembleCommandResult(events: string[]): {
   exitCode: number;
   stdout: string;
   stderr: string;
+  reason?: CommandExitReason;
 } {
   const stdoutLines: string[] = [];
   const stderrLines: string[] = [];
   let exitCode = -1;
+  let reason: CommandExitReason | undefined;
 
   for (const eventJson of events) {
     const raw = JSON.parse(eventJson) as Record<string, unknown>;
@@ -476,9 +478,28 @@ export function assembleCommandResult(events: string[]): {
         exitCode = raw.exit_code;
       } else if (typeof raw.signal === "number") {
         exitCode = -raw.signal;
+      } else {
+        continue;
       }
+      reason = exitReason(raw);
     }
   }
 
-  return { exitCode, stdout: stdoutLines.join("\n"), stderr: stderrLines.join("\n") };
+  return { exitCode, stdout: stdoutLines.join("\n"), stderr: stderrLines.join("\n"), reason };
+}
+
+const KNOWN_EXIT_REASONS = new Set<string>(Object.values(CommandExitReason));
+
+/**
+ * The daemon's reported exit reason. Sandboxes that predate the field, or a
+ * reason this SDK does not know, fall back to one derived from how the process
+ * ended; a timeout is only ever reported by the sandbox, never inferred.
+ */
+function exitReason(raw: Record<string, unknown>): CommandExitReason {
+  if (typeof raw.reason === "string" && KNOWN_EXIT_REASONS.has(raw.reason)) {
+    return raw.reason as CommandExitReason;
+  }
+  if (raw.oom_killed === true) return CommandExitReason.OOM_KILLED;
+  if (typeof raw.exit_code === "number") return CommandExitReason.EXITED;
+  return CommandExitReason.SIGNALED;
 }

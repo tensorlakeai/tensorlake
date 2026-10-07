@@ -1099,7 +1099,28 @@ pub enum RunProcessEvent {
         signal: Option<i64>,
         #[serde(default)]
         oom_killed: bool,
+        /// Why the process ended. Absent from daemons older than this field.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        reason: Option<ProcessExitReason>,
     },
+}
+
+/// Why a process run to completion ended, as reported by the sandbox daemon.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ProcessExitReason {
+    /// The process exited on its own; `exit_code` holds its status.
+    Exited,
+    /// The process was killed by a signal; `signal` holds its number.
+    Signaled,
+    /// The kernel OOM killer terminated the process.
+    OomKilled,
+    /// The run's `timeout` expired and the daemon killed the process.
+    TimedOut,
+    /// A reason this SDK version does not know. `exit_code` and `signal`
+    /// still describe how the process ended.
+    #[serde(other)]
+    Unknown,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1511,6 +1532,7 @@ mod tests {
                 exit_code: Some(0),
                 signal: None,
                 oom_killed: false,
+                reason: None,
             }
         ));
     }
@@ -1525,6 +1547,7 @@ mod tests {
                 exit_code: None,
                 signal: Some(9),
                 oom_killed: false,
+                reason: None,
             }
         ));
     }
@@ -1539,8 +1562,49 @@ mod tests {
                 exit_code: None,
                 signal: Some(9),
                 oom_killed: true,
+                reason: None,
             }
         ));
+    }
+
+    #[test]
+    fn run_process_event_deserializes_timed_out_reason() {
+        let json = r#"{"signal": 9, "reason": "timed_out"}"#;
+        let event: RunProcessEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            event,
+            RunProcessEvent::Exited {
+                exit_code: None,
+                signal: Some(9),
+                oom_killed: false,
+                reason: Some(ProcessExitReason::TimedOut),
+            }
+        ));
+        // The reason survives re-encoding: the Python and TypeScript SDKs
+        // read the events this crate serializes.
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert_eq!(encoded["reason"], "timed_out");
+    }
+
+    #[test]
+    fn run_process_event_tolerates_unknown_reason() {
+        let json = r#"{"signal": 9, "reason": "some_future_reason"}"#;
+        let event: RunProcessEvent = serde_json::from_str(json).unwrap();
+        assert!(matches!(
+            event,
+            RunProcessEvent::Exited {
+                signal: Some(9),
+                reason: Some(ProcessExitReason::Unknown),
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn run_process_event_omits_absent_reason() {
+        let event: RunProcessEvent = serde_json::from_str(r#"{"exit_code": 0}"#).unwrap();
+        let encoded = serde_json::to_value(&event).unwrap();
+        assert!(encoded.get("reason").is_none());
     }
 
     #[test]
