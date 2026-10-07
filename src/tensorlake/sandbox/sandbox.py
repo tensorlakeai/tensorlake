@@ -26,6 +26,7 @@ from .exceptions import (
 from .models import (
     CheckpointType,
     ClearNetworkPolicy,
+    CommandExitReason,
     CommandResult,
     CopySandboxResponse,
     DaemonInfo,
@@ -1576,6 +1577,54 @@ class Sandbox:
         return payload
 
     @staticmethod
+    def _command_result_from_run_events(events_json: list[str]) -> CommandResult:
+        """Reduce the ``POST /api/v1/processes/run`` events into a result."""
+        stdout_lines: list[str] = []
+        stderr_lines: list[str] = []
+        exit_event: dict[str, Any] | None = None
+
+        for event_json in events_json:
+            event = json.loads(event_json)
+            if "line" in event:
+                if event.get("stream") == "stderr":
+                    stderr_lines.append(event["line"])
+                else:
+                    stdout_lines.append(event["line"])
+            elif event.get("exit_code") is not None or event.get("signal") is not None:
+                exit_event = event
+
+        if exit_event is None:
+            raise SandboxConnectionError(
+                "sandbox process stream ended without an exit event"
+            )
+
+        signal = exit_event.get("signal")
+        if exit_event.get("exit_code") is not None:
+            exit_code = exit_event["exit_code"]
+        else:
+            exit_code = -signal
+
+        try:
+            reason = CommandExitReason(exit_event.get("reason"))
+        except ValueError:
+            # Sandboxes that predate the field, or a reason this SDK does not
+            # know: derive it from how the process ended. A timeout is only
+            # ever reported by the sandbox, never inferred from a SIGKILL.
+            if exit_event.get("oom_killed"):
+                reason = CommandExitReason.OOM_KILLED
+            elif exit_event.get("exit_code") is None:
+                reason = CommandExitReason.SIGNALED
+            else:
+                reason = CommandExitReason.EXITED
+
+        return CommandResult(
+            exit_code=exit_code,
+            stdout="\n".join(stdout_lines),
+            stderr="\n".join(stderr_lines),
+            reason=reason,
+        )
+
+    @staticmethod
     def _normalize_process_user(
         user: ProcessUser | None,
     ) -> str | dict[str, Any] | None:
@@ -1700,36 +1749,7 @@ class Sandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-        stdout_lines: list[str] = []
-        stderr_lines: list[str] = []
-        exit_code: int | None = None
-
-        for event_json in events_json:
-            event = json.loads(event_json)
-            if "line" in event:
-                if event.get("stream") == "stderr":
-                    stderr_lines.append(event["line"])
-                else:
-                    stdout_lines.append(event["line"])
-            elif "exit_code" in event or "signal" in event:
-                if event.get("exit_code") is not None:
-                    exit_code = event["exit_code"]
-                elif event.get("signal") is not None:
-                    exit_code = -event["signal"]
-
-        if exit_code is None:
-            raise SandboxConnectionError(
-                "sandbox process stream ended without an exit event"
-            )
-
-        return Traced(
-            trace_id,
-            CommandResult(
-                exit_code=exit_code,
-                stdout="\n".join(stdout_lines),
-                stderr="\n".join(stderr_lines),
-            ),
-        )
+        return Traced(trace_id, self._command_result_from_run_events(events_json))
 
     # --- Process management ---
 

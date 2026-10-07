@@ -20,6 +20,7 @@ import {
 } from "./native-sandbox.js";
 import {
   type CheckpointOptions,
+  CommandExitReason,
   type CommandResult,
   type ConnectOptions,
   type CopySandboxOptions,
@@ -1219,16 +1220,18 @@ export class Sandbox {
       () => proxy.runProcess(JSON.stringify(body)),
       { sandboxId: this.sandboxId },
     );
-    const { exitCode, stdout, stderr } = assembleCommandResult(events);
+    const { exitCode, stdout, stderr, reason } = assembleCommandResult(events);
     logSdkTiming("sandbox.run", "complete", opStart, {
       sandbox_id: this.sandboxId,
       server_trace_id: traceId,
       command: sdkTimingPayloadsEnabled() ? command : undefined,
       command_length: command.length,
       exit_code: exitCode,
+      exit_reason: reason,
     });
 
-    return Object.assign({ exitCode, stdout, stderr }, { traceId });
+    const timedOut = reason === CommandExitReason.TIMED_OUT;
+    return Object.assign({ exitCode, stdout, stderr, reason, timedOut }, { traceId });
   }
 
   // --- Process management ---

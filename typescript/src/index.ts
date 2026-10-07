@@ -123,6 +123,7 @@ export {
   SandboxPendingReason,
   SnapshotStatus,
   ProcessStatus,
+  CommandExitReason,
   StdinMode,
   OutputMode,
   ContainerState,

@@ -29,6 +29,7 @@ from .models import (
     AsyncPendingSandbox,
     CheckpointType,
     ClearNetworkPolicy,
+    CommandExitReason,
     CommandResult,
     ContainerResourcesInfo,
     CopiedSandboxResponse,
@@ -149,6 +150,7 @@ __all__ = [
     "CheckpointType",
     "CreateSnapshotResponse",
     # Command result
+    "CommandExitReason",
     "CommandResult",
     # Process models
     "ProcessStatus",

@@ -6,6 +6,7 @@ from tensorlake._tracing import Traced, TracedIterator
 from tensorlake.sandbox import Sandbox, SandboxConnectionError
 from tensorlake.sandbox.exceptions import SandboxError
 from tensorlake.sandbox.models import (
+    CommandExitReason,
     ContainerResourcesInfo,
     ProcessUserSpec,
     SandboxInfo,
@@ -315,6 +316,8 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(result.stdout, "out1\nout2")
         self.assertEqual(result.stderr, "err1")
         self.assertEqual(result.exit_code, 0)
+        self.assertEqual(result.reason, CommandExitReason.EXITED)
+        self.assertFalse(result.timed_out)
 
     def test_run_signal_maps_to_negative_exit_code(self):
         class _SignaledFakeClient(_FakeRustProxyClient):
@@ -326,6 +329,38 @@ class TestSandboxRustBackend(unittest.TestCase):
         result = sandbox.run("sleep", args=["100"])
 
         self.assertEqual(result.exit_code, -9)
+        self.assertEqual(result.reason, CommandExitReason.SIGNALED)
+        self.assertFalse(result.timed_out)
+
+    def test_run_reports_daemon_exit_reason(self):
+        cases = [
+            ({"signal": 9, "reason": "timed_out"}, CommandExitReason.TIMED_OUT),
+            (
+                {"signal": 9, "oom_killed": True, "reason": "oom_killed"},
+                CommandExitReason.OOM_KILLED,
+            ),
+            # Sandboxes that predate the field: derived, never TIMED_OUT.
+            ({"signal": 9, "oom_killed": True}, CommandExitReason.OOM_KILLED),
+            # A reason this SDK does not know falls back to the derived one.
+            ({"signal": 9, "reason": "future_reason"}, CommandExitReason.SIGNALED),
+            ({"exit_code": 3, "reason": "exited"}, CommandExitReason.EXITED),
+        ]
+        for exit_event, expected in cases:
+            with self.subTest(exit_event=exit_event):
+
+                class _ExitFakeClient(_FakeRustProxyClient):
+                    def run_process_json(self, payload_json):
+                        return _TRACE_ID, [json.dumps(exit_event)]
+
+                sandbox, _ = _make_sandbox(_ExitFakeClient())
+
+                result = sandbox.run("sleep", args=["100"], timeout=1)
+
+                self.assertEqual(result.reason, expected)
+                self.assertEqual(
+                    result.timed_out, expected == CommandExitReason.TIMED_OUT
+                )
+                self.assertEqual(result.exit_code, exit_event.get("exit_code", -9))
 
     def test_run_raises_when_stream_has_no_exit_event(self):
         class _MissingExitFakeClient(_FakeRustProxyClient):

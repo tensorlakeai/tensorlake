@@ -6,6 +6,7 @@ from tensorlake._tracing import Traced, TracedIterator
 from tensorlake.sandbox import AsyncSandbox, SandboxConnectionError
 from tensorlake.sandbox.exceptions import SandboxError
 from tensorlake.sandbox.models import (
+    CommandExitReason,
     ContainerResourcesInfo,
     OutputMode,
     ProcessStatus,
@@ -334,6 +335,20 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         result = await sandbox.run("sleep", args=["100"])
 
         self.assertEqual(result.exit_code, -9)
+        self.assertEqual(result.reason, CommandExitReason.SIGNALED)
+
+    async def test_run_reports_timeout_reason(self):
+        class _TimedOutFake(_FakeAsyncRustProxyClient):
+            async def run_process_json_async(self, payload_json):
+                return _TRACE_ID, [json.dumps({"signal": 9, "reason": "timed_out"})]
+
+        sandbox, _ = _make_async_sandbox(_TimedOutFake())
+
+        result = await sandbox.run("sleep", args=["100"], timeout=1)
+
+        self.assertEqual(result.exit_code, -9)
+        self.assertEqual(result.reason, CommandExitReason.TIMED_OUT)
+        self.assertTrue(result.timed_out)
 
     async def test_run_raises_when_stream_has_no_exit_event(self):
         class _MissingExit(_FakeAsyncRustProxyClient):

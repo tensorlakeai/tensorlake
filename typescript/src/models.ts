@@ -705,10 +705,30 @@ export interface RunOptions {
   user?: ProcessUser;
 }
 
+/** Why a command run with `Sandbox.run()` ended. */
+export enum CommandExitReason {
+  /** The process exited on its own; `exitCode` is its exit status. */
+  EXITED = "exited",
+  /** The process was killed by a signal; `exitCode` is `-signal`. */
+  SIGNALED = "signaled",
+  /** The kernel OOM killer terminated the process (`exitCode` is `-9`). */
+  OOM_KILLED = "oom_killed",
+  /** The run's `timeout` expired and the sandbox killed the process (`exitCode` is `-9`). */
+  TIMED_OUT = "timed_out",
+}
+
 export interface CommandResult {
   exitCode: number;
   stdout: string;
   stderr: string;
+  /**
+   * Why the command ended. `Sandbox.run()` always sets it; sandboxes that
+   * predate timeout reporting never report `TIMED_OUT`, so a timed-out run on
+   * them shows as `SIGNALED`.
+   */
+  reason?: CommandExitReason;
+  /** True when the run's `timeout` expired and the process was killed. */
+  timedOut?: boolean;
 }
 
 // --- File operations ---

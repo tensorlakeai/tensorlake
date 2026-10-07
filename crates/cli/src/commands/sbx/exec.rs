@@ -902,7 +902,10 @@ async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
                             Some("stderr") => eprintln!("{}", line),
                             _ => println!("{}", line),
                         },
-                        RunEvent::Exited { code } => {
+                        RunEvent::Exited { code, timed_out } => {
+                            if timed_out {
+                                eprintln!("process timed out and was killed");
+                            }
                             exit_code = Some(code);
                         }
                         RunEvent::Other => {}
@@ -928,6 +931,8 @@ enum RunEvent {
     },
     Exited {
         code: i32,
+        /// The run's `--timeout` expired and the sandbox killed the process.
+        timed_out: bool,
     },
     Other,
 }
@@ -956,12 +961,17 @@ fn parse_run_event(data: &str) -> Result<Option<RunEvent>> {
     }
 
     // Exit event
+    let timed_out = value.get("reason").and_then(|v| v.as_str()) == Some("timed_out");
     if let Some(code) = value.get("exit_code").and_then(|v| v.as_i64()) {
-        return Ok(Some(RunEvent::Exited { code: code as i32 }));
+        return Ok(Some(RunEvent::Exited {
+            code: code as i32,
+            timed_out,
+        }));
     }
     if let Some(signal) = value.get("signal").and_then(|v| v.as_i64()) {
         return Ok(Some(RunEvent::Exited {
             code: 128 + signal as i32,
+            timed_out,
         }));
     }
 
@@ -1124,7 +1134,10 @@ mod tests {
     fn parse_run_event_parses_exit_code() {
         let event = parse_run_event(r#"{"exit_code":0}"#).unwrap().unwrap();
         match event {
-            super::RunEvent::Exited { code } => assert_eq!(code, 0),
+            super::RunEvent::Exited { code, timed_out } => {
+                assert_eq!(code, 0);
+                assert!(!timed_out);
+            }
             _ => panic!("expected Exited"),
         }
     }
@@ -1133,7 +1146,24 @@ mod tests {
     fn parse_run_event_parses_signal_as_exit_code() {
         let event = parse_run_event(r#"{"signal":9}"#).unwrap().unwrap();
         match event {
-            super::RunEvent::Exited { code } => assert_eq!(code, 128 + 9),
+            super::RunEvent::Exited { code, timed_out } => {
+                assert_eq!(code, 128 + 9);
+                assert!(!timed_out);
+            }
+            _ => panic!("expected Exited"),
+        }
+    }
+
+    #[test]
+    fn parse_run_event_reports_timeout_reason() {
+        let event = parse_run_event(r#"{"signal":9,"reason":"timed_out"}"#)
+            .unwrap()
+            .unwrap();
+        match event {
+            super::RunEvent::Exited { code, timed_out } => {
+                assert_eq!(code, 128 + 9);
+                assert!(timed_out);
+            }
             _ => panic!("expected Exited"),
         }
     }
