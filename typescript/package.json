@@ -59,6 +59,7 @@
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
     "prepack": "npm run build"
+    "preinstall": "node lib/setup.mjs"
   },
   "engines": {
     "node": ">=22.0.0"
