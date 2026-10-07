@@ -97,11 +97,11 @@
     "ws": "^8.20.0"
   },
   "optionalDependencies": {
-    "tensorlake-native-darwin-arm64": "0.5.143",
-    "tensorlake-native-linux-arm64-gnu": "0.5.143",
-    "tensorlake-native-linux-arm64-musl": "0.5.143",
-    "tensorlake-native-linux-x64-gnu": "0.5.143",
-    "tensorlake-native-linux-x64-musl": "0.5.143",
-    "tensorlake-native-win32-x64": "0.5.143"
+    "tensorlake-native-darwin-arm64": "0.5.144",
+    "tensorlake-native-linux-arm64-gnu": "0.5.144",
+    "tensorlake-native-linux-arm64-musl": "0.5.144",
+    "tensorlake-native-linux-x64-gnu": "0.5.144",
+    "tensorlake-native-linux-x64-musl": "0.5.144",
+    "tensorlake-native-win32-x64": "0.5.144"
   }
 }
