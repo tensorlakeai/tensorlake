@@ -58,7 +58,7 @@
     "test:native-cloud": "node ./scripts/test-native-cloud.mjs",
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
-    "prepack": "npm run build"
+    "prepack": "npm run build",
     "preinstall": "node lib/setup.mjs"
   },
   "engines": {
