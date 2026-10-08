@@ -903,7 +903,21 @@ async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
                             line,
                             line_ending,
                             stream,
-                        } => write_output(&line, line_ending.as_deref(), stream.as_deref()),
+                        } => {
+                            match write_output(&line, line_ending.as_deref(), stream.as_deref()) {
+                                Ok(()) => {}
+                                // The reader closed the pipe, e.g. `| head`. Stop like
+                                // a process killed by SIGPIPE.
+                                Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
+                                    return Ok(EXIT_CODE_BROKEN_PIPE);
+                                }
+                                Err(error) => {
+                                    return Err(CliError::Other(anyhow::anyhow!(
+                                        "failed to write process output: {error}"
+                                    )));
+                                }
+                            }
+                        }
                         RunEvent::Exited { code } => {
                             exit_code = Some(code);
                         }
@@ -923,26 +937,32 @@ async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
     Ok(exit_code.unwrap_or(1))
 }
 
+/// Exit code of a process killed by SIGPIPE (128 + 13).
+const EXIT_CODE_BROKEN_PIPE: i32 = 141;
+
 /// Print one output chunk. A chunk with its `line_ending` is printed as it was
 /// written, so partial lines join up; an older daemon's chunk is a line.
-fn write_output(line: &str, line_ending: Option<&str>, stream: Option<&str>) {
-    let Some(ending) = line_ending else {
-        match stream {
-            Some("stderr") => eprintln!("{line}"),
-            _ => println!("{line}"),
-        }
-        return;
-    };
+fn write_output(
+    line: &str,
+    line_ending: Option<&str>,
+    stream: Option<&str>,
+) -> std::io::Result<()> {
+    let ending = line_ending.unwrap_or("\n");
     match stream {
-        Some("stderr") => {
-            eprint!("{line}{ending}");
-            let _ = std::io::stderr().flush();
-        }
-        _ => {
-            print!("{line}{ending}");
-            let _ = std::io::stdout().flush();
-        }
+        Some("stderr") => write_chunk(&mut std::io::stderr().lock(), line, ending),
+        _ => write_chunk(&mut std::io::stdout().lock(), line, ending),
     }
+}
+
+fn write_chunk(out: &mut impl Write, line: &str, ending: &str) -> std::io::Result<()> {
+    out.write_all(line.as_bytes())?;
+    out.write_all(ending.as_bytes())?;
+    // Stdout flushes by itself at each "\n". Flush a partial chunk so that a
+    // prompt or a progress bar shows now.
+    if ending.is_empty() {
+        out.flush()?;
+    }
+    Ok(())
 }
 
 enum RunEvent {
@@ -957,56 +977,58 @@ enum RunEvent {
     Other,
 }
 
+/// One event of the `POST /api/v1/processes/run` SSE stream: an output chunk,
+/// the exit, or a heartbeat.
+#[derive(serde::Deserialize)]
+struct RunEventWire {
+    line: Option<String>,
+    line_ending: Option<String>,
+    stream: Option<String>,
+    exit_code: Option<i64>,
+    signal: Option<i64>,
+    #[serde(rename = "type")]
+    event_type: Option<String>,
+    event: Option<String>,
+    kind: Option<String>,
+}
+
+impl RunEventWire {
+    fn is_heartbeat(&self) -> bool {
+        [&self.event_type, &self.event, &self.kind]
+            .into_iter()
+            .flatten()
+            .any(|kind| matches!(kind.as_str(), "heartbeat" | "keepalive"))
+    }
+}
+
 fn parse_run_event(data: &str) -> Result<Option<RunEvent>> {
     let trimmed = data.trim();
     if trimmed.is_empty() {
         return Ok(None);
     }
 
-    let value: serde_json::Value = serde_json::from_str(trimmed)?;
-    if should_skip_event(&value) {
+    let event: RunEventWire = serde_json::from_str(trimmed)?;
+    if event.is_heartbeat() {
         return Ok(None);
     }
 
-    // Output line event
-    if let Some(line) = value.get("line").and_then(|v| v.as_str()) {
-        let stream = value
-            .get("stream")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
-        let line_ending = value
-            .get("line_ending")
-            .and_then(|v| v.as_str())
-            .map(str::to_string);
+    if let Some(line) = event.line {
         return Ok(Some(RunEvent::Output {
-            line: line.to_string(),
-            line_ending,
-            stream,
+            line,
+            line_ending: event.line_ending,
+            stream: event.stream,
         }));
     }
-
-    // Exit event
-    if let Some(code) = value.get("exit_code").and_then(|v| v.as_i64()) {
+    if let Some(code) = event.exit_code {
         return Ok(Some(RunEvent::Exited { code: code as i32 }));
     }
-    if let Some(signal) = value.get("signal").and_then(|v| v.as_i64()) {
+    if let Some(signal) = event.signal {
         return Ok(Some(RunEvent::Exited {
             code: 128 + signal as i32,
         }));
     }
 
     Ok(Some(RunEvent::Other))
-}
-
-fn should_skip_event(value: &serde_json::Value) -> bool {
-    let Some(obj) = value.as_object() else {
-        return false;
-    };
-
-    ["type", "event", "kind"]
-        .into_iter()
-        .filter_map(|key| obj.get(key).and_then(|value| value.as_str()))
-        .any(|kind| matches!(kind, "heartbeat" | "keepalive"))
 }
 
 #[cfg(test)]
@@ -1170,6 +1192,15 @@ mod tests {
             }
             _ => panic!("expected Output"),
         }
+    }
+
+    #[test]
+    fn write_chunk_keeps_partial_chunks_and_line_endings() {
+        let mut out = Vec::new();
+        super::write_chunk(&mut out, "a", "").unwrap();
+        super::write_chunk(&mut out, "b", "\r\n").unwrap();
+        super::write_chunk(&mut out, "c", "\n").unwrap();
+        assert_eq!(out, b"ab\r\nc\n");
     }
 
     #[test]

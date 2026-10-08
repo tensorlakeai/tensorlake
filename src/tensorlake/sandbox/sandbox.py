@@ -152,11 +152,16 @@ def _join_output(chunks: list[dict]) -> str:
 
     The daemon sends each chunk's ``line_ending`` (``""`` for a partial
     chunk), so the chunks join exactly. An older daemon sends lines without
-    their terminators, which can only be joined with ``"\n"``.
+    their terminators, so such a chunk ends with ``"\n"``, except the last one.
     """
-    if all("line_ending" in chunk for chunk in chunks):
-        return "".join(chunk["line"] + chunk["line_ending"] for chunk in chunks)
-    return "\n".join(chunk["line"] for chunk in chunks)
+    endings = [chunk.get("line_ending") for chunk in chunks]
+    text = "".join(
+        chunk["line"] + ("\n" if ending is None else ending)
+        for chunk, ending in zip(chunks, endings)
+    )
+    if endings and endings[-1] is None:
+        text = text[:-1]
+    return text
 
 
 def _command_result(events_json: list[str]) -> CommandResult:

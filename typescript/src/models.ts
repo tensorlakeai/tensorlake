@@ -693,6 +693,11 @@ export interface OutputEvent {
   line: string;
   timestamp: Date;
   stream?: string;
+  /**
+   * The terminator the daemon removed from `line`: "\n", "\r\n", or "" for a
+   * partial chunk. Absent from an older daemon.
+   */
+  lineEnding?: string;
 }
 
 // --- Run ---

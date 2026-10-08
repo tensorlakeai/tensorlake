@@ -450,10 +450,6 @@ export async function* nativeEventStream(
   }
 }
 
-/**
- * Reduce the buffered `runProcess` events into a `CommandResult`, matching the
- * SSE-parsing logic the undici `run()` path used.
- */
 interface OutputChunk {
   line: string;
   lineEnding?: string;
@@ -462,15 +458,19 @@ interface OutputChunk {
 /**
  * Join one stream's output chunks into the text the process wrote. The daemon
  * sends each chunk's `line_ending` ("" for a partial chunk); an older daemon
- * sends lines without terminators, joined with "\n".
+ * sends lines without terminators, so such a chunk ends with "\n", except the
+ * last one.
  */
 function joinOutput(chunks: OutputChunk[]): string {
-  if (chunks.every((chunk) => chunk.lineEnding !== undefined)) {
-    return chunks.map((chunk) => chunk.line + chunk.lineEnding).join("");
-  }
-  return chunks.map((chunk) => chunk.line).join("\n");
+  const text = chunks.map((chunk) => chunk.line + (chunk.lineEnding ?? "\n")).join("");
+  const last = chunks[chunks.length - 1];
+  return last && last.lineEnding === undefined ? text.slice(0, -1) : text;
 }
 
+/**
+ * Reduce the buffered `runProcess` events into a `CommandResult`, matching the
+ * SSE-parsing logic the undici `run()` path used.
+ */
 export function assembleCommandResult(events: string[]): {
   exitCode: number;
   stdout: string;
@@ -478,7 +478,7 @@ export function assembleCommandResult(events: string[]): {
 } {
   const stdoutChunks: OutputChunk[] = [];
   const stderrChunks: OutputChunk[] = [];
-  let exitCode = -1;
+  let exitCode: number | undefined;
 
   for (const eventJson of events) {
     const raw = JSON.parse(eventJson) as Record<string, unknown>;
@@ -501,5 +501,8 @@ export function assembleCommandResult(events: string[]): {
     }
   }
 
+  if (exitCode === undefined) {
+    throw new SandboxConnectionError("sandbox process stream ended without an exit event");
+  }
   return { exitCode, stdout: joinOutput(stdoutChunks), stderr: joinOutput(stderrChunks) };
 }

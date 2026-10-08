@@ -5,7 +5,7 @@ import {
   type NativeSandboxBinding,
   type NativeSandboxProxyClient,
 } from "../src/native-sandbox.js";
-import { SandboxNotFoundError, RemoteAPIError } from "../src/errors.js";
+import { SandboxConnectionError, SandboxNotFoundError, RemoteAPIError } from "../src/errors.js";
 
 /**
  * Verifies the Rust-backed proxy path: the rewired Sandbox methods call the
@@ -166,6 +166,37 @@ describe("Sandbox native proxy path", () => {
     const result = await sbx.run("sh");
     expect(result.stdout).toBe("ab\r\n\n");
     expect(result.stderr).toBe("oops\n");
+    sbx.close();
+  });
+
+  it("joins old lines and chunks in one stream", async () => {
+    installFakeBinding({
+      runProcess: vi.fn(async () => ({
+        traceId: "tr-run",
+        events: [
+          JSON.stringify({ line: "a", line_ending: "", timestamp: 1 }),
+          JSON.stringify({ line: "b", line_ending: "\n", timestamp: 2 }),
+          JSON.stringify({ line: "old", timestamp: 3 }),
+          JSON.stringify({ line: "last", timestamp: 4 }),
+          JSON.stringify({ exit_code: 0 }),
+        ],
+      })),
+    });
+    const sbx = makeSandbox();
+    const result = await sbx.run("sh");
+    expect(result.stdout).toBe("ab\nold\nlast");
+    sbx.close();
+  });
+
+  it("rejects a run stream that ends without an exit event", async () => {
+    installFakeBinding({
+      runProcess: vi.fn(async () => ({
+        traceId: "tr-run",
+        events: [JSON.stringify({ line: "partial", line_ending: "", timestamp: 1 })],
+      })),
+    });
+    const sbx = makeSandbox();
+    await expect(sbx.run("sh")).rejects.toThrow(SandboxConnectionError);
     sbx.close();
   });
 
