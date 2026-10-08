@@ -25,9 +25,9 @@ npm --prefix typescript/examples/http-body install
 npm --prefix typescript/examples/http-body run typecheck
 ```
 
-The repository example uses `"tensorlake": "file:../.."` to resolve the SDK
+The repository example uses `"@tensorlakeai/tensorlake": "file:../.."` to resolve the SDK
 from this checkout. In an independent project, install the published
-`tensorlake` package instead.
+`@tensorlakeai/tensorlake` package instead.
 
 ## Deploy
 

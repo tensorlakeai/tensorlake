@@ -2,11 +2,24 @@ name: Release - TypeScript SDK (npm)
 
 run-name: "Release - TypeScript SDK (npm) · ${{ github.ref_name }} · @${{ github.actor }}"
 
+# Every package requires staged publishing: this workflow uploads versions with
+# `npm stage publish`, and a maintainer approves each one on npmjs.com (or with
+# `npm stage approve`) before it becomes public. Native packages are staged as
+# the exact tarballs this workflow packs, so their checksums can be locked into
+# the SDK before anything is public. Approve in this order:
+#
+#   1. the six @tensorlakeai/native-* packages,
+#   2. @tensorlakeai/tensorlake,
+#   3. the `tensorlake` wrapper,
+#
+# so no public package ever depends on a version that is still staged.
 on:
   workflow_dispatch:
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+  # `npm stage` requires npm 11.15.0 or newer.
+  NPM_VERSION: "11.15.0"
 
 permissions:
   contents: read
@@ -16,6 +29,25 @@ defaults:
     working-directory: typescript
 
 jobs:
+  notify-start:
+    name: Notify Slack that the release is starting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read SDK version
+        id: version
+        run: echo "version=$(node -p "require('./package.json').version")" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack
+        continue-on-error: true
+        uses: ./.github/actions/notify-release
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          package: TypeScript SDK (npm)
+          version: ${{ steps.version.outputs.version }}
+          package-url: https://www.npmjs.com/package/@tensorlakeai/tensorlake/v/${{ steps.version.outputs.version }}
+
   build-sdk-and-test:
     name: Build SDK and test
     runs-on: ubuntu-latest
@@ -173,10 +205,8 @@ jobs:
           name: native-${{ matrix.target_id }}
           path: typescript/dist/native/${{ matrix.target_id }}
 
-  # Each platform package must be bootstrapped once on npm and configured to
-  # trust this workflow before OIDC publishing can manage later releases.
-  publish-native-binaries:
-    name: Publish native package (${{ matrix.target_id }})
+  stage-native-binaries:
+    name: Stage native package (${{ matrix.target_id }})
     needs:
       - build-native-binaries
     runs-on: ubuntu-latest
@@ -191,17 +221,17 @@ jobs:
       matrix:
         include:
           - target_id: linux-x64
-            package_name: "tensorlake-native-linux-x64-gnu"
+            package_name: "@tensorlakeai/native-linux-x64-gnu"
           - target_id: linux-arm64
-            package_name: "tensorlake-native-linux-arm64-gnu"
+            package_name: "@tensorlakeai/native-linux-arm64-gnu"
           - target_id: linux-x64-musl
-            package_name: "tensorlake-native-linux-x64-musl"
+            package_name: "@tensorlakeai/native-linux-x64-musl"
           - target_id: linux-arm64-musl
-            package_name: "tensorlake-native-linux-arm64-musl"
+            package_name: "@tensorlakeai/native-linux-arm64-musl"
           - target_id: darwin-arm64
-            package_name: "tensorlake-native-darwin-arm64"
+            package_name: "@tensorlakeai/native-darwin-arm64"
           - target_id: win32-x64
-            package_name: "tensorlake-native-win32-x64"
+            package_name: "@tensorlakeai/native-win32-x64"
     steps:
       - uses: actions/checkout@v4
 
@@ -211,6 +241,11 @@ jobs:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
+
+      - name: Install npm with staged publishing
+        run: |
+          npm install --global --ignore-scripts "npm@${NPM_VERSION}"
+          npm --version
 
       - name: Download native artifact
         uses: actions/download-artifact@v4
@@ -224,18 +259,33 @@ jobs:
           test "$(node -p "require('./npm/${{ matrix.target_id }}/package.json').name")" = "${{ matrix.package_name }}"
           npm pack "./npm/${{ matrix.target_id }}" --dry-run --ignore-scripts
 
-      - name: Publish native package to npm
-        run: npm publish "./npm/${{ matrix.target_id }}" --access public --ignore-scripts
+      - name: Pack native package
+        id: pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-tarball" "$RUNNER_TEMP/native-integrity"
+          npm pack "./npm/${{ matrix.target_id }}" --ignore-scripts --json --pack-destination "$RUNNER_TEMP/native-tarball" > "$RUNNER_TEMP/pack.json"
+          node ./scripts/record-native-integrity.mjs "$RUNNER_TEMP/pack.json" "$RUNNER_TEMP/native-tarball" "$RUNNER_TEMP/native-integrity/${{ matrix.target_id }}.json"
 
-  publish:
-    name: Publish to npm
+      # Stage the tarball that was just checksummed, so the integrity locked
+      # into the SDK matches the artifact users will install.
+      - name: Stage native package on npm
+        run: npm stage publish "${{ steps.pack.outputs.tarball }}" --access public --provenance
+
+      - name: Upload native integrity record
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-integrity-${{ matrix.target_id }}
+          path: ${{ runner.temp }}/native-integrity/${{ matrix.target_id }}.json
+
+  stage-sdk:
+    name: Stage SDK on npm
     needs:
       - build-sdk-and-test
-      - publish-native-binaries
+      - stage-native-binaries
     runs-on: ubuntu-latest
     environment:
       name: npm
-      url: https://www.npmjs.com/package/tensorlake
+      url: https://www.npmjs.com/package/@tensorlakeai/tensorlake
     permissions:
       contents: read
       id-token: write
@@ -249,14 +299,26 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
+      - name: Install npm with staged publishing
+        run: |
+          npm install --global --ignore-scripts "npm@${NPM_VERSION}"
+          npm --version
+
       - name: Reject install lifecycle scripts
         run: node ./scripts/check-no-install-scripts.mjs
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      - name: Lock published native package checksums
-        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Download native integrity records
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-integrity-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/native-integrity
+
+      - name: Lock staged native package checksums
+        run: node ./scripts/lock-native-integrity.mjs "$RUNNER_TEMP/native-integrity"
 
       - name: Download SDK artifact
         uses: actions/download-artifact@v4
@@ -271,5 +333,49 @@ jobs:
           test -z "$(find dist runtime -type f -name '*.node' -print -quit)"
           npm pack --dry-run --ignore-scripts
 
-      - name: Publish to npm
-        run: npm publish --access public --ignore-scripts
+      - name: Stage SDK on npm
+        env:
+          npm_config_ignore_scripts: "true"
+        run: npm stage publish --access public --provenance
+
+  stage-wrapper:
+    name: Stage tensorlake wrapper on npm
+    needs:
+      - stage-sdk
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    environment:
+      name: npm
+      url: https://www.npmjs.com/package/tensorlake
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        working-directory: typescript/tensorlake-wrapper
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          registry-url: "https://registry.npmjs.org"
+          package-manager-cache: false
+
+      - name: Install npm with staged publishing
+        run: |
+          npm install --global --ignore-scripts "npm@${NPM_VERSION}"
+          npm --version
+
+      - name: Verify wrapper pins this SDK release
+        run: |
+          sdk_version="$(node -p "require('../package.json').version")"
+          test "$(node -p "require('./package.json').version")" = "$sdk_version"
+          test "$(node -p "require('./package.json').dependencies['@tensorlakeai/tensorlake']")" = "$sdk_version"
+          npm pack --dry-run --ignore-scripts
+
+      - name: Stage wrapper on npm
+        env:
+          npm_config_ignore_scripts: "true"
+        run: npm stage publish --access public --provenance

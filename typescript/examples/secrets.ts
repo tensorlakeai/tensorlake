@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { Image, registerApplication } from "tensorlake/applications";
+import { Image, registerApplication } from "@tensorlakeai/tensorlake/applications";
 
 // Function Agent resolves declared secrets before importing this module. Reading
 // here verifies that import-time installation works, not only handler-time access.

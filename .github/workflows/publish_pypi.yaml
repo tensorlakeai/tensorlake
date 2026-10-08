@@ -12,6 +12,25 @@ permissions:
   contents: read
 
 jobs:
+  notify-start:
+    name: Notify Slack that the release is starting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "version=$(grep -m1 -E '^version = ' pyproject.toml | sed -E 's/version = "(.*)"/\1/')" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack
+        continue-on-error: true
+        uses: ./.github/actions/notify-release
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          package: Python SDK (PyPI)
+          version: ${{ steps.version.outputs.version }}
+          package-url: https://pypi.org/project/tensorlake/${{ steps.version.outputs.version }}/
+
   build-wheels:
     name: Build wheels on ${{ matrix.platform.os }} (${{ matrix.platform.target }})
     runs-on: ${{ matrix.platform.os }}

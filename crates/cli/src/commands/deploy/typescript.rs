@@ -34,13 +34,24 @@ use crate::error::{CliError, Result};
 
 const VIRTUAL_ENTRY: &str = "tensorlake:application-entry";
 const RESOLVED_VIRTUAL_ENTRY: &str = "\0tensorlake:application-entry";
+/// Imported by the generated entry and resolved to whichever SDK package the
+/// application installed, so the CLI keeps deploying apps on the legacy name.
+const SDK_APPLICATIONS_ENTRY: &str = "tensorlake:sdk-applications";
+/// SDK package names in resolution order. Releases up to 0.5.145 were
+/// published as `tensorlake`.
+const SDK_PACKAGE_NAMES: [&str; 2] = ["@tensorlakeai/tensorlake", "tensorlake"];
 const RUNTIME_MODULE: &str = "runtime.mjs";
 const CODE_MANIFEST_FILE: &str = ".tensorlake_code_manifest.json";
 const MAX_CODE_SIZE: u64 = 5 * 1024 * 1024;
 const DEFAULT_NODE_IMAGE: &str = "node:24-trixie";
 const FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH: &str =
     ".tensorlake/typescript-function-runner-runtime.tgz";
-const FUNCTION_RUNNER_LINUX_X64_PACKAGE: &str = "tensorlake-native-linux-x64-gnu";
+/// Linux x64 native package names in preference order. Function runner
+/// capsules from releases up to 0.5.145 declare the unscoped name.
+const FUNCTION_RUNNER_LINUX_X64_PACKAGES: [&str; 2] = [
+    "@tensorlakeai/native-linux-x64-gnu",
+    "tensorlake-native-linux-x64-gnu",
+];
 const DISCOVERY_TIMEOUT: Duration = Duration::from_secs(30);
 const UNAUTHENTICATED_REQUESTS: &str = "unauthenticated_requests";
 const DISCOVERY_SCRIPT: &str = r#"
@@ -124,6 +135,7 @@ struct FunctionRunnerCapsuleFile {
 #[derive(Debug)]
 struct TensorlakeEntryPlugin {
     source: String,
+    entry_file: PathBuf,
     sdk_package_root: Arc<Mutex<Option<PathBuf>>>,
 }
 
@@ -134,9 +146,22 @@ impl Plugin for TensorlakeEntryPlugin {
 
     async fn resolve_id(
         &self,
-        _ctx: &PluginContext,
+        ctx: &PluginContext,
         args: &HookResolveIdArgs<'_>,
     ) -> HookResolveIdReturn {
+        if args.specifier == SDK_APPLICATIONS_ENTRY {
+            let importer = self.entry_file.to_string_lossy();
+            for package in SDK_PACKAGE_NAMES {
+                let specifier = format!("{package}/applications");
+                if let Ok(resolved) = ctx.resolve(&specifier, Some(&importer), None).await? {
+                    return Ok(Some(HookResolveIdOutput::from_resolved_id(resolved)));
+                }
+            }
+            anyhow::bail!(
+                "Could not resolve the Tensorlake SDK from {}. Install @tensorlakeai/tensorlake in the application's project.",
+                self.entry_file.display()
+            );
+        }
         if args.specifier != VIRTUAL_ENTRY {
             return Ok(None);
         }
@@ -232,7 +257,11 @@ fn tensorlake_package_root(id: &str) -> anyhow::Result<Option<PathBuf>> {
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
         Err(error) => return Err(error.into()),
     };
-    if package_json.get("name").and_then(Value::as_str) != Some("tensorlake") {
+    let is_sdk = package_json
+        .get("name")
+        .and_then(Value::as_str)
+        .is_some_and(|name| SDK_PACKAGE_NAMES.contains(&name));
+    if !is_sdk {
         return Ok(None);
     }
     Ok(Some(package_root.canonicalize()?))
@@ -333,7 +362,7 @@ import {{
   getFunction,
   getFunctions,
   SDK_VERSION,
-}} from "tensorlake/applications";
+}} from "{SDK_APPLICATIONS_ENTRY}";
 
 export function __tensorlakeGetFunction(name) {{
   return getFunction(name);
@@ -394,6 +423,7 @@ export function __tensorlakeDeployment() {{
     let sdk_package_root = Arc::new(Mutex::new(None));
     let plugin = TensorlakeEntryPlugin {
         source,
+        entry_file: entry_file.clone(),
         sdk_package_root: Arc::clone(&sdk_package_root),
     };
     let mut bundler = Bundler::with_plugins(options, vec![Arc::new(plugin)])
@@ -424,7 +454,7 @@ export function __tensorlakeDeployment() {{
         .clone()
         .ok_or_else(|| {
             CliError::usage(
-                "Rolldown did not resolve tensorlake/applications from a Tensorlake SDK package",
+                "Rolldown did not resolve @tensorlakeai/tensorlake/applications from a Tensorlake SDK package",
             )
         })?;
     let function_runner_capsule =
@@ -674,16 +704,21 @@ fn load_function_runner_capsule(
             package_directory.display()
         )));
     }
-    if package_json
-        .get("optionalDependencies")
-        .and_then(|dependencies| dependencies.get(FUNCTION_RUNNER_LINUX_X64_PACKAGE))
-        .and_then(Value::as_str)
-        != Some(sdk_version)
-    {
+    let declared_native_dependencies = package_json.get("optionalDependencies");
+    let Some(linux_x64_package) = FUNCTION_RUNNER_LINUX_X64_PACKAGES
+        .into_iter()
+        .find(|package| {
+            declared_native_dependencies
+                .and_then(|dependencies| dependencies.get(package))
+                .and_then(Value::as_str)
+                == Some(sdk_version)
+        })
+    else {
         return Err(CliError::usage(format!(
-            "The Tensorlake TypeScript function runner capsule does not declare {FUNCTION_RUNNER_LINUX_X64_PACKAGE}@{sdk_version}, which is required by Linux x64 sandbox images. Reinstall the published package or rebuild the function runner capsule."
+            "The Tensorlake TypeScript function runner capsule does not declare {}@{sdk_version}, which is required by Linux x64 sandbox images. Reinstall the published package or rebuild the function runner capsule.",
+            FUNCTION_RUNNER_LINUX_X64_PACKAGES[0]
         )));
-    }
+    };
 
     let shrinkwrap_path = package_directory.join("npm-shrinkwrap.json");
     let shrinkwrap: Value =
@@ -692,9 +727,9 @@ fn load_function_runner_capsule(
     let locked_root_native_version = shrinkwrap_packages
         .and_then(|packages| packages.get(""))
         .and_then(|root| root.get("optionalDependencies"))
-        .and_then(|dependencies| dependencies.get(FUNCTION_RUNNER_LINUX_X64_PACKAGE))
+        .and_then(|dependencies| dependencies.get(linux_x64_package))
         .and_then(Value::as_str);
-    let locked_native_path = format!("node_modules/{FUNCTION_RUNNER_LINUX_X64_PACKAGE}");
+    let locked_native_path = format!("node_modules/{linux_x64_package}");
     let locked_native = shrinkwrap_packages.and_then(|packages| packages.get(&locked_native_path));
     if locked_root_native_version != Some(sdk_version)
         || locked_native
@@ -707,7 +742,7 @@ fn load_function_runner_capsule(
             != Some(true)
     {
         return Err(CliError::usage(format!(
-            "The Tensorlake TypeScript function runner capsule lockfile does not pin optional dependency {FUNCTION_RUNNER_LINUX_X64_PACKAGE}@{sdk_version}"
+            "The Tensorlake TypeScript function runner capsule lockfile does not pin optional dependency {linux_x64_package}@{sdk_version}"
         )));
     }
 
@@ -1279,7 +1314,7 @@ mod tests {
         SerializedImageOperation, application_dockerfile, application_with_resolved_images,
         bundle_application, canonical_entrypoint, discover_deployment_with_timeout,
         ensure_public_endpoint_id, load_function_runner_capsule, registered_image_component,
-        render_image_operation,
+        render_image_operation, tensorlake_package_root,
     };
     use serde_json::json;
     use std::collections::BTreeMap;
@@ -1537,6 +1572,122 @@ export function __tensorlakeDeployment() {
         );
     }
 
+    fn write_package(root: &std::path::Path, name: &str, entry: &str) -> PathBuf {
+        let entry = root.join(entry);
+        std::fs::create_dir_all(entry.parent().unwrap()).unwrap();
+        std::fs::write(&entry, "").unwrap();
+        std::fs::write(
+            root.join("package.json"),
+            json!({ "name": name }).to_string(),
+        )
+        .unwrap();
+        entry
+    }
+
+    #[test]
+    fn detects_scoped_and_legacy_sdk_package_roots() {
+        let directory = tempfile::tempdir().unwrap();
+        for name in ["@tensorlakeai/tensorlake", "tensorlake"] {
+            let root = directory.path().join(name.replace('/', "_"));
+            let entry = write_package(&root, name, "dist/applications/index.js");
+            assert_eq!(
+                tensorlake_package_root(entry.to_str().unwrap()).unwrap(),
+                Some(root.canonicalize().unwrap()),
+                "{name}",
+            );
+        }
+
+        let other = directory.path().join("other");
+        let entry = write_package(&other, "not-tensorlake", "dist/applications/index.js");
+        assert_eq!(
+            tensorlake_package_root(entry.to_str().unwrap()).unwrap(),
+            None
+        );
+
+        // The `tensorlake` wrapper re-exports the scoped SDK from flat files, so
+        // only the real SDK package is detected when both are bundled.
+        let wrapper = directory.path().join("wrapper");
+        let entry = write_package(&wrapper, "tensorlake", "applications.js");
+        assert_eq!(
+            tensorlake_package_root(entry.to_str().unwrap()).unwrap(),
+            None
+        );
+    }
+
+    fn link_directory(target: &std::path::Path, link: &std::path::Path) {
+        std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+        #[cfg(unix)]
+        std::os::unix::fs::symlink(target, link).unwrap();
+        #[cfg(windows)]
+        std::os::windows::fs::symlink_dir(target, link).unwrap();
+    }
+
+    fn write_hello_application(directory: &std::path::Path, specifier: &str) -> PathBuf {
+        let entry = directory.join("application.mjs");
+        std::fs::write(
+            &entry,
+            format!(
+                r#"
+import {{ registerApplication, registerFunction }} from "{specifier}";
+
+const greet = registerFunction("greet", async (name) => `Hello, ${{name}}!`);
+export const app = registerApplication("legacy_hello", async (names) => greet.map(names));
+"#
+            ),
+        )
+        .unwrap();
+        entry
+    }
+
+    #[tokio::test]
+    async fn bundles_application_that_installed_the_legacy_sdk_name() {
+        let directory = tempfile::tempdir().unwrap();
+        link_directory(
+            &repository_root().join("typescript"),
+            &directory.path().join("node_modules/tensorlake"),
+        );
+        let entry = write_hello_application(directory.path(), "tensorlake/applications");
+
+        let bundle = bundle_application(&entry).await.unwrap();
+        assert_eq!(
+            bundle.discovery.applications[0]
+                .get("name")
+                .and_then(serde_json::Value::as_str),
+            Some("legacy_hello")
+        );
+    }
+
+    #[tokio::test]
+    async fn bundles_application_that_imports_through_the_tensorlake_wrapper() {
+        let directory = tempfile::tempdir().unwrap();
+        let typescript_root = repository_root().join("typescript");
+        link_directory(
+            &typescript_root,
+            &directory
+                .path()
+                .join("node_modules/@tensorlakeai/tensorlake"),
+        );
+        // Copy rather than link the wrapper so its own dependency resolves from
+        // the application's node_modules, as it does in a real install.
+        let wrapper = directory.path().join("node_modules/tensorlake");
+        std::fs::create_dir_all(&wrapper).unwrap();
+        for entry in std::fs::read_dir(typescript_root.join("tensorlake-wrapper")).unwrap() {
+            let entry = entry.unwrap();
+            std::fs::copy(entry.path(), wrapper.join(entry.file_name())).unwrap();
+        }
+        let entry = write_hello_application(directory.path(), "tensorlake/applications");
+
+        // The generated entry imports the scoped SDK while the application
+        // imports the wrapper; both must share one SDK registry.
+        let bundle = bundle_application(&entry).await.unwrap();
+        assert_eq!(
+            bundle.discovery.applications[0]
+                .get("name")
+                .and_then(serde_json::Value::as_str),
+            Some("legacy_hello")
+        );
+    }
+
     #[tokio::test]
     async fn rejects_imported_application_commonjs_modules() {
         let typescript_root = repository_root().join("typescript");
@@ -1549,7 +1700,7 @@ export function __tensorlakeDeployment() {
             &entry,
             r#"
 import "./legacy.cjs";
-import { registerApplication, schema } from "tensorlake/applications";
+import { registerApplication, schema } from "@tensorlakeai/tensorlake/applications";
 
 export const app = registerApplication(async () => null, {
   name: "commonjs_rejection",

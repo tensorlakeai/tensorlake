@@ -1,0 +1,48 @@
+name: Notify Slack about a release
+description: >
+  Posts a release-started message to Slack through an incoming webhook. Skips when no
+  webhook is configured; callers should set continue-on-error so Slack never blocks a release.
+
+inputs:
+  webhook-url:
+    description: Slack incoming webhook URL, usually secrets.SLACK_WEBHOOK_URL.
+    required: false
+    default: ''
+  package:
+    description: Human-readable name of what is being released, e.g. "Python SDK (PyPI)".
+    required: true
+  version:
+    description: Version being released.
+    required: true
+  package-url:
+    description: Registry or release page for the package.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Notify Slack
+      if: ${{ inputs.webhook-url != '' }}
+      uses: slackapi/slack-github-action@v4
+      with:
+        webhook: ${{ inputs.webhook-url }}
+        webhook-type: incoming-webhook
+        payload: |
+          text: ":package: ${{ github.actor }} is releasing ${{ inputs.package }} ${{ inputs.version }}"
+          blocks:
+            - type: "section"
+              text:
+                type: "mrkdwn"
+                text: ":package: *Releasing ${{ inputs.package }}*"
+            - type: "section"
+              fields:
+                - type: "mrkdwn"
+                  text: "*Version*\n<${{ inputs.package-url }}|`${{ inputs.version }}`>"
+                - type: "mrkdwn"
+                  text: "*Commit*\n<${{ github.server_url }}/${{ github.repository }}/commit/${{ github.sha }}|${{ github.ref_name }}>"
+                - type: "mrkdwn"
+                  text: "*Triggered by*\n${{ github.actor }}"
+            - type: "context"
+              elements:
+                - type: "mrkdwn"
+                  text: "<${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"

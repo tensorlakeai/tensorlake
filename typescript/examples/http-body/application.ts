@@ -6,7 +6,7 @@ import {
   registerApplication,
   registerFunction,
   schema,
-} from "tensorlake/applications";
+} from "@tensorlakeai/tensorlake/applications";
 
 const webhookEventSchema = schema.object({
   event: schema.string(),

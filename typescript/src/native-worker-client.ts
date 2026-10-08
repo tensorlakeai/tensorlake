@@ -32,7 +32,7 @@ export class NativeWorkerClient {
   constructor(
     private readonly workerPath: () => string | URL = () =>
       createRequire(import.meta.url).resolve(
-        "tensorlake/internal/native-worker",
+        "@tensorlakeai/tensorlake/internal/native-worker",
       ),
   ) {}
 

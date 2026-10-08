@@ -22,12 +22,12 @@ interface NativeBindingPathOptions extends TargetOptions {
 }
 
 const NATIVE_PACKAGES: Readonly<Record<string, string>> = {
-  "darwin-arm64": "tensorlake-native-darwin-arm64",
-  "linux-arm64": "tensorlake-native-linux-arm64-gnu",
-  "linux-arm64-musl": "tensorlake-native-linux-arm64-musl",
-  "linux-x64": "tensorlake-native-linux-x64-gnu",
-  "linux-x64-musl": "tensorlake-native-linux-x64-musl",
-  "win32-x64": "tensorlake-native-win32-x64",
+  "darwin-arm64": "@tensorlakeai/native-darwin-arm64",
+  "linux-arm64": "@tensorlakeai/native-linux-arm64-gnu",
+  "linux-arm64-musl": "@tensorlakeai/native-linux-arm64-musl",
+  "linux-x64": "@tensorlakeai/native-linux-x64-gnu",
+  "linux-x64-musl": "@tensorlakeai/native-linux-x64-musl",
+  "win32-x64": "@tensorlakeai/native-win32-x64",
 };
 
 function packageRoot(): string {
@@ -105,7 +105,7 @@ export function loadNative<T>(): T {
     packageEntry = require.resolve(packageName);
   } catch (cause) {
     throw new Error(
-      `Missing native binding package ${packageName} for ${target}. Reinstall tensorlake without omitting optional dependencies, and install dependencies on the machine where they will run.`,
+      `Missing native binding package ${packageName} for ${target}. Reinstall @tensorlakeai/tensorlake without omitting optional dependencies, and install dependencies on the machine where they will run.`,
       { cause },
     );
   }

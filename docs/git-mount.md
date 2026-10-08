@@ -15,7 +15,7 @@ CLI organization/project scope. It looks for `TENSORLAKE_CLI`, `tl` on `PATH`, t
 `~/.tensorlake/bin/tl`.
 
 ```ts
-import { RepositoryClient } from "tensorlake";
+import { RepositoryClient } from "@tensorlakeai/tensorlake";
 import { writeFile } from "node:fs/promises";
 import { join } from "node:path";
 

@@ -237,7 +237,12 @@ mod tests {
         );
         assert!(files[0].1.contains("registerApplication"));
         assert!(files[0].1.contains("\"hello_world\""));
-        assert!(files[1].1.contains("\"tensorlake\""));
+        assert!(files[1].1.contains("\"@tensorlakeai/tensorlake\""));
+        assert!(
+            files[0]
+                .1
+                .contains("from \"@tensorlakeai/tensorlake/applications\"")
+        );
         assert!(files[1].1.contains("\"name\": \"tensorlake-hello-world\""));
         assert!(
             !files

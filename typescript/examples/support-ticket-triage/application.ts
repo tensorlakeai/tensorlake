@@ -6,7 +6,7 @@ import {
   registerFunction,
   retries,
   schema,
-} from "tensorlake/applications";
+} from "@tensorlakeai/tensorlake/applications";
 import { z } from "zod";
 
 const customerTierSchema = schema.enum(["free", "pro", "enterprise"] as const);

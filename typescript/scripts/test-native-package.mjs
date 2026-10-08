@@ -22,7 +22,8 @@ try {
   assert.equal(unpacked.status, 0, unpacked.stderr);
   const modules = path.join(directory, "node_modules");
   await mkdir(modules);
-  const sdk = path.join(modules, "tensorlake");
+  const sdk = path.join(modules, "@tensorlakeai", "tensorlake");
+  await mkdir(path.dirname(sdk));
   await rename(path.join(directory, "package"), sdk);
   // Reuse the already-installed, locked JS dependencies. Only Tensorlake and
   // its native package must come from the isolated packaging layout.
@@ -46,8 +47,8 @@ try {
     const applicationDispatcher = {};
     globalThis[dispatcherKey] = applicationDispatcher;
     process.dlopen = () => { throw new Error('Main-thread addon load'); };
-    const { SandboxClient, CloudClient } = await import('tensorlake');
-    const { Sandbox, CloudClient: CommonJSCloudClient } = createRequire(import.meta.url)('tensorlake');
+    const { SandboxClient, CloudClient } = await import('@tensorlakeai/tensorlake');
+    const { Sandbox, CloudClient: CommonJSCloudClient } = createRequire(import.meta.url)('@tensorlakeai/tensorlake');
     assert.equal(globalThis[dispatcherKey], applicationDispatcher, 'SDK replaced application dispatcher');
     const server = createServer((_req, res) => {
       res.setHeader('Content-Type', 'application/json');

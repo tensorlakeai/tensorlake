@@ -35,16 +35,16 @@ describe("runtime native binding selection", () => {
 
   it("selects the platform-specific optional package", () => {
     expect(nativePackageName("linux", "x64", { libc: "gnu" })).toBe(
-      "tensorlake-native-linux-x64-gnu",
+      "@tensorlakeai/native-linux-x64-gnu",
     );
     expect(nativePackageName("linux", "arm64", { libc: "musl" })).toBe(
-      "tensorlake-native-linux-arm64-musl",
+      "@tensorlakeai/native-linux-arm64-musl",
     );
     expect(nativePackageName("darwin", "arm64")).toBe(
-      "tensorlake-native-darwin-arm64",
+      "@tensorlakeai/native-darwin-arm64",
     );
     expect(nativePackageName("win32", "x64")).toBe(
-      "tensorlake-native-win32-x64",
+      "@tensorlakeai/native-win32-x64",
     );
     expect(nativePackageName("darwin", "x64")).toBeUndefined();
   });
@@ -84,7 +84,7 @@ describe.each(["SDK", "CommonJS launcher"])("%s libc detection", (loader) => {
         path.join("native", target, "tensorlake-node.node"),
       );
       expect(runtime.nativePackageName("linux", "x64")).toBe(
-        libc === "musl" ? "tensorlake-native-linux-x64-musl" : "tensorlake-native-linux-x64-gnu",
+        libc === "musl" ? "@tensorlakeai/native-linux-x64-musl" : "@tensorlakeai/native-linux-x64-gnu",
       );
       expect(runtime.nativeTargetId("linux", "x64", { libc: "musl" })).toBe("linux-x64-musl");
       expect(runtime.nativeTargetId("linux", "x64", { report: { header: {} } })).toBe("linux-x64-musl");

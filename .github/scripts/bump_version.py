@@ -18,9 +18,11 @@ DEFAULT_FILES = (
     "typescript/npm/linux-x64/package.json",
     "typescript/npm/linux-x64-musl/package.json",
     "typescript/npm/win32-x64/package.json",
+    "typescript/tensorlake-wrapper/package.json",
 )
 
-NATIVE_PACKAGE_PREFIX = "tensorlake-native-"
+NATIVE_PACKAGE_PREFIX = "@tensorlakeai/native-"
+SDK_PACKAGE = "@tensorlakeai/tensorlake"
 
 
 def bump_typescript_package_lock(path: Path, version: str) -> None:
@@ -83,6 +85,16 @@ def bump_version(path: Path, version: str) -> None:
         )
         if native_dependency_count == 0:
             raise SystemExit(f"failed to update native dependency versions in {path}")
+    if path.as_posix() == "typescript/tensorlake-wrapper/package.json":
+        updated, sdk_dependency_count = re.subn(
+            rf'("{re.escape(SDK_PACKAGE)}":\s*)"[^"]*"',
+            rf'\g<1>"{version}"',
+            updated,
+        )
+        if sdk_dependency_count != 1:
+            raise SystemExit(
+                f"failed to update {SDK_PACKAGE} dependency version in {path}"
+            )
     path.write_text(updated)
     print(f"Updated {path}")
 

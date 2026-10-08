@@ -115,7 +115,7 @@ the constants `TERMINATION_REASON_NO_CAPACITY` / `TERMINATION_REASON_CANCELLED`.
 ## TypeScript
 
 ```typescript
-import { Sandbox, SandboxPending, SandboxError } from "tensorlake";
+import { Sandbox, SandboxPending, SandboxError } from "@tensorlakeai/tensorlake";
 
 const pending = await Sandbox.create({
   name: "job-17", image: "tensorlake/ubuntu-minimal", maxPendingSecs: 45 * 60, wait: false,

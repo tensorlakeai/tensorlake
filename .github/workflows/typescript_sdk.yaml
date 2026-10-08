@@ -227,7 +227,7 @@ jobs:
         run: |
           package_contents="$(npm pack --dry-run --ignore-scripts --json)"
           if [[ "$package_contents" == *tensorlake-node.node* ]]; then
-            echo "The main tensorlake package unexpectedly contains a native binding."
+            echo "The main @tensorlakeai/tensorlake package unexpectedly contains a native binding."
             exit 1
           fi
 

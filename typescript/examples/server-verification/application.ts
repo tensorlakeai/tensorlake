@@ -8,7 +8,7 @@ import {
   registerFunction,
   retries,
   schema,
-} from "tensorlake/applications";
+} from "@tensorlakeai/tensorlake/applications";
 
 const verificationImage = new Image({
   name: "typescript-server-verification-runtime",
