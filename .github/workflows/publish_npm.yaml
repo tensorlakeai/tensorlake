@@ -338,8 +338,6 @@ jobs:
           npm_config_ignore_scripts: "true"
         run: npm stage publish --access public --provenance
 
-  # npm currently blocks publishing to the `tensorlake` name, so the wrapper is
-  # staged last and a failure here does not fail the release.
   stage-wrapper:
     name: Stage tensorlake wrapper on npm
     needs:
