@@ -92,7 +92,9 @@ def bump_version(path: Path, version: str) -> None:
             updated,
         )
         if sdk_dependency_count != 1:
-            raise SystemExit(f"failed to update {SDK_PACKAGE} dependency version in {path}")
+            raise SystemExit(
+                f"failed to update {SDK_PACKAGE} dependency version in {path}"
+            )
     path.write_text(updated)
     print(f"Updated {path}")
 
