@@ -1,27 +1,20 @@
 name: Release - TypeScript SDK (npm)
 
-run-name: "Release - TypeScript SDK (npm) · ${{ inputs.phase }} · ${{ github.ref_name }} · @${{ github.actor }}"
+run-name: "Release - TypeScript SDK (npm) · ${{ github.ref_name }} · @${{ github.actor }}"
 
 # Every package requires staged publishing: this workflow uploads versions with
 # `npm stage publish`, and a maintainer approves each one on npmjs.com (or with
-# `npm stage approve`) before it becomes public. A release runs in two phases:
+# `npm stage approve`) before it becomes public. Native packages are staged as
+# the exact tarballs this workflow packs, so their checksums can be locked into
+# the SDK before anything is public. Approve in this order:
 #
-#   1. `native`: build and stage the six @tensorlakeai/native-* packages.
-#      Approve all six before continuing.
-#   2. `sdk`: lock the approved native checksums, then stage
-#      @tensorlakeai/tensorlake and, last, the `tensorlake` wrapper.
-#      Approve the SDK before the wrapper so `npm install tensorlake` never
-#      resolves a wrapper whose dependency is not public yet.
+#   1. the six @tensorlakeai/native-* packages,
+#   2. @tensorlakeai/tensorlake,
+#   3. the `tensorlake` wrapper,
 #
-# Trusted publishing is bound to this workflow file, so both phases stay here.
+# so no public package ever depends on a version that is still staged.
 on:
   workflow_dispatch:
-    inputs:
-      phase:
-        description: Release phase to run
-        required: true
-        type: choice
-        options: [native, sdk]
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
@@ -38,7 +31,6 @@ defaults:
 jobs:
   notify-start:
     name: Notify Slack that the release is starting
-    if: inputs.phase == 'sdk'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -58,7 +50,6 @@ jobs:
 
   build-sdk-and-test:
     name: Build SDK and test
-    if: inputs.phase == 'sdk'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,7 +87,6 @@ jobs:
 
   build-native-binaries:
     name: Build native binding (${{ matrix.target_id }})
-    if: inputs.phase == 'native'
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -217,7 +207,6 @@ jobs:
 
   stage-native-binaries:
     name: Stage native package (${{ matrix.target_id }})
-    if: inputs.phase == 'native'
     needs:
       - build-native-binaries
     runs-on: ubuntu-latest
@@ -270,17 +259,29 @@ jobs:
           test "$(node -p "require('./npm/${{ matrix.target_id }}/package.json').name")" = "${{ matrix.package_name }}"
           npm pack "./npm/${{ matrix.target_id }}" --dry-run --ignore-scripts
 
+      - name: Pack native package
+        id: pack
+        run: |
+          mkdir -p "$RUNNER_TEMP/native-tarball" "$RUNNER_TEMP/native-integrity"
+          npm pack "./npm/${{ matrix.target_id }}" --ignore-scripts --json --pack-destination "$RUNNER_TEMP/native-tarball" > "$RUNNER_TEMP/pack.json"
+          node ./scripts/record-native-integrity.mjs "$RUNNER_TEMP/pack.json" "$RUNNER_TEMP/native-tarball" "$RUNNER_TEMP/native-integrity/${{ matrix.target_id }}.json"
+
+      # Stage the tarball that was just checksummed, so the integrity locked
+      # into the SDK matches the artifact users will install.
       - name: Stage native package on npm
-        working-directory: typescript/npm/${{ matrix.target_id }}
-        env:
-          npm_config_ignore_scripts: "true"
-        run: npm stage publish --access public --provenance
+        run: npm stage publish "${{ steps.pack.outputs.tarball }}" --access public --provenance
+
+      - name: Upload native integrity record
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-integrity-${{ matrix.target_id }}
+          path: ${{ runner.temp }}/native-integrity/${{ matrix.target_id }}.json
 
   stage-sdk:
     name: Stage SDK on npm
-    if: inputs.phase == 'sdk'
     needs:
       - build-sdk-and-test
+      - stage-native-binaries
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -303,35 +304,21 @@ jobs:
           npm install --global --ignore-scripts "npm@${NPM_VERSION}"
           npm --version
 
-      - name: Require approved native packages
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          packages="$(node -p "Object.keys(require('./package.json').optionalDependencies).join(' ')")"
-          # Newly approved versions can take a short while to become visible.
-          for attempt in $(seq 1 12); do
-            missing=""
-            for package in $packages; do
-              if [ -z "$(npm view "${package}@${version}" dist.integrity 2>/dev/null)" ]; then
-                missing="$missing $package"
-              fi
-            done
-            [ -z "$missing" ] && exit 0
-            echo "Waiting for${missing} @ ${version} (attempt ${attempt}/12)"
-            sleep 10
-          done
-          for package in $missing; do
-            echo "::error::${package}@${version} is not public. Run the 'native' phase and approve its staged packages first."
-          done
-          exit 1
-
       - name: Reject install lifecycle scripts
         run: node ./scripts/check-no-install-scripts.mjs
 
       - name: Install dependencies
         run: npm ci --ignore-scripts
 
-      - name: Lock published native package checksums
-        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Download native integrity records
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-integrity-*
+          merge-multiple: true
+          path: ${{ runner.temp }}/native-integrity
+
+      - name: Lock staged native package checksums
+        run: node ./scripts/lock-native-integrity.mjs "$RUNNER_TEMP/native-integrity"
 
       - name: Download SDK artifact
         uses: actions/download-artifact@v4
@@ -355,7 +342,6 @@ jobs:
   # staged last and a failure here does not fail the release.
   stage-wrapper:
     name: Stage tensorlake wrapper on npm
-    if: inputs.phase == 'sdk'
     needs:
       - stage-sdk
     continue-on-error: true
