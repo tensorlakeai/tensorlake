@@ -1,0 +1,63 @@
+{
+  "name": "tensorlake",
+  "version": "0.5.145",
+  "description": "Compatibility package that re-exports @tensorlakeai/tensorlake. New projects should depend on @tensorlakeai/tensorlake directly.",
+  "type": "module",
+  "main": "./index.cjs",
+  "module": "./index.js",
+  "types": "./index.d.ts",
+  "exports": {
+    ".": {
+      "import": {
+        "types": "./index.d.ts",
+        "default": "./index.js"
+      },
+      "require": {
+        "types": "./index.d.cts",
+        "default": "./index.cjs"
+      }
+    },
+    "./applications": {
+      "import": {
+        "types": "./applications.d.ts",
+        "default": "./applications.js"
+      },
+      "require": {
+        "types": "./applications.d.cts",
+        "default": "./applications.cjs"
+      }
+    }
+  },
+  "files": [
+    "index.js",
+    "index.cjs",
+    "index.d.ts",
+    "index.d.cts",
+    "applications.js",
+    "applications.cjs",
+    "applications.d.ts",
+    "applications.d.cts"
+  ],
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "keywords": [
+    "tensorlake",
+    "sandbox",
+    "cloud",
+    "sdk",
+    "applications"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tensorlakeai/tensorlake",
+    "directory": "typescript/tensorlake-wrapper"
+  },
+  "license": "Apache-2.0",
+  "dependencies": {
+    "@tensorlakeai/tensorlake": "0.5.145"
+  },
+  "publishConfig": {
+    "access": "public"
+  }
+}

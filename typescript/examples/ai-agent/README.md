@@ -14,9 +14,9 @@ count the words in a passage before explaining the result.
   dependencies.
 - `tsconfig.json` enables strict checking without emitting JavaScript.
 
-The repository example uses `"tensorlake": "file:../.."` so it resolves the
+The repository example uses `"@tensorlakeai/tensorlake": "file:../.."` so it resolves the
 SDK from this checkout. In an independent project, install the published
-`tensorlake` package instead.
+`@tensorlakeai/tensorlake` package instead.
 
 ## Prerequisites
 

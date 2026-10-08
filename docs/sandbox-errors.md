@@ -26,7 +26,7 @@ except RemoteAPIError as error:
 The same fields are available with `AsyncSandboxClient`.
 
 ```typescript
-import { RemoteAPIError, SandboxClient } from "tensorlake";
+import { RemoteAPIError, SandboxClient } from "@tensorlakeai/tensorlake";
 
 const client = SandboxClient.forCloud();
 try {

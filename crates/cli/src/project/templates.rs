@@ -19,7 +19,7 @@ def {function_name}(name: str) -> str:
     return f"Hello, {name}!"
 "#;
 
-pub const TYPESCRIPT_TEMPLATE: &str = r#"import { registerApplication } from "tensorlake/applications";
+pub const TYPESCRIPT_TEMPLATE: &str = r#"import { registerApplication } from "@tensorlakeai/tensorlake/applications";
 
 export const app = registerApplication(
   "{function_name}",
@@ -38,7 +38,7 @@ pub const TYPESCRIPT_PACKAGE_TEMPLATE: &str = r#"{
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "tensorlake": "^{sdk_version}"
+    "@tensorlakeai/tensorlake": "^{sdk_version}"
   },
   "devDependencies": {
     "typescript": "^5.8.0"

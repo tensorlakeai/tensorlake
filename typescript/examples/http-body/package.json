@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "tensorlake": "file:../.."
+    "@tensorlakeai/tensorlake": "file:../.."
   },
   "devDependencies": {
     "typescript": "^5.8.0"

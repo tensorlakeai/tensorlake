@@ -4,10 +4,10 @@ import { access, readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 
-const commonJS = require("tensorlake");
-const commonJSApplications = require("tensorlake/applications");
-const esm = await import("tensorlake");
-const esmApplications = await import("tensorlake/applications");
+const commonJS = require("@tensorlakeai/tensorlake");
+const commonJSApplications = require("@tensorlakeai/tensorlake/applications");
+const esm = await import("@tensorlakeai/tensorlake");
+const esmApplications = await import("@tensorlakeai/tensorlake/applications");
 
 for (const [label, module] of [
   ["CommonJS SDK", commonJS],
@@ -89,7 +89,7 @@ await access(new URL("../runtime/typescript-function-runner/manifest.json", impo
 await access(new URL("../dist/native-worker.cjs", import.meta.url));
 await access(new URL("../runtime/function-executor/package/dist/native-worker.cjs", import.meta.url));
 await access(new URL("../runtime/typescript-function-runner/package/dist/native-worker.cjs", import.meta.url));
-if (require.resolve("tensorlake/internal/native-worker") !== fileURLToPath(new URL("../dist/native-worker.cjs", import.meta.url))) {
+if (require.resolve("@tensorlakeai/tensorlake/internal/native-worker") !== fileURLToPath(new URL("../dist/native-worker.cjs", import.meta.url))) {
   throw new Error("Native worker package export does not resolve to its packaged entrypoint");
 }
 const functionRunnerManifest = JSON.parse(await readFile(
@@ -108,7 +108,7 @@ const functionRunnerPackage = JSON.parse(await readFile(
 if (
   Object.keys(functionRunnerPackage.optionalDependencies ?? {}).length === 0
   || Object.keys(functionRunnerPackage.optionalDependencies).some(
-    (dependency) => !dependency.startsWith("tensorlake-native-"),
+    (dependency) => !dependency.startsWith("@tensorlakeai/native-"),
   )
 ) {
   throw new Error("Function runner capsule does not declare native platform packages");

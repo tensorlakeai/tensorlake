@@ -6,6 +6,6 @@
     "node": ">=24.0.0"
   },
   "dependencies": {
-    "tensorlake": "file:../.."
+    "@tensorlakeai/tensorlake": "file:../.."
   }
 }

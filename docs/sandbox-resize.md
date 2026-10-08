@@ -122,7 +122,7 @@ booleans, and numeric strings are rejected without rounding.
 and `diskMb` option names:
 
 ```ts
-import { Sandbox } from "tensorlake";
+import { Sandbox } from "@tensorlakeai/tensorlake";
 
 const sandbox = await Sandbox.connect({ sandboxId: "my-sandbox" });
 const info = await sandbox.update({ cpus: 2, memoryMb: 4096, diskMb: 20480 });
@@ -134,7 +134,7 @@ A no-op returns current resources without submitting an update. Its
 failed one; use confirmed resources as above to report the result.
 
 ```ts
-import { ResizeStatus } from "tensorlake";
+import { ResizeStatus } from "@tensorlakeai/tensorlake";
 
 const admitted = await sandbox.update({ memoryMb: 6144, wait: false });
 const resize = admitted.resourceResize;

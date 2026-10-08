@@ -12,6 +12,25 @@ permissions:
   contents: write
 
 jobs:
+  notify-start:
+    name: Notify Slack that the release is starting
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read version
+        id: version
+        run: echo "version=$(grep -m1 -E '^version = ' Cargo.toml | sed -E 's/version = "(.*)"/\1/')" >> "$GITHUB_OUTPUT"
+
+      - name: Notify Slack
+        continue-on-error: true
+        uses: ./.github/actions/notify-release
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          package: CLI binaries
+          version: ${{ steps.version.outputs.version }}
+          package-url: ${{ github.server_url }}/${{ github.repository }}/releases/tag/cli-v${{ steps.version.outputs.version }}
+
   artifact-storage-source:
     name: Pin private artifact_storage source
     runs-on: ubuntu-latest

@@ -39,7 +39,7 @@ export TENSORLAKE_ORGANIZATION_ID="..."
 export TENSORLAKE_PROJECT_ID="..."
 ```
 
-This repository fixture deliberately uses `"tensorlake": "file:../.."`, so it tests the SDK and executor from this checkout without publishing either one. Build the local SDK, install the example dependency, and deploy from the repository root:
+This repository fixture deliberately uses `"@tensorlakeai/tensorlake": "file:../.."`, so it tests the SDK and executor from this checkout without publishing either one. Build the local SDK, install the example dependency, and deploy from the repository root:
 
 ```bash
 npm --prefix typescript install
@@ -60,7 +60,7 @@ npm --prefix typescript/examples/server-verification install
 node typescript/examples/server-verification/verify.mjs
 ```
 
-The SDK build creates a hashed executor capsule next to the local package. Rolldown records the exact `tensorlake/applications` package it resolves, and `tl deploy` validates that package's capsule, adds it directly to the image-build context, and installs it from a local tarball. The Tensorlake package itself never needs to be present in an npm registry; npm is only used by the image builder to install the capsule's locked third-party dependencies.
+The SDK build creates a hashed executor capsule next to the local package. Rolldown records the exact `@tensorlakeai/tensorlake/applications` package it resolves, and `tl deploy` validates that package's capsule, adds it directly to the image-build context, and installs it from a local tarball. The Tensorlake package itself never needs to be present in an npm registry; npm is only used by the image builder to install the capsule's locked third-party dependencies.
 
 `tl` bundles `application.ts` as ESM with its embedded Rust Rolldown implementation, initializes the bundle once with Node 24 to discover the registered functions, builds the function image, and uploads the application manifests and code ZIP to the configured server.
 

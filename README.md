@@ -249,7 +249,7 @@ records directly from signed object-store URLs. File payloads normally do not pa
 Tensorlake API service.
 
 ```ts
-import { FilesystemClient } from "tensorlake";
+import { FilesystemClient } from "@tensorlakeai/tensorlake";
 
 const client = new FilesystemClient({
   apiKey: "your-api-key",

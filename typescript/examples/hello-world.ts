@@ -1,4 +1,4 @@
-import { registerApplication, registerFunction } from "tensorlake/applications";
+import { registerApplication, registerFunction } from "@tensorlakeai/tensorlake/applications";
 
 const greeting = registerFunction(
   "greeting",

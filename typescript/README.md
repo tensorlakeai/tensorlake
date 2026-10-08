@@ -19,7 +19,7 @@ can start a fresh worker. Byte arguments are copied across the worker boundary;
 caller-owned buffers are never detached. File-path upload APIs avoid that copy.
 
 Both ESM and CommonJS packages include the worker entrypoint. Applications using a
-bundler should keep `tensorlake` external so its worker and optional native packages
+bundler should keep `@tensorlakeai/tensorlake` external so its worker and optional native packages
 remain available at runtime. Tensorlake's function runtime capsules carry the worker
 for deployed application bundles. Image-building and Function Agent runtime bindings
 have their own native entrypoints and are outside this sandbox worker boundary.
@@ -30,7 +30,7 @@ executable, set `TENSORLAKE_NODE_LIBC=gnu` or `TENSORLAKE_NODE_LIBC=musl` before
 the SDK.
 
 ```ts
-import { registerApplication, registerFunction } from "tensorlake/applications";
+import { registerApplication, registerFunction } from "@tensorlakeai/tensorlake/applications";
 
 const square = registerFunction(
   "square",
@@ -50,7 +50,7 @@ runtime validation, API metadata, optional parameters without a JavaScript
 default, rest parameters, `File` inputs and outputs, or an `HttpBody` input:
 
 ```ts
-import { registerApplication, schema } from "tensorlake/applications";
+import { registerApplication, schema } from "@tensorlakeai/tensorlake/applications";
 
 export const validatedSquare = registerApplication(
   async (value: number) => value * value,
@@ -65,7 +65,7 @@ export const validatedSquare = registerApplication(
 Run locally or deploy the same file:
 
 ```ts
-import { runLocal } from "tensorlake/applications";
+import { runLocal } from "@tensorlakeai/tensorlake/applications";
 
 const request = await runLocal(squares, [1, 2, 3]);
 console.log(await request.output());
@@ -77,7 +77,7 @@ last argument when every application argument is supplied. Wrap options with
 can never be mistaken for client configuration:
 
 ```ts
-import { registerApplication, remoteOptions, runRemote } from "tensorlake/applications";
+import { registerApplication, remoteOptions, runRemote } from "@tensorlakeai/tensorlake/applications";
 
 const greeting = registerApplication(
   "greeting",
@@ -92,13 +92,13 @@ console.log(await request.output());
 ```
 
 ```bash
-npm install tensorlake
+npm install @tensorlakeai/tensorlake
 tl deploy app.ts
 ```
 
 `tl` recognizes ESM `.ts`, `.mts`, `.js`, and `.mjs` entrypoints. The Rust CLI bundles the application for Node 24 with Rolldown, initializes the resulting ESM bundle once with Node to discover its registered functions, builds the function images, and uploads the deployment. CommonJS application modules and bundler configuration files are not supported.
 
-The SDK build also produces a hashed executor capsule containing the Node 24 ESM executor, its protobufs, and an npm shrinkwrap derived from the checked-in SDK lockfile. During deployment, `tl` uses the capsule from the exact SDK package Rolldown resolved and adds it directly to the image-build context. This supports local dependencies such as `"tensorlake": "file:../tensorlake/typescript"`; build that SDK checkout with `npm run build:sdk` before deploying. The local Tensorlake package does not need to be published.
+The SDK build also produces a hashed executor capsule containing the Node 24 ESM executor, its protobufs, and an npm shrinkwrap derived from the checked-in SDK lockfile. During deployment, `tl` uses the capsule from the exact SDK package Rolldown resolved and adds it directly to the image-build context. This supports local dependencies such as `"@tensorlakeai/tensorlake": "file:../tensorlake/typescript"`; build that SDK checkout with `npm run build:sdk` before deploying. The local Tensorlake package does not need to be published.
 
 Functions expose `future`, `map`, `reduce`, and `tailCall`. `map` and `reduce`
 accept either an iterable or a Promise/Future that produces one, and their

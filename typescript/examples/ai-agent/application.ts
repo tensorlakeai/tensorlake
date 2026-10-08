@@ -1,6 +1,6 @@
 import { openai } from "@ai-sdk/openai";
 import { ToolLoopAgent, stepCountIs, tool } from "ai";
-import { registerApplication } from "tensorlake/applications";
+import { registerApplication } from "@tensorlakeai/tensorlake/applications";
 import { z } from "zod";
 
 export const aiAgent = registerApplication(
