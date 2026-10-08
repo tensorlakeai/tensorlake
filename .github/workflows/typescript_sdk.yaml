@@ -80,7 +80,7 @@ jobs:
           virtualenvs-in-project: true
 
       - name: Install TypeScript dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Install Python dependencies
         working-directory: ${{ github.workspace }}
@@ -109,8 +109,11 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Reject install lifecycle scripts
+        run: node ./scripts/check-no-install-scripts.mjs
+
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Check shared function-executor protocol source
         run: npm run check:proto
@@ -164,8 +167,11 @@ jobs:
       - name: Install Rust target
         run: rustup target add x86_64-unknown-linux-gnu x86_64-unknown-linux-musl
 
+      - name: Reject install lifecycle scripts
+        run: node ./scripts/check-no-install-scripts.mjs
+
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build SDK
         run: npm run build:sdk
@@ -245,8 +251,11 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Reject install lifecycle scripts
+        run: node ./scripts/check-no-install-scripts.mjs
+
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98.1
