@@ -30,8 +30,11 @@ jobs:
           cache: "npm"
           cache-dependency-path: typescript/package-lock.json
 
+      - name: Reject install lifecycle scripts
+        run: node ./scripts/check-no-install-scripts.mjs
+
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Type check
         run: npm run typecheck
@@ -130,8 +133,11 @@ jobs:
         if: matrix.rust_target_base != ''
         run: rustup target add ${{ matrix.rust_target_base }}
 
+      - name: Reject install lifecycle scripts
+        run: node ./scripts/check-no-install-scripts.mjs
+
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Build native binding
         run: npm run build:native
@@ -243,8 +249,11 @@ jobs:
           registry-url: "https://registry.npmjs.org"
           package-manager-cache: false
 
+      - name: Reject install lifecycle scripts
+        run: node ./scripts/check-no-install-scripts.mjs
+
       - name: Install dependencies
-        run: npm ci
+        run: npm ci --ignore-scripts
 
       - name: Lock published native package checksums
         run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund

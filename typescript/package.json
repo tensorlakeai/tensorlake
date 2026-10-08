@@ -1,6 +1,6 @@
 {
   "name": "tensorlake",
-  "version": "0.5.143",
+  "version": "0.5.145",
   "description": "TensorLake SDK for applications, sandboxes, and cloud services",
   "type": "module",
   "main": "./dist/index.cjs",
@@ -49,6 +49,7 @@
     "build:native": "node ./scripts/build-native.mjs",
     "build": "npm run build:sdk && npm run build:native && npm run build:runtime",
     "check:proto": "node ./scripts/check-function-executor-proto.mjs",
+    "check:install-scripts": "node ./scripts/check-no-install-scripts.mjs",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --exclude tests/integration.test.ts",
     "test:function-executor": "vitest run tests/function-executor.test.ts tests/function-executor-protocol.test.ts",
@@ -96,11 +97,11 @@
     "ws": "^8.20.0"
   },
   "optionalDependencies": {
-    "tensorlake-native-darwin-arm64": "0.5.143",
-    "tensorlake-native-linux-arm64-gnu": "0.5.143",
-    "tensorlake-native-linux-arm64-musl": "0.5.143",
-    "tensorlake-native-linux-x64-gnu": "0.5.143",
-    "tensorlake-native-linux-x64-musl": "0.5.143",
-    "tensorlake-native-win32-x64": "0.5.143"
+    "tensorlake-native-darwin-arm64": "0.5.145",
+    "tensorlake-native-linux-arm64-gnu": "0.5.145",
+    "tensorlake-native-linux-arm64-musl": "0.5.145",
+    "tensorlake-native-linux-x64-gnu": "0.5.145",
+    "tensorlake-native-linux-x64-musl": "0.5.145",
+    "tensorlake-native-win32-x64": "0.5.145"
   }
 }

@@ -98,7 +98,7 @@ jobs:
       - name: Build TypeScript SDK and Function Service runner capsule
         working-directory: typescript
         run: |
-          npm ci
+          npm ci --ignore-scripts
           npm run build
 
       - name: Vendor private artifact_storage crates
