@@ -2019,9 +2019,9 @@ async fn follow_process_output(
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
     let mut replayed_events_seen = 0usize;
-    // Partial chunks (`line_ending == ""`) per stream, until their line ends.
-    let mut partial_lines: HashMap<String, String> = HashMap::new();
-    let result = proxy
+    // Emit each chunk at once, partial ones too, so that progress output
+    // without a "\n" (e.g. curl's "\r" meter) shows while the build runs.
+    proxy
         .follow_output_streaming(pid, |output| {
             if replayed_events_seen < *output_events_seen {
                 replayed_events_seen += 1;
@@ -2029,27 +2029,12 @@ async fn follow_process_output(
             }
             replayed_events_seen += 1;
             *output_events_seen += 1;
-            let stream = output.stream.unwrap_or_else(|| "stdout".to_string());
-            if output.line_ending.as_deref() == Some("") {
-                partial_lines
-                    .entry(stream)
-                    .or_default()
-                    .push_str(&output.line);
-                return;
-            }
-            let message = match partial_lines.remove(&stream) {
-                Some(partial) => partial + &output.line,
-                None => output.line,
-            };
-            emit(SandboxImageBuildEvent::BuildLog { stream, message });
+            emit(SandboxImageBuildEvent::BuildLog {
+                stream: output.stream.unwrap_or_else(|| "stdout".to_string()),
+                message: output.line,
+            });
         })
-        .await;
-
-    // Do not lose a last line that has no terminator, or one cut by a reconnect.
-    for (stream, message) in partial_lines {
-        emit(SandboxImageBuildEvent::BuildLog { stream, message });
-    }
-    result?;
+        .await?;
 
     Ok(())
 }
