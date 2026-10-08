@@ -150,10 +150,9 @@ def _validate_managed_name_client_side(name: str) -> None:
 def _join_output(chunks: list[dict]) -> str:
     """Join one stream's output chunks into the text the process wrote.
 
-    A daemon that honors ``exact_output`` sends each chunk's ``line_ending``
-    (``""`` for a partial chunk), so the chunks join exactly. An older daemon
-    sends lines without their terminators, which can only be joined with
-    ``"\n"``.
+    The daemon sends each chunk's ``line_ending`` (``""`` for a partial
+    chunk), so the chunks join exactly. An older daemon sends lines without
+    their terminators, which can only be joined with ``"\n"``.
     """
     if all("line_ending" in chunk for chunk in chunks):
         return "".join(chunk["line"] + chunk["line_ending"] for chunk in chunks)
@@ -1727,7 +1726,6 @@ class Sandbox:
             working_dir,
             timeout=timeout,
             user=process_user,
-            exact_output=True,
         )
 
         try:

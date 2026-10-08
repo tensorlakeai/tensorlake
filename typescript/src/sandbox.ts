@@ -1200,7 +1200,7 @@ export class Sandbox {
    */
   async run(command: string, options?: RunOptions): Promise<Traced<CommandResult>> {
     const opStart = nowMs();
-    const body: Record<string, unknown> = { command, exact_output: true };
+    const body: Record<string, unknown> = { command };
     if (options?.args) body.args = options.args;
     if (options?.env) body.env = options.env;
     if (options?.workingDir) body.working_dir = options.workingDir;

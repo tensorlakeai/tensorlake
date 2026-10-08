@@ -324,7 +324,7 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(fake.run_payload_json)
         self.assertEqual(payload["timeout"], 2.5)
 
-    async def test_run_asks_for_exact_output_and_joins_line_endings(self):
+    async def test_run_joins_line_endings(self):
         class _ExactFake(_FakeAsyncRustProxyClient):
             async def run_process_json_async(self, payload_json):
                 self.run_payload_json = payload_json
@@ -347,7 +347,6 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
 
         result = await sandbox.run("sh")
 
-        self.assertIs(json.loads(fake.run_payload_json)["exact_output"], True)
         self.assertEqual(result.stdout, "ab\r\n\n")
         self.assertEqual(result.stderr, "oops\n")
 

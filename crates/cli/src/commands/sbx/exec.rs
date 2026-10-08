@@ -750,7 +750,7 @@ fn build_process_payload(
             SANDBOX_EXEC_MODE_ENV.to_string(),
             Value::String(SANDBOX_EXEC_MODE_ONE_SHOT.to_string()),
         );
-    let mut body = serde_json::json!({ "command": command, "exact_output": true });
+    let mut body = serde_json::json!({ "command": command });
     if !args.is_empty() {
         body["args"] = serde_json::json!(args);
     }

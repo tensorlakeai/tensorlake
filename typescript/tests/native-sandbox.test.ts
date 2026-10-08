@@ -148,7 +148,7 @@ describe("Sandbox native proxy path", () => {
     sbx.close();
   });
 
-  it("asks for exact output and joins chunks with their line endings", async () => {
+  it("joins chunks with their line endings", async () => {
     const { proxy } = installFakeBinding({
       runProcess: vi.fn(async () => ({
         traceId: "tr-run",
@@ -164,7 +164,6 @@ describe("Sandbox native proxy path", () => {
     });
     const sbx = makeSandbox();
     const result = await sbx.run("sh");
-    expect(JSON.parse(proxy.runProcess.mock.calls[0][0]).exact_output).toBe(true);
     expect(result.stdout).toBe("ab\r\n\n");
     expect(result.stderr).toBe("oops\n");
     sbx.close();

@@ -460,9 +460,9 @@ interface OutputChunk {
 }
 
 /**
- * Join one stream's output chunks into the text the process wrote. A daemon
- * that honors `exact_output` sends each chunk's `line_ending` ("" for a partial
- * chunk); an older daemon sends lines without terminators, joined with "\n".
+ * Join one stream's output chunks into the text the process wrote. The daemon
+ * sends each chunk's `line_ending` ("" for a partial chunk); an older daemon
+ * sends lines without terminators, joined with "\n".
  */
 function joinOutput(chunks: OutputChunk[]): string {
   if (chunks.every((chunk) => chunk.lineEnding !== undefined)) {

@@ -316,10 +316,9 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(result.stderr, "err1")
         self.assertEqual(result.exit_code, 0)
 
-    def test_run_asks_for_exact_output_and_joins_line_endings(self):
+    def test_run_joins_line_endings(self):
         class _ExactFakeClient(_FakeRustProxyClient):
             def run_process_json(self, payload_json):
-                self.run_payload_json = payload_json
                 return _TRACE_ID, [
                     json.dumps({"line": "a", "line_ending": "", "timestamp": 1}),
                     json.dumps({"line": "b", "line_ending": "\r\n", "timestamp": 2}),
@@ -335,11 +334,10 @@ class TestSandboxRustBackend(unittest.TestCase):
                     json.dumps({"exit_code": 0}),
                 ]
 
-        sandbox, fake = _make_sandbox(_ExactFakeClient())
+        sandbox, _ = _make_sandbox(_ExactFakeClient())
 
         result = sandbox.run("sh")
 
-        self.assertIs(json.loads(fake.run_payload_json)["exact_output"], True)
         self.assertEqual(result.stdout, "ab\r\n\n")
         self.assertEqual(result.stderr, "oops\n")
 

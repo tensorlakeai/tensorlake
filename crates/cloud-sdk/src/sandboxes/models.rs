@@ -1070,8 +1070,7 @@ pub struct OutputEvent {
     #[serde(default)]
     pub stream: Option<String>,
     /// The terminator the daemon removed from `line`: `"\n"`, `"\r\n"`, or
-    /// `""` for a partial chunk. Present only when the run asked for
-    /// `exact_output` and the daemon supports it.
+    /// `""` for a partial chunk. Absent from an older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_ending: Option<String>,
 }

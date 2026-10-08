@@ -1115,7 +1115,6 @@ class AsyncSandbox:
             working_dir,
             timeout=timeout,
             user=process_user,
-            exact_output=True,
         )
         try:
             trace_id, events_json = await self._rust_client.run_process_json_async(
