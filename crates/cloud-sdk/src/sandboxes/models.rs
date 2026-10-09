@@ -387,8 +387,10 @@ pub struct DetachFileSystemRequest {
     pub mount_path: String,
 }
 
-/// Resource targets for a running Cloud Hypervisor sandbox. Names and numeric
-/// types match create; values are optional to support partial updates.
+/// Resource targets for a running sandbox. Non-GPU sandboxes support CPU,
+/// memory, and root-disk resize; GPU sandboxes support only root-disk growth.
+/// Non-CAS sandboxes do not support live resize.
+/// Names and numeric types match create; values are optional for partial updates.
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
 pub struct ResizeSandboxResources {
     #[serde(skip_serializing_if = "Option::is_none")]

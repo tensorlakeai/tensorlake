@@ -626,7 +626,9 @@ export class SandboxClient {
   }
 
   /**
-   * Update properties or resize a Running Cloud Hypervisor sandbox.
+   * Update properties or resize a running sandbox. Non-GPU sandboxes support
+   * CPU, memory, and root-disk resize; GPU sandboxes support only root-disk
+   * growth. Non-CAS sandboxes do not support live resize.
    * Resource names match create. Resize waits by default; wait=false returns
    * admission. Timeout leaves the resize running and reports its generation.
    * Wait, timeout, and pollInterval are ignored on non-resource updates.

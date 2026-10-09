@@ -173,9 +173,12 @@ except SandboxPending as still:
     print(still.pending_reason)  # still queued; call ready() again
 ```
 
-Running Cloud Hypervisor sandboxes support live CPU, memory, and root-disk updates
-through `tl sbx update` and every Sandbox SDK. Resource arguments match create,
-and updates wait for confirmed completion by default. See [sandbox resource resize](docs/sandbox-resize.md).
+Running non-GPU sandboxes support live CPU, memory, and root-disk updates
+through `tl sbx update` and every Sandbox SDK. Running GPU sandboxes support
+root-disk growth; CPU and memory changes are rejected. Non-CAS sandboxes do not
+support live resize. Resource arguments match create, and updates wait for
+confirmed completion by default.
+See [sandbox resource resize](docs/sandbox-resize.md).
 
 ### Snapshots
 
