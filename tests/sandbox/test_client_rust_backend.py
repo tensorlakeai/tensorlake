@@ -163,7 +163,7 @@ class _FakeRustClient:
             ),
         )
 
-    def list_sandboxes_json(self):
+    def list_sandboxes_json(self, *, limit=None, cursor=None):
         return (
             "trace-list-sandboxes",
             """
@@ -228,6 +228,52 @@ class _FakeRustClient:
             "sandbox_url": f"https://{sandbox_id}.sandbox.tensorlake.ai",
         }
         return ("trace-update-sandbox", json.dumps(response))
+
+
+def _sandbox_page_json(ids: list[str], *, next_cursor: str | None = None) -> str:
+    """Render one ``list_sandboxes_json`` page for the given sandbox ids."""
+    payload = {
+        "sandboxes": [
+            {
+                "id": sandbox_id,
+                "namespace": "default",
+                "status": "running",
+                "resources": {"cpus": 1.0, "memory_mb": 512, "disk_mb": 1024},
+            }
+            for sandbox_id in ids
+        ]
+    }
+    if next_cursor is not None:
+        payload["next_cursor"] = next_cursor
+    return json.dumps(payload)
+
+
+class _PaginatedListRustClient(_FakeRustClient):
+    """A fake server that answers ``list_sandboxes_json`` over 3 pages of
+    100, 100, and 50 sandboxes, matching the server's default page size."""
+
+    def __init__(self):
+        super().__init__()
+        self.list_calls: list[dict] = []
+
+    def list_sandboxes_json(self, *, limit=None, cursor=None):
+        self.list_calls.append({"limit": limit, "cursor": cursor})
+        if cursor is None:
+            ids = [f"sbx-{i}" for i in range(100)]
+            return (
+                "trace-list-page-1",
+                _sandbox_page_json(ids, next_cursor="cursor-1"),
+            )
+        if cursor == "cursor-1":
+            ids = [f"sbx-{i}" for i in range(100, 200)]
+            return (
+                "trace-list-page-2",
+                _sandbox_page_json(ids, next_cursor="cursor-2"),
+            )
+        if cursor == "cursor-2":
+            ids = [f"sbx-{i}" for i in range(200, 250)]
+            return ("trace-list-page-3", _sandbox_page_json(ids))
+        raise AssertionError(f"unexpected pagination cursor: {cursor!r}")
 
 
 class _FakeProxyClient:
@@ -995,7 +1041,7 @@ class TestSandboxClientRustBackend(unittest.TestCase):
                     _sandbox_info_json(sandbox_id, network_policy=policy),
                 )
 
-            def list_sandboxes_json(self):
+            def list_sandboxes_json(self, *, limit=None, cursor=None):
                 sandbox = _sandbox_info_payload("sbx-1", network_policy=policy)
                 return ("trace-list-sandboxes", json.dumps({"sandboxes": [sandbox]}))
 
@@ -1476,6 +1522,71 @@ class TestSandboxClientRustBackend(unittest.TestCase):
         self.assertEqual(len(sandboxes_list), 1)
         self.assertEqual(sandboxes_list[0].sandbox_id, "sbx-1")
         self.assertEqual(sandboxes_list[0].status, "running")
+
+    def test_list_follows_the_cursor_across_pages(self):
+        # Reproduces the prod bug (2026-09-28): 1000 sandboxes in a
+        # namespace, every poll of list() stopped at exactly 100, the
+        # server's default page size. Here the server hands back 250
+        # sandboxes over 3 pages (100, 100, 50); list() must return all of
+        # them, not just the first page.
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _PaginatedListRustClient()
+        client._rust_client = fake
+
+        sandboxes = client.list()
+        sandboxes_list = list(sandboxes)
+
+        self.assertEqual(len(sandboxes_list), 250)
+        self.assertEqual(sandboxes_list[0].sandbox_id, "sbx-0")
+        self.assertEqual(sandboxes_list[-1].sandbox_id, "sbx-249")
+        self.assertEqual(
+            [call["cursor"] for call in fake.list_calls],
+            [None, "cursor-1", "cursor-2"],
+        )
+        # The trace ID of the whole listing is the first page's, the one
+        # that started it.
+        self.assertEqual(sandboxes.trace_id, "trace-list-page-1")
+
+    def test_list_stops_on_a_repeated_cursor(self):
+        class _LoopingRustClient(_FakeRustClient):
+            def list_sandboxes_json(self, *, limit=None, cursor=None):
+                # A broken server that always answers the same next_cursor,
+                # however it is called.
+                return (
+                    "trace-list-loop",
+                    _sandbox_page_json(["sbx-1"], next_cursor="same-cursor"),
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        client._rust_client = _LoopingRustClient()
+
+        with self.assertRaisesRegex(SandboxError, "same pagination cursor twice"):
+            client.list()
+
+    def test_list_stops_after_the_page_guard(self):
+        class _NeverEndingRustClient(_FakeRustClient):
+            def __init__(self):
+                super().__init__()
+                self.calls = 0
+
+            def list_sandboxes_json(self, *, limit=None, cursor=None):
+                self.calls += 1
+                return (
+                    "trace-list",
+                    _sandbox_page_json(
+                        [f"sbx-{self.calls}"], next_cursor=f"cursor-{self.calls}"
+                    ),
+                )
+
+        client = SandboxClient(api_url="http://localhost:8900", api_key="k")
+        fake = _NeverEndingRustClient()
+        client._rust_client = fake
+
+        with patch("tensorlake.sandbox.client._defaults.MAX_LIST_PAGES", 3):
+            with self.assertRaisesRegex(SandboxError, "did not finish after 3 pages"):
+                client.list()
+
+        self.assertEqual(fake.calls, 3)
 
     def test_copy_uses_rust_backend_and_allows_partial_failures(self):
         client = SandboxClient(api_url="http://localhost:8900", api_key="k")

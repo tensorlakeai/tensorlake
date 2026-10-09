@@ -20,3 +20,8 @@ DEFAULT_HTTP_TIMEOUT_SEC: float = 300.0
 MAX_RETRIES: int = 3
 RETRY_BACKOFF_SEC: float = 0.5
 RETRYABLE_STATUS_CODES: frozenset[int] = frozenset({429, 502, 503, 504})
+
+# Upper bound on pages ``list()`` follows. Guards against an infinite loop if
+# the server ever repeats a cursor. 10,000 pages is far more than any real
+# namespace needs (the CLI's ``tl sbx ls`` uses the same bound).
+MAX_LIST_PAGES: int = 10_000

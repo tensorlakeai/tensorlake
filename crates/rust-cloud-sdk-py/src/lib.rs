@@ -35,8 +35,8 @@ use tensorlake::sandbox_images::SandboxImageBuildEvent;
 use tensorlake::sandbox_templates::SandboxTemplatesClient;
 use tensorlake::sandboxes::models::{
     ArchivedSandboxesPaginationDirection, ClaimSandboxRequest, CreateSandboxPoolRequest,
-    CreateSandboxRequest, GetSandboxLogsRequest, ListArchivedSandboxesParams, SnapshotType,
-    UpdateSandboxPoolRequest, UpdateSandboxRequest,
+    CreateSandboxRequest, GetSandboxLogsRequest, ListArchivedSandboxesParams, ListSandboxesParams,
+    SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 use tensorlake::sandboxes::{
     DEFAULT_WAIT_POLL_INTERVAL, SandboxDesktopClient as RustSandboxDesktopClient,
@@ -1636,13 +1636,24 @@ impl CloudSandboxClient {
         })
     }
 
-    fn list_sandboxes_json(&self) -> PyResult<(String, String)> {
-        self.run_with_retry(5, move |client| async move {
-            let traced = client.list().await?;
-            let trace_id = traced.trace_id.clone();
-            let response = serde_json::json!({ "sandboxes": *traced });
-            let json = serde_json::to_string(&response).map_err(SdkError::from)?;
-            Ok((trace_id, json))
+    /// Fetch one page of `GET /sandboxes`. `limit`/`cursor` mirror
+    /// `list_archived_sandboxes_json`; the Python `list()` wrapper calls this
+    /// once per page and follows `next_cursor` until it is exhausted.
+    #[pyo3(signature = (limit=None, cursor=None))]
+    fn list_sandboxes_json(
+        &self,
+        limit: Option<usize>,
+        cursor: Option<String>,
+    ) -> PyResult<(String, String)> {
+        let params = ListSandboxesParams { limit, cursor };
+        self.run_with_retry(5, move |client| {
+            let params = params.clone();
+            async move {
+                let traced = client.list(&params).await?;
+                let trace_id = traced.trace_id.clone();
+                let json = serde_json::to_string(&*traced).map_err(SdkError::from)?;
+                Ok((trace_id, json))
+            }
         })
     }
 
@@ -2089,15 +2100,24 @@ impl CloudSandboxClient {
         })
     }
 
-    fn list_sandboxes_json_async<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
+    #[pyo3(signature = (limit=None, cursor=None))]
+    fn list_sandboxes_json_async<'py>(
+        &self,
+        py: Python<'py>,
+        limit: Option<usize>,
+        cursor: Option<String>,
+    ) -> PyResult<Bound<'py, PyAny>> {
+        let params = ListSandboxesParams { limit, cursor };
         let client = self.client.clone();
         future_into_py(py, async move {
-            let traced = retry_async_op(client, 5, move |c| async move { c.list().await })
-                .await
-                .map_err(into_sandbox_py_error)?;
+            let traced = retry_async_op(client, 5, move |c| {
+                let params = params.clone();
+                async move { c.list(&params).await }
+            })
+            .await
+            .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
-            let response = serde_json::json!({ "sandboxes": *traced });
-            let json = serde_json::to_string(&response).map_err(sandbox_serde_err)?;
+            let json = serde_json::to_string(&*traced).map_err(sandbox_serde_err)?;
             Ok((trace_id, json))
         })
     }

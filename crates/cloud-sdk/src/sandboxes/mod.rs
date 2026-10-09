@@ -58,11 +58,11 @@ use models::{
     CreateSandboxResponse, CreateSnapshotRequest, CreateSnapshotResponse, DaemonInfo,
     DetachFileSystemRequest, FileSystemMount, GetSandboxLogsRequest, HealthResponse,
     ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
-    ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
-    NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent,
-    SandboxAccepted, SandboxInfo, SandboxLogsResponse, SandboxPoolInfo, SandboxPoolRequest,
-    SandboxProcessLogFiltersResponse, SendSignalResponse, SignBlobRequest, SnapshotInfo,
-    SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
+    ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesParams, ListSandboxesResponse,
+    ListSnapshotsResponse, NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo,
+    RunProcessEvent, SandboxAccepted, SandboxInfo, SandboxLogsResponse, SandboxPoolInfo,
+    SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse, SignBlobRequest,
+    SnapshotInfo, SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 
 pub const DEFAULT_SANDBOX_PROXY_URL: &str = "https://sandbox.tensorlake.ai";
@@ -645,14 +645,33 @@ impl SandboxesClient {
         self.client.execute_json(req).await
     }
 
-    pub async fn list(&self) -> Result<Traced<Vec<SandboxInfo>>, SdkError> {
+    /// Fetch one page of `GET /sandboxes`. The server's default page size is
+    /// 100 sandboxes. (Bug observed 2026-09-28: a namespace with 1000
+    /// sandboxes, and every call returned exactly 100.) Pass `params.cursor`
+    /// from the previous page's `next_cursor` to keep walking forward; a
+    /// `None` `next_cursor` means the listing is complete.
+    ///
+    /// This method answers one page only. `AsyncSandboxClient.list()` /
+    /// `SandboxClient.list()` in the Python and TypeScript SDKs call this
+    /// once per page and stitch the pages together.
+    pub async fn list(
+        &self,
+        params: &ListSandboxesParams,
+    ) -> Result<Traced<ListSandboxesResponse>, SdkError> {
         let uri = self.endpoint("sandboxes");
-        let req = self.client.request(Method::GET, &uri).build()?;
-        Ok(self
-            .client
-            .execute_json::<ListSandboxesResponse>(req)
-            .await?
-            .map(|r| r.sandboxes))
+        let mut request_builder = self.client.request(Method::GET, &uri);
+        let mut query: Vec<(&str, String)> = Vec::new();
+        if let Some(limit) = params.limit {
+            query.push(("limit", limit.to_string()));
+        }
+        if let Some(cursor) = params.cursor.as_deref() {
+            query.push(("cursor", cursor.to_string()));
+        }
+        if !query.is_empty() {
+            request_builder = request_builder.query(&query);
+        }
+        let req = request_builder.build()?;
+        self.client.execute_json(req).await
     }
 
     /// List archived (terminated) sandboxes in the namespace. Archived sandboxes

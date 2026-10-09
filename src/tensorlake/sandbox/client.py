@@ -982,17 +982,45 @@ class SandboxClient:
     def list(self) -> TracedIterator[SandboxInfo]:
         """List all sandboxes in the namespace.
 
+        The server paginates the list (a page holds 100 sandboxes by
+        default). This method follows the ``next_cursor`` the server returns
+        and fetches every page, so the result holds every sandbox in the
+        namespace, not just the first page.
+
         Returns:
-            TracedIterator[SandboxInfo] — iterable over sandboxes, with .trace_id
+            TracedIterator[SandboxInfo] — iterable over every sandbox, with
+            .trace_id set to the trace ID of the first page's request.
 
         Raises:
             RemoteAPIError: If the API request fails
             SandboxConnectionError: If the server is unreachable
+            SandboxError: If the server does not finish paginating within
+                ``_defaults.MAX_LIST_PAGES`` pages, or repeats a cursor
         """
         try:
-            trace_id, response_json = self._rust_client.list_sandboxes_json()
-            data = ListSandboxesResponse.model_validate(json.loads(response_json))
-            return TracedIterator(trace_id, data.sandboxes)
+            sandboxes: list[SandboxInfo] = []
+            trace_id: str | None = None
+            cursor: str | None = None
+            for _ in range(_defaults.MAX_LIST_PAGES):
+                page_trace_id, response_json = self._rust_client.list_sandboxes_json(
+                    limit=None, cursor=cursor
+                )
+                if trace_id is None:
+                    trace_id = page_trace_id
+                data = ListSandboxesResponse.model_validate(json.loads(response_json))
+                sandboxes.extend(data.sandboxes)
+                next_cursor = data.next_cursor
+                if next_cursor is None:
+                    return TracedIterator(trace_id, sandboxes)
+                if next_cursor == cursor:
+                    raise SandboxError(
+                        f"list() got the same pagination cursor twice "
+                        f"({next_cursor!r}); stopping to avoid an infinite loop"
+                    )
+                cursor = next_cursor
+            raise SandboxError(
+                f"list() did not finish after {_defaults.MAX_LIST_PAGES} pages"
+            )
         except Exception as e:
             _raise_as_sandbox_error(e)
 

@@ -80,10 +80,12 @@ wait=False)` return an `AsyncPendingSandbox` whose `ready()` and `status()` are
 coroutines.
 
 For many sandboxes, poll the list instead of each handle: `client.list()`
-returns every sandbox of the namespace in one request, with `.status` and,
-while pending, `.pending_reason`; a sandbox that dropped out of the list has
-settled, and `client.get_archived(id).termination_reason` says why
-(`no_capacity`, `cancelled`, ...).
+returns every sandbox of the namespace, with `.status` and, while pending,
+`.pending_reason`. The server paginates the list (100 sandboxes per page by
+default); `list()` follows the pages for you, so it may send more than one
+request. A sandbox that dropped out of the list has settled, and
+`client.get_archived(id).termination_reason` says why (`no_capacity`,
+`cancelled`, ...).
 
 Parameters:
 
