@@ -26,7 +26,6 @@ from .exceptions import (
 from .models import (
     CheckpointType,
     ClearNetworkPolicy,
-    CommandExitReason,
     CommandResult,
     CopySandboxResponse,
     DaemonInfo,

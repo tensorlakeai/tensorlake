@@ -1696,6 +1696,9 @@ fn contains_disk_space_evidence(output: &str) -> bool {
 
 const DISK_SPACE_MARKERS: [&str; 2] = ["enospc", "no space"];
 
+/// Enough characters to hold all of the longest marker but its last one.
+const DISK_SPACE_TAIL_CHARS: usize = "no space".len() - 1;
+
 /// The end of the last build log chunk of each stream. The daemon can split a
 /// line into chunks, e.g. `"...: no sp"` and `"ace left on device"`, so a
 /// marker is looked for in the tail and the next chunk together.
@@ -1713,18 +1716,10 @@ impl LogTails {
         };
         tail.push_str(message);
         let found = contains_disk_space_evidence(tail);
-        // Keep only enough characters to hold all of a marker but its last
-        // character.
-        let keep = DISK_SPACE_MARKERS
-            .iter()
-            .map(|m| m.len())
-            .max()
-            .unwrap_or(1)
-            - 1;
         let start = tail
             .char_indices()
             .rev()
-            .nth(keep.saturating_sub(1))
+            .nth(DISK_SPACE_TAIL_CHARS - 1)
             .map_or(0, |(index, _)| index);
         tail.drain(..start);
         found

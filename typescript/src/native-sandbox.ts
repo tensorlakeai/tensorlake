@@ -1,4 +1,4 @@
-import { type CommandExitReason, fromSnakeKeys } from "./models.js";
+import { type CommandResult, fromSnakeKeys } from "./models.js";
 import {
   PoolInUseError,
   PoolNotFoundError,
@@ -455,20 +455,11 @@ export async function* nativeEventStream(
  * Parse the `CommandResult` that the Rust SDK built from the `runCommand`
  * events.
  */
-export function parseCommandResult(resultJson: string | null | undefined): {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  reason: CommandExitReason;
-} {
+export function parseCommandResult(
+  resultJson: string | null | undefined,
+): Required<Omit<CommandResult, "timedOut">> {
   if (resultJson == null) {
     throw new SandboxConnectionError("sandbox process stream ended without an exit event");
   }
-  const raw = JSON.parse(resultJson) as {
-    exit_code: number;
-    stdout: string;
-    stderr: string;
-    reason: CommandExitReason;
-  };
-  return { exitCode: raw.exit_code, stdout: raw.stdout, stderr: raw.stderr, reason: raw.reason };
+  return fromSnakeKeys(JSON.parse(resultJson)) as Required<Omit<CommandResult, "timedOut">>;
 }
