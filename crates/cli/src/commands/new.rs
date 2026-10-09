@@ -126,7 +126,11 @@ pub fn run(name: &str, force: bool, language: Language) -> Result<()> {
     fs::create_dir_all(&target_dir)?;
 
     for (filename, content) in files {
-        fs::write(target_dir.join(&filename), content)?;
+        let file_path = target_dir.join(&filename);
+        if let Some(parent) = file_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::write(file_path, content)?;
         eprintln!("  + {}", filename);
     }
 

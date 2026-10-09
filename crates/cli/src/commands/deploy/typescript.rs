@@ -1020,11 +1020,27 @@ async fn build_application_images(
                 } else {
                     empty_context_directory.clone()
                 }),
-                context_files: vec![SandboxImageContextFile {
-                    path: PathBuf::from(FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH),
-                    contents: bundle.function_runner_capsule.tgz.clone(),
-                    mode: 0o644,
-                }],
+                context_files: vec![
+                    SandboxImageContextFile {
+                        path: PathBuf::from(FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH),
+                        contents: bundle.function_runner_capsule.tgz.clone(),
+                        mode: 0o644,
+                    },
+                    SandboxImageContextFile {
+                        path: PathBuf::from(".tensorlake/npm-security/guarded-npm.mjs"),
+                        contents: include_bytes!("../../project/node-security/guarded-npm.mjs")
+                            .to_vec(),
+                        mode: 0o644,
+                    },
+                    SandboxImageContextFile {
+                        path: PathBuf::from(".tensorlake/npm-security/check-npm-release-age.mjs"),
+                        contents: include_bytes!(
+                            "../../project/node-security/check-npm-release-age.mjs"
+                        )
+                        .to_vec(),
+                        mode: 0o644,
+                    },
+                ],
                 build_args: Vec::new(),
             };
             let mut renderer = ImageBuildEventRenderer::new();
@@ -1128,10 +1144,11 @@ fn application_dockerfile(image: Option<&SerializedImageDefinition>) -> Result<S
     lines.push(format!(
         "COPY {FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH} /tmp/tensorlake-typescript-function-runner-runtime.tgz"
     ));
-    // The capsule was integrity-checked above and contains its runtime dependencies.
-    // Offline installation forbids newly resolved registry artifacts; hooks stay disabled.
+    lines.push("COPY .tensorlake/npm-security/ /opt/npm-security/".to_string());
+    // The local capsule is integrity-checked above; its registry dependencies
+    // still require publication-age checks before installation, with hooks disabled.
     lines.push(
-        "RUN set -eu; npm install --global --offline --ignore-scripts --force --omit=dev --no-bin-links /tmp/tensorlake-typescript-function-runner-runtime.tgz; runner_entry=\"$(npm root --global)/@tensorlake/typescript-function-runner-runtime/bin/tensorlake-typescript-function-runner.js\"; test -f \"$runner_entry\"; mkdir -p /usr/local/bin; printf '#!/bin/sh\\nexec node \"%s\" \"$@\"\\n' \"$runner_entry\" > /usr/local/bin/tensorlake-typescript-function-runner; chmod 0755 /usr/local/bin/tensorlake-typescript-function-runner; rm -f /tmp/tensorlake-typescript-function-runner-runtime.tgz; test -x /usr/local/bin/tensorlake-typescript-function-runner; test ! -L /usr/local/bin/tensorlake-typescript-function-runner; node -e \"if (Number(process.versions.node.split('.')[0]) < 24) process.exit(1)\""
+        "RUN set -eu; node /opt/npm-security/guarded-npm.mjs global --allow-local-artifacts -- --prefix /opt/tensorlake-runtime --omit=dev --no-bin-links /tmp/tensorlake-typescript-function-runner-runtime.tgz; runner_entry=\"/opt/tensorlake-runtime/lib/node_modules/@tensorlake/typescript-function-runner-runtime/bin/tensorlake-typescript-function-runner.js\"; test -f \"$runner_entry\"; mkdir -p /usr/local/bin; printf '#!/bin/sh\\nexec node \"%s\" \"$@\"\\n' \"$runner_entry\" > /usr/local/bin/tensorlake-typescript-function-runner; chmod 0755 /usr/local/bin/tensorlake-typescript-function-runner; rm -f /tmp/tensorlake-typescript-function-runner-runtime.tgz; test -x /usr/local/bin/tensorlake-typescript-function-runner; test ! -L /usr/local/bin/tensorlake-typescript-function-runner; node -e \"if (Number(process.versions.node.split('.')[0]) < 24) process.exit(1)\""
             .to_string(),
     );
     Ok(lines.join("\n"))

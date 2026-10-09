@@ -100,7 +100,9 @@ async function install() {
     await checkReleaseAge(join(directory, "package-lock.json"), {
       registry, minimumDays, allowedVersions, allowLocalArtifacts,
     });
-    npm(["ci", ...(operation === "ci" ? args : []), "--ignore-scripts"], directory);
+    const installOptions = operation === "ci" ? args : args.filter((arg) =>
+      arg === "--no-bin-links" || arg.startsWith("--omit="));
+    npm(["ci", ...installOptions, "--ignore-scripts"], directory);
     if (operation === "global") {
       const moduleRoot = npm(["root", "--global", "--prefix", globalPrefix], directory, true).trim();
       const project = JSON.parse(await readFile(join(directory, "package.json"), "utf8"));
