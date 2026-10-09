@@ -28,6 +28,5 @@ Do not use scope-wide exclusions or disable the delay for the whole test graph.
 Existing pnpm projects retain pnpm and their longer release delay where present.
 Their policy rechecks frozen lockfiles and requires publication timestamps.
 
-Run `node --test .github/scripts/test-npm-release-age.mjs` to verify the guard.
 
 For an intentionally temporary test dependency, `install --temporary` restores the original package manifest and lockfile after validating and installing; it does not relax publication-age checks.
