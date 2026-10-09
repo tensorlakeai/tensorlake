@@ -2,10 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Sandbox } from "../src/sandbox.js";
 import {
   __setNativeSandboxBindingForTest,
+  assembleCommandResult,
   type NativeSandboxBinding,
   type NativeSandboxProxyClient,
 } from "../src/native-sandbox.js";
 import { SandboxNotFoundError, RemoteAPIError } from "../src/errors.js";
+import { CommandExitReason } from "../src/models.js";
 
 /**
  * Verifies the Rust-backed proxy path: the rewired Sandbox methods call the
@@ -199,5 +201,34 @@ describe("Sandbox native proxy path", () => {
     });
     expect(RemoteAPIError).toBeDefined();
     sbx.close();
+  });
+});
+
+describe("assembleCommandResult exit reason", () => {
+  const exit = (event: Record<string, unknown>) =>
+    assembleCommandResult([JSON.stringify(event)]);
+
+  it("uses the reason the sandbox reports", () => {
+    const result = exit({ exit_code: null, signal: 9, oom_killed: false, reason: "timed_out" });
+    expect(result.exitCode).toBe(-9);
+    expect(result.reason).toBe(CommandExitReason.TIMED_OUT);
+  });
+
+  it("derives the reason from sandboxes that predate the field", () => {
+    expect(exit({ exit_code: 3 }).reason).toBe(CommandExitReason.EXITED);
+    expect(exit({ exit_code: null, signal: 9 }).reason).toBe(CommandExitReason.SIGNALED);
+    expect(exit({ exit_code: null, signal: 9, oom_killed: true }).reason).toBe(
+      CommandExitReason.OOM_KILLED,
+    );
+  });
+
+  it("falls back to the derived reason for an unknown one", () => {
+    expect(exit({ exit_code: null, signal: 9, reason: "future_reason" }).reason).toBe(
+      CommandExitReason.SIGNALED,
+    );
+  });
+
+  it("leaves the reason unset without an exit event", () => {
+    expect(assembleCommandResult([]).reason).toBeUndefined();
   });
 });

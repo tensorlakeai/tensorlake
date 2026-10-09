@@ -1151,9 +1151,32 @@ class ListDirectoryResponse(BaseModel):
     entries: list[DirectoryEntry]
 
 
+class CommandExitReason(str, Enum):
+    """Why a command run with ``Sandbox.run`` ended."""
+
+    EXITED = "exited"
+    """The process exited on its own; ``exit_code`` is its exit status."""
+    SIGNALED = "signaled"
+    """The process was killed by a signal; ``exit_code`` is ``-signal``."""
+    OOM_KILLED = "oom_killed"
+    """The kernel OOM killer terminated the process (``exit_code`` is ``-9``)."""
+    TIMED_OUT = "timed_out"
+    """The run's ``timeout`` expired and the sandbox killed the process
+    (``exit_code`` is ``-9``)."""
+
+
 class CommandResult(BaseModel):
     """Result of running a command to completion."""
 
     exit_code: int
     stdout: str
     stderr: str
+    reason: CommandExitReason | None = None
+    """Why the command ended. ``Sandbox.run`` always sets it; sandboxes that
+    predate timeout reporting never report ``TIMED_OUT``, so a timed-out run
+    on them shows as ``SIGNALED``."""
+
+    @property
+    def timed_out(self) -> bool:
+        """True when the run's ``timeout`` expired and the process was killed."""
+        return self.reason == CommandExitReason.TIMED_OUT
