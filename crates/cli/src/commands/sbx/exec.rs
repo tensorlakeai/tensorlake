@@ -897,7 +897,7 @@ async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
     while let Some(event) = stream.next().await {
         match event {
             Ok(msg) => {
-                if let Some(parsed) = parse_run_event(&msg.data)? {
+                if let Some(parsed) = parse_run_event(&msg.data) {
                     match parsed {
                         RunEvent::Output {
                             line,
@@ -1007,39 +1007,37 @@ impl RunEventWire {
     }
 }
 
-fn parse_run_event(data: &str) -> Result<Option<RunEvent>> {
-    let trimmed = data.trim();
-    if trimmed.is_empty() {
-        return Ok(None);
-    }
-
-    let event: RunEventWire = serde_json::from_str(trimmed)?;
+/// Parse one SSE payload. Skip a payload that does not parse, as
+/// `SandboxProxyClient::run_process_streaming` does, so one bad event does not
+/// stop the output of a process that still runs.
+fn parse_run_event(data: &str) -> Option<RunEvent> {
+    let event: RunEventWire = serde_json::from_str(data.trim()).ok()?;
     if event.is_heartbeat() {
-        return Ok(None);
+        return None;
     }
 
     if let Some(line) = event.line {
-        return Ok(Some(RunEvent::Output {
+        return Some(RunEvent::Output {
             line,
             line_ending: event.line_ending,
             stream: event.stream,
-        }));
+        });
     }
     let timed_out = event.reason.as_deref() == Some("timed_out");
     if let Some(code) = event.exit_code {
-        return Ok(Some(RunEvent::Exited {
+        return Some(RunEvent::Exited {
             code: code as i32,
             timed_out,
-        }));
+        });
     }
     if let Some(signal) = event.signal {
-        return Ok(Some(RunEvent::Exited {
+        return Some(RunEvent::Exited {
             code: 128 + signal as i32,
             timed_out,
-        }));
+        });
     }
 
-    Ok(Some(RunEvent::Other))
+    Some(RunEvent::Other)
 }
 
 #[cfg(test)]
@@ -1150,29 +1148,26 @@ mod tests {
 
     #[test]
     fn parse_run_event_skips_empty_payloads() {
-        assert!(parse_run_event("").unwrap().is_none());
-        assert!(parse_run_event("   ").unwrap().is_none());
+        assert!(parse_run_event("").is_none());
+        assert!(parse_run_event("   ").is_none());
     }
 
     #[test]
     fn parse_run_event_skips_heartbeat_payloads() {
-        assert!(
-            parse_run_event(r#"{"type":"heartbeat"}"#)
-                .unwrap()
-                .is_none()
-        );
-        assert!(
-            parse_run_event(r#"{"event":"keepalive"}"#)
-                .unwrap()
-                .is_none()
-        );
+        assert!(parse_run_event(r#"{"type":"heartbeat"}"#).is_none());
+        assert!(parse_run_event(r#"{"event":"keepalive"}"#).is_none());
+    }
+
+    #[test]
+    fn parse_run_event_skips_payloads_that_do_not_parse() {
+        for data in ["null", r#""ping""#, "not json", r#"{"signal":"SIGKILL"}"#] {
+            assert!(parse_run_event(data).is_none(), "{data}");
+        }
     }
 
     #[test]
     fn parse_run_event_parses_output_lines() {
-        let event = parse_run_event(r#"{"line":"hello","stream":"stdout"}"#)
-            .unwrap()
-            .unwrap();
+        let event = parse_run_event(r#"{"line":"hello","stream":"stdout"}"#).unwrap();
 
         match event {
             super::RunEvent::Output {
@@ -1190,9 +1185,7 @@ mod tests {
 
     #[test]
     fn parse_run_event_keeps_the_line_ending() {
-        let event = parse_run_event(r#"{"line":"","line_ending":"\r\n"}"#)
-            .unwrap()
-            .unwrap();
+        let event = parse_run_event(r#"{"line":"","line_ending":"\r\n"}"#).unwrap();
 
         match event {
             super::RunEvent::Output {
@@ -1216,7 +1209,7 @@ mod tests {
 
     #[test]
     fn parse_run_event_parses_exit_code() {
-        let event = parse_run_event(r#"{"exit_code":0}"#).unwrap().unwrap();
+        let event = parse_run_event(r#"{"exit_code":0}"#).unwrap();
         match event {
             super::RunEvent::Exited { code, timed_out } => {
                 assert_eq!(code, 0);
@@ -1228,7 +1221,7 @@ mod tests {
 
     #[test]
     fn parse_run_event_parses_signal_as_exit_code() {
-        let event = parse_run_event(r#"{"signal":9}"#).unwrap().unwrap();
+        let event = parse_run_event(r#"{"signal":9}"#).unwrap();
         match event {
             super::RunEvent::Exited { code, timed_out } => {
                 assert_eq!(code, 128 + 9);
@@ -1240,9 +1233,7 @@ mod tests {
 
     #[test]
     fn parse_run_event_reports_timeout_reason() {
-        let event = parse_run_event(r#"{"signal":9,"reason":"timed_out"}"#)
-            .unwrap()
-            .unwrap();
+        let event = parse_run_event(r#"{"signal":9,"reason":"timed_out"}"#).unwrap();
         match event {
             super::RunEvent::Exited { code, timed_out } => {
                 assert_eq!(code, 128 + 9);
