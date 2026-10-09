@@ -53,6 +53,9 @@ class _FakeRustProxyClient:
     def base_url(self):
         return self._base_url
 
+    def close(self):
+        pass
+
 
 class _FakeRustClient:
     def __init__(self):

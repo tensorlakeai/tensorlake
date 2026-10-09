@@ -497,6 +497,7 @@ class Sandbox:
                 CAS image; when ``image`` is omitted, the server selects its
                 configured GPU default.
             gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.
+                Defaults to one GPU when ``gpus`` is omitted.
             gpu: Typed GPU model and count request. Cannot be combined with
                 ``gpus`` or ``gpu_model``.
             timeout_secs: Sandbox timeout in seconds.

@@ -194,7 +194,9 @@ def _build_gpu_resources(
             raise SandboxError("gpu cannot be combined with gpus or gpu_model")
         return [gpu]
     if gpus is None:
-        return None
+        if gpu_model is None:
+            return None
+        gpus = 1
     if isinstance(gpus, bool) or not isinstance(gpus, int) or gpus < 1:
         raise SandboxError("gpus must be a positive integer")
     gpu_model = "A10" if gpu_model is None else gpu_model
@@ -206,16 +208,6 @@ def _build_gpu_resources(
             f"unsupported GPU model {gpu_model!r}; expected one of: {supported}"
         ) from None
     return [GpuRequest(count=gpus, model=model)]
-
-
-def _build_pool_gpu_resources(
-    gpus: int | None,
-    gpu_model: GpuModel | str | None,
-    gpu: GpuRequest | None = None,
-) -> list[GpuRequest] | None:
-    if gpu is None and gpus is None and gpu_model is not None:
-        gpus = 1
-    return _build_gpu_resources(gpus, gpu_model, gpu)
 
 
 def _unsupported_request_timeout_kwarg(e: TypeError) -> bool:
@@ -627,6 +619,7 @@ class SandboxClient:
                 CAS image; when ``image`` is omitted, the server selects its
                 configured GPU default.
             gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.
+                Defaults to one GPU when ``gpus`` is omitted.
             gpu: Typed GPU model and count request. Cannot be combined with
                 ``gpus`` or ``gpu_model``.
             timeout_secs: Timeout in seconds (optional)
@@ -1755,7 +1748,7 @@ class SandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                gpus=_build_pool_gpu_resources(gpus, gpu_model, gpu),
+                gpus=_build_gpu_resources(gpus, gpu_model, gpu),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -1877,7 +1870,7 @@ class SandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                gpus=_build_pool_gpu_resources(gpus, gpu_model, gpu),
+                gpus=_build_gpu_resources(gpus, gpu_model, gpu),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -2099,6 +2092,7 @@ class SandboxClient:
                 CAS image; when ``image`` is omitted, the server selects its
                 configured GPU default.
             gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.
+                Defaults to one GPU when ``gpus`` is omitted.
             gpu: Typed GPU model and count request. Cannot be combined with
                 ``gpus`` or ``gpu_model``.
             timeout_secs: Timeout in seconds (optional)

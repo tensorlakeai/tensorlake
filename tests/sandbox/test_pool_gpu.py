@@ -6,6 +6,7 @@ import unittest
 from tensorlake.sandbox import (
     AsyncSandboxClient,
     ContainerResourcesInfo,
+    GpuAllocation,
     GpuModel,
     GpuRequest,
     SandboxClient,
@@ -109,13 +110,14 @@ class TestGpuPools(unittest.TestCase):
         )
         fetched = self.client.get_pool("pool-1")
         listed = list(self.client.list_pools())
-        expected = [GpuRequest(count=2, model=GpuModel.H100)]
+        expected = [GpuAllocation(count=2, model="H100")]
         self.assertEqual(fetched.resources.gpu_configs, expected)
         self.assertEqual(listed[0].resources.gpu_configs, expected)
         updated = self.client.update_pool(
             pool_id=fetched.pool_id,
             image=fetched.image,
-            gpu=fetched.resources.gpu_configs[0],
+            gpus=fetched.resources.gpu_configs[0].count,
+            gpu_model=fetched.resources.gpu_configs[0].model,
         )
         self.assertEqual(updated.resources.gpu_configs, expected)
         self.assertEqual(
@@ -164,13 +166,14 @@ class TestAsyncGpuPools(unittest.IsolatedAsyncioTestCase):
         )
         fetched = await self.client.get_pool("pool-1")
         listed = list(await self.client.list_pools())
-        expected = [GpuRequest(count=2, model=GpuModel.H100)]
+        expected = [GpuAllocation(count=2, model="H100")]
         self.assertEqual(fetched.resources.gpu_configs, expected)
         self.assertEqual(listed[0].resources.gpu_configs, expected)
         updated = await self.client.update_pool(
             pool_id=fetched.pool_id,
             image=fetched.image,
-            gpu=fetched.resources.gpu_configs[0],
+            gpus=fetched.resources.gpu_configs[0].count,
+            gpu_model=fetched.resources.gpu_configs[0].model,
         )
         self.assertEqual(updated.resources.gpu_configs, expected)
         self.assertEqual(
@@ -206,18 +209,25 @@ class TestAsyncGpuPools(unittest.IsolatedAsyncioTestCase):
 
 class TestPoolResponseResources(unittest.TestCase):
     def test_gpu_allocation_survives_deserialization_and_serialization(self):
-        allocation = [{"count": 2, "model": "H100"}]
-        for field in ("gpu_configs", "gpus"):
-            with self.subTest(field=field):
-                resources = ContainerResourcesInfo.model_validate(
-                    {"cpus": 1, "memory_mb": 1024, "disk_mb": 20480, field: allocation}
-                )
-                self.assertEqual(
-                    resources.gpu_configs, [GpuRequest(count=2, model=GpuModel.H100)]
-                )
-                self.assertEqual(
-                    json.loads(resources.model_dump_json())["gpu_configs"], allocation
-                )
+        for model in ("H100", "H100-PCIe-80GB", "future-exact-gpu-model"):
+            allocation = [{"count": 2, "model": model}]
+            for field in ("gpu_configs", "gpus"):
+                with self.subTest(model=model, field=field):
+                    resources = ContainerResourcesInfo.model_validate(
+                        {
+                            "cpus": 1,
+                            "memory_mb": 1024,
+                            "disk_mb": 20480,
+                            field: allocation,
+                        }
+                    )
+                    self.assertEqual(
+                        resources.gpu_configs, [GpuAllocation(count=2, model=model)]
+                    )
+                    self.assertEqual(
+                        json.loads(resources.model_dump_json())["gpu_configs"],
+                        allocation,
+                    )
 
     def test_cpu_resources_accept_omitted_null_and_empty_gpu_allocations(self):
         for gpu in ({}, {"gpu_configs": None}, {"gpu_configs": []}):

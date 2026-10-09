@@ -182,16 +182,16 @@ describe("SandboxClient", () => {
       client.close();
     });
 
-    it("does not send GPU resources when only the model is provided", async () => {
+    it("requests one GPU when only the model is provided", async () => {
       installNativeStub({
         client: {
           createSandbox: vi.fn(async (json: string) => {
             const body = JSON.parse(json);
-            expect(body.resources.gpus).toBeUndefined();
+            expect(body.resources.gpus).toEqual([{ count: 1, model: "A10" }]);
             return {
               traceId: "t",
               json: JSON.stringify({
-                sandbox_id: "sbx-cpu",
+                sandbox_id: "sbx-gpu",
                 status: "pending",
               }),
             };
@@ -201,7 +201,7 @@ describe("SandboxClient", () => {
 
       const client = SandboxClient.forLocalhost();
       const result = await client.create({ gpuModel: "A10" });
-      expect(result.sandboxId).toBe("sbx-cpu");
+      expect(result.sandboxId).toBe("sbx-gpu");
       client.close();
     });
 
@@ -1147,6 +1147,115 @@ describe("SandboxClient", () => {
         "times must be a positive integer",
       );
       client.close();
+    });
+  });
+
+  describe("shared GPU inference", () => {
+    it("infers one GPU through Sandbox.create", async () => {
+      const stub = installNativeStub({
+        client: {
+          createSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({
+              sandbox_id: "sbx-gpu",
+              status: "running",
+              sandbox_url: "https://sbx-gpu.sandbox.tensorlake.ai",
+            }),
+          })),
+        },
+      });
+      const sandbox = await Sandbox.create({
+        apiKey: "test-key",
+        gpuModel: "H100",
+      });
+      try {
+        expect(
+          JSON.parse(stub.client.createSandbox.mock.calls[0][0]).resources.gpus,
+        ).toEqual([{ count: 1, model: "H100" }]);
+      } finally {
+        sandbox.close();
+      }
+    });
+
+    for (const operation of ["create", "createAndConnect"] as const) {
+      it(`${operation} infers one GPU for each supported model`, async () => {
+        const stub = installNativeStub({
+          client: {
+            createSandbox: vi.fn(async () => ({
+              traceId: "t",
+              json: JSON.stringify({
+                sandbox_id: "sbx-gpu",
+                status: "running",
+                sandbox_url: "https://sbx-gpu.sandbox.tensorlake.ai",
+              }),
+            })),
+          },
+        });
+        const client = SandboxClient.forLocalhost();
+        try {
+          for (const model of [
+            "A100-40GB",
+            "A100-80GB",
+            "H100",
+            "T4",
+            "A6000",
+            "RTX-PRO-6000",
+            "L40",
+            "A10",
+          ] satisfies GpuModel[]) {
+            const result = await client[operation]({ gpuModel: model });
+            expect(
+              JSON.parse(stub.client.createSandbox.mock.calls.at(-1)![0]).resources.gpus,
+            ).toEqual([{ count: 1, model }]);
+            if (result instanceof Sandbox) result.close();
+          }
+        } finally {
+          client.close();
+        }
+      });
+
+      it(`${operation} rejects invalid and conflicting GPU options before a request`, async () => {
+        const stub = installNativeStub();
+        const client = SandboxClient.forLocalhost();
+        try {
+          for (const options of [
+            { gpuModel: "V100" },
+            { gpuModel: "" },
+            { gpus: 0, gpuModel: "H100" },
+            { gpus: -1, gpuModel: "H100" },
+            { gpus: 1.5, gpuModel: "H100" },
+            { gpu: { count: 1, model: "H100" as const }, gpuModel: "H100" },
+          ]) {
+            await expect(client[operation](options)).rejects.toBeInstanceOf(
+              SandboxError,
+            );
+          }
+          expect(stub.client.createSandbox).not.toHaveBeenCalled();
+          expect(stub.client.createSandboxNoWait).not.toHaveBeenCalled();
+        } finally {
+          client.close();
+        }
+      });
+    }
+
+    it("includes a model-only allocation in a wait-free create", async () => {
+      const stub = installNativeStub({
+        client: {
+          createSandbox: vi.fn(async () => ({
+            traceId: "t",
+            json: JSON.stringify({ sandbox_id: "sbx-gpu", status: "pending" }),
+          })),
+        },
+      });
+      const client = SandboxClient.forLocalhost();
+      try {
+        await client.create({ gpuModel: "H100", wait: false });
+        expect(
+          JSON.parse(stub.client.createSandboxNoWait.mock.calls[0][0]).resources.gpus,
+        ).toEqual([{ count: 1, model: "H100" }]);
+      } finally {
+        client.close();
+      }
     });
   });
 

@@ -234,7 +234,8 @@ GPU CAS pools allocate GPUs per container. Use a CAS image and pass `gpus=1`
 with `gpu_model="A10"` (or `gpu=GpuRequest(count=1, model=GpuModel.A10)`) to
 `create_pool` and `update_pool`. The asynchronous Python API accepts the same
 arguments; TypeScript uses `gpus`, `gpuModel`, or `gpu` in its pool options.
-Passing only `gpu_model` / `gpuModel` allocates one GPU per container.
+Passing only `gpu_model` / `gpuModel` allocates one GPU per container for
+both standalone sandbox creation and pool APIs, matching `tl sbx create --gpu`.
 Claimed sandboxes inherit the pool's GPU allocation. Include that allocation
 on each pool update; omitting it configures a CPU-only CAS pool. Changing the
 allocation recycles unclaimed warm containers while claimed sandboxes keep
@@ -243,8 +244,11 @@ a single-GPU pool; it can replenish warm capacity after the claim releases
 its GPU.
 
 Pool responses expose the allocation as `pool.resources.gpu_configs` in
-Python and Rust, and `pool.resources.gpuConfigs` in TypeScript. Reuse its
-model and count when updating a GPU CAS pool.
+Python and Rust, and `pool.resources.gpuConfigs` in TypeScript.
+Python response allocations use `GpuAllocation`, whose `model` preserves the
+server's exact identifier, such as `H100-PCIe-80GB`. Typed requests use
+`GpuRequest` with a supported `GpuModel`. When updating a pool, pass the
+reported count and the corresponding supported request model.
 
 Inspect a claimed sandbox's GPU allocation with `tl sbx describe <sandbox-id>`
 or the `GPUs` column in `tl sbx ls`. Both show count and model, such as
