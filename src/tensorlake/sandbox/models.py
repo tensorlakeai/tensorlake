@@ -1118,6 +1118,9 @@ class OutputEvent(BaseModel):
     line: str
     timestamp: Timestamp
     stream: str | None = None
+    # The terminator the daemon removed from ``line``: ``"\n"``, ``"\r\n"``,
+    # or ``""`` for a partial chunk. ``None`` from an older daemon.
+    line_ending: str | None = None
 
 
 class DaemonInfo(BaseModel):

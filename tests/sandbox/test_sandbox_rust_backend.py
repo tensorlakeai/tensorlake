@@ -319,6 +319,48 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(result.reason, CommandExitReason.EXITED)
         self.assertFalse(result.timed_out)
 
+    def test_run_joins_line_endings(self):
+        class _ExactFakeClient(_FakeRustProxyClient):
+            def run_process_json(self, payload_json):
+                return _TRACE_ID, [
+                    json.dumps({"line": "a", "line_ending": "", "timestamp": 1}),
+                    json.dumps({"line": "b", "line_ending": "\r\n", "timestamp": 2}),
+                    json.dumps({"line": "", "line_ending": "\n", "timestamp": 3}),
+                    json.dumps(
+                        {
+                            "line": "oops",
+                            "line_ending": "\n",
+                            "stream": "stderr",
+                            "timestamp": 4,
+                        }
+                    ),
+                    json.dumps({"exit_code": 0}),
+                ]
+
+        sandbox, _ = _make_sandbox(_ExactFakeClient())
+
+        result = sandbox.run("sh")
+
+        self.assertEqual(result.stdout, "ab\r\n\n")
+        self.assertEqual(result.stderr, "oops\n")
+
+    def test_run_joins_old_lines_and_chunks_in_one_stream(self):
+        class _MixedFakeClient(_FakeRustProxyClient):
+            def run_process_json(self, payload_json):
+                return _TRACE_ID, [
+                    json.dumps({"line": "a", "line_ending": "", "timestamp": 1}),
+                    json.dumps({"line": "b", "line_ending": "\n", "timestamp": 2}),
+                    json.dumps({"line": "old", "timestamp": 3}),
+                    json.dumps({"line": "last", "timestamp": 4}),
+                    json.dumps({"exit_code": 0}),
+                ]
+
+        sandbox, _ = _make_sandbox(_MixedFakeClient())
+
+        result = sandbox.run("sh")
+
+        self.assertEqual(result.stdout, "ab\nold\nlast")
+
     def test_run_signal_maps_to_negative_exit_code(self):
         class _SignaledFakeClient(_FakeRustProxyClient):
             def run_process_json(self, payload_json):

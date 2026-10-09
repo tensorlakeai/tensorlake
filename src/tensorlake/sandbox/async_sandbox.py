@@ -66,6 +66,7 @@ from .sandbox import (
     _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE,
     RustCloudSandboxProxyClient,
     Sandbox,
+    _command_result,
     _raise_as_sandbox_error,
     _resolve_process_arg,
     _validate_managed_name_client_side,
@@ -1125,7 +1126,7 @@ class AsyncSandbox:
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-        return Traced(trace_id, Sandbox._command_result_from_run_events(events_json))
+        return Traced(trace_id, _command_result(events_json))
 
     # --- Process management ---
 

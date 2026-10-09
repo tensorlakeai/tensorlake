@@ -22,7 +22,7 @@ use crate::{
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
         models::{
-            CreateSandboxRequest, CreateSandboxResources, MultipartHint, ProcessInfo,
+            CreateSandboxRequest, CreateSandboxResources, MultipartHint, OutputEvent, ProcessInfo,
             RunProcessEvent, SandboxInfo, SignBlobOp, SignBlobRequest, SignBlobTarget,
         },
         resolve_sandbox_proxy_target, select_sandbox_proxy_url,
@@ -1675,7 +1675,7 @@ async fn run_diagnostic_command_stdout(proxy: &SandboxProxyClient, script: &str)
             && event.stream.as_deref() != Some("stderr")
         {
             output.push_str(&event.line);
-            output.push('\n');
+            output.push_str(event.line_ending.as_deref().unwrap_or("\n"));
         }
     }
     Some(output)
@@ -2019,14 +2019,23 @@ async fn follow_process_output(
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
     let mut replayed_events_seen = 0usize;
+    // A follow replays the output from its start, so this rebuilds on each
+    // reconnect.
+    let mut partial_lines = PartialLines::default();
+    // Emit each chunk at once, partial ones too, so that progress output
+    // without a "\n" (e.g. curl's "\r" meter) shows while the build runs.
     proxy
         .follow_output_streaming(pid, |output| {
+            let late_terminator = partial_lines.is_late_terminator(&output);
             if replayed_events_seen < *output_events_seen {
                 replayed_events_seen += 1;
                 return;
             }
             replayed_events_seen += 1;
             *output_events_seen += 1;
+            if late_terminator {
+                return;
+            }
             emit(SandboxImageBuildEvent::BuildLog {
                 stream: output.stream.unwrap_or_else(|| "stdout".to_string()),
                 message: output.line,
@@ -2035,6 +2044,33 @@ async fn follow_process_output(
         .await?;
 
     Ok(())
+}
+
+/// Which streams last sent a partial chunk (`line_ending == ""`).
+#[derive(Default)]
+struct PartialLines {
+    stdout: bool,
+    stderr: bool,
+}
+
+impl PartialLines {
+    /// Record `output` and tell whether it only ends a line already sent in
+    /// part. Each build log message prints on its own line, so such a chunk
+    /// would add a blank line.
+    fn is_late_terminator(&mut self, output: &OutputEvent) -> bool {
+        let partial = match output.stream.as_deref() {
+            Some("stderr") => &mut self.stderr,
+            _ => &mut self.stdout,
+        };
+        let late_terminator = *partial
+            && output.line.is_empty()
+            && output
+                .line_ending
+                .as_deref()
+                .is_some_and(|ending| !ending.is_empty());
+        *partial = output.line_ending.as_deref() == Some("");
+        late_terminator
+    }
 }
 
 async fn get_process_terminal_status_with_retries(
@@ -3317,6 +3353,31 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         assert!(!contains_disk_space_evidence(
             "rootfs builder exited with status 1"
         ));
+    }
+
+    #[test]
+    fn build_log_skips_only_the_terminator_of_a_partial_line() {
+        let event = |stream: &str, line: &str, ending: Option<&str>| super::OutputEvent {
+            line: line.to_string(),
+            timestamp: serde_json::Value::Null,
+            stream: Some(stream.to_string()),
+            line_ending: ending.map(str::to_string),
+        };
+        let mut partial_lines = super::PartialLines::default();
+        let skipped: Vec<_> = [
+            event("stdout", "Password: ", Some("")),
+            event("stderr", "", Some("\n")),
+            event("stdout", "", Some("\r\n")),
+            event("stdout", "", Some("\n")),
+            event("stdout", "50%\r", Some("")),
+            event("stdout", "", Some("")),
+            // An older daemon sends no line endings.
+            event("stdout", "", None),
+        ]
+        .iter()
+        .map(|output| partial_lines.is_late_terminator(output))
+        .collect();
+        assert_eq!(skipped, [false, false, true, false, false, false, false]);
     }
 
     #[test]

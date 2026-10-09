@@ -450,6 +450,23 @@ export async function* nativeEventStream(
   }
 }
 
+interface OutputChunk {
+  line: string;
+  lineEnding?: string;
+}
+
+/**
+ * Join one stream's output chunks into the text the process wrote. The daemon
+ * sends each chunk's `line_ending` ("" for a partial chunk); an older daemon
+ * sends lines without terminators, so such a chunk ends with "\n", except the
+ * last one.
+ */
+function joinOutput(chunks: OutputChunk[]): string {
+  const text = chunks.map((chunk) => chunk.line + (chunk.lineEnding ?? "\n")).join("");
+  const last = chunks[chunks.length - 1];
+  return last && last.lineEnding === undefined ? text.slice(0, -1) : text;
+}
+
 /**
  * Reduce the buffered `runProcess` events into a `CommandResult`, matching the
  * SSE-parsing logic the undici `run()` path used.
@@ -460,18 +477,22 @@ export function assembleCommandResult(events: string[]): {
   stderr: string;
   reason?: CommandExitReason;
 } {
-  const stdoutLines: string[] = [];
-  const stderrLines: string[] = [];
-  let exitCode = -1;
+  const stdoutChunks: OutputChunk[] = [];
+  const stderrChunks: OutputChunk[] = [];
+  let exitCode: number | undefined;
   let reason: CommandExitReason | undefined;
 
   for (const eventJson of events) {
     const raw = JSON.parse(eventJson) as Record<string, unknown>;
     if (typeof raw.line === "string") {
+      const chunk: OutputChunk = {
+        line: raw.line,
+        lineEnding: typeof raw.line_ending === "string" ? raw.line_ending : undefined,
+      };
       if (raw.stream === "stderr") {
-        stderrLines.push(raw.line);
+        stderrChunks.push(chunk);
       } else {
-        stdoutLines.push(raw.line);
+        stdoutChunks.push(chunk);
       }
     } else if ("exit_code" in raw || "signal" in raw) {
       if (typeof raw.exit_code === "number") {
@@ -485,7 +506,10 @@ export function assembleCommandResult(events: string[]): {
     }
   }
 
-  return { exitCode, stdout: stdoutLines.join("\n"), stderr: stderrLines.join("\n"), reason };
+  if (exitCode === undefined) {
+    throw new SandboxConnectionError("sandbox process stream ended without an exit event");
+  }
+  return { exitCode, stdout: joinOutput(stdoutChunks), stderr: joinOutput(stderrChunks), reason };
 }
 
 const KNOWN_EXIT_REASONS = new Set<string>(Object.values(CommandExitReason));
