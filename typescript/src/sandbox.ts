@@ -1201,6 +1201,12 @@ export class Sandbox {
    *
    * Uses a single streaming `POST /api/v1/processes/run` request that starts
    * the process, streams output, and delivers the exit code over one connection.
+   *
+   * `stdout` and `stderr` are the exact text the process wrote, with trailing
+   * newlines and "\r\n". An older sandbox daemon gives lines joined with "\n"
+   * and drops the last newline.
+   *
+   * @throws {SandboxConnectionError} The stream ended without an exit event.
    */
   async run(command: string, options?: RunOptions): Promise<Traced<CommandResult>> {
     const opStart = nowMs();

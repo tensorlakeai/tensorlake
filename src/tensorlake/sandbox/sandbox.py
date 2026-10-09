@@ -1745,7 +1745,13 @@ class Sandbox:
         Returns:
             Traced[CommandResult] — access ``.trace_id`` for the W3C trace ID
             and ``.exit_code`` / ``.stdout`` / ``.stderr`` directly (or via
-            ``.value``).
+            ``.value``). ``stdout`` and ``stderr`` are the exact text the
+            process wrote, with trailing newlines and ``"\\r\\n"``. An older
+            sandbox daemon gives lines joined with ``"\\n"`` and drops the
+            last newline.
+
+        Raises:
+            SandboxConnectionError: The stream ended without an exit event.
         """
         process_user = self._normalize_process_user(user)
         payload = self._build_command_payload(
