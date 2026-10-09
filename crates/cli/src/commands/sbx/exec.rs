@@ -183,7 +183,7 @@ pub async fn run(
         )));
     }
 
-    let exit_code = stream_run_events(resp).await?;
+    let exit_code = stream_run_events(resp, ctx.debug).await?;
     if exit_code != 0 {
         return Err(CliError::ExitCode(exit_code));
     }
@@ -454,7 +454,7 @@ async fn probe_mount_ready_request(
             "readiness check failed (HTTP {status}): {body}"
         )));
     }
-    match stream_run_events(resp).await? {
+    match stream_run_events(resp, false).await? {
         0 => Ok(MountReadinessProbe::Ready),
         124 => Ok(MountReadinessProbe::Waiting),
         125 => Ok(MountReadinessProbe::ProcessExited),
@@ -890,24 +890,50 @@ fn parse_http_health_spec(spec: &str) -> Result<(u16, Option<String>)> {
 
 /// Read a streaming `POST /api/v1/processes/run` SSE response, print output
 /// lines to stdout/stderr, and return the exit code from the final event.
-async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
+/// With `debug`, report each payload that is skipped because it does not parse.
+async fn stream_run_events(resp: reqwest::Response, debug: bool) -> Result<i32> {
     let mut stream = tensorlake::sse::event_stream(resp, None);
     let mut exit_code: Option<i32> = None;
+    let mut stderr_closed = false;
 
     while let Some(event) = stream.next().await {
         match event {
             Ok(msg) => {
-                if let Some(parsed) = parse_run_event(&msg.data) {
+                let parsed = match parse_run_event(&msg.data) {
+                    Ok(parsed) => parsed,
+                    Err(error) => {
+                        if debug && !stderr_closed {
+                            eprintln!(
+                                "skipped a run event that does not parse ({error}): {}",
+                                msg.data
+                            );
+                        }
+                        None
+                    }
+                };
+                if let Some(parsed) = parsed {
                     match parsed {
                         RunEvent::Output {
                             line,
                             line_ending,
                             stream,
                         } => {
+                            let is_stderr = stream.as_deref() == Some("stderr");
+                            if is_stderr && stderr_closed {
+                                continue;
+                            }
                             match write_output(&line, line_ending.as_deref(), stream.as_deref()) {
                                 Ok(()) => {}
-                                // The reader closed the pipe, e.g. `| head`. Stop like
-                                // a process killed by SIGPIPE.
+                                // The stderr reader closed the pipe. Drop the stderr
+                                // chunks that follow, and keep the stdout stream.
+                                Err(error)
+                                    if is_stderr
+                                        && error.kind() == std::io::ErrorKind::BrokenPipe =>
+                                {
+                                    stderr_closed = true;
+                                }
+                                // The stdout reader closed the pipe, e.g. `| head`. Stop
+                                // like a process killed by SIGPIPE.
                                 Err(error) if error.kind() == std::io::ErrorKind::BrokenPipe => {
                                     return Ok(EXIT_CODE_BROKEN_PIPE);
                                 }
@@ -919,7 +945,8 @@ async fn stream_run_events(resp: reqwest::Response) -> Result<i32> {
                             }
                         }
                         RunEvent::Exited { code, timed_out } => {
-                            if timed_out {
+                            // `eprintln!` panics when stderr is a closed pipe.
+                            if timed_out && !stderr_closed {
                                 eprintln!("process timed out and was killed");
                             }
                             exit_code = Some(code);
@@ -983,19 +1010,50 @@ enum RunEvent {
 }
 
 /// One event of the `POST /api/v1/processes/run` SSE stream: an output chunk,
-/// the exit, or a heartbeat.
+/// the exit, or a heartbeat. A field with an unexpected JSON type is read as
+/// absent, so it does not drop the other fields of the event.
 #[derive(serde::Deserialize)]
 struct RunEventWire {
+    #[serde(default, deserialize_with = "lenient_string")]
     line: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
     line_ending: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
     stream: Option<String>,
+    #[serde(default, deserialize_with = "lenient_int")]
     exit_code: Option<i64>,
+    #[serde(default, deserialize_with = "lenient_int")]
     signal: Option<i64>,
+    #[serde(default, deserialize_with = "lenient_string")]
     reason: Option<String>,
-    #[serde(rename = "type")]
+    #[serde(rename = "type", default, deserialize_with = "lenient_string")]
     event_type: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
     event: Option<String>,
+    #[serde(default, deserialize_with = "lenient_string")]
     kind: Option<String>,
+}
+
+fn lenient_string<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<String>, D::Error> {
+    match <serde_json::Value as serde::Deserialize>::deserialize(deserializer)? {
+        serde_json::Value::String(value) => Ok(Some(value)),
+        _ => Ok(None),
+    }
+}
+
+/// Read an integer. Also accept a float with no fraction, such as `0.0`.
+fn lenient_int<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> std::result::Result<Option<i64>, D::Error> {
+    let value = <serde_json::Value as serde::Deserialize>::deserialize(deserializer)?;
+    Ok(value.as_i64().or_else(|| {
+        value
+            .as_f64()
+            .filter(|number| number.fract() == 0.0)
+            .map(|number| number as i64)
+    }))
 }
 
 impl RunEventWire {
@@ -1007,37 +1065,42 @@ impl RunEventWire {
     }
 }
 
-/// Parse one SSE payload. Skip a payload that does not parse, as
-/// `SandboxProxyClient::run_process_streaming` does, so one bad event does not
-/// stop the output of a process that still runs.
-fn parse_run_event(data: &str) -> Option<RunEvent> {
-    let event: RunEventWire = serde_json::from_str(data.trim()).ok()?;
+/// Parse one SSE payload. Return `Ok(None)` for an empty payload or a
+/// heartbeat. Return an error for a payload that is not a JSON object; the
+/// caller skips it, as `SandboxProxyClient::run_process_streaming` does, so one
+/// bad event does not stop the output of a process that still runs.
+fn parse_run_event(data: &str) -> serde_json::Result<Option<RunEvent>> {
+    let data = data.trim();
+    if data.is_empty() {
+        return Ok(None);
+    }
+    let event: RunEventWire = serde_json::from_str(data)?;
     if event.is_heartbeat() {
-        return None;
+        return Ok(None);
     }
 
     if let Some(line) = event.line {
-        return Some(RunEvent::Output {
+        return Ok(Some(RunEvent::Output {
             line,
             line_ending: event.line_ending,
             stream: event.stream,
-        });
+        }));
     }
     let timed_out = event.reason.as_deref() == Some("timed_out");
     if let Some(code) = event.exit_code {
-        return Some(RunEvent::Exited {
+        return Ok(Some(RunEvent::Exited {
             code: code as i32,
             timed_out,
-        });
+        }));
     }
     if let Some(signal) = event.signal {
-        return Some(RunEvent::Exited {
+        return Ok(Some(RunEvent::Exited {
             code: 128 + signal as i32,
             timed_out,
-        });
+        }));
     }
 
-    Some(RunEvent::Other)
+    Ok(Some(RunEvent::Other))
 }
 
 #[cfg(test)]
@@ -1148,26 +1211,62 @@ mod tests {
 
     #[test]
     fn parse_run_event_skips_empty_payloads() {
-        assert!(parse_run_event("").is_none());
-        assert!(parse_run_event("   ").is_none());
+        assert!(parse_run_event("").unwrap().is_none());
+        assert!(parse_run_event("   ").unwrap().is_none());
     }
 
     #[test]
     fn parse_run_event_skips_heartbeat_payloads() {
-        assert!(parse_run_event(r#"{"type":"heartbeat"}"#).is_none());
-        assert!(parse_run_event(r#"{"event":"keepalive"}"#).is_none());
+        assert!(
+            parse_run_event(r#"{"type":"heartbeat"}"#)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            parse_run_event(r#"{"event":"keepalive"}"#)
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
-    fn parse_run_event_skips_payloads_that_do_not_parse() {
-        for data in ["null", r#""ping""#, "not json", r#"{"signal":"SIGKILL"}"#] {
-            assert!(parse_run_event(data).is_none(), "{data}");
+    fn parse_run_event_rejects_payloads_that_are_not_objects() {
+        for data in ["null", r#""ping""#, "not json"] {
+            assert!(parse_run_event(data).is_err(), "{data}");
         }
     }
 
     #[test]
+    fn parse_run_event_ignores_fields_with_unexpected_types() {
+        match parse_run_event(r#"{"line":"x","kind":1}"#)
+            .unwrap()
+            .unwrap()
+        {
+            super::RunEvent::Output { line, .. } => assert_eq!(line, "x"),
+            _ => panic!("expected Output"),
+        }
+        match parse_run_event(r#"{"exit_code":0.0}"#).unwrap().unwrap() {
+            super::RunEvent::Exited { code, .. } => assert_eq!(code, 0),
+            _ => panic!("expected Exited"),
+        }
+        match parse_run_event(r#"{"signal":"SIGKILL","exit_code":137}"#)
+            .unwrap()
+            .unwrap()
+        {
+            super::RunEvent::Exited { code, .. } => assert_eq!(code, 137),
+            _ => panic!("expected Exited"),
+        }
+        assert!(matches!(
+            parse_run_event(r#"{"signal":"SIGKILL"}"#).unwrap(),
+            Some(super::RunEvent::Other)
+        ));
+    }
+
+    #[test]
     fn parse_run_event_parses_output_lines() {
-        let event = parse_run_event(r#"{"line":"hello","stream":"stdout"}"#).unwrap();
+        let event = parse_run_event(r#"{"line":"hello","stream":"stdout"}"#)
+            .unwrap()
+            .unwrap();
 
         match event {
             super::RunEvent::Output {
@@ -1185,7 +1284,9 @@ mod tests {
 
     #[test]
     fn parse_run_event_keeps_the_line_ending() {
-        let event = parse_run_event(r#"{"line":"","line_ending":"\r\n"}"#).unwrap();
+        let event = parse_run_event(r#"{"line":"","line_ending":"\r\n"}"#)
+            .unwrap()
+            .unwrap();
 
         match event {
             super::RunEvent::Output {
@@ -1209,7 +1310,7 @@ mod tests {
 
     #[test]
     fn parse_run_event_parses_exit_code() {
-        let event = parse_run_event(r#"{"exit_code":0}"#).unwrap();
+        let event = parse_run_event(r#"{"exit_code":0}"#).unwrap().unwrap();
         match event {
             super::RunEvent::Exited { code, timed_out } => {
                 assert_eq!(code, 0);
@@ -1221,7 +1322,7 @@ mod tests {
 
     #[test]
     fn parse_run_event_parses_signal_as_exit_code() {
-        let event = parse_run_event(r#"{"signal":9}"#).unwrap();
+        let event = parse_run_event(r#"{"signal":9}"#).unwrap().unwrap();
         match event {
             super::RunEvent::Exited { code, timed_out } => {
                 assert_eq!(code, 128 + 9);
@@ -1233,7 +1334,9 @@ mod tests {
 
     #[test]
     fn parse_run_event_reports_timeout_reason() {
-        let event = parse_run_event(r#"{"signal":9,"reason":"timed_out"}"#).unwrap();
+        let event = parse_run_event(r#"{"signal":9,"reason":"timed_out"}"#)
+            .unwrap()
+            .unwrap();
         match event {
             super::RunEvent::Exited { code, timed_out } => {
                 assert_eq!(code, 128 + 9);
