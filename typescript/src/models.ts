@@ -97,6 +97,8 @@ export interface ContainerResourcesInfo {
   cpus: number;
   memoryMb: number;
   diskMb: number;
+  /** Reported GPU allocation. Include it in a pool update to retain the allocation. */
+  gpuConfigs?: GPUResources[];
 }
 
 /** GPU models supported by the sandbox scheduler. */
@@ -520,6 +522,12 @@ export interface CreatePoolOptions {
   memoryMb?: number;
   /** Root disk size in MiB. Omit to use the registered image's size. */
   diskMb?: number;
+  /** GPUs per container. Defaults to A10 unless gpuModel is set. GPU CAS pools require a CAS image. */
+  gpus?: number;
+  /** GPU model to allocate for each container. Defaults to one GPU when gpus is omitted. Validated at runtime. */
+  gpuModel?: GpuModel | (string & {});
+  /** Typed GPU allocation. Cannot be combined with gpus or gpuModel. */
+  gpu?: GpuRequest;
   timeoutSecs?: number;
   entrypoint?: string[];
   maxContainers?: number;
@@ -541,6 +549,12 @@ export interface UpdatePoolOptions {
   memoryMb?: number;
   /** Root disk size in MiB. Omit to use the registered image's size. */
   diskMb?: number;
+  /** GPUs per container. Include on each update to keep a GPU CAS pool; omission configures a CPU-only CAS pool. Defaults to A10 unless gpuModel is set. */
+  gpus?: number;
+  /** GPU model to allocate for each container. Defaults to one GPU when gpus is omitted. Validated at runtime. */
+  gpuModel?: GpuModel | (string & {});
+  /** Typed GPU allocation. Cannot be combined with gpus or gpuModel. */
+  gpu?: GpuRequest;
   timeoutSecs?: number;
   entrypoint?: string[];
   maxContainers?: number;

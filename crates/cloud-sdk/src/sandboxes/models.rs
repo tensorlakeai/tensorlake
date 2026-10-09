@@ -112,6 +112,10 @@ pub struct ContainerResourcesInfo {
     pub cpus: f64,
     pub memory_mb: i64,
     pub disk_mb: i64,
+    /// GPU allocation reported by the service. Include it in pool updates to
+    /// retain the allocation when replacing the pool configuration.
+    #[serde(default, alias = "gpus", skip_serializing_if = "Option::is_none")]
+    pub gpu_configs: Option<Vec<GPUResources>>,
 }
 
 /// GPU models supported by the sandbox scheduler.
@@ -435,6 +439,9 @@ pub struct UpdateSandboxRequest {
 pub struct SandboxPoolRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Per-container allocation, including GPUs for a GPU CAS pool. Pool
+    /// updates replace this allocation; include GPUs on each update to keep
+    /// the pool GPU-enabled. Claims inherit these resources.
     pub resources: CreateSandboxResources,
     #[serde(default)]
     pub timeout_secs: i64,
@@ -1231,6 +1238,36 @@ mod tests {
             serde_json::to_value(&policy).unwrap()
         );
         assert!(out.get("network").is_none());
+    }
+
+    #[test]
+    fn container_resources_info_retains_gpu_allocations() {
+        let allocation = serde_json::json!([{"count": 2, "model": "H100"}]);
+        for field in ["gpu_configs", "gpus"] {
+            let mut wire = serde_json::json!({"cpus": 2.0, "memory_mb": 4096, "disk_mb": 20480});
+            wire[field] = allocation.clone();
+            let resources: ContainerResourcesInfo = serde_json::from_value(wire).unwrap();
+            assert_eq!(
+                resources.gpu_configs,
+                Some(vec![
+                    GpuRequest {
+                        count: 2,
+                        model: GpuModel::H100
+                    }
+                    .into()
+                ])
+            );
+            let serialized = serde_json::to_value(&resources).unwrap();
+            assert_eq!(serialized["gpu_configs"], allocation);
+            assert!(serialized.get("gpus").is_none());
+        }
+        for allocation in [serde_json::Value::Null, serde_json::json!([])] {
+            let resources: ContainerResourcesInfo = serde_json::from_value(serde_json::json!({
+                "cpus": 1.0, "memory_mb": 1024, "disk_mb": 20480, "gpu_configs": allocation
+            }))
+            .unwrap();
+            assert!(resources.gpu_configs.as_ref().is_none_or(Vec::is_empty));
+        }
     }
 
     #[test]

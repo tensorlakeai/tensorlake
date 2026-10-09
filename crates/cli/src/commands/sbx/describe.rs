@@ -1,7 +1,7 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
     DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, SandboxFailureDetails, SandboxTimestamp,
-    error_details_message, native_ssh, sandbox_endpoint,
+    error_details_message, format_gpu_allocation, native_ssh, sandbox_endpoint,
 };
 use crate::error::{CliError, Result};
 use serde::Deserialize;
@@ -39,6 +39,8 @@ struct SandboxResources {
     memory_mb: Option<i64>,
     disk_mb: Option<i64>,
     ephemeral_disk_mb: Option<i64>,
+    #[serde(default, alias = "gpus")]
+    gpu_configs: Option<Vec<tensorlake::sandboxes::models::GPUResources>>,
 }
 
 #[derive(Deserialize)]
@@ -159,6 +161,14 @@ fn print_sandbox_details(item: &SandboxDescription) {
     println!("CPUs:            {}", cpus);
     println!("Memory:          {}", memory);
     println!("Disk:            {}", disk);
+    println!(
+        "GPUs:            {}",
+        format_gpu_allocation(
+            resources
+                .and_then(|r| r.gpu_configs.as_deref())
+                .unwrap_or_default()
+        )
+    );
     if let Some(resize) = &item.resource_resize {
         println!(
             "Resize:          generation {}: {}",

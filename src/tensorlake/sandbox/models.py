@@ -191,14 +191,6 @@ class CheckpointType(str, Enum):
     FILESYSTEM = "filesystem"
 
 
-class ContainerResourcesInfo(BaseModel):
-    """Container resource configuration."""
-
-    cpus: float
-    memory_mb: int
-    disk_mb: int
-
-
 class GpuModel(str, Enum):
     """GPU models supported by the sandbox scheduler."""
 
@@ -221,6 +213,17 @@ class GpuRequest(BaseModel):
 
 # Preserve the public name used by request/response models in older releases.
 GPUResources = GpuRequest
+
+
+class ContainerResourcesInfo(BaseModel):
+    """Container resource configuration, including its GPU allocation."""
+
+    cpus: float
+    memory_mb: int
+    disk_mb: int
+    gpu_configs: list[GpuRequest] | None = Field(
+        default=None, validation_alias=AliasChoices("gpu_configs", "gpus")
+    )
 
 
 class CreateSandboxResources(BaseModel):

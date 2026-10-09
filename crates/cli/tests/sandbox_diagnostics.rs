@@ -243,3 +243,141 @@ async fn describe_running_sandbox_still_prints_ssh_config() {
     assert!(stdout.contains("User sbx-running"), "{stdout}");
     assert!(!stdout.contains("Error details:"), "{stdout}");
 }
+
+#[tokio::test]
+async fn describe_prints_gpu_allocations_for_live_and_archived_sandboxes() {
+    for (field, count, model) in [("gpus", 2, "H100-PCIe-80GB"), ("gpu_configs", 1, "A10")] {
+        for archived in [false, true] {
+            let mut sandbox = json!({
+                "sandbox_id": "sbx-gpu", "pool_id": "pool-gpu",
+                "status": if archived { "terminated" } else { "running" },
+                "sandbox_url": "https://sbx-gpu.example.com",
+                "resources": {"cpus": 2, "memory_mb": 4096, "disk_mb": 20480},
+            });
+            sandbox["resources"][field] = json!([{"count": count, "model": model}]);
+            let responses = if archived {
+                vec![(404, json!({})), (200, sandbox)]
+            } else {
+                vec![(200, sandbox)]
+            };
+            let output = run_cli(&["describe", "sbx-gpu"], responses).await;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            assert!(
+                stdout
+                    .lines()
+                    .any(|line| line == format!("GPUs:            {count} x {model}")),
+                "{stdout}"
+            );
+            for line in [
+                "CPUs:            2",
+                "Memory:          4096 MiB",
+                "Disk:            20480 MiB",
+            ] {
+                assert!(stdout.contains(line), "{stdout}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn describe_handles_cpu_and_legacy_resources_without_gpus() {
+    for resources in [
+        json!({"cpus": 1, "memory_mb": 1024, "disk_mb": 10240}),
+        json!({"gpus": []}),
+        json!({"gpu_configs": null}),
+        Value::Null,
+    ] {
+        let output = run_cli(
+            &["describe", "sbx-cpu"],
+            vec![(
+                200,
+                json!({
+                    "sandbox_id": "sbx-cpu", "status": "terminated", "resources": resources,
+                }),
+            )],
+        )
+        .await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert!(
+            stdout.lines().any(|line| line == "GPUs:            -"),
+            "{stdout}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn ls_prints_gpu_count_and_model_in_live_and_archived_columns() {
+    for field in ["gpus", "gpu_configs"] {
+        for archived in [false, true] {
+            let mut gpu_sandbox = json!({
+                "sandbox_id": "sbx-gpu", "pool_id": "pool-gpu",
+                "status": "running", "image": "gpu-image",
+                "resources": {"cpus": 2, "memory_mb": 4096, "disk_mb": 20480},
+            });
+            gpu_sandbox["resources"][field] = json!([{"count": 2, "model": "H100-PCIe-80GB"}]);
+            let body = json!({"sandboxes": [
+                gpu_sandbox,
+                {"sandbox_id": "sbx-cpu", "status": "running", "resources": {"gpus": []}},
+                {"sandbox_id": "sbx-legacy", "status": "running", "resources": {}},
+                {"sandbox_id": "sbx-null", "status": "running", "resources": {"gpu_configs": null}},
+            ]});
+            let args = if archived {
+                vec!["ls", "--archived"]
+            } else {
+                vec!["ls"]
+            };
+            let output = run_cli(&args, vec![(200, body)]).await;
+            let stdout = String::from_utf8_lossy(&output.stdout);
+            let stderr = String::from_utf8_lossy(&output.stderr);
+            assert!(output.status.success(), "{stdout}\n{stderr}");
+            let mut lines = stdout.lines();
+            let header: Vec<_> = lines.next().unwrap().split('\t').collect();
+            let gpu_column = header
+                .iter()
+                .position(|name| *name == "GPUs")
+                .expect("GPUs column");
+            for (id, allocation) in [
+                ("sbx-gpu", "2 x H100-PCIe-80GB"),
+                ("sbx-cpu", "-"),
+                ("sbx-legacy", "-"),
+                ("sbx-null", "-"),
+            ] {
+                let row: Vec<_> = lines.next().unwrap().split('\t').collect();
+                assert_eq!(row.len(), header.len(), "{stdout}");
+                assert_eq!(row[0], id, "{stdout}");
+                assert_eq!(row[gpu_column], allocation, "{stdout}");
+                if id == "sbx-gpu" {
+                    for (name, value) in
+                        [("CPUs", "2"), ("Memory", "4096 MiB"), ("Disk", "20480 MiB")]
+                    {
+                        let column = header.iter().position(|field| *field == name).unwrap();
+                        assert_eq!(row[column], value, "{stdout}");
+                    }
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn ls_quiet_keeps_ids_only_for_gpu_and_cpu_sandboxes() {
+    for archived in [false, true] {
+        let args = if archived {
+            vec!["ls", "--archived", "--quiet"]
+        } else {
+            vec!["ls", "--quiet"]
+        };
+        let output = run_cli(&args, vec![(200, json!({"sandboxes": [
+            {"sandbox_id": "sbx-gpu", "status": "running", "resources": {"gpus": [{"count": 1, "model": "A10"}]}},
+            {"sandbox_id": "sbx-cpu", "status": "running"},
+        ]}))]).await;
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stdout}\n{stderr}");
+        assert_eq!(stdout, "sbx-gpu\nsbx-cpu\n");
+    }
+}

@@ -197,7 +197,7 @@ def _build_gpu_resources(
         return None
     if isinstance(gpus, bool) or not isinstance(gpus, int) or gpus < 1:
         raise SandboxError("gpus must be a positive integer")
-    gpu_model = gpu_model or "A10"
+    gpu_model = "A10" if gpu_model is None else gpu_model
     try:
         model = GpuModel(gpu_model)
     except ValueError:
@@ -206,6 +206,16 @@ def _build_gpu_resources(
             f"unsupported GPU model {gpu_model!r}; expected one of: {supported}"
         ) from None
     return [GpuRequest(count=gpus, model=model)]
+
+
+def _build_pool_gpu_resources(
+    gpus: int | None,
+    gpu_model: GpuModel | str | None,
+    gpu: GpuRequest | None = None,
+) -> list[GpuRequest] | None:
+    if gpu is None and gpus is None and gpu_model is not None:
+        gpus = 1
+    return _build_gpu_resources(gpus, gpu_model, gpu)
 
 
 def _unsupported_request_timeout_kwarg(e: TypeError) -> bool:
@@ -1702,6 +1712,9 @@ class SandboxClient:
         max_containers: int | None = None,
         warm_containers: int | None = None,
         network: NetworkConfig | ClearNetworkPolicy | None = None,
+        gpus: int | None = None,
+        gpu_model: GpuModel | str | None = None,
+        gpu: GpuRequest | None = None,
     ) -> Traced[CreateSandboxPoolResponse]:
         """Create a new sandbox pool.
 
@@ -1717,6 +1730,11 @@ class SandboxClient:
             max_containers: Maximum number of containers in pool
             warm_containers: Number of warm containers to maintain
             network: Network policy for each container in the pool
+            gpus: GPUs per container, using A10 unless ``gpu_model`` is set.
+                GPU CAS pools require a CAS image.
+            gpu_model: GPU model to allocate for each container. Defaults to
+                one GPU when ``gpus`` is omitted.
+            gpu: Typed GPU allocation, exclusive with ``gpus``/``gpu_model``.
 
         Returns:
             CreateSandboxPoolResponse with pool_id and namespace
@@ -1734,7 +1752,10 @@ class SandboxClient:
         request_model = SandboxPoolRequest(
             image=image,
             resources=CreateSandboxResources(
-                cpus=cpus, memory_mb=memory_mb, disk_mb=disk_mb
+                cpus=cpus,
+                memory_mb=memory_mb,
+                disk_mb=disk_mb,
+                gpus=_build_pool_gpu_resources(gpus, gpu_model, gpu),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -1804,6 +1825,9 @@ class SandboxClient:
         max_containers: int | None = None,
         warm_containers: int | None = None,
         network: NetworkConfig | ClearNetworkPolicy | None = None,
+        gpus: int | None = None,
+        gpu_model: GpuModel | str | None = None,
+        gpu: GpuRequest | None = None,
     ) -> Traced[SandboxPoolInfo]:
         """Update a sandbox pool configuration.
 
@@ -1812,10 +1836,10 @@ class SandboxClient:
         policy entirely. On a change the service recycles the pool's unclaimed
         warm containers onto the new policy, while containers already claimed
         by sandboxes keep the policy they booted with. Changes to CPU, memory,
-        disk, image, or entrypoint likewise recycle unclaimed warm containers
-        asynchronously. If suitable capacity is unavailable, the pool remains
-        below its warm target until capacity appears; stale warm containers are
-        never used as a fallback.
+        disk, GPU allocation, image, or entrypoint likewise recycle unclaimed
+        warm containers asynchronously. If suitable capacity is unavailable,
+        the pool remains below its warm target until capacity appears; stale
+        warm containers are never used as a fallback.
 
         Args:
             pool_id: ID of the pool to update
@@ -1832,6 +1856,12 @@ class SandboxClient:
             network: Replacement network policy for each container in the
                 pool. Omit to keep the current policy, or pass
                 ``CLEAR_NETWORK_POLICY`` to remove it.
+            gpus: GPUs per container, using A10 unless ``gpu_model`` is set.
+                Include the GPU allocation on each update to keep a GPU CAS
+                pool; omitting it configures a CPU-only CAS pool.
+            gpu_model: GPU model to allocate for each container. Defaults to
+                one GPU when ``gpus`` is omitted.
+            gpu: Typed GPU allocation, exclusive with ``gpus``/``gpu_model``.
 
         Returns:
             SandboxPoolInfo with updated pool details
@@ -1844,7 +1874,10 @@ class SandboxClient:
         request_model = SandboxPoolRequest(
             image=image,
             resources=CreateSandboxResources(
-                cpus=cpus, memory_mb=memory_mb, disk_mb=disk_mb
+                cpus=cpus,
+                memory_mb=memory_mb,
+                disk_mb=disk_mb,
+                gpus=_build_pool_gpu_resources(gpus, gpu_model, gpu),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
