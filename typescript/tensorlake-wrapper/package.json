@@ -1,6 +1,6 @@
 {
   "name": "tensorlake",
-  "version": "0.5.147",
+  "version": "0.5.148",
   "description": "Compatibility package that re-exports @tensorlakeai/tensorlake. New projects should depend on @tensorlakeai/tensorlake directly.",
   "type": "module",
   "main": "./index.cjs",
@@ -55,7 +55,7 @@
   },
   "license": "Apache-2.0",
   "dependencies": {
-    "@tensorlakeai/tensorlake": "0.5.147"
+    "@tensorlakeai/tensorlake": "0.5.148"
   },
   "publishConfig": {
     "access": "public"
