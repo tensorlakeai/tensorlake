@@ -1,0 +1,46 @@
+name: Notify Slack about npm approval
+description: >
+  Posts the state of staged npm packages to Slack through an incoming webhook. Skips when no
+  webhook is configured; callers should set continue-on-error so Slack never blocks a release.
+
+inputs:
+  webhook-url:
+    description: Slack incoming webhook URL, usually secrets.SLACK_WEBHOOK_URL.
+    required: false
+    default: ''
+  title:
+    description: Headline, for example "npm 0.5.148 is waiting for approval".
+    required: true
+  details:
+    description: Slack mrkdwn body, may span several lines.
+    required: true
+  mention:
+    description: Optional Slack mention prepended to the headline, e.g. "<!subteam^S0123>".
+    required: false
+    default: ''
+
+runs:
+  using: composite
+  steps:
+    - name: Notify Slack
+      if: ${{ inputs.webhook-url != '' }}
+      uses: slackapi/slack-github-action@v4
+      with:
+        webhook: ${{ inputs.webhook-url }}
+        webhook-type: incoming-webhook
+        # toJSON quotes the inputs so multi-line values stay valid YAML.
+        payload: |
+          text: ${{ toJSON(format('{0} {1}', inputs.mention, inputs.title)) }}
+          blocks:
+            - type: "section"
+              text:
+                type: "mrkdwn"
+                text: ${{ toJSON(format('{0} *{1}*', inputs.mention, inputs.title)) }}
+            - type: "section"
+              text:
+                type: "mrkdwn"
+                text: ${{ toJSON(inputs.details) }}
+            - type: "context"
+              elements:
+                - type: "mrkdwn"
+                  text: "Triggered by ${{ github.actor }} · <${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}|View workflow run>"
