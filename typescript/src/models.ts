@@ -53,7 +53,7 @@ export enum SnapshotStatus {
  * - `"filesystem"`: Capture filesystem state only. Sandboxes restored from
  *   this snapshot cold-boot from the snapshot tarball instead of warm-
  *   restoring VM state. Use this for sandbox image builds so that the
- *   restored sandbox bypasses Firecracker's overlay-path constraints.
+ *   restored sandbox bypasses the overlay-path constraints of non-CAS sandboxes.
  */
 export type SnapshotType = "memory" | "filesystem";
 

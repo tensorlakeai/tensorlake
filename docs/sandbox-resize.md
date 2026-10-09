@@ -1,7 +1,10 @@
 # Resize a running sandbox
 
-Resize CPU, memory, or the root disk of a running Cloud Hypervisor sandbox.
-Use `tl sbx describe <id>` to check its runtime and current allocation. Memory
+Resize CPU, memory, or the root disk of a running CPU-only CAS sandbox.
+Running GPU CAS sandboxes support root-disk growth only; CPU and memory changes
+are rejected before submitting an update.
+Non-CAS sandboxes do not support live resize.
+Use `tl sbx describe <id>` to check its current allocation. Memory
 and disk values are MiB, with the same resource names and units as create.
 Omitted dimensions stay unchanged; send name, proxy, and network updates separately.
 
@@ -9,6 +12,12 @@ Omitted dimensions stay unchanged; send name, proxy, and network updates separat
 
 ```sh
 tl sbx update my-sandbox -c 2 -m 4096 --disk_mb 20480
+```
+
+For a GPU CAS sandbox, supply only the disk target:
+
+```sh
+tl sbx update my-gpu-sandbox --disk_mb 20480
 ```
 
 The CLI prints the requested target, shows a spinner while waiting, and reports
@@ -187,7 +196,7 @@ incompatible response, not confirmation of completion.
 
 - CPU targets must be finite positive whole-vCPU counts. `2.0` is accepted;
   `1.5` is rejected without rounding. Host-specific limits remain server decisions.
-- Cloud Hypervisor's boot-memory floor and hotplug window are not exposed by
+- CPU-only CAS sandboxes' boot-memory floor and hotplug window are not exposed by
   the public API. The SDK preserves driver rejection details, including after
   full snapshot restore or suspend/resume. The driver adjusts hotplug memory
   in 128 MiB blocks, so confirmed memory can differ from the requested target.
@@ -198,5 +207,8 @@ incompatible response, not confirmation of completion.
   capture, pinned memory, and virtual machine state remain server/driver decisions.
 
 A sandbox must be running. Full-snapshot-restored or suspended-then-resumed
-Cloud Hypervisor sandboxes may resize once running. This feature does not add
-GPU, pool-template, attached-volume, suspended/paused, Firecracker, or gVisor resizing.
+CPU-only CAS sandboxes may resize once running. GPU CAS sandboxes support only root-disk
+growth. Unchanged CPU and memory targets are omitted from the update, so they may
+be supplied alongside a larger disk target without requesting a CPU or memory
+resize. GPU allocation, pool templates, and attached volumes cannot be resized
+through this API. Suspended, paused, and non-CAS sandboxes do not support live resize.

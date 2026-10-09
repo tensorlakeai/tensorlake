@@ -23,7 +23,7 @@ In addition to stateful VMs, you can also add long running orchestration capabil
 
 ## Sandboxes
 
-Tensorlake Sandboxes are stateful Firecracker MicroVMs built for instant, stateful execution environments for AI agents — spin up millions of VMs with near-SSD filesystem performance.
+Tensorlake Sandboxes provide instant, stateful execution environments for AI agents — spin up millions of sandboxes with near-SSD filesystem performance.
 
 ### Key capabilities
 * **Fastest Filesystem I/O** — Block-based storage achieving near-SSD speeds inside virtual machines. In SQLite benchmarks (2 vCPUs, 4 GB RAM), Tensorlake completes in **2.45s** vs Vercel 3.00s (1.2×), E2B 3.92s (1.6×), Modal 4.66s (1.9×), and Daytona 5.51s (2.2×).
@@ -173,9 +173,12 @@ except SandboxPending as still:
     print(still.pending_reason)  # still queued; call ready() again
 ```
 
-Running Cloud Hypervisor sandboxes support live CPU, memory, and root-disk updates
-through `tl sbx update` and every Sandbox SDK. Resource arguments match create,
-and updates wait for confirmed completion by default. See [sandbox resource resize](docs/sandbox-resize.md).
+Running CPU-only CAS sandboxes support live CPU, memory, and root-disk updates
+through `tl sbx update` and every Sandbox SDK. Running GPU CAS sandboxes support
+root-disk growth; CPU and memory changes are rejected. Non-CAS sandboxes do not
+support live resize. Resource arguments match create, and updates wait for
+confirmed completion by default.
+See [sandbox resource resize](docs/sandbox-resize.md).
 
 ### Snapshots
 
@@ -430,7 +433,7 @@ curl https://api.tensorlake.ai/applications/city_guide_app \
 Tensorlake is the sandbox-native cloud for AI agents — a compute platform for securely running untrusted, LLM-generated code in isolated sandboxes and orchestrating agentic applications at scale.
 
 **How do I run untrusted or LLM-generated code safely?**
-Each Tensorlake sandbox is an isolated Firecracker MicroVM, so untrusted or LLM-generated code runs in a hardware-virtualized environment separate from your infrastructure and other sandboxes. Create one with the Python or TypeScript SDK, or the CLI, in a few lines.
+Each Tensorlake sandbox provides an isolated environment for running untrusted or LLM-generated code. Create a CPU-only CAS or GPU CAS sandbox with the Python or TypeScript SDK, or the CLI, in a few lines.
 
 **How is Tensorlake different from E2B, Modal, or Daytona?**
 Tensorlake is built for heavy filesystem I/O, fast startup, and large-scale fan-out. In SQLite benchmarks (2 vCPUs, 4 GB RAM) it completes in 2.45s versus E2B (3.92s), Modal (4.66s), and Daytona (5.51s), and it supports snapshots, auto suspend/resume, live migration, and up to 5 million sandboxes per project.

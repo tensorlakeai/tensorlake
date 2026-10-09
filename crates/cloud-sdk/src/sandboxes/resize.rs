@@ -110,12 +110,10 @@ impl ResizeSandboxResources {
                 current.status
             )));
         }
-        if let Some(runtime) = &current.runtime
-            && (matches!(runtime.as_str(), "firecracker" | "gvisor"))
-        {
-            return Err(SdkError::ClientError(format!(
-                "resource resize requires Cloud Hypervisor; current runtime is {runtime}"
-            )));
+        if current.runtime.as_deref() == Some("firecracker") {
+            return Err(SdkError::ClientError(
+                "live resource resize is not supported for non-CAS sandboxes".into(),
+            ));
         }
         let mut target = self.clone();
         if let Some(disk) = target.disk_mb
@@ -136,6 +134,14 @@ impl ResizeSandboxResources {
             && target.disk_mb == Some(current.resources.disk_mb as u64)
         {
             target.disk_mb = None;
+        }
+        if current.runtime.as_deref() == Some("gvisor")
+            && (target.cpus.is_some() || target.memory_mb.is_some())
+        {
+            return Err(SdkError::ClientError(
+                "GPU CAS sandboxes only support live root-disk growth; CPU and memory changes are not supported"
+                    .into(),
+            ));
         }
         Ok(target)
     }

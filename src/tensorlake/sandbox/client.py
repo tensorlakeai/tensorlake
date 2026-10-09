@@ -613,7 +613,7 @@ class SandboxClient:
             disk_mb: Root disk size in MiB. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
-                ``A10`` unless ``gpu_model`` is set. GPU sandboxes require a
+                ``A10`` unless ``gpu_model`` is set. GPU CAS sandboxes require a
                 CAS image; when ``image`` is omitted, the server selects its
                 configured GPU default.
             gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.
@@ -1076,9 +1076,12 @@ class SandboxClient:
     ) -> Traced[SandboxInfo]:
         """Update a running sandbox's properties.
 
-        Resource names and units match create. Resize requires a running Cloud
-        Hypervisor sandbox and cannot be mixed with name, proxy, or network
-        changes. Omitted dimensions retain their confirmed allocation.
+        Resource names and units match create. CPU-only CAS sandboxes support CPU,
+        memory, and root-disk resize. GPU CAS sandboxes support only root-disk growth
+        and reject CPU and memory changes. Non-CAS sandboxes do not support live
+        resize. Resize requires a running sandbox and cannot be mixed with name,
+        proxy, or network changes. Omitted dimensions retain their confirmed
+        allocation.
         Integer-valued floats such as 2048.0 are accepted for memory and disk;
         fractional values and booleans are rejected without rounding.
 
@@ -2059,7 +2062,7 @@ class SandboxClient:
             disk_mb: Root disk size in MiB. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
-                ``A10`` unless ``gpu_model`` is set. GPU sandboxes require a
+                ``A10`` unless ``gpu_model`` is set. GPU CAS sandboxes require a
                 CAS image; when ``image`` is omitted, the server selects its
                 configured GPU default.
             gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.

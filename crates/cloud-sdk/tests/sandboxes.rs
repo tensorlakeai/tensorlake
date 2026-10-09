@@ -1344,6 +1344,145 @@ async fn resize_omits_unchanged_dimensions_and_waits_for_confirmed_generation() 
         1
     );
 }
+
+#[tokio::test]
+async fn gvisor_resize_only_patches_disk_and_waits_for_confirmed_growth() {
+    use tensorlake::sandboxes::{models::ResizeSandboxResources, resize::ResizeOptions};
+
+    for include_unchanged in [false, true] {
+        let mut current: serde_json::Value = serde_json::from_str(SANDBOX_INFO_JSON).unwrap();
+        current["runtime"] = "gvisor".into();
+        let mut pending = current.clone();
+        pending["resource_resize"] = serde_json::json!({
+            "generation": 7, "status": "pending",
+            "requested": {"cpus": 1.0, "memory_mb": 1024, "disk_mb": 2048},
+            "error_message": null,
+        });
+        let mut succeeded = pending.clone();
+        succeeded["resources"]["disk_mb"] = 2048.into();
+        succeeded["resource_resize"]["status"] = "succeeded".into();
+        let (client, task) = resize_server(vec![
+            (200, current),
+            (200, pending.clone()),
+            (200, pending),
+            (200, succeeded),
+        ])
+        .await;
+
+        let result = client
+            .update_with_result(
+                "sb-1",
+                &resize_request(ResizeSandboxResources {
+                    cpus: include_unchanged.then_some(1.0),
+                    memory_mb: include_unchanged.then_some(1024),
+                    disk_mb: Some(2048),
+                }),
+                ResizeOptions {
+                    poll_interval: Duration::from_millis(1),
+                    ..Default::default()
+                },
+            )
+            .await
+            .unwrap();
+        assert_eq!(result.resize_generation, Some(7));
+        assert_eq!(result.info.resources.disk_mb, 2048);
+        assert_eq!(result.info.resources.cpus, 1.0);
+        assert_eq!(result.info.resources.memory_mb, 1024);
+        assert_eq!(result.info.runtime.as_deref(), Some("gvisor"));
+        assert_eq!(
+            result.info.resource_resize.as_ref().unwrap().status,
+            "succeeded"
+        );
+
+        let requests = task.await.unwrap();
+        assert_eq!(requests.len(), 4);
+        assert!(requests[0].starts_with("GET "));
+        assert!(requests[1].starts_with("PATCH "));
+        assert!(requests[2..].iter().all(|r| r.starts_with("GET ")));
+        let body: serde_json::Value =
+            serde_json::from_str(requests[1].split("\r\n\r\n").nth(1).unwrap()).unwrap();
+        assert_eq!(body, serde_json::json!({"resources": {"disk_mb": 2048}}));
+    }
+}
+
+#[tokio::test]
+async fn gvisor_resize_rejects_cpu_and_memory_changes_before_patch() {
+    use tensorlake::sandboxes::models::ResizeSandboxResources;
+
+    for (cpus, memory_mb) in [
+        (Some(3.0), None),
+        (Some(1.0), None),
+        (None, Some(2048)),
+        (None, Some(512)),
+        (Some(3.0), Some(2048)),
+    ] {
+        for disk_mb in [None, Some(2048)] {
+            let mut current: serde_json::Value = serde_json::from_str(SANDBOX_INFO_JSON).unwrap();
+            current["runtime"] = "gvisor".into();
+            current["resources"]["cpus"] = 2.0.into();
+            let (client, task) = resize_server(vec![(200, current)]).await;
+            let error = client
+                .update(
+                    "sb-1",
+                    &resize_request(ResizeSandboxResources {
+                        cpus,
+                        memory_mb,
+                        disk_mb,
+                    }),
+                )
+                .await
+                .unwrap_err();
+            assert!(matches!(error, SdkError::ClientError(_)));
+            assert!(error.to_string().contains("GPU CAS sandboxes"));
+            assert!(error.to_string().contains("CPU and memory"));
+            let requests = task.await.unwrap();
+            assert_eq!(requests.len(), 1);
+            assert!(requests[0].starts_with("GET "));
+        }
+    }
+}
+
+#[test]
+fn gvisor_resize_preserves_disk_and_running_constraints() {
+    use tensorlake::sandboxes::models::{ResizeSandboxResources, SandboxInfo};
+
+    let mut current: SandboxInfo = serde_json::from_str(SANDBOX_INFO_JSON).unwrap();
+    current.runtime = Some("gvisor".into());
+    let mut request = ResizeSandboxResources {
+        disk_mb: Some(1023),
+        ..Default::default()
+    };
+    assert!(
+        request
+            .against(&current)
+            .unwrap_err()
+            .to_string()
+            .contains("live disk resize can only grow")
+    );
+    request.disk_mb = Some(1024);
+    assert!(request.against(&current).unwrap().is_empty());
+    request.disk_mb = Some(2048);
+    for status in ["suspended", "paused", "pending", "terminated"] {
+        current.status = status.into();
+        assert!(
+            request
+                .against(&current)
+                .unwrap_err()
+                .to_string()
+                .contains("requires a Running sandbox")
+        );
+    }
+    current.status = "running".into();
+    current.runtime = Some("firecracker".into());
+    assert!(
+        request
+            .against(&current)
+            .unwrap_err()
+            .to_string()
+            .contains("non-CAS sandboxes")
+    );
+}
+
 #[tokio::test]
 async fn resize_admission_only_keeps_the_old_confirmed_allocation() {
     use tensorlake::sandboxes::{models::ResizeSandboxResources, resize::ResizeOptions};
@@ -1373,22 +1512,23 @@ async fn resize_admission_only_keeps_the_old_confirmed_allocation() {
 #[tokio::test]
 async fn resize_noop_never_submits_or_waits_on_an_old_failed_generation() {
     use tensorlake::sandboxes::models::ResizeSandboxResources;
-    let (client, task) = resize_server(vec![(
-        200,
-        resize_info(4, "failed", 1024, Some("old failure")),
-    )])
-    .await;
-    client
-        .update(
-            "sb-1",
-            &resize_request(ResizeSandboxResources {
-                disk_mb: Some(1024),
-                ..Default::default()
-            }),
-        )
-        .await
-        .unwrap();
-    assert_eq!(task.await.unwrap().len(), 1);
+    for runtime in ["cloud_hypervisor", "gvisor"] {
+        let mut current = resize_info(4, "failed", 1024, Some("old failure"));
+        current["runtime"] = runtime.into();
+        let (client, task) = resize_server(vec![(200, current)]).await;
+        client
+            .update(
+                "sb-1",
+                &resize_request(ResizeSandboxResources {
+                    cpus: Some(1.0),
+                    memory_mb: Some(1024),
+                    disk_mb: Some(1024),
+                }),
+            )
+            .await
+            .unwrap();
+        assert_eq!(task.await.unwrap().len(), 1);
+    }
 }
 #[tokio::test]
 async fn resize_terminal_errors_preserve_driver_diagnostics_and_actual_allocation() {
