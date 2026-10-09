@@ -1141,12 +1141,15 @@ def join_output(events: Iterable[OutputEvent]) -> str:
     An older daemon sends lines without their terminators: they are joined
     with ``"\\n"``, with no newline after the last line.
     """
-    text = ""
+    parts = []
     ending = ""
     for event in events:
         ending = event.line_ending
-        text += event.line + ("\n" if ending is None else ending)
-    return text[:-1] if ending is None else text
+        parts.append(event.line)
+        parts.append("\n" if ending is None else ending)
+    if ending is None:
+        parts.pop()
+    return "".join(parts)
 
 
 class DaemonInfo(BaseModel):
