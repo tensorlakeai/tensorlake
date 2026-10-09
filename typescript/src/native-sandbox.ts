@@ -1,4 +1,4 @@
-import { CommandExitReason, fromSnakeKeys } from "./models.js";
+import { type CommandExitReason, fromSnakeKeys } from "./models.js";
 import {
   PoolInUseError,
   PoolNotFoundError,
@@ -41,9 +41,10 @@ export interface TracedBytes {
   fullSize?: number;
 }
 
-export interface TracedEvents {
+/** The JSON `CommandResult` of a run; absent when the stream had no exit event. */
+export interface TracedCommandResult {
   traceId: string;
-  events: string[];
+  result?: string | null;
 }
 
 /** Per-event callback used by the streaming proxy methods. */
@@ -68,7 +69,7 @@ export interface NativeSandboxProxyClient {
   followStdout(process: string, emit: NativeEmit): Promise<string>;
   followStderr(process: string, emit: NativeEmit): Promise<string>;
   followOutput(process: string, emit: NativeEmit): Promise<string>;
-  runProcess(payloadJson: string): Promise<TracedEvents>;
+  runCommand(payloadJson: string): Promise<TracedCommandResult>;
   runProcessStreaming(payloadJson: string, emit: NativeEmit): Promise<string>;
 
   readFile(path: string): Promise<TracedBytes>;
@@ -450,80 +451,24 @@ export async function* nativeEventStream(
   }
 }
 
-interface OutputChunk {
-  line: string;
-  lineEnding?: string;
-}
-
 /**
- * Join one stream's output chunks into the text the process wrote. The daemon
- * sends each chunk's `line_ending` ("" for a partial chunk); an older daemon
- * sends lines without terminators, so such a chunk ends with "\n", except the
- * last one.
+ * Parse the `CommandResult` that the Rust SDK built from the `runCommand`
+ * events.
  */
-function joinOutput(chunks: OutputChunk[]): string {
-  const text = chunks.map((chunk) => chunk.line + (chunk.lineEnding ?? "\n")).join("");
-  const last = chunks[chunks.length - 1];
-  return last && last.lineEnding === undefined ? text.slice(0, -1) : text;
-}
-
-/**
- * Reduce the buffered `runProcess` events into a `CommandResult`, matching the
- * SSE-parsing logic the undici `run()` path used.
- */
-export function assembleCommandResult(events: string[]): {
+export function parseCommandResult(resultJson: string | null | undefined): {
   exitCode: number;
   stdout: string;
   stderr: string;
-  reason?: CommandExitReason;
+  reason: CommandExitReason;
 } {
-  const stdoutChunks: OutputChunk[] = [];
-  const stderrChunks: OutputChunk[] = [];
-  let exitCode: number | undefined;
-  let reason: CommandExitReason | undefined;
-
-  for (const eventJson of events) {
-    const raw = JSON.parse(eventJson) as Record<string, unknown>;
-    if (typeof raw.line === "string") {
-      const chunk: OutputChunk = {
-        line: raw.line,
-        lineEnding: typeof raw.line_ending === "string" ? raw.line_ending : undefined,
-      };
-      if (raw.stream === "stderr") {
-        stderrChunks.push(chunk);
-      } else {
-        stdoutChunks.push(chunk);
-      }
-    } else if ("exit_code" in raw || "signal" in raw) {
-      if (typeof raw.exit_code === "number") {
-        exitCode = raw.exit_code;
-      } else if (typeof raw.signal === "number") {
-        exitCode = -raw.signal;
-      } else {
-        continue;
-      }
-      reason = exitReason(raw);
-    }
-  }
-
-  if (exitCode === undefined) {
+  if (resultJson == null) {
     throw new SandboxConnectionError("sandbox process stream ended without an exit event");
   }
-  return { exitCode, stdout: joinOutput(stdoutChunks), stderr: joinOutput(stderrChunks), reason };
-}
-
-const KNOWN_EXIT_REASONS = new Set<string>(Object.values(CommandExitReason));
-
-/**
- * The daemon's reported exit reason. Sandboxes that predate the field, or a
- * reason this SDK does not know, fall back to one derived from how the process
- * ended; a timeout is only ever reported by the sandbox, never inferred.
- */
-function exitReason(raw: Record<string, unknown>): CommandExitReason {
-  if (typeof raw.reason === "string" && KNOWN_EXIT_REASONS.has(raw.reason)) {
-    return raw.reason as CommandExitReason;
-  }
-  if (raw.oom_killed === true) return CommandExitReason.OOM_KILLED;
-  if (typeof raw.exit_code === "number") return CommandExitReason.EXITED;
-  return CommandExitReason.SIGNALED;
+  const raw = JSON.parse(resultJson) as {
+    exit_code: number;
+    stdout: string;
+    stderr: string;
+    reason: CommandExitReason;
+  };
+  return { exitCode: raw.exit_code, stdout: raw.stdout, stderr: raw.stderr, reason: raw.reason };
 }

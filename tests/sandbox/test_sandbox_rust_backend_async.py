@@ -109,20 +109,16 @@ class _FakeAsyncRustProxyClient:
             )
         ]
 
-    async def run_process_json_async(self, payload_json):
+    async def run_command_json_async(self, payload_json):
         self.run_payload_json = payload_json
-        return _TRACE_ID, [
-            json.dumps(
-                {"line": "out1", "stream": "stdout", "timestamp": 1_700_000_001}
-            ),
-            json.dumps(
-                {"line": "err1", "stream": "stderr", "timestamp": 1_700_000_002}
-            ),
-            json.dumps(
-                {"line": "out2", "stream": "stdout", "timestamp": 1_700_000_003}
-            ),
-            json.dumps({"exit_code": 0}),
-        ]
+        return _TRACE_ID, json.dumps(
+            {
+                "exit_code": 0,
+                "stdout": "out1\nout2",
+                "stderr": "err1",
+                "reason": "exited",
+            }
+        )
 
     async def read_file_bytes_async(self, *, path):
         self.read_file_calls.append(path)
@@ -325,48 +321,17 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         payload = json.loads(fake.run_payload_json)
         self.assertEqual(payload["timeout"], 2.5)
 
-    async def test_run_joins_line_endings(self):
-        class _ExactFake(_FakeAsyncRustProxyClient):
-            async def run_process_json_async(self, payload_json):
-                self.run_payload_json = payload_json
-                return _TRACE_ID, [
-                    json.dumps({"line": "a", "line_ending": "", "timestamp": 1}),
-                    json.dumps({"line": "b", "line_ending": "\r\n", "timestamp": 2}),
-                    json.dumps({"line": "", "line_ending": "\n", "timestamp": 3}),
-                    json.dumps(
-                        {
-                            "line": "oops",
-                            "line_ending": "\n",
-                            "stream": "stderr",
-                            "timestamp": 4,
-                        }
-                    ),
-                    json.dumps({"exit_code": 0}),
-                ]
-
-        sandbox, fake = _make_async_sandbox(_ExactFake())
-
-        result = await sandbox.run("sh")
-
-        self.assertEqual(result.stdout, "ab\r\n\n")
-        self.assertEqual(result.stderr, "oops\n")
-
-    async def test_run_signal_maps_to_negative_exit_code(self):
-        class _SignaledFake(_FakeAsyncRustProxyClient):
-            async def run_process_json_async(self, payload_json):
-                return _TRACE_ID, [json.dumps({"signal": 9})]
-
-        sandbox, _ = _make_async_sandbox(_SignaledFake())
-
-        result = await sandbox.run("sleep", args=["100"])
-
-        self.assertEqual(result.exit_code, -9)
-        self.assertEqual(result.reason, CommandExitReason.SIGNALED)
-
     async def test_run_reports_timeout_reason(self):
         class _TimedOutFake(_FakeAsyncRustProxyClient):
-            async def run_process_json_async(self, payload_json):
-                return _TRACE_ID, [json.dumps({"signal": 9, "reason": "timed_out"})]
+            async def run_command_json_async(self, payload_json):
+                return _TRACE_ID, json.dumps(
+                    {
+                        "exit_code": -9,
+                        "stdout": "",
+                        "stderr": "",
+                        "reason": "timed_out",
+                    }
+                )
 
         sandbox, _ = _make_async_sandbox(_TimedOutFake())
 
@@ -378,8 +343,8 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
 
     async def test_run_raises_when_stream_has_no_exit_event(self):
         class _MissingExit(_FakeAsyncRustProxyClient):
-            async def run_process_json_async(self, payload_json):
-                return _TRACE_ID, []
+            async def run_command_json_async(self, payload_json):
+                return _TRACE_ID, None
 
         sandbox, _ = _make_async_sandbox(_MissingExit())
 
@@ -387,24 +352,6 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
             SandboxConnectionError, "stream ended without an exit event"
         ):
             await sandbox.run("echo", args=["hello"])
-
-    async def test_run_ignores_unknown_event_kinds(self):
-        # Belt-and-braces: the parser should skip anything that is neither a
-        # line nor an exit event without falling over.
-        class _NoisyFake(_FakeAsyncRustProxyClient):
-            async def run_process_json_async(self, payload_json):
-                return _TRACE_ID, [
-                    json.dumps({"hello": "world"}),
-                    json.dumps({"line": "ok", "stream": "stdout", "timestamp": 1}),
-                    json.dumps({"exit_code": 0}),
-                ]
-
-        sandbox, _ = _make_async_sandbox(_NoisyFake())
-
-        result = await sandbox.run("echo")
-
-        self.assertEqual(result.stdout, "ok")
-        self.assertEqual(result.exit_code, 0)
 
     async def test_write_stdin_forwards_bytes(self):
         sandbox, fake = _make_async_sandbox()

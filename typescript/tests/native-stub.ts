@@ -20,7 +20,7 @@ import {
  *   parses and runs through `fromSnakeKeys`. Default: `{ traceId: "t", json: "{}" }`.
  * - "void" methods (delete/suspend/resume/stdin/...) resolve a trace-id string.
  * - bytes: `readFile` resolves `{ traceId, data: Buffer }`.
- * - `runProcess` resolves `{ traceId, events: string[] }` (each a JSON string).
+ * - `runCommand` resolves `{ traceId, result?: string }`, a `CommandResult` JSON.
  * - streaming `follow*`/`runProcessStreaming` take `(…, emit)` and resolve a
  *   trace-id string after invoking `emit(jsonString)` per event.
  * - errors: throw `new Error(JSON.stringify({ category, status, message }))` to
@@ -64,7 +64,7 @@ function makeProxy(): FakeFns {
     followStdout: vi.fn(tracedId()),
     followStderr: vi.fn(tracedId()),
     followOutput: vi.fn(tracedId()),
-    runProcess: vi.fn(async () => ({ traceId: "t", events: [] })),
+    runCommand: vi.fn(async () => ({ traceId: "t" })),
     runProcessStreaming: vi.fn(tracedId()),
     readFile: vi.fn(async () => ({ traceId: "t", data: Buffer.alloc(0) })),
     writeFile: vi.fn(tracedId()),

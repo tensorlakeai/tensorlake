@@ -1,6 +1,7 @@
 """Pydantic models for sandbox operations."""
 
 import warnings
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Annotated, Any, Literal
@@ -1113,14 +1114,39 @@ class OutputResponse(BaseModel):
 
 
 class OutputEvent(BaseModel):
-    """A single output event from an SSE stream."""
+    """One output chunk from an SSE stream.
+
+    A chunk is not always a whole line. The daemon can send a line in parts,
+    e.g. after a pause in the output, so ``line`` holds the text and
+    ``line_ending`` the terminator that came after it. Use ``join_output`` to
+    get the text the process wrote.
+    """
 
     line: str
     timestamp: Timestamp
     stream: str | None = None
-    # The terminator the daemon removed from ``line``: ``"\n"``, ``"\r\n"``,
-    # or ``""`` for a partial chunk. ``None`` from an older daemon.
     line_ending: str | None = None
+    """The terminator the daemon removed from ``line``: ``"\\n"``,
+    ``"\\r\\n"``, or ``""`` for a partial chunk. ``None`` from an older daemon,
+    which sends whole lines."""
+
+
+def join_output(events: Iterable[OutputEvent]) -> str:
+    """Join the output chunks of one stream into the text the process wrote.
+
+    Give the events of one stream only. The events of ``follow_output`` mix
+    stdout and stderr, so split them by ``stream`` first.
+
+    The result is the same as ``CommandResult.stdout`` of ``Sandbox.run``.
+    An older daemon sends lines without their terminators: they are joined
+    with ``"\\n"``, with no newline after the last line.
+    """
+    text = ""
+    ending = ""
+    for event in events:
+        ending = event.line_ending
+        text += event.line + ("\n" if ending is None else ending)
+    return text[:-1] if ending is None else text
 
 
 class DaemonInfo(BaseModel):

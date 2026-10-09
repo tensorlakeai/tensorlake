@@ -12,10 +12,10 @@ import {
 } from "./errors.js";
 import { type Traced } from "./traced.js";
 import {
-  assembleCommandResult,
   callNative,
   loadNativeSandboxBinding,
   nativeEventStream,
+  parseCommandResult,
   type NativeSandboxProxyClient,
 } from "./native-sandbox.js";
 import {
@@ -1225,11 +1225,11 @@ export class Sandbox {
     });
 
     const proxy = await this.proxy.client();
-    const { traceId, events } = await callNative(
-      () => proxy.runProcess(JSON.stringify(body)),
+    const { traceId, result } = await callNative(
+      () => proxy.runCommand(JSON.stringify(body)),
       { sandboxId: this.sandboxId },
     );
-    const { exitCode, stdout, stderr, reason } = assembleCommandResult(events);
+    const { exitCode, stdout, stderr, reason } = parseCommandResult(result);
     logSdkTiming("sandbox.run", "complete", opStart, {
       sandbox_id: this.sandboxId,
       server_trace_id: traceId,
@@ -1413,7 +1413,15 @@ export class Sandbox {
 
   // --- Streaming (SSE) ---
 
-  /** Stream stdout events until the process exits. `process` is a PID or process name given on creation. */
+  /**
+   * Stream stdout events until the process exits. `process` is a PID or process name given on creation.
+   *
+   * Each event is an output chunk, not always a whole line: a line can come in
+   * parts, and a terminator can come in an event with an empty `line`. To print
+   * the output live, write `line + (lineEnding ?? "\n")` with no added newline.
+   * To get all of the text the process wrote, collect the events and call
+   * `joinOutput(events)`.
+   */
   async *followStdout(
     process: number | string,
     options?: { signal?: AbortSignal },
@@ -1428,7 +1436,15 @@ export class Sandbox {
     }
   }
 
-  /** Stream stderr events until the process exits. `process` is a PID or process name given on creation. */
+  /**
+   * Stream stderr events until the process exits. `process` is a PID or process name given on creation.
+   *
+   * Each event is an output chunk, not always a whole line: a line can come in
+   * parts, and a terminator can come in an event with an empty `line`. To print
+   * the output live, write `line + (lineEnding ?? "\n")` with no added newline.
+   * To get all of the text the process wrote, collect the events and call
+   * `joinOutput(events)`.
+   */
   async *followStderr(
     process: number | string,
     options?: { signal?: AbortSignal },
@@ -1443,7 +1459,15 @@ export class Sandbox {
     }
   }
 
-  /** Stream combined stdout+stderr events until the process exits. `process` is a PID or process name given on creation. */
+  /**
+   * Stream combined stdout+stderr events until the process exits. `process` is a PID or process name given on creation.
+   *
+   * Each event is an output chunk, not always a whole line: a line can come in
+   * parts, and a terminator can come in an event with an empty `line`. To print
+   * the output live, write `line + (lineEnding ?? "\n")` with no added newline.
+   * Keep stdout and stderr apart: split the events by `stream`, then call
+   * `joinOutput` on each part.
+   */
   async *followOutput(
     process: number | string,
     options?: { signal?: AbortSignal },

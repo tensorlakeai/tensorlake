@@ -124,6 +124,7 @@ export {
   SnapshotStatus,
   ProcessStatus,
   CommandExitReason,
+  joinOutput,
   StdinMode,
   OutputMode,
   ContainerState,

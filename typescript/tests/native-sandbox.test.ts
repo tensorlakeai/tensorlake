@@ -2,12 +2,11 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { Sandbox } from "../src/sandbox.js";
 import {
   __setNativeSandboxBindingForTest,
-  assembleCommandResult,
   type NativeSandboxBinding,
   type NativeSandboxProxyClient,
 } from "../src/native-sandbox.js";
 import { SandboxConnectionError, SandboxNotFoundError, RemoteAPIError } from "../src/errors.js";
-import { CommandExitReason } from "../src/models.js";
+import { CommandExitReason, joinOutput } from "../src/models.js";
 
 /**
  * Verifies the Rust-backed proxy path: the rewired Sandbox methods call the
@@ -36,7 +35,7 @@ function installFakeBinding(overrides: ProxyOverrides = {}): {
     followStdout: vi.fn(),
     followStderr: vi.fn(),
     followOutput: vi.fn(),
-    runProcess: vi.fn(),
+    runCommand: vi.fn(),
     runProcessStreaming: vi.fn(),
     readFile: vi.fn(),
     writeFile: vi.fn(async () => "trace-write"),
@@ -129,73 +128,32 @@ describe("Sandbox native proxy path", () => {
     sbx.close();
   });
 
-  it("assembles run() output from buffered run_process events", async () => {
+  it("returns the run() result the Rust SDK built", async () => {
     installFakeBinding({
-      runProcess: vi.fn(async () => ({
+      runCommand: vi.fn(async () => ({
         traceId: "tr-run",
-        events: [
-          JSON.stringify({ pid: 7, started_at: 1 }),
-          JSON.stringify({ line: "hello", timestamp: 2 }),
-          JSON.stringify({ line: "oops", stream: "stderr", timestamp: 3 }),
-          JSON.stringify({ exit_code: 0 }),
-        ],
-      })),
-    });
-    const sbx = makeSandbox();
-    const result = await sbx.run("echo hello");
-    expect(result.stdout).toBe("hello");
-    expect(result.stderr).toBe("oops");
-    expect(result.exitCode).toBe(0);
-    expect(result.traceId).toBe("tr-run");
-    sbx.close();
-  });
-
-  it("joins chunks with their line endings", async () => {
-    const { proxy } = installFakeBinding({
-      runProcess: vi.fn(async () => ({
-        traceId: "tr-run",
-        events: [
-          JSON.stringify({ pid: 7, started_at: 1 }),
-          JSON.stringify({ line: "a", line_ending: "", timestamp: 2 }),
-          JSON.stringify({ line: "b", line_ending: "\r\n", timestamp: 3 }),
-          JSON.stringify({ line: "", line_ending: "\n", timestamp: 4 }),
-          JSON.stringify({ line: "oops", line_ending: "\n", stream: "stderr", timestamp: 5 }),
-          JSON.stringify({ exit_code: 0 }),
-        ],
+        result: JSON.stringify({
+          exit_code: -9,
+          stdout: "ab\r\n",
+          stderr: "oops\n",
+          reason: "timed_out",
+        }),
       })),
     });
     const sbx = makeSandbox();
     const result = await sbx.run("sh");
-    expect(result.stdout).toBe("ab\r\n\n");
+    expect(result.stdout).toBe("ab\r\n");
     expect(result.stderr).toBe("oops\n");
-    sbx.close();
-  });
-
-  it("joins old lines and chunks in one stream", async () => {
-    installFakeBinding({
-      runProcess: vi.fn(async () => ({
-        traceId: "tr-run",
-        events: [
-          JSON.stringify({ line: "a", line_ending: "", timestamp: 1 }),
-          JSON.stringify({ line: "b", line_ending: "\n", timestamp: 2 }),
-          JSON.stringify({ line: "old", timestamp: 3 }),
-          JSON.stringify({ line: "last", timestamp: 4 }),
-          JSON.stringify({ exit_code: 0 }),
-        ],
-      })),
-    });
-    const sbx = makeSandbox();
-    const result = await sbx.run("sh");
-    expect(result.stdout).toBe("ab\nold\nlast");
+    expect(result.exitCode).toBe(-9);
+    expect(result.reason).toBe(CommandExitReason.TIMED_OUT);
+    expect(result.timedOut).toBe(true);
+    expect(result.traceId).toBe("tr-run");
     sbx.close();
   });
 
   it("rejects a run stream that ends without an exit event", async () => {
     installFakeBinding({
-      runProcess: vi.fn(async () => ({
-        traceId: "tr-run",
-        events: [JSON.stringify({ line: "partial", line_ending: "", timestamp: 1 })],
-      })),
+      runCommand: vi.fn(async () => ({ traceId: "tr-run" })),
     });
     const sbx = makeSandbox();
     await expect(sbx.run("sh")).rejects.toThrow(SandboxConnectionError);
@@ -256,27 +214,26 @@ describe("Sandbox native proxy path", () => {
   });
 });
 
-describe("assembleCommandResult exit reason", () => {
-  const exit = (event: Record<string, unknown>) =>
-    assembleCommandResult([JSON.stringify(event)]);
-
-  it("uses the reason the sandbox reports", () => {
-    const result = exit({ exit_code: null, signal: 9, oom_killed: false, reason: "timed_out" });
-    expect(result.exitCode).toBe(-9);
-    expect(result.reason).toBe(CommandExitReason.TIMED_OUT);
+describe("joinOutput", () => {
+  it("joins chunks with their line endings", () => {
+    expect(
+      joinOutput([
+        { line: "Password: ", lineEnding: "" },
+        { line: "", lineEnding: "\n" },
+        { line: "b", lineEnding: "\r\n" },
+      ]),
+    ).toBe("Password: \nb\r\n");
   });
 
-  it("derives the reason from sandboxes that predate the field", () => {
-    expect(exit({ exit_code: 3 }).reason).toBe(CommandExitReason.EXITED);
-    expect(exit({ exit_code: null, signal: 9 }).reason).toBe(CommandExitReason.SIGNALED);
-    expect(exit({ exit_code: null, signal: 9, oom_killed: true }).reason).toBe(
-      CommandExitReason.OOM_KILLED,
-    );
-  });
-
-  it("falls back to the derived reason for an unknown one", () => {
-    expect(exit({ exit_code: null, signal: 9, reason: "future_reason" }).reason).toBe(
-      CommandExitReason.SIGNALED,
-    );
+  it("joins old lines and chunks in one stream", () => {
+    expect(
+      joinOutput([
+        { line: "a", lineEnding: "" },
+        { line: "b", lineEnding: "\n" },
+        { line: "old" },
+        { line: "last" },
+      ]),
+    ).toBe("ab\nold\nlast");
+    expect(joinOutput([])).toBe("");
   });
 });

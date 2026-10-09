@@ -53,7 +53,7 @@ pub fn is_sandbox_pending(status: &str) -> bool {
 pub const WAIT_POLL_MIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 use models::{
-    ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, ClaimSandboxRequest,
+    ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, ClaimSandboxRequest, CommandResult,
     CopySandboxResponse, CreateSandboxPoolRequest, CreateSandboxPoolResponse, CreateSandboxRequest,
     CreateSandboxResponse, CreateSnapshotRequest, CreateSnapshotResponse, DaemonInfo,
     DetachFileSystemRequest, FileSystemMount, GetSandboxLogsRequest, HealthResponse,
@@ -1263,6 +1263,18 @@ impl SandboxProxyClient {
             .run_process_streaming(payload, |event| events.push(event))
             .await?;
         Ok(Traced::new(trace_id, events))
+    }
+
+    /// Run a process to completion and build its [`CommandResult`]. The
+    /// result is `None` when the stream ended without an exit event.
+    pub async fn run_command(
+        &self,
+        payload: &Value,
+    ) -> Result<Traced<Option<CommandResult>>, SdkError> {
+        Ok(self
+            .run_process(payload)
+            .await?
+            .map(|events| CommandResult::from_run_events(&events)))
     }
 
     /// Start a process and stream its lifecycle events to `on_event` as they

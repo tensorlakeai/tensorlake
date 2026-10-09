@@ -148,63 +148,13 @@ def _validate_managed_name_client_side(name: str) -> None:
     _vmn(name)
 
 
-def _join_output(chunks: list[dict]) -> str:
-    """Join one stream's output chunks into the text the process wrote.
-
-    The daemon sends each chunk's ``line_ending`` (``""`` for a partial
-    chunk), so the chunks join exactly. An older daemon sends lines without
-    their terminators, so such a chunk ends with ``"\n"``, except the last one.
-    """
-    endings = [chunk.get("line_ending") for chunk in chunks]
-    text = "".join(
-        chunk["line"] + ("\n" if ending is None else ending)
-        for chunk, ending in zip(chunks, endings)
-    )
-    if endings and endings[-1] is None:
-        text = text[:-1]
-    return text
-
-
-def _command_result(events_json: list[str]) -> CommandResult:
-    """Build the result of ``run`` from its stream of process events."""
-    stdout: list[dict] = []
-    stderr: list[dict] = []
-    exit_event: dict[str, Any] | None = None
-    for event_json in events_json:
-        event = json.loads(event_json)
-        if "line" in event:
-            (stderr if event.get("stream") == "stderr" else stdout).append(event)
-        elif event.get("exit_code") is not None or event.get("signal") is not None:
-            exit_event = event
-    if exit_event is None:
+def _command_result(result_json: str | None) -> CommandResult:
+    """Parse the result of ``run`` that the Rust client built."""
+    if result_json is None:
         raise SandboxConnectionError(
             "sandbox process stream ended without an exit event"
         )
-
-    if exit_event.get("exit_code") is not None:
-        exit_code = exit_event["exit_code"]
-    else:
-        exit_code = -exit_event["signal"]
-
-    try:
-        reason = CommandExitReason(exit_event.get("reason"))
-    except ValueError:
-        # Sandboxes that predate the field, or a reason this SDK does not
-        # know: derive it from how the process ended. A timeout is only
-        # ever reported by the sandbox, never inferred from a SIGKILL.
-        if exit_event.get("oom_killed"):
-            reason = CommandExitReason.OOM_KILLED
-        elif exit_event.get("exit_code") is None:
-            reason = CommandExitReason.SIGNALED
-        else:
-            reason = CommandExitReason.EXITED
-
-    return CommandResult(
-        exit_code=exit_code,
-        stdout=_join_output(stdout),
-        stderr=_join_output(stderr),
-        reason=reason,
-    )
+    return CommandResult.model_validate_json(result_json)
 
 
 def _resolve_process_arg(process: object, pid: object) -> str:
@@ -1764,13 +1714,13 @@ class Sandbox:
         )
 
         try:
-            trace_id, events_json = self._rust_client.run_process_json(
+            trace_id, result_json = self._rust_client.run_command_json(
                 json.dumps(payload)
             )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-        return Traced(trace_id, _command_result(events_json))
+        return Traced(trace_id, _command_result(result_json))
 
     # --- Process management ---
 
@@ -2041,7 +1991,13 @@ class Sandbox:
         Args:
             process: PID or process name given on creation.
 
-        Blocks until the process exits and all output has been received."""
+        Blocks until the process exits and all output has been received.
+
+        Each event is an output chunk, not always a whole line. A line can
+        come in parts, and a terminator can come in an event with an empty
+        ``line``. Use ``join_output(events)`` to get the text the process
+        wrote, or join ``line`` and ``line_ending`` yourself.
+        """
         seg = _resolve_process_arg(process, pid)
         try:
             trace_id, events_json = self._rust_client.follow_stdout_json(seg)
@@ -2063,7 +2019,13 @@ class Sandbox:
         Args:
             process: PID or process name given on creation.
 
-        Blocks until the process exits and all output has been received."""
+        Blocks until the process exits and all output has been received.
+
+        Each event is an output chunk, not always a whole line. A line can
+        come in parts, and a terminator can come in an event with an empty
+        ``line``. Use ``join_output(events)`` to get the text the process
+        wrote, or join ``line`` and ``line_ending`` yourself.
+        """
         seg = _resolve_process_arg(process, pid)
         try:
             trace_id, events_json = self._rust_client.follow_stderr_json(seg)
@@ -2085,7 +2047,14 @@ class Sandbox:
         Args:
             process: PID or process name given on creation.
 
-        Blocks until the process exits and all output has been received."""
+        Blocks until the process exits and all output has been received.
+
+        Each event is an output chunk, not always a whole line. A line can
+        come in parts, and a terminator can come in an event with an empty
+        ``line``. Keep stdout and stderr apart: split the events by ``stream``,
+        then use ``join_output`` on each part to get the text the process
+        wrote.
+        """
         seg = _resolve_process_arg(process, pid)
         try:
             trace_id, events_json = self._rust_client.follow_output_json(seg)

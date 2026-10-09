@@ -23,7 +23,7 @@ use crate::{
         SandboxProxyClient, SandboxesClient,
         models::{
             CreateSandboxRequest, CreateSandboxResources, MultipartHint, OutputEvent, ProcessInfo,
-            RunProcessEvent, SandboxInfo, SignBlobOp, SignBlobRequest, SignBlobTarget,
+            RunProcessEvent, SandboxInfo, SignBlobOp, SignBlobRequest, SignBlobTarget, join_output,
         },
         resolve_sandbox_proxy_target, select_sandbox_proxy_url,
     },
@@ -1577,12 +1577,13 @@ struct BuilderFailureDiagnostics {
     oom_killed: bool,
     disk_usage_percent: Option<u8>,
     disk_error_output: bool,
+    log_tails: LogTails,
 }
 
 impl BuilderFailureDiagnostics {
     fn observe_build_event(&mut self, event: &SandboxImageBuildEvent) {
-        if let SandboxImageBuildEvent::BuildLog { message, .. } = event
-            && contains_disk_space_evidence(message)
+        if let SandboxImageBuildEvent::BuildLog { stream, message } = event
+            && self.log_tails.contains_disk_space_evidence(stream, message)
         {
             self.disk_error_output = true;
         }
@@ -1652,6 +1653,7 @@ async fn diagnose_builder_failure(
             .is_some_and(contains_oom_killer_evidence),
         disk_usage_percent: disk_output.as_deref().and_then(parse_df_max_usage_percent),
         disk_error_output: contains_disk_space_evidence(failure_output),
+        log_tails: LogTails::default(),
     }
 }
 
@@ -1669,16 +1671,13 @@ async fn run_diagnostic_command_stdout(proxy: &SandboxProxyClient, script: &str)
     );
 
     let events = proxy.run_process(&payload).await.ok()?.into_inner();
-    let mut output = String::new();
-    for event in events {
-        if let RunProcessEvent::Output(event) = event
-            && event.stream.as_deref() != Some("stderr")
-        {
-            output.push_str(&event.line);
-            output.push_str(event.line_ending.as_deref().unwrap_or("\n"));
+    let stdout = events.iter().filter_map(|event| match event {
+        RunProcessEvent::Output(output) if output.stream.as_deref() != Some("stderr") => {
+            Some(output)
         }
-    }
-    Some(output)
+        _ => None,
+    });
+    Some(join_output(stdout))
 }
 
 fn contains_oom_killer_evidence(output: &str) -> bool {
@@ -1690,7 +1689,46 @@ fn contains_oom_killer_evidence(output: &str) -> bool {
 
 fn contains_disk_space_evidence(output: &str) -> bool {
     let output = output.to_ascii_lowercase();
-    output.contains("enospc") || output.contains("no space")
+    DISK_SPACE_MARKERS
+        .iter()
+        .any(|marker| output.contains(marker))
+}
+
+const DISK_SPACE_MARKERS: [&str; 2] = ["enospc", "no space"];
+
+/// The end of the last build log chunk of each stream. The daemon can split a
+/// line into chunks, e.g. `"...: no sp"` and `"ace left on device"`, so a
+/// marker is looked for in the tail and the next chunk together.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+struct LogTails {
+    stdout: String,
+    stderr: String,
+}
+
+impl LogTails {
+    fn contains_disk_space_evidence(&mut self, stream: &str, message: &str) -> bool {
+        let tail = match stream {
+            "stderr" => &mut self.stderr,
+            _ => &mut self.stdout,
+        };
+        tail.push_str(message);
+        let found = contains_disk_space_evidence(tail);
+        // Keep only enough characters to hold all of a marker but its last
+        // character.
+        let keep = DISK_SPACE_MARKERS
+            .iter()
+            .map(|m| m.len())
+            .max()
+            .unwrap_or(1)
+            - 1;
+        let start = tail
+            .char_indices()
+            .rev()
+            .nth(keep.saturating_sub(1))
+            .map_or(0, |(index, _)| index);
+        tail.drain(..start);
+        found
+    }
 }
 
 fn parse_df_max_usage_percent(output: &str) -> Option<u8> {
@@ -3381,6 +3419,33 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
     }
 
     #[test]
+    fn diagnostics_find_a_disk_space_marker_split_across_chunks() {
+        let mut diagnostics = BuilderFailureDiagnostics::default();
+        for (stream, message) in [
+            ("stderr", "dd: error writing '/tmp/fill': no sp"),
+            ("stdout", "unrelated"),
+            ("stderr", "ace left on device"),
+        ] {
+            diagnostics.observe_build_event(&SandboxImageBuildEvent::BuildLog {
+                stream: stream.to_string(),
+                message: message.to_string(),
+            });
+        }
+
+        assert!(diagnostics.disk_error_output);
+    }
+
+    #[test]
+    fn diagnostics_keep_a_short_log_tail() {
+        let mut tails = super::LogTails::default();
+        assert!(!tails.contains_disk_space_evidence("stdout", &"x".repeat(10_000)));
+        assert_eq!(tails.stdout.len(), 7);
+        assert!(!tails.contains_disk_space_evidence("stdout", "é"));
+        assert!(!tails.contains_disk_space_evidence("stdout", "ENOSP"));
+        assert!(tails.contains_disk_space_evidence("stdout", "C"));
+    }
+
+    #[test]
     fn diagnostics_observe_disk_space_build_log_events() {
         let mut diagnostics = BuilderFailureDiagnostics::default();
         diagnostics.observe_build_event(&SandboxImageBuildEvent::BuildLog {
@@ -3404,6 +3469,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
                 oom_killed: false,
                 disk_usage_percent: Some(94),
                 disk_error_output: false,
+                ..Default::default()
             }
             .advice_messages()
             .is_empty()
@@ -3413,6 +3479,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             oom_killed: true,
             disk_usage_percent: Some(95),
             disk_error_output: false,
+            ..Default::default()
         }
         .advice_messages();
         assert_eq!(messages.len(), 2);
@@ -3424,6 +3491,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             oom_killed: false,
             disk_usage_percent: Some(10),
             disk_error_output: true,
+            ..Default::default()
         }
         .advice_messages();
         assert_eq!(messages.len(), 1);
@@ -3440,6 +3508,7 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
                 oom_killed: true,
                 disk_usage_percent: Some(99),
                 disk_error_output: false,
+                ..Default::default()
             }
             .advice_messages()
             .join("\n"),
