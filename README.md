@@ -230,6 +230,17 @@ sandbox = client.connect("stable-name")
 Pool root disks default to the registered image's size. Pass `disk_mb` to grow
 a filesystem-only image; a pool disk cannot be smaller than its image.
 
+GPU CAS pools allocate GPUs per container. Use a CAS image and pass `gpus=1`
+with `gpu_model="A10"` (or `gpu=GpuRequest(count=1, model=GpuModel.A10)`) to
+`create_pool` and `update_pool`. The asynchronous Python API accepts the same
+arguments; TypeScript uses `gpus`, `gpuModel`, or `gpu` in its pool options.
+Claimed sandboxes inherit the pool's GPU allocation. Include that allocation
+on each pool update; omitting it configures a CPU-only CAS pool. Changing the
+allocation recycles unclaimed warm containers while claimed sandboxes keep
+their original allocation. Set `max_containers=1` and `warm_containers=1` for
+a single-GPU pool; it can replenish warm capacity after the claim releases
+its GPU.
+
 Set the pool network policy when you create the pool, replace it later with a
 pool update, or pass `CLEAR_NETWORK_POLICY` (Python) / `null` (TypeScript) to
 remove it. On a change the service recycles the pool's unclaimed warm

@@ -435,6 +435,9 @@ pub struct UpdateSandboxRequest {
 pub struct SandboxPoolRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<String>,
+    /// Per-container allocation, including GPUs for a GPU CAS pool. Pool
+    /// updates replace this allocation; include GPUs on each update to keep
+    /// the pool GPU-enabled. Claims inherit these resources.
     pub resources: CreateSandboxResources,
     #[serde(default)]
     pub timeout_secs: i64,

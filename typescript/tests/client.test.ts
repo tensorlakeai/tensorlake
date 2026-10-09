@@ -1887,6 +1887,82 @@ describe("SandboxClient", () => {
   });
 
   describe("pools", () => {
+    for (const operation of ["createPool", "updatePool"] as const) {
+      it(`${operation} sends typed and shorthand GPU allocations`, async () => {
+        const nativePool = vi.fn(async () => ({
+          traceId: "t",
+          json: JSON.stringify({ pool_id: "pool-1", namespace: "default" }),
+        }));
+        installNativeStub({ client: { [operation]: nativePool } });
+        const client = SandboxClient.forLocalhost();
+        try {
+          const allocations = [
+            { options: {}, expected: undefined },
+            { options: { gpus: 1 }, expected: [{ count: 1, model: "A10" }] },
+            {
+              options: { gpus: 2, gpuModel: "L40" },
+              expected: [{ count: 2, model: "L40" }],
+            },
+            {
+              options: { gpu: { count: 1, model: "H100" as const } },
+              expected: [{ count: 1, model: "H100" }],
+            },
+          ];
+          for (const { options, expected } of allocations) {
+            const request = {
+              image: "tensorlake-cas/ubuntu-minimal",
+              diskMb: 20480,
+              warmContainers: 1,
+              ...options,
+            };
+            if (operation === "createPool") await client.createPool(request);
+            else await client.updatePool("pool-1", request);
+            const args = nativePool.mock.calls.at(-1) as unknown as string[];
+            const body = JSON.parse(args.at(-1)!);
+            expect(body.resources).toMatchObject({ disk_mb: 20480 });
+            expect(body.warm_containers).toBe(1);
+            if (expected === undefined)
+              expect(body.resources).not.toHaveProperty("gpus");
+            else expect(body.resources.gpus).toEqual(expected);
+          }
+        } finally {
+          client.close();
+        }
+      });
+
+      it(`${operation} rejects invalid GPU allocations before calling native`, async () => {
+        const nativePool = vi.fn();
+        installNativeStub({ client: { [operation]: nativePool } });
+        const client = SandboxClient.forLocalhost();
+        try {
+          for (const allocation of [
+            { gpus: 0 },
+            { gpus: -1 },
+            { gpus: 1.5 },
+            { gpus: 1, gpuModel: "V100" },
+            { gpu: { count: 1, model: "H100" as const }, gpus: 1 },
+            {
+              gpu: { count: 1, model: "H100" as const },
+              gpuModel: "A10",
+            },
+          ]) {
+            const options = {
+              image: "tensorlake-cas/ubuntu-minimal",
+              ...allocation,
+            };
+            const result =
+              operation === "createPool"
+                ? client.createPool(options)
+                : client.updatePool("pool-1", options);
+            await expect(result).rejects.toThrow(SandboxError);
+          }
+          expect(nativePool).not.toHaveBeenCalled();
+        } finally {
+          client.close();
+        }
+      });
+    }
+
     it("creates a pool", async () => {
       installNativeStub({
         client: {

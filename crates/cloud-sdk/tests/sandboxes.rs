@@ -6,8 +6,9 @@ use tensorlake::{
         SandboxProxyClient, SandboxesClient, TERMINATION_REASON_NO_CAPACITY,
         models::{
             ClaimSandboxRequest, CreateSandboxPoolRequest, CreateSandboxRequest,
-            CreateSandboxResources, FileSystemMount, NetworkConfig, NetworkPolicyUpdate,
-            SandboxPoolRequest, UpdateSandboxPoolRequest, UpdateSandboxRequest,
+            CreateSandboxResources, FileSystemMount, GpuModel, GpuRequest, NetworkConfig,
+            NetworkPolicyUpdate, SandboxPoolRequest, UpdateSandboxPoolRequest,
+            UpdateSandboxRequest,
         },
     },
 };
@@ -18,6 +19,89 @@ use tensorlake::{
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
+
+#[tokio::test]
+async fn gpu_pool_create_update_and_claim_use_pool_allocation() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+    let address = listener.local_addr().expect("address");
+    let server = tokio::spawn(async move {
+        let responses = [
+            r#"{"pool_id":"gpu-pool","namespace":"default"}"#,
+            r#"{"pool_id":"gpu-pool","namespace":"default","image":"tensorlake-cas/ubuntu-minimal","resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":20480,"gpu_configs":[{"count":1,"model":"L40"}]}}"#,
+            r#"{"sandbox_id":"gpu-claim","status":"running"}"#,
+        ];
+        let mut requests = Vec::new();
+        for response in responses {
+            let (mut socket, _) = listener.accept().await.expect("accept");
+            requests.push(read_http_request(&mut socket).await);
+            write_json_response(&mut socket, response).await;
+        }
+        requests
+    });
+    let client = ClientBuilder::new(&format!("http://{address}"))
+        .build()
+        .expect("client");
+    let sandboxes = SandboxesClient::new(client, "default", false);
+    let mut pool = SandboxPoolRequest {
+        image: Some("tensorlake-cas/ubuntu-minimal".to_string()),
+        resources: CreateSandboxResources {
+            cpus: 1.0,
+            memory_mb: 1024,
+            disk_mb: Some(20480),
+            gpu_configs: Some(vec![
+                GpuRequest {
+                    count: 1,
+                    model: GpuModel::A10,
+                }
+                .into(),
+            ]),
+        },
+        timeout_secs: 30,
+        entrypoint: None,
+        max_containers: Some(1),
+        warm_containers: Some(1),
+    };
+    assert_eq!(
+        sandboxes.create_pool(&pool).await.expect("create").pool_id,
+        "gpu-pool"
+    );
+    pool.resources.gpu_configs = Some(vec![
+        GpuRequest {
+            count: 1,
+            model: GpuModel::L40,
+        }
+        .into(),
+    ]);
+    sandboxes
+        .update_pool_with_network(
+            "gpu-pool",
+            &UpdateSandboxPoolRequest {
+                pool,
+                network: NetworkPolicyUpdate::Clear,
+            },
+        )
+        .await
+        .expect("update");
+    assert_eq!(
+        sandboxes.claim("gpu-pool").await.expect("claim").sandbox_id,
+        "gpu-claim"
+    );
+    let requests = server.await.expect("server");
+    for (index, model) in [(0, "A10"), (1, "L40")] {
+        let text = String::from_utf8_lossy(&requests[index]);
+        let (_, body) = text.split_once("\r\n\r\n").expect("body");
+        let body: serde_json::Value = serde_json::from_str(body).expect("json");
+        assert_eq!(
+            body["resources"]["gpus"],
+            serde_json::json!([{"count": 1, "model": model}])
+        );
+        assert_eq!(body["max_containers"], 1);
+        assert_eq!(body["warm_containers"], 1);
+    }
+    let claim = String::from_utf8_lossy(&requests[2]);
+    assert!(claim.starts_with("POST /sandbox-pools/gpu-pool/sandboxes HTTP/1.1\r\n"));
+    assert!(claim.ends_with("\r\n\r\n"));
+}
 
 #[tokio::test]
 async fn sandbox_proxy_raw_and_empty_posts_send_content_length_and_routing_headers() {
