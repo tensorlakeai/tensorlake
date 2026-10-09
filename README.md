@@ -234,12 +234,17 @@ GPU CAS pools allocate GPUs per container. Use a CAS image and pass `gpus=1`
 with `gpu_model="A10"` (or `gpu=GpuRequest(count=1, model=GpuModel.A10)`) to
 `create_pool` and `update_pool`. The asynchronous Python API accepts the same
 arguments; TypeScript uses `gpus`, `gpuModel`, or `gpu` in its pool options.
+Passing only `gpu_model` / `gpuModel` allocates one GPU per container.
 Claimed sandboxes inherit the pool's GPU allocation. Include that allocation
 on each pool update; omitting it configures a CPU-only CAS pool. Changing the
 allocation recycles unclaimed warm containers while claimed sandboxes keep
 their original allocation. Set `max_containers=1` and `warm_containers=1` for
 a single-GPU pool; it can replenish warm capacity after the claim releases
 its GPU.
+
+Pool responses expose the allocation as `pool.resources.gpu_configs` in
+Python and Rust, and `pool.resources.gpuConfigs` in TypeScript. Reuse its
+model and count when updating a GPU CAS pool.
 
 Set the pool network policy when you create the pool, replace it later with a
 pool update, or pass `CLEAR_NETWORK_POLICY` (Python) / `null` (TypeScript) to

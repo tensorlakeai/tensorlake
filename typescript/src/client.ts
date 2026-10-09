@@ -126,6 +126,16 @@ function gpuRequest(
   return [{ count: gpus, model: gpuModel }];
 }
 
+function poolGpuRequest(
+  options: CreatePoolOptions | UpdatePoolOptions,
+): Array<{ count: number; model: string }> | undefined {
+  let count = options.gpus;
+  if (options.gpu == null && count == null && options.gpuModel != null) {
+    count = 1;
+  }
+  return gpuRequest(options.gpu, count, options.gpuModel);
+}
+
 /**
  * Client for managing TensorLake sandboxes, pools, and snapshots.
  *
@@ -1038,7 +1048,7 @@ export class SandboxClient {
   async createPool(
     options: CreatePoolOptions,
   ): Promise<CreateSandboxPoolResponse> {
-    const gpus = gpuRequest(options.gpu, options.gpus, options.gpuModel);
+    const gpus = poolGpuRequest(options);
     const body: Record<string, unknown> = {
       image: options.image,
       resources: {
@@ -1096,7 +1106,7 @@ export class SandboxClient {
     poolId: string,
     options: UpdatePoolOptions,
   ): Promise<SandboxPoolInfo> {
-    const gpus = gpuRequest(options.gpu, options.gpus, options.gpuModel);
+    const gpus = poolGpuRequest(options);
     const body: Record<string, unknown> = {
       image: options.image,
       resources: {

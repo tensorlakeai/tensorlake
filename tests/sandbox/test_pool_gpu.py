@@ -5,6 +5,7 @@ import unittest
 
 from tensorlake.sandbox import (
     AsyncSandboxClient,
+    ContainerResourcesInfo,
     GpuModel,
     GpuRequest,
     SandboxClient,
@@ -20,15 +21,31 @@ class PoolBackend:
         pass
 
     def create_pool(self, request_json):
-        self.requests.append(json.loads(request_json))
+        self.save_pool(json.loads(request_json))
         return "trace-create", '{"pool_id":"pool-1","namespace":"default"}'
 
     def update_pool(self, pool_id, request_json):
         request = json.loads(request_json)
+        self.save_pool(request)
+        return "trace-update", json.dumps(self.pool)
+
+    def save_pool(self, request):
         self.requests.append(request)
-        return "trace-update", json.dumps(
-            {"pool_id": pool_id, "namespace": "default", **request}
-        )
+        resources = dict(request["resources"])
+        resources.setdefault("disk_mb", 10 * 1024)
+        resources["gpu_configs"] = resources.pop("gpus", None)
+        self.pool = {
+            "pool_id": "pool-1",
+            "namespace": "default",
+            **request,
+            "resources": resources,
+        }
+
+    def get_pool_json(self, pool_id):
+        return "trace-get", json.dumps(self.pool)
+
+    def list_pools_json(self):
+        return "trace-list", json.dumps({"pools": [self.pool]})
 
     async def create_pool_async(self, request_json):
         return self.create_pool(request_json)
@@ -36,10 +53,18 @@ class PoolBackend:
     async def update_pool_async(self, pool_id, request_json):
         return self.update_pool(pool_id, request_json)
 
+    async def get_pool_json_async(self, pool_id):
+        return self.get_pool_json(pool_id)
+
+    async def list_pools_json_async(self):
+        return self.list_pools_json()
+
 
 VALID_ALLOCATIONS = [
     ({}, None),
     ({"gpus": 1}, [{"count": 1, "model": "A10"}]),
+    ({"gpu_model": "H100"}, [{"count": 1, "model": "H100"}]),
+    ({"gpu_model": GpuModel.L40}, [{"count": 1, "model": "L40"}]),
     *[
         ({"gpus": 2, "gpu_model": model}, [{"count": 2, "model": model.value}])
         for model in GpuModel
@@ -55,6 +80,8 @@ INVALID_ALLOCATIONS = [
     {"gpus": True},
     {"gpus": 1.5},
     {"gpus": 1, "gpu_model": "V100"},
+    {"gpu_model": "V100"},
+    {"gpu_model": ""},
     {"gpu": GpuRequest(count=1, model=GpuModel.H100), "gpus": 1},
     {"gpu": GpuRequest(count=1, model=GpuModel.H100), "gpu_model": "A10"},
 ]
@@ -75,6 +102,26 @@ class TestGpuPools(unittest.TestCase):
         self.client = SandboxClient(api_url="http://localhost:8900", _internal=True)
         self.client._rust_client = self.backend
         self.addCleanup(self.client.close)
+
+    def test_pool_responses_retain_gpu_allocation_for_read_modify_write(self):
+        self.client.create_pool(
+            image="tensorlake-cas/ubuntu-minimal", gpus=2, gpu_model="H100"
+        )
+        fetched = self.client.get_pool("pool-1")
+        listed = list(self.client.list_pools())
+        expected = [GpuRequest(count=2, model=GpuModel.H100)]
+        self.assertEqual(fetched.resources.gpu_configs, expected)
+        self.assertEqual(listed[0].resources.gpu_configs, expected)
+        updated = self.client.update_pool(
+            pool_id=fetched.pool_id,
+            image=fetched.image,
+            gpu=fetched.resources.gpu_configs[0],
+        )
+        self.assertEqual(updated.resources.gpu_configs, expected)
+        self.assertEqual(
+            self.backend.requests[-1]["resources"]["gpus"],
+            [{"count": 2, "model": "H100"}],
+        )
 
     def test_create_and_update_send_gpu_allocations(self):
         for operation in (self.client.create_pool, self.client.update_pool):
@@ -111,6 +158,26 @@ class TestAsyncGpuPools(unittest.IsolatedAsyncioTestCase):
         self.client._rust_client = self.backend
         self.addCleanup(self.client.close)
 
+    async def test_pool_responses_retain_gpu_allocation_for_read_modify_write(self):
+        await self.client.create_pool(
+            image="tensorlake-cas/ubuntu-minimal", gpus=2, gpu_model="H100"
+        )
+        fetched = await self.client.get_pool("pool-1")
+        listed = list(await self.client.list_pools())
+        expected = [GpuRequest(count=2, model=GpuModel.H100)]
+        self.assertEqual(fetched.resources.gpu_configs, expected)
+        self.assertEqual(listed[0].resources.gpu_configs, expected)
+        updated = await self.client.update_pool(
+            pool_id=fetched.pool_id,
+            image=fetched.image,
+            gpu=fetched.resources.gpu_configs[0],
+        )
+        self.assertEqual(updated.resources.gpu_configs, expected)
+        self.assertEqual(
+            self.backend.requests[-1]["resources"]["gpus"],
+            [{"count": 2, "model": "H100"}],
+        )
+
     async def test_create_and_update_send_gpu_allocations(self):
         for operation in (self.client.create_pool, self.client.update_pool):
             pool = {"pool_id": "pool-1"} if operation == self.client.update_pool else {}
@@ -135,3 +202,27 @@ class TestAsyncGpuPools(unittest.IsolatedAsyncioTestCase):
                             image="tensorlake-cas/ubuntu-minimal", **pool, **allocation
                         )
         self.assertEqual(self.backend.requests, [])
+
+
+class TestPoolResponseResources(unittest.TestCase):
+    def test_gpu_allocation_survives_deserialization_and_serialization(self):
+        allocation = [{"count": 2, "model": "H100"}]
+        for field in ("gpu_configs", "gpus"):
+            with self.subTest(field=field):
+                resources = ContainerResourcesInfo.model_validate(
+                    {"cpus": 1, "memory_mb": 1024, "disk_mb": 20480, field: allocation}
+                )
+                self.assertEqual(
+                    resources.gpu_configs, [GpuRequest(count=2, model=GpuModel.H100)]
+                )
+                self.assertEqual(
+                    json.loads(resources.model_dump_json())["gpu_configs"], allocation
+                )
+
+    def test_cpu_resources_accept_omitted_null_and_empty_gpu_allocations(self):
+        for gpu in ({}, {"gpu_configs": None}, {"gpu_configs": []}):
+            with self.subTest(gpu=gpu):
+                resources = ContainerResourcesInfo.model_validate(
+                    {"cpus": 1, "memory_mb": 1024, "disk_mb": 20480, **gpu}
+                )
+                self.assertFalse(resources.gpu_configs)

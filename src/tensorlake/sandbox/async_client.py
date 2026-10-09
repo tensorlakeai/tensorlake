@@ -27,7 +27,7 @@ from .client import (
     DEFAULT_WAIT_POLL_INTERVAL_SEC,
     RustCloudSandboxClient,
     _build_create_request,
-    _build_gpu_resources,
+    _build_pool_gpu_resources,
     _explicit_proxy_url_override,
     _normalize_log_levels,
     _normalize_user_ports,
@@ -1145,6 +1145,7 @@ class AsyncSandboxClient:
         Set ``gpus`` (with optional ``gpu_model``, default A10) or a typed
         ``gpu`` request to allocate GPUs per container. GPU CAS pools require
         a CAS image; ``gpu`` cannot be combined with ``gpus``/``gpu_model``.
+        A ``gpu_model`` without ``gpus`` allocates one GPU per container.
         """
         if network is CLEAR_NETWORK_POLICY:
             raise ValueError(
@@ -1158,7 +1159,7 @@ class AsyncSandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                gpus=_build_gpu_resources(gpus, gpu_model, gpu),
+                gpus=_build_pool_gpu_resources(gpus, gpu_model, gpu),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -1226,6 +1227,7 @@ class AsyncSandboxClient:
         Include ``gpus``/``gpu_model`` or a typed ``gpu`` request on each
         update to keep a GPU CAS pool. Omitting the allocation configures a
         CPU-only CAS pool. ``gpu`` is exclusive with ``gpus``/``gpu_model``.
+        A ``gpu_model`` without ``gpus`` allocates one GPU per container.
         """
         request_model = SandboxPoolRequest(
             image=image,
@@ -1233,7 +1235,7 @@ class AsyncSandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                gpus=_build_gpu_resources(gpus, gpu_model, gpu),
+                gpus=_build_pool_gpu_resources(gpus, gpu_model, gpu),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,

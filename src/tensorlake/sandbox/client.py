@@ -197,7 +197,7 @@ def _build_gpu_resources(
         return None
     if isinstance(gpus, bool) or not isinstance(gpus, int) or gpus < 1:
         raise SandboxError("gpus must be a positive integer")
-    gpu_model = gpu_model or "A10"
+    gpu_model = "A10" if gpu_model is None else gpu_model
     try:
         model = GpuModel(gpu_model)
     except ValueError:
@@ -206,6 +206,16 @@ def _build_gpu_resources(
             f"unsupported GPU model {gpu_model!r}; expected one of: {supported}"
         ) from None
     return [GpuRequest(count=gpus, model=model)]
+
+
+def _build_pool_gpu_resources(
+    gpus: int | None,
+    gpu_model: GpuModel | str | None,
+    gpu: GpuRequest | None = None,
+) -> list[GpuRequest] | None:
+    if gpu is None and gpus is None and gpu_model is not None:
+        gpus = 1
+    return _build_gpu_resources(gpus, gpu_model, gpu)
 
 
 def _unsupported_request_timeout_kwarg(e: TypeError) -> bool:
@@ -1722,7 +1732,8 @@ class SandboxClient:
             network: Network policy for each container in the pool
             gpus: GPUs per container, using A10 unless ``gpu_model`` is set.
                 GPU CAS pools require a CAS image.
-            gpu_model: GPU model to allocate for each container.
+            gpu_model: GPU model to allocate for each container. Defaults to
+                one GPU when ``gpus`` is omitted.
             gpu: Typed GPU allocation, exclusive with ``gpus``/``gpu_model``.
 
         Returns:
@@ -1744,7 +1755,7 @@ class SandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                gpus=_build_gpu_resources(gpus, gpu_model, gpu),
+                gpus=_build_pool_gpu_resources(gpus, gpu_model, gpu),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,
@@ -1848,7 +1859,8 @@ class SandboxClient:
             gpus: GPUs per container, using A10 unless ``gpu_model`` is set.
                 Include the GPU allocation on each update to keep a GPU CAS
                 pool; omitting it configures a CPU-only CAS pool.
-            gpu_model: GPU model to allocate for each container.
+            gpu_model: GPU model to allocate for each container. Defaults to
+                one GPU when ``gpus`` is omitted.
             gpu: Typed GPU allocation, exclusive with ``gpus``/``gpu_model``.
 
         Returns:
@@ -1865,7 +1877,7 @@ class SandboxClient:
                 cpus=cpus,
                 memory_mb=memory_mb,
                 disk_mb=disk_mb,
-                gpus=_build_gpu_resources(gpus, gpu_model, gpu),
+                gpus=_build_pool_gpu_resources(gpus, gpu_model, gpu),
             ),
             timeout_secs=timeout_secs,
             entrypoint=entrypoint,

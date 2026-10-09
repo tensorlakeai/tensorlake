@@ -27,6 +27,8 @@ async fn gpu_pool_create_update_and_claim_use_pool_allocation() {
     let server = tokio::spawn(async move {
         let responses = [
             r#"{"pool_id":"gpu-pool","namespace":"default"}"#,
+            r#"{"pool_id":"gpu-pool","namespace":"default","image":"tensorlake-cas/ubuntu-minimal","resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":20480,"gpu_configs":[{"count":1,"model":"A10"}]}}"#,
+            r#"{"pools":[{"pool_id":"gpu-pool","namespace":"default","image":"tensorlake-cas/ubuntu-minimal","resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":20480,"gpu_configs":[{"count":1,"model":"A10"}]}}]}"#,
             r#"{"pool_id":"gpu-pool","namespace":"default","image":"tensorlake-cas/ubuntu-minimal","resources":{"cpus":1.0,"memory_mb":1024,"disk_mb":20480,"gpu_configs":[{"count":1,"model":"L40"}]}}"#,
             r#"{"sandbox_id":"gpu-claim","status":"running"}"#,
         ];
@@ -65,6 +67,17 @@ async fn gpu_pool_create_update_and_claim_use_pool_allocation() {
         sandboxes.create_pool(&pool).await.expect("create").pool_id,
         "gpu-pool"
     );
+    let fetched = sandboxes.get_pool("gpu-pool").await.expect("get");
+    assert_eq!(fetched.resources.gpu_configs, pool.resources.gpu_configs);
+    let listed = sandboxes.list_pools().await.expect("list");
+    assert_eq!(listed.len(), 1);
+    assert_eq!(listed[0].resources.gpu_configs, pool.resources.gpu_configs);
+    // The bindings serialize the Rust response into JSON before Python/TS
+    // deserialize it. Verify the GPU field survives that extra step as well.
+    assert_eq!(
+        serde_json::to_value(&*fetched).expect("serialize get")["resources"]["gpu_configs"],
+        serde_json::json!([{"count": 1, "model": "A10"}])
+    );
     pool.resources.gpu_configs = Some(vec![
         GpuRequest {
             count: 1,
@@ -72,7 +85,7 @@ async fn gpu_pool_create_update_and_claim_use_pool_allocation() {
         }
         .into(),
     ]);
-    sandboxes
+    let updated = sandboxes
         .update_pool_with_network(
             "gpu-pool",
             &UpdateSandboxPoolRequest {
@@ -83,11 +96,21 @@ async fn gpu_pool_create_update_and_claim_use_pool_allocation() {
         .await
         .expect("update");
     assert_eq!(
+        updated.resources.gpu_configs,
+        Some(vec![
+            GpuRequest {
+                count: 1,
+                model: GpuModel::L40
+            }
+            .into()
+        ])
+    );
+    assert_eq!(
         sandboxes.claim("gpu-pool").await.expect("claim").sandbox_id,
         "gpu-claim"
     );
     let requests = server.await.expect("server");
-    for (index, model) in [(0, "A10"), (1, "L40")] {
+    for (index, model) in [(0, "A10"), (3, "L40")] {
         let text = String::from_utf8_lossy(&requests[index]);
         let (_, body) = text.split_once("\r\n\r\n").expect("body");
         let body: serde_json::Value = serde_json::from_str(body).expect("json");
@@ -98,7 +121,7 @@ async fn gpu_pool_create_update_and_claim_use_pool_allocation() {
         assert_eq!(body["max_containers"], 1);
         assert_eq!(body["warm_containers"], 1);
     }
-    let claim = String::from_utf8_lossy(&requests[2]);
+    let claim = String::from_utf8_lossy(&requests[4]);
     assert!(claim.starts_with("POST /sandbox-pools/gpu-pool/sandboxes HTTP/1.1\r\n"));
     assert!(claim.ends_with("\r\n\r\n"));
 }
