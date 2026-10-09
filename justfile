@@ -231,9 +231,9 @@ test-cli-full *ARGS:
 test-node-filesystem-full:
     just with-function-agent-core cargo clippy -p tensorlake-rust-cloud-sdk-node --no-deps -- -D warnings
     just with-function-agent-core cargo test -p tensorlake-rust-cloud-sdk-node
-    cd typescript && pnpm run typecheck
-    cd typescript && pnpm test tests/filesystem.test.ts
-    just with-function-agent-core 'cd typescript && pnpm run build:native'
+    cd typescript && npm run typecheck
+    cd typescript && npm test -- tests/filesystem.test.ts
+    just with-function-agent-core 'cd typescript && npm run build:native'
 
 # Authoritative validation for the private filesystem client integration. Run the complete
 # full-feature CLI suite so changes exercise every consumer of the private crate.

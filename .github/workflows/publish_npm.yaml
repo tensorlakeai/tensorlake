@@ -54,32 +54,28 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.28.5
-          run_install: false
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "24"
           registry-url: "https://registry.npmjs.org"
-          cache: "pnpm"
-          cache-dependency-path: typescript/pnpm-lock.yaml
+          cache: "npm"
+          cache-dependency-path: typescript/package-lock.json
 
       - name: Reject install lifecycle scripts
         run: node ./scripts/check-no-install-scripts.mjs
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        run: node "${{ github.workspace }}/.github/scripts/install-sdk-source.mjs" .
 
       - name: Type check
-        run: pnpm run typecheck
+        run: npm run typecheck
 
       - name: Run tests
-        run: pnpm test
+        run: npm test
 
       - name: Build SDK
-        run: pnpm run build:sdk
+        run: npm run build:sdk
 
       - name: Upload SDK artifact
         uses: actions/upload-artifact@v4
@@ -141,16 +137,12 @@ jobs:
           app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
           private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.28.5
-          run_install: false
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: "pnpm"
-          cache-dependency-path: typescript/pnpm-lock.yaml
+          cache: "npm"
+          cache-dependency-path: typescript/package-lock.json
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98.1
@@ -177,10 +169,10 @@ jobs:
         run: node ./scripts/check-no-install-scripts.mjs
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        run: node "${{ github.workspace }}/.github/scripts/install-sdk-source.mjs" .
 
       - name: Build native binding
-        run: pnpm run build:native
+        run: npm run build:native
         env:
           TENSORLAKE_NODE_TARGET_ID: ${{ matrix.target_id }}
           TENSORLAKE_NODE_TARGET_TRIPLE: ${{ matrix.rust_target }}
@@ -205,7 +197,7 @@ jobs:
 
       - name: Verify native cloud transport on host targets
         if: "!endsWith(matrix.target_id, '-musl')"
-        run: pnpm run test:native-cloud
+        run: npm run test:native-cloud
 
       - name: Upload native artifact
         uses: actions/upload-artifact@v4
@@ -277,7 +269,7 @@ jobs:
       # Stage the tarball that was just checksummed, so the integrity locked
       # into the SDK matches the artifact users will install.
       - name: Stage native package on npm
-        run: npm stage publish --ignore-scripts "${{ steps.pack.outputs.tarball }}" --access public --provenance
+        run: npm stage publish "${{ steps.pack.outputs.tarball }}" --access public --provenance
 
       - name: Upload native integrity record
         uses: actions/upload-artifact@v4
@@ -300,10 +292,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: pnpm/action-setup@v4
-        with:
-          version: 11.28.5
-          run_install: false
       - name: Setup Node.js
         uses: actions/setup-node@v6
         with:
@@ -320,7 +308,7 @@ jobs:
         run: node ./scripts/check-no-install-scripts.mjs
 
       - name: Install dependencies
-        run: pnpm install --frozen-lockfile --ignore-scripts
+        run: node "${{ github.workspace }}/.github/scripts/install-sdk-source.mjs" .
 
       - name: Download native integrity records
         uses: actions/download-artifact@v4
@@ -340,7 +328,7 @@ jobs:
 
       - name: Verify package contents
         run: |
-          pnpm run build:runtime
+          npm run build:runtime
           test -f runtime/typescript-function-runner/manifest.json
           test -z "$(find dist runtime -type f -name '*.node' -print -quit)"
           npm pack --dry-run --ignore-scripts
@@ -348,7 +336,7 @@ jobs:
       - name: Stage SDK on npm
         env:
           npm_config_ignore_scripts: "true"
-        run: npm stage publish --ignore-scripts --access public --provenance
+        run: npm stage publish --access public --provenance
 
   stage-wrapper:
     name: Stage tensorlake wrapper on npm
@@ -390,4 +378,4 @@ jobs:
       - name: Stage wrapper on npm
         env:
           npm_config_ignore_scripts: "true"
-        run: npm stage publish --ignore-scripts --access public --provenance
+        run: npm stage publish --access public --provenance

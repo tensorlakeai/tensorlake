@@ -37,19 +37,19 @@ From the repository root, build the local Tensorlake package and install this
 example's locked dependencies:
 
 ```bash
-pnpm --dir typescript install
-pnpm --dir typescript run build:sdk
-pnpm --dir typescript/examples/ai-agent install
+npm --prefix typescript install
+npm --prefix typescript run build:sdk
+npm --prefix typescript/examples/ai-agent install
 ```
 
 No separate application build step is required. `tl deploy` transpiles and
 bundles the TypeScript application and its npm dependencies into the uploaded
 application runtime.
 
-After the first install, use `pnpm install --frozen-lockfile` for a reproducible clean install:
+After the first install, use `npm ci` for a reproducible clean install:
 
 ```bash
-pnpm --dir typescript/examples/ai-agent install --frozen-lockfile
+npm --prefix typescript/examples/ai-agent ci
 ```
 
 ## Optional type-check
@@ -59,7 +59,7 @@ During development, run the following command to catch type errors before
 deploying:
 
 ```bash
-pnpm --dir typescript/examples/ai-agent run typecheck
+npm --prefix typescript/examples/ai-agent run typecheck
 ```
 
 This check is optional and is not required for deployment.

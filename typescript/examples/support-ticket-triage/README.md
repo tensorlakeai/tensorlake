@@ -35,21 +35,21 @@ From the repository root, build the local Tensorlake package and install the
 example's dependencies:
 
 ```bash
-pnpm --dir typescript install
-pnpm --dir typescript run build:sdk
-pnpm --dir typescript/examples/support-ticket-triage install
+npm --prefix typescript install
+npm --prefix typescript run build:sdk
+npm --prefix typescript/examples/support-ticket-triage install
 ```
 
-After the first install, use `pnpm install --frozen-lockfile` for reproducible clean installs:
+After the first install, use `npm ci` for reproducible clean installs:
 
 ```bash
-pnpm --dir typescript/examples/support-ticket-triage install --frozen-lockfile
+npm --prefix typescript/examples/support-ticket-triage ci
 ```
 
 ## Type-check
 
 ```bash
-pnpm --dir typescript/examples/support-ticket-triage run typecheck
+npm --prefix typescript/examples/support-ticket-triage run typecheck
 ```
 
 ## Configure secrets

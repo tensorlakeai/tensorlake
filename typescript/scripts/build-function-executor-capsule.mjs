@@ -1,4 +1,3 @@
-import { loadRuntimeLock } from "./runtime-lock.mjs";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -16,7 +15,7 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const sharedProtoRoot = path.resolve(root, "..", "proto");
 const packageJson = JSON.parse(readFileSync(path.join(root, "package.json"), "utf8"));
-const packageLock = loadRuntimeLock(root);
+const packageLock = JSON.parse(readFileSync(path.join(root, "package-lock.json"), "utf8"));
 const capsuleRoot = path.join(root, "runtime", "function-executor");
 const capsulePackage = path.join(capsuleRoot, "package");
 
@@ -36,7 +35,7 @@ const dependencies = {};
 for (const dependency of Object.keys(packageJson.dependencies).sort()) {
   const locked = packageLock.packages[`node_modules/${dependency}`];
   if (typeof locked?.version !== "string") {
-    throw new Error(`runtime-package-lock.json does not contain a resolved version for ${dependency}`);
+    throw new Error(`package-lock.json does not contain a resolved version for ${dependency}`);
   }
   dependencies[dependency] = locked.version;
 }

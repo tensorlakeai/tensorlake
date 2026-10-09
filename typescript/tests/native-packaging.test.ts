@@ -114,9 +114,9 @@ describe("native package metadata", () => {
     expect(wrapper.bin).toBeUndefined();
   });
 
-  it("keeps the npm runtime compatibility lock ready before first publish", () => {
+  it("keeps the npm lockfile ready for clean installs before first publish", () => {
     const rootPackage = readJson("package.json");
-    const packageLock = readJson("scripts/runtime-package-lock.json");
+    const packageLock = readJson("package-lock.json");
 
     expect(packageLock.packages[""].optionalDependencies).toEqual(
       rootPackage.optionalDependencies,

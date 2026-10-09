@@ -1,0 +1,29 @@
+name: Node installation security
+on:
+  pull_request: {}
+  workflow_dispatch: {}
+permissions:
+  contents: read
+jobs:
+  node-install-security:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+    - uses: actions/checkout@v4
+    - uses: actions/setup-node@v4
+      with:
+        node-version: '24'
+    - name: Use supported npm release-age configuration
+      run: npm install --global npm@11.15.0 --ignore-scripts
+    - name: Test publication-age guard
+      run: node --test .github/scripts/test-npm-release-age.mjs
+    - name: Validate typescript/examples/ai-agent npm lock
+      run: node .github/scripts/check-npm-release-age.mjs typescript/examples/ai-agent/package-lock.json
+    - name: Validate typescript/examples/http-body npm lock
+      run: node .github/scripts/check-npm-release-age.mjs typescript/examples/http-body/package-lock.json
+    - name: Validate typescript/examples/server-verification npm lock
+      run: node .github/scripts/check-npm-release-age.mjs typescript/examples/server-verification/package-lock.json
+    - name: Validate typescript/examples/support-ticket-triage npm lock
+      run: node .github/scripts/check-npm-release-age.mjs typescript/examples/support-ticket-triage/package-lock.json
+    - name: Validate typescript npm lock
+      run: node .github/scripts/install-sdk-source.mjs typescript --check-only

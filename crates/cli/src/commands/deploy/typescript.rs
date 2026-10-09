@@ -1128,8 +1128,10 @@ fn application_dockerfile(image: Option<&SerializedImageDefinition>) -> Result<S
     lines.push(format!(
         "COPY {FUNCTION_RUNNER_CAPSULE_CONTEXT_PATH} /tmp/tensorlake-typescript-function-runner-runtime.tgz"
     ));
+    // The capsule was integrity-checked above and contains its runtime dependencies.
+    // Offline installation forbids newly resolved registry artifacts; hooks stay disabled.
     lines.push(
-        "RUN set -eu; npm install --global --ignore-scripts --force --omit=dev --no-bin-links /tmp/tensorlake-typescript-function-runner-runtime.tgz; runner_entry=\"$(npm root --global)/@tensorlake/typescript-function-runner-runtime/bin/tensorlake-typescript-function-runner.js\"; test -f \"$runner_entry\"; mkdir -p /usr/local/bin; printf '#!/bin/sh\\nexec node \"%s\" \"$@\"\\n' \"$runner_entry\" > /usr/local/bin/tensorlake-typescript-function-runner; chmod 0755 /usr/local/bin/tensorlake-typescript-function-runner; rm -f /tmp/tensorlake-typescript-function-runner-runtime.tgz; test -x /usr/local/bin/tensorlake-typescript-function-runner; test ! -L /usr/local/bin/tensorlake-typescript-function-runner; node -e \"if (Number(process.versions.node.split('.')[0]) < 24) process.exit(1)\""
+        "RUN set -eu; npm install --global --offline --ignore-scripts --force --omit=dev --no-bin-links /tmp/tensorlake-typescript-function-runner-runtime.tgz; runner_entry=\"$(npm root --global)/@tensorlake/typescript-function-runner-runtime/bin/tensorlake-typescript-function-runner.js\"; test -f \"$runner_entry\"; mkdir -p /usr/local/bin; printf '#!/bin/sh\\nexec node \"%s\" \"$@\"\\n' \"$runner_entry\" > /usr/local/bin/tensorlake-typescript-function-runner; chmod 0755 /usr/local/bin/tensorlake-typescript-function-runner; rm -f /tmp/tensorlake-typescript-function-runner-runtime.tgz; test -x /usr/local/bin/tensorlake-typescript-function-runner; test ! -L /usr/local/bin/tensorlake-typescript-function-runner; node -e \"if (Number(process.versions.node.split('.')[0]) < 24) process.exit(1)\""
             .to_string(),
     );
     Ok(lines.join("\n"))

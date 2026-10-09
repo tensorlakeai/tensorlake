@@ -45,9 +45,9 @@
   ],
   "scripts": {
     "build:sdk": "tsup",
-    "build:runtime": "pnpm run check:runtime-lock && node ./scripts/build-function-executor-capsule.mjs && node ./scripts/build-typescript-function-runner-capsule.mjs && node ./scripts/check-package-compatibility.mjs",
+    "build:runtime": "node ./scripts/build-function-executor-capsule.mjs && node ./scripts/build-typescript-function-runner-capsule.mjs && node ./scripts/check-package-compatibility.mjs",
     "build:native": "node ./scripts/build-native.mjs",
-    "build": "pnpm run build:sdk && pnpm run build:native && pnpm run build:runtime",
+    "build": "npm run build:sdk && npm run build:native && npm run build:runtime",
     "check:proto": "node ./scripts/check-function-executor-proto.mjs",
     "check:install-scripts": "node ./scripts/check-no-install-scripts.mjs",
     "typecheck": "tsc --noEmit",
@@ -59,8 +59,7 @@
     "test:native-cloud": "node ./scripts/test-native-cloud.mjs",
     "test:watch": "vitest",
     "lint": "eslint src/ tests/",
-    "prepack": "pnpm run build",
-    "check:runtime-lock": "node --test ./scripts/runtime-lock.test.mjs && node ./scripts/check-runtime-lock.mjs"
+    "prepack": "npm run build"
   },
   "engines": {
     "node": ">=22.0.0"
@@ -86,9 +85,7 @@
     "tsup": "^8.0.0",
     "typescript": "^5.8.0",
     "typescript-eslint": "^8.65.0",
-    "vitest": "^2.0.0",
-    "yaml": "2.8.3",
-    "esbuild": "0.27.4"
+    "vitest": "^2.0.0"
   },
   "dependencies": {
     "@grpc/grpc-js": "^1.13.0",
@@ -106,6 +103,5 @@
     "@tensorlakeai/native-linux-x64-gnu": "0.5.145",
     "@tensorlakeai/native-linux-x64-musl": "0.5.145",
     "@tensorlakeai/native-win32-x64": "0.5.145"
-  },
-  "packageManager": "pnpm@11.28.5"
+  }
 }

@@ -6,7 +6,7 @@ use clap::ValueEnum;
 use crate::error::{CliError, Result};
 use crate::project::templates::{
     PYTHON_TEMPLATE, README_TEMPLATE, TYPESCRIPT_CONFIG_TEMPLATE, TYPESCRIPT_PACKAGE_TEMPLATE,
-    TYPESCRIPT_README_TEMPLATE, TYPESCRIPT_TEMPLATE, TYPESCRIPT_WORKSPACE_TEMPLATE,
+    TYPESCRIPT_README_TEMPLATE, TYPESCRIPT_TEMPLATE,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -136,7 +136,7 @@ pub fn run(name: &str, force: bool, language: Language) -> Result<()> {
     eprintln!("\nNext steps:");
     eprintln!("  cd {}", module_name);
     if language == Language::Typescript {
-        eprintln!("  pnpm install");
+        eprintln!("  node scripts/guarded-npm.mjs install --");
     }
     eprintln!("  Deploy: tl app deploy {}", application_filename);
     eprintln!("\nLearn more: https://docs.tensorlake.ai/applications/introduction");
@@ -177,10 +177,6 @@ fn scaffold_files(name: &str, module_name: &str, language: Language) -> Vec<(Str
                     .replace("{sdk_version}", env!("CARGO_PKG_VERSION")),
             ),
             (
-                "pnpm-workspace.yaml".to_string(),
-                TYPESCRIPT_WORKSPACE_TEMPLATE.to_string(),
-            ),
-            (
                 "tsconfig.json".to_string(),
                 TYPESCRIPT_CONFIG_TEMPLATE.to_string(),
             ),
@@ -189,6 +185,18 @@ fn scaffold_files(name: &str, module_name: &str, language: Language) -> Vec<(Str
                 TYPESCRIPT_README_TEMPLATE
                     .replace("{app_name}", name)
                     .replace("{function_name}", module_name),
+            ),
+            (
+                ".npmrc".to_string(),
+                "min-release-age=1\nignore-scripts=true\n".to_string(),
+            ),
+            (
+                "scripts/guarded-npm.mjs".to_string(),
+                include_str!("../project/node-security/guarded-npm.mjs").to_string(),
+            ),
+            (
+                "scripts/check-npm-release-age.mjs".to_string(),
+                include_str!("../project/node-security/check-npm-release-age.mjs").to_string(),
             ),
         ],
     }
@@ -235,9 +243,11 @@ mod tests {
             [
                 "application.ts",
                 "package.json",
-                "pnpm-workspace.yaml",
                 "tsconfig.json",
-                "README.md"
+                "README.md",
+                ".npmrc",
+                "scripts/guarded-npm.mjs",
+                "scripts/check-npm-release-age.mjs"
             ]
         );
         assert!(files[0].1.contains("registerApplication"));

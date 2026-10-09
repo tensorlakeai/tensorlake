@@ -91,8 +91,8 @@ test_sandbox:
 # Launches both real function executors and drives the shared gRPC allocation
 # parity matrix through bindings generated from the shared protocol source.
 test_function_executor_compatibility:
-	@pnpm --dir typescript run check:proto
-	@pnpm --dir typescript run build:sdk
+	@npm --prefix typescript run check:proto
+	@npm --prefix typescript run build:sdk
 	@PYTHONPATH=src poetry run python tests/function_executor_compatibility/run.py
 
 # Replicates the PyPI publish workflow locally: builds the tensorlake wheel with
@@ -130,8 +130,8 @@ test_filesystem_placement:
 test_filesystem_placement_wrappers:
 	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests/filesystem -p 'test_filesystem_unit.py'
 	PYTHONPATH=src $(PYTHON) -m unittest tests.sandbox.test_file_systems
-	pnpm --dir typescript run typecheck
-	pnpm --dir typescript test
+	npm --prefix typescript run typecheck
+	npm --prefix typescript test
 
 # Socket-free wire checks complement the full placement retry/transport gate above.
 .PHONY: test_filesystem_placement_unit
@@ -144,5 +144,5 @@ test_filesystem_placement_unit:
 test_filesystem_placement_wrapper_unit:
 	PYTHONPATH=src $(PYTHON) -m unittest discover -s tests/filesystem -p 'test_filesystem_unit.py'
 	PYTHONPATH=src $(PYTHON) -m unittest tests.sandbox.test_file_systems
-	pnpm --dir typescript run typecheck
-	pnpm --dir typescript test --cache=false tests/filesystem.test.ts tests/sandbox.test.ts
+	npm --prefix typescript run typecheck
+	npm --prefix typescript test -- --cache=false tests/filesystem.test.ts tests/sandbox.test.ts

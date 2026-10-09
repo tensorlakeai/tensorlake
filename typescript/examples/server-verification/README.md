@@ -42,9 +42,9 @@ export TENSORLAKE_PROJECT_ID="..."
 This repository fixture deliberately uses `"@tensorlakeai/tensorlake": "file:../.."`, so it tests the SDK and executor from this checkout without publishing either one. Build the local SDK, install the example dependency, and deploy from the repository root:
 
 ```bash
-pnpm --dir typescript install
-pnpm --dir typescript run build:sdk
-pnpm --dir typescript/examples/server-verification install
+npm --prefix typescript install
+npm --prefix typescript run build:sdk
+npm --prefix typescript/examples/server-verification install
 tl deploy typescript/examples/server-verification/application.ts
 node typescript/examples/server-verification/verify.mjs
 ```
@@ -53,9 +53,9 @@ To build and exercise the CLI from this repository instead, run these commands f
 
 ```bash
 cargo build -p tensorlake-cli --bin tl
-pnpm --dir typescript install
-pnpm --dir typescript run build:sdk
-pnpm --dir typescript/examples/server-verification install
+npm --prefix typescript install
+npm --prefix typescript run build:sdk
+npm --prefix typescript/examples/server-verification install
 ./target/debug/tl deploy typescript/examples/server-verification/application.ts
 node typescript/examples/server-verification/verify.mjs
 ```
