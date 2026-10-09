@@ -63,7 +63,7 @@ pub struct TracedBytes {
 }
 
 /// The JSON-encoded `CommandResult` of a run, paired with the request's W3C
-/// trace id. `result` is absent when the stream ended without an exit event.
+/// trace id. `result` is absent when the sandbox reported no exit status.
 #[napi(object)]
 pub struct TracedCommandResult {
     pub trace_id: String,

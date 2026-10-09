@@ -1206,7 +1206,8 @@ export class Sandbox {
    * newlines and "\r\n". An older sandbox daemon gives lines joined with "\n"
    * and drops the last newline.
    *
-   * @throws {SandboxConnectionError} The stream ended without an exit event.
+   * @throws {SandboxConnectionError} The sandbox did not report an exit status,
+   *   for example because it lost the exit status of the process.
    */
   async run(command: string, options?: RunOptions): Promise<Traced<CommandResult>> {
     const opStart = nowMs();

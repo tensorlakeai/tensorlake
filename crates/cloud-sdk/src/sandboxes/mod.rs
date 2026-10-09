@@ -1266,7 +1266,7 @@ impl SandboxProxyClient {
     }
 
     /// Run a process to completion and build its [`CommandResult`]. The
-    /// result is `None` when the stream ended without an exit event.
+    /// result is `None` when the sandbox reported no exit status.
     pub async fn run_command(
         &self,
         payload: &Value,
@@ -1325,8 +1325,9 @@ impl SandboxProxyClient {
                 match event {
                     Ok(msg) => {
                         // The Exited variant has all-optional fields so it acts as a
-                        // catch-all for unrecognised JSON. Discard Exited{None, None}
-                        // — a real exit always has at least one of exit_code or signal.
+                        // catch-all for unrecognised JSON. Discard Exited{None, None}: it is
+                        // unrecognised JSON, or the `{}` exit a daemon sends when it lost the
+                        // exit status. Either way it gives no exit status.
                         match serde_json::from_str::<RunProcessEvent>(&msg.data) {
                             Ok(RunProcessEvent::Exited {
                                 exit_code: None,

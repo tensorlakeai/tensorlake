@@ -151,12 +151,13 @@ describe("Sandbox native proxy path", () => {
     sbx.close();
   });
 
-  it("rejects a run stream that ends without an exit event", async () => {
+  it("rejects a run whose exit status is unknown", async () => {
     installFakeBinding({
       runCommand: vi.fn(async () => ({ traceId: "tr-run" })),
     });
     const sbx = makeSandbox();
     await expect(sbx.run("sh")).rejects.toThrow(SandboxConnectionError);
+    await expect(sbx.run("sh")).rejects.toThrow("did not report an exit status");
     sbx.close();
   });
 

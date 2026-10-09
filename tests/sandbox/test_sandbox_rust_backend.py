@@ -345,7 +345,7 @@ class TestSandboxRustBackend(unittest.TestCase):
         sandbox, _ = _make_sandbox(_MissingExitFakeClient())
 
         with self.assertRaisesRegex(
-            SandboxConnectionError, "stream ended without an exit event"
+            SandboxConnectionError, "did not report an exit status"
         ):
             sandbox.run("echo", args=["hello"])
 

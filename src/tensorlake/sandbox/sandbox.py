@@ -151,7 +151,7 @@ def _command_result(result_json: str | None) -> CommandResult:
     """Parse the result of ``run`` that the Rust client built."""
     if result_json is None:
         raise SandboxConnectionError(
-            "sandbox process stream ended without an exit event"
+            "the sandbox did not report an exit status for the process"
         )
     return CommandResult.model_validate_json(result_json)
 
@@ -1700,7 +1700,8 @@ class Sandbox:
             last newline.
 
         Raises:
-            SandboxConnectionError: The stream ended without an exit event.
+            SandboxConnectionError: The sandbox did not report an exit
+            status, for example because it lost the exit status of the process.
         """
         process_user = self._normalize_process_user(user)
         payload = self._build_command_payload(

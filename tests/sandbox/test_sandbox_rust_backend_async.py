@@ -349,7 +349,7 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         sandbox, _ = _make_async_sandbox(_MissingExit())
 
         with self.assertRaisesRegex(
-            SandboxConnectionError, "stream ended without an exit event"
+            SandboxConnectionError, "did not report an exit status"
         ):
             await sandbox.run("echo", args=["hello"])
 

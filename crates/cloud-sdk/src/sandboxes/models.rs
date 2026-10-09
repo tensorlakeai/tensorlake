@@ -1161,7 +1161,7 @@ pub struct CommandResult {
 
 impl CommandResult {
     /// Build the result from the events of `POST /api/v1/processes/run`.
-    /// Returns `None` when the events have no exit event.
+    /// Returns `None` when no event reports an exit status.
     pub fn from_run_events(events: &[RunProcessEvent]) -> Option<Self> {
         let mut stdout = Vec::new();
         let mut stderr = Vec::new();
