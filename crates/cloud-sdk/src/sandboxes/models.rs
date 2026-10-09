@@ -1082,6 +1082,15 @@ pub struct OutputEvent {
     /// `""` for a partial chunk. Absent from an older daemon.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub line_ending: Option<String>,
+    /// The byte offset of this chunk in the raw output of its stream. Absent
+    /// from a daemon that does not send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_offset: Option<usize>,
+    /// The raw output bytes of this chunk, terminator included. `line` can
+    /// have a different length, because the daemon replaces bytes that are
+    /// not UTF-8 with U+FFFD. Absent from a daemon that does not send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_bytes: Option<usize>,
 }
 
 /// Events returned by the streaming `POST /api/v1/processes/run` endpoint.
@@ -1184,6 +1193,10 @@ pub enum ProcessExitReason {
 /// The daemon sends each chunk's `line_ending` (`""` for a partial chunk), so
 /// the chunks join exactly. An older daemon sends lines without their
 /// terminators, so such a chunk ends with `"\n"`, except the last one.
+///
+/// The text is exact only if the output is valid UTF-8 and each character is
+/// written within 25 ms. Otherwise the daemon sends U+FFFD for the bytes it
+/// cannot decode.
 pub fn join_output<'a>(chunks: impl IntoIterator<Item = &'a OutputEvent>) -> String {
     let mut text = JoinedOutput::default();
     for chunk in chunks {
@@ -1283,9 +1296,11 @@ impl CommandResultBuilder {
 pub struct CommandResult {
     /// The exit status, or `-signal` for a process killed by a signal.
     pub exit_code: i64,
-    /// The exact text the process wrote to stdout. See [`join_output`].
+    /// The text the process wrote to stdout. See [`join_output`] for when
+    /// it is exact.
     pub stdout: String,
-    /// The exact text the process wrote to stderr. See [`join_output`].
+    /// The text the process wrote to stderr. See [`join_output`] for when
+    /// it is exact.
     pub stderr: String,
     /// Why the process ended. Never [`ProcessExitReason::Unknown`].
     pub reason: ProcessExitReason,

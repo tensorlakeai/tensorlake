@@ -1695,7 +1695,9 @@ class Sandbox:
             ``.value``). ``stdout`` and ``stderr`` are the exact text the
             process wrote, with trailing newlines and ``"\\r\\n"``. An older
             sandbox daemon gives lines joined with ``"\\n"`` and drops the
-            last newline.
+            last newline. The text is exact only if the output is valid
+            UTF-8 and each character is written within 25 ms. Otherwise the
+            daemon sends U+FFFD for the bytes it cannot decode.
 
         Raises:
             SandboxError: The sandbox lost the exit status of the process,

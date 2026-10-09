@@ -1213,13 +1213,14 @@ mod tests {
             assert!(parse_run_event(data).is_err(), "{data}");
         }
         // Events with no output and no exit status.
-        for data in [
-            r#"{"pid":7,"started_at":1}"#,
-            r#"{}"#,
-            r#"{"line":"no timestamp"}"#,
-        ] {
+        for data in [r#"{"pid":7,"started_at":1}"#, r#"{"line":"no timestamp"}"#] {
             assert!(parse_run_event(data).unwrap().is_none(), "{data}");
         }
+        // The daemon sends `{}` when it lost the exit status.
+        assert!(matches!(
+            parse_run_event("{}").unwrap(),
+            Some(super::RunEvent::ExitStatusLost)
+        ));
         // The exit code wins over the signal, as in `CommandResult`.
         match parse_run_event(r#"{"signal":9,"exit_code":137}"#)
             .unwrap()

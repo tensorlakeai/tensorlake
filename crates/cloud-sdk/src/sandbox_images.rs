@@ -2076,6 +2076,12 @@ impl StreamBytes {
 /// A reconnect replays the output from its start, but not in the same chunks:
 /// a line sent live in parts can come back as one chunk. So this skips the
 /// replay by bytes, not by events.
+///
+/// The daemon's `capture_offset` and `capture_bytes` give the exact raw
+/// bytes. A daemon that does not send them gets the bytes of the decoded text
+/// counted instead. That count is not exact: the daemon sends a character
+/// split across writes, or bytes that are not UTF-8, as U+FFFD live, but can
+/// replay them as different bytes.
 #[derive(Default)]
 struct ReceivedOutput {
     bytes: StreamBytes,
@@ -2090,12 +2096,18 @@ impl ReceivedOutput {
         replayed: &mut StreamBytes,
         mut output: OutputEvent,
     ) -> Option<OutputEvent> {
-        // An older daemon sends whole lines without `line_ending`.
-        let ending_len = output.line_ending.as_deref().map_or(1, str::len);
-        let len = output.line.len() + ending_len;
-        let received = replayed.get_mut(output.stream.as_deref());
-        let start = *received;
-        *received += len;
+        let (start, len) = match (output.capture_offset, output.capture_bytes) {
+            (Some(offset), Some(bytes)) => (offset, bytes),
+            _ => {
+                // An older daemon sends whole lines without `line_ending`.
+                let ending_len = output.line_ending.as_deref().map_or(1, str::len);
+                let len = output.line.len() + ending_len;
+                let received = replayed.get_mut(output.stream.as_deref());
+                let start = *received;
+                *received += len;
+                (start, len)
+            }
+        };
         let seen = self.bytes.get_mut(output.stream.as_deref());
         let skip = seen.saturating_sub(start);
         if skip >= len {
@@ -2103,9 +2115,15 @@ impl ReceivedOutput {
         }
         *seen = start + len;
         if skip > 0 {
-            // Live chunks end on a character boundary, so this cut does too.
-            // A cut past `line` leaves only the terminator.
-            output.line = output.line.get(skip..).unwrap_or_default().to_string();
+            // A raw byte count matches the text only if all of it is UTF-8.
+            // Otherwise move the cut to the next character boundary: the
+            // live part sent a character it cut as U+FFFD. A cut past `line`
+            // leaves only the terminator.
+            let mut cut = skip.min(output.line.len());
+            while !output.line.is_char_boundary(cut) {
+                cut += 1;
+            }
+            output.line.drain(..cut);
         }
         Some(output)
     }
@@ -3438,6 +3456,8 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             timestamp: serde_json::Value::Null,
             stream: Some(stream.to_string()),
             line_ending: ending.map(str::to_string),
+            capture_offset: None,
+            capture_bytes: None,
         };
         let mut partial_lines = super::PartialLines::default();
         let lines: Vec<_> = [
@@ -3479,6 +3499,8 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             timestamp: serde_json::Value::Null,
             stream: Some(stream.to_string()),
             line_ending: Some(ending.to_string()),
+            capture_offset: None,
+            capture_bytes: None,
         };
         let mut received = super::ReceivedOutput::default();
         let mut follow = |events: Vec<super::OutputEvent>| {
@@ -3532,6 +3554,59 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
     }
 
     #[test]
+    fn build_log_reconnect_skips_replayed_output_by_capture_offset() {
+        let event = |line: &str, ending: &str, offset: usize, bytes: usize| super::OutputEvent {
+            line: line.to_string(),
+            timestamp: serde_json::Value::Null,
+            stream: Some("stdout".to_string()),
+            line_ending: Some(ending.to_string()),
+            capture_offset: Some(offset),
+            capture_bytes: Some(bytes),
+        };
+        let mut received = super::ReceivedOutput::default();
+        let mut follow = |events: Vec<super::OutputEvent>| {
+            let mut replayed = super::StreamBytes::default();
+            events
+                .into_iter()
+                .filter_map(|output| {
+                    let output = received.unseen_part(&mut replayed, output)?;
+                    received.partial_lines.complete(&output)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Live: "café\n" with "é" (2 bytes) split across two writes. The
+        // daemon sends each half as U+FFFD (3 bytes of text each).
+        assert_eq!(
+            follow(vec![
+                event("caf\u{FFFD}", "", 0, 4),
+                event("\u{FFFD}", "\n", 4, 2),
+                event("50%", "", 6, 3),
+            ]),
+            ["caf\u{FFFD}\u{FFFD}"]
+        );
+        // Replay: the whole bytes come back as one valid line. The text
+        // counts differ from the live ones, but the raw offsets do not.
+        assert_eq!(
+            follow(vec![
+                event("café", "\n", 0, 6),
+                event("50% done", "\n", 6, 9),
+                event("next", "\n", 15, 5),
+            ]),
+            ["50% done", "next"]
+        );
+
+        // A cut inside a character moves to the next character boundary.
+        let mut received = super::ReceivedOutput::default();
+        let mut replayed = super::StreamBytes::default();
+        received.unseen_part(&mut replayed, event("caf\u{FFFD}", "", 0, 4));
+        let output = received
+            .unseen_part(&mut replayed, event("café!", "\n", 0, 7))
+            .unwrap();
+        assert_eq!(output.line, "!");
+    }
+
+    #[test]
     fn diagnostics_do_not_join_build_log_lines() {
         let mut diagnostics = BuilderFailureDiagnostics::default();
         for message in ["Remove all images? answer: no", " space reclaimed"] {
@@ -3551,6 +3626,8 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
             timestamp: serde_json::Value::Null,
             stream: Some("stdout".to_string()),
             line_ending: Some(ending.to_string()),
+            capture_offset: None,
+            capture_bytes: None,
         };
         let mut partial_lines = super::PartialLines::default();
         let half = "x".repeat(super::PARTIAL_LINE_MAX_BYTES / 2);

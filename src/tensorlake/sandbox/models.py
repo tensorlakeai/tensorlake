@@ -1140,6 +1140,10 @@ def join_output(events: Iterable[OutputEvent]) -> str:
     The result is the same as ``CommandResult.stdout`` of ``Sandbox.run``.
     An older daemon sends lines without their terminators: they are joined
     with ``"\\n"``, with no newline after the last line.
+
+    The text is exact only if the output is valid UTF-8 and each character
+    is written within 25 ms. Otherwise the daemon sends U+FFFD for the bytes
+    it cannot decode.
     """
     parts = []
     ending = ""
