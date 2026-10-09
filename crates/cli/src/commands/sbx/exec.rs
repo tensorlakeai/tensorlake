@@ -5,7 +5,7 @@ use std::future::Future;
 use std::io::Write;
 use std::path::Path;
 use std::time::Duration;
-use tensorlake::sandboxes::models::{ProcessExitReason, RunProcessEvent};
+use tensorlake::sandboxes::models::{ProcessExitReason, RunProcessEvent, RunStreamMessage};
 
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{parse_env_vars, resolve_sandbox_proxy_target, with_sandbox_headers};
@@ -895,6 +895,7 @@ fn parse_http_health_spec(spec: &str) -> Result<(u16, Option<String>)> {
 async fn stream_run_events(resp: reqwest::Response, debug: bool) -> Result<i32> {
     let mut stream = tensorlake::sse::event_stream(resp, None);
     let mut exit_code: Option<i32> = None;
+    let mut exit_status_lost = false;
     let mut stderr_closed = false;
 
     while let Some(event) = stream.next().await {
@@ -951,6 +952,7 @@ async fn stream_run_events(resp: reqwest::Response, debug: bool) -> Result<i32> 
                             }
                             exit_code = Some(code);
                         }
+                        RunEvent::ExitStatusLost => exit_status_lost = true,
                     }
                 }
             }
@@ -963,11 +965,15 @@ async fn stream_run_events(resp: reqwest::Response, debug: bool) -> Result<i32> 
         }
     }
 
-    exit_code.ok_or_else(|| {
-        CliError::Other(anyhow::anyhow!(
-            "the sandbox did not report an exit status for the process"
-        ))
-    })
+    match exit_code {
+        Some(code) => Ok(code),
+        None if exit_status_lost => Err(CliError::Other(anyhow::anyhow!(
+            "the sandbox lost the exit status of the process"
+        ))),
+        None => Err(CliError::Other(anyhow::anyhow!(
+            "the connection closed before the process exited; the process may still run"
+        ))),
+    }
 }
 
 /// Print a message of the CLI to stderr. Unlike `eprintln!`, do not panic
@@ -1015,12 +1021,13 @@ enum RunEvent {
         /// The run's `--timeout` expired and the sandbox killed the process.
         timed_out: bool,
     },
+    /// The `{}` exit event a daemon sends when it lost the exit status.
+    ExitStatusLost,
 }
 
-/// Parse one SSE payload with the SDK's [`RunProcessEvent`] model, so `tl sbx
+/// Parse one SSE payload with the SDK's [`RunStreamMessage`] model, so `tl sbx
 /// exec` reads events as the SDKs do. Return `Ok(None)` for an empty payload,
-/// the start event, or an event with no exit status: a heartbeat, an unknown
-/// event, or the `{}` exit a daemon sends when it lost the exit status.
+/// the start event, a heartbeat, or an unknown event.
 /// Return an error for a payload that does not parse; the caller skips it, as
 /// `SandboxProxyClient::run_process_streaming` does, so one bad event does
 /// not stop the output of a process that still runs.
@@ -1029,7 +1036,12 @@ fn parse_run_event(data: &str) -> serde_json::Result<Option<RunEvent>> {
     if data.is_empty() {
         return Ok(None);
     }
-    Ok(match serde_json::from_str(data)? {
+    let event = match RunStreamMessage::parse(data)? {
+        RunStreamMessage::Event(event) => event,
+        RunStreamMessage::ExitStatusLost => return Ok(Some(RunEvent::ExitStatusLost)),
+        RunStreamMessage::Ignored => return Ok(None),
+    };
+    Ok(match event {
         RunProcessEvent::Output(output) => Some(RunEvent::Output {
             line: output.line,
             line_ending: output.line_ending,
@@ -1560,7 +1572,13 @@ mod tests {
 
     #[tokio::test]
     async fn stream_run_events_fails_without_an_exit_status() {
-        for body in ["data: {}\n\n", "data: {\"pid\":1,\"started_at\":1}\n\n"] {
+        for (body, message) in [
+            ("data: {}\n\n", "lost the exit status"),
+            (
+                "data: {\"pid\":1,\"started_at\":1}\n\n",
+                "connection closed before the process exited",
+            ),
+        ] {
             let (target, server) = serve_process_responses(vec![(200, body)]).await;
             let client = crate::http::client_builder().build().unwrap();
             let resp = client.get(&target.proxy_base).send().await.unwrap();
@@ -1568,10 +1586,7 @@ mod tests {
             let error = super::stream_run_events(resp, false).await.unwrap_err();
             server.await.unwrap();
 
-            assert!(
-                error.to_string().contains("did not report an exit status"),
-                "{error}"
-            );
+            assert!(error.to_string().contains(message), "{error}");
         }
     }
 

@@ -459,7 +459,7 @@ export function parseCommandResult(
   resultJson: string | null | undefined,
 ): Required<Omit<CommandResult, "timedOut">> {
   if (resultJson == null) {
-    throw new SandboxConnectionError("the sandbox did not report an exit status for the process");
+    throw new SandboxError("the sandbox lost the exit status of the process");
   }
   return fromSnakeKeys(JSON.parse(resultJson)) as Required<Omit<CommandResult, "timedOut">>;
 }

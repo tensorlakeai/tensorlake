@@ -341,17 +341,16 @@ class TestAsyncSandboxRustBackend(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.reason, CommandExitReason.TIMED_OUT)
         self.assertTrue(result.timed_out)
 
-    async def test_run_raises_when_stream_has_no_exit_event(self):
+    async def test_run_raises_when_the_sandbox_lost_the_exit_status(self):
         class _MissingExit(_FakeAsyncRustProxyClient):
             async def run_command_json_async(self, payload_json):
                 return _TRACE_ID, None
 
         sandbox, _ = _make_async_sandbox(_MissingExit())
 
-        with self.assertRaisesRegex(
-            SandboxConnectionError, "did not report an exit status"
-        ):
+        with self.assertRaisesRegex(SandboxError, "lost the exit status") as raised:
             await sandbox.run("echo", args=["hello"])
+        self.assertNotIsInstance(raised.exception, SandboxConnectionError)
 
     async def test_write_stdin_forwards_bytes(self):
         sandbox, fake = _make_async_sandbox()

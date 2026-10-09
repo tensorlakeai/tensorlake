@@ -150,9 +150,7 @@ def _validate_managed_name_client_side(name: str) -> None:
 def _command_result(result_json: str | None) -> CommandResult:
     """Parse the result of ``run`` that the Rust client built."""
     if result_json is None:
-        raise SandboxConnectionError(
-            "the sandbox did not report an exit status for the process"
-        )
+        raise SandboxError("the sandbox lost the exit status of the process")
     return CommandResult.model_validate_json(result_json)
 
 
@@ -1700,8 +1698,9 @@ class Sandbox:
             last newline.
 
         Raises:
-            SandboxConnectionError: The sandbox did not report an exit
-            status, for example because it lost the exit status of the process.
+            SandboxError: The sandbox lost the exit status of the process,
+            or the connection closed before the process exited. In the
+            second case the process may still run.
         """
         process_user = self._normalize_process_user(user)
         payload = self._build_command_payload(

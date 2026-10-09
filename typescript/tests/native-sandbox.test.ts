@@ -5,7 +5,12 @@ import {
   type NativeSandboxBinding,
   type NativeSandboxProxyClient,
 } from "../src/native-sandbox.js";
-import { SandboxConnectionError, SandboxNotFoundError, RemoteAPIError } from "../src/errors.js";
+import {
+  SandboxConnectionError,
+  SandboxError,
+  SandboxNotFoundError,
+  RemoteAPIError,
+} from "../src/errors.js";
 import { CommandExitReason, joinOutput } from "../src/models.js";
 
 /**
@@ -156,8 +161,9 @@ describe("Sandbox native proxy path", () => {
       runCommand: vi.fn(async () => ({ traceId: "tr-run" })),
     });
     const sbx = makeSandbox();
-    await expect(sbx.run("sh")).rejects.toThrow(SandboxConnectionError);
-    await expect(sbx.run("sh")).rejects.toThrow("did not report an exit status");
+    await expect(sbx.run("sh")).rejects.toThrow(SandboxError);
+    await expect(sbx.run("sh")).rejects.not.toThrow(SandboxConnectionError);
+    await expect(sbx.run("sh")).rejects.toThrow("lost the exit status");
     sbx.close();
   });
 

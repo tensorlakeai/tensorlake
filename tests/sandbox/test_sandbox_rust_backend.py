@@ -337,17 +337,16 @@ class TestSandboxRustBackend(unittest.TestCase):
         self.assertEqual(result.reason, CommandExitReason.TIMED_OUT)
         self.assertTrue(result.timed_out)
 
-    def test_run_raises_when_stream_has_no_exit_event(self):
+    def test_run_raises_when_the_sandbox_lost_the_exit_status(self):
         class _MissingExitFakeClient(_FakeRustProxyClient):
             def run_command_json(self, payload_json):
                 return _TRACE_ID, None
 
         sandbox, _ = _make_sandbox(_MissingExitFakeClient())
 
-        with self.assertRaisesRegex(
-            SandboxConnectionError, "did not report an exit status"
-        ):
+        with self.assertRaisesRegex(SandboxError, "lost the exit status") as raised:
             sandbox.run("echo", args=["hello"])
+        self.assertNotIsInstance(raised.exception, SandboxConnectionError)
 
     def test_join_output_joins_chunks_with_their_line_endings(self):
         events = [

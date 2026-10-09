@@ -54,15 +54,15 @@ pub const WAIT_POLL_MIN_REQUEST_TIMEOUT: Duration = Duration::from_secs(1);
 
 use models::{
     ArchivedSandboxInfo, ArchivedSandboxesPaginationDirection, ClaimSandboxRequest, CommandResult,
-    CopySandboxResponse, CreateSandboxPoolRequest, CreateSandboxPoolResponse, CreateSandboxRequest,
-    CreateSandboxResponse, CreateSnapshotRequest, CreateSnapshotResponse, DaemonInfo,
-    DetachFileSystemRequest, FileSystemMount, GetSandboxLogsRequest, HealthResponse,
+    CommandResultBuilder, CopySandboxResponse, CreateSandboxPoolRequest, CreateSandboxPoolResponse,
+    CreateSandboxRequest, CreateSandboxResponse, CreateSnapshotRequest, CreateSnapshotResponse,
+    DaemonInfo, DetachFileSystemRequest, FileSystemMount, GetSandboxLogsRequest, HealthResponse,
     ListArchivedSandboxesParams, ListArchivedSandboxesResponse, ListDirectoryResponse,
     ListProcessesResponse, ListSandboxPoolsResponse, ListSandboxesResponse, ListSnapshotsResponse,
     NetworkPolicyUpdate, OutputEvent, OutputResponse, ProcessInfo, RunProcessEvent,
-    SandboxAccepted, SandboxInfo, SandboxLogsResponse, SandboxPoolInfo, SandboxPoolRequest,
-    SandboxProcessLogFiltersResponse, SendSignalResponse, SignBlobRequest, SnapshotInfo,
-    SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
+    RunStreamMessage, SandboxAccepted, SandboxInfo, SandboxLogsResponse, SandboxPoolInfo,
+    SandboxPoolRequest, SandboxProcessLogFiltersResponse, SendSignalResponse, SignBlobRequest,
+    SnapshotInfo, SnapshotType, UpdateSandboxPoolRequest, UpdateSandboxRequest,
 };
 
 pub const DEFAULT_SANDBOX_PROXY_URL: &str = "https://sandbox.tensorlake.ai";
@@ -1266,15 +1266,33 @@ impl SandboxProxyClient {
     }
 
     /// Run a process to completion and build its [`CommandResult`]. The
-    /// result is `None` when the sandbox reported no exit status.
+    /// result is `None` when the sandbox lost the exit status of the process.
+    /// It is an error when the stream closes before an exit event: the
+    /// process may still run.
     pub async fn run_command(
         &self,
         payload: &Value,
     ) -> Result<Traced<Option<CommandResult>>, SdkError> {
-        Ok(self
-            .run_process(payload)
-            .await?
-            .map(|events| CommandResult::from_run_events(&events)))
+        let mut builder = CommandResultBuilder::default();
+        let mut exit_status_lost = false;
+        let trace_id = self
+            .run_process_messages(payload, |message| {
+                match message {
+                    RunStreamMessage::Event(event) => builder.push(&event),
+                    RunStreamMessage::ExitStatusLost => exit_status_lost = true,
+                    RunStreamMessage::Ignored => {}
+                }
+                std::future::ready(Ok(()))
+            })
+            .await?;
+        match builder.finish() {
+            Some(result) => Ok(Traced::new(trace_id, Some(result))),
+            None if exit_status_lost => Ok(Traced::new(trace_id, None)),
+            None => Err(SdkError::EventSourceError(
+                "the connection closed before the process exited; the process may still run"
+                    .to_string(),
+            )),
+        }
     }
 
     /// Start a process and stream its lifecycle events to `on_event` as they
@@ -1301,6 +1319,32 @@ impl SandboxProxyClient {
     where
         F: std::future::Future<Output = Result<(), SdkError>>,
     {
+        self.run_process_messages(payload, |message| {
+            let event = match message {
+                RunStreamMessage::Event(event) => Some(on_event(event)),
+                // The lost-exit event gives no exit status.
+                RunStreamMessage::ExitStatusLost | RunStreamMessage::Ignored => None,
+            };
+            async move {
+                match event {
+                    Some(event) => event.await,
+                    None => Ok(()),
+                }
+            }
+        })
+        .await
+    }
+
+    /// Start a process and pass each message of its run stream to
+    /// `on_message`. Returns the request `trace_id` once the stream closes.
+    async fn run_process_messages<F>(
+        &self,
+        payload: &Value,
+        mut on_message: impl FnMut(RunStreamMessage) -> F,
+    ) -> Result<String, SdkError>
+    where
+        F: std::future::Future<Output = Result<(), SdkError>>,
+    {
         let path = "/api/v1/processes/run";
         let req = self
             .request(Method::POST, path)
@@ -1323,27 +1367,13 @@ impl SandboxProxyClient {
         let stream =
             event_stream(response.into_inner(), idle_timeout).filter_map(move |event| async move {
                 match event {
-                    Ok(msg) => {
-                        // The Exited variant has all-optional fields so it acts as a
-                        // catch-all for unrecognised JSON. Discard Exited{None, None}: it is
-                        // unrecognised JSON, or the `{}` exit a daemon sends when it lost the
-                        // exit status. Either way it gives no exit status.
-                        match serde_json::from_str::<RunProcessEvent>(&msg.data) {
-                            Ok(RunProcessEvent::Exited {
-                                exit_code: None,
-                                signal: None,
-                                ..
-                            }) => None,
-                            Ok(evt) => Some(Ok(evt)),
-                            Err(_) => None,
-                        }
-                    }
+                    Ok(msg) => RunStreamMessage::parse(&msg.data).ok().map(Ok),
                     Err(error) => Some(Err(error)),
                 }
             });
         futures::pin_mut!(stream);
-        while let Some(event) = stream.next().await {
-            on_event(event?).await?;
+        while let Some(message) = stream.next().await {
+            on_message(message?).await?;
         }
         Ok(trace_id)
     }
