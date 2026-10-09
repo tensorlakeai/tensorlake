@@ -1788,7 +1788,7 @@ impl CloudSandboxClient {
         })
     }
 
-    #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false, snapshot_id=None, owner=None))]
+    #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false, snapshot_id=None, owner=None, source_path="/"))]
     fn attach_file_system(
         &self,
         sandbox_id: String,
@@ -1798,16 +1798,19 @@ impl CloudSandboxClient {
         prefetch: bool,
         snapshot_id: Option<String>,
         owner: Option<String>,
+        source_path: &str,
     ) -> PyResult<(String, String)> {
+        let source_path = source_path.to_string();
         self.run_with_retry(5, move |client| {
             let sandbox_id = sandbox_id.clone();
             let file_system_id = file_system_id.clone();
             let mount_path = mount_path.clone();
+            let source_path = source_path.clone();
             let snapshot_id = snapshot_id.clone();
             let owner = owner.clone();
             async move {
                 let traced = client
-                    .attach_file_system(
+                    .attach_file_system_view(
                         &sandbox_id,
                         &file_system_id,
                         &mount_path,
@@ -1815,6 +1818,7 @@ impl CloudSandboxClient {
                         prefetch,
                         snapshot_id.as_deref(),
                         owner.as_deref(),
+                        &source_path,
                     )
                     .await?;
                 let trace_id = traced.trace_id.clone();
@@ -2296,7 +2300,7 @@ impl CloudSandboxClient {
         })
     }
 
-    #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false, snapshot_id=None, owner=None))]
+    #[pyo3(signature = (sandbox_id, file_system_id, mount_path, read_only=false, prefetch=false, snapshot_id=None, owner=None, source_path="/"))]
     fn attach_file_system_async<'py>(
         &self,
         py: Python<'py>,
@@ -2307,17 +2311,20 @@ impl CloudSandboxClient {
         prefetch: bool,
         snapshot_id: Option<String>,
         owner: Option<String>,
+        source_path: &str,
     ) -> PyResult<Bound<'py, PyAny>> {
         let client = self.client.clone();
+        let source_path = source_path.to_string();
         future_into_py(py, async move {
             let traced = retry_async_op(client, 5, move |c| {
                 let sandbox_id = sandbox_id.clone();
                 let file_system_id = file_system_id.clone();
                 let mount_path = mount_path.clone();
+                let source_path = source_path.clone();
                 let snapshot_id = snapshot_id.clone();
                 let owner = owner.clone();
                 async move {
-                    c.attach_file_system(
+                    c.attach_file_system_view(
                         &sandbox_id,
                         &file_system_id,
                         &mount_path,
@@ -2325,6 +2332,7 @@ impl CloudSandboxClient {
                         prefetch,
                         snapshot_id.as_deref(),
                         owner.as_deref(),
+                        &source_path,
                     )
                     .await
                 }
