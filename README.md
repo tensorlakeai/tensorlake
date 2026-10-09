@@ -246,6 +246,11 @@ Pool responses expose the allocation as `pool.resources.gpu_configs` in
 Python and Rust, and `pool.resources.gpuConfigs` in TypeScript. Reuse its
 model and count when updating a GPU CAS pool.
 
+Inspect a claimed sandbox's GPU allocation with `tl sbx describe <sandbox-id>`
+or the `GPUs` column in `tl sbx ls`. Both show count and model, such as
+`2 x H100`; sandboxes without a GPU allocation show `-`. Archived sandboxes
+show the same information with `tl sbx ls --archived`.
+
 Set the pool network policy when you create the pool, replace it later with a
 pool update, or pass `CLEAR_NETWORK_POLICY` (Python) / `null` (TypeScript) to
 remove it. On a change the service recycles the pool's unclaimed warm

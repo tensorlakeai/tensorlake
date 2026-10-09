@@ -29,8 +29,9 @@ use crate::error::{CliError, Result};
 use chrono::{DateTime, Local, TimeZone, Utc};
 use serde::Deserialize;
 use tensorlake::sandboxes::{
-    models::NetworkConfig, resolve_default_sandbox_proxy_url,
-    resolve_sandbox_proxy_target as resolve_core_proxy_target, select_sandbox_proxy_url,
+    models::{GPUResources, NetworkConfig},
+    resolve_default_sandbox_proxy_url, resolve_sandbox_proxy_target as resolve_core_proxy_target,
+    select_sandbox_proxy_url,
 };
 use tokio::time::{Duration, Instant};
 
@@ -620,6 +621,16 @@ mod network_config_tests {
         assert!(build_network_config(true, &rule, &[]).is_err());
         assert!(build_network_config(true, &[], &rule).is_err());
     }
+}
+
+fn format_gpu_allocation(gpus: &[GPUResources]) -> String {
+    if gpus.is_empty() {
+        return "-".to_string();
+    }
+    gpus.iter()
+        .map(|gpu| format!("{} x {}", gpu.count, gpu.model))
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 pub fn format_created_at(value: Option<&serde_json::Value>) -> String {

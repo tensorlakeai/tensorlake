@@ -1,6 +1,6 @@
 use crate::auth::context::CliContext;
 use crate::commands::sbx::{
-    DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, format_created_at, sandbox_endpoint,
+    DEFAULT_SANDBOX_IMAGE_DISPLAY_NAME, format_created_at, format_gpu_allocation, sandbox_endpoint,
 };
 use crate::error::{CliError, Result};
 
@@ -157,7 +157,7 @@ fn print_live_sandbox(sandbox: &serde_json::Value, quiet: bool, printed_header: 
 
     let resources = sandbox.get("resources");
     println!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         id,
         sandbox.get("name").and_then(|v| v.as_str()).unwrap_or(""),
         sandbox
@@ -168,6 +168,7 @@ fn print_live_sandbox(sandbox: &serde_json::Value, quiet: bool, printed_header: 
         format_cpus(resources),
         format_memory(resources),
         format_disk(resources, false),
+        format_gpus(resources),
         format_created_at(sandbox.get("created_at")),
     );
 }
@@ -186,23 +187,24 @@ fn print_archived_sandbox(sandbox: &serde_json::Value, quiet: bool, printed_head
 
     let resources = sandbox.get("resources");
     println!(
-        "{}\t{}\t{}\t{}\t{}\t{}\t{}",
+        "{}\t{}\t{}\t{}\t{}\t{}\t{}\t{}",
         id,
         sandbox.get("name").and_then(|v| v.as_str()).unwrap_or(""),
         sandbox_image(sandbox),
         format_cpus(resources),
         format_memory(resources),
         format_disk(resources, true),
+        format_gpus(resources),
         format_created_at(sandbox.get("archived_at")),
     );
 }
 
 fn print_live_header() {
-    println!("ID\tName\tStatus\tImage\tCPUs\tMemory\tDisk\tCreated At");
+    println!("ID\tName\tStatus\tImage\tCPUs\tMemory\tDisk\tGPUs\tCreated At");
 }
 
 fn print_archived_header() {
-    println!("ID\tName\tImage\tCPUs\tMemory\tDisk\tArchived At");
+    println!("ID\tName\tImage\tCPUs\tMemory\tDisk\tGPUs\tArchived At");
 }
 
 fn sandbox_id(sandbox: &serde_json::Value) -> &str {
@@ -249,6 +251,17 @@ fn format_disk(resources: Option<&serde_json::Value>, include_ephemeral_fallback
         .and_then(|v| v.as_i64())
         .map(|v| format!("{} MiB", v))
         .unwrap_or_else(|| "-".to_string())
+}
+
+fn format_gpus(resources: Option<&serde_json::Value>) -> String {
+    let gpus = resources
+        .and_then(|r| r.get("gpu_configs").or_else(|| r.get("gpus")))
+        .and_then(|v| {
+            serde_json::from_value::<Vec<tensorlake::sandboxes::models::GPUResources>>(v.clone())
+                .ok()
+        })
+        .unwrap_or_default();
+    format_gpu_allocation(&gpus)
 }
 
 fn next_sandbox_list_url(current_url: &str, body: &serde_json::Value) -> Option<String> {
