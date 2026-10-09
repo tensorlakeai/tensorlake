@@ -203,7 +203,7 @@ export interface CreateSandboxOptions {
   diskMb?: number;
   /** Number of GPUs to allocate. Defaults to A10 unless gpuModel is set. GPU sandboxes require a CAS image. */
   gpus?: number;
-  /** GPU model to allocate. The string arm preserves compatibility with existing callers; values are validated at runtime. */
+  /** GPU model to allocate. Defaults to one GPU when gpus is omitted. The string arm preserves compatibility with existing callers; values are validated at runtime. */
   gpuModel?: GpuModel | (string & {});
   /** Typed GPU model and count request. Cannot be combined with gpus or gpuModel. */
   gpu?: GpuRequest;

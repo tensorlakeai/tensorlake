@@ -115,7 +115,10 @@ function gpuRequest(
     gpus = gpu.count;
     gpuModel = gpu.model;
   }
-  if (gpus == null) return undefined;
+  if (gpus == null) {
+    if (gpuModel == null) return undefined;
+    gpus = 1;
+  }
   if (!Number.isInteger(gpus) || gpus < 1) {
     throw new SandboxError("gpus must be a positive integer");
   }
@@ -124,16 +127,6 @@ function gpuRequest(
     throw new SandboxError(`unsupported GPU model: ${gpuModel}`);
   }
   return [{ count: gpus, model: gpuModel }];
-}
-
-function poolGpuRequest(
-  options: CreatePoolOptions | UpdatePoolOptions,
-): Array<{ count: number; model: string }> | undefined {
-  let count = options.gpus;
-  if (options.gpu == null && count == null && options.gpuModel != null) {
-    count = 1;
-  }
-  return gpuRequest(options.gpu, count, options.gpuModel);
 }
 
 /**
@@ -1048,7 +1041,7 @@ export class SandboxClient {
   async createPool(
     options: CreatePoolOptions,
   ): Promise<CreateSandboxPoolResponse> {
-    const gpus = poolGpuRequest(options);
+    const gpus = gpuRequest(options.gpu, options.gpus, options.gpuModel);
     const body: Record<string, unknown> = {
       image: options.image,
       resources: {
@@ -1106,7 +1099,7 @@ export class SandboxClient {
     poolId: string,
     options: UpdatePoolOptions,
   ): Promise<SandboxPoolInfo> {
-    const gpus = poolGpuRequest(options);
+    const gpus = gpuRequest(options.gpu, options.gpus, options.gpuModel);
     const body: Record<string, unknown> = {
       image: options.image,
       resources: {

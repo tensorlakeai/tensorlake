@@ -215,13 +215,20 @@ class GpuRequest(BaseModel):
 GPUResources = GpuRequest
 
 
+class GpuAllocation(BaseModel):
+    """A reported GPU allocation, preserving the server's exact model identifier."""
+
+    count: int
+    model: str
+
+
 class ContainerResourcesInfo(BaseModel):
     """Container resource configuration, including its GPU allocation."""
 
     cpus: float
     memory_mb: int
     disk_mb: int
-    gpu_configs: list[GpuRequest] | None = Field(
+    gpu_configs: list[GpuAllocation] | None = Field(
         default=None, validation_alias=AliasChoices("gpu_configs", "gpus")
     )
 
