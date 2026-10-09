@@ -1,7 +1,7 @@
 # Resize a running sandbox
 
-Resize CPU, memory, or the root disk of a running non-GPU sandbox.
-Running GPU sandboxes support root-disk growth only; CPU and memory changes
+Resize CPU, memory, or the root disk of a running CPU-only CAS sandbox.
+Running GPU CAS sandboxes support root-disk growth only; CPU and memory changes
 are rejected before submitting an update.
 Non-CAS sandboxes do not support live resize.
 Use `tl sbx describe <id>` to check its current allocation. Memory
@@ -14,7 +14,7 @@ Omitted dimensions stay unchanged; send name, proxy, and network updates separat
 tl sbx update my-sandbox -c 2 -m 4096 --disk_mb 20480
 ```
 
-For a GPU sandbox, supply only the disk target:
+For a GPU CAS sandbox, supply only the disk target:
 
 ```sh
 tl sbx update my-gpu-sandbox --disk_mb 20480
@@ -196,7 +196,7 @@ incompatible response, not confirmation of completion.
 
 - CPU targets must be finite positive whole-vCPU counts. `2.0` is accepted;
   `1.5` is rejected without rounding. Host-specific limits remain server decisions.
-- Non-GPU sandboxes' boot-memory floor and hotplug window are not exposed by
+- CPU-only CAS sandboxes' boot-memory floor and hotplug window are not exposed by
   the public API. The SDK preserves driver rejection details, including after
   full snapshot restore or suspend/resume. The driver adjusts hotplug memory
   in 128 MiB blocks, so confirmed memory can differ from the requested target.
@@ -207,7 +207,7 @@ incompatible response, not confirmation of completion.
   capture, pinned memory, and virtual machine state remain server/driver decisions.
 
 A sandbox must be running. Full-snapshot-restored or suspended-then-resumed
-non-GPU sandboxes may resize once running. GPU sandboxes support only root-disk
+CPU-only CAS sandboxes may resize once running. GPU CAS sandboxes support only root-disk
 growth. Unchanged CPU and memory targets are omitted from the update, so they may
 be supplied alongside a larger disk target without requesting a CPU or memory
 resize. GPU allocation, pool templates, and attached volumes cannot be resized

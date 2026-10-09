@@ -139,7 +139,7 @@ impl ResizeSandboxResources {
             && (target.cpus.is_some() || target.memory_mb.is_some())
         {
             return Err(SdkError::ClientError(
-                "GPU sandboxes only support live root-disk growth; CPU and memory changes are not supported"
+                "GPU CAS sandboxes only support live root-disk growth; CPU and memory changes are not supported"
                     .into(),
             ));
         }

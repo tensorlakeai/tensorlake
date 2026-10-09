@@ -613,7 +613,7 @@ class SandboxClient:
             disk_mb: Root disk size in MiB. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
-                ``A10`` unless ``gpu_model`` is set. GPU sandboxes require a
+                ``A10`` unless ``gpu_model`` is set. GPU CAS sandboxes require a
                 CAS image; when ``image`` is omitted, the server selects its
                 configured GPU default.
             gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.
@@ -1076,8 +1076,8 @@ class SandboxClient:
     ) -> Traced[SandboxInfo]:
         """Update a running sandbox's properties.
 
-        Resource names and units match create. Non-GPU sandboxes support CPU,
-        memory, and root-disk resize. GPU sandboxes support only root-disk growth
+        Resource names and units match create. CPU-only CAS sandboxes support CPU,
+        memory, and root-disk resize. GPU CAS sandboxes support only root-disk growth
         and reject CPU and memory changes. Non-CAS sandboxes do not support live
         resize. Resize requires a running sandbox and cannot be mixed with name,
         proxy, or network changes. Omitted dimensions retain their confirmed
@@ -2062,7 +2062,7 @@ class SandboxClient:
             disk_mb: Root disk size in MiB. When omitted, the server
                 uses its default disk size.
             gpus: Number of GPUs to allocate. When provided, defaults to
-                ``A10`` unless ``gpu_model`` is set. GPU sandboxes require a
+                ``A10`` unless ``gpu_model`` is set. GPU CAS sandboxes require a
                 CAS image; when ``image`` is omitted, the server selects its
                 configured GPU default.
             gpu_model: GPU model to allocate. Accepts any :class:`GpuModel` value.

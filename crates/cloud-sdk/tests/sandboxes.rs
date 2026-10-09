@@ -1433,7 +1433,7 @@ async fn gvisor_resize_rejects_cpu_and_memory_changes_before_patch() {
                 .await
                 .unwrap_err();
             assert!(matches!(error, SdkError::ClientError(_)));
-            assert!(error.to_string().contains("GPU sandboxes"));
+            assert!(error.to_string().contains("GPU CAS sandboxes"));
             assert!(error.to_string().contains("CPU and memory"));
             let requests = task.await.unwrap();
             assert_eq!(requests.len(), 1);
