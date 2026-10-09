@@ -7,5 +7,6 @@
   },
   "dependencies": {
     "@tensorlakeai/tensorlake": "file:../.."
-  }
+  },
+  "packageManager": "pnpm@11.28.5"
 }

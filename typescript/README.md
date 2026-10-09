@@ -98,7 +98,7 @@ tl deploy app.ts
 
 `tl` recognizes ESM `.ts`, `.mts`, `.js`, and `.mjs` entrypoints. The Rust CLI bundles the application for Node 24 with Rolldown, initializes the resulting ESM bundle once with Node to discover its registered functions, builds the function images, and uploads the deployment. CommonJS application modules and bundler configuration files are not supported.
 
-The SDK build also produces a hashed executor capsule containing the Node 24 ESM executor, its protobufs, and an npm shrinkwrap derived from the checked-in SDK lockfile. During deployment, `tl` uses the capsule from the exact SDK package Rolldown resolved and adds it directly to the image-build context. This supports local dependencies such as `"@tensorlakeai/tensorlake": "file:../tensorlake/typescript"`; build that SDK checkout with `npm run build:sdk` before deploying. The local Tensorlake package does not need to be published.
+The SDK build also produces a hashed executor capsule containing the Node 24 ESM executor, its protobufs, and an npm shrinkwrap derived from the checked-in SDK lockfile. During deployment, `tl` uses the capsule from the exact SDK package Rolldown resolved and adds it directly to the image-build context. This supports local dependencies such as `"@tensorlakeai/tensorlake": "file:../tensorlake/typescript"`; build that SDK checkout with `pnpm run build:sdk` before deploying. The local Tensorlake package does not need to be published.
 
 Functions expose `future`, `map`, `reduce`, and `tailCall`. `map` and `reduce`
 accept either an iterable or a Promise/Future that produces one, and their
@@ -130,10 +130,10 @@ application's stable public endpoint identifier across updates.
 Run the executor transport and protocol-state regression suites with:
 
 ```bash
-npm run test:function-executor
+pnpm run test:function-executor
 ```
 
-These tests use bounded fake-server event sequences to cover terminal-result cardinality, retry exhaustion, deterministic concurrent fan-out and strict replay, function-call reduce chains, malformed user input, non-advancing event pages, tail calls, cross-bundle request errors, state reconciliation, and ranged BLOB transport. `npm run build:sdk` additionally builds the exact executor capsule used during deployment.
+These tests use bounded fake-server event sequences to cover terminal-result cardinality, retry exhaustion, deterministic concurrent fan-out and strict replay, function-call reduce chains, malformed user input, non-advancing event pages, tail calls, cross-bundle request errors, state reconciliation, and ranged BLOB transport. `pnpm run build:sdk` additionally builds the exact executor capsule used during deployment.
 
 ## Live server verification
 
@@ -163,5 +163,21 @@ failure fetching the redirected result cannot prove that the mutation was not
 delivered. Safe reads still follow redirects and retry failed response transfers.
 Cloud requests advertise gzip support and decode gzip responses, including live SSE.
 
-After building the SDK and native addon, run `npm run test:native-cloud` to check
+After building the SDK and native addon, run `pnpm run test:native-cloud` to check
 the cloud transport against a local HTTP server.
+
+## Source dependency policy
+
+Use Node 24 and pnpm 11.28.5. Source installation uses the canonical pnpm lock
+with a strict 24-hour release delay and disabled installation hooks. Native
+optional packages for this SDK release are omitted from source installation:
+source/native CI builds them explicitly, rather than fetching the fresh release
+from npm. The published optional-dependency contract is unchanged.
+
+`check:runtime-lock` requires the npm runtime compatibility graph to match pnpm
+production versions and integrity values before either capsule is built.
+Maintain `scripts/runtime-package-lock.json` together with production dependency
+updates; a mismatch fails closed. This compatibility lock exists only for the
+npm shrinkwraps in deployment capsules, not for source dependency installation.
+Staged npm publication and npm consumer packaging tests remain supported with
+installation/pack/publish hooks disabled.

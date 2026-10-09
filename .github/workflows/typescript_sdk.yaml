@@ -59,12 +59,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+          run_install: false
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: "24"
-          cache: npm
-          cache-dependency-path: typescript/package-lock.json
+          cache: pnpm
+          cache-dependency-path: typescript/pnpm-lock.yaml
 
       - name: Setup Python
         uses: actions/setup-python@v5
@@ -80,7 +84,7 @@ jobs:
           virtualenvs-in-project: true
 
       - name: Install TypeScript dependencies
-        run: npm ci --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Install Python dependencies
         working-directory: ${{ github.workspace }}
@@ -89,7 +93,7 @@ jobs:
       - name: Verify the shared protocol and generated Python bindings
         working-directory: ${{ github.workspace }}
         run: |
-          npm --prefix typescript run check:proto
+          pnpm --dir typescript run check:proto
           make build_proto
           git diff --exit-code -- src/tensorlake/function_executor/proto
 
@@ -104,6 +108,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+          run_install: false
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -113,22 +121,22 @@ jobs:
         run: node ./scripts/check-no-install-scripts.mjs
 
       - name: Install dependencies
-        run: npm ci --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Check shared function-executor protocol source
-        run: npm run check:proto
+        run: pnpm run check:proto
 
       - name: Type check
-        run: npm run typecheck
+        run: pnpm run typecheck
 
       - name: Run unit tests
-        run: npm test
+        run: pnpm test
 
       - name: Build SDK
-        run: npm run build:sdk
+        run: pnpm run build:sdk
 
       - name: Run snapshot-focused SDK unit tests
-        run: npm test -- tests/client.test.ts tests/sandbox-image.test.ts
+        run: pnpm test tests/client.test.ts tests/sandbox-image.test.ts
 
   native-binding-smoke:
     name: Native Function Agent binding smoke tests
@@ -144,6 +152,10 @@ jobs:
           app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
           private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+          run_install: false
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -171,13 +183,13 @@ jobs:
         run: node ./scripts/check-no-install-scripts.mjs
 
       - name: Install dependencies
-        run: npm ci --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Build SDK
-        run: npm run build:sdk
+        run: pnpm run build:sdk
 
       - name: Build native binding (glibc compatibility smoke)
-        run: npm run build:native
+        run: pnpm run build:native
         env:
           TENSORLAKE_NODE_TARGET_ID: linux-x64
           TENSORLAKE_NODE_TARGET_TRIPLE: x86_64-unknown-linux-gnu.2.28
@@ -196,7 +208,7 @@ jobs:
           fi
 
       - name: Build native binding (musl smoke)
-        run: npm run build:native
+        run: pnpm run build:native
         env:
           TENSORLAKE_NODE_TARGET_ID: linux-x64-musl
           TENSORLAKE_NODE_TARGET_TRIPLE: x86_64-unknown-linux-musl
@@ -214,10 +226,10 @@ jobs:
           fi
 
       - name: Build and verify Function Service runner capsule
-        run: npm run build:runtime
+        run: pnpm run build:runtime
 
       - name: Verify native cloud transport and cancellation
-        run: npm run test:native-cloud
+        run: pnpm run test:native-cloud
 
       - name: Verify cloud decoding preserves Function Agent blob transfers
         run: |
@@ -246,6 +258,10 @@ jobs:
           app-id: ${{ secrets.COMPUTE_ENGINE_APP_ID }}
           private-key: ${{ secrets.COMPUTE_ENGINE_APP_PRIVATE_KEY }}
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+          run_install: false
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
@@ -255,7 +271,7 @@ jobs:
         run: node ./scripts/check-no-install-scripts.mjs
 
       - name: Install dependencies
-        run: npm ci --ignore-scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@1.98.1
@@ -267,7 +283,7 @@ jobs:
           cache-bin: false
 
       - name: Build native binding
-        run: npm run build:native
+        run: pnpm run build:native
 
       - name: Wait for Python sandbox integration
         if: github.event_name != 'workflow_dispatch'
@@ -309,7 +325,7 @@ jobs:
           exit 1
 
       - name: Run integration tests
-        run: npm run test:integration
+        run: pnpm run test:integration
         env:
           TENSORLAKE_API_KEY: ${{ secrets.TENSORLAKE_API_KEY }}
           TENSORLAKE_ORGANIZATION_ID: ${{ vars.TENSORLAKE_ORGANIZATION_ID }}

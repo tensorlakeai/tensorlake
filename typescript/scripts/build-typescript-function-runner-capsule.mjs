@@ -1,3 +1,4 @@
+import { loadRuntimeLock } from "./runtime-lock.mjs";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -16,9 +17,7 @@ const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const packageJson = JSON.parse(
   readFileSync(path.join(root, "package.json"), "utf8"),
 );
-const packageLock = JSON.parse(
-  readFileSync(path.join(root, "package-lock.json"), "utf8"),
-);
+const packageLock = loadRuntimeLock(root);
 const capsuleRoot = path.join(root, "runtime", "typescript-function-runner");
 const capsulePackage = path.join(capsuleRoot, "package");
 
@@ -45,7 +44,7 @@ for (const dependency of ["ajv", "fflate"]) {
   const locked = packageLock.packages[`node_modules/${dependency}`];
   if (typeof locked?.version !== "string") {
     throw new Error(
-      `package-lock.json does not contain a resolved version for ${dependency}`,
+      `runtime-package-lock.json does not contain a resolved version for ${dependency}`,
     );
   }
   dependencies[dependency] = locked.version;

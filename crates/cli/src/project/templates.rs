@@ -29,6 +29,7 @@ export const app = registerApplication(
 
 pub const TYPESCRIPT_PACKAGE_TEMPLATE: &str = r#"{
   "name": "{package_name}",
+  "packageManager": "pnpm@11.28.5",
   "private": true,
   "type": "module",
   "engines": {
@@ -118,7 +119,7 @@ A TypeScript Tensorlake application created with `tl app new`.
 Install dependencies:
 
 ```bash
-npm install
+pnpm install
 ```
 
 Deploy your application:
@@ -140,7 +141,19 @@ curl https://api.tensorlake.ai/applications/{function_name} \
 - Modify `application.ts` to process your own input.
 - Add `registerFunction` functions for multi-step or parallel workflows.
 - Declare runtime secrets with the function or application's `secrets` option.
-- Run `npm run typecheck` during development.
+- Run `pnpm run typecheck` during development.
 
 [Read the complete documentation](https://docs.tensorlake.ai/applications/introduction).
+"#;
+
+// First-party scaffolds require reviewed registry releases and explicit builds.
+pub const TYPESCRIPT_WORKSPACE_TEMPLATE: &str = r#"# Security policy applies to registry dependencies and frozen-lockfile installs.
+minimumReleaseAge: 1440 # 24 hours, in minutes
+minimumReleaseAgeStrict: true
+minimumReleaseAgeIgnoreMissingTime: false
+trustLockfile: false
+blockExoticSubdeps: true
+strictDepBuilds: true
+ignoreScripts: true
+optimisticRepeatInstall: false
 "#;

@@ -6,7 +6,7 @@ use clap::ValueEnum;
 use crate::error::{CliError, Result};
 use crate::project::templates::{
     PYTHON_TEMPLATE, README_TEMPLATE, TYPESCRIPT_CONFIG_TEMPLATE, TYPESCRIPT_PACKAGE_TEMPLATE,
-    TYPESCRIPT_README_TEMPLATE, TYPESCRIPT_TEMPLATE,
+    TYPESCRIPT_README_TEMPLATE, TYPESCRIPT_TEMPLATE, TYPESCRIPT_WORKSPACE_TEMPLATE,
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
@@ -136,7 +136,7 @@ pub fn run(name: &str, force: bool, language: Language) -> Result<()> {
     eprintln!("\nNext steps:");
     eprintln!("  cd {}", module_name);
     if language == Language::Typescript {
-        eprintln!("  npm install");
+        eprintln!("  pnpm install");
     }
     eprintln!("  Deploy: tl app deploy {}", application_filename);
     eprintln!("\nLearn more: https://docs.tensorlake.ai/applications/introduction");
@@ -175,6 +175,10 @@ fn scaffold_files(name: &str, module_name: &str, language: Language) -> Vec<(Str
                 TYPESCRIPT_PACKAGE_TEMPLATE
                     .replace("{package_name}", &npm_package_name(module_name))
                     .replace("{sdk_version}", env!("CARGO_PKG_VERSION")),
+            ),
+            (
+                "pnpm-workspace.yaml".to_string(),
+                TYPESCRIPT_WORKSPACE_TEMPLATE.to_string(),
             ),
             (
                 "tsconfig.json".to_string(),
@@ -231,6 +235,7 @@ mod tests {
             [
                 "application.ts",
                 "package.json",
+                "pnpm-workspace.yaml",
                 "tsconfig.json",
                 "README.md"
             ]

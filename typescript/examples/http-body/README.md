@@ -19,10 +19,10 @@ After parsing the body, the application passes ordinary JSON data to
 From the repository root:
 
 ```bash
-npm --prefix typescript install
-npm --prefix typescript run build:sdk
-npm --prefix typescript/examples/http-body install
-npm --prefix typescript/examples/http-body run typecheck
+pnpm --dir typescript install
+pnpm --dir typescript run build:sdk
+pnpm --dir typescript/examples/http-body install
+pnpm --dir typescript/examples/http-body run typecheck
 ```
 
 The repository example uses `"@tensorlakeai/tensorlake": "file:../.."` to resolve the SDK

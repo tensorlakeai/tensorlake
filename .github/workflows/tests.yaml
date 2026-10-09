@@ -82,12 +82,16 @@ jobs:
         with:
           components: clippy
 
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.28.5
+          run_install: false
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '24'
-          cache: npm
-          cache-dependency-path: typescript/package-lock.json
+          cache: pnpm
+          cache-dependency-path: typescript/pnpm-lock.yaml
 
       - name: Cache Rust build artifacts
         uses: Swatinem/rust-cache@v2
@@ -98,8 +102,8 @@ jobs:
       - name: Build TypeScript SDK and Function Service runner capsule
         working-directory: typescript
         run: |
-          npm ci --ignore-scripts
-          npm run build
+          pnpm install --frozen-lockfile --ignore-scripts
+          pnpm run build
 
       - name: Vendor private artifact_storage crates
         uses: ./.github/actions/vendor-private-crates
