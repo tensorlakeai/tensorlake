@@ -264,6 +264,8 @@ jobs:
             tests.sandbox.test_sandbox_rust_backend_async \
             tests.sandbox.test_file_systems \
             tests.sandbox.test_get_or_create \
+            tests.sandbox.test_gpu_allocations \
+            tests.sandbox.test_pool_gpu \
             tests.sandbox.test_ready_timeout \
             tests.sandbox.test_resource_resize \
             tests.image.test_sandbox_builder \
