@@ -396,16 +396,9 @@ pub fn with_sandbox_headers(
 ///
 /// Converts `api.tensorlake.*` → `sandbox.tensorlake.*`. Localhost is unchanged.
 pub fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
-    if is_localhost(api_url) {
-        return api_url.to_string();
-    }
-    if let Ok(parsed) = url::Url::parse(api_url) {
-        let host = parsed.host_str().unwrap_or("");
-        if let Some(rest) = host.strip_prefix("api.") {
-            return format!("{}://sandbox.{}", parsed.scheme(), rest);
-        }
-    }
-    "https://sandbox.tensorlake.ai".to_string()
+    // Single source of truth, including the TENSORLAKE_SANDBOX_API_URL
+    // override, lives in the cloud SDK crate.
+    tensorlake::resolve_sandbox_lifecycle_url(api_url)
 }
 
 fn explicit_proxy_url_override() -> Option<String> {

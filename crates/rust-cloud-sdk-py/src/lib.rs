@@ -4159,23 +4159,9 @@ fn is_localhost_api_url(api_url: &str) -> bool {
 }
 
 fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
-    if is_localhost_api_url(api_url) {
-        return api_url.to_string();
-    }
-    if let Ok(mut parsed) = reqwest::Url::parse(api_url)
-        && let Some(host) = parsed.host_str()
-        && let Some(rest) = host.strip_prefix("api.")
-    {
-        let new_host = format!("sandbox.{rest}");
-        if parsed.set_host(Some(&new_host)).is_ok() {
-            let mut result = parsed.to_string();
-            if result.ends_with('/') {
-                result.pop();
-            }
-            return result;
-        }
-    }
-    "https://sandbox.tensorlake.ai".to_string()
+    // Single source of truth, including the TENSORLAKE_SANDBOX_API_URL
+    // override, lives in the cloud SDK crate.
+    tensorlake::resolve_sandbox_lifecycle_url(api_url)
 }
 
 /// Create a Docker build context tar.gz for a Tensorlake image definition.
