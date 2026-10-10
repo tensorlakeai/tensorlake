@@ -12,7 +12,13 @@ run-name: "Release - TypeScript SDK (npm) · ${{ github.ref_name }} · @${{ gith
 #   2. @tensorlakeai/tensorlake,
 #   3. the `tensorlake` wrapper,
 #
-# so no public package ever depends on a version that is still staged.
+# so no public package ever depends on a version that is still staged. After
+# staging, `announce-approval` lists the staged packages in the run summary and
+# on Slack, and `await-approval` keeps the run in progress until every package
+# is public. It fails, which emails whoever triggered the run, if approval takes
+# longer than APPROVAL_TIMEOUT_MINUTES or happens out of order. Set the
+# NPM_APPROVERS_SLACK_MENTION repository variable (e.g. `<!subteam^S0123>`) to
+# ping the approvers.
 on:
   workflow_dispatch:
 
@@ -20,6 +26,7 @@ env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
   # `npm stage` requires npm 11.15.0 or newer.
   NPM_VERSION: "11.15.0"
+  APPROVAL_TIMEOUT_MINUTES: "120"
 
 permissions:
   contents: read
@@ -343,6 +350,8 @@ jobs:
     needs:
       - stage-sdk
     continue-on-error: true
+    outputs:
+      staged: ${{ steps.stage.outputs.staged }}
     runs-on: ubuntu-latest
     environment:
       name: npm
@@ -376,6 +385,89 @@ jobs:
           npm pack --dry-run --ignore-scripts
 
       - name: Stage wrapper on npm
+        id: stage
         env:
           npm_config_ignore_scripts: "true"
-        run: npm stage publish --access public --provenance
+        run: |
+          npm stage publish --access public --provenance
+          echo "staged=true" >> "$GITHUB_OUTPUT"
+
+  # A separate job from the wait, because GitHub shows a job's summary only once
+  # the job finishes.
+  announce-approval:
+    name: Announce staged npm packages
+    needs:
+      - stage-sdk
+      - stage-wrapper
+    # The wrapper is staged on a best-effort basis; include it only if it was staged.
+    if: ${{ !cancelled() && needs.stage-sdk.result == 'success' }}
+    runs-on: ubuntu-latest
+    env:
+      INCLUDE_WRAPPER: ${{ needs.stage-wrapper.outputs.staged == 'true' }}
+    outputs:
+      version: ${{ steps.staged.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: List staged packages
+        id: staged
+        run: node ./scripts/await-npm-approval.mjs announce
+
+      - name: Notify Slack that packages await approval
+        continue-on-error: true
+        uses: ./.github/actions/notify-npm-approval
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          mention: ${{ vars.NPM_APPROVERS_SLACK_MENTION }}
+          title: ":hourglass_flowing_sand: TypeScript SDK ${{ steps.staged.outputs.version }} is staged on npm and needs approval"
+          details: "Approve on npmjs.com (or `npm stage approve STAGE_ID`) in this order:\n${{ steps.staged.outputs.packages }}"
+
+  await-approval:
+    name: Wait for npm approval
+    needs:
+      - stage-wrapper
+      - announce-approval
+    if: ${{ !cancelled() && needs.announce-approval.result == 'success' }}
+    runs-on: ubuntu-latest
+    # Backstop above APPROVAL_TIMEOUT_MINUTES, so the script reports the timeout.
+    timeout-minutes: 140
+    env:
+      INCLUDE_WRAPPER: ${{ needs.stage-wrapper.outputs.staged == 'true' }}
+      VERSION: ${{ needs.announce-approval.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          node-version: "24"
+          package-manager-cache: false
+
+      - name: Wait until every package is public
+        id: wait
+        run: node ./scripts/await-npm-approval.mjs wait
+
+      - name: Notify Slack that the release is public
+        if: success()
+        continue-on-error: true
+        uses: ./.github/actions/notify-npm-approval
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          title: ":white_check_mark: TypeScript SDK ${{ env.VERSION }} is public on npm"
+          details: "<https://www.npmjs.com/package/@tensorlakeai/tensorlake/v/${{ env.VERSION }}|@tensorlakeai/tensorlake@${{ env.VERSION }}>"
+
+      - name: Notify Slack that approval is incomplete
+        if: failure() && steps.wait.outputs.failure != ''
+        continue-on-error: true
+        uses: ./.github/actions/notify-npm-approval
+        with:
+          webhook-url: ${{ secrets.SLACK_WEBHOOK_URL }}
+          mention: ${{ vars.NPM_APPROVERS_SLACK_MENTION }}
+          title: ":x: TypeScript SDK ${{ env.VERSION }} npm approval is incomplete"
+          details: ${{ steps.wait.outputs.failure }}
