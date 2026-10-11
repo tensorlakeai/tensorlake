@@ -136,7 +136,7 @@ client = SandboxClient.for_cloud(api_key="your-api-key")
 with client.create_and_connect() as sandbox:
     # Run a command
     result = sandbox.run("sh", ["-lc", "printf 'Hello from the sandbox!\\n'"])
-    print(result.stdout)  # "Hello from the sandbox!"
+    print(result.stdout)  # "Hello from the sandbox!\n"
 
     # Write and read files
     sandbox.write_file("/tmp/data.txt", b"some data")

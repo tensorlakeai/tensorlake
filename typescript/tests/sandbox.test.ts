@@ -416,22 +416,21 @@ describe("Sandbox", () => {
   });
 
   describe("run", () => {
-    /** A buffered run_process event list (each event a JSON string). */
-    function runEvents(events: unknown[]): { traceId: string; events: string[] } {
-      return { traceId: "t", events: events.map((e) => JSON.stringify(e)) };
+    /** The `CommandResult` JSON the native `runCommand` returns. */
+    function runResult(result: Record<string, unknown> = {}): { traceId: string; result: string } {
+      return {
+        traceId: "t",
+        result: JSON.stringify({ exit_code: 0, stdout: "", stderr: "", reason: "exited", ...result }),
+      };
     }
 
     it("runs a command and returns result", async () => {
       installNativeStub({
         proxy: {
-          runProcess: vi.fn(async (json: string) => {
+          runCommand: vi.fn(async (json: string) => {
             const body = JSON.parse(json);
             expect(body.user).toBe("1000:1000");
-            return runEvents([
-              { pid: 42, started_at: 1700000000 },
-              { line: "hello", timestamp: 1700000000.1, stream: "stdout" },
-              { exit_code: 0 },
-            ]);
+            return runResult({ stdout: "hello" });
           }),
         },
       });
@@ -449,11 +448,8 @@ describe("Sandbox", () => {
     it("reports a run killed by its timeout", async () => {
       installNativeStub({
         proxy: {
-          runProcess: vi.fn(async () =>
-            runEvents([
-              { pid: 42, started_at: 1700000000 },
-              { exit_code: null, signal: 9, oom_killed: false, reason: "timed_out" },
-            ]),
+          runCommand: vi.fn(async () =>
+            runResult({ exit_code: -9, reason: "timed_out" }),
           ),
         },
       });
@@ -471,8 +467,8 @@ describe("Sandbox", () => {
       const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
       installNativeStub({
         proxy: {
-          runProcess: vi.fn(async () =>
-            runEvents([{ pid: 42, started_at: 1700000000 }, { exit_code: 0 }]),
+          runCommand: vi.fn(async () =>
+            runResult(),
           ),
           readFile: vi.fn(async () => ({
             traceId: "t",
@@ -514,15 +510,12 @@ describe("Sandbox", () => {
     it("omits the process user by default", async () => {
       installNativeStub({
         proxy: {
-          runProcess: vi.fn(async (json: string) => {
+          runCommand: vi.fn(async (json: string) => {
             const body = JSON.parse(json);
             // No user requested -> field omitted so the sandbox resolves the
             // image's configured user (image USER, falling back to root).
             expect(body.user).toBeUndefined();
-            return runEvents([
-              { pid: 42, started_at: 1700000000 },
-              { exit_code: 0 },
-            ]);
+            return runResult();
           }),
         },
       });

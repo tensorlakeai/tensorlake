@@ -703,10 +703,44 @@ export interface OutputResponse {
   lineCount: number;
 }
 
+/**
+ * One output chunk from an SSE stream. A chunk is not always a whole line: the
+ * daemon can send a line in parts, e.g. after a pause in the output. Use
+ * `joinOutput` to get the text the process wrote.
+ */
 export interface OutputEvent {
   line: string;
   timestamp: Date;
   stream?: string;
+  /**
+   * The terminator the daemon removed from `line`: "\n", "\r\n", or "" for a
+   * partial chunk. Absent from an older daemon, which sends whole lines.
+   */
+  lineEnding?: string;
+}
+
+/**
+ * Join the output chunks of one stream into the text the process wrote.
+ *
+ * Give the events of one stream only. The events of `followOutput` mix stdout
+ * and stderr, so split them by `stream` first.
+ *
+ * The result is the same as `CommandResult.stdout` of `Sandbox.run()`. An
+ * older daemon sends lines without their terminators: they are joined with
+ * "\n", with no newline after the last line.
+ *
+ * The text is exact only if the output is valid UTF-8 and each character is
+ * written within 25 ms. Otherwise the daemon sends U+FFFD for the bytes it
+ * cannot decode.
+ */
+export function joinOutput(events: Iterable<Pick<OutputEvent, "line" | "lineEnding">>): string {
+  let text = "";
+  let ending: string | undefined = "";
+  for (const event of events) {
+    ending = event.lineEnding;
+    text += event.line + (ending ?? "\n");
+  }
+  return ending === undefined ? text.slice(0, -1) : text;
 }
 
 // --- Run ---

@@ -1078,6 +1078,19 @@ pub struct OutputEvent {
     pub timestamp: serde_json::Value,
     #[serde(default)]
     pub stream: Option<String>,
+    /// The terminator the daemon removed from `line`: `"\n"`, `"\r\n"`, or
+    /// `""` for a partial chunk. Absent from an older daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_ending: Option<String>,
+    /// The byte offset of this chunk in the raw output of its stream. Absent
+    /// from a daemon that does not send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_offset: Option<usize>,
+    /// The raw output bytes of this chunk, terminator included. `line` can
+    /// have a different length, because the daemon replaces bytes that are
+    /// not UTF-8 with U+FFFD. Absent from a daemon that does not send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub capture_bytes: Option<usize>,
 }
 
 /// Events returned by the streaming `POST /api/v1/processes/run` endpoint.
@@ -1105,6 +1118,58 @@ pub enum RunProcessEvent {
     },
 }
 
+/// One message of the streaming `POST /api/v1/processes/run` endpoint.
+#[derive(Clone, Debug, PartialEq)]
+pub enum RunStreamMessage {
+    /// A start, output, or exit event. An exit event has an exit status.
+    Event(RunProcessEvent),
+    /// The `{}` exit event a daemon sends when it lost the exit status of
+    /// the process.
+    ExitStatusLost,
+    /// A message this SDK does not use, such as a heartbeat or an unknown
+    /// event.
+    Ignored,
+}
+
+/// The fields of an exit event. Only an exit event with no other fields can
+/// be the daemon's lost-exit event.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+#[allow(dead_code)]
+struct ExitEventFields {
+    #[serde(default)]
+    exit_code: Option<i64>,
+    #[serde(default)]
+    signal: Option<i64>,
+    #[serde(default)]
+    oom_killed: Option<bool>,
+    #[serde(default)]
+    reason: Option<ProcessExitReason>,
+}
+
+impl RunStreamMessage {
+    /// Parse the data of one SSE message.
+    pub fn parse(data: &str) -> serde_json::Result<Self> {
+        // The Exited variant has all-optional fields, so any JSON object
+        // parses as Exited. Exited{None, None} is either the lost-exit event
+        // or JSON this SDK does not know.
+        Ok(match serde_json::from_str::<RunProcessEvent>(data)? {
+            RunProcessEvent::Exited {
+                exit_code: None,
+                signal: None,
+                ..
+            } => {
+                if serde_json::from_str::<ExitEventFields>(data).is_ok() {
+                    Self::ExitStatusLost
+                } else {
+                    Self::Ignored
+                }
+            }
+            event => Self::Event(event),
+        })
+    }
+}
+
 /// Why a process run to completion ended, as reported by the sandbox daemon.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1121,6 +1186,136 @@ pub enum ProcessExitReason {
     /// still describe how the process ended.
     #[serde(other)]
     Unknown,
+}
+
+/// Join one stream's output chunks into the text the process wrote.
+///
+/// The daemon sends each chunk's `line_ending` (`""` for a partial chunk), so
+/// the chunks join exactly. An older daemon sends lines without their
+/// terminators, so such a chunk ends with `"\n"`, except the last one.
+///
+/// The text is exact only if the output is valid UTF-8 and each character is
+/// written within 25 ms. Otherwise the daemon sends U+FFFD for the bytes it
+/// cannot decode.
+pub fn join_output<'a>(chunks: impl IntoIterator<Item = &'a OutputEvent>) -> String {
+    let mut text = JoinedOutput::default();
+    for chunk in chunks {
+        text.push(chunk);
+    }
+    text.finish()
+}
+
+/// [`join_output`] one chunk at a time, so a caller keeps only the text.
+#[derive(Debug)]
+struct JoinedOutput {
+    text: String,
+    last_has_ending: bool,
+}
+
+impl Default for JoinedOutput {
+    fn default() -> Self {
+        Self {
+            text: String::new(),
+            last_has_ending: true,
+        }
+    }
+}
+
+impl JoinedOutput {
+    fn push(&mut self, chunk: &OutputEvent) {
+        self.text.push_str(&chunk.line);
+        self.text
+            .push_str(chunk.line_ending.as_deref().unwrap_or("\n"));
+        self.last_has_ending = chunk.line_ending.is_some();
+    }
+
+    fn finish(mut self) -> String {
+        if !self.last_has_ending {
+            self.text.pop();
+        }
+        self.text
+    }
+}
+
+/// Builds a [`CommandResult`] from the run events as they arrive. It keeps
+/// only the joined text, not the events.
+#[derive(Debug, Default)]
+pub(crate) struct CommandResultBuilder {
+    stdout: JoinedOutput,
+    stderr: JoinedOutput,
+    exit: Option<(i64, ProcessExitReason)>,
+}
+
+impl CommandResultBuilder {
+    pub(crate) fn push(&mut self, event: &RunProcessEvent) {
+        match event {
+            RunProcessEvent::Output(output) if output.stream.as_deref() == Some("stderr") => {
+                self.stderr.push(output)
+            }
+            RunProcessEvent::Output(output) => self.stdout.push(output),
+            RunProcessEvent::Exited {
+                exit_code,
+                signal,
+                oom_killed,
+                reason,
+            } => {
+                let (code, derived) = match (exit_code, signal) {
+                    (Some(code), _) => (*code, ProcessExitReason::Exited),
+                    (None, Some(signal)) => (-signal, ProcessExitReason::Signaled),
+                    (None, None) => return,
+                };
+                let reason = match reason {
+                    Some(reason) if *reason != ProcessExitReason::Unknown => *reason,
+                    // Sandboxes that predate the field, or a reason this SDK
+                    // does not know: derive it from how the process ended. A
+                    // timeout is only ever reported by the sandbox, never
+                    // inferred from a SIGKILL.
+                    _ if *oom_killed => ProcessExitReason::OomKilled,
+                    _ => derived,
+                };
+                self.exit = Some((code, reason));
+            }
+            RunProcessEvent::Started { .. } => {}
+        }
+    }
+
+    /// The result, or `None` when no event reported an exit status.
+    pub(crate) fn finish(self) -> Option<CommandResult> {
+        let (exit_code, reason) = self.exit?;
+        Some(CommandResult {
+            exit_code,
+            stdout: self.stdout.finish(),
+            stderr: self.stderr.finish(),
+            reason,
+        })
+    }
+}
+
+/// Result of a process run to completion.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct CommandResult {
+    /// The exit status, or `-signal` for a process killed by a signal.
+    pub exit_code: i64,
+    /// The text the process wrote to stdout. See [`join_output`] for when
+    /// it is exact.
+    pub stdout: String,
+    /// The text the process wrote to stderr. See [`join_output`] for when
+    /// it is exact.
+    pub stderr: String,
+    /// Why the process ended. Never [`ProcessExitReason::Unknown`].
+    pub reason: ProcessExitReason,
+}
+
+impl CommandResult {
+    /// Build the result from the events of `POST /api/v1/processes/run`.
+    /// Returns `None` when no event reports an exit status.
+    pub fn from_run_events(events: &[RunProcessEvent]) -> Option<Self> {
+        let mut builder = CommandResultBuilder::default();
+        for event in events {
+            builder.push(event);
+        }
+        builder.finish()
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -1718,6 +1913,138 @@ mod tests {
                 count: 2,
                 model: "H100".to_string(),
             }
+        );
+    }
+
+    #[test]
+    fn run_output_events_keep_their_line_ending() {
+        let line_ending = |data: &str| {
+            let event: RunProcessEvent = serde_json::from_str(data).unwrap();
+            serde_json::to_value(&event)
+                .unwrap()
+                .get("line_ending")
+                .cloned()
+        };
+
+        assert_eq!(
+            line_ending(r#"{"line":"a","timestamp":1,"line_ending":"\r\n"}"#),
+            Some(serde_json::json!("\r\n"))
+        );
+        assert_eq!(line_ending(r#"{"line":"a","timestamp":1}"#), None);
+    }
+
+    fn command_result(events: &[&str]) -> Option<CommandResult> {
+        let events: Vec<RunProcessEvent> = events
+            .iter()
+            .map(|event| serde_json::from_str(event).unwrap())
+            .collect();
+        CommandResult::from_run_events(&events)
+    }
+
+    #[test]
+    fn run_stream_message_tells_a_lost_exit_from_an_unknown_event() {
+        for data in [
+            "{}",
+            r#"{"exit_code":null,"signal":null,"oom_killed":false}"#,
+        ] {
+            assert_eq!(
+                RunStreamMessage::parse(data).unwrap(),
+                RunStreamMessage::ExitStatusLost,
+                "{data}"
+            );
+        }
+        assert_eq!(
+            RunStreamMessage::parse(r#"{"heartbeat":1}"#).unwrap(),
+            RunStreamMessage::Ignored
+        );
+        assert!(matches!(
+            RunStreamMessage::parse(r#"{"exit_code":3}"#).unwrap(),
+            RunStreamMessage::Event(RunProcessEvent::Exited {
+                exit_code: Some(3),
+                ..
+            })
+        ));
+        assert!(RunStreamMessage::parse("not json").is_err());
+    }
+
+    #[test]
+    fn command_result_joins_chunks_with_their_line_endings() {
+        let result = command_result(&[
+            r#"{"pid":7,"started_at":1}"#,
+            r#"{"line":"a","line_ending":"","timestamp":2}"#,
+            r#"{"line":"b","line_ending":"\r\n","timestamp":3}"#,
+            r#"{"line":"","line_ending":"\n","timestamp":4}"#,
+            r#"{"line":"oops","line_ending":"\n","stream":"stderr","timestamp":5}"#,
+            r#"{"exit_code":0,"reason":"exited"}"#,
+        ])
+        .unwrap();
+        assert_eq!(result.stdout, "ab\r\n\n");
+        assert_eq!(result.stderr, "oops\n");
+        assert_eq!(result.exit_code, 0);
+        assert_eq!(result.reason, ProcessExitReason::Exited);
+    }
+
+    #[test]
+    fn command_result_joins_old_lines_and_chunks_in_one_stream() {
+        let result = command_result(&[
+            r#"{"line":"a","line_ending":"","timestamp":1}"#,
+            r#"{"line":"b","line_ending":"\n","timestamp":2}"#,
+            r#"{"line":"old","timestamp":3}"#,
+            r#"{"line":"last","timestamp":4}"#,
+            r#"{"exit_code":0}"#,
+        ])
+        .unwrap();
+        assert_eq!(result.stdout, "ab\nold\nlast");
+        assert_eq!(result.stderr, "");
+    }
+
+    #[test]
+    fn command_result_needs_an_exit_event() {
+        assert_eq!(command_result(&[]), None);
+        assert_eq!(
+            command_result(&[
+                r#"{"line":"partial","line_ending":"","timestamp":1}"#,
+                r#"{"type":"heartbeat"}"#,
+            ]),
+            None
+        );
+    }
+
+    #[test]
+    fn command_result_derives_a_missing_or_unknown_reason() {
+        let exit = |event: &str| {
+            let result = command_result(&[event]).unwrap();
+            (result.exit_code, result.reason)
+        };
+        assert_eq!(exit(r#"{"exit_code":3}"#), (3, ProcessExitReason::Exited));
+        assert_eq!(exit(r#"{"signal":15}"#), (-15, ProcessExitReason::Signaled));
+        assert_eq!(
+            exit(r#"{"signal":9,"oom_killed":true}"#),
+            (-9, ProcessExitReason::OomKilled)
+        );
+        assert_eq!(
+            exit(r#"{"signal":9,"reason":"timed_out"}"#),
+            (-9, ProcessExitReason::TimedOut)
+        );
+        assert_eq!(
+            exit(r#"{"exit_code":0,"reason":"new_reason"}"#),
+            (0, ProcessExitReason::Exited)
+        );
+        // A SIGKILL without a reported reason is not a timeout.
+        assert_eq!(exit(r#"{"signal":9}"#), (-9, ProcessExitReason::Signaled));
+    }
+
+    #[test]
+    fn command_result_serializes_the_reason_in_snake_case() {
+        let result = command_result(&[r#"{"signal":9,"oom_killed":true}"#]).unwrap();
+        assert_eq!(
+            serde_json::to_value(&result).unwrap(),
+            serde_json::json!({
+                "exit_code": -9,
+                "stdout": "",
+                "stderr": "",
+                "reason": "oom_killed",
+            })
         );
     }
 }

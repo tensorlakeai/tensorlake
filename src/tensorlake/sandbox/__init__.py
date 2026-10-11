@@ -87,6 +87,7 @@ from .models import (
     SnapshotType,
     SnapshotWaitCondition,
     StdinMode,
+    join_output,
     sandbox_url_from_ingress_endpoint,
 )
 from .pty import AsyncPty, Pty
@@ -177,6 +178,7 @@ __all__ = [
     "SendSignalResponse",
     "OutputResponse",
     "OutputEvent",
+    "join_output",
     # File models
     "DirectoryEntry",
     "ListDirectoryResponse",

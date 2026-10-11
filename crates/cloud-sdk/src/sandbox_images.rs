@@ -22,8 +22,8 @@ use crate::{
     sandboxes::{
         SandboxProxyClient, SandboxesClient,
         models::{
-            CreateSandboxRequest, CreateSandboxResources, MultipartHint, ProcessInfo,
-            RunProcessEvent, SandboxInfo, SignBlobOp, SignBlobRequest, SignBlobTarget,
+            CreateSandboxRequest, CreateSandboxResources, MultipartHint, OutputEvent, ProcessInfo,
+            RunProcessEvent, SandboxInfo, SignBlobOp, SignBlobRequest, SignBlobTarget, join_output,
         },
         resolve_sandbox_proxy_target, select_sandbox_proxy_url,
     },
@@ -1669,16 +1669,13 @@ async fn run_diagnostic_command_stdout(proxy: &SandboxProxyClient, script: &str)
     );
 
     let events = proxy.run_process(&payload).await.ok()?.into_inner();
-    let mut output = String::new();
-    for event in events {
-        if let RunProcessEvent::Output(event) = event
-            && event.stream.as_deref() != Some("stderr")
-        {
-            output.push_str(&event.line);
-            output.push('\n');
+    let stdout = events.iter().filter_map(|event| match event {
+        RunProcessEvent::Output(output) if output.stream.as_deref() != Some("stderr") => {
+            Some(output)
         }
-    }
-    Some(output)
+        _ => None,
+    });
+    Some(join_output(stdout))
 }
 
 fn contains_oom_killer_evidence(output: &str) -> bool {
@@ -1690,8 +1687,12 @@ fn contains_oom_killer_evidence(output: &str) -> bool {
 
 fn contains_disk_space_evidence(output: &str) -> bool {
     let output = output.to_ascii_lowercase();
-    output.contains("enospc") || output.contains("no space")
+    DISK_SPACE_MARKERS
+        .iter()
+        .any(|marker| output.contains(marker))
 }
+
+const DISK_SPACE_MARKERS: [&str; 2] = ["enospc", "no space"];
 
 fn parse_df_max_usage_percent(output: &str) -> Option<u8> {
     output.lines().filter_map(parse_df_line_usage_percent).max()
@@ -1960,11 +1961,28 @@ async fn stream_started_process(
     pid: i64,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<ProcessTerminalStatus> {
-    let mut output_events_seen = 0usize;
+    let mut received = ReceivedOutput::default();
+    let status = follow_until_exit(proxy, pid, &mut received, emit).await;
+    // Show the last line of a stream that ended without a terminator.
+    for (stream, message) in received.partial_lines.take() {
+        emit(SandboxImageBuildEvent::BuildLog {
+            stream: stream.to_string(),
+            message,
+        });
+    }
+    status
+}
+
+async fn follow_until_exit(
+    proxy: &SandboxProxyClient,
+    pid: i64,
+    received: &mut ReceivedOutput,
+    emit: &mut impl FnMut(SandboxImageBuildEvent),
+) -> Result<ProcessTerminalStatus> {
     let mut attempts = 0usize;
 
     loop {
-        let follow_result = follow_process_output(proxy, pid, &mut output_events_seen, emit).await;
+        let follow_result = follow_process_output(proxy, pid, received, emit).await;
 
         if let Err(error) = follow_result {
             attempts += 1;
@@ -2015,26 +2033,138 @@ pub(crate) async fn follow_started_process_output(
 async fn follow_process_output(
     proxy: &SandboxProxyClient,
     pid: i64,
-    output_events_seen: &mut usize,
+    received: &mut ReceivedOutput,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
-    let mut replayed_events_seen = 0usize;
+    // A follow replays the output from its start, so this counts the bytes
+    // replayed on each reconnect.
+    let mut replayed = StreamBytes::default();
     proxy
         .follow_output_streaming(pid, |output| {
-            if replayed_events_seen < *output_events_seen {
-                replayed_events_seen += 1;
-                return;
+            if let Some(output) = received.unseen_part(&mut replayed, output)
+                && let Some(message) = received.partial_lines.complete(&output)
+            {
+                emit(SandboxImageBuildEvent::BuildLog {
+                    stream: output.stream.unwrap_or_else(|| "stdout".to_string()),
+                    message,
+                });
             }
-            replayed_events_seen += 1;
-            *output_events_seen += 1;
-            emit(SandboxImageBuildEvent::BuildLog {
-                stream: output.stream.unwrap_or_else(|| "stdout".to_string()),
-                message: output.line,
-            });
         })
         .await?;
 
     Ok(())
+}
+
+/// Output bytes per stream, line terminators included.
+#[derive(Default)]
+struct StreamBytes {
+    stdout: usize,
+    stderr: usize,
+}
+
+impl StreamBytes {
+    fn get_mut(&mut self, stream: Option<&str>) -> &mut usize {
+        match stream {
+            Some("stderr") => &mut self.stderr,
+            _ => &mut self.stdout,
+        }
+    }
+}
+
+/// The build log output already received, kept across reconnects.
+///
+/// A reconnect replays the output from its start, but not in the same chunks:
+/// a line sent live in parts can come back as one chunk. So this skips the
+/// replay by bytes, not by events.
+///
+/// The daemon's `capture_offset` and `capture_bytes` give the exact raw
+/// bytes. A daemon that does not send them gets the bytes of the decoded text
+/// counted instead. That count is not exact: the daemon sends a character
+/// split across writes, or bytes that are not UTF-8, as U+FFFD live, but can
+/// replay them as different bytes.
+#[derive(Default)]
+struct ReceivedOutput {
+    bytes: StreamBytes,
+    partial_lines: PartialLines,
+}
+
+impl ReceivedOutput {
+    /// The part of `output` not received yet, if any. `replayed` counts the
+    /// bytes this follow received before `output`.
+    fn unseen_part(
+        &mut self,
+        replayed: &mut StreamBytes,
+        mut output: OutputEvent,
+    ) -> Option<OutputEvent> {
+        let (start, len) = match (output.capture_offset, output.capture_bytes) {
+            (Some(offset), Some(bytes)) => (offset, bytes),
+            _ => {
+                // An older daemon sends whole lines without `line_ending`.
+                let ending_len = output.line_ending.as_deref().map_or(1, str::len);
+                let len = output.line.len() + ending_len;
+                let received = replayed.get_mut(output.stream.as_deref());
+                let start = *received;
+                *received += len;
+                (start, len)
+            }
+        };
+        let seen = self.bytes.get_mut(output.stream.as_deref());
+        let skip = seen.saturating_sub(start);
+        if skip >= len {
+            return None;
+        }
+        *seen = start + len;
+        if skip > 0 {
+            // A raw byte count matches the text only if all of it is UTF-8.
+            // Otherwise move the cut to the next character boundary: the
+            // live part sent a character it cut as U+FFFD. A cut past `line`
+            // leaves only the terminator.
+            let mut cut = skip.min(output.line.len());
+            while !output.line.is_char_boundary(cut) {
+                cut += 1;
+            }
+            output.line.drain(..cut);
+        }
+        Some(output)
+    }
+}
+
+/// The text of a line received in parts, per stream, held until its
+/// terminator comes. Each build log message prints as one line, so a part
+/// emitted alone would split the line. Text longer than
+/// [`PARTIAL_LINE_MAX_BYTES`] is emitted without its terminator, so a long
+/// line with no `\n` does not hold the log or grow with no limit.
+#[derive(Default)]
+struct PartialLines {
+    stdout: String,
+    stderr: String,
+}
+
+/// The most text of one line that the build log holds back.
+const PARTIAL_LINE_MAX_BYTES: usize = 64 * 1024;
+
+impl PartialLines {
+    /// Add `output` and return the whole line it ends, if it ends one.
+    fn complete(&mut self, output: &OutputEvent) -> Option<String> {
+        let partial = match output.stream.as_deref() {
+            Some("stderr") => &mut self.stderr,
+            _ => &mut self.stdout,
+        };
+        partial.push_str(&output.line);
+        // An older daemon sends whole lines without `line_ending`.
+        (output.line_ending.as_deref() != Some("") || partial.len() >= PARTIAL_LINE_MAX_BYTES)
+            .then(|| std::mem::take(partial))
+    }
+
+    /// Take the text of lines that got no terminator.
+    fn take(&mut self) -> impl Iterator<Item = (&'static str, String)> {
+        [
+            ("stdout", std::mem::take(&mut self.stdout)),
+            ("stderr", std::mem::take(&mut self.stderr)),
+        ]
+        .into_iter()
+        .filter(|(_, line)| !line.is_empty())
+    }
 }
 
 async fn get_process_terminal_status_with_retries(
@@ -3317,6 +3447,201 @@ Filesystem 1024-blocks Used Available Capacity Mounted on
         assert!(!contains_disk_space_evidence(
             "rootfs builder exited with status 1"
         ));
+    }
+
+    #[test]
+    fn build_log_emits_whole_lines() {
+        let event = |stream: &str, line: &str, ending: Option<&str>| super::OutputEvent {
+            line: line.to_string(),
+            timestamp: serde_json::Value::Null,
+            stream: Some(stream.to_string()),
+            line_ending: ending.map(str::to_string),
+            capture_offset: None,
+            capture_bytes: None,
+        };
+        let mut partial_lines = super::PartialLines::default();
+        let lines: Vec<_> = [
+            event("stdout", "Step 3/7 : RUN ", Some("")),
+            event("stderr", "warn", Some("\n")),
+            event("stdout", "apt-get install", Some("\n")),
+            event("stdout", "", Some("\r\n")),
+            event("stdout", " 10%\r", Some("")),
+            event("stdout", " 50%\r", Some("")),
+            event("stdout", "100%", Some("\n")),
+            // An older daemon sends whole lines without line endings.
+            event("stdout", "old", None),
+            event("stderr", "no terminator", Some("")),
+        ]
+        .iter()
+        .filter_map(|output| partial_lines.complete(output))
+        .collect();
+        assert_eq!(
+            lines,
+            [
+                "warn",
+                "Step 3/7 : RUN apt-get install",
+                "",
+                " 10%\r 50%\r100%",
+                "old"
+            ]
+        );
+        assert_eq!(
+            partial_lines.take().collect::<Vec<_>>(),
+            [("stderr", "no terminator".to_string())]
+        );
+        assert_eq!(partial_lines.take().count(), 0);
+    }
+
+    #[test]
+    fn build_log_reconnect_skips_replayed_output_by_bytes() {
+        let event = |stream: &str, line: &str, ending: &str| super::OutputEvent {
+            line: line.to_string(),
+            timestamp: serde_json::Value::Null,
+            stream: Some(stream.to_string()),
+            line_ending: Some(ending.to_string()),
+            capture_offset: None,
+            capture_bytes: None,
+        };
+        let mut received = super::ReceivedOutput::default();
+        let mut follow = |events: Vec<super::OutputEvent>| {
+            let mut replayed = super::StreamBytes::default();
+            events
+                .into_iter()
+                .filter_map(|output| {
+                    let output = received.unseen_part(&mut replayed, output)?;
+                    received.partial_lines.complete(&output)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Live: two lines sent in parts, then the stream drops.
+        assert_eq!(
+            follow(vec![
+                event("stdout", "Password: ", ""),
+                event("stdout", "", "\n"),
+                event("stdout", "50%", ""),
+                event("stderr", "warn", "\n"),
+            ]),
+            ["Password: ", "warn"]
+        );
+        // Replay: the same output in whole lines, then new output. The held
+        // "50%" joins the rest of its line.
+        assert_eq!(
+            follow(vec![
+                event("stdout", "Password: ", "\n"),
+                event("stdout", "50% done", "\n"),
+                event("stderr", "warn", "\n"),
+                event("stdout", "next", "\n"),
+            ]),
+            ["50% done", "next"]
+        );
+        // Replay again: a line cut after its text leaves only a terminator.
+        let mut received = super::ReceivedOutput::default();
+        let mut replayed = super::StreamBytes::default();
+        let output = received
+            .unseen_part(&mut replayed, event("stdout", "abc", ""))
+            .unwrap();
+        assert_eq!(received.partial_lines.complete(&output), None);
+        let mut replayed = super::StreamBytes::default();
+        let output = received
+            .unseen_part(&mut replayed, event("stdout", "abc", "\n"))
+            .unwrap();
+        assert_eq!(output.line, "");
+        assert_eq!(
+            received.partial_lines.complete(&output).as_deref(),
+            Some("abc")
+        );
+    }
+
+    #[test]
+    fn build_log_reconnect_skips_replayed_output_by_capture_offset() {
+        let event = |line: &str, ending: &str, offset: usize, bytes: usize| super::OutputEvent {
+            line: line.to_string(),
+            timestamp: serde_json::Value::Null,
+            stream: Some("stdout".to_string()),
+            line_ending: Some(ending.to_string()),
+            capture_offset: Some(offset),
+            capture_bytes: Some(bytes),
+        };
+        let mut received = super::ReceivedOutput::default();
+        let mut follow = |events: Vec<super::OutputEvent>| {
+            let mut replayed = super::StreamBytes::default();
+            events
+                .into_iter()
+                .filter_map(|output| {
+                    let output = received.unseen_part(&mut replayed, output)?;
+                    received.partial_lines.complete(&output)
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Live: "café\n" with "é" (2 bytes) split across two writes. The
+        // daemon sends each half as U+FFFD (3 bytes of text each).
+        assert_eq!(
+            follow(vec![
+                event("caf\u{FFFD}", "", 0, 4),
+                event("\u{FFFD}", "\n", 4, 2),
+                event("50%", "", 6, 3),
+            ]),
+            ["caf\u{FFFD}\u{FFFD}"]
+        );
+        // Replay: the whole bytes come back as one valid line. The text
+        // counts differ from the live ones, but the raw offsets do not.
+        assert_eq!(
+            follow(vec![
+                event("café", "\n", 0, 6),
+                event("50% done", "\n", 6, 9),
+                event("next", "\n", 15, 5),
+            ]),
+            ["50% done", "next"]
+        );
+
+        // A cut inside a character moves to the next character boundary.
+        let mut received = super::ReceivedOutput::default();
+        let mut replayed = super::StreamBytes::default();
+        received.unseen_part(&mut replayed, event("caf\u{FFFD}", "", 0, 4));
+        let output = received
+            .unseen_part(&mut replayed, event("café!", "\n", 0, 7))
+            .unwrap();
+        assert_eq!(output.line, "!");
+    }
+
+    #[test]
+    fn diagnostics_do_not_join_build_log_lines() {
+        let mut diagnostics = BuilderFailureDiagnostics::default();
+        for message in ["Remove all images? answer: no", " space reclaimed"] {
+            diagnostics.observe_build_event(&SandboxImageBuildEvent::BuildLog {
+                stream: "stdout".to_string(),
+                message: message.to_string(),
+            });
+        }
+
+        assert!(!diagnostics.disk_error_output);
+    }
+
+    #[test]
+    fn build_log_emits_a_long_partial_line_without_its_terminator() {
+        let event = |line: String, ending: &str| super::OutputEvent {
+            line,
+            timestamp: serde_json::Value::Null,
+            stream: Some("stdout".to_string()),
+            line_ending: Some(ending.to_string()),
+            capture_offset: None,
+            capture_bytes: None,
+        };
+        let mut partial_lines = super::PartialLines::default();
+        let half = "x".repeat(super::PARTIAL_LINE_MAX_BYTES / 2);
+        assert_eq!(partial_lines.complete(&event(half.clone(), "")), None);
+        assert_eq!(
+            partial_lines.complete(&event(half.clone(), "")),
+            Some(half.repeat(2))
+        );
+        assert_eq!(
+            partial_lines
+                .complete(&event("y".to_string(), "\n"))
+                .as_deref(),
+            Some("y")
+        );
     }
 
     #[test]

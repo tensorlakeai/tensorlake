@@ -2183,7 +2183,11 @@ async fn main() {
             CliError::ExitCode(code) => std::process::exit(*code),
             CliError::Cancelled => std::process::exit(1),
             _ => {
-                eprintln!("Error: {}", e);
+                // Unlike `eprintln!`, do not panic when stderr is a closed
+                // pipe, e.g. `tl sbx exec ... 2>&1 >/dev/null | head -1`.
+                use std::io::Write as _;
+                let mut stderr = std::io::stderr().lock();
+                let _ = writeln!(stderr, "Error: {}", e);
                 // Walk the source chain: wrapped errors like reqwest's hide the
                 // root cause (DNS failure, connection refused, TLS, timeout)
                 // behind Display and only expose it via source().
@@ -2192,14 +2196,14 @@ async fn main() {
                 while let Some(cause) = source {
                     let msg = cause.to_string();
                     if !prev.contains(&msg) {
-                        eprintln!("  Caused by: {}", msg);
+                        let _ = writeln!(stderr, "  Caused by: {}", msg);
                         prev = msg;
                     }
                     source = cause.source();
                 }
                 if ctx.debug {
-                    eprintln!("\nDebug info:");
-                    eprintln!("  {:?}", e);
+                    let _ = writeln!(stderr, "\nDebug info:");
+                    let _ = writeln!(stderr, "  {:?}", e);
                 }
                 std::process::exit(1);
             }

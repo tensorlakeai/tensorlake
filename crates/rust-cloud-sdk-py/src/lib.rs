@@ -2914,7 +2914,10 @@ impl CloudSandboxProxyClient {
         })
     }
 
-    fn run_process_json(&self, payload_json: String) -> PyResult<(String, Vec<String>)> {
+    /// Run a process to completion. Returns the trace id and the
+    /// `CommandResult` as JSON, or `None` when the stream ended without an
+    /// exit event.
+    fn run_command_json(&self, payload_json: String) -> PyResult<(String, Option<String>)> {
         let payload: Value = parse_json_payload(&payload_json)?;
         // Running a process is not idempotent: the general retry would replay
         // it after a timeout, when the sandbox may already be executing the
@@ -2924,14 +2927,14 @@ impl CloudSandboxProxyClient {
         self.run_with_connect_replay(move |client| {
             let payload = payload.clone();
             async move {
-                let traced = client.run_process(&payload).await?;
+                let traced = client.run_command(&payload).await?;
                 let trace_id = traced.trace_id.clone();
-                let events = traced
+                let result = traced
                     .into_inner()
-                    .into_iter()
-                    .map(|event| serde_json::to_string(&event).map_err(SdkError::from))
-                    .collect::<Result<Vec<String>, SdkError>>()?;
-                Ok((trace_id, events))
+                    .map(|result| serde_json::to_string(&result))
+                    .transpose()
+                    .map_err(SdkError::from)?;
+                Ok((trace_id, result))
             }
         })
     }
@@ -3338,7 +3341,7 @@ impl CloudSandboxProxyClient {
         })
     }
 
-    fn run_process_json_async<'py>(
+    fn run_command_json_async<'py>(
         &self,
         py: Python<'py>,
         payload_json: String,
@@ -3346,21 +3349,21 @@ impl CloudSandboxProxyClient {
         let payload: Value = parse_json_payload(&payload_json)?;
         let client = self.client.clone();
         future_into_py(py, async move {
-            // See `run_process_json`: replay only failures that never reached
+            // See `run_command_json`: replay only failures that never reached
             // the sandbox, so a timeout cannot start the command twice.
             let traced = replay_if_never_delivered(client, move |c| {
                 let payload = payload.clone();
-                async move { c.run_process(&payload).await }
+                async move { c.run_command(&payload).await }
             })
             .await
             .map_err(into_sandbox_py_error)?;
             let trace_id = traced.trace_id.clone();
-            let events: Vec<String> = traced
+            let result = traced
                 .into_inner()
-                .into_iter()
-                .map(|event| serde_json::to_string(&event).map_err(sandbox_serde_err))
-                .collect::<Result<Vec<String>, _>>()?;
-            Ok((trace_id, events))
+                .map(|result| serde_json::to_string(&result))
+                .transpose()
+                .map_err(sandbox_serde_err)?;
+            Ok((trace_id, result))
         })
     }
 

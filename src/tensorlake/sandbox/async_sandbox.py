@@ -66,6 +66,7 @@ from .sandbox import (
     _RUST_SANDBOX_PROXY_CLIENT_AVAILABLE,
     RustCloudSandboxProxyClient,
     Sandbox,
+    _command_result,
     _raise_as_sandbox_error,
     _resolve_process_arg,
     _validate_managed_name_client_side,
@@ -1119,13 +1120,13 @@ class AsyncSandbox:
             user=process_user,
         )
         try:
-            trace_id, events_json = await self._rust_client.run_process_json_async(
+            trace_id, result_json = await self._rust_client.run_command_json_async(
                 json.dumps(payload)
             )
         except Exception as e:
             _raise_as_sandbox_error(e)
 
-        return Traced(trace_id, Sandbox._command_result_from_run_events(events_json))
+        return Traced(trace_id, _command_result(result_json))
 
     # --- Process management ---
 
@@ -1327,7 +1328,13 @@ class AsyncSandbox:
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
     ) -> TracedIterator[OutputEvent]:
-        """Follow stdout output events by PID or process name given on creation."""
+        """Follow stdout output events by PID or process name given on creation.
+
+        Each event is an output chunk, not always a whole line. A line can
+        come in parts, and a terminator can come in an event with an empty
+        ``line``. Use ``join_output(events)`` to get the text the process
+        wrote, or join ``line`` and ``line_ending`` yourself.
+        """
         seg = _resolve_process_arg(process, pid)
         try:
             trace_id, events_json = await self._rust_client.follow_stdout_json_async(
@@ -1345,7 +1352,13 @@ class AsyncSandbox:
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
     ) -> TracedIterator[OutputEvent]:
-        """Follow stderr output events by PID or process name given on creation."""
+        """Follow stderr output events by PID or process name given on creation.
+
+        Each event is an output chunk, not always a whole line. A line can
+        come in parts, and a terminator can come in an event with an empty
+        ``line``. Use ``join_output(events)`` to get the text the process
+        wrote, or join ``line`` and ``line_ending`` yourself.
+        """
         seg = _resolve_process_arg(process, pid)
         try:
             trace_id, events_json = await self._rust_client.follow_stderr_json_async(
@@ -1363,7 +1376,14 @@ class AsyncSandbox:
         *,
         pid: int | str = _PROCESS_ARG_UNSET,
     ) -> TracedIterator[OutputEvent]:
-        """Follow combined output events by PID or process name given on creation."""
+        """Follow combined output events by PID or process name given on creation.
+
+        Each event is an output chunk, not always a whole line. A line can
+        come in parts, and a terminator can come in an event with an empty
+        ``line``. Keep stdout and stderr apart: split the events by ``stream``,
+        then use ``join_output`` on each part to get the text the process
+        wrote.
+        """
         seg = _resolve_process_arg(process, pid)
         try:
             trace_id, events_json = await self._rust_client.follow_output_json_async(

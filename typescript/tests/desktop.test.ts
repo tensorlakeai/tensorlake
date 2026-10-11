@@ -248,13 +248,13 @@ describe("DesktopSession", () => {
     ({ installNativeStub, clearNativeStub } = await import("./native-stub.js"));
     // The Sandbox constructor synchronously mints a native proxy client, so a
     // fake binding must be installed before any Sandbox is built. The VNC port
-    // probe runs `/bin/bash` via `Sandbox.run` (-> native runProcess); have it
+    // probe runs `/bin/bash` via `Sandbox.run` (-> native runCommand); have it
     // resolve with exit_code 0 so the probe reports "port is ready".
     installNativeStub({
       proxy: {
-        runProcess: vi.fn(async () => ({
+        runCommand: vi.fn(async () => ({
           traceId: "t",
-          events: [JSON.stringify({ exit_code: 0 })],
+          result: JSON.stringify({ exit_code: 0, stdout: "", stderr: "", reason: "exited" }),
         })),
       },
     });

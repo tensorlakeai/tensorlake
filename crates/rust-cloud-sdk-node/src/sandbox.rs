@@ -62,11 +62,12 @@ pub struct TracedBytes {
     pub full_size: Option<f64>,
 }
 
-/// A list of JSON-encoded events paired with the request's W3C trace id.
+/// The JSON-encoded `CommandResult` of a run, paired with the request's W3C
+/// trace id. `result` is absent when the sandbox reported no exit status.
 #[napi(object)]
-pub struct TracedEvents {
+pub struct TracedCommandResult {
     pub trace_id: String,
-    pub events: Vec<String>,
+    pub result: Option<String>,
 }
 
 // ---- Error encoding -------------------------------------------------------
@@ -1200,10 +1201,10 @@ impl NativeSandboxProxyClient {
         })
     }
 
-    /// Start a process and buffer all lifecycle events, returning them once the
-    /// process exits. Convenience for `run()`-style "to completion" callers.
+    /// Run a process to completion and return its `CommandResult`, built
+    /// in the Rust SDK from the buffered lifecycle events.
     #[napi]
-    pub async fn run_process(&self, payload_json: String) -> napi::Result<TracedEvents> {
+    pub async fn run_command(&self, payload_json: String) -> napi::Result<TracedCommandResult> {
         let payload: Value = parse_json_payload(&payload_json)?;
         // Running a process is not idempotent, so this is not wrapped in the
         // general retry. Failures that never reached the sandbox — a connect
@@ -1211,18 +1212,17 @@ impl NativeSandboxProxyClient {
         // replayed: no process was started.
         let traced = replay_if_never_delivered(self.client().await?, |client| {
             let payload = payload.clone();
-            async move { client.run_process(&payload).await }
+            async move { client.run_command(&payload).await }
         })
         .await
         .map_err(into_napi_error)?;
         let trace_id = traced.trace_id.clone();
-        let events = traced
+        let result = traced
             .into_inner()
-            .into_iter()
-            .map(|event| serde_json::to_string(&event))
-            .collect::<Result<Vec<String>, serde_json::Error>>()
+            .map(|result| serde_json::to_string(&result))
+            .transpose()
             .map_err(|e| into_napi_error(SdkError::from(e)))?;
-        Ok(TracedEvents { trace_id, events })
+        Ok(TracedCommandResult { trace_id, result })
     }
 
     // -- File operations --

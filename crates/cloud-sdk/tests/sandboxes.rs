@@ -15,7 +15,7 @@ use tensorlake::{
 use tensorlake::{
     error::{SdkError, TransportFailure},
     retry::is_transient,
-    sandboxes::models::RunProcessEvent,
+    sandboxes::models::{CommandResult, ProcessExitReason, RunProcessEvent},
 };
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{TcpListener, TcpStream};
@@ -1295,6 +1295,71 @@ async fn run_stream_connection_failure_keeps_its_cause() {
         error.detail()
     );
     server.await.expect("server join");
+}
+
+async fn run_command_with(
+    parts: Vec<(Duration, &'static str)>,
+) -> Result<Option<CommandResult>, SdkError> {
+    let (url, server) = run_stream_server(Some(Duration::ZERO), parts).await;
+    let proxy = run_stream_proxy(&url, Duration::from_secs(5));
+    let result = tokio::time::timeout(
+        Duration::from_secs(5),
+        proxy.run_command(&serde_json::json!({"command": "true"})),
+    )
+    .await
+    .expect("run finishes")
+    .map(|traced| traced.into_inner());
+    server.await.expect("server join");
+    result
+}
+
+#[tokio::test]
+async fn run_command_builds_the_result_from_the_stream() {
+    let result = run_command_with(vec![
+        (Duration::ZERO, STARTED),
+        (
+            Duration::ZERO,
+            "data: {\"line\":\"a\",\"line_ending\":\"\\n\",\"timestamp\":1}\n\n",
+        ),
+        (Duration::ZERO, EXITED),
+    ])
+    .await
+    .expect("run succeeds")
+    .expect("exit status");
+
+    assert_eq!(result.exit_code, 0);
+    assert_eq!(result.stdout, "a\n");
+    assert_eq!(result.reason, ProcessExitReason::Exited);
+}
+
+#[tokio::test]
+async fn run_command_reports_a_lost_exit_status_as_none() {
+    let result = run_command_with(vec![
+        (Duration::ZERO, STARTED),
+        (Duration::ZERO, "data: {}\n\n"),
+    ])
+    .await
+    .expect("run succeeds");
+
+    assert_eq!(result, None);
+}
+
+#[tokio::test]
+async fn run_command_fails_when_the_stream_closes_before_the_exit() {
+    // An unknown event is not the lost-exit event.
+    let error = run_command_with(vec![
+        (Duration::ZERO, STARTED),
+        (Duration::ZERO, "data: {\"heartbeat\":1}\n\n"),
+    ])
+    .await
+    .expect_err("stream closes early");
+
+    assert!(
+        error
+            .to_string()
+            .contains("connection closed before the process exited"),
+        "unexpected error: {error:?}"
+    );
 }
 
 async fn write_status_json_response(socket: &mut TcpStream, status: u16, body: &str) {

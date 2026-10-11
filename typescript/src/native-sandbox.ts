@@ -1,4 +1,4 @@
-import { CommandExitReason, fromSnakeKeys } from "./models.js";
+import { type CommandResult, fromSnakeKeys } from "./models.js";
 import {
   PoolInUseError,
   PoolNotFoundError,
@@ -41,9 +41,10 @@ export interface TracedBytes {
   fullSize?: number;
 }
 
-export interface TracedEvents {
+/** The JSON `CommandResult` of a run; absent when the sandbox reported no exit status. */
+export interface TracedCommandResult {
   traceId: string;
-  events: string[];
+  result?: string | null;
 }
 
 /** Per-event callback used by the streaming proxy methods. */
@@ -68,7 +69,7 @@ export interface NativeSandboxProxyClient {
   followStdout(process: string, emit: NativeEmit): Promise<string>;
   followStderr(process: string, emit: NativeEmit): Promise<string>;
   followOutput(process: string, emit: NativeEmit): Promise<string>;
-  runProcess(payloadJson: string): Promise<TracedEvents>;
+  runCommand(payloadJson: string): Promise<TracedCommandResult>;
   runProcessStreaming(payloadJson: string, emit: NativeEmit): Promise<string>;
 
   readFile(path: string): Promise<TracedBytes>;
@@ -451,55 +452,14 @@ export async function* nativeEventStream(
 }
 
 /**
- * Reduce the buffered `runProcess` events into a `CommandResult`, matching the
- * SSE-parsing logic the undici `run()` path used.
+ * Parse the `CommandResult` that the Rust SDK built from the `runCommand`
+ * events.
  */
-export function assembleCommandResult(events: string[]): {
-  exitCode: number;
-  stdout: string;
-  stderr: string;
-  reason?: CommandExitReason;
-} {
-  const stdoutLines: string[] = [];
-  const stderrLines: string[] = [];
-  let exitCode = -1;
-  let reason: CommandExitReason | undefined;
-
-  for (const eventJson of events) {
-    const raw = JSON.parse(eventJson) as Record<string, unknown>;
-    if (typeof raw.line === "string") {
-      if (raw.stream === "stderr") {
-        stderrLines.push(raw.line);
-      } else {
-        stdoutLines.push(raw.line);
-      }
-    } else if ("exit_code" in raw || "signal" in raw) {
-      if (typeof raw.exit_code === "number") {
-        exitCode = raw.exit_code;
-      } else if (typeof raw.signal === "number") {
-        exitCode = -raw.signal;
-      } else {
-        continue;
-      }
-      reason = exitReason(raw);
-    }
+export function parseCommandResult(
+  resultJson: string | null | undefined,
+): Required<Omit<CommandResult, "timedOut">> {
+  if (resultJson == null) {
+    throw new SandboxError("the sandbox lost the exit status of the process");
   }
-
-  return { exitCode, stdout: stdoutLines.join("\n"), stderr: stderrLines.join("\n"), reason };
-}
-
-const KNOWN_EXIT_REASONS = new Set<string>(Object.values(CommandExitReason));
-
-/**
- * The daemon's reported exit reason. Sandboxes that predate the field, or a
- * reason this SDK does not know, fall back to one derived from how the process
- * ended; a timeout is only ever reported by the sandbox, never inferred.
- */
-function exitReason(raw: Record<string, unknown>): CommandExitReason {
-  if (typeof raw.reason === "string" && KNOWN_EXIT_REASONS.has(raw.reason)) {
-    return raw.reason as CommandExitReason;
-  }
-  if (raw.oom_killed === true) return CommandExitReason.OOM_KILLED;
-  if (typeof raw.exit_code === "number") return CommandExitReason.EXITED;
-  return CommandExitReason.SIGNALED;
+  return fromSnakeKeys(JSON.parse(resultJson)) as Required<Omit<CommandResult, "timedOut">>;
 }
