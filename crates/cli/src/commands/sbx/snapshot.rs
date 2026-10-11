@@ -155,13 +155,6 @@ async fn create_snapshot_with_details_until(
                 .get("snapshot_uri")
                 .and_then(|v| v.as_str())
                 .map(ToString::to_string);
-            if wait_target == SnapshotWaitTarget::Completed && snapshot_uri.is_none() {
-                spinner.finish_with_message("Snapshot completed without snapshot_uri");
-                return Err(CliError::Other(anyhow::anyhow!(
-                    "snapshot {} completed without snapshot_uri",
-                    snapshot_id
-                )));
-            }
             if current_status == "completed" {
                 spinner.finish_with_message(format!("Snapshot completed ({:.1} MiB)", size_mb));
             } else {
@@ -215,7 +208,73 @@ pub async fn run(
 
 #[cfg(test)]
 mod tests {
-    use super::SnapshotWaitTarget;
+    use super::{SnapshotWaitTarget, create_snapshot_with_details_until};
+    use crate::auth::context::CliContext;
+    use crate::config::resolver::ResolvedConfig;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    #[tokio::test]
+    async fn completed_wait_uses_status_even_without_snapshot_uri() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let responses = [
+                ("POST", r#"{"snapshot_id":"snap-1","status":"in_progress"}"#),
+                (
+                    "GET",
+                    r#"{"status":"local_ready","snapshot_uri":"s3://snap-1"}"#,
+                ),
+                ("GET", r#"{"status":"completed"}"#),
+            ];
+            for (method, body) in responses {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let mut buffer = [0u8; 1024];
+                while !request.windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                    let count = stream.read(&mut buffer).await.unwrap();
+                    assert!(count > 0);
+                    request.extend_from_slice(&buffer[..count]);
+                }
+                let path = if method == "POST" {
+                    "/v1/namespaces/default/sandboxes/sbx-1/snapshot"
+                } else {
+                    "/v1/namespaces/default/snapshots/snap-1"
+                };
+                assert!(
+                    String::from_utf8_lossy(&request).starts_with(&format!("{method} {path} "))
+                );
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                );
+                stream.write_all(response.as_bytes()).await.unwrap();
+                stream.shutdown().await.unwrap();
+            }
+        });
+        let ctx = CliContext::from_resolved(ResolvedConfig {
+            api_url: format!("http://{address}"),
+            cloud_url: format!("http://{address}"),
+            namespace: "default".to_string(),
+            api_key: Some("test-key".to_string()),
+            personal_access_token: None,
+            organization_id: None,
+            project_id: None,
+            debug: false,
+        });
+        let result = create_snapshot_with_details_until(
+            &ctx,
+            "sbx-1",
+            5.0,
+            None,
+            SnapshotWaitTarget::Completed,
+        )
+        .await
+        .unwrap();
+        assert_eq!(result.snapshot_id, "snap-1");
+        assert!(result.snapshot_uri.is_none());
+        server.await.unwrap();
+    }
 
     #[test]
     fn local_ready_wait_target_accepts_local_ready_and_completed() {

@@ -1663,8 +1663,9 @@ class SandboxClient:
             wait_until: Snapshot readiness condition. Defaults to
                 :attr:`SnapshotWaitCondition.LOCAL_READY`, which is enough to
                 resume from the snapshot. Use
-                :attr:`SnapshotWaitCondition.COMPLETED` when durable
-                ``snapshot_uri`` metadata is required.
+                :attr:`SnapshotWaitCondition.COMPLETED` to wait for durable
+                completion. Readiness is determined by snapshot status;
+                ``snapshot_uri`` may be absent even after completion.
 
         Returns:
             Traced[SnapshotInfo] with snapshot details and trace_id
