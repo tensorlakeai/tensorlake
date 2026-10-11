@@ -113,13 +113,19 @@ pub fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
 }
 
 /// The validated `TENSORLAKE_SANDBOX_API_URL` override, if set and usable.
-fn sandbox_api_url_override() -> Option<String> {
+///
+/// Callers that build sandbox lifecycle URLs by a path other than
+/// [`resolve_sandbox_lifecycle_url`] (the CLI's localhost mode) consult this
+/// so the override applies regardless of what the API URL points at.
+pub fn sandbox_api_url_override() -> Option<String> {
     let raw = std::env::var(SANDBOX_API_URL_ENV).ok()?;
     normalize_sandbox_api_url(&raw)
 }
 
-/// Accept only absolute `http(s)` URLs with a host; trim whitespace and one
-/// trailing slash so the value joins cleanly with `/sandboxes`.
+/// Accept only absolute `http(s)` URLs with a host and nothing after the
+/// path: no query string, fragment or credentials, since callers append
+/// `/sandboxes` and the like as text. Whitespace and one trailing slash are
+/// trimmed so the value joins cleanly.
 fn normalize_sandbox_api_url(raw: &str) -> Option<String> {
     let trimmed = raw.trim();
     if trimmed.is_empty() {
@@ -127,6 +133,13 @@ fn normalize_sandbox_api_url(raw: &str) -> Option<String> {
     }
     let parsed = url::Url::parse(trimmed).ok()?;
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    if parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
         return None;
     }
     Some(trimmed.trim_end_matches('/').to_string())
@@ -190,7 +203,33 @@ mod sandbox_lifecycle_url_tests {
         assert_eq!(normalize_sandbox_api_url(""), None);
         assert_eq!(normalize_sandbox_api_url("   "), None);
         assert_eq!(normalize_sandbox_api_url("byoc-acme.tensorlake.ai"), None);
-        assert_eq!(normalize_sandbox_api_url("ftp://byoc-acme.tensorlake.ai"), None);
+        assert_eq!(
+            normalize_sandbox_api_url("ftp://byoc-acme.tensorlake.ai"),
+            None
+        );
+    }
+
+    #[test]
+    fn override_rejects_anything_after_the_path() {
+        // Callers append `/sandboxes` as text; a query string would end up in
+        // the middle of the path and a fragment would be dropped by the client.
+        assert_eq!(
+            normalize_sandbox_api_url("https://byoc-acme.tensorlake.ai?q=1"),
+            None
+        );
+        assert_eq!(
+            normalize_sandbox_api_url("https://byoc-acme.tensorlake.ai/#fragment"),
+            None
+        );
+        assert_eq!(
+            normalize_sandbox_api_url("https://user:pw@byoc-acme.tensorlake.ai"),
+            None
+        );
+        // A path prefix still joins cleanly.
+        assert_eq!(
+            normalize_sandbox_api_url("https://byoc-acme.tensorlake.ai/proxy/"),
+            Some("https://byoc-acme.tensorlake.ai/proxy".to_string())
+        );
     }
 }
 

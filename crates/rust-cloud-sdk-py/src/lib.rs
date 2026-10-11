@@ -1484,7 +1484,10 @@ impl CloudSandboxClient {
 
         let client = lifecycle_builder.build().map_err(into_sandbox_py_error)?;
         let log_client = api_builder.build().map_err(into_sandbox_py_error)?;
-        let use_namespaced_endpoints = is_localhost_api_url(&api_url);
+        // A TENSORLAKE_SANDBOX_API_URL override names a sandbox proxy, which
+        // takes the flat cloud paths even when the API URL is a local server.
+        let use_namespaced_endpoints =
+            tensorlake::sandbox_api_url_override().is_none() && is_localhost_api_url(&api_url);
         let sandboxes_client = SandboxesClient::new(
             client,
             namespace.unwrap_or_else(|| "default".to_string()),

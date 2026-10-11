@@ -84,20 +84,34 @@ pub struct ResolvedSandboxProxyTarget {
 
 /// Build the lifecycle API base URL for sandbox CRUD operations.
 ///
+/// `TENSORLAKE_SANDBOX_API_URL`, when set, names a sandbox proxy and wins in
+/// every mode: `{override}/sandboxes`. A proxy scopes requests by the API
+/// key, so the flat path applies even when the API URL is a local server.
+/// Otherwise:
 /// Cloud mode: `{sandbox_url}/sandboxes` where sandbox_url = `sandbox.tensorlake.*`
 /// Localhost mode: `{api_url}/v1/namespaces/{namespace}/sandboxes`
 pub fn sandbox_endpoint(ctx: &CliContext, endpoint: &str) -> String {
-    if is_localhost(&ctx.api_url) {
-        format!(
-            "{}/v1/namespaces/{}/{}",
-            ctx.api_url, ctx.namespace, endpoint
-        )
+    sandbox_endpoint_with(
+        tensorlake::sandbox_api_url_override().as_deref(),
+        &ctx.api_url,
+        &ctx.namespace,
+        endpoint,
+    )
+}
+
+fn sandbox_endpoint_with(
+    override_url: Option<&str>,
+    api_url: &str,
+    namespace: &str,
+    endpoint: &str,
+) -> String {
+    if let Some(override_url) = override_url {
+        return format!("{override_url}/{endpoint}");
+    }
+    if is_localhost(api_url) {
+        format!("{api_url}/v1/namespaces/{namespace}/{endpoint}")
     } else {
-        format!(
-            "{}/{}",
-            resolve_sandbox_lifecycle_url(&ctx.api_url),
-            endpoint
-        )
+        format!("{}/{}", resolve_sandbox_lifecycle_url(api_url), endpoint)
     }
 }
 
@@ -526,6 +540,42 @@ pub fn parse_env_vars(env: &[String]) -> Result<Option<serde_json::Value>> {
         );
     }
     Ok(Some(serde_json::Value::Object(map)))
+}
+
+#[cfg(test)]
+mod sandbox_endpoint_tests {
+    use super::sandbox_endpoint_with;
+
+    #[test]
+    fn cloud_api_url_derives_the_sandbox_host() {
+        assert_eq!(
+            sandbox_endpoint_with(None, "https://api.tensorlake.ai", "ns", "sandboxes"),
+            "https://sandbox.tensorlake.ai/sandboxes"
+        );
+    }
+
+    #[test]
+    fn localhost_api_url_uses_namespaced_paths() {
+        assert_eq!(
+            sandbox_endpoint_with(None, "http://localhost:8900", "ns", "sandboxes/sb_1"),
+            "http://localhost:8900/v1/namespaces/ns/sandboxes/sb_1"
+        );
+    }
+
+    #[test]
+    fn override_wins_in_every_mode_with_flat_paths() {
+        let proxy = Some("https://byoc-acme.tensorlake.ai");
+        assert_eq!(
+            sandbox_endpoint_with(proxy, "https://api.tensorlake.ai", "ns", "sandboxes"),
+            "https://byoc-acme.tensorlake.ai/sandboxes"
+        );
+        // The override is a proxy; the API URL being local does not change
+        // where sandbox requests go or how their paths look.
+        assert_eq!(
+            sandbox_endpoint_with(proxy, "http://localhost:8900", "ns", "sandboxes"),
+            "https://byoc-acme.tensorlake.ai/sandboxes"
+        );
+    }
 }
 
 #[cfg(test)]

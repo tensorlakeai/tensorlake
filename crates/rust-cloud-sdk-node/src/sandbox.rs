@@ -292,12 +292,14 @@ impl NativeSandboxClient {
     async fn client(&self) -> napi::Result<SandboxesClient> {
         let client = self.client.get().await?;
         let log_client = client.with_base_url(&self.api_url);
-        Ok(SandboxesClient::new(
-            client,
-            self.namespace.clone(),
-            is_localhost_api_url(&self.api_url),
+        // A TENSORLAKE_SANDBOX_API_URL override names a sandbox proxy, which
+        // takes the flat cloud paths even when the API URL is a local server.
+        let use_namespaced_endpoints =
+            tensorlake::sandbox_api_url_override().is_none() && is_localhost_api_url(&self.api_url);
+        Ok(
+            SandboxesClient::new(client, self.namespace.clone(), use_namespaced_endpoints)
+                .with_log_client(log_client),
         )
-        .with_log_client(log_client))
     }
 }
 
