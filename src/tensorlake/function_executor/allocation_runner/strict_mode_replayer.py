@@ -143,13 +143,17 @@ class AllocationStrictModeReplayer:
         self._replayed_watcher_ids: set[str] = set()
         self._replayed_watcher_result_ids: set[str] = set()
 
-    def _replay_mismatch(self) -> StrictReplayResult:
+    def _replay_mismatch(
+        self, allocation_event_clock: int | None = None
+    ) -> StrictReplayResult:
         """Sends emergency shutdown to event loop and returns a replay mismatch result."""
         self._event_loop.add_input_event(InputEventEmergencyShutdown())
         return StrictReplayResult(
             last_clock=self._alloc_buffer.last_read_clock,
             pending_event_loop_output_events=[],
-            finish_event=self._finish_event_helper.from_replay_mismatch(),
+            finish_event=self._finish_event_helper.from_replay_mismatch(
+                allocation_event_clock=allocation_event_clock
+            ),
         )
 
     def _finalize_replay(
@@ -225,7 +229,14 @@ class AllocationStrictModeReplayer:
                         "Finish allocation event observed during replay, "
                         "indicating a replay mismatch."
                     )
-                    return self._replay_mismatch()
+                    next_alloc_event = self._alloc_buffer.peek()
+                    return self._replay_mismatch(
+                        allocation_event_clock=(
+                            next_alloc_event.clock
+                            if next_alloc_event is not None
+                            else None
+                        )
+                    )
 
                 # Branch for all output events that require strict ordering for their corresponding alloc events.
                 elif isinstance(
@@ -253,7 +264,9 @@ class AllocationStrictModeReplayer:
                                 expected_type="OutputEventCreateFunctionCall",
                                 got_type=type(output_event).__name__,
                             )
-                            return self._replay_mismatch()
+                            return self._replay_mismatch(
+                                allocation_event_clock=alloc_event.clock
+                            )
 
                         fcc: AllocationEventFunctionCallCreated = (
                             alloc_event.function_call_created
@@ -264,7 +277,9 @@ class AllocationStrictModeReplayer:
                                 expected=output_event.durable_id,
                                 got=fcc.function_call_id,
                             )
-                            return self._replay_mismatch()
+                            return self._replay_mismatch(
+                                allocation_event_clock=alloc_event.clock
+                            )
                         process_function_call_created(
                             event=fcc,
                             event_loop=self._event_loop,
@@ -279,7 +294,9 @@ class AllocationStrictModeReplayer:
                                 expected_type="OutputEventCreateFunctionCallWatcher",
                                 type=type(output_event),
                             )
-                            return self._replay_mismatch()
+                            return self._replay_mismatch(
+                                allocation_event_clock=alloc_event.clock
+                            )
 
                         fwcc: AllocationEventFunctionCallWatcherCreated = (
                             alloc_event.function_call_watcher_created
@@ -293,14 +310,18 @@ class AllocationStrictModeReplayer:
                                 expected=output_event.function_call_durable_id,
                                 got=fwcc.function_call_id,
                             )
-                            return self._replay_mismatch()
+                            return self._replay_mismatch(
+                                allocation_event_clock=alloc_event.clock
+                            )
                         if fwcc.function_call_id in self._replayed_watcher_ids:
                             self._logger.info(
                                 "Replay mismatch: duplicate function call watcher "
                                 "creation.",
                                 function_call_id=fwcc.function_call_id,
                             )
-                            return self._replay_mismatch()
+                            return self._replay_mismatch(
+                                allocation_event_clock=alloc_event.clock
+                            )
                         self._replayed_watcher_ids.add(fwcc.function_call_id)
                         process_function_call_watcher_created(
                             event=fwcc,
@@ -312,14 +333,23 @@ class AllocationStrictModeReplayer:
                             "Replay mismatch: unknown allocation event type.",
                             type=alloc_event.WhichOneof("event"),
                         )
-                        return self._replay_mismatch()
+                        return self._replay_mismatch(
+                            allocation_event_clock=alloc_event.clock
+                        )
 
                 else:
                     self._logger.info(
                         "Replay mismatch: unknown event loop output event type.",
                         type=type(output_event),
                     )
-                    return self._replay_mismatch()
+                    next_alloc_event = self._alloc_buffer.peek()
+                    return self._replay_mismatch(
+                        allocation_event_clock=(
+                            next_alloc_event.clock
+                            if next_alloc_event is not None
+                            else None
+                        )
+                    )
 
     def _consume_pending_unordered_alloc_events(self) -> StrictReplayResult | None:
         """Consumes all pending unordered alloc events from the alloc buffer.
@@ -346,13 +376,17 @@ class AllocationStrictModeReplayer:
                         "before its watcher was created.",
                         function_call_id=fcwr.function_call_id,
                     )
-                    return self._replay_mismatch()
+                    return self._replay_mismatch(
+                        allocation_event_clock=alloc_event.clock
+                    )
                 if fcwr.function_call_id in self._replayed_watcher_result_ids:
                     self._logger.info(
                         "Replay mismatch: duplicate function call watcher result.",
                         function_call_id=fcwr.function_call_id,
                     )
-                    return self._replay_mismatch()
+                    return self._replay_mismatch(
+                        allocation_event_clock=alloc_event.clock
+                    )
                 self._replayed_watcher_result_ids.add(fcwr.function_call_id)
                 process_function_call_watcher_result(
                     event=fcwr,
