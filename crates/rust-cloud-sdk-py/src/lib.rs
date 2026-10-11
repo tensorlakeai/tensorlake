@@ -1484,7 +1484,10 @@ impl CloudSandboxClient {
 
         let client = lifecycle_builder.build().map_err(into_sandbox_py_error)?;
         let log_client = api_builder.build().map_err(into_sandbox_py_error)?;
-        let use_namespaced_endpoints = is_localhost_api_url(&api_url);
+        // A TENSORLAKE_SANDBOX_API_URL override names a sandbox proxy, which
+        // takes the flat cloud paths even when the API URL is a local server.
+        let use_namespaced_endpoints =
+            tensorlake::sandbox_api_url_override().is_none() && is_localhost_api_url(&api_url);
         let sandboxes_client = SandboxesClient::new(
             client,
             namespace.unwrap_or_else(|| "default".to_string()),
@@ -4159,23 +4162,9 @@ fn is_localhost_api_url(api_url: &str) -> bool {
 }
 
 fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
-    if is_localhost_api_url(api_url) {
-        return api_url.to_string();
-    }
-    if let Ok(mut parsed) = reqwest::Url::parse(api_url)
-        && let Some(host) = parsed.host_str()
-        && let Some(rest) = host.strip_prefix("api.")
-    {
-        let new_host = format!("sandbox.{rest}");
-        if parsed.set_host(Some(&new_host)).is_ok() {
-            let mut result = parsed.to_string();
-            if result.ends_with('/') {
-                result.pop();
-            }
-            return result;
-        }
-    }
-    "https://sandbox.tensorlake.ai".to_string()
+    // Single source of truth, including the TENSORLAKE_SANDBOX_API_URL
+    // override, lives in the cloud SDK crate.
+    tensorlake::resolve_sandbox_lifecycle_url(api_url)
 }
 
 /// Create a Docker build context tar.gz for a Tensorlake image definition.

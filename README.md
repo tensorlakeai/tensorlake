@@ -429,6 +429,16 @@ deployment, invocation, output, listing, and inspection all use that same
 origin. Trusted split local installations can set `TENSORLAKE_IMAGE_SERVICE_URL`
 and `TENSORLAKE_FUNCTION_SERVICE_URL` independently.
 
+Sandbox create, list, snapshot and pool requests go to the sandbox API, which
+is derived from `TENSORLAKE_API_URL` (`api.tensorlake.ai` becomes
+`sandbox.tensorlake.ai`). Set `TENSORLAKE_SANDBOX_API_URL` to an absolute
+`http(s)` origin (no query string, fragment or credentials) to send them
+elsewhere, for example to a dedicated BYOC proxy
+such as `https://byoc-<customer>.tensorlake.ai`. The CLI, the Python SDK and the
+TypeScript SDK all honor it; `tl whoami --output json` shows the resolved value
+as `sandboxApi`. `TENSORLAKE_SANDBOX_PROXY_URL` is different: it only affects
+per-sandbox connections when the server did not return a sandbox URL.
+
 #### Call via HTTP
 
 ```bash

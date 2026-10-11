@@ -92,20 +92,145 @@ use secrets::*;
 mod client;
 pub use client::{Client, ClientBuilder, Traced};
 
+/// Environment variable that overrides the sandbox API (lifecycle) base URL.
+///
+/// Set it to the origin of the sandbox proxy that should receive sandbox
+/// create, list, snapshot and pool requests, e.g. a dedicated BYOC proxy such
+/// as `https://byoc-<customer>.tensorlake.ai`. It is distinct from
+/// `TENSORLAKE_SANDBOX_PROXY_URL`, which only affects per-sandbox handles.
+pub const SANDBOX_API_URL_ENV: &str = "TENSORLAKE_SANDBOX_API_URL";
+
 /// Derive the sandbox lifecycle base URL from the API URL.
 ///
-/// Converts `api.tensorlake.*` → `sandbox.tensorlake.*`. Localhost is unchanged.
+/// `TENSORLAKE_SANDBOX_API_URL`, when set to an absolute `http(s)` URL, wins.
+/// Otherwise `api.tensorlake.*` becomes `sandbox.tensorlake.*` (keeping any
+/// scheme, port and path) and localhost is unchanged.
 pub fn resolve_sandbox_lifecycle_url(api_url: &str) -> String {
-    if let Ok(parsed) = url::Url::parse(api_url) {
-        let host = parsed.host_str().unwrap_or("");
+    if let Some(url) = sandbox_api_url_override() {
+        return url;
+    }
+    resolve_sandbox_lifecycle_url_from_api_url(api_url)
+}
+
+/// The validated `TENSORLAKE_SANDBOX_API_URL` override, if set and usable.
+///
+/// Callers that build sandbox lifecycle URLs by a path other than
+/// [`resolve_sandbox_lifecycle_url`] (the CLI's localhost mode) consult this
+/// so the override applies regardless of what the API URL points at.
+pub fn sandbox_api_url_override() -> Option<String> {
+    let raw = std::env::var(SANDBOX_API_URL_ENV).ok()?;
+    normalize_sandbox_api_url(&raw)
+}
+
+/// Accept only absolute `http(s)` URLs with a host and nothing after the
+/// path: no query string, fragment or credentials, since callers append
+/// `/sandboxes` and the like as text. Whitespace and one trailing slash are
+/// trimmed so the value joins cleanly.
+fn normalize_sandbox_api_url(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let parsed = url::Url::parse(trimmed).ok()?;
+    if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
+        return None;
+    }
+    if parsed.query().is_some()
+        || parsed.fragment().is_some()
+        || !parsed.username().is_empty()
+        || parsed.password().is_some()
+    {
+        return None;
+    }
+    Some(trimmed.trim_end_matches('/').to_string())
+}
+
+fn resolve_sandbox_lifecycle_url_from_api_url(api_url: &str) -> String {
+    if let Ok(mut parsed) = url::Url::parse(api_url)
+        && let Some(host) = parsed.host_str()
+    {
         if host == "localhost" || host == "127.0.0.1" {
             return api_url.to_string();
         }
         if let Some(rest) = host.strip_prefix("api.") {
-            return format!("{}://sandbox.{}", parsed.scheme(), rest);
+            let new_host = format!("sandbox.{rest}");
+            if parsed.set_host(Some(&new_host)).is_ok() {
+                return parsed.to_string().trim_end_matches('/').to_string();
+            }
         }
     }
     "https://sandbox.tensorlake.ai".to_string()
+}
+
+#[cfg(test)]
+mod sandbox_lifecycle_url_tests {
+    use super::*;
+
+    #[test]
+    fn derives_sandbox_host_from_api_host() {
+        assert_eq!(
+            resolve_sandbox_lifecycle_url_from_api_url("https://api.tensorlake.ai"),
+            "https://sandbox.tensorlake.ai"
+        );
+        assert_eq!(
+            resolve_sandbox_lifecycle_url_from_api_url("https://api.tensorlake.dev/"),
+            "https://sandbox.tensorlake.dev"
+        );
+        assert_eq!(
+            resolve_sandbox_lifecycle_url_from_api_url("http://api.example.test:8443"),
+            "http://sandbox.example.test:8443"
+        );
+        assert_eq!(
+            resolve_sandbox_lifecycle_url_from_api_url("http://localhost:8900"),
+            "http://localhost:8900"
+        );
+        assert_eq!(
+            resolve_sandbox_lifecycle_url_from_api_url("https://custom.example.test"),
+            "https://sandbox.tensorlake.ai"
+        );
+    }
+
+    #[test]
+    fn override_accepts_only_absolute_http_origins() {
+        assert_eq!(
+            normalize_sandbox_api_url(" https://byoc-acme.tensorlake.ai/ "),
+            Some("https://byoc-acme.tensorlake.ai".to_string())
+        );
+        assert_eq!(
+            normalize_sandbox_api_url("http://127.0.0.1:9443"),
+            Some("http://127.0.0.1:9443".to_string())
+        );
+        assert_eq!(normalize_sandbox_api_url(""), None);
+        assert_eq!(normalize_sandbox_api_url("   "), None);
+        assert_eq!(normalize_sandbox_api_url("byoc-acme.tensorlake.ai"), None);
+        assert_eq!(
+            normalize_sandbox_api_url("ftp://byoc-acme.tensorlake.ai"),
+            None
+        );
+    }
+
+    #[test]
+    fn override_rejects_anything_after_the_path() {
+        // Callers append `/sandboxes` as text; a query string would end up in
+        // the middle of the path and a fragment would be dropped by the client.
+        assert_eq!(
+            normalize_sandbox_api_url("https://byoc-acme.tensorlake.ai?q=1"),
+            None
+        );
+        assert_eq!(
+            normalize_sandbox_api_url("https://byoc-acme.tensorlake.ai/#fragment"),
+            None
+        );
+        assert_eq!(
+            normalize_sandbox_api_url("https://user:pw@byoc-acme.tensorlake.ai"),
+            None
+        );
+        // A path prefix still joins cleanly.
+        assert_eq!(
+            normalize_sandbox_api_url("https://byoc-acme.tensorlake.ai/proxy/"),
+            Some("https://byoc-acme.tensorlake.ai/proxy".to_string())
+        );
+    }
 }
 
 /// Derive the Artifact Storage Git base URL from the API URL.
