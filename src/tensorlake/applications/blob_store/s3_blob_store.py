@@ -1,4 +1,5 @@
-from typing import List
+import re
+from typing import List, Optional
 
 import httpx
 
@@ -8,13 +9,38 @@ from tensorlake.utils.retries import exponential_backoff
 
 # Customers can upload and download large files, allow up to 1 hour per S3 operation.
 _S3_OPERATION_TIMEOUT_SEC = 1 * 60 * 60  # 1 hour
-# Keep established connections around for up to 1 hour to maximize download/upload throughput
-# when we download function inputs and when we upload the function outputs.
-_CONNECTION_KEEP_ALIVE_EXPIRY_SEC = 1 * 60 * 60  # 1 hour
+# S3 closes idle keep-alive connections on its own after a short period (tens of seconds).
+# If the client pool holds an idle connection for longer than the server keeps it, the pool
+# eventually hands out a socket S3 has already closed or is about to close. That surfaces as
+# `httpx.RemoteProtocolError: Server disconnected without sending a response` or as an HTTP 400
+# with S3 error code `RequestTimeout`. Keep the client side expiry well below the server side so
+# the pool never reuses a connection S3 considers idle. Connections used back to back while
+# transferring chunks are never idle, so download/upload throughput is unaffected.
+_CONNECTION_KEEP_ALIVE_EXPIRY_SEC = 10.0
 # Do fast retries because we don't want to slow down functions too much due to S3 issues.
 _MAX_RETRIES = 3
 _INITIAL_RETRY_DELAY_SEC = 0.1
 _MAX_RETRY_DELAY_SEC = 10.0
+
+# S3 reports a few transient conditions with HTTP status codes that are otherwise permanent
+# client errors, so the status code alone is not enough to classify a failure. The error code
+# in the XML response body is what distinguishes them:
+#   * RequestTimeout (400) - "Your socket connection to the server was not read from or written
+#     to within the timeout period. Idle connections will be closed."
+#   * RequestTimeTooSkewed (403) - local clock drifted from S3's; typically resolves on retry.
+#   * SlowDown / ServiceUnavailable / InternalError - explicit "retry me" responses.
+_RETRIABLE_S3_ERROR_CODES = frozenset(
+    {
+        "InternalError",
+        "RequestTimeout",
+        "RequestTimeTooSkewed",
+        "ServiceUnavailable",
+        "SlowDown",
+    }
+)
+# Status codes that are permanent client errors unless the S3 error code says otherwise.
+_NON_RETRIABLE_STATUS_CODES = frozenset({400, 403, 404})
+_S3_ERROR_CODE_RE = re.compile(r"<Code>([^<]+)</Code>")
 
 
 class S3BLOBStore:
@@ -52,9 +78,7 @@ class S3BLOBStore:
             try:
                 if isinstance(e, httpx.HTTPStatusError):
                     status_code = e.response.status_code
-                    # .read() is required before accessing .text
-                    # because we're in streaming mode.
-                    e.response.read()
+                    # get_with_retries() reads error bodies before closing the stream.
                     response = e.response.text
             except Exception as extract_response_exception:
                 logger.error(
@@ -90,6 +114,11 @@ class S3BLOBStore:
                 _to_https_uri_schema(uri),
                 headers={"Range": f"bytes={offset}-{offset + len(destination) - 1}"},
             ) as streaming_response:
+                if streaming_response.is_error:
+                    # Error bodies are small and must be read before the stream is closed,
+                    # otherwise neither retry classification nor logging can see the S3 error
+                    # code. Reading it here leaves it cached on the response object.
+                    streaming_response.read()
                 streaming_response.raise_for_status()
                 read_size: int = 0
                 for partial_data in streaming_response.iter_bytes():
@@ -108,9 +137,7 @@ class S3BLOBStore:
             response: str = "None"
             try:
                 status_code = e.response.status_code
-                # .read() is required before accessing .text
-                # because we're in streaming mode.
-                e.response.read()
+                # get_with_retries() reads error bodies before closing the stream.
                 response = e.response.text
             except Exception as extract_response_exception:
                 logger.error(
@@ -223,10 +250,31 @@ class S3BLOBStore:
             raise InternalError("Failed to put S3 object")
 
 
+def _s3_error_code(response: httpx.Response) -> Optional[str]:
+    """Returns the error code from an S3 XML error response, None if it can't be determined.
+
+    The body of a streaming response is only available if it was read before the stream was
+    closed; callers that stream must read the body of an error response themselves.
+    """
+    try:
+        body: str = response.text
+    except Exception:
+        # The response was streamed and the stream is already closed, so the body is gone.
+        return None
+
+    match = _S3_ERROR_CODE_RE.search(body)
+    return None if match is None else match.group(1)
+
+
 def _is_retriable_exception(e: Exception) -> bool:
     if isinstance(e, httpx.HTTPStatusError):
-        # Let's simply retry everything which is not 404 (not found) or 400 (bad request) or 403 (forbidden).
-        return e.response.status_code not in [400, 403, 404]
+        if e.response.status_code not in _NON_RETRIABLE_STATUS_CODES:
+            # Retry everything else, i.e. 5xx and 429.
+            return True
+        # The status code alone says "permanent client error", but S3 uses these status codes
+        # for a few transient conditions too. Only the error code in the body can tell them
+        # apart, so a body we can't read has to stay non retriable.
+        return _s3_error_code(e.response) in _RETRIABLE_S3_ERROR_CODES
     else:
         # Retry anything else like network errors, request timeouts, etc.
         return True
