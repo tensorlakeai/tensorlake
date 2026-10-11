@@ -11,6 +11,7 @@ on:
       - "Cargo.toml"
       - "crates/function-agent-core/**"
       - ".github/actions/vendor-function-agent-core/**"
+      - ".github/actions/setup-tensorlake-rust-cache/**"
       - ".github/scripts/stage_function_agent_core.sh"
       - "Cargo.lock"
       - "proto/**"
@@ -32,6 +33,7 @@ on:
       - "Cargo.toml"
       - "crates/function-agent-core/**"
       - ".github/actions/vendor-function-agent-core/**"
+      - ".github/actions/setup-tensorlake-rust-cache/**"
       - ".github/scripts/stage_function_agent_core.sh"
       - "Cargo.lock"
       - "proto/**"
@@ -54,6 +56,8 @@ defaults:
 jobs:
   function-executor-compatibility:
     name: Python/TypeScript function executor compatibility
+    # Fork pull requests execute this job, so keep it away from the shared
+    # repository cache volume mounted on Tensorlake runners.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -99,6 +103,8 @@ jobs:
 
   unit-tests:
     name: Unit tests
+    # Fork pull requests execute this job, so keep it away from the shared
+    # repository cache volume mounted on Tensorlake runners.
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -133,7 +139,7 @@ jobs:
   native-binding-smoke:
     name: Native Function Agent binding smoke tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tensorlake, tensorlake-xlarge]
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -156,10 +162,9 @@ jobs:
         uses: mlugg/setup-zig@v2
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-tensorlake-rust-cache
         with:
-          prefix-key: v1-rust-no-bin
-          cache-bin: false
+          cache-namespace: typescript-native-binding-smoke
 
       - name: Install cargo-zigbuild
         run: cargo install cargo-zigbuild --locked
@@ -234,7 +239,7 @@ jobs:
   integration-tests:
     name: Integration tests
     if: github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, tensorlake, tensorlake-large]
     timeout-minutes: 30
     environment: prod
     steps:
@@ -261,10 +266,9 @@ jobs:
         uses: dtolnay/rust-toolchain@1.98.1
 
       - name: Cache Rust build artifacts
-        uses: Swatinem/rust-cache@v2
+        uses: ./.github/actions/setup-tensorlake-rust-cache
         with:
-          prefix-key: v1-rust-no-bin
-          cache-bin: false
+          cache-namespace: typescript-integration
 
       - name: Build native binding
         run: npm run build:native
