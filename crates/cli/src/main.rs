@@ -1292,8 +1292,8 @@ enum SbxCommands {
 
         /// Mount a registered file system at boot as
         /// `<name>[@<snapshot_id>]:<mount_path>[:<opts>]`, where `<opts>` is
-        /// a comma-separated list of `ro` (read-only) and/or `prefetch`
-        /// (eagerly download contents), e.g. `data:/mnt/data:ro,prefetch`.
+        /// a comma-separated list of `ro`, `prefetch`, and/or an absolute
+        /// `source=<path>`, e.g. `data:/mnt/data:source=/models,ro,prefetch`.
         /// `@<snapshot_id>` pins the mount to a filesystem snapshot and
         /// requires `ro` (pinned mounts are read-only), e.g.
         /// `data@0abc123:/mnt/data:ro`; `@` cannot appear in file system
@@ -1675,6 +1675,10 @@ enum SbxFsCommands {
         /// File system id to attach (e.g. `file_system_...`)
         #[arg(short, long = "id")]
         file_system_id: String,
+
+        /// Absolute path inside the file system exposed as the mount root
+        #[arg(long, default_value = "/")]
+        source_path: String,
 
         /// Absolute guest mount path (e.g. `/mnt/skills`)
         #[arg(short, long)]
@@ -2812,6 +2816,7 @@ async fn run_command(
                         SbxFsCommands::Attach {
                             sandbox_id,
                             file_system_id,
+                            source_path,
                             path,
                             read_only,
                             prefetch,
@@ -2823,6 +2828,7 @@ async fn run_command(
                                 ctx,
                                 &sandbox_id,
                                 &file_system_id,
+                                &source_path,
                                 &path,
                                 read_only,
                                 prefetch,

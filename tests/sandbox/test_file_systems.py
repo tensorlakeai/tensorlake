@@ -59,6 +59,7 @@ class _FakeRustClient:
         prefetch,
         snapshot_id,
         owner,
+        source_path,
     ):
         self.attach_calls.append(
             (
@@ -72,6 +73,8 @@ class _FakeRustClient:
             )
         )
         mount = {"file_system_id": file_system_id, "mount_path": mount_path}
+        if source_path != "/":
+            mount["source_path"] = source_path
         if read_only:
             mount["read_only"] = True
         if prefetch:
@@ -117,6 +120,7 @@ class _FakeAsyncRustClient:
         prefetch,
         snapshot_id,
         owner,
+        source_path,
     ):
         self.attach_calls.append(
             (
@@ -130,6 +134,8 @@ class _FakeAsyncRustClient:
             )
         )
         mount = {"file_system_id": file_system_id, "mount_path": mount_path}
+        if source_path != "/":
+            mount["source_path"] = source_path
         if read_only:
             mount["read_only"] = True
         if prefetch:
@@ -464,6 +470,28 @@ class TestSandboxClientFileSystems(unittest.TestCase):
                     mount_path="/mnt/skills",
                     read_only=True,
                     prefetch=True,
+                )
+            ],
+        )
+
+    def test_attach_file_system_threads_source_path(self):
+        fake = _FakeRustClient()
+        client = _sync_client(fake)
+
+        traced = client.attach_file_system(
+            "sbx-1",
+            "file_system_abc",
+            "/mnt/models",
+            source_path="/shared/models",
+        )
+
+        self.assertEqual(
+            traced.value.file_systems,
+            [
+                FileSystemMount(
+                    file_system_id="file_system_abc",
+                    mount_path="/mnt/models",
+                    source_path="/shared/models",
                 )
             ],
         )
