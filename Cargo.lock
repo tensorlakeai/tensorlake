@@ -6015,6 +6015,7 @@ dependencies = [
  "ignore",
  "indicatif",
  "keyring-core",
+ "libc",
  "minijinja",
  "open",
  "rand 0.9.4",
@@ -6040,6 +6041,7 @@ dependencies = [
  "urlencoding",
  "uuid",
  "windows-native-keyring-store",
+ "windows-sys 0.61.2",
  "zbus-secret-service-keyring-store",
  "zip",
 ]

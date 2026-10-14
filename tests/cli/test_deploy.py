@@ -1,5 +1,7 @@
 import asyncio
+import io
 import os
+import sys
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -330,6 +332,64 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(deployed_event["type"], "deployed")
         self.assertEqual(deployed_event["application"], "app-one")
         self.assertEqual(deployed_event["curl_command"], "curl https://example.test")
+
+    @unittest.skipIf(sys.platform == "win32", "uses inherited Unix file descriptors")
+    def test_deploy_reads_pipe_after_handshake_before_loading_application(self):
+        captured = '{"auths":{"registry":{"identitytoken":"captured-token"}}}'
+        reader, writer = os.pipe()
+        write_pipe = os.fdopen(writer, "wb")
+        self.addCleanup(write_pipe.close)
+        self.addCleanup(lambda: self._close_if_open(reader))
+        os.set_inheritable(reader, True)
+        events = []
+
+        def emit(event):
+            events.append(event)
+            if event["type"] == "protocol":
+                self.assertEqual(event["version"], 1)
+                self.assertTrue(event["docker_config_pipe"])
+                write_pipe.write(captured.encode())
+                write_pipe.close()
+
+        def load_application(*_):
+            self.config_loader.assert_not_called()
+            self.assertNotIn("TENSORLAKE_DOCKER_CONFIG_PIPE", os.environ)
+            with self.assertRaises(OSError):
+                os.fstat(reader)
+            self.assertEqual(deploy_module.sys.stdin.read(), "application stdin")
+
+        prepare_images = AsyncMock(return_value={})
+        with (
+            self._successful_deploy_patches(self._make_auth_context(), ["fn"]),
+            patch.dict(os.environ, {"TENSORLAKE_DOCKER_CONFIG_PIPE": str(reader)}),
+            patch.object(deploy_module.sys, "stdin", io.StringIO("application stdin")),
+            patch.object(deploy_module, "load_code", side_effect=load_application),
+            patch.object(deploy_module, "_prepare_images", prepare_images),
+            patch.object(deploy_module, "_deploy_applications"),
+            patch.object(deploy_module, "_emit", side_effect=emit),
+            patch(
+                "builtins.open", side_effect=AssertionError("unexpected file access")
+            ),
+            patch(
+                "tempfile.NamedTemporaryFile", side_effect=AssertionError("temp file")
+            ),
+        ):
+            deploy_module.deploy("my_app.py", upgrade_running_requests=False)
+
+        self.assertEqual(events[0]["type"], "protocol")
+        prepare_images.assert_awaited_once_with(
+            ["fn"],
+            context_dir=os.path.dirname(os.path.abspath("my_app.py")),
+            build_envs=None,
+            docker_config_json=captured,
+        )
+
+    @staticmethod
+    def _close_if_open(fd):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     def test_deploy_emits_missing_secret_names(self):
         prepare_images = AsyncMock()

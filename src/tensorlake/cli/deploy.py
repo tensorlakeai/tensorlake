@@ -139,6 +139,23 @@ def _parse_build_envs(build_envs: list[str]) -> list[tuple[str, str]]:
     return parsed_build_envs
 
 
+def _read_docker_config_pipe() -> str | None:
+    """Consume the CLI's anonymous pipe before running any application code."""
+    descriptor = os.environ.pop("TENSORLAKE_DOCKER_CONFIG_PIPE", None)
+    if descriptor is None:
+        return None
+    fd = int(descriptor)
+    if sys.platform == "win32":
+        import msvcrt
+
+        fd = msvcrt.open_osfhandle(fd, os.O_RDONLY | os.O_BINARY)
+    # Do not pass the descriptor to application subprocesses. fdopen owns and
+    # closes it after EOF; the child's existing stdin is never read or replaced.
+    os.set_inheritable(fd, False)
+    with os.fdopen(fd, "r", encoding="utf-8", newline="") as pipe:
+        return pipe.read()
+
+
 def deploy(
     application_file_path: str,
     upgrade_running_requests: bool,
@@ -151,14 +168,14 @@ def deploy(
             "type": "protocol",
             "version": _DEPLOY_PROTOCOL_VERSION,
             "sdk_version": _SDK_VERSION,
-            "docker_config_snapshot": True,
+            "docker_config_pipe": True,
         }
     )
+    captured_config = _read_docker_config_pipe()
     if docker_config_json is None:
-        snapshot_path = os.environ.pop("TENSORLAKE_DOCKER_CONFIG_SNAPSHOT", None)
         docker_config_json = (
-            Path(snapshot_path).read_text(encoding="utf-8")
-            if snapshot_path is not None
+            captured_config
+            if captured_config is not None
             else _load_docker_config_json()
         )
     if upgrade_running_requests:

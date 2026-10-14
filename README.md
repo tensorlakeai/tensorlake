@@ -223,6 +223,12 @@ contents to every image operation in that invocation. A missing config supplies
 an explicit empty document. Credential changes during a running invocation do not
 cause the CLI to reread the config file.
 
+Python deployers that advertise pipe support receive this snapshot through a
+dedicated anonymous pipe before loading application code. Credentials are never
+written to temporary files, command-line arguments, or environment variables, and
+stdin remains available to the application. Older protocol-v1 deployers continue
+using their existing Docker-config discovery behavior.
+
 Rust callers must now supply the additional `Option<String>` argument:
 `build_sandbox_image(options, docker_config_json, emit)` and
 `import_sandbox_image(options, docker_config_json, emit)`. Use `None` for discovery
