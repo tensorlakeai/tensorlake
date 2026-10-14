@@ -1,13 +1,12 @@
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashSet,
     fs::File,
     io::{Cursor, Read},
     path::{Path, PathBuf},
     time::Duration,
 };
 
-use base64::{Engine as _, engine::general_purpose::STANDARD};
-use docker_credentials_config::DockerConfig;
+use crate::docker_config::resolve_docker_config_json;
 use ignore::gitignore::{Gitignore, GitignoreBuilder};
 use reqwest::{Method, StatusCode};
 use serde::{Deserialize, Serialize};
@@ -418,10 +417,18 @@ struct CompleteSandboxTemplateBuildRequest {
 /// Build a sandbox image from a Dockerfile (path or inline text). To import a
 /// registry image directly into a rootfs without a Dockerfile, use
 /// [`import_sandbox_image`] instead.
-pub async fn build_sandbox_image<F>(options: SandboxImageBuildOptions, mut emit: F) -> Result<Value>
+///
+/// `docker_config_json` supplies Docker config file contents for this call. `None`
+/// discovers local config at entry; `Some("{}".into())` disables discovery.
+pub async fn build_sandbox_image<F>(
+    options: SandboxImageBuildOptions,
+    docker_config_json: Option<String>,
+    mut emit: F,
+) -> Result<Value>
 where
     F: FnMut(SandboxImageBuildEvent),
 {
+    let registry_credentials_json = resolve_docker_config_json(docker_config_json)?;
     emit(SandboxImageBuildEvent::Status(
         "Loading Dockerfile...".to_string(),
     ));
@@ -449,6 +456,7 @@ where
             options.build_args,
             options.context_files,
             options.common,
+            registry_credentials_json,
             emit,
         )
         .await;
@@ -459,19 +467,31 @@ where
              has no build-arg channel",
         ));
     }
-    run_build_plan(plan, options.common, options.context_files, emit).await
+    run_build_plan(
+        plan,
+        options.common,
+        options.context_files,
+        registry_credentials_json,
+        emit,
+    )
+    .await
 }
 
 /// Import a registry image directly into a rootfs (no Dockerfile, no Docker
 /// daemon). The reference is always pulled fresh from the registry; it is
 /// never resolved against the Tensorlake template registry.
+///
+/// `docker_config_json` supplies Docker config file contents for this call. `None`
+/// discovers local config at entry; `Some("{}".into())` disables discovery.
 pub async fn import_sandbox_image<F>(
     options: SandboxImageImportOptions,
+    docker_config_json: Option<String>,
     mut emit: F,
 ) -> Result<Value>
 where
     F: FnMut(SandboxImageBuildEvent),
 {
+    let registry_credentials_json = resolve_docker_config_json(docker_config_json)?;
     emit(SandboxImageBuildEvent::Status(format!(
         "Importing registry image {}...",
         options.image_reference
@@ -487,11 +507,19 @@ where
             Vec::new(),
             Vec::new(),
             options.common,
+            registry_credentials_json,
             emit,
         )
         .await;
     }
-    run_build_plan(plan, options.common, Vec::new(), emit).await
+    run_build_plan(
+        plan,
+        options.common,
+        Vec::new(),
+        registry_credentials_json,
+        emit,
+    )
+    .await
 }
 
 /// Resolve the authenticated Image Service ingress used for CAS catalog
@@ -509,6 +537,7 @@ async fn run_build_plan<F>(
     plan: DockerfileBuildPlan,
     options: CommonBuildOptions,
     context_files: Vec<SandboxImageContextFile>,
+    registry_credentials_json: Option<String>,
     mut emit: F,
 ) -> Result<Value>
 where
@@ -704,6 +733,7 @@ where
                 options.disk_mb,
                 options.docker_compat,
                 &context_files,
+                registry_credentials_json,
                 &mut emit,
             )
             .await?;
@@ -1229,6 +1259,7 @@ async fn upload_build_inputs(
     disk_mb: Option<u64>,
     docker_compat: bool,
     context_files: &[SandboxImageContextFile],
+    docker_config_json: Option<String>,
     emit: &mut impl FnMut(SandboxImageBuildEvent),
 ) -> Result<()> {
     // Pre-create REMOTE_BUILD_DIR with permissive mode as root so the
@@ -1245,7 +1276,6 @@ async fn upload_build_inputs(
         upload_context_archive(proxy, &plan.context_dir, context_files, emit).await?;
     }
 
-    let docker_config_json = resolved_docker_config_json().await?;
     let spec = build_rootfs_spec(
         prepared_spec,
         prepared,
@@ -1455,41 +1485,6 @@ const MULTIPART_PART_SIZE_BYTES: u64 = MULTIPART_PART_SIZE_MB * 1024 * 1024;
 /// endpoint enforces the same ceiling (`MAX_MULTIPART_PARTS` in
 /// `indexify/crates/dataplane/src/sign_blob.rs`); keep these in sync.
 const MULTIPART_MAX_PARTS: u32 = 10_000;
-
-pub(crate) async fn resolved_docker_config_json() -> Result<Option<String>> {
-    let docker_config = DockerConfig::load().await.map_err(|error| {
-        SandboxImageBuildError::other(format!("Failed to load Docker config: {error}"))
-    })?;
-    let credentials = docker_config.all_credentials();
-    if credentials.is_empty() {
-        return Ok(None);
-    }
-
-    docker_config_json_from_credentials(credentials)
-        .map(Some)
-        .map_err(Into::into)
-}
-
-fn docker_config_json_from_credentials(
-    credentials: HashMap<String, bollard::auth::DockerCredentials>,
-) -> serde_json::Result<String> {
-    let mut auths = Map::new();
-    for (registry, creds) in credentials {
-        let mut entry = Map::new();
-        if let Some(identity_token) = creds.identitytoken {
-            entry.insert("identitytoken".to_string(), Value::String(identity_token));
-        }
-        if let (Some(username), Some(password)) = (creds.username, creds.password) {
-            let encoded = STANDARD.encode(format!("{username}:{password}"));
-            entry.insert("auth".to_string(), Value::String(encoded));
-        }
-        if !entry.is_empty() {
-            auths.insert(registry, Value::Object(entry));
-        }
-    }
-
-    serde_json::to_string(&json!({ "auths": auths }))
-}
 
 /// Spawn a background task that pings the builder sandbox at a fixed cadence
 /// to keep it from being suspended due to inactivity / lifetime expiry. The

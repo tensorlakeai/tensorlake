@@ -69,6 +69,7 @@
 pub mod applications;
 pub mod artifact_storage;
 pub mod cron;
+pub mod docker_config;
 pub mod document_ai;
 pub mod error;
 pub mod http_transport;

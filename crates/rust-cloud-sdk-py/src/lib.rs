@@ -4211,6 +4211,13 @@ fn create_image_context_file(
     Ok(())
 }
 
+/// Capture Docker config contents at CLI startup, before asynchronous work.
+#[pyfunction]
+fn load_docker_config_json() -> PyResult<String> {
+    tensorlake::docker_config::load_docker_config_json()
+        .map_err(|error| pyo3::exceptions::PyValueError::new_err(error.to_string()))
+}
+
 #[pyfunction]
 #[pyo3(signature = (
     api_url,
@@ -4233,6 +4240,7 @@ fn create_image_context_file(
     cas=false,
     build_args=None,
     emit=None,
+    docker_config_json=None,
 ))]
 fn build_sandbox_image(
     py: Python<'_>,
@@ -4256,6 +4264,7 @@ fn build_sandbox_image(
     cas: bool,
     build_args: Option<std::collections::BTreeMap<String, String>>,
     emit: Option<Py<PyAny>>,
+    docker_config_json: Option<String>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageBuildOptions {
         common: common_build_options(
@@ -4287,11 +4296,15 @@ fn build_sandbox_image(
     let result = py
         .detach(move || {
             shared_runtime().block_on(async move {
-                tensorlake::sandbox_images::build_sandbox_image(options, |event| {
-                    if let Some(callback) = emit.as_ref() {
-                        emit_sandbox_image_event(callback, event);
-                    }
-                })
+                tensorlake::sandbox_images::build_sandbox_image(
+                    options,
+                    docker_config_json,
+                    |event| {
+                        if let Some(callback) = emit.as_ref() {
+                            emit_sandbox_image_event(callback, event);
+                        }
+                    },
+                )
                 .await
             })
         })
@@ -4331,6 +4344,7 @@ fn build_sandbox_image(
     docker_compat=false,
     cas=false,
     emit=None,
+    docker_config_json=None,
 ))]
 fn import_sandbox_image(
     py: Python<'_>,
@@ -4351,6 +4365,7 @@ fn import_sandbox_image(
     docker_compat: bool,
     cas: bool,
     emit: Option<Py<PyAny>>,
+    docker_config_json: Option<String>,
 ) -> PyResult<String> {
     let options = tensorlake::sandbox_images::SandboxImageImportOptions {
         common: common_build_options(
@@ -4376,11 +4391,15 @@ fn import_sandbox_image(
     let result = py
         .detach(move || {
             shared_runtime().block_on(async move {
-                tensorlake::sandbox_images::import_sandbox_image(options, |event| {
-                    if let Some(callback) = emit.as_ref() {
-                        emit_sandbox_image_event(callback, event);
-                    }
-                })
+                tensorlake::sandbox_images::import_sandbox_image(
+                    options,
+                    docker_config_json,
+                    |event| {
+                        if let Some(callback) = emit.as_ref() {
+                            emit_sandbox_image_event(callback, event);
+                        }
+                    },
+                )
                 .await
             })
         })
@@ -4494,6 +4513,7 @@ fn _cloud_sdk(_py: Python<'_>, module: &Bound<'_, PyModule>) -> PyResult<()> {
     module.add_class::<CloudDocumentAIClient>()?;
     module.add_class::<function_agent::FunctionAgentCore>()?;
     module.add_function(wrap_pyfunction!(create_image_context_file, module)?)?;
+    module.add_function(wrap_pyfunction!(load_docker_config_json, module)?)?;
     module.add_function(wrap_pyfunction!(build_sandbox_image, module)?)?;
     module.add_function(wrap_pyfunction!(import_sandbox_image, module)?)?;
     module.add_function(wrap_pyfunction!(validate_managed_name, module)?)?;

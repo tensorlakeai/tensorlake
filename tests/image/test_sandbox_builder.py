@@ -51,6 +51,42 @@ def _make_import_patches(ctx):
     )
 
 
+class TestDockerConfigContents(unittest.TestCase):
+    def test_all_image_apis_forward_config_contents(self):
+        contents = '{"auths":{"registry.example.com":{"auth":"dXNlcjpwYXNz"}}}'
+        for config in (None, "{}", contents):
+            with (
+                self.subTest(config=config),
+                patch.object(sbm, "_build_context_from_env", return_value=_make_ctx()),
+                patch.object(
+                    sbm, "_rust_build_sandbox_image", return_value='{"id":"tpl-1"}'
+                ) as build,
+                patch.object(
+                    sbm, "_rust_import_sandbox_image", return_value='{"id":"tpl-1"}'
+                ) as import_image,
+            ):
+                image = Image(
+                    name="test-image", base_image="registry.example.com/app:latest"
+                )
+                image.build(docker_config_json=config)
+                self.assertEqual(build.call_args.kwargs["docker_config_json"], config)
+                sbm.build_sandbox_application_image(image, docker_config_json=config)
+                self.assertEqual(build.call_args.kwargs["docker_config_json"], config)
+                sbm.import_sandbox_image(
+                    "registry.example.com/app:latest", docker_config_json=config
+                )
+                self.assertEqual(
+                    import_image.call_args.kwargs["docker_config_json"], config
+                )
+                with tempfile.TemporaryDirectory() as directory:
+                    dockerfile = Path(directory) / "Dockerfile"
+                    dockerfile.write_text("FROM registry.example.com/app:latest\n")
+                    sbm.build_sandbox_image(str(dockerfile), docker_config_json=config)
+                    self.assertEqual(
+                        build.call_args.kwargs["docker_config_json"], config
+                    )
+
+
 class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
     def test_registers_snapshot_from_dockerfile(self):
         ctx = _make_ctx()
@@ -95,6 +131,7 @@ class TestBuildSandboxImageFromDockerfile(unittest.TestCase):
             None,
             cas=False,
             emit=ANY,
+            docker_config_json=None,
         )
 
     def test_private_cli_path_allows_pat_and_forwards_explicit_scope(self):
@@ -164,6 +201,7 @@ class TestBuildSandboxImageFromDockerfileOptions(unittest.TestCase):
             None,
             cas=False,
             emit=ANY,
+            docker_config_json=None,
         )
 
     def test_missing_dockerfile_raises_load_error(self):
@@ -476,6 +514,7 @@ class TestImportSandboxImage(unittest.TestCase):
             False,
             cas=False,
             emit=ANY,
+            docker_config_json=None,
         )
 
     def test_default_name_strips_registry_path_and_digest(self):

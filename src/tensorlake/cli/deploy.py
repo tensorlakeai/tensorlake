@@ -32,6 +32,7 @@ from tensorlake.applications.validation import (
 from tensorlake.cli._common import Context
 from tensorlake.image.sandbox_builder import (
     SandboxImageBuildError,
+    _load_docker_config_json,
     build_sandbox_application_image,
 )
 from tensorlake.image.utils import _SDK_VERSION
@@ -138,10 +139,28 @@ def _parse_build_envs(build_envs: list[str]) -> list[tuple[str, str]]:
     return parsed_build_envs
 
 
+def _read_docker_config_pipe() -> str | None:
+    """Consume the CLI's anonymous pipe before running any application code."""
+    descriptor = os.environ.pop("TENSORLAKE_DOCKER_CONFIG_PIPE", None)
+    if descriptor is None:
+        return None
+    fd = int(descriptor)
+    if sys.platform == "win32":
+        import msvcrt
+
+        fd = msvcrt.open_osfhandle(fd, os.O_RDONLY | os.O_BINARY)
+    # Do not pass the descriptor to application subprocesses. fdopen owns and
+    # closes it after EOF; the child's existing stdin is never read or replaced.
+    os.set_inheritable(fd, False)
+    with os.fdopen(fd, "r", encoding="utf-8", newline="") as pipe:
+        return pipe.read()
+
+
 def deploy(
     application_file_path: str,
     upgrade_running_requests: bool,
     build_envs: list[tuple[str, str]] | None = None,
+    docker_config_json: str | None = None,
 ):
     """Deploys applications to Tensorlake Cloud, emitting NDJSON events to stdout."""
     _emit(
@@ -149,8 +168,16 @@ def deploy(
             "type": "protocol",
             "version": _DEPLOY_PROTOCOL_VERSION,
             "sdk_version": _SDK_VERSION,
+            "docker_config_pipe": True,
         }
     )
+    captured_config = _read_docker_config_pipe()
+    if docker_config_json is None:
+        docker_config_json = (
+            captured_config
+            if captured_config is not None
+            else _load_docker_config_json()
+        )
     if upgrade_running_requests:
         _emit(
             {
@@ -222,6 +249,7 @@ def deploy(
                 functions,
                 context_dir=str(Path(application_file_path).parent),
                 build_envs=build_envs,
+                docker_config_json=docker_config_json,
             )
         )
     except KeyboardInterrupt:
@@ -245,6 +273,7 @@ async def _prepare_images(
     functions: list[Function],
     context_dir: str,
     build_envs: list[tuple[str, str]] | None = None,
+    docker_config_json: str | None = None,
 ) -> dict[tuple[str, str], str]:
     image_builds = _application_images(functions)
     function_images: dict[tuple[str, str], str] = {}
@@ -258,6 +287,7 @@ async def _prepare_images(
                 image,
                 registered_name=image_name,
                 build_env_vars=build_envs,
+                docker_config_json=docker_config_json,
                 context_dir=context_dir,
                 emit=_emit,
                 _allow_pat=True,

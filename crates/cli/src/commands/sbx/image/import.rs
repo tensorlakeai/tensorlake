@@ -51,9 +51,11 @@ pub async fn run(
     };
 
     let mut renderer = ImageBuildEventRenderer::new();
-    let registered = import_sandbox_image(options, |event| renderer.render(event))
-        .await
-        .map_err(|error| CliError::Other(error.into()))?;
+    let registered = import_sandbox_image(options, ctx.docker_config_json(), |event| {
+        renderer.render(event)
+    })
+    .await
+    .map_err(|error| CliError::Other(error.into()))?;
 
     if output_json || cas {
         // --cas prints the published Image Service image record; --json

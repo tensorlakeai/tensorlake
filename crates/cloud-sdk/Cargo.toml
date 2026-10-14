@@ -19,6 +19,7 @@ bollard = { workspace = true }
 chrono = { workspace = true }
 dirs = { workspace = true }
 docker-credentials-config = { workspace = true }
+docker_credential = { workspace = true }
 utoipa = { workspace = true, optional = true }
 derive_builder = { workspace = true }
 flate2 = { workspace = true }

@@ -1,9 +1,10 @@
-use std::{path::PathBuf, process::Stdio};
+use std::{io::Write, path::PathBuf, process::Stdio};
 use tokio::io::{AsyncBufReadExt, BufReader};
 
 use crate::auth::context::CliContext;
 use crate::error::{CliError, Result};
 
+mod docker_config_pipe;
 mod typescript;
 
 const PYTHON_DEPLOY_PROTOCOL_VERSION: u64 = 1;
@@ -106,6 +107,10 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
     let mut cmd = tokio::process::Command::new(&executable);
     cmd.args(remaining_args);
 
+    let (snapshot_reader, snapshot_writer) =
+        docker_config_pipe::prepare(&mut cmd).map_err(CliError::Io)?;
+    let mut snapshot_writer = Some(snapshot_writer);
+
     // Pass auth context via environment
     cmd.env("TENSORLAKE_API_URL", &ctx.api_url);
     if let Some(key) = &ctx.api_key {
@@ -127,7 +132,8 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
 
     cmd.stdin(Stdio::inherit())
         .stdout(Stdio::piped())
-        .stderr(Stdio::inherit());
+        .stderr(Stdio::inherit())
+        .kill_on_drop(true);
 
     let mut child = cmd.spawn().map_err(|e: std::io::Error| {
         if e.kind() == std::io::ErrorKind::NotFound {
@@ -139,12 +145,14 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
             CliError::Io(e)
         }
     })?;
+    drop(snapshot_reader);
 
     let stdout = child.stdout.take().expect("stdout was piped");
     let reader = BufReader::new(stdout);
     let mut lines = reader.lines();
     let mut ctrl_c = Box::pin(tokio::signal::ctrl_c());
     let mut protocol_verified = false;
+    let mut snapshot_transfer: Option<tokio::task::JoinHandle<std::io::Result<()>>> = None;
 
     loop {
         let maybe_line = tokio::select! {
@@ -152,6 +160,14 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
             _ = &mut ctrl_c => {
                 terminate_child(&mut child).await?;
                 return Err(CliError::Cancelled);
+            }
+            result = async { snapshot_transfer.as_mut().unwrap().await }, if snapshot_transfer.is_some() => {
+                snapshot_transfer = None;
+                if !matches!(result, Ok(Ok(()))) {
+                    terminate_child(&mut child).await?;
+                    return Err(CliError::usage("Failed to send Docker config to the Python deployer"));
+                }
+                continue;
             }
         }
         .map_err(CliError::Io)?;
@@ -176,6 +192,23 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
                 ));
             }
             protocol_verified = true;
+            if event
+                .get("docker_config_pipe")
+                .and_then(|value| value.as_bool())
+                == Some(true)
+            {
+                let mut writer = snapshot_writer.take().expect("first protocol handshake");
+                let contents = ctx.docker_config_json().unwrap_or_else(|| "{}".into());
+                // A large config may exceed pipe capacity. Write independently so we
+                // can continue draining child output and responding to cancellation.
+                snapshot_transfer = Some(tokio::task::spawn_blocking(move || {
+                    writer.write_all(contents.as_bytes())
+                }));
+            } else {
+                // Legacy deployers keep their original credential-discovery behavior.
+                // Close the pipe without ever sending the captured credentials.
+                drop(snapshot_writer.take());
+            }
             continue;
         }
 
@@ -292,6 +325,13 @@ async fn run_python_deployer(ctx: &CliContext, remaining_args: &[String]) -> Res
     }
 
     let status = child.wait().await.map_err(CliError::Io)?;
+    if let Some(transfer) = snapshot_transfer
+        && !matches!(transfer.await, Ok(Ok(())))
+    {
+        return Err(CliError::usage(
+            "Failed to send Docker config to the Python deployer",
+        ));
+    }
     if !protocol_verified {
         return Err(CliError::usage(
             "The installed Python Tensorlake SDK did not provide a deploy protocol handshake. Upgrade both `tl` and `tensorlake` to the same release.",
@@ -329,12 +369,18 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn python_deployer_protocol_fails_closed() {
+    fn python_deployer_protocol_accepts_optional_pipe_support() {
         assert!(supports_python_deploy_protocol(
-            &json!({"type": "protocol", "version": 1})
+            &json!({"type": "protocol", "version": 1, "docker_config_pipe": true})
         ));
         assert!(!supports_python_deploy_protocol(
             &json!({"type": "protocol", "version": 2})
+        ));
+        assert!(supports_python_deploy_protocol(
+            &json!({"type": "protocol", "version": 1})
+        ));
+        assert!(supports_python_deploy_protocol(
+            &json!({"type": "protocol", "version": 1, "docker_config_pipe": false})
         ));
         assert!(!supports_python_deploy_protocol(
             &json!({"type": "status", "version": 1})

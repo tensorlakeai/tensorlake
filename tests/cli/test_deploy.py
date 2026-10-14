@@ -1,5 +1,7 @@
 import asyncio
+import io
 import os
+import sys
 import unittest
 from contextlib import contextmanager
 from types import SimpleNamespace
@@ -138,6 +140,13 @@ class TestDeployHelpers(unittest.TestCase):
 
 
 class TestDeployEntrypoints(unittest.TestCase):
+    def setUp(self):
+        loader = patch.object(
+            deploy_module, "_load_docker_config_json", return_value="{}"
+        )
+        self.config_loader = loader.start()
+        self.addCleanup(loader.stop)
+
     def _make_auth_context(self):
         return SimpleNamespace(
             api_url="https://api.tensorlake.ai",
@@ -257,6 +266,13 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(event_types[-1], "validation_failed")
 
     def test_deploy_runs_build_and_deploy_flow(self):
+        captured = '{"auths":{"registry":{"identitytoken":"initial-token"}}}'
+        self.config_loader.return_value = captured
+
+        def load_application(*_):
+            self.config_loader.assert_called_once_with()
+            self.config_loader.return_value = "{}"
+
         prepare_images = AsyncMock()
         prepare_images.return_value = {}
         auth = self._make_auth_context()
@@ -267,7 +283,7 @@ class TestDeployEntrypoints(unittest.TestCase):
                 "_build_context_from_env",
                 return_value=auth,
             ),
-            patch.object(deploy_module, "load_code"),
+            patch.object(deploy_module, "load_code", side_effect=load_application),
             patch.object(
                 deploy_module, "validate_loaded_applications", return_value=[]
             ),
@@ -299,6 +315,7 @@ class TestDeployEntrypoints(unittest.TestCase):
             ["fn"],
             context_dir=os.path.dirname(os.path.abspath("my_app.py")),
             build_envs=None,
+            docker_config_json=captured,
         )
         deploy_apps.assert_called_once_with(
             applications_file_path=os.path.abspath("my_app.py"),
@@ -315,6 +332,64 @@ class TestDeployEntrypoints(unittest.TestCase):
         self.assertEqual(deployed_event["type"], "deployed")
         self.assertEqual(deployed_event["application"], "app-one")
         self.assertEqual(deployed_event["curl_command"], "curl https://example.test")
+
+    @unittest.skipIf(sys.platform == "win32", "uses inherited Unix file descriptors")
+    def test_deploy_reads_pipe_after_handshake_before_loading_application(self):
+        captured = '{"auths":{"registry":{"identitytoken":"captured-token"}}}'
+        reader, writer = os.pipe()
+        write_pipe = os.fdopen(writer, "wb")
+        self.addCleanup(write_pipe.close)
+        self.addCleanup(lambda: self._close_if_open(reader))
+        os.set_inheritable(reader, True)
+        events = []
+
+        def emit(event):
+            events.append(event)
+            if event["type"] == "protocol":
+                self.assertEqual(event["version"], 1)
+                self.assertTrue(event["docker_config_pipe"])
+                write_pipe.write(captured.encode())
+                write_pipe.close()
+
+        def load_application(*_):
+            self.config_loader.assert_not_called()
+            self.assertNotIn("TENSORLAKE_DOCKER_CONFIG_PIPE", os.environ)
+            with self.assertRaises(OSError):
+                os.fstat(reader)
+            self.assertEqual(deploy_module.sys.stdin.read(), "application stdin")
+
+        prepare_images = AsyncMock(return_value={})
+        with (
+            self._successful_deploy_patches(self._make_auth_context(), ["fn"]),
+            patch.dict(os.environ, {"TENSORLAKE_DOCKER_CONFIG_PIPE": str(reader)}),
+            patch.object(deploy_module.sys, "stdin", io.StringIO("application stdin")),
+            patch.object(deploy_module, "load_code", side_effect=load_application),
+            patch.object(deploy_module, "_prepare_images", prepare_images),
+            patch.object(deploy_module, "_deploy_applications"),
+            patch.object(deploy_module, "_emit", side_effect=emit),
+            patch(
+                "builtins.open", side_effect=AssertionError("unexpected file access")
+            ),
+            patch(
+                "tempfile.NamedTemporaryFile", side_effect=AssertionError("temp file")
+            ),
+        ):
+            deploy_module.deploy("my_app.py", upgrade_running_requests=False)
+
+        self.assertEqual(events[0]["type"], "protocol")
+        prepare_images.assert_awaited_once_with(
+            ["fn"],
+            context_dir=os.path.dirname(os.path.abspath("my_app.py")),
+            build_envs=None,
+            docker_config_json=captured,
+        )
+
+    @staticmethod
+    def _close_if_open(fd):
+        try:
+            os.close(fd)
+        except OSError:
+            pass
 
     def test_deploy_emits_missing_secret_names(self):
         prepare_images = AsyncMock()

@@ -2116,6 +2116,26 @@ async fn main() {
         }
     };
 
+    // Capture before auth, application loading, or any other asynchronous work.
+    let docker_config_json = if matches!(
+        &command,
+        Commands::Deploy { .. }
+            | Commands::App(AppCommands::Deploy { .. })
+            | Commands::Sbx(SbxCommands::Image(
+                ImageCommands::Create { .. } | ImageCommands::Import { .. }
+            ))
+    ) {
+        match tensorlake::docker_config::load_docker_config_json() {
+            Ok(contents) => Some(contents),
+            Err(error) => {
+                eprintln!("Error: {error}");
+                std::process::exit(1);
+            }
+        }
+    } else {
+        None
+    };
+
     // `--context` on the command line beats TENSORLAKE_CONTEXT; the resolver reads the
     // env var itself so that `tl whoami` can say where the context came from.
     //
@@ -2167,6 +2187,9 @@ async fn main() {
     };
 
     let mut ctx = CliContext::from_resolved(resolved);
+    if let Some(contents) = docker_config_json {
+        ctx.set_docker_config_json(contents);
+    }
 
     // The context named by `--context` or `TENSORLAKE_CONTEXT`, saved or not. `tl login`
     // saves into it, so a login made to repair a missing context lands under its name. An

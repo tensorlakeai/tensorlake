@@ -1976,7 +1976,7 @@ dependencies = [
 
 [[package]]
 name = "gsvc-fs-client"
-version = "0.5.150"
+version = "0.5.151"
 dependencies = [
  "anyhow",
  "base64",
@@ -5933,7 +5933,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake"
-version = "0.5.150"
+version = "0.5.151"
 dependencies = [
  "anyhow",
  "base64",
@@ -5946,6 +5946,7 @@ dependencies = [
  "des",
  "dirs",
  "docker-credentials-config",
+ "docker_credential",
  "eventsource-stream",
  "fastcdc",
  "flate2",
@@ -5988,7 +5989,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-cli"
-version = "0.5.150"
+version = "0.5.151"
 dependencies = [
  "anyhow",
  "apple-native-keyring-store",
@@ -6014,6 +6015,7 @@ dependencies = [
  "ignore",
  "indicatif",
  "keyring-core",
+ "libc",
  "minijinja",
  "open",
  "rand 0.9.4",
@@ -6039,13 +6041,14 @@ dependencies = [
  "urlencoding",
  "uuid",
  "windows-native-keyring-store",
+ "windows-sys 0.61.2",
  "zbus-secret-service-keyring-store",
  "zip",
 ]
 
 [[package]]
 name = "tensorlake-function-agent-core"
-version = "0.5.150"
+version = "0.5.151"
 dependencies = [
  "anyhow",
  "base64",
@@ -6070,7 +6073,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-node"
-version = "0.5.150"
+version = "0.5.151"
 dependencies = [
  "anyhow",
  "async-compression",
@@ -6094,7 +6097,7 @@ dependencies = [
 
 [[package]]
 name = "tensorlake-rust-cloud-sdk-py"
-version = "0.5.150"
+version = "0.5.151"
 dependencies = [
  "base64",
  "chrono",

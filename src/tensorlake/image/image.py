@@ -107,6 +107,7 @@ class Image:
         docker_compat: bool = False,
         context_dir: str | None = None,
         verbose: bool = False,
+        docker_config_json: str | None = None,
     ) -> dict:
         """Build this image as a sandbox template and register it.
 
@@ -130,6 +131,8 @@ class Image:
                 files — building without it then raises. When the image has no
                 such ops it may be omitted, and an empty context (just the
                 generated Dockerfile) is uploaded so the cwd is not archived.
+            docker_config_json: Docker config JSON contents. Omit to discover local
+                config at entry; pass "{}" to disable discovery.
             verbose: If True, print build progress to stderr.
 
         Returns:
@@ -148,6 +151,7 @@ class Image:
             docker_compat=docker_compat,
             context_dir=context_dir,
             verbose=verbose,
+            docker_config_json=docker_config_json,
         )
 
     def _add_operation(self, op: _ImageBuildOperation) -> "Image":

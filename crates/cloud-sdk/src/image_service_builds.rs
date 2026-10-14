@@ -34,7 +34,7 @@ use crate::{
         CommonBuildOptions, DockerfileBuildPlan, SandboxImageBuildError, SandboxImageBuildEvent,
         SandboxImageContextFile, client_builder, collect_dir_files, follow_started_process_output,
         is_localhost, normalize_context_file_path, open_context_file, resolve_build_context,
-        resolved_docker_config_json, sandbox_lifecycle_client, sandbox_proxy_client,
+        sandbox_lifecycle_client, sandbox_proxy_client,
     },
     sandboxes::{SandboxesClient, models::ProcessInfo},
 };
@@ -89,6 +89,7 @@ pub(crate) async fn run_image_service_build<F>(
     build_args: Vec<(String, String)>,
     context_files: Vec<SandboxImageContextFile>,
     options: CommonBuildOptions,
+    registry_credentials_json: Option<String>,
     mut emit: F,
 ) -> Result<Value>
 where
@@ -98,14 +99,13 @@ where
     let disk_mb = cas_target_disk_mb(options.disk_mb)?;
     let is_public = options.is_public;
     let builder_resources = builder_resource_overrides(&options)?;
-    // Forward the local `docker login` state for the guest's registry pulls,
-    // the same source the legacy path ships into its builder. The service
+    // Forward credentials already resolved for this operation, using the same
+    // document as the non-CAS builder. The service
     // stages it write-only and the reconciler hands the guest a short-lived
     // fetch URL; the document never enters the catalog.
-    let registry_credentials_json = resolved_docker_config_json().await?;
     if registry_credentials_json.is_some() {
         emit(SandboxImageBuildEvent::Status(
-            "Forwarding local registry credentials to the build".to_string(),
+            "Forwarding registry credentials to the build".to_string(),
         ));
     }
     // Ingress authenticates the bearer credential and injects the canonical project header.
