@@ -332,24 +332,16 @@ pub async fn resolve_cas_image(
         }
     }
     let mut item: serde_json::Value = response.json().await.map_err(CliError::Http)?;
-    // The by-id record carries no registered name (names are a separate
-    // index), so an id or `cas-v1:` lookup takes it from the project catalog
-    // the way `ls` shows it. A global image outside the project has none.
-    let name = match name {
-        Some(name) => Some(name),
-        None => list_all_cas_images(ctx, client)
-            .await?
-            .into_iter()
-            .find(|entry| {
-                entry.get("image_id").and_then(serde_json::Value::as_str) == Some(image_id.as_str())
-            })
-            .and_then(|entry| {
-                entry
-                    .get("name")
-                    .and_then(serde_json::Value::as_str)
-                    .map(str::to_string)
-            }),
-    };
+    // The record carries every name the project points at the image
+    // (`names`); an id or `cas-v1:` lookup shows the first one the way `ls`
+    // does. A global image the project never named has none.
+    let name = name.or_else(|| {
+        item.get("names")
+            .and_then(serde_json::Value::as_array)
+            .and_then(|names| names.first())
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    });
     if let (Some(name), Some(object)) = (name, item.as_object_mut()) {
         object.insert("name".to_string(), serde_json::Value::String(name));
     }
