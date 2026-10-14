@@ -6,7 +6,7 @@
 use std::{collections::BTreeSet, path::PathBuf};
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use docker_credential::{DockerCredential, get_credential_from_reader};
+use docker_credential::{CredentialRetrievalError, DockerCredential, get_credential_from_reader};
 use docker_credentials_config::DockerConfig;
 use serde_json::{Map, Value, json};
 
@@ -84,8 +84,27 @@ pub(crate) fn resolve_docker_config_json(contents: Option<String>) -> Result<Opt
                 json!({"auth": STANDARD.encode(format!("{username}:{password}"))})
             }
             Ok(DockerCredential::IdentityToken(token)) => json!({"identitytoken": token}),
-            // Preserve discovery's existing behavior for absent/broken helpers.
-            Err(_) => continue,
+            // Preserve discovery's behavior for absent credentials and broken helpers,
+            // but never silently turn invalid inline credentials into an anonymous build.
+            Err(
+                CredentialRetrievalError::NoCredentialConfigured
+                | CredentialRetrievalError::HelperCommunicationError
+                | CredentialRetrievalError::MalformedHelperResponse
+                | CredentialRetrievalError::HelperFailure { .. },
+            ) => continue,
+            Err(CredentialRetrievalError::CredentialDecodingError) => {
+                return Err(SandboxImageBuildError::usage(
+                    "Invalid Docker config JSON: failed to decode registry credentials",
+                ));
+            }
+            Err(
+                CredentialRetrievalError::ConfigNotFound
+                | CredentialRetrievalError::ConfigReadError,
+            ) => {
+                return Err(SandboxImageBuildError::usage(
+                    "Invalid Docker config JSON: failed to read registry credentials",
+                ));
+            }
         };
         auths.insert(registry.clone(), entry);
     }
@@ -176,6 +195,34 @@ mod tests {
     }
 
     #[test]
+    fn malformed_auth_fails_without_exposing_credentials() {
+        for credential in ["secret-without-a-separator", ""] {
+            let encoded = STANDARD.encode(credential);
+            let contents = json!({"auths": {
+                "valid.example.com": {"auth": STANDARD.encode("user:password")},
+                "invalid.example.com": {"auth": encoded}
+            }});
+            let error = resolve_docker_config_json(Some(contents.to_string()))
+                .unwrap_err()
+                .to_string();
+            assert!(error.contains("Invalid Docker config JSON"));
+            assert!(!error.contains("secret-without-a-separator"));
+            assert!(!error.contains("password"));
+            if !encoded.is_empty() {
+                assert!(!error.contains(&encoded));
+            }
+        }
+    }
+
+    #[test]
+    fn empty_registry_entries_are_still_ignored() {
+        assert_eq!(
+            resolve_docker_config_json(Some(r#"{"auths":{"registry":{}}}"#.into())).unwrap(),
+            None
+        );
+    }
+
+    #[test]
     fn identity_tokens_are_preserved_and_unrelated_fields_are_not_forwarded() {
         let resolved = resolve_docker_config_json(Some(
             r#"{"auths":{"registry":{"identitytoken":"token"}},"HttpHeaders":{"secret":"value"}}"#
@@ -204,6 +251,14 @@ printf '%s' '{"Username":"helper-user","Secret":"helper-password"}'
         )
         .unwrap();
         std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        for (name, script) in [
+            ("failed", "#!/bin/sh\nprintf secret-helper-output\nexit 1\n"),
+            ("malformed", "#!/bin/sh\nprintf secret-helper-output\n"),
+        ] {
+            let helper = dir.path().join(format!("docker-credential-{name}"));
+            std::fs::write(&helper, script).unwrap();
+            std::fs::set_permissions(&helper, std::fs::Permissions::from_mode(0o700)).unwrap();
+        }
         // A malformed ambient file makes accidental discovery fail, even when the
         // caller supplies an empty document or uses a credential helper.
         std::fs::write(dir.path().join("config.json"), "invalid ambient config").unwrap();
@@ -257,6 +312,17 @@ printf '%s' '{"Username":"helper-user","Secret":"helper-password"}'
                 serde_json::from_str::<Value>(&resolved).unwrap(),
                 json!({"auths":{"registry":{"auth": STANDARD.encode("helper-user:helper-password")}}})
             );
+        }
+        for helper in ["missing", "failed", "malformed"] {
+            for helper_config in [
+                json!({"auths":{"registry":{}}, "credsStore":helper}),
+                json!({"credHelpers":{"registry":helper}}),
+            ] {
+                assert_eq!(
+                    resolve_docker_config_json(Some(helper_config.to_string())).unwrap(),
+                    None
+                );
+            }
         }
         let path = PathBuf::from(std::env::var_os("DOCKER_CONFIG").unwrap()).join("config.json");
         let default_config = config("discovered");

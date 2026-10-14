@@ -1,5 +1,6 @@
 """Exercise credential isolation through the actual Python/Rust boundary."""
 
+import base64
 import concurrent.futures
 import http.server
 import json
@@ -19,26 +20,42 @@ except ImportError:
 @unittest.skipIf(_cloud_sdk is None, "requires the built native SDK")
 class TestDockerConfigNative(unittest.TestCase):
     def test_invalid_config_fails_before_build_or_import_for_both_backends(self):
+        secret = "do-not-log-this-secret"
+        encoded = base64.b64encode(secret.encode()).decode()
+        invalid_configs = [
+            json.dumps({"auths": secret}),
+            json.dumps({"auths": {"registry.example.com": {"auth": encoded}}}),
+            json.dumps({"auths": {"registry.example.com": {"auth": ""}}}),
+        ]
         for cas in (False, True):
             for operation in ("build", "import"):
-                with self.subTest(cas=cas, operation=operation):
-                    args = dict(
-                        api_url="http://127.0.0.1:1",
-                        token="test-key",
-                        cas=cas,
-                        docker_config_json='{"auths":"do-not-log-this-secret"}',
-                    )
-                    with self.assertRaises(Exception) as raised:
-                        if operation == "build":
-                            _cloud_sdk.build_sandbox_image(
-                                dockerfile_path="/nonexistent/Dockerfile", **args
-                            )
-                        else:
-                            _cloud_sdk.import_sandbox_image(
-                                image_reference="registry.example.com/app", **args
-                            )
-                    self.assertIn("Invalid Docker config JSON", str(raised.exception))
-                    self.assertNotIn("do-not-log-this-secret", str(raised.exception))
+                for config_index, config in enumerate(invalid_configs):
+                    with self.subTest(
+                        cas=cas, operation=operation, config_index=config_index
+                    ):
+                        events = []
+                        args = dict(
+                            api_url="http://127.0.0.1:1",
+                            token="test-key",
+                            cas=cas,
+                            docker_config_json=config,
+                            emit=events.append,
+                        )
+                        with self.assertRaises(Exception) as raised:
+                            if operation == "build":
+                                _cloud_sdk.build_sandbox_image(
+                                    dockerfile_path="/nonexistent/Dockerfile", **args
+                                )
+                            else:
+                                _cloud_sdk.import_sandbox_image(
+                                    image_reference="registry.example.com/app", **args
+                                )
+                        self.assertIn(
+                            "Invalid Docker config JSON", str(raised.exception)
+                        )
+                        self.assertNotIn(secret, str(raised.exception))
+                        self.assertNotIn(encoded, str(raised.exception))
+                        self.assertEqual(events, [])
 
     def test_concurrent_cas_builds_and_imports_forward_independent_credentials(self):
         captured = []
