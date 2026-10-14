@@ -1700,6 +1700,16 @@ enum SbxFsCommands {
         #[arg(long, value_name = "OWNER")]
         owner: Option<String>,
 
+        /// Maximum seconds to wait for the sandbox to mount the file system;
+        /// the mount continues after a timeout
+        #[arg(short, long, default_value_t = 120)]
+        timeout: u64,
+
+        /// Return once the server accepts the change instead of waiting for
+        /// the sandbox to mount it
+        #[arg(long, conflicts_with = "timeout")]
+        no_wait: bool,
+
         /// Print the updated sandbox as JSON
         #[arg(long)]
         json: bool,
@@ -1713,6 +1723,16 @@ enum SbxFsCommands {
         /// Absolute guest mount path to detach
         #[arg(short, long)]
         path: String,
+
+        /// Maximum seconds to wait for the sandbox to unmount the file
+        /// system; the unmount continues after a timeout
+        #[arg(short, long, default_value_t = 120)]
+        timeout: u64,
+
+        /// Return once the server accepts the change instead of waiting for
+        /// the sandbox to unmount it
+        #[arg(long, conflicts_with = "timeout")]
+        no_wait: bool,
 
         /// Print the updated sandbox as JSON
         #[arg(long)]
@@ -2002,7 +2022,13 @@ impl SnapshotTypeArg {
 #[derive(Subcommand)]
 enum SnapshotCommands {
     /// List all snapshots
-    Ls,
+    Ls {
+        /// Also list the suspend checkpoints the server hides by default.
+        /// They hold a suspended sandbox's saved state and cannot seed a new
+        /// sandbox; use `tl sbx copy` for that.
+        #[arg(long)]
+        include_suspend_checkpoints: bool,
+    },
 
     /// Delete one or more snapshots
     Rm {
@@ -2633,7 +2659,11 @@ async fn run_command(
                         timeout,
                     } => commands::sbx::copy::run(ctx, &sandbox_id, times.get(), timeout).await,
                     SbxCommands::Checkpoint(snapshot_args) => match snapshot_args.command {
-                        Some(SnapshotCommands::Ls) => commands::sbx::snapshot_ls::run(ctx).await,
+                        Some(SnapshotCommands::Ls {
+                            include_suspend_checkpoints,
+                        }) => {
+                            commands::sbx::snapshot_ls::run(ctx, include_suspend_checkpoints).await
+                        }
                         Some(SnapshotCommands::Rm { snapshot_ids }) => {
                             commands::sbx::snapshot_rm::run(ctx, &snapshot_ids).await
                         }
@@ -2840,6 +2870,8 @@ async fn run_command(
                             prefetch,
                             snapshot_id,
                             owner,
+                            timeout,
+                            no_wait,
                             json,
                         } => {
                             commands::sbx::fs::attach(
@@ -2851,6 +2883,10 @@ async fn run_command(
                                 prefetch,
                                 snapshot_id.as_deref(),
                                 owner.as_deref(),
+                                commands::sbx::fs::FileSystemUpdateWaitOptions {
+                                    no_wait,
+                                    timeout: std::time::Duration::from_secs(timeout),
+                                },
                                 json,
                             )
                             .await
@@ -2858,8 +2894,22 @@ async fn run_command(
                         SbxFsCommands::Detach {
                             sandbox_id,
                             path,
+                            timeout,
+                            no_wait,
                             json,
-                        } => commands::sbx::fs::detach(ctx, &sandbox_id, &path, json).await,
+                        } => {
+                            commands::sbx::fs::detach(
+                                ctx,
+                                &sandbox_id,
+                                &path,
+                                commands::sbx::fs::FileSystemUpdateWaitOptions {
+                                    no_wait,
+                                    timeout: std::time::Duration::from_secs(timeout),
+                                },
+                                json,
+                            )
+                            .await
+                        }
                         SbxFsCommands::Ls { sandbox_id, json } => {
                             commands::sbx::fs::list(ctx, &sandbox_id, json).await
                         }
